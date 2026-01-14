@@ -1,34 +1,37 @@
-import express, { Application, Request, Response } from "express";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
-
-// Load .env variables
-dotenv.config();
+import express, { Application } from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import passport from 'passport';
+import { jwtStrategy } from './config/passport';
+import connectDB from './config/db';
+import routes from './routes';
+import { errorHandler } from './middleware/error.middleware';
+import config from './config';
 
 const app: Application = express();
 
+// Connect to MongoDB
+connectDB();
+
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  credentials: true
+}));
+app.use(cookieParser());
 
-// Environment variables
-const PORT = process.env.PORT || 5000;
-const MONGODB_URI = process.env.MONGODB_URI;
+// Passport middleware
+app.use(passport.initialize());
+passport.use('jwt', jwtStrategy);
 
-// Simple test route
-app.get("/", (req: Request, res: Response) => {
-  res.send("Server is running!");
+// API Routes
+app.use('/api', routes);
+
+// Global error handler
+app.use(errorHandler);
+
+app.listen(config.port, () => {
+  console.log(`Server running on port ${config.port}`);
 });
-
-// Connect to MongoDB and start server
-mongoose
-  .connect(MONGODB_URI || "")
-  .then(() => {
-    console.log("Connected to MongoDB");
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error("Failed to connect to MongoDB", err);
-    process.exit(1);
-  });
