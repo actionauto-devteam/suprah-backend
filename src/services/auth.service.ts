@@ -45,6 +45,7 @@ const refreshAuth = async (refreshToken: string): Promise<any> => {
     await refreshTokenDoc.deleteOne();
     return tokenService.generateAuthTokens(user);
   } catch (error) {
+    console.error('Refresh Auth Failed:', error);
     throw new ApiError(401, 'Please authenticate');
   }
 };

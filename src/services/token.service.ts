@@ -56,15 +56,23 @@ const saveToken = async (
  * @returns {Promise<IToken>}
  */
 const verifyToken = async (token: string, type: string): Promise<IToken> => {
-  const payload = jwt.verify(token, type === 'refresh' ? config.jwt.refreshSecret : config.jwt.accessSecret);
-  if (typeof payload.sub !== 'string') {
-    throw new ApiError(401, 'Invalid token');
+  try {
+    const payload = jwt.verify(token, type === 'refresh' ? config.jwt.refreshSecret : config.jwt.accessSecret);
+    console.log(`[VerifyToken] Token verified. Sub: ${(payload as any).sub}`);
+
+    if (typeof payload.sub !== 'string') {
+      throw new ApiError(401, 'Invalid token');
+    }
+    const tokenDoc = await Token.findOne({ token, type, user: payload.sub, blacklisted: false });
+    if (!tokenDoc) {
+      console.error(`[VerifyToken] Token not found in DB. Sub: ${(payload as any).sub}, Type: ${type}`);
+      throw new ApiError(401, 'Token not found');
+    }
+    return tokenDoc;
+  } catch (err) {
+    console.error('[VerifyToken] Error verifying token:', err);
+    throw err;
   }
-  const tokenDoc = await Token.findOne({ token, type, user: payload.sub, blacklisted: false });
-  if (!tokenDoc) {
-    throw new ApiError(401, 'Token not found');
-  }
-  return tokenDoc;
 };
 
 /**
@@ -73,10 +81,10 @@ const verifyToken = async (token: string, type: string): Promise<IToken> => {
  * @returns {Promise<Object>}
  */
 const generateAuthTokens = async (user: IUser) => {
-  const accessTokenExpires = moment().add(config.jwt.accessExpiration, 'minutes');
+  const accessTokenExpires = moment().add(parseInt(config.jwt.accessExpiration), 'minutes');
   const accessToken = generateToken(user, accessTokenExpires, 'access');
 
-  const refreshTokenExpires = moment().add(config.jwt.refreshExpiration, 'days');
+  const refreshTokenExpires = moment().add(parseInt(config.jwt.refreshExpiration), 'days');
   const refreshToken = generateToken(user, refreshTokenExpires, 'refresh', config.jwt.refreshSecret);
   await saveToken(refreshToken, user, refreshTokenExpires, 'refresh');
 
