@@ -32,6 +32,11 @@ app.use('/api', routes);
 // Global error handler
 app.use(errorHandler);
 
-app.listen(config.port, () => {
-  console.log(`Server running on port ${config.port}`);
-});
+// Only listen if this file is run directly (not imported)
+if (require.main === module) {
+  app.listen(config.port, () => {
+    console.log(`Server running on port ${config.port}`);
+  });
+}
+
+export default app;
