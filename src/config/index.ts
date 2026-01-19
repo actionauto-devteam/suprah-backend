@@ -7,7 +7,7 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const envVarsSchema = Joi.object()
   .keys({
-    NODE_ENV: Joi.string().valid('production', 'development', 'test').required(),
+    NODE_ENV: Joi.string().valid('production', 'development', 'test', 'staging').required(),
     PORT: Joi.number().default(5000),
     MONGODB_URI: Joi.string().required().description('Mongo DB url'),
     BCRYPT_SALT_ROUNDS: Joi.number().required().description('Bcrypt salt rounds'),
@@ -17,6 +17,7 @@ const envVarsSchema = Joi.object()
     JWT_REFRESH_EXPIRATION: Joi.string()
       .required()
       .description('expiration time for refresh token (e.g., "7d", "30d")'),
+    CORS_ORIGIN: Joi.string().default('http://localhost:3000').description('CORS allowed origin'),
   })
   .unknown();
 
@@ -29,6 +30,7 @@ if (error) {
 const config = {
   env: envVars.NODE_ENV,
   port: envVars.PORT,
+  corsOrigin: envVars.CORS_ORIGIN,
   mongoose: {
     url: envVars.MONGODB_URI,
     options: {
