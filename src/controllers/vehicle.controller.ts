@@ -4,7 +4,7 @@ import Vehicle from '../models/Vehicle.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 
-// ✅ FIXED: Normalize vehicle data to match frontend interface
+// Normalize vehicle data to match frontend interface
 const normalizeVehicle = (vehicle: any) => ({
   id: vehicle._id.toString(),
   vin: vehicle.vin,
@@ -90,7 +90,7 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
-  // ✅ FIXED: Update stepEnteredAt when currentStep changes
+  //  Update stepEnteredAt when currentStep changes
   const existingVehicle = await Vehicle.findById(req.params.id);
   
   if (!existingVehicle) {
@@ -127,7 +127,7 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, 'Vehicle deleted successfully'));
 });
 
-// ✅ NEW: Add note to vehicle
+
 const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   const { text } = req.body;
   const userId = (req as any).user?._id;

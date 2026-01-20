@@ -21,11 +21,11 @@ const defaultRoutes = [
     route: dashboardRoute,
   },
   {
-    path: '/shipments', // ✅ ADD
+    path: '/shipments', 
     route: shipmentRoute,
   },
   {
-    path: '/quotes', // ✅ ADD
+    path: '/quotes', 
     route: quoteRoute,
   },
 ];

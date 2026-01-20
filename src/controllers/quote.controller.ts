@@ -45,7 +45,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Invalid ZIP code format');
     }
 
-    // ✅ FIXED: Get vehicle details if vehicleId is provided
+    // Get vehicle details if vehicleId is provided
     let vehicleData: any = {};
     if (vehicleId) {
         const vehicle = await Vehicle.findById(vehicleId);
@@ -106,7 +106,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         status: 'pending'
     });
 
-    // ✅ FIXED: Populate vehicle details in response
+    // Populate vehicle details in response
     const populatedQuote = await Quote.findById(quote._id)
         .populate('vehicleId', 'year make modelName vin stockNumber image location');
 

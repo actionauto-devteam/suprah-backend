@@ -18,8 +18,7 @@ router
     .get(vehicleController.getVehicleById)
     .put(vehicleController.updateVehicle)
     .delete(vehicleController.deleteVehicle);
-
-// ✅ NEW: Notes endpoint
+    
 router
     .route('/:id/notes')
     .post(vehicleController.addVehicleNote);

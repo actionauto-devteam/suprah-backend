@@ -37,10 +37,10 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         requestedPickupDate: requestedPickupDate || new Date()
     });
 
-    // Update quote status to booked
+
     await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
 
-    // ✅ FIXED: Properly populate nested vehicle data
+
     const populatedShipment = await Shipment.findById(shipment._id)
         .populate({
             path: 'quoteId',
@@ -67,7 +67,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         filter.status = status;
     }
 
-    // ✅ FIXED: Properly populate nested data
+    // FIXED: Properly populate nested data
     const shipments = await Shipment.find(filter)
         .populate({
             path: 'quoteId',
