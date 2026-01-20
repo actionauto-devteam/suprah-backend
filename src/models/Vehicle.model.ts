@@ -1,6 +1,7 @@
-import mongoose, { Document, Schema, Model } from 'mongoose';
+import mongoose, { Document, Schema, Model, Query } from 'mongoose';
 
 export interface IVehicle extends Document {
+    // Basic Information
     vin: string;
     year: number;
     make: string;
@@ -8,11 +9,33 @@ export interface IVehicle extends Document {
     trim?: string;
     color?: string;
     stockNumber?: string;
-    status: 'In Recon' | 'Ready for Sale' | 'Sold';
-    currentStep: 'Inspection' | 'Mechanical' | 'Body / Paint' | 'Detail' | 'Photography' | 'Ready';
-    assignedTo?: mongoose.Types.ObjectId;
+    
+    // Pricing
+    price?: number;
+    marketPrice?: number;
+    
+    // Details
+    mileage?: number;
+    transmission?: string;
+    fuelType?: string;
+    location?: string;
+    image?: string;
+    
+    // Status
+    status: 'In Recon' | 'Ready for Sale' | 'Sold' | 'In Transit';
+    currentStep?: 'Inspection' | 'Mechanical' | 'Body / Paint' | 'Detail' | 'Photography' | 'Ready';
+    
+    // Dates
     reconStartDate?: Date;
     stepEnteredAt?: Date;
+    daysOnLot?: number;
+    dateAdded?: Date;
+    dateSold?: Date;
+    
+    // Assignment
+    assignedTo?: mongoose.Types.ObjectId;
+    
+    // Notes
     notes: Array<{
         text: string;
         author: mongoose.Types.ObjectId;
@@ -21,21 +44,35 @@ export interface IVehicle extends Document {
 }
 
 export interface IVehicleModel extends Model<IVehicle> {
-    paginate(filter: any, options: any): Promise<any>; // Add if you use pagination plugin
+    paginate(filter: any, options: any): Promise<any>;
 }
 
 const VehicleSchema: Schema<IVehicle> = new Schema(
     {
+        // Basic Information
         vin: { type: String, required: true, unique: true, trim: true },
         year: { type: Number, required: true },
         make: { type: String, required: true, trim: true },
         modelName: { type: String, required: true, trim: true },
         trim: { type: String, trim: true },
         color: { type: String, trim: true },
-        stockNumber: { type: String, trim: true },
+        stockNumber: { type: String, trim: true, unique: true, sparse: true },
+        
+        // Pricing
+        price: { type: Number },
+        marketPrice: { type: Number },
+        
+        // Details
+        mileage: { type: Number },
+        transmission: { type: String, trim: true },
+        fuelType: { type: String, trim: true },
+        location: { type: String, trim: true },
+        image: { type: String, trim: true },
+        
+        // Status
         status: {
             type: String,
-            enum: ['In Recon', 'Ready for Sale', 'Sold'],
+            enum: ['In Recon', 'Ready for Sale', 'Sold', 'In Transit'],
             default: 'In Recon',
         },
         currentStep: {
@@ -43,9 +80,18 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
             enum: ['Inspection', 'Mechanical', 'Body / Paint', 'Detail', 'Photography', 'Ready'],
             default: 'Inspection',
         },
-        assignedTo: { type: Schema.Types.ObjectId, ref: 'User' },
+        
+        // Dates
         reconStartDate: { type: Date, default: Date.now },
         stepEnteredAt: { type: Date, default: Date.now },
+        daysOnLot: { type: Number, default: 0 },
+        dateAdded: { type: Date, default: Date.now },
+        dateSold: { type: Date },
+        
+        // Assignment
+        assignedTo: { type: Schema.Types.ObjectId, ref: 'User' },
+        
+        // Notes
         notes: [
             {
                 text: { type: String, required: true },
@@ -59,9 +105,18 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
     }
 );
 
-// Add plugins if needed (toJSON, paginate)
-// VehicleSchema.plugin(toJSON);
-// VehicleSchema.plugin(paginate);
+// Update daysOnLot before each query
+VehicleSchema.post('find', function (docs: IVehicle[]) {
+    docs.forEach((vehicle) => {
+        if (vehicle.dateAdded) {
+            const days = Math.floor(
+                (Date.now() - new Date(vehicle.dateAdded).getTime()) /
+                (1000 * 60 * 60 * 24)
+            );
+            vehicle.daysOnLot = days;
+        }
+    });
+});
 
 const Vehicle = mongoose.model<IVehicle, IVehicleModel>('Vehicle', VehicleSchema);
 

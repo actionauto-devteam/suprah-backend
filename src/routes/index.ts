@@ -2,6 +2,9 @@ import express from 'express';
 import authRoute from './auth.route';
 import vehicleRoute from './vehicle.route';
 import dashboardRoute from './dashboard.route';
+import shipmentRoute from './shipment.routes';
+import quoteRoute from './quote.routes';
+
 const router = express.Router();
 
 const defaultRoutes = [
@@ -17,7 +20,16 @@ const defaultRoutes = [
     path: '/dashboard',
     route: dashboardRoute,
   },
+  {
+    path: '/shipments', // ✅ ADD
+    route: shipmentRoute,
+  },
+  {
+    path: '/quotes', // ✅ ADD
+    route: quoteRoute,
+  },
 ];
+
 
 defaultRoutes.forEach((route) => {
   router.use(route.path, route.route);

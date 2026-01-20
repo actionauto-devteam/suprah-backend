@@ -4,8 +4,10 @@ import auth from '../middleware/auth.middleware';
 
 const router = express.Router();
 
+// Apply authentication middleware to all routes
 router.use(auth());
 
+// Vehicle CRUD routes
 router
     .route('/')
     .post(vehicleController.createVehicle)
@@ -14,6 +16,12 @@ router
 router
     .route('/:id')
     .get(vehicleController.getVehicleById)
-    .put(vehicleController.updateVehicle);
+    .put(vehicleController.updateVehicle)
+    .delete(vehicleController.deleteVehicle);
+
+// ✅ NEW: Notes endpoint
+router
+    .route('/:id/notes')
+    .post(vehicleController.addVehicleNote);
 
 export default router;
