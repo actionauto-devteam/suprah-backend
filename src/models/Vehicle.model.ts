@@ -9,38 +9,39 @@ export interface IVehicle extends Document {
     trim?: string;
     color?: string;
     stockNumber?: string;
-    
+
     // Pricing
     price?: number;
     marketPrice?: number;
-    
+
     // Details
     mileage?: number;
     transmission?: string;
     fuelType?: string;
     location?: string;
     image?: string;
-    
+
     // Status
     status: 'In Recon' | 'Ready for Sale' | 'Sold' | 'In Transit';
     currentStep?: 'Inspection' | 'Mechanical' | 'Body / Paint' | 'Detail' | 'Photography' | 'Ready';
-    
+
     // Dates
     reconStartDate?: Date;
     stepEnteredAt?: Date;
     daysOnLot?: number;
     dateAdded?: Date;
     dateSold?: Date;
-    
+
     // Assignment
     assignedTo?: mongoose.Types.ObjectId;
-    
+
     // Notes
     notes: Array<{
         text: string;
         author: mongoose.Types.ObjectId;
         date: Date;
     }>;
+    isDeleted: boolean;
 }
 
 export interface IVehicleModel extends Model<IVehicle> {
@@ -57,18 +58,18 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         trim: { type: String, trim: true },
         color: { type: String, trim: true },
         stockNumber: { type: String, trim: true, unique: true, sparse: true },
-        
+
         // Pricing
         price: { type: Number },
         marketPrice: { type: Number },
-        
+
         // Details
         mileage: { type: Number },
         transmission: { type: String, trim: true },
         fuelType: { type: String, trim: true },
         location: { type: String, trim: true },
         image: { type: String, trim: true },
-        
+
         // Status
         status: {
             type: String,
@@ -80,17 +81,17 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
             enum: ['Inspection', 'Mechanical', 'Body / Paint', 'Detail', 'Photography', 'Ready'],
             default: 'Inspection',
         },
-        
+
         // Dates
         reconStartDate: { type: Date, default: Date.now },
         stepEnteredAt: { type: Date, default: Date.now },
         daysOnLot: { type: Number, default: 0 },
         dateAdded: { type: Date, default: Date.now },
         dateSold: { type: Date },
-        
+
         // Assignment
         assignedTo: { type: Schema.Types.ObjectId, ref: 'User' },
-        
+
         // Notes
         notes: [
             {
@@ -99,6 +100,7 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
                 date: { type: Date, default: Date.now },
             },
         ],
+        isDeleted: { type: Boolean, default: false },
     },
     {
         timestamps: true,

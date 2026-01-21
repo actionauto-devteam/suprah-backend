@@ -18,6 +18,11 @@ const envVarsSchema = Joi.object()
       .required()
       .description('expiration time for refresh token (e.g., "7d", "30d")'),
     CORS_ORIGIN: Joi.string().default('http://localhost:3000').description('CORS allowed origin'),
+    DEALERSCLOUD_FTP_HOST: Joi.string().allow('').default(''),
+    DEALERSCLOUD_FTP_USER: Joi.string().allow('').default(''),
+    DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
+    DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
+    SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
   })
   .unknown();
 
@@ -44,6 +49,15 @@ const config = {
     accessExpiration: envVars.JWT_ACCESS_EXPIRATION,
     refreshSecret: envVars.JWT_REFRESH_SECRET,
     refreshExpiration: envVars.JWT_REFRESH_EXPIRATION,
+  },
+  ftp: {
+    host: envVars.DEALERSCLOUD_FTP_HOST,
+    user: envVars.DEALERSCLOUD_FTP_USER,
+    password: envVars.DEALERSCLOUD_FTP_PASSWORD,
+    file: envVars.DEALERSCLOUD_FTP_FILE,
+  },
+  sync: {
+    schedule: envVars.SYNC_SCHEDULE,
   },
 };
 

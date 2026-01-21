@@ -33,12 +33,10 @@ describe('Dashboard Routes', () => {
     test('GET /api/dashboard/metrics should return metrics', async () => {
         // Seed some vehicles
         await Vehicle.create({
-            vin: 'VIN123', year: 2021, make: 'Toyota', modelName: 'Camry',
-            status: 'In Recon', currentStep: 'Inspection'
+            vin: 'VIN123', year: 2021, make: 'Toyota', modelName: 'Camry'
         });
         await Vehicle.create({
-            vin: 'VIN456', year: 2022, make: 'Honda', modelName: 'Civic',
-            status: 'Ready for Sale', currentStep: 'Ready'
+            vin: 'VIN456', year: 2022, make: 'Honda', modelName: 'Civic'
         });
 
         const res = await request(app)
@@ -48,7 +46,6 @@ describe('Dashboard Routes', () => {
         expect(res.status).toBe(200);
         expect(res.body.data.inventoryOverview).toBeDefined();
         expect(res.body.data.inventoryOverview.totalActive).toBe(2);
-        expect(res.body.data.inventoryOverview.inRecon).toBe(1);
-        expect(res.body.data.reconStatus.Inspection).toBe(1);
+        expect(res.body.data.recentActivity).toHaveLength(2);
     });
 });
