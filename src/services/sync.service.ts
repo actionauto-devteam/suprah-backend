@@ -124,6 +124,61 @@ export class SyncService {
     }
 
     /**
+     * Process a locally uploaded file (from FTP server)
+     */
+    async processLocalFile(filePath: string): Promise<any> {
+        const startTime = new Date();
+        const syncLog = await SyncLog.create({ startTime, status: 'RUNNING' });
+
+        try {
+            // Read and parse the local file
+            const fs = require('fs');
+            const stream = fs.createReadStream(filePath);
+            const rawData = await ftpService.parseInventoryFile(stream);
+
+            syncLog.vehiclesProcessed = rawData.length;
+            await syncLog.save();
+
+            const csvVins = new Set(rawData.map(v => v.VIN));
+            let added = 0;
+            let updated = 0;
+
+            // Process Additions and Updates
+            for (const rawVehicle of rawData) {
+                const result = await this.syncVehicle(rawVehicle);
+                if (result.type === 'added') added++;
+                if (result.type === 'updated') updated++;
+            }
+
+            // Process Deletions
+            const deletionResult = await this.handleDeletions(csvVins);
+
+            // Finalize
+            syncLog.vehiclesAdded = added;
+            syncLog.vehiclesUpdated = updated;
+            syncLog.vehiclesDeleted = deletionResult.deletedCount;
+            syncLog.status = 'COMPLETED';
+            syncLog.endTime = new Date();
+            await syncLog.save();
+
+            return {
+                added,
+                updated,
+                deleted: deletionResult.deletedCount,
+                processed: rawData.length
+            };
+
+        } catch (error: any) {
+            syncLog.status = 'FAILED';
+            syncLog.errorMessage = error.message;
+            syncLog.stackTrace = error.stack;
+            syncLog.endTime = new Date();
+            await syncLog.save();
+            throw error;
+        }
+    }
+
+    /**
      * Soft-deletes vehicles missing from the current feed
      */
     private async handleDeletions(csvVins: Set<string>) {

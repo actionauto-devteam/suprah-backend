@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  ftp-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile.ftp
+    container_name: actionauto-ftp
+    restart: unless-stopped
+    
+    ports:
+      # FTP Control Port
+      - "21:21"
+      # Passive Mode Data Ports
+      - "21000-21010:21000-21010"
+    
+    environment:
+      # Node Environment
+      NODE_ENV: production
+      
+      # MongoDB Connection
+      MONGODB_URI: ${MONGODB_URI}
+      
+      # FTP Server Configuration
+      FTP_SERVER_PORT: 21
+      FTP_PASSIVE_URL: ${VPS_PUBLIC_IP}
+      FTP_PASV_MIN: 21000
+      FTP_PASV_MAX: 21010
+      FTP_SERVER_USER: ${FTP_SERVER_USER}
+      FTP_SERVER_PASSWORD: ${FTP_SERVER_PASSWORD}
+      FTP_UPLOAD_DIR: /app/ftp-uploads
+    
+    volumes:
+      # Persist uploaded files (optional, since they're deleted after processing)
+      - ftp-uploads:/app/ftp-uploads
+    
+    networks:
+      - ftp-network
+    
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "21"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  ftp-uploads:
+    driver: local
+
+networks:
+  ftp-network:
+    driver: bridge

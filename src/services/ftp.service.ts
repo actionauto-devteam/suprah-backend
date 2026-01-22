@@ -74,6 +74,9 @@ export class FtpService {
                         columns: true, // Uses first row as headers
                         skip_empty_lines: true,
                         trim: true,
+                        relax_quotes: true, // Allow quotes to appear in unquoted fields
+                        relax_column_count: true, // Allow inconsistent column counts
+                        skip_records_with_error: true, // Skip malformed records instead of failing
                     })
                 )
                 .on('data', (data) => results.push(data))
