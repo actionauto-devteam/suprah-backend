@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install ALL dependencies (including dev dependencies for build)
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -23,10 +23,14 @@ WORKDIR /app
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init
 
-# Copy built files and dependencies from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
+# Copy package files first
 COPY --from=builder /app/package*.json ./
+
+# Install only production dependencies in final image
+RUN npm ci --only=production
+
+# Copy built files from builder
+COPY --from=builder /app/dist ./dist
 
 # Create upload directory
 RUN mkdir -p /app/ftp-uploads && chmod 755 /app/ftp-uploads
