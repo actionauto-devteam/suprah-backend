@@ -8,6 +8,9 @@ services:
     container_name: actionauto-ftp
     restart: unless-stopped
     
+    env_file:
+      - .env
+    
     ports:
       # FTP Control Port
       - "21:21"
@@ -29,6 +32,18 @@ services:
       FTP_SERVER_USER: ${FTP_SERVER_USER}
       FTP_SERVER_PASSWORD: ${FTP_SERVER_PASSWORD}
       FTP_UPLOAD_DIR: /app/ftp-uploads
+      
+      # JWT Configuration (required by config validation)
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_EXPIRATION: ${JWT_ACCESS_EXPIRATION}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION}
+      
+      # Bcrypt Configuration (required by config validation)
+      BCRYPT_SALT_ROUNDS: ${BCRYPT_SALT_ROUNDS}
+      
+      # Port (required by config validation)
+      PORT: ${PORT}
     
     volumes:
       # Persist uploaded files (optional, since they're deleted after processing)
