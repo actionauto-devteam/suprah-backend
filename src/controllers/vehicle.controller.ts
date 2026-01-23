@@ -41,25 +41,63 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getVehicles = asyncHandler(async (req: Request, res: Response) => {
-  const { status, search, make, minPrice, maxPrice } = req.query;
+  const {
+    status,
+    search,
+    make,
+    model,
+    year,
+    location,
+    minPrice,
+    maxPrice,
+    minMileage,
+    maxMileage,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+    page = '1',
+    limit = '20'
+  } = req.query;
 
   // Build filter
   const filter: any = {};
-  
-  if (status && status !== 'all') {
-    filter.status = status;
+
+  // Default to 'Ready for Sale' unless explicitly specified
+  if (status) {
+    if (status !== 'all') {
+      filter.status = status;
+    }
+  } else {
+    filter.status = 'Ready for Sale'; // DEFAULT
   }
-  
+
   if (make) {
     filter.make = { $regex: make, $options: 'i' };
   }
-  
+
+  if (model) {
+    filter.modelName = { $regex: model, $options: 'i' };
+  }
+
+  if (year) {
+    filter.year = Number(year);
+  }
+
+  if (location) {
+    filter.location = { $regex: location, $options: 'i' };
+  }
+
   if (minPrice || maxPrice) {
     filter.price = {};
     if (minPrice) filter.price.$gte = Number(minPrice);
     if (maxPrice) filter.price.$lte = Number(maxPrice);
   }
-  
+
+  if (minMileage || maxMileage) {
+    filter.mileage = {};
+    if (minMileage) filter.mileage.$gte = Number(minMileage);
+    if (maxMileage) filter.mileage.$lte = Number(maxMileage);
+  }
+
   if (search) {
     filter.$or = [
       { vin: { $regex: search, $options: 'i' } },
@@ -69,36 +107,64 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     ];
   }
 
-  const vehicles = await Vehicle.find(filter)
-    .populate('assignedTo', 'email name')
-    .sort({ createdAt: -1 });
-  
+  // Build sort object
+  const sortObj: any = {};
+  const validSortFields = ['price', 'year', 'mileage', 'dateAdded', 'createdAt'];
+  if (validSortFields.includes(sortBy as string)) {
+    sortObj[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
+  } else {
+    sortObj.createdAt = -1; // Default sort
+  }
+
+  // Pagination
+  const pageNum = Math.max(1, Number(page));
+  const limitNum = Math.min(100, Math.max(1, Number(limit))); // Max 100 items per page
+  const skip = (pageNum - 1) * limitNum;
+
+  // Execute query with pagination
+  const [vehicles, total] = await Promise.all([
+    Vehicle.find(filter)
+      .populate('assignedTo', 'email name')
+      .sort(sortObj)
+      .skip(skip)
+      .limit(limitNum),
+    Vehicle.countDocuments(filter)
+  ]);
+
   const normalized = vehicles.map(normalizeVehicle);
 
-  res.json(new ApiResponse(200, normalized, 'Vehicles fetched successfully'));
+  res.json(new ApiResponse(200, {
+    vehicles: normalized,
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      total,
+      totalPages: Math.ceil(total / limitNum)
+    }
+  }, 'Vehicles fetched successfully'));
 });
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
   const vehicle = await Vehicle.findById(req.params.id)
     .populate('assignedTo', 'email name');
-    
+
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
   }
-  
+
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle fetched successfully'));
 });
 
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   //  Update stepEnteredAt when currentStep changes
   const existingVehicle = await Vehicle.findById(req.params.id);
-  
+
   if (!existingVehicle) {
     throw new ApiError(404, 'Vehicle not found');
   }
 
   const updateData = { ...req.body };
-  
+
   // If currentStep is changing, update stepEnteredAt
   if (updateData.currentStep && updateData.currentStep !== existingVehicle.currentStep) {
     updateData.stepEnteredAt = new Date();
@@ -113,7 +179,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
   }
-  
+
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle updated successfully'));
 });
 
@@ -153,13 +219,376 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
     },
     { new: true }
   ).populate('assignedTo', 'email name')
-   .populate('notes.author', 'name email');
+    .populate('notes.author', 'name email');
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
   }
 
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Note added successfully'));
+});
+
+const getFilters = asyncHandler(async (req: Request, res: Response) => {
+  // Get unique values for filter dropdowns
+  const [makes, models, years, locations] = await Promise.all([
+    Vehicle.distinct('make'),
+    Vehicle.distinct('modelName'),
+    Vehicle.distinct('year'),
+    Vehicle.distinct('location')
+  ]);
+
+  res.json(new ApiResponse(200, {
+    makes: makes.filter(Boolean).sort(),
+    models: models.filter(Boolean).sort(),
+    years: years.filter(Boolean).sort((a, b) => b - a), // Descending order
+    locations: locations.filter(Boolean).sort()
+  }, 'Filters fetched successfully'));
+});
+
+const getStats = asyncHandler(async (req: Request, res: Response) => {
+  // Get inventory statistics
+  const [total, byStatus, vehicles] = await Promise.all([
+    Vehicle.countDocuments({ isDeleted: false }),
+    Vehicle.aggregate([
+      { $match: { isDeleted: false } },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]),
+    Vehicle.find({ isDeleted: false }).select('price daysOnLot')
+  ]);
+
+  // Calculate statistics
+  const statusBreakdown = byStatus.reduce((acc: any, item: any) => {
+    acc[item._id] = item.count;
+    return acc;
+  }, {});
+
+  const prices = vehicles.map(v => v.price || 0).filter(p => p > 0);
+  const averagePrice = prices.length > 0
+    ? Math.round(prices.reduce((sum, p) => sum + p, 0) / prices.length)
+    : 0;
+
+  const daysOnLot = vehicles.map(v => v.daysOnLot || 0);
+  const averageDaysOnLot = daysOnLot.length > 0
+    ? Math.round(daysOnLot.reduce((sum, d) => sum + d, 0) / daysOnLot.length)
+    : 0;
+
+  const totalValue = prices.reduce((sum, p) => sum + p, 0);
+
+  res.json(new ApiResponse(200, {
+    total,
+    byStatus: statusBreakdown,
+    averagePrice,
+    averageDaysOnLot,
+    totalValue
+  }, 'Statistics fetched successfully'));
+});
+
+const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
+  // Sales Trend (last 6 months)
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+  const salesTrend = await Vehicle.aggregate([
+    {
+      $match: {
+        status: 'Sold',
+        dateSold: { $gte: sixMonthsAgo }
+      }
+    },
+    {
+      $group: {
+        _id: {
+          year: { $year: '$dateSold' },
+          month: { $month: '$dateSold' }
+        },
+        sold: { $sum: 1 },
+        revenue: { $sum: '$price' }
+      }
+    },
+    { $sort: { '_id.year': 1, '_id.month': 1 } }
+  ]);
+
+  // Format sales trend data
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const formattedSalesTrend = salesTrend.map(item => ({
+    month: monthNames[item._id.month - 1],
+    sold: item.sold,
+    revenue: item.revenue || 0
+  }));
+
+  // Inventory by Make
+  const inventoryByMake = await Vehicle.aggregate([
+    { $match: { isDeleted: false, status: { $ne: 'Sold' } } },
+    { $group: { _id: '$make', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 10 }
+  ]);
+
+  const formattedInventoryByMake = inventoryByMake.map(item => ({
+    make: item._id,
+    count: item.count
+  }));
+
+  // Price Distribution
+  const priceDistribution = await Vehicle.aggregate([
+    { $match: { isDeleted: false, status: { $ne: 'Sold' }, price: { $gt: 0 } } },
+    {
+      $bucket: {
+        groupBy: '$price',
+        boundaries: [0, 20000, 40000, 60000, 80000, 100000, 200000],
+        default: '200k+',
+        output: { count: { $sum: 1 } }
+      }
+    }
+  ]);
+
+  const priceRangeLabels = ['0-20k', '20k-40k', '40k-60k', '60k-80k', '80k-100k', '100k-200k', '200k+'];
+  const formattedPriceDistribution = priceDistribution.map((item, index) => ({
+    range: priceRangeLabels[index] || '200k+',
+    count: item.count
+  }));
+
+  // Days on Lot Average (current vs last month)
+  const now = new Date();
+  const lastMonth = new Date();
+  lastMonth.setMonth(lastMonth.getMonth() - 1);
+
+  const [currentVehicles, lastMonthVehicles] = await Promise.all([
+    Vehicle.find({
+      isDeleted: false,
+      status: { $ne: 'Sold' },
+      dateAdded: { $gte: lastMonth }
+    }).select('daysOnLot'),
+    Vehicle.find({
+      isDeleted: false,
+      status: 'Sold',
+      dateSold: { $gte: lastMonth, $lt: now }
+    }).select('daysOnLot')
+  ]);
+
+  const currentAvg = currentVehicles.length > 0
+    ? Math.round(currentVehicles.reduce((sum, v) => sum + (v.daysOnLot || 0), 0) / currentVehicles.length)
+    : 0;
+
+  const lastMonthAvg = lastMonthVehicles.length > 0
+    ? Math.round(lastMonthVehicles.reduce((sum, v) => sum + (v.daysOnLot || 0), 0) / lastMonthVehicles.length)
+    : 0;
+
+  const trend = currentAvg < lastMonthAvg ? 'improving' : currentAvg > lastMonthAvg ? 'declining' : 'stable';
+
+  res.json(new ApiResponse(200, {
+    salesTrend: formattedSalesTrend,
+    inventoryByMake: formattedInventoryByMake,
+    priceDistribution: formattedPriceDistribution,
+    daysOnLotAverage: {
+      current: currentAvg,
+      lastMonth: lastMonthAvg,
+      trend
+    }
+  }, 'Dashboard graphs data fetched successfully'));
+});
+
+const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => {
+  const { status, currentStep } = req.body;
+
+  if (!status) {
+    throw new ApiError(400, 'Status is required');
+  }
+
+  const updateData: any = { status };
+
+  // If currentStep is provided, update it and stepEnteredAt
+  if (currentStep) {
+    updateData.currentStep = currentStep;
+    updateData.stepEnteredAt = new Date();
+  }
+
+  const vehicle = await Vehicle.findByIdAndUpdate(
+    req.params.id,
+    updateData,
+    { new: true, runValidators: true }
+  ).populate('assignedTo', 'email name');
+
+  if (!vehicle) {
+    throw new ApiError(404, 'Vehicle not found');
+  }
+
+  res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle status updated successfully'));
+});
+
+const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
+  const { status, search, make, model, year, location, minPrice, maxPrice, minMileage, maxMileage } = req.query;
+
+  // Build filter (same as getVehicles)
+  const filter: any = {};
+
+  if (status) {
+    if (status !== 'all') {
+      filter.status = status;
+    }
+  } else {
+    filter.status = 'Ready for Sale';
+  }
+
+  if (make) filter.make = { $regex: make, $options: 'i' };
+  if (model) filter.modelName = { $regex: model, $options: 'i' };
+  if (year) filter.year = Number(year);
+  if (location) filter.location = { $regex: location, $options: 'i' };
+
+  if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice) filter.price.$gte = Number(minPrice);
+    if (maxPrice) filter.price.$lte = Number(maxPrice);
+  }
+
+  if (minMileage || maxMileage) {
+    filter.mileage = {};
+    if (minMileage) filter.mileage.$gte = Number(minMileage);
+    if (maxMileage) filter.mileage.$lte = Number(maxMileage);
+  }
+
+  if (search) {
+    filter.$or = [
+      { vin: { $regex: search, $options: 'i' } },
+      { make: { $regex: search, $options: 'i' } },
+      { modelName: { $regex: search, $options: 'i' } },
+      { stockNumber: { $regex: search, $options: 'i' } }
+    ];
+  }
+
+  const vehicles = await Vehicle.find(filter).sort({ createdAt: -1 });
+
+  // Generate CSV
+  const csvHeader = 'VIN,Year,Make,Model,Trim,Color,Stock Number,Price,Mileage,Status,Location,Date Added\n';
+  const csvRows = vehicles.map(v =>
+    `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ''}","${v.color || ''}","${v.stockNumber || ''}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.location || ''}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split('T')[0] : ''}`
+  ).join('\n');
+
+  const csv = csvHeader + csvRows;
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="vehicles-export-${Date.now()}.csv"`);
+  res.send(csv);
+});
+
+const getDashboard = asyncHandler(async (req: Request, res: Response) => {
+  // Get recent vehicles and quick stats
+  const [recentVehicles, stats, alerts] = await Promise.all([
+    Vehicle.find({ isDeleted: false })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate('assignedTo', 'email name'),
+    Vehicle.aggregate([
+      { $match: { isDeleted: false } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+          avgPrice: { $avg: '$price' }
+        }
+      }
+    ]),
+    Vehicle.find({
+      isDeleted: false,
+      status: 'In Recon',
+      daysOnLot: { $gt: 30 }
+    }).countDocuments()
+  ]);
+
+  const statusBreakdown = stats.reduce((acc: any, item: any) => {
+    acc[item._id] = {
+      count: item.count,
+      avgPrice: Math.round(item.avgPrice || 0)
+    };
+    return acc;
+  }, {});
+
+  res.json(new ApiResponse(200, {
+    recentVehicles: recentVehicles.map(normalizeVehicle),
+    statusBreakdown,
+    alerts: {
+      longRecon: alerts
+    }
+  }, 'Dashboard data fetched successfully'));
+});
+
+const autocomplete = asyncHandler(async (req: Request, res: Response) => {
+  const { q } = req.query;
+
+  if (!q || (q as string).length < 2) {
+    return res.json(new ApiResponse(200, [], 'Query too short'));
+  }
+
+  const regex = { $regex: q, $options: 'i' };
+
+  const [vins, makes, models, stockNumbers] = await Promise.all([
+    Vehicle.distinct('vin', { vin: regex, isDeleted: false }).limit(5),
+    Vehicle.distinct('make', { make: regex, isDeleted: false }).limit(5),
+    Vehicle.distinct('modelName', { modelName: regex, isDeleted: false }).limit(5),
+    Vehicle.distinct('stockNumber', { stockNumber: regex, isDeleted: false }).limit(5)
+  ]);
+
+  const suggestions = [
+    ...vins.map(v => ({ type: 'vin', value: v })),
+    ...makes.map(m => ({ type: 'make', value: m })),
+    ...models.map(m => ({ type: 'model', value: m })),
+    ...stockNumbers.filter(Boolean).map(s => ({ type: 'stock', value: s }))
+  ].slice(0, 10);
+
+  res.json(new ApiResponse(200, suggestions, 'Autocomplete suggestions fetched'));
+});
+
+const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
+  const vehicle = await Vehicle.findById(req.params.id);
+
+  if (!vehicle) {
+    throw new ApiError(404, 'Vehicle not found');
+  }
+
+  const available = vehicle.status === 'Ready for Sale';
+
+  res.json(new ApiResponse(200, {
+    available,
+    status: vehicle.status,
+    location: vehicle.location || 'Unknown',
+    reservedUntil: null // Can be extended later
+  }, 'Availability checked'));
+});
+
+const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
+  const { customerName, duration = 24 } = req.body;
+
+  if (!customerName) {
+    throw new ApiError(400, 'Customer name is required');
+  }
+
+  const vehicle = await Vehicle.findById(req.params.id);
+
+  if (!vehicle) {
+    throw new ApiError(404, 'Vehicle not found');
+  }
+
+  if (vehicle.status !== 'Ready for Sale') {
+    throw new ApiError(400, 'Vehicle is not available for reservation');
+  }
+
+  // Add note about reservation
+  const userId = (req as any).user?._id;
+  const reservedUntil = new Date();
+  reservedUntil.setHours(reservedUntil.getHours() + duration);
+
+  vehicle.notes.push({
+    text: `Reserved for ${customerName} until ${reservedUntil.toISOString()}`,
+    author: userId,
+    date: new Date()
+  } as any);
+
+  await vehicle.save();
+
+  res.json(new ApiResponse(200, {
+    ...normalizeVehicle(vehicle),
+    reservedUntil
+  }, 'Vehicle reserved successfully'));
 });
 
 export default {
@@ -169,4 +598,13 @@ export default {
   updateVehicle,
   deleteVehicle,
   addVehicleNote,
+  getFilters,
+  getStats,
+  getDashboardGraphs,
+  updateVehicleStatus,
+  exportVehicles,
+  getDashboard,
+  autocomplete,
+  checkAvailability,
+  reserveVehicle,
 };
