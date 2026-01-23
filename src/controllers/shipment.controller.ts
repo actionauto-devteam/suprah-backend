@@ -1,3 +1,5 @@
+// shipment.controller.ts
+
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
@@ -7,9 +9,10 @@ import { ApiError } from '../utils/ApiError';
 
 /**
  * Create a new shipment from a quote
+ * This will automatically delete the quote after creating the shipment
  */
 const createShipment = asyncHandler(async (req: Request, res: Response) => {
-    const { quoteId, requestedPickupDate } = req.body;
+    const { quoteId, requestedPickupDate, autoDeleteQuote = true } = req.body;
 
     if (!quoteId) {
         throw new ApiError(400, 'Quote ID is required');
@@ -28,19 +31,42 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Shipment already exists for this quote');
     }
 
-    // Create shipment
+    // Check if quote is already booked by another shipment
+    if (quote.status === 'booked') {
+        throw new ApiError(400, 'This quote has already been converted to a shipment');
+    }
+
+    // Create shipment with all quote data embedded to preserve information
     const shipment = await Shipment.create({
         quoteId,
         status: 'Available for Pickup',
         origin: quote.fromAddress,
         destination: quote.toAddress,
-        requestedPickupDate: requestedPickupDate || new Date()
+        requestedPickupDate: requestedPickupDate || new Date(),
+        // Store quote data for reference even after quote deletion
+        preservedQuoteData: {
+            firstName: quote.firstName,
+            lastName: quote.lastName,
+            email: quote.email,
+            phone: quote.phone,
+            vehicleName: quote.vehicleName,
+            vehicleImage: quote.vehicleImage,
+            vin: quote.vin,
+            stockNumber: quote.stockNumber,
+            fromZip: quote.fromZip,
+            toZip: quote.toZip,
+            fromAddress: quote.fromAddress,
+            toAddress: quote.toAddress,
+            miles: quote.miles,
+            rate: quote.rate,
+            eta: quote.eta,
+            enclosedTrailer: quote.enclosedTrailer,
+            vehicleInoperable: quote.vehicleInoperable,
+            units: quote.units
+        }
     });
 
-
-    await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
-
-
+    // Populate the shipment before deletion/update of quote
     const populatedShipment = await Shipment.findById(shipment._id)
         .populate({
             path: 'quoteId',
@@ -50,8 +76,22 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
             }
         });
 
+    // Delete quote if autoDeleteQuote is true (default behavior)
+    if (autoDeleteQuote) {
+        await Quote.findByIdAndDelete(quoteId);
+    } else {
+        // Otherwise just mark as booked
+        await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
+    }
+
     res.status(201).json(
-        new ApiResponse(201, populatedShipment, 'Shipment created successfully')
+        new ApiResponse(
+            201, 
+            populatedShipment, 
+            autoDeleteQuote 
+                ? 'Shipment created successfully. Quote has been removed.' 
+                : 'Shipment created successfully.'
+        )
     );
 });
 
@@ -67,7 +107,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         filter.status = status;
     }
 
-    // FIXED: Properly populate nested data
+    // Properly populate nested data
     const shipments = await Shipment.find(filter)
         .populate({
             path: 'quoteId',
@@ -84,11 +124,20 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         const searchLower = (search as string).toLowerCase();
         filteredShipments = shipments.filter(shipment => {
             const quote = shipment.quoteId as any;
+            const preserved = shipment.preservedQuoteData as any;
+            
             return (
+                // Search in quote data (if quote still exists)
                 quote?.firstName?.toLowerCase().includes(searchLower) ||
                 quote?.lastName?.toLowerCase().includes(searchLower) ||
                 quote?.vin?.toLowerCase().includes(searchLower) ||
                 quote?.stockNumber?.toLowerCase().includes(searchLower) ||
+                // Search in preserved data (if quote was deleted)
+                preserved?.firstName?.toLowerCase().includes(searchLower) ||
+                preserved?.lastName?.toLowerCase().includes(searchLower) ||
+                preserved?.vin?.toLowerCase().includes(searchLower) ||
+                preserved?.stockNumber?.toLowerCase().includes(searchLower) ||
+                // Search in tracking number
                 shipment.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
@@ -217,18 +266,61 @@ const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Delete shipment
+ * This will restore the quote if it was deleted during shipment creation
  */
 const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
-    const shipment = await Shipment.findByIdAndDelete(req.params.id);
+    const shipment = await Shipment.findById(req.params.id);
 
     if (!shipment) {
         throw new ApiError(404, 'Shipment not found');
     }
 
-    // Update quote status back to accepted
-    await Quote.findByIdAndUpdate(shipment.quoteId, { status: 'accepted' });
+    // Check if the quote still exists
+    const existingQuote = await Quote.findById(shipment.quoteId);
+    
+    if (existingQuote) {
+        // Quote exists, just update its status back to accepted
+        await Quote.findByIdAndUpdate(shipment.quoteId, { status: 'accepted' });
+    } else if (shipment.preservedQuoteData) {
+        // Quote was deleted, restore it from preserved data
+        const preserved = shipment.preservedQuoteData as any;
+        await Quote.create({
+            _id: shipment.quoteId, // Restore with original ID
+            firstName: preserved.firstName,
+            lastName: preserved.lastName,
+            email: preserved.email,
+            phone: preserved.phone,
+            vehicleName: preserved.vehicleName,
+            vehicleImage: preserved.vehicleImage,
+            vin: preserved.vin,
+            stockNumber: preserved.stockNumber,
+            fromZip: preserved.fromZip,
+            toZip: preserved.toZip,
+            fromAddress: preserved.fromAddress,
+            toAddress: preserved.toAddress,
+            miles: preserved.miles,
+            rate: preserved.rate,
+            eta: preserved.eta,
+            enclosedTrailer: preserved.enclosedTrailer,
+            vehicleInoperable: preserved.vehicleInoperable,
+            units: preserved.units,
+            status: 'accepted', // Set status to accepted when restoring
+            vehicleId: preserved.vehicleId
+        });
+    }
 
-    res.json(new ApiResponse(200, null, 'Shipment deleted successfully'));
+    // Delete the shipment
+    await Shipment.findByIdAndDelete(req.params.id);
+
+    res.json(
+        new ApiResponse(
+            200, 
+            null, 
+            existingQuote 
+                ? 'Shipment deleted successfully. Quote status updated to accepted.' 
+                : 'Shipment deleted successfully. Quote has been restored.'
+        )
+    );
 });
 
 /**
