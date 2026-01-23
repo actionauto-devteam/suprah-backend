@@ -36,9 +36,23 @@ async function startFtpWorker() {
         const ftpServerConfig = require('./config/ftp-server.config').ftpServerConfig;
         const syncService = require('./services/sync.service').default;
         const fs = require('fs/promises');
+        const path = require('path');
 
-        const watcher = chokidar.watch(ftpServerConfig.uploadDir, {
-            ignored: /(^|[\/\\])\../, // ignore dotfiles
+        const uploadDir = ftpServerConfig.uploadDir;
+        const processedDir = path.join(uploadDir, 'processed');
+
+        // Ensure processed directory exists
+        try {
+            await fs.mkdir(processedDir, { recursive: true });
+        } catch (error) {
+            console.error('⚠️ Could not create processed directory:', error);
+        }
+
+        const watcher = chokidar.watch(uploadDir, {
+            ignored: [
+                /(^|[\/\\])\../, // ignore dotfiles
+                processedDir // ignore processed directory to prevent loops
+            ],
             persistent: true,
             ignoreInitial: true, // Don't process existing files on startup
             awaitWriteFinish: {
@@ -48,15 +62,21 @@ async function startFtpWorker() {
         });
 
         watcher.on('add', async (filePath: string) => {
-            if (filePath.endsWith('.csv')) {
+            // Only process CSV files that are NOT in the processed directory
+            if (filePath.endsWith('.csv') && !filePath.includes('processed')) {
                 console.log(`📥 New file detected: ${filePath}`);
                 try {
                     await syncService.processLocalFile(filePath);
                     console.log(`✅ File processed successfully: ${filePath}`);
 
-                    // Delete file after processing
-                    await fs.unlink(filePath);
-                    console.log(`🗑️  File deleted: ${filePath}`);
+                    // Move file to processed directory with timestamp
+                    const fileName = path.basename(filePath, '.csv');
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const newFileName = `${fileName}_${timestamp}.csv`;
+                    const newPath = path.join(processedDir, newFileName);
+
+                    await fs.rename(filePath, newPath);
+                    console.log(`📂 File moved to: ${newPath}`);
                 } catch (error) {
                     console.error(`❌ Error processing file ${filePath}:`, error);
                 }
