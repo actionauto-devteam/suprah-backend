@@ -1,5 +1,3 @@
-// shipment.controller.ts
-
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
@@ -25,25 +23,21 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Quote not found');
     }
 
-    // Check if shipment already exists for this quote
     const existingShipment = await Shipment.findOne({ quoteId });
     if (existingShipment) {
         throw new ApiError(400, 'Shipment already exists for this quote');
     }
 
-    // Check if quote is already booked by another shipment
     if (quote.status === 'booked') {
         throw new ApiError(400, 'This quote has already been converted to a shipment');
     }
 
-    // Create shipment with all quote data embedded to preserve information
     const shipment = await Shipment.create({
         quoteId,
         status: 'Available for Pickup',
         origin: quote.fromAddress,
         destination: quote.toAddress,
         requestedPickupDate: requestedPickupDate || new Date(),
-        // Store quote data for reference even after quote deletion
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,
@@ -66,7 +60,6 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         }
     });
 
-    // Populate the shipment before deletion/update of quote
     const populatedShipment = await Shipment.findById(shipment._id)
         .populate({
             path: 'quoteId',
@@ -76,11 +69,9 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
             }
         });
 
-    // Delete quote if autoDeleteQuote is true (default behavior)
     if (autoDeleteQuote) {
         await Quote.findByIdAndDelete(quoteId);
     } else {
-        // Otherwise just mark as booked
         await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
     }
 
@@ -107,7 +98,6 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         filter.status = status;
     }
 
-    // Properly populate nested data
     const shipments = await Shipment.find(filter)
         .populate({
             path: 'quoteId',
@@ -118,7 +108,6 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         })
         .sort({ createdAt: -1 });
 
-    // Apply search filter if provided
     let filteredShipments = shipments;
     if (search) {
         const searchLower = (search as string).toLowerCase();
@@ -127,17 +116,14 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             const preserved = shipment.preservedQuoteData as any;
             
             return (
-                // Search in quote data (if quote still exists)
                 quote?.firstName?.toLowerCase().includes(searchLower) ||
                 quote?.lastName?.toLowerCase().includes(searchLower) ||
                 quote?.vin?.toLowerCase().includes(searchLower) ||
                 quote?.stockNumber?.toLowerCase().includes(searchLower) ||
-                // Search in preserved data (if quote was deleted)
                 preserved?.firstName?.toLowerCase().includes(searchLower) ||
                 preserved?.lastName?.toLowerCase().includes(searchLower) ||
                 preserved?.vin?.toLowerCase().includes(searchLower) ||
                 preserved?.stockNumber?.toLowerCase().includes(searchLower) ||
-                // Search in tracking number
                 shipment.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
@@ -167,11 +153,14 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Update shipment status and dates
+ * Update shipment - ENHANCED to support all fields
  */
 const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     const {
         status,
+        origin,
+        destination,
+        requestedPickupDate,
         scheduledPickup,
         pickedUp,
         scheduledDelivery,
@@ -196,11 +185,29 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         updateData.status = status;
     }
 
-    if (scheduledPickup) updateData.scheduledPickup = new Date(scheduledPickup);
-    if (pickedUp) updateData.pickedUp = new Date(pickedUp);
-    if (scheduledDelivery) updateData.scheduledDelivery = new Date(scheduledDelivery);
-    if (delivered) updateData.delivered = new Date(delivered);
-    if (trackingNumber) updateData.trackingNumber = trackingNumber;
+    // Route information
+    if (origin !== undefined) updateData.origin = origin;
+    if (destination !== undefined) updateData.destination = destination;
+
+    // Dates - handle both string dates and null/undefined
+    if (requestedPickupDate !== undefined) {
+        updateData.requestedPickupDate = requestedPickupDate ? new Date(requestedPickupDate) : null;
+    }
+    if (scheduledPickup !== undefined) {
+        updateData.scheduledPickup = scheduledPickup ? new Date(scheduledPickup) : null;
+    }
+    if (pickedUp !== undefined) {
+        updateData.pickedUp = pickedUp ? new Date(pickedUp) : null;
+    }
+    if (scheduledDelivery !== undefined) {
+        updateData.scheduledDelivery = scheduledDelivery ? new Date(scheduledDelivery) : null;
+    }
+    if (delivered !== undefined) {
+        updateData.delivered = delivered ? new Date(delivered) : null;
+    }
+    
+    // Tracking
+    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
     const shipment = await Shipment.findByIdAndUpdate(
@@ -275,17 +282,14 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Shipment not found');
     }
 
-    // Check if the quote still exists
     const existingQuote = await Quote.findById(shipment.quoteId);
     
     if (existingQuote) {
-        // Quote exists, just update its status back to accepted
         await Quote.findByIdAndUpdate(shipment.quoteId, { status: 'accepted' });
     } else if (shipment.preservedQuoteData) {
-        // Quote was deleted, restore it from preserved data
         const preserved = shipment.preservedQuoteData as any;
         await Quote.create({
-            _id: shipment.quoteId, // Restore with original ID
+            _id: shipment.quoteId,
             firstName: preserved.firstName,
             lastName: preserved.lastName,
             email: preserved.email,
@@ -304,12 +308,11 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
             enclosedTrailer: preserved.enclosedTrailer,
             vehicleInoperable: preserved.vehicleInoperable,
             units: preserved.units,
-            status: 'accepted', // Set status to accepted when restoring
+            status: 'accepted',
             vehicleId: preserved.vehicleId
         });
     }
 
-    // Delete the shipment
     await Shipment.findByIdAndDelete(req.params.id);
 
     res.json(

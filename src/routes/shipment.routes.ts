@@ -18,6 +18,7 @@ router
 router
     .route('/:id')
     .get(shipmentController.getShipmentById)
+    .put(shipmentController.updateShipment) 
     .patch(shipmentController.updateShipment)
     .delete(shipmentController.deleteShipment);
 

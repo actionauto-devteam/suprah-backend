@@ -14,6 +14,8 @@ router
 router
     .route('/:id')
     .get(quoteController.getQuoteById)
+    .put(quoteController.updateQuote)      
+    .patch(quoteController.updateQuote)    
     .delete(quoteController.deleteQuote);
 
 router
