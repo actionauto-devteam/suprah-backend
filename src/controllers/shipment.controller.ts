@@ -6,6 +6,41 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 
 /**
+ * Generate a unique tracking number
+ * Format: TRK-YYYYMMDD-XXXX (e.g., TRK-20260127-A3F9)
+ */
+const generateTrackingNumber = async (): Promise<string> => {
+    const date = new Date();
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const datePrefix = `${year}${month}${day}`;
+    
+    // Generate random alphanumeric code
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let trackingNumber: string;
+    let isUnique = false;
+    
+    // Keep generating until we get a unique number
+    while (!isUnique) {
+        let randomCode = '';
+        for (let i = 0; i < 4; i++) {
+            randomCode += characters.charAt(Math.floor(Math.random() * characters.length));
+        }
+        
+        trackingNumber = `TRK-${datePrefix}-${randomCode}`;
+        
+        // Check if tracking number already exists
+        const existing = await Shipment.findOne({ trackingNumber });
+        if (!existing) {
+            isUnique = true;
+        }
+    }
+    
+    return trackingNumber!;
+};
+
+/**
  * Create a new shipment from a quote
  * This will automatically delete the quote after creating the shipment
  */
@@ -32,12 +67,16 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'This quote has already been converted to a shipment');
     }
 
+    // Generate unique tracking number
+    const trackingNumber = await generateTrackingNumber();
+
     const shipment = await Shipment.create({
         quoteId,
         status: 'Available for Pickup',
         origin: quote.fromAddress,
         destination: quote.toAddress,
         requestedPickupDate: requestedPickupDate || new Date(),
+        trackingNumber, // Add the generated tracking number
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,
@@ -154,6 +193,7 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Update shipment - ENHANCED to support all fields
+ * NOTE: trackingNumber is NOT included as it should never be modified
  */
 const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     const {
@@ -165,7 +205,6 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         pickedUp,
         scheduledDelivery,
         delivered,
-        trackingNumber,
         carrierInfo
     } = req.body;
 
@@ -206,8 +245,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         updateData.delivered = delivered ? new Date(delivered) : null;
     }
     
-    // Tracking
-    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+    // Carrier info (trackingNumber is intentionally excluded)
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
     const shipment = await Shipment.findByIdAndUpdate(
