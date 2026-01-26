@@ -4,14 +4,13 @@ import Vehicle from '../models/Vehicle.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 
-// Normalize vehicle data to match frontend interface
 const normalizeVehicle = (vehicle: any) => ({
   id: vehicle._id.toString(),
   vin: vehicle.vin,
   year: vehicle.year,
   make: vehicle.make,
-  model: vehicle.modelName, // Frontend expects 'model'
-  modelName: vehicle.modelName, // Keep for backward compatibility
+  model: vehicle.modelName,
+  modelName: vehicle.modelName,
   trim: vehicle.trim || '',
   color: vehicle.color || 'N/A',
   stockNumber: vehicle.stockNumber || 'N/A',
@@ -55,19 +54,13 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     sortBy = 'createdAt',
     sortOrder = 'desc',
     page = '1',
-    limit = '20'
+    limit = '0'
   } = req.query;
 
-  // Build filter
   const filter: any = {};
 
-  // Default to 'Ready for Sale' unless explicitly specified
-  if (status) {
-    if (status !== 'all') {
-      filter.status = status;
-    }
-  } else {
-    filter.status = 'Ready for Sale'; // DEFAULT
+  if (status && status !== 'all') {
+    filter.status = status;
   }
 
   if (make) {
@@ -107,41 +100,48 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     ];
   }
 
-  // Build sort object
   const sortObj: any = {};
   const validSortFields = ['price', 'year', 'mileage', 'dateAdded', 'createdAt'];
   if (validSortFields.includes(sortBy as string)) {
     sortObj[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
   } else {
-    sortObj.createdAt = -1; // Default sort
+    sortObj.createdAt = -1;
   }
 
-  // Pagination
   const pageNum = Math.max(1, Number(page));
-  const limitNum = Math.min(100, Math.max(1, Number(limit))); // Max 100 items per page
-  const skip = (pageNum - 1) * limitNum;
+  const limitNum = Number(limit);
+  
+  let query = Vehicle.find(filter)
+    .populate('assignedTo', 'email name')
+    .sort(sortObj);
 
-  // Execute query with pagination
+  if (limitNum > 0) {
+    const skip = (pageNum - 1) * limitNum;
+    query = query.skip(skip).limit(limitNum);
+  }
+
   const [vehicles, total] = await Promise.all([
-    Vehicle.find(filter)
-      .populate('assignedTo', 'email name')
-      .sort(sortObj)
-      .skip(skip)
-      .limit(limitNum),
+    query.exec(),
     Vehicle.countDocuments(filter)
   ]);
 
   const normalized = vehicles.map(normalizeVehicle);
 
-  res.json(new ApiResponse(200, {
+  const responseData: any = {
     vehicles: normalized,
-    pagination: {
+    total
+  };
+
+  if (limitNum > 0) {
+    responseData.pagination = {
       page: pageNum,
       limit: limitNum,
       total,
       totalPages: Math.ceil(total / limitNum)
-    }
-  }, 'Vehicles fetched successfully'));
+    };
+  }
+
+  res.json(new ApiResponse(200, responseData, 'Vehicles fetched successfully'));
 });
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
@@ -156,7 +156,6 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
-  //  Update stepEnteredAt when currentStep changes
   const existingVehicle = await Vehicle.findById(req.params.id);
 
   if (!existingVehicle) {
@@ -165,7 +164,6 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
 
   const updateData = { ...req.body };
 
-  // If currentStep is changing, update stepEnteredAt
   if (updateData.currentStep && updateData.currentStep !== existingVehicle.currentStep) {
     updateData.stepEnteredAt = new Date();
   }
@@ -192,7 +190,6 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, null, 'Vehicle deleted successfully'));
 });
-
 
 const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   const { text } = req.body;
@@ -229,7 +226,6 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getFilters = asyncHandler(async (req: Request, res: Response) => {
-  // Get unique values for filter dropdowns
   const [makes, models, years, locations] = await Promise.all([
     Vehicle.distinct('make'),
     Vehicle.distinct('modelName'),
@@ -240,13 +236,12 @@ const getFilters = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, {
     makes: makes.filter(Boolean).sort(),
     models: models.filter(Boolean).sort(),
-    years: years.filter(Boolean).sort((a, b) => b - a), // Descending order
+    years: years.filter(Boolean).sort((a, b) => b - a),
     locations: locations.filter(Boolean).sort()
   }, 'Filters fetched successfully'));
 });
 
 const getStats = asyncHandler(async (req: Request, res: Response) => {
-  // Get inventory statistics
   const [total, byStatus, vehicles] = await Promise.all([
     Vehicle.countDocuments({ isDeleted: false }),
     Vehicle.aggregate([
@@ -256,7 +251,6 @@ const getStats = asyncHandler(async (req: Request, res: Response) => {
     Vehicle.find({ isDeleted: false }).select('price daysOnLot')
   ]);
 
-  // Calculate statistics
   const statusBreakdown = byStatus.reduce((acc: any, item: any) => {
     acc[item._id] = item.count;
     return acc;
@@ -284,7 +278,6 @@ const getStats = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
-  // Sales Trend (last 6 months)
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
@@ -308,7 +301,6 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
     { $sort: { '_id.year': 1, '_id.month': 1 } }
   ]);
 
-  // Format sales trend data
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const formattedSalesTrend = salesTrend.map(item => ({
     month: monthNames[item._id.month - 1],
@@ -316,7 +308,6 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
     revenue: item.revenue || 0
   }));
 
-  // Inventory by Make
   const inventoryByMake = await Vehicle.aggregate([
     { $match: { isDeleted: false, status: { $ne: 'Sold' } } },
     { $group: { _id: '$make', count: { $sum: 1 } } },
@@ -329,7 +320,6 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
     count: item.count
   }));
 
-  // Price Distribution
   const priceDistribution = await Vehicle.aggregate([
     { $match: { isDeleted: false, status: { $ne: 'Sold' }, price: { $gt: 0 } } },
     {
@@ -348,7 +338,6 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
     count: item.count
   }));
 
-  // Days on Lot Average (current vs last month)
   const now = new Date();
   const lastMonth = new Date();
   lastMonth.setMonth(lastMonth.getMonth() - 1);
@@ -397,7 +386,6 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
 
   const updateData: any = { status };
 
-  // If currentStep is provided, update it and stepEnteredAt
   if (currentStep) {
     updateData.currentStep = currentStep;
     updateData.stepEnteredAt = new Date();
@@ -419,7 +407,6 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
 const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
   const { status, search, make, model, year, location, minPrice, maxPrice, minMileage, maxMileage } = req.query;
 
-  // Build filter (same as getVehicles)
   const filter: any = {};
 
   if (status) {
@@ -458,7 +445,6 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 
   const vehicles = await Vehicle.find(filter).sort({ createdAt: -1 });
 
-  // Generate CSV
   const csvHeader = 'VIN,Year,Make,Model,Trim,Color,Stock Number,Price,Mileage,Status,Location,Date Added\n';
   const csvRows = vehicles.map(v =>
     `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ''}","${v.color || ''}","${v.stockNumber || ''}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.location || ''}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split('T')[0] : ''}`
@@ -472,7 +458,6 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getDashboard = asyncHandler(async (req: Request, res: Response) => {
-  // Get recent vehicles and quick stats
   const [recentVehicles, stats, alerts] = await Promise.all([
     Vehicle.find({ isDeleted: false })
       .sort({ createdAt: -1 })
@@ -551,7 +536,7 @@ const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
     available,
     status: vehicle.status,
     location: vehicle.location || 'Unknown',
-    reservedUntil: null // Can be extended later
+    reservedUntil: null
   }, 'Availability checked'));
 });
 
@@ -572,7 +557,6 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Vehicle is not available for reservation');
   }
 
-  // Add note about reservation
   const userId = (req as any).user?._id;
   const reservedUntil = new Date();
   reservedUntil.setHours(reservedUntil.getHours() + duration);
