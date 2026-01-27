@@ -127,11 +127,49 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const sortObj: any = {};
-  const validSortFields = ['price', 'year', 'mileage', 'dateAdded', 'createdAt'];
-  if (validSortFields.includes(sortBy as string)) {
-    sortObj[sortBy as string] = sortOrder === 'asc' ? 1 : -1;
-  } else {
-    sortObj.createdAt = -1;
+  const order = sortOrder === 'desc' ? -1 : 1;
+
+  switch (sortBy) {
+    case 'stockNumber':
+      sortObj.stockNumber = order;
+      break;
+    case 'year':
+      sortObj.year = order;
+      break;
+    case 'make':
+      sortObj.make = order;
+      sortObj.modelName = order;
+      break;
+    case 'location':
+      sortObj.dealerCity = order;
+      sortObj.dealerState = order;
+      break;
+    case 'mileage':
+      sortObj.mileage = order;
+      break;
+    case 'cost':
+      sortObj.cost = order;
+      break;
+    case 'price':
+      sortObj.price = order;
+      break;
+    case 'age':
+      sortObj.daysOnLot = order;
+      break;
+    case 'status':
+      sortObj.status = order;
+      break;
+    case 'updated':
+      sortObj.updatedAt = order;
+      break;
+    case 'created':
+    case 'recent': // Handle 'Recently Added'
+      sortObj.dateAdded = order;
+      break;
+    default:
+      // Default: Make and Model (Alphabetical)
+      sortObj.make = 1;
+      sortObj.modelName = 1;
   }
 
   const pageNum = Math.max(1, Number(page));
