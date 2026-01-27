@@ -7,21 +7,42 @@ export interface IVehicle extends Document {
     make: string;
     modelName: string;
     trim?: string;
-    color?: string;
+    exteriorColor?: string;
+    interiorColor?: string;
     stockNumber?: string;
+    vehicleType?: string;
+    bodyStyle?: string;
 
     // Pricing
     price?: number;
-    marketPrice?: number;
+    msrp?: number;
+    cost?: number;
 
     // Details
     mileage?: number;
     transmission?: string;
+    engine?: string;
     fuelType?: string;
-    location?: string;
-    image?: string;
+    driveTrain?: string;
+    doors?: number;
+    cylinders?: number;
+    options?: string;
+    comments?: string;
+    images?: string[];
+    vdpUrl?: string;
 
-    // Status
+    // Dealer Info
+    dealerId?: string;
+    dealerName?: string;
+    dealerAddress?: string;
+    dealerCity?: string;
+    dealerState?: string;
+    dealerZip?: string;
+    dealerEmail?: string;
+
+    // Status & Logic
+    certified?: boolean;
+    isNewVehicle?: boolean;
     status: 'In Recon' | 'Ready for Sale' | 'Sold' | 'In Transit';
     currentStep?: 'Inspection' | 'Mechanical' | 'Body / Paint' | 'Detail' | 'Photography' | 'Ready';
 
@@ -56,21 +77,42 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         make: { type: String, required: true, trim: true },
         modelName: { type: String, required: true, trim: true },
         trim: { type: String, trim: true },
-        color: { type: String, trim: true },
-        stockNumber: { type: String, trim: true, unique: true, sparse: true },
+        exteriorColor: { type: String, trim: true },
+        interiorColor: { type: String, trim: true },
+        stockNumber: { type: String, trim: true, index: true, sparse: true },
+        vehicleType: { type: String, trim: true },
+        bodyStyle: { type: String, trim: true },
 
         // Pricing
         price: { type: Number },
-        marketPrice: { type: Number },
+        msrp: { type: Number },
+        cost: { type: Number },
 
         // Details
         mileage: { type: Number },
         transmission: { type: String, trim: true },
+        engine: { type: String, trim: true },
         fuelType: { type: String, trim: true },
-        location: { type: String, trim: true },
-        image: { type: String, trim: true },
+        driveTrain: { type: String, trim: true },
+        doors: { type: Number },
+        cylinders: { type: Number },
+        options: { type: String, trim: true },
+        comments: { type: String, trim: true },
+        images: [{ type: String, trim: true }],
+        vdpUrl: { type: String, trim: true },
 
-        // Status
+        // Dealer Info
+        dealerId: { type: String, trim: true },
+        dealerName: { type: String, trim: true },
+        dealerAddress: { type: String, trim: true },
+        dealerCity: { type: String, trim: true },
+        dealerState: { type: String, trim: true },
+        dealerZip: { type: String, trim: true },
+        dealerEmail: { type: String, trim: true },
+
+        // Status & Logic
+        certified: { type: Boolean, default: false },
+        isNewVehicle: { type: Boolean, default: false },
         status: {
             type: String,
             enum: ['In Recon', 'Ready for Sale', 'Sold', 'In Transit'],

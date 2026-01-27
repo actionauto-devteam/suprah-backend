@@ -21,7 +21,7 @@ export class SyncService {
             syncLog.vehiclesProcessed = rawData.length;
             await syncLog.save();
 
-            const csvVins = new Set(rawData.map(v => v.VIN));
+            const csvVins = new Set(rawData.map(v => v.vin));
             let added = 0;
             let updated = 0;
 
@@ -64,16 +64,71 @@ export class SyncService {
      * Syncs a single vehicle record
      */
     private async syncVehicle(raw: RawVehicleData) {
-        const existingVehicle = await Vehicle.findOne({ vin: raw.VIN });
+        const existingVehicle = await Vehicle.findOne({ vin: raw.vin });
+
+        // Helper for robust number parsing
+        const parseNum = (val: string) => {
+            if (!val) return undefined;
+            const parsed = parseFloat(val.replace(/[^0-9.]/g, ''));
+            return isNaN(parsed) ? 0 : parsed;
+        };
+
+        // Helper for boolean parsing
+        const parseBool = (val: string) => {
+            if (!val) return false;
+            const normalized = val.toLowerCase().trim();
+            return normalized === 'yes' || normalized === 'true' || normalized === '1' || normalized === 'y';
+        };
+
+        // Helper for image array
+        const parseImages = (val: string) => {
+            if (!val) return [];
+            return val.split(',').map(url => url.trim()).filter(url => url.length > 0);
+        };
+
+        // 1. Data Sanitization & Validation
+        if (!raw.vin || raw.vin.trim().toLowerCase() === 'vin' || raw.vin.length < 5) {
+            return { type: 'none' }; // Skip headers and empty rows
+        }
+
+        const cleanStock = (val: string) => {
+            if (!val) return undefined;
+            const trimmed = val.trim();
+            // If the stock number is suspiciously long (e.g. > 50 chars), it's likely malformed data
+            return trimmed.length > 50 ? trimmed.substring(0, 50) : trimmed;
+        };
 
         const vehicleData = {
-            vin: raw.VIN,
-            year: parseInt(raw.Year),
-            make: raw.Make,
-            modelName: raw.Model,
-            trim: raw.Trim,
-            color: raw.Color,
-            stockNumber: raw.StockNumber,
+            vin: raw.vin.trim().toUpperCase(),
+            year: Math.floor(parseNum(raw.year) || 0),
+            make: raw.make?.trim(),
+            modelName: raw.model?.trim(),
+            trim: raw.trim?.trim(),
+            exteriorColor: raw['exterior color']?.trim(),
+            interiorColor: raw['interior color']?.trim(),
+            stockNumber: cleanStock(raw['stock number']),
+            vehicleType: raw.vehicletype?.trim(),
+
+            price: parseNum(raw.price),
+            mileage: parseNum(raw.mileage),
+            engine: raw.engine?.trim(),
+            transmission: raw['transmission type']?.trim(),
+            options: raw['installed options']?.trim(),
+            comments: raw['dealer comments on vehicle']?.trim(),
+            images: parseImages(raw['picture urls']),
+            vdpUrl: raw.vdp_vin_url?.trim(),
+
+            certified: parseBool(raw.certified),
+            isNewVehicle: parseBool(raw['is new']),
+
+            dealerId: raw['dealer id']?.trim(),
+            dealerName: raw['dealer name']?.trim(),
+            dealerAddress: raw['dealer street address']?.trim(),
+            dealerCity: raw['dealer city']?.trim(),
+            dealerState: raw['dealer state']?.trim(),
+            dealerZip: raw['dealer zip']?.trim(),
+            dealerEmail: raw['dealer crm email']?.trim(),
+
             isDeleted: false // Re-activate if it was deleted
         };
 
@@ -92,17 +147,12 @@ export class SyncService {
             return { type: 'added' };
         }
 
-        // Compare and Update
-        const oldData = {
-            vin: existingVehicle.vin,
-            year: existingVehicle.year,
-            make: existingVehicle.make,
-            modelName: existingVehicle.modelName,
-            trim: existingVehicle.trim,
-            color: existingVehicle.color,
-            stockNumber: existingVehicle.stockNumber,
-            isDeleted: existingVehicle.isDeleted
-        };
+        // Compare and Update (Selective comparison to minimize noise)
+        const oldData: any = {};
+        const relevantKeys = Object.keys(vehicleData).filter(k => k !== 'isDeleted');
+        relevantKeys.forEach(k => {
+            oldData[k] = (existingVehicle as any)[k];
+        });
 
         const changes = diff(oldData, vehicleData);
 
@@ -139,7 +189,7 @@ export class SyncService {
             syncLog.vehiclesProcessed = rawData.length;
             await syncLog.save();
 
-            const csvVins = new Set(rawData.map(v => v.VIN));
+            const csvVins = new Set(rawData.map(v => v.vin));
             let added = 0;
             let updated = 0;
 
