@@ -12,15 +12,18 @@ const normalizeVehicle = (vehicle: any) => ({
   model: vehicle.modelName,
   modelName: vehicle.modelName,
   trim: vehicle.trim || '',
-  color: vehicle.color || 'N/A',
+  color: vehicle.exteriorColor || 'N/A', // Mapping to 'color' for frontend compatibility
+  exteriorColor: vehicle.exteriorColor || 'N/A',
+  interiorColor: vehicle.interiorColor || 'N/A',
   stockNumber: vehicle.stockNumber || 'N/A',
   price: vehicle.price || 0,
-  marketPrice: vehicle.marketPrice || 0,
+  marketPrice: vehicle.msrp || 0,
   mileage: vehicle.mileage || 0,
   transmission: vehicle.transmission || 'Automatic',
   fuelType: vehicle.fuelType || 'Gasoline',
-  location: vehicle.location || 'Unknown',
-  image: vehicle.image || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+  location: vehicle.dealerCity ? `${vehicle.dealerCity}${vehicle.dealerState ? ', ' + vehicle.dealerState : ''}` : 'Unknown',
+  image: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+  images: vehicle.images || [],
   status: vehicle.status,
   currentStep: vehicle.currentStep,
   reconStartDate: vehicle.reconStartDate,
@@ -76,7 +79,10 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (location) {
-    filter.location = { $regex: location, $options: 'i' };
+    filter.$or = [
+      { dealerCity: { $regex: location, $options: 'i' } },
+      { dealerState: { $regex: location, $options: 'i' } }
+    ];
   }
 
   if (minPrice || maxPrice) {
@@ -110,7 +116,7 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
 
   const pageNum = Math.max(1, Number(page));
   const limitNum = Number(limit);
-  
+
   let query = Vehicle.find(filter)
     .populate('assignedTo', 'email name')
     .sort(sortObj);
@@ -230,7 +236,7 @@ const getFilters = asyncHandler(async (req: Request, res: Response) => {
     Vehicle.distinct('make'),
     Vehicle.distinct('modelName'),
     Vehicle.distinct('year'),
-    Vehicle.distinct('location')
+    Vehicle.distinct('dealerCity')
   ]);
 
   res.json(new ApiResponse(200, {
@@ -420,7 +426,12 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
   if (make) filter.make = { $regex: make, $options: 'i' };
   if (model) filter.modelName = { $regex: model, $options: 'i' };
   if (year) filter.year = Number(year);
-  if (location) filter.location = { $regex: location, $options: 'i' };
+  if (location) {
+    filter.$or = [
+      { dealerCity: { $regex: location, $options: 'i' } },
+      { dealerState: { $regex: location, $options: 'i' } }
+    ];
+  }
 
   if (minPrice || maxPrice) {
     filter.price = {};
@@ -447,7 +458,7 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 
   const csvHeader = 'VIN,Year,Make,Model,Trim,Color,Stock Number,Price,Mileage,Status,Location,Date Added\n';
   const csvRows = vehicles.map(v =>
-    `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ''}","${v.color || ''}","${v.stockNumber || ''}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.location || ''}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split('T')[0] : ''}`
+    `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ''}","${v.exteriorColor || ''}","${v.stockNumber || ''}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.dealerCity}, ${v.dealerState}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split('T')[0] : ''}`
   ).join('\n');
 
   const csv = csvHeader + csvRows;
@@ -535,7 +546,7 @@ const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, {
     available,
     status: vehicle.status,
-    location: vehicle.location || 'Unknown',
+    location: vehicle.dealerCity ? `${vehicle.dealerCity}, ${vehicle.dealerState}` : 'Unknown',
     reservedUntil: null
   }, 'Availability checked'));
 });
