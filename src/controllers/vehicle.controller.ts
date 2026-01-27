@@ -97,6 +97,26 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     if (maxMileage) filter.mileage.$lte = Number(maxMileage);
   }
 
+  if (req.query.bodyStyle) {
+    filter.bodyStyle = { $regex: req.query.bodyStyle, $options: 'i' };
+  }
+
+  if (req.query.driveTrain) {
+    filter.driveTrain = { $regex: req.query.driveTrain, $options: 'i' };
+  }
+
+  if (req.query.minDaysOnLot || req.query.maxDaysOnLot) {
+    filter.daysOnLot = {};
+    if (req.query.minDaysOnLot) filter.daysOnLot.$gte = Number(req.query.minDaysOnLot);
+    if (req.query.maxDaysOnLot) filter.daysOnLot.$lte = Number(req.query.maxDaysOnLot);
+  }
+
+  if (req.query.minCost || req.query.maxCost) {
+    filter.cost = {};
+    if (req.query.minCost) filter.cost.$gte = Number(req.query.minCost);
+    if (req.query.maxCost) filter.cost.$lte = Number(req.query.maxCost);
+  }
+
   if (search) {
     filter.$or = [
       { vin: { $regex: search, $options: 'i' } },
@@ -232,18 +252,22 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getFilters = asyncHandler(async (req: Request, res: Response) => {
-  const [makes, models, years, locations] = await Promise.all([
+  const [makes, models, years, locations, bodyStyles, driveTrains] = await Promise.all([
     Vehicle.distinct('make'),
     Vehicle.distinct('modelName'),
     Vehicle.distinct('year'),
-    Vehicle.distinct('dealerCity')
+    Vehicle.distinct('dealerCity'),
+    Vehicle.distinct('bodyStyle'),
+    Vehicle.distinct('driveTrain')
   ]);
 
   res.json(new ApiResponse(200, {
     makes: makes.filter(Boolean).sort(),
     models: models.filter(Boolean).sort(),
     years: years.filter(Boolean).sort((a, b) => b - a),
-    locations: locations.filter(Boolean).sort()
+    locations: locations.filter(Boolean).sort(),
+    bodyStyles: bodyStyles.filter(Boolean).sort(),
+    driveTrains: driveTrains.filter(Boolean).sort()
   }, 'Filters fetched successfully'));
 });
 
