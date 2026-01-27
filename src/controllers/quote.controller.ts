@@ -56,9 +56,9 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
                 vin: vehicle.vin,
                 stockNumber: vehicle.stockNumber,
                 vehiclePrice: vehicle.price,
-                vehicleMarketPrice: vehicle.marketPrice,
-                vehicleLocation: vehicle.location || 'Unknown',
-                vehicleImage: vehicle.image || 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+                vehicleMarketPrice: vehicle.msrp,
+                vehicleLocation: vehicle.dealerCity ? `${vehicle.dealerCity}, ${vehicle.dealerState}` : 'Unknown',
+                vehicleImage: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
                 vehicleStatus: vehicle.status,
                 daysOnLot: vehicle.daysOnLot
             };
@@ -108,7 +108,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 
     // Populate vehicle details in response
     const populatedQuote = await Quote.findById(quote._id)
-        .populate('vehicleId', 'year make modelName vin stockNumber image location');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     res.status(201).json(
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
@@ -122,7 +122,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
 
     const filter: any = {};
-    
+
     if (status && status !== 'all') {
         filter.status = status;
     }
@@ -138,7 +138,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     }
 
     const quotes = await Quote.find(filter)
-        .populate('vehicleId', 'year make modelName vin stockNumber image location')
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
         .sort({ createdAt: -1 });
 
     res.json(new ApiResponse(200, quotes, 'Quotes fetched successfully'));
@@ -149,7 +149,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
  */
 const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
     const quote = await Quote.findById(req.params.id)
-        .populate('vehicleId', 'year make modelName vin stockNumber image location');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
@@ -187,19 +187,19 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
     // Build update object with only provided fields
     const updateData: any = {};
-    
+
     // Customer information
     if (firstName !== undefined) updateData.firstName = firstName;
     if (lastName !== undefined) updateData.lastName = lastName;
     if (email !== undefined) updateData.email = email;
     if (phone !== undefined) updateData.phone = phone;
-    
+
     // Vehicle information
     if (vehicleName !== undefined) updateData.vehicleName = vehicleName;
     if (vin !== undefined) updateData.vin = vin;
     if (stockNumber !== undefined) updateData.stockNumber = stockNumber;
     if (vehicleLocation !== undefined) updateData.vehicleLocation = vehicleLocation;
-    
+
     // Shipping information
     if (fromZip !== undefined) updateData.fromZip = fromZip;
     if (toZip !== undefined) updateData.toZip = toZip;
@@ -208,12 +208,12 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (units !== undefined) updateData.units = units;
     if (enclosedTrailer !== undefined) updateData.enclosedTrailer = enclosedTrailer;
     if (vehicleInoperable !== undefined) updateData.vehicleInoperable = vehicleInoperable;
-    
+
     // Calculated fields
     if (rate !== undefined) updateData.rate = rate;
     if (miles !== undefined) updateData.miles = miles;
     if (eta !== undefined) updateData.eta = eta;
-    
+
     // Status
     if (status !== undefined) {
         const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
@@ -264,7 +264,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         req.params.id,
         updateData,
         { new: true, runValidators: true }
-    ).populate('vehicleId', 'year make modelName vin stockNumber image location');
+    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
@@ -289,7 +289,7 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         req.params.id,
         { status },
         { new: true }
-    ).populate('vehicleId', 'year make modelName vin stockNumber image location');
+    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
@@ -315,7 +315,7 @@ export default {
     createQuote,
     getQuotes,
     getQuoteById,
-    updateQuote,        
+    updateQuote,
     updateQuoteStatus,
     deleteQuote
 };

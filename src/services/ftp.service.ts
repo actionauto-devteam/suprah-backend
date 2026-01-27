@@ -5,20 +5,32 @@ import config from '../config';
 import { ApiError } from '../utils/ApiError';
 
 export interface RawVehicleData {
-    Year: string;
-    Make: string;
-    Model: string;
-    Trim: string;
-    Color: string;
-    Engine: string;
-    VIN: string;
-    Mileage: string;
-    Cost: string;
-    'J.D. POWER Adj': string;
-    'Internet Price': string;
-    'Retail Price': string;
-    Age: string;
-    StockNumber: string;
+    vin: string;
+    make: string;
+    model: string;
+    year: string;
+    trim: string;
+    price: string;
+    mileage: string;
+    'picture urls': string;
+    'exterior color': string;
+    'dealer comments on vehicle': string;
+    'stock number': string;
+    'transmission type': string;
+    'installed options': string;
+    'dealer id': string;
+    'dealer name': string;
+    'dealer street address': string;
+    'dealer city': string;
+    'dealer state': string;
+    'dealer zip': string;
+    'dealer crm email': string;
+    'interior color': string;
+    certified: string;
+    'is new': string;
+    engine: string;
+    vehicletype: string;
+    vdp_vin_url: string;
 }
 
 /**
@@ -71,12 +83,13 @@ export class FtpService {
             stream
                 .pipe(
                     parse({
-                        columns: true, // Uses first row as headers
+                        columns: (header) => header.map(h => h.trim().toLowerCase()),
                         skip_empty_lines: true,
                         trim: true,
-                        relax_quotes: true, // Allow quotes to appear in unquoted fields
-                        relax_column_count: true, // Allow inconsistent column counts
-                        skip_records_with_error: true, // Skip malformed records instead of failing
+                        relax_quotes: true,
+                        relax_column_count: true,
+                        skip_records_with_error: true,
+                        delimiter: '\t', // DealersCloud TSV format
                     })
                 )
                 .on('data', (data) => results.push(data))
