@@ -21,7 +21,7 @@ const normalizeVehicle = (vehicle: any) => ({
   mileage: vehicle.mileage || 0,
   transmission: vehicle.transmission || 'Automatic',
   fuelType: vehicle.fuelType || 'Gasoline',
-  location: vehicle.dealerCity ? `${vehicle.dealerCity}${vehicle.dealerState ? ', ' + vehicle.dealerState : ''}` : 'Unknown',
+  location: vehicle.dealerCity ? `${vehicle.dealerCity}${vehicle.dealerState ? ', ' + vehicle.dealerState : ''}${vehicle.dealerZip ? ', ' + vehicle.dealerZip : ''}` : 'Unknown',
   image: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
   images: vehicle.images || [],
   status: vehicle.status,
