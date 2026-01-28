@@ -16,9 +16,12 @@ const login = {
 };
 
 const refreshTokens = {
-    cookies: Joi.object().keys({
-      refreshToken: Joi.string().required(),
-    }).unknown(true),
+  body: Joi.object().keys({
+    refreshToken: Joi.string(),
+  }),
+  cookies: Joi.object().keys({
+    refreshToken: Joi.string(),
+  }).unknown(true),
 };
 
 export default {

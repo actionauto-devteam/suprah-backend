@@ -5,9 +5,10 @@ import tokenService from '../services/token.service';
 import authService from '../services/auth.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import config from '../config';
 
 const getCookieOptions = () => {
-    const isDev = process.env.NODE_ENV === 'development';
+    const isDev = config.env === 'development';
     return {
         httpOnly: true,
         secure: !isDev, // True in production/staging
@@ -32,9 +33,9 @@ const login = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const logout = asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = req.cookies;
+    const refreshToken = req.body.refreshToken || req.cookies.refreshToken;
     if (!refreshToken) {
-        throw new ApiError(400, "Refresh token is required");
+        throw new ApiError(401, "Refresh token is required");
     }
     await authService.logout(refreshToken);
     res.clearCookie('refreshToken', { ...getCookieOptions(), maxAge: 0 });
@@ -42,9 +43,9 @@ const logout = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const refreshTokens = asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = req.cookies;
+    const refreshToken = req.body.refreshToken || req.cookies.refreshToken;
     if (!refreshToken) {
-        throw new ApiError(400, "Refresh token is required");
+        throw new ApiError(401, "Please authenticate");
     }
     const tokens = await authService.refreshAuth(refreshToken);
     res.cookie('refreshToken', tokens.refresh.token, getCookieOptions());
