@@ -24,8 +24,23 @@ const refreshTokens = {
   }).unknown(true),
 };
 
+const forgotPassword = {
+  body: Joi.object().keys({
+    email: Joi.string().required().email(),
+  }),
+};
+
+const resetPassword = {
+  body: Joi.object().keys({
+    token: Joi.string().required(),
+    password: Joi.string().required().min(8),
+  }),
+};
+
 export default {
   register,
   login,
   refreshTokens,
+  forgotPassword,
+  resetPassword,
 };

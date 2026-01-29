@@ -23,6 +23,12 @@ const envVarsSchema = Joi.object()
     DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
+    // Email
+    EMAIL_HOST: Joi.string().required().description('Email host'),
+    EMAIL_PORT: Joi.number().required().description('Email port'),
+    EMAIL_USER: Joi.string().required().description('Email user'),
+    EMAIL_PASS: Joi.string().required().description('Email password'),
+    EMAIL_FROM: Joi.string().required().description('Email from address'),
   })
   .unknown();
 
@@ -36,6 +42,7 @@ const config = {
   env: envVars.NODE_ENV,
   port: envVars.PORT,
   corsOrigin: envVars.CORS_ORIGIN,
+  frontendUrl: envVars.CORS_ORIGIN,
   mongoose: {
     url: envVars.MONGODB_URI,
     options: {
@@ -58,6 +65,13 @@ const config = {
   },
   sync: {
     schedule: envVars.SYNC_SCHEDULE,
+  },
+  email: {
+    host: envVars.EMAIL_HOST,
+    port: envVars.EMAIL_PORT,
+    user: envVars.EMAIL_USER,
+    pass: envVars.EMAIL_PASS,
+    from: envVars.EMAIL_FROM,
   },
 };
 

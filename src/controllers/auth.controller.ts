@@ -32,6 +32,27 @@ const login = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { user, tokens }, 'Login successful'));
 });
 
+const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
+    const { email } = req.body;
+    if (!email) {
+        throw new ApiError(400, 'Email is required');
+    }
+    await authService.sendPasswordResetEmail(email);
+    res.status(200).json(new ApiResponse(200, null, 'If an account with that email exists, a password reset link has been sent.'));
+});
+
+const resetPassword = asyncHandler(async (req: Request, res: Response) => {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+        throw new ApiError(400, 'Token and new password are required');
+    }
+
+    await authService.resetPassword(token, password);
+
+    res.status(200).json(new ApiResponse(200, null, 'Password has been reset successfully.'));
+});
+
 const logout = asyncHandler(async (req: Request, res: Response) => {
     const refreshToken = req.body.refreshToken || req.cookies.refreshToken;
     if (!refreshToken) {
@@ -59,6 +80,8 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
 export default {
     register,
     login,
+    forgotPassword,
+    resetPassword,
     logout,
     refreshTokens,
     getMe,

@@ -13,5 +13,8 @@ router.post('/logout', authController.logout);
 router.post('/refresh', validate(authValidation.refreshTokens), authController.refreshTokens);
 router.get('/me', auth(), authorize('user'), authController.getMe);
 router.get('/admin', auth(), authorize('admin'), (req, res) => res.send('Admin content'));
+router.post('/forgot-password', validate(authValidation.forgotPassword), authController.forgotPassword);
+router.post('/reset-password', validate(authValidation.resetPassword), authController.resetPassword);
+
 
 export default router;
