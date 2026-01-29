@@ -11,7 +11,7 @@
     "start:ftp": "node dist/ftp-worker.js",
     "seed": "ts-node scripts/seed.ts",
     "seed:dev": "ts-node-dev --transpile-only scripts/seed.ts",
-    "clean": "rm -rf dist",
+    "clean": "rimraf dist",
     "prebuild": "npm run clean",
     "test": "jest --detectOpenHandles --forceExit",
     "test:watch": "jest --watch"
