@@ -77,20 +77,8 @@ export function calculateRate(
     enclosedTrailer: boolean = false,
     vehicleInoperable: boolean = false
 ): number {
-    // Base rate calculation
-    let baseRate: number;
-
-    if (miles <= 200) {
-        baseRate = 0.75 * miles;
-    } else if (miles <= 500) {
-        baseRate = 0.65 * miles;
-    } else if (miles <= 1000) {
-        baseRate = 0.55 * miles;
-    } else if (miles <= 1500) {
-        baseRate = 0.50 * miles;
-    } else {
-        baseRate = 0.45 * miles;
-    }
+    // Base rate calculation - $1.50 per mile
+    let baseRate = 1.50 * miles;
 
     // Minimum rate
     if (baseRate < 300) {

@@ -4,6 +4,9 @@ import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import { safeCreateNotification } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
+import { IUser } from '../models/User.model';
 import {
     getCoordinatesFromZip,
     calculateDistance,
@@ -12,9 +15,17 @@ import {
 } from '../utils/calculations';
 
 /**
+ * Helper to safely get user ID from request
+ */
+const getUserId = (req: Request): string | undefined => {
+  return (req.user as IUser)?._id?.toString();
+};
+
+/**
  * Create a new shipping quote
  */
 const createQuote = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const {
         firstName,
         lastName,
@@ -30,7 +41,6 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         vehicleInoperable = false
     } = req.body;
 
-    // Validate required fields
     if (!firstName || !lastName || !email || !phone) {
         throw new ApiError(400, 'Customer information is required');
     }
@@ -39,13 +49,11 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Shipping addresses are required');
     }
 
-    // Validate ZIP codes
     const zipRegex = /^\d{5}(-\d{4})?$/;
     if (!zipRegex.test(fromZip) || !zipRegex.test(toZip)) {
         throw new ApiError(400, 'Invalid ZIP code format');
     }
 
-    // Get vehicle details if vehicleId is provided
     let vehicleData: any = {};
     if (vehicleId) {
         const vehicle = await Vehicle.findById(vehicleId);
@@ -65,7 +73,6 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    // Get coordinates for distance calculation
     const fromCoords = await getCoordinatesFromZip(fromZip);
     if (!fromCoords) {
         throw new ApiError(400, 'Invalid origin ZIP code');
@@ -76,7 +83,6 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Invalid destination ZIP code');
     }
 
-    // Calculate shipping details
     const miles = calculateDistance(
         fromCoords.lat,
         fromCoords.lon,
@@ -86,7 +92,6 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     const rate = calculateRate(miles, units, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
 
-    // Create quote
     const quote = await Quote.create({
         firstName,
         lastName,
@@ -106,9 +111,30 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         status: 'pending'
     });
 
-    // Populate vehicle details in response
     const populatedQuote = await Quote.findById(quote._id)
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.quote_created({
+            customerName: `${firstName} ${lastName}`,
+            vehicleName: vehicleData.vehicleName,
+            rate,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'quote_created',
+            title,
+            message,
+            metadata: {
+                quoteId: quote._id.toString(),
+                customerName: `${firstName} ${lastName}`,
+                vehicleName: vehicleData.vehicleName,
+                rate,
+            },
+        });
+    }
 
     res.status(201).json(
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
@@ -160,9 +186,9 @@ const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Update quote - FULL UPDATE
- * This replaces the old updateQuoteStatus to support updating all fields
  */
 const updateQuote = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const {
         firstName,
         lastName,
@@ -185,22 +211,16 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         status
     } = req.body;
 
-    // Build update object with only provided fields
     const updateData: any = {};
 
-    // Customer information
     if (firstName !== undefined) updateData.firstName = firstName;
     if (lastName !== undefined) updateData.lastName = lastName;
     if (email !== undefined) updateData.email = email;
     if (phone !== undefined) updateData.phone = phone;
-
-    // Vehicle information
     if (vehicleName !== undefined) updateData.vehicleName = vehicleName;
     if (vin !== undefined) updateData.vin = vin;
     if (stockNumber !== undefined) updateData.stockNumber = stockNumber;
     if (vehicleLocation !== undefined) updateData.vehicleLocation = vehicleLocation;
-
-    // Shipping information
     if (fromZip !== undefined) updateData.fromZip = fromZip;
     if (toZip !== undefined) updateData.toZip = toZip;
     if (fromAddress !== undefined) updateData.fromAddress = fromAddress;
@@ -208,13 +228,10 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (units !== undefined) updateData.units = units;
     if (enclosedTrailer !== undefined) updateData.enclosedTrailer = enclosedTrailer;
     if (vehicleInoperable !== undefined) updateData.vehicleInoperable = vehicleInoperable;
-
-    // Calculated fields
     if (rate !== undefined) updateData.rate = rate;
     if (miles !== undefined) updateData.miles = miles;
     if (eta !== undefined) updateData.eta = eta;
 
-    // Status
     if (status !== undefined) {
         const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
         if (!validStatuses.includes(status)) {
@@ -223,7 +240,6 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         updateData.status = status;
     }
 
-    // If ZIP codes changed, recalculate distance and rate
     if ((fromZip && toZip) || (updateData.fromZip && updateData.toZip)) {
         const quote = await Quote.findById(req.params.id);
         if (!quote) {
@@ -256,7 +272,6 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
             }
         } catch (error) {
             console.error('Error recalculating shipping details:', error);
-            // Continue with update even if calculation fails
         }
     }
 
@@ -270,14 +285,34 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Quote not found');
     }
 
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.quote_updated({
+            customerName: `${quote.firstName} ${quote.lastName}`,
+            vehicleName: quote.vehicleName,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'quote_updated',
+            title,
+            message,
+            metadata: {
+                quoteId: quote._id.toString(),
+                customerName: `${quote.firstName} ${quote.lastName}`,
+                vehicleName: quote.vehicleName,
+            },
+        });
+    }
+
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 });
-
 
 /**
  * Update quote status (kept for backward compatibility)
  */
 const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const { status } = req.body;
 
     const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
@@ -295,6 +330,25 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Quote not found');
     }
 
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.quote_updated({
+            customerName: `${quote.firstName} ${quote.lastName}`,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'quote_updated',
+            title: 'Quote Status Updated',
+            message: `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
+            metadata: {
+                quoteId: quote._id.toString(),
+                customerName: `${quote.firstName} ${quote.lastName}`,
+                status,
+            },
+        });
+    }
+
     res.json(new ApiResponse(200, quote, 'Quote status updated successfully'));
 });
 
@@ -302,10 +356,35 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
  * Delete quote
  */
 const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
-    const quote = await Quote.findByIdAndDelete(req.params.id);
+    const userId = getUserId(req);
+    const quote = await Quote.findById(req.params.id);
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
+    }
+
+    const customerName = `${quote.firstName} ${quote.lastName}`;
+    const vehicleName = quote.vehicleName;
+
+    await Quote.findByIdAndDelete(req.params.id);
+
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.quote_deleted({
+            customerName,
+            vehicleName,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'quote_deleted',
+            title,
+            message,
+            metadata: {
+                customerName,
+                vehicleName,
+            },
+        });
     }
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));

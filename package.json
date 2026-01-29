@@ -11,7 +11,7 @@
     "start:ftp": "node dist/ftp-worker.js",
     "seed": "ts-node scripts/seed.ts",
     "seed:dev": "ts-node-dev --transpile-only scripts/seed.ts",
-    "clean": "rm -rf dist",
+    "clean": "rimraf dist",
     "prebuild": "npm run clean",
     "test": "jest --detectOpenHandles --forceExit",
     "test:watch": "jest --watch"
@@ -41,6 +41,7 @@
     "moment": "^2.30.1",
     "mongoose": "^8.4.0",
     "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.13",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1"
   },
@@ -56,6 +57,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.19.29",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^7.0.9",
     "@types/passport": "^1.0.16",
     "@types/passport-jwt": "^4.0.1",
     "@types/supertest": "^6.0.3",

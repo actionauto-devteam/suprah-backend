@@ -5,6 +5,8 @@ import dashboardRoute from './dashboard.route';
 import syncRoute from './sync.route';
 import shipmentRoute from './shipment.routes';
 import quoteRoute from './quote.routes';
+import notificationRoute from './notification.route';
+import profileRoute from './profile.route';
 
 const router = express.Router();
 
@@ -33,8 +35,15 @@ const defaultRoutes = [
     path: '/quotes',
     route: quoteRoute,
   },
+  {
+    path: '/notifications',
+    route: notificationRoute,
+  },
+  {
+    path: '/profile',
+    route: profileRoute,
+  },
 ];
-
 
 defaultRoutes.forEach((route) => {
   router.use(route.path, route.route);
