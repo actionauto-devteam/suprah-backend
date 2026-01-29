@@ -4,10 +4,19 @@ import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import { safeCreateNotification } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
+import { IUser } from '../models/User.model';
+
+/**
+ * Helper to safely get user ID from request
+ */
+const getUserId = (req: Request): string | undefined => {
+  return (req.user as IUser)?._id?.toString();
+};
 
 /**
  * Generate a unique tracking number
- * Format: TRK-YYYYMMDD-XXXX (e.g., TRK-20260127-A3F9)
  */
 const generateTrackingNumber = async (): Promise<string> => {
     const date = new Date();
@@ -16,12 +25,10 @@ const generateTrackingNumber = async (): Promise<string> => {
     const day = String(date.getDate()).padStart(2, '0');
     const datePrefix = `${year}${month}${day}`;
     
-    // Generate random alphanumeric code
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let trackingNumber: string;
     let isUnique = false;
     
-    // Keep generating until we get a unique number
     while (!isUnique) {
         let randomCode = '';
         for (let i = 0; i < 4; i++) {
@@ -30,7 +37,6 @@ const generateTrackingNumber = async (): Promise<string> => {
         
         trackingNumber = `TRK-${datePrefix}-${randomCode}`;
         
-        // Check if tracking number already exists
         const existing = await Shipment.findOne({ trackingNumber });
         if (!existing) {
             isUnique = true;
@@ -42,9 +48,9 @@ const generateTrackingNumber = async (): Promise<string> => {
 
 /**
  * Create a new shipment from a quote
- * This will automatically delete the quote after creating the shipment
  */
 const createShipment = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const { quoteId, requestedPickupDate, autoDeleteQuote = true } = req.body;
 
     if (!quoteId) {
@@ -67,7 +73,6 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'This quote has already been converted to a shipment');
     }
 
-    // Generate unique tracking number
     const trackingNumber = await generateTrackingNumber();
 
     const shipment = await Shipment.create({
@@ -76,7 +81,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         origin: quote.fromAddress,
         destination: quote.toAddress,
         requestedPickupDate: requestedPickupDate || new Date(),
-        trackingNumber, // Add the generated tracking number
+        trackingNumber,
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,
@@ -112,6 +117,27 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         await Quote.findByIdAndDelete(quoteId);
     } else {
         await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
+    }
+
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.shipment_created({
+            trackingNumber,
+            customerName: `${quote.firstName} ${quote.lastName}`,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'shipment_created',
+            title,
+            message,
+            metadata: {
+                shipmentId: shipment._id.toString(),
+                trackingNumber,
+                customerName: `${quote.firstName} ${quote.lastName}`,
+                vehicleName: quote.vehicleName,
+            },
+        });
     }
 
     res.status(201).json(
@@ -192,10 +218,10 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Update shipment - ENHANCED to support all fields
- * NOTE: trackingNumber is NOT included as it should never be modified
+ * Update shipment
  */
 const updateShipment = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const {
         status,
         origin,
@@ -224,11 +250,9 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         updateData.status = status;
     }
 
-    // Route information
     if (origin !== undefined) updateData.origin = origin;
     if (destination !== undefined) updateData.destination = destination;
 
-    // Dates - handle both string dates and null/undefined
     if (requestedPickupDate !== undefined) {
         updateData.requestedPickupDate = requestedPickupDate ? new Date(requestedPickupDate) : null;
     }
@@ -245,7 +269,6 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         updateData.delivered = delivered ? new Date(delivered) : null;
     }
     
-    // Carrier info (trackingNumber is intentionally excluded)
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
     const shipment = await Shipment.findByIdAndUpdate(
@@ -264,6 +287,36 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Shipment not found');
     }
 
+    // Create notification safely
+    if (userId) {
+        const quote = shipment.quoteId as any;
+        const preserved = shipment.preservedQuoteData as any;
+        const customerName = quote 
+            ? `${quote.firstName} ${quote.lastName}` 
+            : preserved 
+            ? `${preserved.firstName} ${preserved.lastName}`
+            : 'Customer';
+
+        const { title, message } = notificationTemplates.shipment_updated({
+            trackingNumber: shipment.trackingNumber || 'N/A',
+            customerName,
+            status: shipment.status,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'shipment_updated',
+            title,
+            message,
+            metadata: {
+                shipmentId: shipment._id.toString(),
+                trackingNumber: shipment.trackingNumber,
+                customerName,
+                status: shipment.status,
+            },
+        });
+    }
+
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
 });
 
@@ -272,7 +325,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
  */
 const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
     const { text } = req.body;
-    const userId = (req as any).user?._id;
+    const userId = (req.user as IUser)?._id;
 
     if (!text) {
         throw new ApiError(400, 'Note text is required');
@@ -311,21 +364,24 @@ const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Delete shipment
- * This will restore the quote if it was deleted during shipment creation
  */
 const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
     const shipment = await Shipment.findById(req.params.id);
 
     if (!shipment) {
         throw new ApiError(404, 'Shipment not found');
     }
 
+    const trackingNumber = shipment.trackingNumber || 'N/A';
+    const preserved = shipment.preservedQuoteData as any;
+    const customerName = preserved ? `${preserved.firstName} ${preserved.lastName}` : 'Customer';
+
     const existingQuote = await Quote.findById(shipment.quoteId);
     
     if (existingQuote) {
         await Quote.findByIdAndUpdate(shipment.quoteId, { status: 'accepted' });
     } else if (shipment.preservedQuoteData) {
-        const preserved = shipment.preservedQuoteData as any;
         await Quote.create({
             _id: shipment.quoteId,
             firstName: preserved.firstName,
@@ -352,6 +408,25 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     await Shipment.findByIdAndDelete(req.params.id);
+
+    // Create notification safely
+    if (userId) {
+        const { title, message } = notificationTemplates.shipment_deleted({
+            trackingNumber,
+            customerName,
+        });
+
+        await safeCreateNotification({
+            userId,
+            type: 'shipment_deleted',
+            title,
+            message,
+            metadata: {
+                trackingNumber,
+                customerName,
+            },
+        });
+    }
 
     res.json(
         new ApiResponse(

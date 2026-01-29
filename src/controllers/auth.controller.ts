@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import userService from '../services/user.service';
 import tokenService from '../services/token.service';
 import authService from '../services/auth.service';
+import notificationService from '../services/notification.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import config from '../config';
@@ -28,6 +29,11 @@ const login = asyncHandler(async (req: Request, res: Response) => {
     const { email, password } = req.body;
     const user = await authService.loginUserWithEmailAndPassword(email, password);
     const tokens = await tokenService.generateAuthTokens(user);
+    
+    // Cleanup old notifications in background (don't await)
+    notificationService.cleanupOldNotifications(user._id.toString(), 30)
+        .catch(err => console.error('Notification cleanup failed:', err));
+    
     res.cookie('refreshToken', tokens.refresh.token, getCookieOptions());
     res.json(new ApiResponse(200, { user, tokens }, 'Login successful'));
 });
