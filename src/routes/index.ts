@@ -7,6 +7,8 @@ import shipmentRoute from './shipment.routes';
 import quoteRoute from './quote.routes';
 import notificationRoute from './notification.route';
 import profileRoute from './profile.route';
+import appointmentRoute from './appointment.route';
+import conversationRoute from './conversation.route';
 
 const router = express.Router();
 
@@ -42,6 +44,14 @@ const defaultRoutes = [
   {
     path: '/profile',
     route: profileRoute,
+  },
+  {
+    path: '/appointments',
+    route: appointmentRoute,
+  },
+  {
+    path: '/conversations',
+    route: conversationRoute,
   },
 ];
 

@@ -1,8 +1,3 @@
-/**
- * Centralized notification message templates
- * This ensures consistency across all notifications
- */
-
 interface QuoteData {
   customerName: string;
   vehicleName?: string;
@@ -63,6 +58,26 @@ export const notificationTemplates = {
   profile_updated: (data: ProfileData = {}) => ({
     title: 'Profile Updated',
     message: `Your profile${data.fieldChanged ? ` (${data.fieldChanged})` : ''} has been updated successfully`,
+  }),
+  
+  appointment_created: (data: { title: string; startTime: string }) => ({
+    title: 'New Appointment',
+    message: `You have been invited to "${data.title}"`,
+  }),
+
+  appointment_updated: (data: { title: string }) => ({
+    title: 'Appointment Updated',
+    message: `"${data.title}" has been updated`,
+  }),
+
+  appointment_cancelled: (data: { title: string }) => ({
+    title: 'Appointment Cancelled',
+    message: `"${data.title}" has been cancelled`,
+  }),
+
+  message_received: (data: { from: string; preview: string }) => ({
+    title: `New message from ${data.from}`,
+    message: data.preview,
   }),
 };
 

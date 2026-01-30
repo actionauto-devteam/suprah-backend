@@ -23,6 +23,10 @@ const VALID_NOTIFICATION_TYPES = [
   'password_changed',
   'email_changed',
   'profile_updated',
+  'appointment_created',
+  'appointment_updated',
+  'appointment_cancelled',
+  'message_received',
 ] as const;
 
 /**

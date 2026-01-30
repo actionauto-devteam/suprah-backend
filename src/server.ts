@@ -8,6 +8,7 @@ import routes from './routes';
 import { errorHandler } from './middleware/error.middleware';
 import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
+import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
 
 const app: Application = express();
 
@@ -65,9 +66,9 @@ app.use(errorHandler);
 
 // Only listen if this file is run directly (not imported)
 if (require.main === module) {
-  // Initialize Scheduler
   initSyncScheduler();
-
+  initCleanupScheduler(); // Add this line
+  
   app.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);
   });
