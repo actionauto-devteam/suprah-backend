@@ -1,3 +1,5 @@
+// controllers/conversation.controller.ts
+
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import conversationService from '../services/conversation.service';
@@ -50,9 +52,21 @@ const markAsRead = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
+const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
+    const userId = (req.user as IUser)._id.toString();
+    const { id } = req.params;
+    
+    await conversationService.deleteConversation(id, userId);
+    
+    res.json(
+        new ApiResponse(200, null, 'Conversation deleted successfully')
+    );
+});
+
 export default {
     createConversation,
     getConversations,
     sendMessage,
-    markAsRead
+    markAsRead,
+    deleteConversation
 };

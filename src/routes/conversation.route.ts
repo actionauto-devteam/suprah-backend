@@ -12,6 +12,10 @@ router
     .get(conversationController.getConversations);
 
 router
+    .route('/:id')
+    .delete(conversationController.deleteConversation);
+
+router
     .route('/:id/messages')
     .post(conversationController.sendMessage);
 

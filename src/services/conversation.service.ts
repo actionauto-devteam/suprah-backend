@@ -1,217 +1,220 @@
-import Conversation from '../models/Conversation.model';
-import User from '../models/User.model';
-import notificationService from './notification.service';
+// services/conversation.service.ts
+
+import Conversation, { IConversation } from '../models/Conversation.model';
 import { ApiError } from '../utils/ApiError';
+import mongoose from 'mongoose';
 
-interface CreateConversationData {
-    type: 'direct' | 'group';
-    participants: string[];
-    name?: string;
-    avatar?: string;
-}
+class ConversationService {
+    /**
+     * Create a new conversation
+     */
+    async createConversation(userId: string, data: {
+        type: 'direct' | 'group';
+        participants: string[];
+        name?: string;
+    }): Promise<IConversation> {
+        const { type, participants, name } = data;
 
-interface SendMessageData {
-    content: string;
-    type?: 'text' | 'file' | 'image' | 'appointment';
-    metadata?: any;
-}
+        // Add the creator to participants if not already included
+        const allParticipants = [...new Set([userId, ...participants])];
 
-/**
- * Create or get existing conversation
- */
-const createConversation = async (userId: string, data: CreateConversationData) => {
-    // Ensure creator is in participants
-    const participants = [...new Set([userId, ...data.participants])];
-    
-    if (data.type === 'direct' && participants.length !== 2) {
-        throw new ApiError(400, 'Direct conversations must have exactly 2 participants');
-    }
-    
-    if (data.type === 'group' && participants.length < 2) {
-        throw new ApiError(400, 'Group conversations must have at least 2 participants');
-    }
-    
-    // For direct messages, check if conversation already exists
-    if (data.type === 'direct') {
-        const existing = await Conversation.findOne({
-            type: 'direct',
-            participants: { $all: participants, $size: 2 }
+        // For direct messages, ensure only 2 participants
+        if (type === 'direct' && allParticipants.length !== 2) {
+            throw new ApiError(400, 'Direct conversations must have exactly 2 participants');
+        }
+
+        // Check if direct conversation already exists
+        if (type === 'direct') {
+            const existing = await Conversation.findOne({
+                type: 'direct',
+                participants: { $all: allParticipants, $size: 2 }
+            });
+
+            if (existing) {
+                // Return existing conversation instead of creating duplicate
+                return existing.populate('participants', 'name email avatar');
+            }
+        }
+
+        const conversation = await Conversation.create({
+            type,
+            participants: allParticipants,
+            name: type === 'group' ? name : undefined,
+            createdBy: userId,
+            messages: []
         });
+
+        return conversation.populate('participants', 'name email avatar');
+    }
+
+    /**
+     * Get user's conversations
+     */
+    async getUserConversations(userId: string, options: {
+        hasAppointment?: boolean;
+        includeArchived?: boolean;
+    } = {}): Promise<IConversation[]> {
+        const { hasAppointment, includeArchived = false } = options;
+
+        const query: any = {
+            participants: userId
+        };
+
+        if (hasAppointment !== undefined) {
+            query.hasAppointment = hasAppointment;
+        }
+
+        if (!includeArchived) {
+            query.$or = [
+                { isArchived: false },
+                { archivedBy: { $ne: userId } }
+            ];
+        }
+
+        const conversations = await Conversation.find(query)
+            .populate('participants', 'name email avatar')
+            .populate('appointmentId')
+            .populate('lastMessageBy', 'name')
+            .sort({ lastMessageAt: -1 });
+
+        return conversations as any;
+    }
+
+    /**
+     * Send a message in a conversation
+     */
+    async sendMessage(conversationId: string, userId: string, data: {
+        content: string;
+        type?: 'text' | 'file' | 'image' | 'appointment';
+        metadata?: any;
+    }): Promise<IConversation> {
+        const conversation = await Conversation.findById(conversationId);
+
+        if (!conversation) {
+            throw new ApiError(404, 'Conversation not found');
+        }
+
+        // Check if user is a participant
+        if (!conversation.participants.includes(new mongoose.Types.ObjectId(userId))) {
+            throw new ApiError(403, 'You are not a participant in this conversation');
+        }
+
+        const message = {
+            sender: new mongoose.Types.ObjectId(userId),
+            content: data.content,
+            type: data.type || 'text',
+            metadata: data.metadata,
+            readBy: [new mongoose.Types.ObjectId(userId)],
+            createdAt: new Date()
+        };
+
+        conversation.messages.push(message as any);
+        conversation.lastMessage = data.content;
+        conversation.lastMessageAt = new Date();
+        conversation.lastMessageBy = new mongoose.Types.ObjectId(userId);
+
+        await conversation.save();
+
+        return conversation.populate([
+            { path: 'participants', select: 'name email avatar' },
+            { path: 'messages.sender', select: 'name email avatar' }
+        ]);
+    }
+
+    /**
+     * Mark messages as read
+     */
+    async markAsRead(conversationId: string, userId: string): Promise<void> {
+        const conversation = await Conversation.findById(conversationId);
+
+        if (!conversation) {
+            throw new ApiError(404, 'Conversation not found');
+        }
+
+        // Mark all messages as read by this user
+        conversation.messages.forEach(message => {
+            if (!message.readBy.includes(new mongoose.Types.ObjectId(userId))) {
+                message.readBy.push(new mongoose.Types.ObjectId(userId));
+            }
+        });
+
+        await conversation.save();
+    }
+
+    /**
+     * Delete a conversation
+     */
+    async deleteConversation(conversationId: string, userId: string): Promise<void> {
+        const conversation = await Conversation.findById(conversationId);
+
+        if (!conversation) {
+            throw new ApiError(404, 'Conversation not found');
+        }
+
+        // Check if user is a participant
+        if (!conversation.participants.includes(new mongoose.Types.ObjectId(userId))) {
+            throw new ApiError(403, 'You are not a participant in this conversation');
+        }
+
+        // Delete the conversation
+        await Conversation.findByIdAndDelete(conversationId);
+    }
+
+    /**
+     * Archive a conversation (alternative to delete - keeps data)
+     */
+    async archiveConversation(conversationId: string, userId: string): Promise<IConversation> {
+        const conversation = await Conversation.findById(conversationId);
+
+        if (!conversation) {
+            throw new ApiError(404, 'Conversation not found');
+        }
+
+        // Add user to archivedBy array
+        if (!conversation.archivedBy.includes(new mongoose.Types.ObjectId(userId))) {
+            conversation.archivedBy.push(new mongoose.Types.ObjectId(userId));
+        }
+
+        // If all participants archived it, mark as archived
+        if (conversation.archivedBy.length === conversation.participants.length) {
+            conversation.isArchived = true;
+        }
+
+        await conversation.save();
+        return conversation;
+    }
+
+    /**
+     * Remove duplicate direct conversations (cleanup utility)
+     */
+    async removeDuplicateConversations(): Promise<number> {
+        const directConversations = await Conversation.find({ type: 'direct' });
         
-        if (existing) {
-            return existing.populate('participants', 'name email avatar');
-        }
-    }
-    
-    // Create new conversation
-    const conversation = await Conversation.create({
-        type: data.type,
-        participants,
-        name: data.name,
-        avatar: data.avatar,
-        createdBy: userId,
-        messages: []
-    });
-    
-    return conversation.populate('participants', 'name email avatar');
-};
-
-/**
- * Get user's conversations
- */
-const getUserConversations = async (userId: string, options: {
-    hasAppointment?: boolean;
-    includeArchived?: boolean;
-} = {}) => {
-    const filter: any = {
-        participants: userId
-    };
-    
-    if (options.hasAppointment !== undefined) {
-        filter.hasAppointment = options.hasAppointment;
-    }
-    
-    if (!options.includeArchived) {
-        filter.archivedBy = { $ne: userId };
-    }
-    
-    const conversations = await Conversation.find(filter)
-        .populate('participants', 'name email avatar')
-        .populate('lastMessageBy', 'name')
-        .populate('appointmentId', 'title startTime endTime status')
-        .sort({ lastMessageAt: -1 });
-    
-    return conversations;
-};
-
-/**
- * Send message
- */
-const sendMessage = async (
-    conversationId: string,
-    userId: string,
-    data: SendMessageData
-) => {
-    const conversation = await Conversation.findById(conversationId);
-    
-    if (!conversation) {
-        throw new ApiError(404, 'Conversation not found');
-    }
-    
-    // Check if user is participant
-    if (!conversation.participants.some(p => p.toString() === userId)) {
-        throw new ApiError(403, 'You are not a participant in this conversation');
-    }
-    
-    // Add message
-    const message = {
-        sender: userId,
-        content: data.content,
-        type: data.type || 'text',
-        metadata: data.metadata,
-        readBy: [userId],
-        createdAt: new Date()
-    };
-    
-    conversation.messages.push(message as any);
-    conversation.lastMessage = data.content.substring(0, 100);
-    conversation.lastMessageAt = new Date();
-    conversation.lastMessageBy = userId as any;
-    
-    await conversation.save();
-    
-    // Notify other participants
-    const otherParticipants = conversation.participants
-        .map(p => p.toString())
-        .filter(p => p !== userId);
-    
-    const sender = await User.findById(userId).select('name');
-    const senderName = sender?.name || 'Someone';
-    
-    await Promise.all(
-        otherParticipants.map(participantId =>
-            notificationService.createNotification({
-                userId: participantId,
-                type: 'message_received',
-                title: conversation.type === 'group' 
-                    ? `New message in ${conversation.name}` 
-                    : `New message from ${senderName}`,
-                message: data.content.substring(0, 100),
-                metadata: {
-                    conversationId: conversation._id,
-                    messageId: message,
-                    sender: userId
-                }
-            })
-        )
-    );
-    
-    return conversation.populate('participants', 'name email avatar');
-};
-
-/**
- * Mark messages as read
- */
-const markAsRead = async (conversationId: string, userId: string) => {
-    const conversation = await Conversation.findById(conversationId);
-    
-    if (!conversation) {
-        throw new ApiError(404, 'Conversation not found');
-    }
-    
-    // Update all messages
-    conversation.messages.forEach(msg => {
-        if (!msg.readBy.includes(userId as any)) {
-            msg.readBy.push(userId as any);
-        }
-    });
-    
-    await conversation.save();
-    return conversation;
-};
-
-/**
- * Remove duplicate conversations (automated cleanup)
- */
-const removeDuplicateConversations = async () => {
-    // Find duplicate direct conversations
-    const conversations = await Conversation.find({ type: 'direct' });
-    const participantMap = new Map<string, string[]>();
-    
-    for (const conv of conversations) {
-        const key = conv.participants
-            .map(p => p.toString())
-            .sort()
-            .join('-');
+        const seen = new Map<string, string>();
+        const toDelete: string[] = [];
         
-        if (!participantMap.has(key)) {
-            participantMap.set(key, []);
-        }
-        participantMap.get(key)!.push(conv._id.toString());
-    }
-    
-    let removedCount = 0;
-    
-    for (const [_, convIds] of participantMap) {
-        if (convIds.length > 1) {
-            // Keep the one with most recent activity, delete others
-            const toKeep = await Conversation.findOne({
-                _id: { $in: convIds }
-            }).sort({ lastMessageAt: -1 });
+        for (const conversation of directConversations) {
+            // Create a unique key for the participant pair
+            const participants = conversation.participants
+                .map(p => p.toString())
+                .sort()
+                .join('-');
             
-            const toRemove = convIds.filter(id => id !== toKeep?._id.toString());
-            await Conversation.deleteMany({ _id: { $in: toRemove } });
-            removedCount += toRemove.length;
+            if (seen.has(participants)) {
+                // Duplicate found - mark for deletion (keep the older one)
+                toDelete.push(conversation._id.toString());
+            } else {
+                seen.set(participants, conversation._id.toString());
+            }
         }
+        
+        // Delete duplicates
+        if (toDelete.length > 0) {
+            await Conversation.deleteMany({ _id: { $in: toDelete } });
+        }
+        
+        return toDelete.length;
     }
-    
-    return removedCount;
-};
+}
 
-export default {
-    createConversation,
-    getUserConversations,
-    sendMessage,
-    markAsRead,
-    removeDuplicateConversations
-};
+export default new ConversationService();

@@ -9,6 +9,7 @@ import notificationRoute from './notification.route';
 import profileRoute from './profile.route';
 import appointmentRoute from './appointment.route';
 import conversationRoute from './conversation.route';
+import userRoute from './user.route';
 
 const router = express.Router();
 
@@ -52,6 +53,11 @@ const defaultRoutes = [
   {
     path: '/conversations',
     route: conversationRoute,
+  },
+
+  {
+    path: '/users',
+    route: userRoute,
   },
 ];
 
