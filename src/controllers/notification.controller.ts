@@ -1,98 +1,70 @@
-import { Request, Response } from 'express';
-import { asyncHandler } from '../utils/asyncHandler';
-import notificationService from '../services/notification.service';
-import { ApiResponse } from '../utils/ApiResponse';
+import mongoose, { Document, Schema } from 'mongoose';
 
-/**
- * Get all notifications for the authenticated user
- */
-const getNotifications = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-  const { limit, skip, isRead } = req.query;
+export interface INotification extends Document {
+  userId: mongoose.Types.ObjectId;
+  type: string;
+  title: string;
+  message: string;
+  metadata?: any;
+  isRead: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
-  const options: any = {};
-  if (limit) options.limit = parseInt(limit as string);
-  if (skip) options.skip = parseInt(skip as string);
-  if (isRead !== undefined) options.isRead = isRead === 'true';
+const NotificationSchema = new Schema(
+  {
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      index: true,
+    },
+    type: {
+      type: String,
+      required: true,
+      enum: [
+        'quote_created',
+        'quote_updated',
+        'quote_deleted',
+        'shipment_created',
+        'shipment_updated',
+        'shipment_deleted',
+        'appointment_created',      // Add this
+        'appointment_updated',      // Add this
+        'appointment_cancelled',    // Add this
+        'appointment_reminder',     // Add this (if you plan to use it)
+        'password_changed',
+        'email_changed',
+        'profile_updated',
+      ],
+    },
+    title: {
+      type: String,
+      required: true,
+    },
+    message: {
+      type: String,
+      required: true,
+    },
+    metadata: {
+      type: Schema.Types.Mixed,
+      default: {},
+    },
+    isRead: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
 
-  const result = await notificationService.getUserNotifications(userId, options);
+// Compound indexes for efficient queries
+NotificationSchema.index({ userId: 1, createdAt: -1 });
+NotificationSchema.index({ userId: 1, isRead: 1 });
 
-  res.json(
-    new ApiResponse(200, result, 'Notifications fetched successfully')
-  );
-});
+const Notification = mongoose.model<INotification>('Notification', NotificationSchema);
 
-/**
- * Get unread notification count
- */
-const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-  const count = await notificationService.getUnreadCount(userId);
-
-  res.json(
-    new ApiResponse(200, { count }, 'Unread count fetched successfully')
-  );
-});
-
-/**
- * Mark a notification as read
- */
-const markAsRead = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-  const { id } = req.params;
-
-  const notification = await notificationService.markAsRead(id, userId);
-
-  res.json(
-    new ApiResponse(200, notification, 'Notification marked as read')
-  );
-});
-
-/**
- * Mark all notifications as read
- */
-const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-
-  await notificationService.markAllAsRead(userId);
-
-  res.json(
-    new ApiResponse(200, null, 'All notifications marked as read')
-  );
-});
-
-/**
- * Delete a notification
- */
-const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-  const { id } = req.params;
-
-  await notificationService.deleteNotification(id, userId);
-
-  res.json(
-    new ApiResponse(200, null, 'Notification deleted successfully')
-  );
-});
-
-/**
- * Delete all read notifications
- */
-const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req as any).user._id;
-
-  await notificationService.deleteAllRead(userId);
-
-  res.json(
-    new ApiResponse(200, null, 'All read notifications deleted')
-  );
-});
-
-export default {
-  getNotifications,
-  getUnreadCount,
-  markAsRead,
-  markAllAsRead,
-  deleteNotification,
-  deleteAllRead,
-};
+export default Notification;
