@@ -1,70 +1,113 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import { Request, Response } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
+import { ApiResponse } from '../utils/ApiResponse';
+import Notification from '../models/Notification.model';
+import { IUser } from '../models/User.model';
 
-export interface INotification extends Document {
-  userId: mongoose.Types.ObjectId;
-  type: string;
-  title: string;
-  message: string;
-  metadata?: any;
-  isRead: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
+const getNotifications = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req.user as IUser)?._id.toString();
+  const { page = 1, limit = 20, isRead } = req.query;
 
-const NotificationSchema = new Schema(
-  {
-    userId: {
-      type: Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-      index: true,
-    },
-    type: {
-      type: String,
-      required: true,
-      enum: [
-        'quote_created',
-        'quote_updated',
-        'quote_deleted',
-        'shipment_created',
-        'shipment_updated',
-        'shipment_deleted',
-        'appointment_created',      // Add this
-        'appointment_updated',      // Add this
-        'appointment_cancelled',    // Add this
-        'appointment_reminder',     // Add this (if you plan to use it)
-        'password_changed',
-        'email_changed',
-        'profile_updated',
-      ],
-    },
-    title: {
-      type: String,
-      required: true,
-    },
-    message: {
-      type: String,
-      required: true,
-    },
-    metadata: {
-      type: Schema.Types.Mixed,
-      default: {},
-    },
-    isRead: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-  },
-  {
-    timestamps: true,
+  const query: any = { userId };
+  
+  // Filter by read status if provided
+  if (isRead !== undefined) {
+    query.isRead = isRead === 'true';
   }
-);
 
-// Compound indexes for efficient queries
-NotificationSchema.index({ userId: 1, createdAt: -1 });
-NotificationSchema.index({ userId: 1, isRead: 1 });
+  const notifications = await Notification.find(query)
+    .sort({ createdAt: -1 })
+    .limit(Number(limit))
+    .skip((Number(page) - 1) * Number(limit));
 
-const Notification = mongoose.model<INotification>('Notification', NotificationSchema);
+  const total = await Notification.countDocuments(query);
 
-export default Notification;
+  res.json(new ApiResponse(200, {
+    notifications,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / Number(limit)),
+    },
+  }, 'Notifications fetched successfully'));
+});
+
+const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req.user as IUser)?._id.toString();
+
+  const count = await Notification.countDocuments({
+    userId,
+    isRead: false,
+  });
+
+  res.json(new ApiResponse(200, { count }, 'Unread count fetched successfully'));
+});
+
+const markAsRead = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = (req.user as IUser)?._id.toString();
+
+  const notification = await Notification.findOneAndUpdate(
+    { _id: id, userId },
+    { isRead: true },
+    { new: true }
+  );
+
+  if (!notification) {
+    return res.status(404).json(new ApiResponse(404, null, 'Notification not found'));
+  }
+
+  res.json(new ApiResponse(200, notification, 'Notification marked as read'));
+});
+
+const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req.user as IUser)?._id.toString();
+
+  const result = await Notification.updateMany(
+    { userId, isRead: false },
+    { isRead: true }
+  );
+
+  res.json(new ApiResponse(200, {
+    modifiedCount: result.modifiedCount,
+  }, 'All notifications marked as read'));
+});
+
+const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = (req.user as IUser)?._id.toString();
+
+  const notification = await Notification.findOneAndDelete({
+    _id: id,
+    userId,
+  });
+
+  if (!notification) {
+    return res.status(404).json(new ApiResponse(404, null, 'Notification not found'));
+  }
+
+  res.json(new ApiResponse(200, null, 'Notification deleted successfully'));
+});
+
+const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req.user as IUser)?._id.toString();
+
+  const result = await Notification.deleteMany({
+    userId,
+    isRead: true,
+  });
+
+  res.json(new ApiResponse(200, {
+    deletedCount: result.deletedCount,
+  }, 'All read notifications deleted'));
+});
+
+export default {
+  getNotifications,
+  getUnreadCount,
+  markAsRead,
+  markAllAsRead,
+  deleteNotification,
+  deleteAllRead,
+};

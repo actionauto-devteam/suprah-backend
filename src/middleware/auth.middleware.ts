@@ -3,6 +3,11 @@ import { NextFunction, Request, Response } from 'express';
 import { ApiError } from '../utils/ApiError';
 import { IUser } from '../models/User.model';
 
+// Export AuthRequest interface
+export interface AuthRequest extends Request {
+    user?: IUser;
+}
+
 const verifyCallback = (req: Request, resolve: any, reject: any) => async (err: any, user: IUser, info: any) => {
     if (err || info || !user) {
         const message = info?.message || 'Please authenticate';
