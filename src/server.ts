@@ -1,10 +1,9 @@
 import express, { Application } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import passport from 'passport';
-import { jwtStrategy } from './config/passport';
 import connectDB from './config/db';
 import routes from './routes';
+import webhookRoute from './routes/webhook.route';
 import { errorHandler } from './middleware/error.middleware';
 import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
@@ -16,7 +15,14 @@ const app: Application = express();
 connectDB();
 
 // Middleware
-app.use(express.json());
+// Webhook route must be mounted before body parser or handle its own parsing
+app.use('/api/webhooks', webhookRoute);
+
+app.use(express.json({
+  verify: (req: any, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({
   origin: (origin, callback) => {
@@ -49,9 +55,6 @@ app.use(cors({
 
 app.use(cookieParser());
 
-// Passport middleware
-app.use(passport.initialize());
-passport.use('jwt', jwtStrategy);
 
 // Health check route for Railway
 app.get('/health', (req, res) => {
@@ -68,7 +71,7 @@ app.use(errorHandler);
 if (require.main === module) {
   initSyncScheduler();
   initCleanupScheduler(); // Add this line
-  
+
   app.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);
   });

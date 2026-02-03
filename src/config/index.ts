@@ -11,24 +11,21 @@ const envVarsSchema = Joi.object()
     PORT: Joi.number().default(5000),
     MONGODB_URI: Joi.string().required().description('Mongo DB url'),
     BCRYPT_SALT_ROUNDS: Joi.number().required().description('Bcrypt salt rounds'),
-    JWT_ACCESS_SECRET: Joi.string().required().description('JWT access secret key'),
-    JWT_ACCESS_EXPIRATION: Joi.string().required().description("JWT access token expiration time (e.g., '15m', '1h')"),
-    JWT_REFRESH_SECRET: Joi.string().required().description('JWT refresh secret key'),
-    JWT_REFRESH_EXPIRATION: Joi.string()
-      .required()
-      .description('expiration time for refresh token (e.g., "7d", "30d")'),
+    // JWT - Making these optional during migration, or keep required if we want to ensure envs are still there until fully clear
+    JWT_ACCESS_SECRET: Joi.string().allow('').description('JWT access secret key'),
+    JWT_ACCESS_EXPIRATION: Joi.string().allow('').description("JWT access token expiration time (e.g., '15m', '1h')"),
+    JWT_REFRESH_SECRET: Joi.string().allow('').description('JWT refresh secret key'),
+    JWT_REFRESH_EXPIRATION: Joi.string().allow('').description('expiration time for refresh token (e.g., "7d", "30d")'),
+    // Clerk
+    CLERK_PUBLISHABLE_KEY: Joi.string().required().description('Clerk Publishable Key'),
+    CLERK_SECRET_KEY: Joi.string().required().description('Clerk Secret Key'),
+    CLERK_WEBHOOK_SECRET: Joi.string().required().description('Clerk Webhook Secret'),
     CORS_ORIGIN: Joi.string().default('http://localhost:3000').description('CORS allowed origin'),
     DEALERSCLOUD_FTP_HOST: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_USER: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
-    // Email
-    EMAIL_HOST: Joi.string().required().description('Email host'),
-    EMAIL_PORT: Joi.number().required().description('Email port'),
-    EMAIL_USER: Joi.string().required().description('Email user'),
-    EMAIL_PASS: Joi.string().required().description('Email password'),
-    EMAIL_FROM: Joi.string().required().description('Email from address'),
   })
   .unknown();
 
@@ -66,12 +63,10 @@ const config = {
   sync: {
     schedule: envVars.SYNC_SCHEDULE,
   },
-  email: {
-    host: envVars.EMAIL_HOST,
-    port: envVars.EMAIL_PORT,
-    user: envVars.EMAIL_USER,
-    pass: envVars.EMAIL_PASS,
-    from: envVars.EMAIL_FROM,
+  clerk: {
+    publishableKey: envVars.CLERK_PUBLISHABLE_KEY,
+    secretKey: envVars.CLERK_SECRET_KEY,
+    webhookSecret: envVars.CLERK_WEBHOOK_SECRET,
   },
 };
 

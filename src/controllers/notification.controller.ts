@@ -1,70 +1,104 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import { Request, Response } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
+import notificationService from '../services/notification.service';
+import { ApiResponse } from '../utils/ApiResponse';
 
-export interface INotification extends Document {
-  userId: mongoose.Types.ObjectId;
-  type: string;
-  title: string;
-  message: string;
-  metadata?: any;
-  isRead: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
+/**
+ * Get all notifications for the current user
+ */
+const getNotifications = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
+  const { limit, skip, isRead } = req.query;
 
-const NotificationSchema = new Schema(
-  {
-    userId: {
-      type: Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-      index: true,
-    },
-    type: {
-      type: String,
-      required: true,
-      enum: [
-        'quote_created',
-        'quote_updated',
-        'quote_deleted',
-        'shipment_created',
-        'shipment_updated',
-        'shipment_deleted',
-        'appointment_created',      // Add this
-        'appointment_updated',      // Add this
-        'appointment_cancelled',    // Add this
-        'appointment_reminder',     // Add this (if you plan to use it)
-        'password_changed',
-        'email_changed',
-        'profile_updated',
-      ],
-    },
-    title: {
-      type: String,
-      required: true,
-    },
-    message: {
-      type: String,
-      required: true,
-    },
-    metadata: {
-      type: Schema.Types.Mixed,
-      default: {},
-    },
-    isRead: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-  },
-  {
-    timestamps: true,
-  }
-);
+  const result = await notificationService.getUserNotifications(
+    userId.toString(),
+    {
+      limit: limit ? parseInt(limit as string) : undefined,
+      skip: skip ? parseInt(skip as string) : undefined,
+      isRead: isRead !== undefined ? isRead === 'true' : undefined,
+    }
+  );
 
-// Compound indexes for efficient queries
-NotificationSchema.index({ userId: 1, createdAt: -1 });
-NotificationSchema.index({ userId: 1, isRead: 1 });
+  res.json(
+    new ApiResponse(200, result, 'Notifications fetched successfully')
+  );
+});
 
-const Notification = mongoose.model<INotification>('Notification', NotificationSchema);
+/**
+ * Get unread notification count
+ */
+const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
 
-export default Notification;
+  const count = await notificationService.getUnreadCount(userId.toString());
+
+  res.json(
+    new ApiResponse(200, { unreadCount: count }, 'Unread count fetched successfully')
+  );
+});
+
+/**
+ * Mark a notification as read
+ */
+const markAsRead = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
+  const notificationId = req.params.id;
+
+  const notification = await notificationService.markAsRead(
+    notificationId,
+    userId.toString()
+  );
+
+  res.json(
+    new ApiResponse(200, notification, 'Notification marked as read')
+  );
+});
+
+/**
+ * Mark all notifications as read
+ */
+const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
+
+  const result = await notificationService.markAllAsRead(userId.toString());
+
+  res.json(
+    new ApiResponse(200, result, 'All notifications marked as read')
+  );
+});
+
+/**
+ * Delete a notification
+ */
+const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
+  const notificationId = req.params.id;
+
+  await notificationService.deleteNotification(notificationId, userId.toString());
+
+  res.json(
+    new ApiResponse(200, null, 'Notification deleted successfully')
+  );
+});
+
+/**
+ * Delete all read notifications
+ */
+const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user.id || (req as any).user._id;
+
+  const result = await notificationService.deleteAllRead(userId.toString());
+
+  res.json(
+    new ApiResponse(200, result, 'All read notifications deleted')
+  );
+});
+
+export default {
+  getNotifications,
+  getUnreadCount,
+  markAsRead,
+  markAllAsRead,
+  deleteNotification,
+  deleteAllRead,
+};

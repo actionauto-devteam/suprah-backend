@@ -1,5 +1,4 @@
 import express from 'express';
-import authRoute from './auth.route';
 import vehicleRoute from './vehicle.route';
 import dashboardRoute from './dashboard.route';
 import syncRoute from './sync.route';
@@ -14,10 +13,6 @@ import userRoute from './user.route';
 const router = express.Router();
 
 const defaultRoutes = [
-  {
-    path: '/auth',
-    route: authRoute,
-  },
   {
     path: '/vehicles',
     route: vehicleRoute,
