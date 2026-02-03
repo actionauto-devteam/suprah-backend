@@ -26,6 +26,12 @@ const envVarsSchema = Joi.object()
     DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
+    // Email Config (Restored for Appointments)
+    EMAIL_HOST: Joi.string().allow('').description('Email server host'),
+    EMAIL_PORT: Joi.number().allow('').description('Email server port'),
+    EMAIL_USER: Joi.string().allow('').description('Email server username'),
+    EMAIL_PASS: Joi.string().allow('').description('Email server password'),
+    EMAIL_FROM: Joi.string().allow('').description('Email from address'),
   })
   .unknown();
 
@@ -62,6 +68,13 @@ const config = {
   },
   sync: {
     schedule: envVars.SYNC_SCHEDULE,
+  },
+  email: {
+    host: envVars.EMAIL_HOST,
+    port: envVars.EMAIL_PORT,
+    user: envVars.EMAIL_USER,
+    pass: envVars.EMAIL_PASS,
+    from: envVars.EMAIL_FROM,
   },
   clerk: {
     publishableKey: envVars.CLERK_PUBLISHABLE_KEY,
