@@ -32,7 +32,8 @@ const NotificationSchema = new Schema(
         'appointment_created',    
         'appointment_updated',      
         'appointment_cancelled',    
-        'appointment_reminder',     
+        'appointment_reminder',
+        'guest_response', // NEW: For guest RSVP changes
         'password_changed',
         'email_changed',
         'profile_updated',

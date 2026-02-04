@@ -16,6 +16,22 @@ export interface IUser extends Document {
   createdAt: Date;
   updatedAt: Date;
   theme: 'light' | 'dark';
+  
+  // Google Calendar Integration
+googleCalendar?: {
+  connected: boolean;
+  accessToken?: string;
+  refreshToken?: string;
+  expiryDate?: number;
+  connectedAt?: Date;
+  
+  // NEW: Webhook tracking
+  watchChannelId?: string;      // Current webhook channel ID
+  watchResourceId?: string;      // Current webhook resource ID
+  watchExpiration?: Date;        // When the webhook expires
+};
+
+  
   notificationPreferences: {
     quoteCreated: boolean;
     quoteUpdated: boolean;
@@ -96,6 +112,21 @@ const UserSchema: Schema<IUser> = new Schema(
       enum: ['light', 'dark'],
       default: 'light',
     },
+    
+    // Google Calendar Integration
+  googleCalendar: {
+  connected: { type: Boolean, default: false },
+  accessToken: { type: String, select: false },
+  refreshToken: { type: String, select: false },
+  expiryDate: { type: Number },
+  connectedAt: { type: Date },
+  
+  // NEW fields for webhook tracking
+  watchChannelId: { type: String },
+  watchResourceId: { type: String },
+  watchExpiration: { type: Date },
+},
+    
     notificationPreferences: {
       quoteCreated: { type: Boolean, default: true },
       quoteUpdated: { type: Boolean, default: true },

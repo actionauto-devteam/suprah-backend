@@ -7,6 +7,8 @@ export interface IGuestResponse {
   status: 'pending' | 'accepted' | 'declined';
   respondedAt?: Date;
   googleCalendarEventId?: string;
+  guestName?: string;
+  guestPhone?: string;
 }
 
 export interface IAppointment extends Document {
@@ -18,31 +20,24 @@ export interface IAppointment extends Document {
   type: 'in-person' | 'phone' | 'video' | 'other';
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed';
   
-  // NEW: Entry classification
   entryType: EntryType;
   
-  // Participants
   createdBy: mongoose.Types.ObjectId;
   participants: mongoose.Types.ObjectId[];
   
-  // NEW: External guests
   guestEmails: IGuestResponse[];
   
-  // Related entities
   conversationId?: mongoose.Types.ObjectId;
   vehicleId?: mongoose.Types.ObjectId;
   quoteId?: mongoose.Types.ObjectId;
   shipmentId?: mongoose.Types.ObjectId;
   
-  // Reminders
   reminderSent: boolean;
   reminderTime?: Date;
   
-  // NEW: Google Calendar integration
   googleCalendarEventId?: string;
   meetingLink?: string;
   
-  // Notes
   notes?: string;
   
   createdAt: Date;
@@ -57,7 +52,9 @@ const GuestResponseSchema = new Schema({
     default: 'pending'
   },
   respondedAt: Date,
-  googleCalendarEventId: String
+  googleCalendarEventId: String,
+  guestName: String,
+  guestPhone: String
 }, { _id: false });
 
 const AppointmentSchema: Schema<IAppointment> = new Schema(
@@ -79,7 +76,6 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       index: true
     },
     
-    // Entry type classification
     entryType: {
       type: String,
       enum: ['event', 'task', 'reminder', 'appointment'],
@@ -99,7 +95,6 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       ref: 'User'
     }],
     
-    // External guests
     guestEmails: [GuestResponseSchema],
     
     conversationId: {
@@ -122,7 +117,6 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
     
-    // Google Calendar integration
     googleCalendarEventId: String,
     meetingLink: String,
     
