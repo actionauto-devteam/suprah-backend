@@ -24,7 +24,7 @@ const updateProfile = async (userId: string, updateData: {
   name?: string;
   avatar?: string;
   theme?: 'light' | 'dark';
-}) => {
+}, orgId?: string) => {
   const user = await User.findByIdAndUpdate(
     userId,
     updateData,
@@ -36,13 +36,16 @@ const updateProfile = async (userId: string, updateData: {
   }
 
   // Create notification
-  await notificationService.createNotification({
-    userId,
-    type: 'profile_updated',
-    title: 'Profile Updated',
-    message: 'Your profile information has been successfully updated.',
-    metadata: { updatedFields: Object.keys(updateData) },
-  });
+  if (orgId) {
+    await notificationService.createNotification({
+      userId,
+      organizationId: orgId,
+      type: 'profile_updated',
+      title: 'Profile Updated',
+      message: 'Your profile information has been successfully updated.',
+      metadata: { updatedFields: Object.keys(updateData) },
+    });
+  }
 
   return user;
 };
@@ -110,7 +113,7 @@ const updateNotificationPreferences = async (
 /**
  * Update theme
  */
-const updateTheme = async (userId: string, theme: 'light' | 'dark') => {
+const updateTheme = async (userId: string, theme: 'light' | 'dark', orgId?: string) => {
   const user = await User.findByIdAndUpdate(
     userId,
     { theme },

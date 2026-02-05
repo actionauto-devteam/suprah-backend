@@ -4,6 +4,7 @@ import { ApiError } from '../utils/ApiError';
 
 interface CreateNotificationParams {
   userId: string;
+  organizationId: string;
   type: string;
   title: string;
   message: string;
@@ -36,7 +37,7 @@ const createNotification = async (params: CreateNotificationParams) => {
   try {
     console.log('=== NOTIFICATION SERVICE DEBUG ===');
     console.log('1. Received params:', params);
-    
+
     const { userId, type, title, message, metadata } = params;
 
     // Validate required fields
@@ -65,12 +66,12 @@ const createNotification = async (params: CreateNotificationParams) => {
     // Check if user has notifications enabled for this type
     console.log('2. Looking up user with ID:', userId);
     const user = await User.findById(userId);
-    
+
     if (!user) {
       console.log('3. ❌ User not found!');
       throw new ApiError(404, 'User not found');
     }
-    
+
     console.log('3. ✅ User found:', {
       id: user._id,
       email: user.email,
@@ -93,11 +94,11 @@ const createNotification = async (params: CreateNotificationParams) => {
 
     const preferenceKey = preferenceMap[type];
     console.log('5. Preference key for type', type, ':', preferenceKey);
-    
+
     if (preferenceKey) {
       const isEnabled = user.notificationPreferences[preferenceKey];
       console.log('6. Preference enabled?:', isEnabled);
-      
+
       if (!isEnabled) {
         console.log('7. ❌ Notification disabled by user preference');
         return null;
@@ -107,6 +108,7 @@ const createNotification = async (params: CreateNotificationParams) => {
     console.log('8. Creating notification in database...');
     const notification = await Notification.create({
       userId,
+      organizationId: params.organizationId,
       type,
       title,
       message,
@@ -134,7 +136,7 @@ const createNotification = async (params: CreateNotificationParams) => {
 const createNotificationBatch = async (notifications: CreateNotificationParams[]) => {
   try {
     console.log(`Creating ${notifications.length} notifications in batch`);
-    
+
     const results = await Promise.allSettled(
       notifications.map(params => createNotification(params))
     );
@@ -158,7 +160,7 @@ const createNotificationBatch = async (notifications: CreateNotificationParams[]
 /**
  * Get all notifications for a user
  */
-const getUserNotifications = async (userId: string, options: {
+const getUserNotifications = async (userId: string, orgId: string, options: {
   limit?: number;
   skip?: number;
   isRead?: boolean;
@@ -166,7 +168,7 @@ const getUserNotifications = async (userId: string, options: {
   try {
     const { limit = 50, skip = 0, isRead } = options;
 
-    const filter: any = { userId };
+    const filter: any = { userId, organizationId: orgId };
     if (isRead !== undefined) {
       filter.isRead = isRead;
     }
@@ -177,7 +179,7 @@ const getUserNotifications = async (userId: string, options: {
       .skip(skip);
 
     const total = await Notification.countDocuments(filter);
-    const unreadCount = await Notification.countDocuments({ userId, isRead: false });
+    const unreadCount = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
 
     return {
       notifications,
@@ -193,10 +195,10 @@ const getUserNotifications = async (userId: string, options: {
 /**
  * Mark notification as read
  */
-const markAsRead = async (notificationId: string, userId: string) => {
+const markAsRead = async (notificationId: string, orgId: string, userId: string) => {
   try {
     const notification = await Notification.findOneAndUpdate(
-      { _id: notificationId, userId },
+      { _id: notificationId, organizationId: orgId, userId },
       { isRead: true },
       { new: true }
     );
@@ -215,10 +217,10 @@ const markAsRead = async (notificationId: string, userId: string) => {
 /**
  * Mark all notifications as read
  */
-const markAllAsRead = async (userId: string) => {
+const markAllAsRead = async (userId: string, orgId: string) => {
   try {
     await Notification.updateMany(
-      { userId, isRead: false },
+      { userId, organizationId: orgId, isRead: false },
       { isRead: true }
     );
 
@@ -232,10 +234,11 @@ const markAllAsRead = async (userId: string) => {
 /**
  * Delete a notification
  */
-const deleteNotification = async (notificationId: string, userId: string) => {
+const deleteNotification = async (notificationId: string, orgId: string, userId: string) => {
   try {
     const notification = await Notification.findOneAndDelete({
       _id: notificationId,
+      organizationId: orgId,
       userId,
     });
 
@@ -253,9 +256,9 @@ const deleteNotification = async (notificationId: string, userId: string) => {
 /**
  * Delete all read notifications
  */
-const deleteAllRead = async (userId: string) => {
+const deleteAllRead = async (userId: string, orgId: string) => {
   try {
-    const result = await Notification.deleteMany({ userId, isRead: true });
+    const result = await Notification.deleteMany({ userId, organizationId: orgId, isRead: true });
     console.log(`Deleted ${result.deletedCount} read notifications for user ${userId}`);
     return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
   } catch (error) {
@@ -267,9 +270,9 @@ const deleteAllRead = async (userId: string) => {
 /**
  * Get unread count
  */
-const getUnreadCount = async (userId: string) => {
+const getUnreadCount = async (userId: string, orgId: string) => {
   try {
-    const count = await Notification.countDocuments({ userId, isRead: false });
+    const count = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
     return count;
   } catch (error) {
     console.error('Error in getUnreadCount:', error);

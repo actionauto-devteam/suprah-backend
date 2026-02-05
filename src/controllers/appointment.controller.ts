@@ -11,8 +11,9 @@ import { IUser } from '../models/User.model';
  */
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const appointment = await appointmentService.createAppointment(userId, req.body);
-    
+    const orgId = req.orgId as string;
+    const appointment = await appointmentService.createAppointment(userId, orgId, req.body);
+
     res.status(201).json(
         new ApiResponse(201, appointment, 'Appointment created successfully')
     );
@@ -25,8 +26,9 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { status, entryType, startDate, endDate, limit, skip } = req.query;
-    
+
     const options: any = {};
     if (status) options.status = status;
     if (entryType) options.entryType = entryType;
@@ -34,9 +36,9 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     if (endDate) options.endDate = new Date(endDate as string);
     if (limit) options.limit = parseInt(limit as string);
     if (skip) options.skip = parseInt(skip as string);
-    
-    const result = await appointmentService.getUserAppointments(userId, options);
-    
+
+    const result = await appointmentService.getUserAppointments(userId, orgId, options);
+
     res.json(
         new ApiResponse(200, result, 'Appointments fetched successfully')
     );
@@ -48,11 +50,11 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
  * @access Private
  */
 const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
-    const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    const appointment = await appointmentService.getAppointmentById(id, userId);
-    
+
+    const appointment = await appointmentService.getAppointmentById(id, orgId);
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment fetched successfully')
     );
@@ -65,10 +67,11 @@ const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    const appointment = await appointmentService.updateAppointment(id, userId, req.body);
-    
+
+    const appointment = await appointmentService.updateAppointment(id, orgId, userId, req.body);
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment updated successfully')
     );
@@ -81,10 +84,11 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    const appointment = await appointmentService.cancelAppointment(id, userId);
-    
+
+    const appointment = await appointmentService.cancelAppointment(id, orgId, userId);
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment cancelled successfully')
     );
@@ -97,10 +101,11 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    await appointmentService.deleteAppointment(id, userId);
-    
+
+    await appointmentService.deleteAppointment(id, orgId, userId);
+
     res.json(
         new ApiResponse(200, null, 'Appointment deleted successfully')
     );
@@ -114,7 +119,7 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
 const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const { token, status, googleAccessToken } = req.body;
-    
+
     if (!token || !status) {
         return res.status(400).json(
             new ApiResponse(400, null, 'Token and status are required')
@@ -126,14 +131,14 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
             new ApiResponse(400, null, 'Status must be either "accepted" or "declined"')
         );
     }
-    
+
     const appointment = await appointmentService.handleGuestResponse(
         id,
         token,
         status,
         googleAccessToken
     );
-    
+
     res.json(
         new ApiResponse(200, appointment, `Invitation ${status} successfully`)
     );
@@ -146,7 +151,7 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
  */
 const removeDuplicates = asyncHandler(async (req: Request, res: Response) => {
     const removedCount = await appointmentService.removeDuplicateAppointments();
-    
+
     res.json(
         new ApiResponse(200, { removedCount }, `Removed ${removedCount} duplicate appointments`)
     );
@@ -159,7 +164,7 @@ const removeDuplicates = asyncHandler(async (req: Request, res: Response) => {
  */
 const sendReminders = asyncHandler(async (req: Request, res: Response) => {
     const sentCount = await appointmentService.sendAppointmentReminders();
-    
+
     res.json(
         new ApiResponse(200, { sentCount }, `Sent ${sentCount} appointment reminders`)
     );
@@ -172,7 +177,7 @@ const sendReminders = asyncHandler(async (req: Request, res: Response) => {
  */
 const markPastCompleted = asyncHandler(async (req: Request, res: Response) => {
     const updatedCount = await appointmentService.markPastAppointmentsCompleted();
-    
+
     res.json(
         new ApiResponse(200, { updatedCount }, `Marked ${updatedCount} past appointments as completed`)
     );
@@ -185,25 +190,26 @@ const markPastCompleted = asyncHandler(async (req: Request, res: Response) => {
  */
 const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    
+    const orgId = req.orgId as string;
+
     // Get all user appointments
-    const { appointments } = await appointmentService.getUserAppointments(userId, {});
-    
+    const { appointments } = await appointmentService.getUserAppointments(userId, orgId, {});
+
     const now = new Date();
-    
+
     const stats = {
         total: appointments.length,
-        upcoming: appointments.filter(a => 
-            new Date(a.startTime) > now && 
+        upcoming: appointments.filter(a =>
+            new Date(a.startTime) > now &&
             a.status !== 'cancelled'
         ).length,
-        past: appointments.filter(a => 
+        past: appointments.filter(a =>
             new Date(a.endTime) < now
         ).length,
-        cancelled: appointments.filter(a => 
+        cancelled: appointments.filter(a =>
             a.status === 'cancelled'
         ).length,
-        completed: appointments.filter(a => 
+        completed: appointments.filter(a =>
             a.status === 'completed'
         ).length,
         byType: {
@@ -219,7 +225,7 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
             completed: appointments.filter(a => a.status === 'completed').length,
         }
     };
-    
+
     res.json(
         new ApiResponse(200, stats, 'Appointment statistics fetched successfully')
     );
@@ -232,18 +238,19 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
  */
 const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const limit = parseInt(req.query.limit as string) || 5;
-    
-    const { appointments } = await appointmentService.getUserAppointments(userId, {
+
+    const { appointments } = await appointmentService.getUserAppointments(userId, orgId, {
         limit,
         skip: 0
     });
-    
+
     // Filter to only upcoming, non-cancelled
     const upcoming = appointments
         .filter(a => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
         .slice(0, limit);
-    
+
     res.json(
         new ApiResponse(200, upcoming, 'Upcoming appointments fetched successfully')
     );
@@ -257,18 +264,19 @@ const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response)
 const getAppointmentsByDateRange = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { startDate, endDate } = req.query;
-    
+
     if (!startDate || !endDate) {
         return res.status(400).json(
             new ApiResponse(400, null, 'Start date and end date are required')
         );
     }
-    
-    const result = await appointmentService.getUserAppointments(userId, {
+
+    const orgId = req.orgId as string;
+    const result = await appointmentService.getUserAppointments(userId, orgId, {
         startDate: new Date(startDate as string),
         endDate: new Date(endDate as string)
     });
-    
+
     res.json(
         new ApiResponse(200, result, 'Appointments in date range fetched successfully')
     );
@@ -282,29 +290,30 @@ const getAppointmentsByDateRange = asyncHandler(async (req: Request, res: Respon
 const searchAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { q, entryType, status } = req.query;
-    
+
     if (!q || typeof q !== 'string') {
         return res.status(400).json(
             new ApiResponse(400, null, 'Search query is required')
         );
     }
-    
+
     // Get all appointments
+    const orgId = req.orgId as string;
     const options: any = {};
     if (entryType) options.entryType = entryType;
     if (status) options.status = status;
-    
-    const { appointments } = await appointmentService.getUserAppointments(userId, options);
-    
+
+    const { appointments } = await appointmentService.getUserAppointments(userId, orgId, options);
+
     // Filter by search query
     const searchQuery = q.toLowerCase();
-    const filtered = appointments.filter(a => 
+    const filtered = appointments.filter(a =>
         a.title.toLowerCase().includes(searchQuery) ||
         a.description?.toLowerCase().includes(searchQuery) ||
         a.location?.toLowerCase().includes(searchQuery) ||
         a.notes?.toLowerCase().includes(searchQuery)
     );
-    
+
     res.json(
         new ApiResponse(200, { appointments: filtered, total: filtered.length }, 'Search completed successfully')
     );

@@ -18,7 +18,7 @@ import {
  * Helper to safely get user ID from request
  */
 const getUserId = (req: Request): string | undefined => {
-  return (req.user as IUser)?._id?.toString();
+    return (req.user as IUser)?._id?.toString();
 };
 
 /**
@@ -40,6 +40,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         enclosedTrailer = false,
         vehicleInoperable = false
     } = req.body;
+    const orgId = req.orgId as string;
 
     if (!firstName || !lastName || !email || !phone) {
         throw new ApiError(400, 'Customer information is required');
@@ -108,7 +109,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         miles,
         rate,
         eta,
-        status: 'pending'
+        status: 'pending',
+        organizationId: orgId
     });
 
     const populatedQuote = await Quote.findById(quote._id)
@@ -124,6 +126,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'quote_created',
             title,
             message,
@@ -146,8 +149,9 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
+    const orgId = req.orgId as string;
 
-    const filter: any = {};
+    const filter: any = { organizationId: orgId };
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -174,7 +178,8 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
  * Get quote by ID
  */
 const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
-    const quote = await Quote.findById(req.params.id)
+    const orgId = req.orgId as string;
+    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
@@ -189,6 +194,7 @@ const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
+    const orgId = req.orgId as string;
     const {
         firstName,
         lastName,
@@ -241,7 +247,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if ((fromZip && toZip) || (updateData.fromZip && updateData.toZip)) {
-        const quote = await Quote.findById(req.params.id);
+        const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
         if (!quote) {
             throw new ApiError(404, 'Quote not found');
         }
@@ -275,8 +281,8 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const quote = await Quote.findByIdAndUpdate(
-        req.params.id,
+    const quote = await Quote.findOneAndUpdate(
+        { _id: req.params.id, organizationId: orgId },
         updateData,
         { new: true, runValidators: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
@@ -294,6 +300,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'quote_updated',
             title,
             message,
@@ -313,6 +320,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
+    const orgId = req.orgId as string;
     const { status } = req.body;
 
     const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
@@ -320,8 +328,8 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Invalid status');
     }
 
-    const quote = await Quote.findByIdAndUpdate(
-        req.params.id,
+    const quote = await Quote.findOneAndUpdate(
+        { _id: req.params.id, organizationId: orgId },
         { status },
         { new: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
@@ -338,6 +346,7 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'quote_updated',
             title: 'Quote Status Updated',
             message: `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
@@ -357,7 +366,8 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const quote = await Quote.findById(req.params.id);
+    const orgId = req.orgId as string;
+    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
@@ -366,7 +376,7 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     const customerName = `${quote.firstName} ${quote.lastName}`;
     const vehicleName = quote.vehicleName;
 
-    await Quote.findByIdAndDelete(req.params.id);
+    await Quote.findOneAndDelete({ _id: req.params.id, organizationId: orgId });
 
     // Create notification safely
     if (userId) {
@@ -377,6 +387,7 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'quote_deleted',
             title,
             message,

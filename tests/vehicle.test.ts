@@ -1,7 +1,7 @@
 import request from 'supertest';
-import app from '../src/app';
+import app from '../src/server';
 import Vehicle from '../src/models/Vehicle.model';
-import { generateAuthToken } from '../src/utils/jwt.util';
+import { clerkClient } from '@clerk/clerk-sdk-node';
 import mongoose from 'mongoose';
 
 describe('Vehicle API Endpoints', () => {
@@ -9,10 +9,12 @@ describe('Vehicle API Endpoints', () => {
     let testVehicleId: string;
     let userId: mongoose.Types.ObjectId;
 
+    const mockedClerk = clerkClient as jest.Mocked<any>;
+
     beforeAll(async () => {
-        // Create a test user ID and generate auth token
+        // Create a test user ID
         userId = new mongoose.Types.ObjectId();
-        authToken = generateAuthToken({ _id: userId, email: 'test@example.com' });
+        authToken = 'mock_token';
     });
 
     beforeEach(async () => {
@@ -39,6 +41,14 @@ describe('Vehicle API Endpoints', () => {
         });
 
         testVehicleId = vehicle._id.toString();
+
+        // Setup standard mock for all requests
+        mockedClerk.verifyToken.mockResolvedValue({
+            sub: 'test_clerk_user_id',
+            sid: 'sess_123',
+            org_id: 'test_org_id',
+            org_role: 'org:admin'
+        });
     });
 
     afterAll(async () => {
@@ -196,6 +206,17 @@ describe('Vehicle API Endpoints', () => {
                 .expect(200);
 
             expect(res.body.data.status).toBe('Sold');
+        });
+
+        it('should set manualStatusLock to true when status is updated', async () => {
+            const res = await request(app)
+                .patch(`/api/vehicles/${testVehicleId}/status`)
+                .set('Authorization', `Bearer ${authToken}`)
+                .send({ status: 'Sold' })
+                .expect(200);
+
+            const vehicle = await Vehicle.findById(testVehicleId);
+            expect(vehicle?.manualStatusLock).toBe(true);
         });
 
         it('should return 400 if status is missing', async () => {

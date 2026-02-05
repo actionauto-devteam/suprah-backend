@@ -6,6 +6,7 @@ import Shipment from '../models/Shipment.model';
 import { ApiResponse } from '../utils/ApiResponse';
 
 const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
     // Execute all aggregations in parallel for performance
     const [
         totalActiveVehicles,
@@ -26,6 +27,7 @@ const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => 
 
         // 3. Quote Funnel (Sales Pipeline)
         Quote.aggregate([
+            { $match: { organizationId: orgId } },
             {
                 $group: {
                     _id: '$status',
@@ -37,6 +39,7 @@ const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => 
 
         // 4. Shipment Logistics (Operational Pulse)
         Shipment.aggregate([
+            { $match: { organizationId: orgId } },
             {
                 $group: {
                     _id: '$status',

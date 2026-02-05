@@ -12,7 +12,7 @@ import { IUser } from '../models/User.model';
  * Helper to safely get user ID from request
  */
 const getUserId = (req: Request): string | undefined => {
-  return (req.user as IUser)?._id?.toString();
+    return (req.user as IUser)?._id?.toString();
 };
 
 /**
@@ -24,25 +24,25 @@ const generateTrackingNumber = async (): Promise<string> => {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const datePrefix = `${year}${month}${day}`;
-    
+
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let trackingNumber: string;
     let isUnique = false;
-    
+
     while (!isUnique) {
         let randomCode = '';
         for (let i = 0; i < 4; i++) {
             randomCode += characters.charAt(Math.floor(Math.random() * characters.length));
         }
-        
+
         trackingNumber = `TRK-${datePrefix}-${randomCode}`;
-        
+
         const existing = await Shipment.findOne({ trackingNumber });
         if (!existing) {
             isUnique = true;
         }
     }
-    
+
     return trackingNumber!;
 };
 
@@ -51,20 +51,21 @@ const generateTrackingNumber = async (): Promise<string> => {
  */
 const createShipment = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
+    const orgId = req.orgId as string;
     const { quoteId, requestedPickupDate, autoDeleteQuote = true } = req.body;
 
     if (!quoteId) {
         throw new ApiError(400, 'Quote ID is required');
     }
 
-    const quote = await Quote.findById(quoteId)
+    const quote = await Quote.findOne({ _id: quoteId, organizationId: orgId })
         .populate('vehicleId', 'year make modelName vin stockNumber image location');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
     }
 
-    const existingShipment = await Shipment.findOne({ quoteId });
+    const existingShipment = await Shipment.findOne({ quoteId, organizationId: orgId });
     if (existingShipment) {
         throw new ApiError(400, 'Shipment already exists for this quote');
     }
@@ -82,6 +83,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         destination: quote.toAddress,
         requestedPickupDate: requestedPickupDate || new Date(),
         trackingNumber,
+        organizationId: orgId,
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,
@@ -104,7 +106,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         }
     });
 
-    const populatedShipment = await Shipment.findById(shipment._id)
+    const populatedShipment = await Shipment.findOne({ _id: shipment._id, organizationId: orgId })
         .populate({
             path: 'quoteId',
             populate: {
@@ -114,9 +116,9 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         });
 
     if (autoDeleteQuote) {
-        await Quote.findByIdAndDelete(quoteId);
+        await Quote.findOneAndDelete({ _id: quoteId, organizationId: orgId });
     } else {
-        await Quote.findByIdAndUpdate(quoteId, { status: 'booked' });
+        await Quote.findOneAndUpdate({ _id: quoteId, organizationId: orgId }, { status: 'booked' });
     }
 
     // Create notification safely
@@ -128,6 +130,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'shipment_created',
             title,
             message,
@@ -142,10 +145,10 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 
     res.status(201).json(
         new ApiResponse(
-            201, 
-            populatedShipment, 
-            autoDeleteQuote 
-                ? 'Shipment created successfully. Quote has been removed.' 
+            201,
+            populatedShipment,
+            autoDeleteQuote
+                ? 'Shipment created successfully. Quote has been removed.'
                 : 'Shipment created successfully.'
         )
     );
@@ -156,8 +159,9 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
+    const orgId = req.orgId as string;
 
-    const filter: any = {};
+    const filter: any = { organizationId: orgId };
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -179,7 +183,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         filteredShipments = shipments.filter(shipment => {
             const quote = shipment.quoteId as any;
             const preserved = shipment.preservedQuoteData as any;
-            
+
             return (
                 quote?.firstName?.toLowerCase().includes(searchLower) ||
                 quote?.lastName?.toLowerCase().includes(searchLower) ||
@@ -201,7 +205,8 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
  * Get shipment by ID
  */
 const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
-    const shipment = await Shipment.findById(req.params.id)
+    const orgId = req.orgId as string;
+    const shipment = await Shipment.findOne({ _id: req.params.id, organizationId: orgId })
         .populate({
             path: 'quoteId',
             populate: {
@@ -222,6 +227,7 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
+    const orgId = req.orgId as string;
     const {
         status,
         origin,
@@ -268,7 +274,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     if (delivered !== undefined) {
         updateData.delivered = delivered ? new Date(delivered) : null;
     }
-    
+
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
     const shipment = await Shipment.findByIdAndUpdate(
@@ -291,11 +297,11 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     if (userId) {
         const quote = shipment.quoteId as any;
         const preserved = shipment.preservedQuoteData as any;
-        const customerName = quote 
-            ? `${quote.firstName} ${quote.lastName}` 
-            : preserved 
-            ? `${preserved.firstName} ${preserved.lastName}`
-            : 'Customer';
+        const customerName = quote
+            ? `${quote.firstName} ${quote.lastName}`
+            : preserved
+                ? `${preserved.firstName} ${preserved.lastName}`
+                : 'Customer';
 
         const { title, message } = notificationTemplates.shipment_updated({
             trackingNumber: shipment.trackingNumber || 'N/A',
@@ -305,6 +311,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'shipment_updated',
             title,
             message,
@@ -326,6 +333,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
     const { text } = req.body;
     const userId = (req.user as IUser)?._id;
+    const orgId = req.orgId as string;
 
     if (!text) {
         throw new ApiError(400, 'Note text is required');
@@ -335,8 +343,8 @@ const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(401, 'User not authenticated');
     }
 
-    const shipment = await Shipment.findByIdAndUpdate(
-        req.params.id,
+    const shipment = await Shipment.findOneAndUpdate(
+        { _id: req.params.id, organizationId: orgId },
         {
             $push: {
                 notes: {
@@ -367,7 +375,8 @@ const addShipmentNote = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const shipment = await Shipment.findById(req.params.id);
+    const orgId = req.orgId as string;
+    const shipment = await Shipment.findOne({ _id: req.params.id, organizationId: orgId });
 
     if (!shipment) {
         throw new ApiError(404, 'Shipment not found');
@@ -377,13 +386,14 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
     const preserved = shipment.preservedQuoteData as any;
     const customerName = preserved ? `${preserved.firstName} ${preserved.lastName}` : 'Customer';
 
-    const existingQuote = await Quote.findById(shipment.quoteId);
-    
+    const existingQuote = await Quote.findOne({ _id: shipment.quoteId, organizationId: orgId });
+
     if (existingQuote) {
-        await Quote.findByIdAndUpdate(shipment.quoteId, { status: 'accepted' });
+        await Quote.findOneAndUpdate({ _id: shipment.quoteId, organizationId: orgId }, { status: 'accepted' });
     } else if (shipment.preservedQuoteData) {
         await Quote.create({
             _id: shipment.quoteId,
+            organizationId: orgId,
             firstName: preserved.firstName,
             lastName: preserved.lastName,
             email: preserved.email,
@@ -407,7 +417,7 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
-    await Shipment.findByIdAndDelete(req.params.id);
+    await Shipment.findOneAndDelete({ _id: req.params.id, organizationId: orgId });
 
     // Create notification safely
     if (userId) {
@@ -418,6 +428,7 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
 
         await safeCreateNotification({
             userId,
+            organizationId: orgId,
             type: 'shipment_deleted',
             title,
             message,
@@ -430,10 +441,10 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(
         new ApiResponse(
-            200, 
-            null, 
-            existingQuote 
-                ? 'Shipment deleted successfully. Quote status updated to accepted.' 
+            200,
+            null,
+            existingQuote
+                ? 'Shipment deleted successfully. Quote status updated to accepted.'
                 : 'Shipment deleted successfully. Quote has been restored.'
         )
     );
@@ -443,7 +454,11 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
  * Get shipment statistics
  */
 const getShipmentStats = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
     const stats = await Shipment.aggregate([
+        {
+            $match: { organizationId: orgId }
+        },
         {
             $group: {
                 _id: '$status',

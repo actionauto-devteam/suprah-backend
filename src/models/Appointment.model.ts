@@ -17,34 +17,35 @@ export interface IAppointment extends Document {
   location?: string;
   type: 'in-person' | 'phone' | 'video' | 'other';
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed';
-  
+
   // NEW: Entry classification
   entryType: EntryType;
-  
+  organizationId: string;
+
   // Participants
   createdBy: mongoose.Types.ObjectId;
   participants: mongoose.Types.ObjectId[];
-  
+
   // NEW: External guests
   guestEmails: IGuestResponse[];
-  
+
   // Related entities
   conversationId?: mongoose.Types.ObjectId;
   vehicleId?: mongoose.Types.ObjectId;
   quoteId?: mongoose.Types.ObjectId;
   shipmentId?: mongoose.Types.ObjectId;
-  
+
   // Reminders
   reminderSent: boolean;
   reminderTime?: Date;
-  
+
   // NEW: Google Calendar integration
   googleCalendarEventId?: string;
   meetingLink?: string;
-  
+
   // Notes
   notes?: string;
-  
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -78,7 +79,7 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       default: 'scheduled',
       index: true
     },
-    
+
     // Entry type classification
     entryType: {
       type: String,
@@ -87,7 +88,12 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       required: true,
       index: true
     },
-    
+    organizationId: {
+      type: String,
+      required: true,
+      index: true
+    },
+
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',
@@ -98,10 +104,10 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       type: Schema.Types.ObjectId,
       ref: 'User'
     }],
-    
+
     // External guests
     guestEmails: [GuestResponseSchema],
-    
+
     conversationId: {
       type: Schema.Types.ObjectId,
       ref: 'Conversation'
@@ -118,14 +124,14 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       type: Schema.Types.ObjectId,
       ref: 'Shipment'
     },
-    
+
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
-    
+
     // Google Calendar integration
     googleCalendarEventId: String,
     meetingLink: String,
-    
+
     notes: { type: String, trim: true }
   },
   {

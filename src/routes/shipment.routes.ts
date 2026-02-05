@@ -1,10 +1,12 @@
 import express from 'express';
 import shipmentController from '../controllers/shipment.controller';
 import auth from '../middleware/auth.middleware';
+import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
 router.use(auth());
+router.use(requireOrg);
 
 router
     .route('/')
@@ -18,7 +20,7 @@ router
 router
     .route('/:id')
     .get(shipmentController.getShipmentById)
-    .put(shipmentController.updateShipment) 
+    .put(shipmentController.updateShipment)
     .patch(shipmentController.updateShipment)
     .delete(shipmentController.deleteShipment);
 

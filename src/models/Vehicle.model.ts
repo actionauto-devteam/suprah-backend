@@ -62,6 +62,7 @@ export interface IVehicle extends Document {
         author: mongoose.Types.ObjectId;
         date: Date;
     }>;
+    manualStatusLock: boolean;
     isDeleted: boolean;
 }
 
@@ -142,6 +143,7 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
                 date: { type: Date, default: Date.now },
             },
         ],
+        manualStatusLock: { type: Boolean, default: false },
         isDeleted: { type: Boolean, default: false },
     },
     {

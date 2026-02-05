@@ -8,8 +8,9 @@ import { IUser } from '../models/User.model';
 
 const createConversation = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const conversation = await conversationService.createConversation(userId, req.body);
-    
+    const orgId = req.orgId as string;
+    const conversation = await conversationService.createConversation(userId, orgId, req.body);
+
     res.status(201).json(
         new ApiResponse(201, conversation, 'Conversation created successfully')
     );
@@ -17,14 +18,15 @@ const createConversation = asyncHandler(async (req: Request, res: Response) => {
 
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { hasAppointment, includeArchived } = req.query;
-    
+
     const options: any = {};
     if (hasAppointment !== undefined) options.hasAppointment = hasAppointment === 'true';
     if (includeArchived !== undefined) options.includeArchived = includeArchived === 'true';
-    
-    const conversations = await conversationService.getUserConversations(userId, options);
-    
+
+    const conversations = await conversationService.getUserConversations(userId, orgId, options);
+
     res.json(
         new ApiResponse(200, conversations, 'Conversations fetched successfully')
     );
@@ -32,10 +34,11 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
 
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    const conversation = await conversationService.sendMessage(id, userId, req.body);
-    
+
+    const conversation = await conversationService.sendMessage(id, orgId, userId, req.body);
+
     res.json(
         new ApiResponse(200, conversation, 'Message sent successfully')
     );
@@ -43,10 +46,11 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
 const markAsRead = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    await conversationService.markAsRead(id, userId);
-    
+
+    await conversationService.markAsRead(id, orgId, userId);
+
     res.json(
         new ApiResponse(200, null, 'Messages marked as read')
     );
@@ -54,10 +58,11 @@ const markAsRead = asyncHandler(async (req: Request, res: Response) => {
 
 const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
     const { id } = req.params;
-    
-    await conversationService.deleteConversation(id, userId);
-    
+
+    await conversationService.deleteConversation(id, orgId, userId);
+
     res.json(
         new ApiResponse(200, null, 'Conversation deleted successfully')
     );

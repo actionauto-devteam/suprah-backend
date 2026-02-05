@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface INotification extends Document {
   userId: mongoose.Types.ObjectId;
+  organizationId: string;
   type: string;
   title: string;
   message: string;
@@ -19,6 +20,11 @@ const NotificationSchema = new Schema(
       required: true,
       index: true,
     },
+    organizationId: {
+      type: String,
+      required: true,
+      index: true,
+    },
     type: {
       type: String,
       required: true,
@@ -29,10 +35,10 @@ const NotificationSchema = new Schema(
         'shipment_created',
         'shipment_updated',
         'shipment_deleted',
-        'appointment_created',    
-        'appointment_updated',      
-        'appointment_cancelled',    
-        'appointment_reminder',     
+        'appointment_created',
+        'appointment_updated',
+        'appointment_cancelled',
+        'appointment_reminder',
         'password_changed',
         'email_changed',
         'profile_updated',

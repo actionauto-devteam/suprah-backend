@@ -11,27 +11,28 @@ export interface IMessage {
 
 export interface IConversation extends Document {
     type: 'direct' | 'group';
+    organizationId: string;
     name?: string; // For group chats
     participants: mongoose.Types.ObjectId[];
     messages: IMessage[];
-    
+
     // Appointment tracking
     hasAppointment: boolean;
     appointmentId?: mongoose.Types.ObjectId;
-    
+
     // Metadata
     lastMessage?: string;
     lastMessageAt?: Date;
     lastMessageBy?: mongoose.Types.ObjectId;
-    
+
     // Group chat specific
     createdBy?: mongoose.Types.ObjectId;
     avatar?: string;
-    
+
     // Archiving
     isArchived: boolean;
     archivedBy: mongoose.Types.ObjectId[];
-    
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -75,6 +76,11 @@ const ConversationSchema: Schema<IConversation> = new Schema(
             required: true,
             default: 'direct'
         },
+        organizationId: {
+            type: String,
+            required: true,
+            index: true
+        },
         name: {
             type: String,
             trim: true
@@ -85,7 +91,7 @@ const ConversationSchema: Schema<IConversation> = new Schema(
             required: true
         }],
         messages: [MessageSchema],
-        
+
         hasAppointment: {
             type: Boolean,
             default: false,
@@ -95,7 +101,7 @@ const ConversationSchema: Schema<IConversation> = new Schema(
             type: Schema.Types.ObjectId,
             ref: 'Appointment'
         },
-        
+
         lastMessage: {
             type: String,
             trim: true
@@ -108,7 +114,7 @@ const ConversationSchema: Schema<IConversation> = new Schema(
             type: Schema.Types.ObjectId,
             ref: 'User'
         },
-        
+
         createdBy: {
             type: Schema.Types.ObjectId,
             ref: 'User'
@@ -117,7 +123,7 @@ const ConversationSchema: Schema<IConversation> = new Schema(
             type: String,
             trim: true
         },
-        
+
         isArchived: {
             type: Boolean,
             default: false

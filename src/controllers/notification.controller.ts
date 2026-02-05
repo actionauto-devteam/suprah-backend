@@ -8,10 +8,12 @@ import { ApiResponse } from '../utils/ApiResponse';
  */
 const getNotifications = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
   const { limit, skip, isRead } = req.query;
 
   const result = await notificationService.getUserNotifications(
     userId.toString(),
+    orgId,
     {
       limit: limit ? parseInt(limit as string) : undefined,
       skip: skip ? parseInt(skip as string) : undefined,
@@ -29,8 +31,9 @@ const getNotifications = asyncHandler(async (req: Request, res: Response) => {
  */
 const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
 
-  const count = await notificationService.getUnreadCount(userId.toString());
+  const count = await notificationService.getUnreadCount(userId.toString(), orgId);
 
   res.json(
     new ApiResponse(200, { unreadCount: count }, 'Unread count fetched successfully')
@@ -42,10 +45,12 @@ const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
  */
 const markAsRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
   const notificationId = req.params.id;
 
   const notification = await notificationService.markAsRead(
     notificationId,
+    orgId,
     userId.toString()
   );
 
@@ -59,8 +64,9 @@ const markAsRead = asyncHandler(async (req: Request, res: Response) => {
  */
 const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
 
-  const result = await notificationService.markAllAsRead(userId.toString());
+  const result = await notificationService.markAllAsRead(userId.toString(), orgId);
 
   res.json(
     new ApiResponse(200, result, 'All notifications marked as read')
@@ -72,9 +78,10 @@ const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
   const notificationId = req.params.id;
 
-  await notificationService.deleteNotification(notificationId, userId.toString());
+  await notificationService.deleteNotification(notificationId, orgId, userId.toString());
 
   res.json(
     new ApiResponse(200, null, 'Notification deleted successfully')
@@ -86,8 +93,9 @@ const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const orgId = req.orgId as string;
 
-  const result = await notificationService.deleteAllRead(userId.toString());
+  const result = await notificationService.deleteAllRead(userId.toString(), orgId);
 
   res.json(
     new ApiResponse(200, result, 'All read notifications deleted')

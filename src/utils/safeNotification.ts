@@ -2,6 +2,7 @@ import notificationService from '../services/notification.service';
 
 interface CreateNotificationParams {
   userId: string;
+  organizationId: string;
   type: string;
   title: string;
   message: string;
@@ -20,11 +21,11 @@ export async function safeCreateNotification(params: CreateNotificationParams) {
     }
 
     const notification = await notificationService.createNotification(params);
-    
+
     if (!notification) {
       console.log(`Notification disabled by user preference: ${params.type}`);
     }
-    
+
     return notification;
   } catch (error) {
     console.error('Failed to create notification:', error);

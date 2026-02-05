@@ -10,6 +10,8 @@ declare global {
             auth?: {
                 userId: string;
                 sessionId: string;
+                orgId?: string;
+                orgRole?: string;
                 getToken: () => Promise<string | null>;
             };
         }
@@ -69,12 +71,19 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         }
 
         // 5. Attach user to request
+        const orgId = client.org_id as string | undefined;
+        const orgRole = client.org_role as string | undefined;
+
         req.user = user;
+        req.orgId = orgId;
+        req.orgRole = orgRole;
 
         // Optional: Attach Clerk auth info if needed by other middleware
         req.auth = {
             userId: clerkUserId as string,
             sessionId: client.sid as string,
+            orgId,
+            orgRole,
             getToken: async () => token
         };
 
