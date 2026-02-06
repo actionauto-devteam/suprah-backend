@@ -13,6 +13,7 @@ services:
     environment:
       - PORT=5000
       - NODE_ENV=production
+      - CORS_ORIGIN=https://www.suprah-app.com,https://suprah-app.com,http://localhost:3000
     volumes:
       - ftp-uploads:/app/ftp-uploads
     networks:
