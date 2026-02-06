@@ -25,8 +25,26 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - api
+    containers:
+      - actionauto-nginx
+    networks:
+      - app-network
+
+  certbot:
+    image: certbot/certbot
+    container_name: actionauto-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    networks:
+      - app-network
     depends_on:
       - api
     networks:
