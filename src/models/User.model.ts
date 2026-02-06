@@ -11,6 +11,8 @@ export interface IUser extends Document {
   avatar?: string;
   role: 'user' | 'admin';
   isActive: boolean;
+  organizationId?: string;
+  organizationRole?: string;
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   createdAt: Date;
@@ -98,6 +100,13 @@ const UserSchema: Schema<IUser> = new Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    organizationId: {
+      type: String,
+      index: true,
+    },
+    organizationRole: {
+      type: String,
     },
     passwordResetToken: {
       type: String,

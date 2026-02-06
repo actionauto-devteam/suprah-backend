@@ -57,7 +57,7 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     sortBy = 'createdAt',
     sortOrder = 'desc',
     page = '1',
-    limit = '0'
+    limit = '20'
   } = req.query;
 
   const filter: any = {};
@@ -196,14 +196,12 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     total
   };
 
-  if (limitNum > 0) {
-    responseData.pagination = {
-      page: pageNum,
-      limit: limitNum,
-      total,
-      totalPages: Math.ceil(total / limitNum)
-    };
-  }
+  responseData.pagination = {
+    page: pageNum,
+    limit: limitNum,
+    total,
+    totalPages: limitNum > 0 ? Math.ceil(total / limitNum) : 1
+  };
 
   res.json(new ApiResponse(200, responseData, 'Vehicles fetched successfully'));
 });
@@ -230,6 +228,10 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
 
   if (updateData.currentStep && updateData.currentStep !== existingVehicle.currentStep) {
     updateData.stepEnteredAt = new Date();
+  }
+
+  if (updateData.status && updateData.status !== existingVehicle.status) {
+    updateData.manualStatusLock = true;
   }
 
   const vehicle = await Vehicle.findByIdAndUpdate(
@@ -459,6 +461,8 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
     updateData.stepEnteredAt = new Date();
   }
 
+  updateData.manualStatusLock = true;
+
   const vehicle = await Vehicle.findByIdAndUpdate(
     req.params.id,
     updateData,
@@ -580,10 +584,10 @@ const autocomplete = asyncHandler(async (req: Request, res: Response) => {
   const regex = { $regex: q, $options: 'i' };
 
   const [vins, makes, models, stockNumbers] = await Promise.all([
-    Vehicle.distinct('vin', { vin: regex, isDeleted: false }).limit(5),
-    Vehicle.distinct('make', { make: regex, isDeleted: false }).limit(5),
-    Vehicle.distinct('modelName', { modelName: regex, isDeleted: false }).limit(5),
-    Vehicle.distinct('stockNumber', { stockNumber: regex, isDeleted: false }).limit(5)
+    Vehicle.distinct('vin', { vin: regex, isDeleted: false }),
+    Vehicle.distinct('make', { make: regex, isDeleted: false }),
+    Vehicle.distinct('modelName', { modelName: regex, isDeleted: false }),
+    Vehicle.distinct('stockNumber', { stockNumber: regex, isDeleted: false })
   ]);
 
   const suggestions = [

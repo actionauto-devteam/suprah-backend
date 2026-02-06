@@ -41,28 +41,33 @@ interface CreateAppointmentData {
 /**
  * Create a new appointment with Google Calendar integration
  */
-const createAppointment = async (userId: string, data: CreateAppointmentData) => {
+const createAppointment = async (userId: string, orgId: string, data: CreateAppointmentData) => {
+  // Validate times
   const start = new Date(data.startTime);
   const end = new Date(data.endTime);
-  
+
   if (start >= end) {
     throw new ApiError(400, 'End time must be after start time');
   }
-  
+
   if (start < new Date()) {
     throw new ApiError(400, 'Cannot schedule appointments in the past');
   }
-  
-  const participants = [...new Set([userId, ...data.participants])];
-  
-  const guestEmails = (data.guestEmails || []).map((email: string) => ({
+
+  // Ensure creator is in participants
+  const participants = [...new Set([userId, ...(data.participants || [])])];
+
+  // Prepare guest emails with pending status
+  const guestEmails = (data.guestEmails || []).map(email => ({
     email: email.toLowerCase().trim(),
     status: 'pending' as const,
   }));
-  
+
+  // Create appointment
   const appointment = await Appointment.create({
     ...data,
     createdBy: userId,
+    organizationId: orgId,
     participants,
     guestEmails,
     status: 'scheduled',
@@ -98,7 +103,7 @@ const createAppointment = async (userId: string, data: CreateAppointmentData) =>
           process.env.JWT_SECRET || 'secret',
           { expiresIn: '90d' }
         );
-        
+
         await emailService.sendAppointmentInvitation(
           appointment,
           organizer,
@@ -111,16 +116,18 @@ const createAppointment = async (userId: string, data: CreateAppointmentData) =>
         console.error(`Failed to send invitation to ${guest.email}:`, error);
       }
     });
-    
+
     await Promise.allSettled(invitationPromises);
   }
-  
+
+  // Link to conversation if provided
   if (data.conversationId) {
     await Conversation.findByIdAndUpdate(data.conversationId, {
       hasAppointment: true,
       appointmentId: appointment._id
     });
-    
+
+    // Add appointment message to conversation
     await Conversation.findByIdAndUpdate(data.conversationId, {
       $push: {
         messages: {
@@ -142,12 +149,14 @@ const createAppointment = async (userId: string, data: CreateAppointmentData) =>
       lastMessageBy: userId
     });
   }
-  
+
+  // Notify all registered participants
   const participantIds = participants.filter(p => p !== userId);
   await Promise.all(
     participantIds.map(participantId =>
       notificationService.createNotification({
         userId: participantId,
+        organizationId: orgId,
         type: 'appointment_created',
         title: `New ${data.entryType.charAt(0).toUpperCase() + data.entryType.slice(1)}`,
         message: `You have been invited to "${data.title}" on ${start.toLocaleDateString()}`,
@@ -161,7 +170,7 @@ const createAppointment = async (userId: string, data: CreateAppointmentData) =>
       })
     )
   );
-  
+
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
@@ -180,7 +189,7 @@ const handleGuestResponse = async (
 ) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
-    
+
     if (decoded.appointmentId !== appointmentId) {
       throw new ApiError(403, 'Invalid token for this appointment');
     }
@@ -195,7 +204,7 @@ const handleGuestResponse = async (
     const guestIndex = appointment.guestEmails.findIndex(
       g => g.email === decoded.email
     );
-    
+
     if (guestIndex === -1) {
       throw new ApiError(404, 'Guest not found in appointment');
     }
@@ -210,7 +219,7 @@ const handleGuestResponse = async (
     if (guestInfo?.guestPhone) {
       appointment.guestEmails[guestIndex].guestPhone = guestInfo.guestPhone;
     }
-    
+
     await appointment.save();
     
     const guestDisplayName = guestInfo?.guestName || decoded.email;
@@ -220,6 +229,7 @@ const handleGuestResponse = async (
     
     await notificationService.createNotification({
       userId: appointment.createdBy._id.toString(),
+      organizationId: appointment.organizationId,
       type: 'guest_response',
       title: `Guest Response - ${status === 'accepted' ? 'Accepted' : 'Declined'}`,
       message: notificationMessage,
@@ -265,14 +275,14 @@ const handleGuestResponse = async (
 /**
  * Get appointment by ID with full details
  */
-const getAppointmentById = async (appointmentId: string, userId: string) => {
-  const appointment = await Appointment.findById(appointmentId)
+const getAppointmentById = async (appointmentId: string, orgId: string) => {
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
     .populate('participants createdBy', 'name email avatar')
     .populate('conversationId', 'type name')
     .populate('vehicleId')
     .populate('quoteId')
     .populate('shipmentId');
-  
+
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
@@ -284,7 +294,7 @@ const getAppointmentById = async (appointmentId: string, userId: string) => {
   if (!hasAccess) {
     throw new ApiError(403, 'Not authorized to view this appointment');
   }
-  
+
   return appointment;
 };
 
@@ -293,6 +303,7 @@ const getAppointmentById = async (appointmentId: string, userId: string) => {
  */
 const getUserAppointments = async (
   userId: string,
+  orgId: string,
   options: {
     status?: string;
     entryType?: string;
@@ -303,32 +314,33 @@ const getUserAppointments = async (
   } = {}
 ) => {
   const filter: any = {
+    organizationId: orgId,
     participants: userId
   };
-  
+
   if (options.status) {
     filter.status = options.status;
   }
-  
+
   if (options.entryType) {
     filter.entryType = options.entryType;
   }
-  
+
   if (options.startDate || options.endDate) {
     filter.startTime = {};
     if (options.startDate) filter.startTime.$gte = options.startDate;
     if (options.endDate) filter.startTime.$lte = options.endDate;
   }
-  
+
   const appointments = await Appointment.find(filter)
     .populate('participants createdBy', 'name email avatar')
     .populate('conversationId', 'type name')
     .sort({ startTime: 1 })
     .limit(options.limit || 100)
     .skip(options.skip || 0);
-  
+
   const total = await Appointment.countDocuments(filter);
-  
+
   return { appointments, total };
 };
 
@@ -337,18 +349,20 @@ const getUserAppointments = async (
  */
 const updateAppointment = async (
   appointmentId: string,
+  orgId: string,
   userId: string,
   updateData: Partial<CreateAppointmentData & { status: string }>
 ) => {
-  const appointment = await Appointment.findById(appointmentId).populate('createdBy', 'name email');
-  
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
-  
+
+  // Check if user is creator or participant
   const isCreator = appointment.createdBy._id.toString() === userId;
   const isParticipant = appointment.participants.some(p => p.toString() === userId);
-  
+
   if (!isCreator && !isParticipant) {
     throw new ApiError(403, 'Not authorized to update this appointment');
   }
@@ -376,11 +390,12 @@ const updateAppointment = async (
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
-  
+
   await Promise.all(
     participantIds.map(participantId =>
       notificationService.createNotification({
         userId: participantId,
+        organizationId: appointment.organizationId,
         type: 'appointment_updated',
         title: `${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)} Updated`,
         message: `"${appointment.title}" has been updated`,
@@ -393,7 +408,8 @@ const updateAppointment = async (
       })
     )
   );
-  
+
+  // Notify guests via email
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -404,24 +420,25 @@ const updateAppointment = async (
       );
     }
   }
-  
+
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
 /**
  * Cancel appointment
  */
-const cancelAppointment = async (appointmentId: string, userId: string) => {
-  const appointment = await Appointment.findById(appointmentId).populate('createdBy', 'name email');
-  
+const cancelAppointment = async (appointmentId: string, orgId: string, userId: string) => {
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
-  
+
+  // Only creator can cancel
   if (appointment.createdBy._id.toString() !== userId) {
     throw new ApiError(403, 'Only the creator can cancel this appointment');
   }
-  
+
   appointment.status = 'cancelled';
   await appointment.save();
   
@@ -440,15 +457,17 @@ const cancelAppointment = async (appointmentId: string, userId: string) => {
       $unset: { appointmentId: 1 }
     });
   }
-  
+
+  // Notify participants
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
-  
+
   await Promise.all(
     participantIds.map(participantId =>
       notificationService.createNotification({
         userId: participantId,
+        organizationId: appointment.organizationId,
         type: 'appointment_cancelled',
         title: `${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)} Cancelled`,
         message: `"${appointment.title}" has been cancelled`,
@@ -461,7 +480,8 @@ const cancelAppointment = async (appointmentId: string, userId: string) => {
       })
     )
   );
-  
+
+  // Notify external guests via email
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -472,20 +492,20 @@ const cancelAppointment = async (appointmentId: string, userId: string) => {
       );
     }
   }
-  
+
   return appointment;
 };
 
 /**
  * Delete appointment
  */
-const deleteAppointment = async (appointmentId: string, userId: string) => {
-  const appointment = await Appointment.findById(appointmentId).populate('createdBy', 'name email');
-  
+const deleteAppointment = async (appointmentId: string, orgId: string, userId: string) => {
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
-  
+
   if (appointment.createdBy._id.toString() !== userId) {
     throw new ApiError(403, 'Only the creator can delete this appointment');
   }
@@ -504,7 +524,8 @@ const deleteAppointment = async (appointmentId: string, userId: string) => {
       $unset: { appointmentId: 1 }
     });
   }
-  
+
+  // Notify external guests via email about cancellation before deleting
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -515,7 +536,7 @@ const deleteAppointment = async (appointmentId: string, userId: string) => {
       );
     }
   }
-  
+
   await Appointment.findByIdAndDelete(appointmentId);
 };
 
@@ -539,15 +560,15 @@ const removeDuplicateAppointments = async () => {
       $match: { count: { $gt: 1 } }
     }
   ]);
-  
+
   let removedCount = 0;
-  
+
   for (const dup of duplicates) {
     const [keep, ...remove] = dup.ids;
     await Appointment.deleteMany({ _id: { $in: remove } });
     removedCount += remove.length;
   }
-  
+
   return removedCount;
 };
 
@@ -557,7 +578,7 @@ const removeDuplicateAppointments = async () => {
 const sendAppointmentReminders = async () => {
   const tomorrow = new Date();
   tomorrow.setHours(tomorrow.getHours() + 24);
-  
+
   const appointments = await Appointment.find({
     startTime: {
       $gte: new Date(),
@@ -566,9 +587,9 @@ const sendAppointmentReminders = async () => {
     reminderSent: false,
     status: { $in: ['scheduled', 'confirmed'] }
   }).populate('participants createdBy', 'name email');
-  
+
   let sentCount = 0;
-  
+
   for (const appointment of appointments) {
     try {
       for (const participant of appointment.participants as any[]) {
@@ -582,7 +603,8 @@ const sendAppointmentReminders = async () => {
           console.error(`Failed to send reminder to ${participant.email}:`, error);
         }
       }
-      
+
+      // Send to external guests
       for (const guest of appointment.guestEmails) {
         if (guest.status === 'accepted') {
           try {
@@ -597,16 +619,17 @@ const sendAppointmentReminders = async () => {
           }
         }
       }
-      
+
+      // Mark reminder as sent
       appointment.reminderSent = true;
       await appointment.save();
-      
+
       sentCount++;
     } catch (error) {
       console.error(`Failed to send reminders for appointment ${appointment._id}:`, error);
     }
   }
-  
+
   return sentCount;
 };
 
@@ -623,7 +646,7 @@ const markPastAppointmentsCompleted = async () => {
       $set: { status: 'completed' }
     }
   );
-  
+
   return result.modifiedCount;
 };
 

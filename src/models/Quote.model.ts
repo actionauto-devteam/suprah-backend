@@ -6,7 +6,8 @@ export interface IQuote extends Document {
     lastName: string;
     email: string;
     phone: string;
-    
+    organizationId: string;
+
     // Vehicle Information (populated from Vehicle model or manually entered)
     vehicleId?: mongoose.Types.ObjectId;
     vehicleName?: string;
@@ -18,7 +19,7 @@ export interface IQuote extends Document {
     vehicleLocation?: string;
     vehicleStatus?: string;
     daysOnLot?: number;
-    
+
     // Shipping Information
     fromZip: string;
     toZip: string;
@@ -27,7 +28,7 @@ export interface IQuote extends Document {
     units: number;
     enclosedTrailer: boolean;
     vehicleInoperable: boolean;
-    
+
     // Calculated Fields
     miles: number;
     rate: number;
@@ -35,10 +36,10 @@ export interface IQuote extends Document {
         min: number;
         max: number;
     };
-    
+
     // Status
     status: 'pending' | 'accepted' | 'rejected' | 'booked';
-    
+
     // Timestamps
     createdAt: Date;
     updatedAt: Date;
@@ -51,7 +52,12 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         lastName: { type: String, required: true, trim: true },
         email: { type: String, required: true, trim: true, lowercase: true },
         phone: { type: String, required: true, trim: true },
-        
+        organizationId: {
+            type: String,
+            required: true,
+            index: true
+        },
+
         // Vehicle Information
         vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle' },
         vehicleName: { type: String, trim: true },
@@ -63,7 +69,7 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         vehicleLocation: { type: String, trim: true },
         vehicleStatus: { type: String, trim: true },
         daysOnLot: { type: Number },
-        
+
         // Shipping Information
         fromZip: { type: String, required: true, trim: true },
         toZip: { type: String, required: true, trim: true },
@@ -72,7 +78,7 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         units: { type: Number, required: true, min: 1, max: 5, default: 1 },
         enclosedTrailer: { type: Boolean, default: false },
         vehicleInoperable: { type: Boolean, default: false },
-        
+
         // Calculated Fields
         miles: { type: Number, required: true },
         rate: { type: Number, required: true },
@@ -80,7 +86,7 @@ const QuoteSchema: Schema<IQuote> = new Schema(
             min: { type: Number, required: true },
             max: { type: Number, required: true }
         },
-        
+
         // Status
         status: {
             type: String,

@@ -1,11 +1,13 @@
 import express from 'express';
 import notificationController from '../controllers/notification.controller';
 import auth from '../middleware/auth.middleware';
+import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(auth());
+router.use(requireOrg);
 
 // Get all notifications
 router.get('/', notificationController.getNotifications);

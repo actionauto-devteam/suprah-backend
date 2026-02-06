@@ -11,9 +11,12 @@ const mockedFtpService = ftpService as jest.Mocked<any>;
 
 describe('SyncService', () => {
     beforeEach(async () => {
-        await Vehicle.deleteMany({});
-        await SyncLog.deleteMany({});
-        await AuditLog.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await Vehicle.deleteMany({});
+            await SyncLog.deleteMany({});
+            await AuditLog.deleteMany({});
+        }
     });
 
     afterAll(async () => {

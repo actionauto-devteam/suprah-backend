@@ -4,28 +4,29 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IShipment extends Document {
     quoteId: mongoose.Types.ObjectId;
-    
+    organizationId: string;
+
     // Status
     status: 'Available for Pickup' | 'Cancelled' | 'Delivered' | 'Dispatched' | 'In-Route';
-    
+
     // Route Information
     origin: string;
     destination: string;
-    
+
     // Dates
     requestedPickupDate: Date;
     scheduledPickup?: Date;
     pickedUp?: Date;
     scheduledDelivery?: Date;
     delivered?: Date;
-    
+
     // Tracking
     trackingNumber?: string;
     carrierInfo?: {
         name: string;
         contact: string;
     };
-    
+
     // Preserved Quote Data (stored when quote is deleted)
     preservedQuoteData?: {
         firstName: string;
@@ -51,47 +52,53 @@ export interface IShipment extends Document {
         vehicleInoperable: boolean;
         units: number;
     };
-    
+
     // Notes
     notes?: Array<{
         text: string;
         author: mongoose.Types.ObjectId;
         date: Date;
     }>;
-    
+
     createdAt: Date;
     updatedAt: Date;
 }
 
 const ShipmentSchema: Schema<IShipment> = new Schema(
     {
-        quoteId: { 
-            type: Schema.Types.ObjectId, 
-            ref: 'Quote', 
-            required: true 
+        quoteId: {
+            type: Schema.Types.ObjectId,
+            ref: 'Quote',
+            required: true
         },
-        
+
+        organizationId: {
+            type: String,
+            required: true,
+            index: true
+        },
+
         status: {
             type: String,
             enum: ['Available for Pickup', 'Cancelled', 'Delivered', 'Dispatched', 'In-Route'],
             default: 'Available for Pickup'
         },
-        
+
         origin: { type: String, required: true, trim: true },
         destination: { type: String, required: true, trim: true },
-        
+
         requestedPickupDate: { type: Date, required: true, default: Date.now },
         scheduledPickup: { type: Date },
         pickedUp: { type: Date },
         scheduledDelivery: { type: Date },
         delivered: { type: Date },
-        
+
         trackingNumber: { type: String, trim: true },
         carrierInfo: {
             name: { type: String, trim: true },
             contact: { type: String, trim: true }
         },
-        
+
         // Preserved quote data for when quotes are deleted
         preservedQuoteData: {
             firstName: { type: String, trim: true },
@@ -117,7 +124,7 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
             vehicleInoperable: { type: Boolean },
             units: { type: Number }
         },
-        
+
         notes: [{
             text: { type: String, required: true },
             author: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -130,7 +137,7 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
 );
 
 // Virtual to get quote data from either the quote reference or preserved data
-ShipmentSchema.virtual('quoteData').get(function(this: IShipment) {
+ShipmentSchema.virtual('quoteData').get(function (this: IShipment) {
     if (this.populated('quoteId')) {
         return this.quoteId;
     }

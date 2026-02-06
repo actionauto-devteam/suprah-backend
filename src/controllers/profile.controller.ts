@@ -28,7 +28,8 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
   if (avatar !== undefined) updateData.avatar = avatar;
   if (theme !== undefined) updateData.theme = theme;
 
-  const profile = await profileService.updateProfile(userId, updateData);
+  const orgId = (req as any).orgId;
+  const profile = await profileService.updateProfile(userId, updateData, orgId);
 
   res.json(
     new ApiResponse(200, profile, 'Profile updated successfully')
@@ -109,7 +110,8 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Invalid theme value');
   }
 
-  const user = await profileService.updateTheme(userId, theme);
+  const orgId = (req as any).orgId;
+  const user = await profileService.updateTheme(userId, theme, orgId);
 
   res.json(
     new ApiResponse(200, user, 'Theme updated successfully')

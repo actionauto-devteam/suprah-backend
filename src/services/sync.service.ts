@@ -121,14 +121,10 @@ export class SyncService {
             certified: parseBool(raw.certified),
             isNewVehicle: parseBool(raw['is new']),
 
-            dealerId: raw['dealer id']?.trim(),
-            dealerName: raw['dealer name']?.trim(),
-            dealerAddress: raw['dealer street address']?.trim(),
-            dealerCity: raw['dealer city']?.trim(),
-            dealerState: raw['dealer state']?.trim(),
             dealerZip: raw['dealer zip']?.trim(),
             dealerEmail: raw['dealer crm email']?.trim(),
 
+            status: 'Ready for Sale' as const,
             isDeleted: false // Re-activate if it was deleted
         };
 
@@ -150,6 +146,12 @@ export class SyncService {
         // Compare and Update (Selective comparison to minimize noise)
         const oldData: any = {};
         const relevantKeys = Object.keys(vehicleData).filter(k => k !== 'isDeleted');
+
+        // Respect Manual Lock for Status
+        if (existingVehicle.manualStatusLock) {
+            delete (vehicleData as any).status;
+        }
+
         relevantKeys.forEach(k => {
             oldData[k] = (existingVehicle as any)[k];
         });
@@ -232,25 +234,29 @@ export class SyncService {
      * Soft-deletes vehicles missing from the current feed
      */
     private async handleDeletions(csvVins: Set<string>) {
-        // Find active vehicles that are NOT in the CSV
-        const vehiclesToRemove = await Vehicle.find({
+        // Find active vehicles that are NOT in the CSV and NOT locked
+        const vehiclesToMarkSold = await Vehicle.find({
             vin: { $nin: Array.from(csvVins) },
+            status: { $ne: 'Sold' },
+            manualStatusLock: { $ne: true },
             isDeleted: false
         });
 
-        for (const vehicle of vehiclesToRemove) {
-            vehicle.isDeleted = true;
+        for (const vehicle of vehiclesToMarkSold) {
+            vehicle.status = 'Sold';
+            vehicle.dateSold = new Date();
             await vehicle.save();
 
             await AuditLog.create({
                 entityType: 'Vehicle',
                 entityId: vehicle._id,
-                action: 'DELETE',
-                reason: 'Vehicle no longer present in DealersCloud source feed',
+                action: 'UPDATE',
+                reason: 'Vehicle no longer present in DealersCloud source feed - marking as Sold',
+                changes: { status: 'Sold' }
             });
         }
 
-        return { deletedCount: vehiclesToRemove.length };
+        return { deletedCount: vehiclesToMarkSold.length };
     }
 }
 

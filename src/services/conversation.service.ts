@@ -8,7 +8,7 @@ class ConversationService {
     /**
      * Create a new conversation
      */
-    async createConversation(userId: string, data: {
+    async createConversation(userId: string, orgId: string, data: {
         type: 'direct' | 'group';
         participants: string[];
         name?: string;
@@ -27,6 +27,7 @@ class ConversationService {
         if (type === 'direct') {
             const existing = await Conversation.findOne({
                 type: 'direct',
+                organizationId: orgId,
                 participants: { $all: allParticipants, $size: 2 }
             });
 
@@ -38,6 +39,7 @@ class ConversationService {
 
         const conversation = await Conversation.create({
             type,
+            organizationId: orgId,
             participants: allParticipants,
             name: type === 'group' ? name : undefined,
             createdBy: userId,
@@ -50,14 +52,15 @@ class ConversationService {
     /**
      * Get user's conversations
      */
-    async getUserConversations(userId: string, options: {
+    async getUserConversations(userId: string, orgId: string, options: {
         hasAppointment?: boolean;
         includeArchived?: boolean;
     } = {}): Promise<IConversation[]> {
         const { hasAppointment, includeArchived = false } = options;
 
         const query: any = {
-            participants: userId
+            participants: userId,
+            organizationId: orgId
         };
 
         if (hasAppointment !== undefined) {
@@ -83,12 +86,12 @@ class ConversationService {
     /**
      * Send a message in a conversation
      */
-    async sendMessage(conversationId: string, userId: string, data: {
+    async sendMessage(conversationId: string, orgId: string, userId: string, data: {
         content: string;
         type?: 'text' | 'file' | 'image' | 'appointment';
         metadata?: any;
     }): Promise<IConversation> {
-        const conversation = await Conversation.findById(conversationId);
+        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
 
         if (!conversation) {
             throw new ApiError(404, 'Conversation not found');
@@ -124,8 +127,8 @@ class ConversationService {
     /**
      * Mark messages as read
      */
-    async markAsRead(conversationId: string, userId: string): Promise<void> {
-        const conversation = await Conversation.findById(conversationId);
+    async markAsRead(conversationId: string, orgId: string, userId: string): Promise<void> {
+        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
 
         if (!conversation) {
             throw new ApiError(404, 'Conversation not found');
@@ -144,8 +147,8 @@ class ConversationService {
     /**
      * Delete a conversation
      */
-    async deleteConversation(conversationId: string, userId: string): Promise<void> {
-        const conversation = await Conversation.findById(conversationId);
+    async deleteConversation(conversationId: string, orgId: string, userId: string): Promise<void> {
+        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
 
         if (!conversation) {
             throw new ApiError(404, 'Conversation not found');
@@ -157,14 +160,14 @@ class ConversationService {
         }
 
         // Delete the conversation
-        await Conversation.findByIdAndDelete(conversationId);
+        await Conversation.findOneAndDelete({ _id: conversationId, organizationId: orgId });
     }
 
     /**
      * Archive a conversation (alternative to delete - keeps data)
      */
-    async archiveConversation(conversationId: string, userId: string): Promise<IConversation> {
-        const conversation = await Conversation.findById(conversationId);
+    async archiveConversation(conversationId: string, orgId: string, userId: string): Promise<IConversation> {
+        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
 
         if (!conversation) {
             throw new ApiError(404, 'Conversation not found');
@@ -189,17 +192,17 @@ class ConversationService {
      */
     async removeDuplicateConversations(): Promise<number> {
         const directConversations = await Conversation.find({ type: 'direct' });
-        
+
         const seen = new Map<string, string>();
         const toDelete: string[] = [];
-        
+
         for (const conversation of directConversations) {
             // Create a unique key for the participant pair
             const participants = conversation.participants
                 .map(p => p.toString())
                 .sort()
                 .join('-');
-            
+
             if (seen.has(participants)) {
                 // Duplicate found - mark for deletion (keep the older one)
                 toDelete.push(conversation._id.toString());
@@ -207,12 +210,12 @@ class ConversationService {
                 seen.set(participants, conversation._id.toString());
             }
         }
-        
+
         // Delete duplicates
         if (toDelete.length > 0) {
             await Conversation.deleteMany({ _id: { $in: toDelete } });
         }
-        
+
         return toDelete.length;
     }
 }

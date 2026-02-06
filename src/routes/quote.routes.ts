@@ -1,10 +1,12 @@
 import express from 'express';
 import quoteController from '../controllers/quote.controller';
 import auth from '../middleware/auth.middleware';
+import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
 router.use(auth());
+router.use(requireOrg);
 
 router
     .route('/')
@@ -14,8 +16,8 @@ router
 router
     .route('/:id')
     .get(quoteController.getQuoteById)
-    .put(quoteController.updateQuote)      
-    .patch(quoteController.updateQuote)    
+    .put(quoteController.updateQuote)
+    .patch(quoteController.updateQuote)
     .delete(quoteController.deleteQuote);
 
 router
