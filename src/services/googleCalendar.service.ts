@@ -98,7 +98,7 @@ class GoogleCalendarService {
   async getUserTokens(userId: string): Promise<GoogleCalendarTokens | null> {
     try {
       const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-      
+
       if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
         return null;
       }
@@ -120,15 +120,15 @@ class GoogleCalendarService {
   async refreshAccessToken(userId: string): Promise<string> {
     try {
       const tokens = await this.getUserTokens(userId);
-      
+
       if (!tokens?.refresh_token) {
         throw new ApiError(401, 'No refresh token available. Please reconnect Google Calendar.');
       }
 
       this.oauth2Client.setCredentials(tokens);
-      
+
       const { credentials } = await this.oauth2Client.refreshAccessToken();
-      
+
       await this.saveUserTokens(userId, {
         access_token: credentials.access_token!,
         refresh_token: credentials.refresh_token || tokens.refresh_token,
@@ -148,7 +148,7 @@ class GoogleCalendarService {
    */
   async getCalendarClient(userId: string) {
     const tokens = await this.getUserTokens(userId);
-    
+
     if (!tokens) {
       throw new ApiError(401, 'Google Calendar not connected');
     }
@@ -175,7 +175,7 @@ class GoogleCalendarService {
 
       // Get participant emails
       const participantEmails: string[] = [];
-      
+
       for (const p of appointment.participants) {
         if (typeof p === 'string') {
           try {
@@ -255,22 +255,22 @@ class GoogleCalendarService {
    */
   private buildEventDescription(appointment: IAppointment): string {
     let description = appointment.description || '';
-    
+
     if (appointment.notes) {
       description += `\n\nNotes:\n${appointment.notes}`;
     }
-    
+
     description += `\n\n--- Appointment Details ---`;
     description += `\nType: ${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)}`;
     description += `\nMeeting Type: ${appointment.type}`;
-    
+
     if (appointment.meetingLink) {
       description += `\n\nJoin Meeting: ${appointment.meetingLink}`;
     }
-    
+
     description += `\n\nManage: ${process.env.FRONTEND_URL}/appointments`;
     description += `\nAppointment ID: ${appointment._id}`;
-    
+
     return description.trim();
   }
 
@@ -427,7 +427,7 @@ class GoogleCalendarService {
 
       for (const event of events) {
         const appointmentId = event.extendedProperties?.private?.appointmentId;
-        
+
         if (appointmentId) {
           await this.checkEventRSVPStatus(appointmentId, event);
         }
@@ -478,6 +478,7 @@ class GoogleCalendarService {
 
           await notificationService.createNotification({
             userId: appointment.createdBy._id.toString(),
+            organizationId: appointment.organizationId,
             type: 'guest_response',
             title: `Guest Response - ${newStatus === 'accepted' ? 'Accepted' : 'Declined'}`,
             message: `${email} has ${newStatus} your invitation to "${appointment.title}"`,
@@ -544,7 +545,7 @@ class GoogleCalendarService {
       await User.findByIdAndUpdate(userId, {
         $unset: { googleCalendar: 1 }
       });
-      
+
       console.log(`Disconnected Google Calendar for user ${userId}`);
     } catch (error) {
       console.error('Failed to disconnect calendar:', error);

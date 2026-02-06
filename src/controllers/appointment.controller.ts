@@ -3,7 +3,6 @@ import { asyncHandler } from '../utils/asyncHandler';
 import appointmentService from '../services/appointment.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
-import { IAppointment } from '../models/Appointment.model';
 
 /**
  * Create a new appointment
@@ -27,7 +26,6 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const orgId = req.orgId as string;
     const { status, entryType, startDate, endDate, limit, skip } = req.query;
 
     const options: any = {};
@@ -38,6 +36,7 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     if (limit) options.limit = parseInt(limit as string);
     if (skip) options.skip = parseInt(skip as string);
 
+    const orgId = req.orgId as string;
     const result = await appointmentService.getUserAppointments(userId, orgId, options);
 
     res.json(
@@ -51,10 +50,11 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
  * @access Private
  */
 const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
+    const userId = (req.user as IUser)._id.toString();
     const { id } = req.params;
 
-    const appointment = await appointmentService.getAppointmentById(id, orgId);
+    const orgId = req.orgId as string;
+    const appointment = await appointmentService.getAppointmentById(id, orgId, userId);
 
     res.json(
         new ApiResponse(200, appointment, 'Appointment fetched successfully')
@@ -68,9 +68,9 @@ const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const orgId = req.orgId as string;
     const { id } = req.params;
 
+    const orgId = req.orgId as string;
     const appointment = await appointmentService.updateAppointment(id, orgId, userId, req.body);
 
     res.json(
@@ -85,9 +85,9 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const orgId = req.orgId as string;
     const { id } = req.params;
 
+    const orgId = req.orgId as string;
     const appointment = await appointmentService.cancelAppointment(id, orgId, userId);
 
     res.json(
@@ -102,9 +102,9 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const orgId = req.orgId as string;
     const { id } = req.params;
 
+    const orgId = req.orgId as string;
     await appointmentService.deleteAppointment(id, orgId, userId);
 
     res.json(
@@ -119,8 +119,8 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { token, status, guestName, guestPhone } = req.body;
-    
+    const { token, status, googleAccessToken } = req.body;
+
     if (!token || !status) {
         return res.status(400).json(
             new ApiResponse(400, null, 'Token and status are required')
@@ -132,17 +132,12 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
             new ApiResponse(400, null, 'Status must be either "accepted" or "declined"')
         );
     }
-    
-    // Accept guest info (optional for declined, but good to have)
-    const guestInfo: any = {};
-    if (guestName) guestInfo.guestName = guestName;
-    if (guestPhone) guestInfo.guestPhone = guestPhone;
-    
+
     const appointment = await appointmentService.handleGuestResponse(
         id,
         token,
         status,
-        guestInfo
+        googleAccessToken
     );
 
     res.json(
@@ -196,6 +191,7 @@ const markPastCompleted = asyncHandler(async (req: Request, res: Response) => {
  */
 const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
+
     const orgId = req.orgId as string;
 
     // Get all user appointments
@@ -205,30 +201,30 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
 
     const stats = {
         total: appointments.length,
-        upcoming: appointments.filter((a: IAppointment) => 
-            new Date(a.startTime) > now && 
+        upcoming: appointments.filter(a =>
+            new Date(a.startTime) > now &&
             a.status !== 'cancelled'
         ).length,
-        past: appointments.filter((a: IAppointment) => 
+        past: appointments.filter(a =>
             new Date(a.endTime) < now
         ).length,
-        cancelled: appointments.filter((a: IAppointment) => 
+        cancelled: appointments.filter(a =>
             a.status === 'cancelled'
         ).length,
-        completed: appointments.filter((a: IAppointment) => 
+        completed: appointments.filter(a =>
             a.status === 'completed'
         ).length,
         byType: {
-            appointment: appointments.filter((a: IAppointment) => a.entryType === 'appointment').length,
-            event: appointments.filter((a: IAppointment) => a.entryType === 'event').length,
-            task: appointments.filter((a: IAppointment) => a.entryType === 'task').length,
-            reminder: appointments.filter((a: IAppointment) => a.entryType === 'reminder').length,
+            appointment: appointments.filter(a => a.entryType === 'appointment').length,
+            event: appointments.filter(a => a.entryType === 'event').length,
+            task: appointments.filter(a => a.entryType === 'task').length,
+            reminder: appointments.filter(a => a.entryType === 'reminder').length,
         },
         byStatus: {
-            scheduled: appointments.filter((a: IAppointment) => a.status === 'scheduled').length,
-            confirmed: appointments.filter((a: IAppointment) => a.status === 'confirmed').length,
-            cancelled: appointments.filter((a: IAppointment) => a.status === 'cancelled').length,
-            completed: appointments.filter((a: IAppointment) => a.status === 'completed').length,
+            scheduled: appointments.filter(a => a.status === 'scheduled').length,
+            confirmed: appointments.filter(a => a.status === 'confirmed').length,
+            cancelled: appointments.filter(a => a.status === 'cancelled').length,
+            completed: appointments.filter(a => a.status === 'completed').length,
         }
     };
 
@@ -244,8 +240,9 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
  */
 const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const orgId = req.orgId as string;
     const limit = parseInt(req.query.limit as string) || 5;
+
+    const orgId = req.orgId as string;
 
     const { appointments } = await appointmentService.getUserAppointments(userId, orgId, {
         limit,
@@ -254,7 +251,7 @@ const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response)
 
     // Filter to only upcoming, non-cancelled
     const upcoming = appointments
-        .filter((a: IAppointment) => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
+        .filter(a => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
         .slice(0, limit);
 
     res.json(
@@ -304,11 +301,11 @@ const searchAppointments = asyncHandler(async (req: Request, res: Response) => {
     }
 
     // Get all appointments
-    const orgId = req.orgId as string;
     const options: any = {};
     if (entryType) options.entryType = entryType;
     if (status) options.status = status;
 
+    const orgId = req.orgId as string;
     const { appointments } = await appointmentService.getUserAppointments(userId, orgId, options);
 
     // Filter by search query
