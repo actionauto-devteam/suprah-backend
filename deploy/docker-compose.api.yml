@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # API Service
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: actionauto-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=5000
+      - NODE_ENV=production
+    volumes:
+      - ftp-uploads:/app/ftp-uploads
+    networks:
+      - app-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: actionauto-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - api
+    networks:
+      - app-network
+
+volumes:
+  ftp-uploads:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
