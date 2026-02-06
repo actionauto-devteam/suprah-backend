@@ -9,6 +9,7 @@ import profileRoute from './profile.route';
 import appointmentRoute from './appointment.route';
 import conversationRoute from './conversation.route';
 import userRoute from './user.route';
+import googleCalendarRoute from './googleCalendar.routes';
 
 const router = express.Router();
 
@@ -49,10 +50,13 @@ const defaultRoutes = [
     path: '/conversations',
     route: conversationRoute,
   },
-
   {
     path: '/users',
     route: userRoute,
+  },
+  {
+    path: '/google-calendar',
+    route: googleCalendarRoute,
   },
 ];
 

@@ -27,6 +27,8 @@ const VALID_NOTIFICATION_TYPES = [
   'appointment_created',
   'appointment_updated',
   'appointment_cancelled',
+  'appointment_reminder',
+  'guest_response', // NEW: For guest RSVP changes
   'message_received',
 ] as const;
 

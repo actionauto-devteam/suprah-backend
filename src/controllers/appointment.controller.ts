@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import appointmentService from '../services/appointment.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
+import { IAppointment } from '../models/Appointment.model';
 
 /**
  * Create a new appointment
@@ -118,8 +119,8 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
  */
 const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { token, status, googleAccessToken } = req.body;
-
+    const { token, status, guestName, guestPhone } = req.body;
+    
     if (!token || !status) {
         return res.status(400).json(
             new ApiResponse(400, null, 'Token and status are required')
@@ -131,12 +132,17 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
             new ApiResponse(400, null, 'Status must be either "accepted" or "declined"')
         );
     }
-
+    
+    // Accept guest info (optional for declined, but good to have)
+    const guestInfo: any = {};
+    if (guestName) guestInfo.guestName = guestName;
+    if (guestPhone) guestInfo.guestPhone = guestPhone;
+    
     const appointment = await appointmentService.handleGuestResponse(
         id,
         token,
         status,
-        googleAccessToken
+        guestInfo
     );
 
     res.json(
@@ -199,30 +205,30 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
 
     const stats = {
         total: appointments.length,
-        upcoming: appointments.filter(a =>
-            new Date(a.startTime) > now &&
+        upcoming: appointments.filter((a: IAppointment) => 
+            new Date(a.startTime) > now && 
             a.status !== 'cancelled'
         ).length,
-        past: appointments.filter(a =>
+        past: appointments.filter((a: IAppointment) => 
             new Date(a.endTime) < now
         ).length,
-        cancelled: appointments.filter(a =>
+        cancelled: appointments.filter((a: IAppointment) => 
             a.status === 'cancelled'
         ).length,
-        completed: appointments.filter(a =>
+        completed: appointments.filter((a: IAppointment) => 
             a.status === 'completed'
         ).length,
         byType: {
-            appointment: appointments.filter(a => a.entryType === 'appointment').length,
-            event: appointments.filter(a => a.entryType === 'event').length,
-            task: appointments.filter(a => a.entryType === 'task').length,
-            reminder: appointments.filter(a => a.entryType === 'reminder').length,
+            appointment: appointments.filter((a: IAppointment) => a.entryType === 'appointment').length,
+            event: appointments.filter((a: IAppointment) => a.entryType === 'event').length,
+            task: appointments.filter((a: IAppointment) => a.entryType === 'task').length,
+            reminder: appointments.filter((a: IAppointment) => a.entryType === 'reminder').length,
         },
         byStatus: {
-            scheduled: appointments.filter(a => a.status === 'scheduled').length,
-            confirmed: appointments.filter(a => a.status === 'confirmed').length,
-            cancelled: appointments.filter(a => a.status === 'cancelled').length,
-            completed: appointments.filter(a => a.status === 'completed').length,
+            scheduled: appointments.filter((a: IAppointment) => a.status === 'scheduled').length,
+            confirmed: appointments.filter((a: IAppointment) => a.status === 'confirmed').length,
+            cancelled: appointments.filter((a: IAppointment) => a.status === 'cancelled').length,
+            completed: appointments.filter((a: IAppointment) => a.status === 'completed').length,
         }
     };
 
@@ -248,7 +254,7 @@ const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response)
 
     // Filter to only upcoming, non-cancelled
     const upcoming = appointments
-        .filter(a => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
+        .filter((a: IAppointment) => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
         .slice(0, limit);
 
     res.json(

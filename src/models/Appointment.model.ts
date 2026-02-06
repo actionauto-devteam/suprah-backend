@@ -7,6 +7,8 @@ export interface IGuestResponse {
   status: 'pending' | 'accepted' | 'declined';
   respondedAt?: Date;
   googleCalendarEventId?: string;
+  guestName?: string;
+  guestPhone?: string;
 }
 
 export interface IAppointment extends Document {
@@ -58,7 +60,9 @@ const GuestResponseSchema = new Schema({
     default: 'pending'
   },
   respondedAt: Date,
-  googleCalendarEventId: String
+  googleCalendarEventId: String,
+  guestName: String,
+  guestPhone: String
 }, { _id: false });
 
 const AppointmentSchema: Schema<IAppointment> = new Schema(

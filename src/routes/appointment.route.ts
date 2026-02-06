@@ -5,7 +5,7 @@ import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
-// Public route for guest responses
+// Public route for guest responses - MUST be before auth middleware
 router.post('/:id/guest-response', appointmentController.handleGuestResponse);
 
 // Protected routes
