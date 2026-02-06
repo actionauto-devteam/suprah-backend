@@ -47,8 +47,6 @@ services:
       - app-network
     depends_on:
       - api
-    networks:
-      - app-network
 
 volumes:
   ftp-uploads:
