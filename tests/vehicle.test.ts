@@ -18,8 +18,13 @@ describe('Vehicle API Endpoints', () => {
     });
 
     beforeEach(async () => {
-        // Clear vehicles collection before each test
-        await Vehicle.deleteMany({});
+        // SAFETY: Only clear if we are explicitly on a test DB name
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await Vehicle.deleteMany({});
+        } else {
+            console.warn(`[SAFETY] Skipping deleteMany because database name "${dbName}" does not look like a test DB.`);
+        }
 
         // Create a test vehicle
         const vehicle = await Vehicle.create({

@@ -30,12 +30,18 @@ describe('Organization Data Isolation', () => {
     });
 
     beforeEach(async () => {
-        await Quote.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await Quote.deleteMany({});
+        }
     });
 
     afterAll(async () => {
-        await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-        await Quote.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
+            await Quote.deleteMany({});
+        }
     });
 
     it('should only return quotes belonging to the user\'s organization', async () => {

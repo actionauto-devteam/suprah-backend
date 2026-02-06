@@ -24,12 +24,18 @@ describe('Notification API - Organization Isolation', () => {
     }, 15000);
 
     beforeEach(async () => {
-        await Notification.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await Notification.deleteMany({});
+        }
     });
 
     afterAll(async () => {
-        await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-        await Notification.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
+            await Notification.deleteMany({});
+        }
     });
 
     it('should only return notifications belonging to the user\'s organization', async () => {

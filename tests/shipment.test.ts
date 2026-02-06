@@ -38,13 +38,19 @@ describe('Shipment API - Organization Isolation', () => {
     }, 15000);
 
     beforeEach(async () => {
-        await Shipment.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await Shipment.deleteMany({});
+        }
     });
 
     afterAll(async () => {
-        await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-        await Quote.deleteMany({ email: { $in: ['ship_q1@a.com', 'ship_q2@b.com', 'ship_new@q.com'] } });
-        await Shipment.deleteMany({});
+        const dbName = mongoose.connection.name;
+        if (dbName && dbName.includes('test')) {
+            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
+            await Quote.deleteMany({ email: { $in: ['ship_q1@a.com', 'ship_q2@b.com', 'ship_new@q.com'] } });
+            await Shipment.deleteMany({});
+        }
     });
 
     it('should only return shipments belonging to the user\'s organization', async () => {

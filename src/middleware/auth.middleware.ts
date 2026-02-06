@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { clerkClient } from '@clerk/clerk-sdk-node';
 import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
+import Organization from '../models/Organization.model';
 
 // Extend Express Request type to include auth property from Clerk
 declare global {
@@ -71,8 +72,54 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         }
 
         // 5. Attach user to request
-        const orgId = client.org_id as string | undefined;
-        const orgRole = client.org_role as string | undefined;
+        // Fallback: If orgId is not in the token, check the user record
+        let orgId = (client.org_id as string | undefined) || user?.organizationId;
+        let orgRole = (client.org_role as string | undefined) || (user?.organizationRole as string | undefined);
+
+        // 6. Hard Fallback: If still no orgId, fetch memberships from Clerk API (Direct Sync)
+        if (!orgId && user) {
+            try {
+                const memberships = await clerkClient.users.getOrganizationMembershipList({ userId: clerkUserId as string });
+                if (memberships.length > 0) {
+                    const firstMembership = memberships[0];
+                    orgId = firstMembership.organization.id;
+                    orgRole = firstMembership.role;
+
+                    // Update user locally
+                    user.organizationId = orgId;
+                    user.organizationRole = orgRole;
+                    await user.save();
+                }
+            } catch (membershipError) {
+                console.error('Error fetching memberships from Clerk:', membershipError);
+            }
+        }
+
+        // 7. JIT Organization Sync - If we have an orgId (from token or fallback) but no local record
+        if (orgId) {
+            let org = await Organization.findOne({ clerkId: orgId });
+            if (!org) {
+                try {
+                    const clerkOrg = await clerkClient.organizations.getOrganization({ organizationId: orgId });
+                    org = await Organization.create({
+                        clerkId: orgId,
+                        name: clerkOrg.name,
+                        slug: clerkOrg.slug,
+                        logoUrl: clerkOrg.imageUrl,
+                        metadata: clerkOrg.publicMetadata
+                    });
+                } catch (orgError) {
+                    console.error('Error JIT syncing organization:', orgError);
+                }
+            }
+
+            // Sync user membership if it doesn't match
+            if (user && user.organizationId !== orgId) {
+                user.organizationId = orgId;
+                user.organizationRole = orgRole;
+                await user.save();
+            }
+        }
 
         req.user = user;
         req.orgId = orgId;

@@ -58,6 +58,8 @@ export const handleClerkWebhook = async (req: Request, res: Response) => {
     const { id } = evt.data;
     const eventType = evt.type;
 
+    console.log('Running Webhook with event type', eventType);
+
     console.log(`Webhook with and ID of ${id} and type of ${eventType}`);
 
     try {

@@ -7,7 +7,16 @@ const router = express.Router();
 
 // Apply authentication middleware to all routes
 router.use(auth());
-router.use(requireOrg);
+
+// Middleware to protect non-GET routes with organization context
+const requireOrgForMutation = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.method !== 'GET') {
+        return requireOrg(req, res, next);
+    }
+    next();
+};
+
+router.use(requireOrgForMutation);
 
 // Filter and statistics routes (must be before /:id routes)
 router.get('/filters', vehicleController.getFilters);
