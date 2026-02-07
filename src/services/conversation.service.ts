@@ -1,223 +1,307 @@
-// services/conversation.service.ts
-
 import Conversation, { IConversation } from '../models/Conversation.model';
+import Appointment from '../models/Appointment.model';
+import gmailConversationService from './gmailConversation.service';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 
-class ConversationService {
-    /**
-     * Create a new conversation
-     */
-    async createConversation(userId: string, orgId: string, data: {
-        type: 'direct' | 'group';
-        participants: string[];
-        name?: string;
-    }): Promise<IConversation> {
-        const { type, participants, name } = data;
-
-        // Add the creator to participants if not already included
-        const allParticipants = [...new Set([userId, ...participants])];
-
-        // For direct messages, ensure only 2 participants
-        if (type === 'direct' && allParticipants.length !== 2) {
-            throw new ApiError(400, 'Direct conversations must have exactly 2 participants');
-        }
-
-        // Check if direct conversation already exists
-        if (type === 'direct') {
-            const existing = await Conversation.findOne({
-                type: 'direct',
-                organizationId: orgId,
-                participants: { $all: allParticipants, $size: 2 }
-            });
-
-            if (existing) {
-                // Return existing conversation instead of creating duplicate
-                return existing.populate('participants', 'name email avatar');
-            }
-        }
-
-        const conversation = await Conversation.create({
-            type,
-            organizationId: orgId,
-            participants: allParticipants,
-            name: type === 'group' ? name : undefined,
-            createdBy: userId,
-            messages: []
-        });
-
-        return conversation.populate('participants', 'name email avatar');
-    }
-
-    /**
-     * Get user's conversations
-     */
-    async getUserConversations(userId: string, orgId: string, options: {
-        hasAppointment?: boolean;
-        includeArchived?: boolean;
-    } = {}): Promise<IConversation[]> {
-        const { hasAppointment, includeArchived = false } = options;
-
-        const query: any = {
-            participants: userId,
-            organizationId: orgId
-        };
-
-        if (hasAppointment !== undefined) {
-            query.hasAppointment = hasAppointment;
-        }
-
-        if (!includeArchived) {
-            query.$or = [
-                { isArchived: false },
-                { archivedBy: { $ne: userId } }
-            ];
-        }
-
-        const conversations = await Conversation.find(query)
-            .populate('participants', 'name email avatar')
-            .populate('appointmentId')
-            .populate('lastMessageBy', 'name')
-            .sort({ lastMessageAt: -1 });
-
-        return conversations as any;
-    }
-
-    /**
-     * Send a message in a conversation
-     */
-    async sendMessage(conversationId: string, orgId: string, userId: string, data: {
-        content: string;
-        type?: 'text' | 'file' | 'image' | 'appointment';
-        metadata?: any;
-    }): Promise<IConversation> {
-        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
-
-        if (!conversation) {
-            throw new ApiError(404, 'Conversation not found');
-        }
-
-        // Check if user is a participant
-        if (!conversation.participants.includes(new mongoose.Types.ObjectId(userId))) {
-            throw new ApiError(403, 'You are not a participant in this conversation');
-        }
-
-        const message = {
-            sender: new mongoose.Types.ObjectId(userId),
-            content: data.content,
-            type: data.type || 'text',
-            metadata: data.metadata,
-            readBy: [new mongoose.Types.ObjectId(userId)],
-            createdAt: new Date()
-        };
-
-        conversation.messages.push(message as any);
-        conversation.lastMessage = data.content;
-        conversation.lastMessageAt = new Date();
-        conversation.lastMessageBy = new mongoose.Types.ObjectId(userId);
-
-        await conversation.save();
-
-        return conversation.populate([
-            { path: 'participants', select: 'name email avatar' },
-            { path: 'messages.sender', select: 'name email avatar' }
-        ]);
-    }
-
-    /**
-     * Mark messages as read
-     */
-    async markAsRead(conversationId: string, orgId: string, userId: string): Promise<void> {
-        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
-
-        if (!conversation) {
-            throw new ApiError(404, 'Conversation not found');
-        }
-
-        // Mark all messages as read by this user
-        conversation.messages.forEach(message => {
-            if (!message.readBy.includes(new mongoose.Types.ObjectId(userId))) {
-                message.readBy.push(new mongoose.Types.ObjectId(userId));
-            }
-        });
-
-        await conversation.save();
-    }
-
-    /**
-     * Delete a conversation
-     */
-    async deleteConversation(conversationId: string, orgId: string, userId: string): Promise<void> {
-        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
-
-        if (!conversation) {
-            throw new ApiError(404, 'Conversation not found');
-        }
-
-        // Check if user is a participant
-        if (!conversation.participants.includes(new mongoose.Types.ObjectId(userId))) {
-            throw new ApiError(403, 'You are not a participant in this conversation');
-        }
-
-        // Delete the conversation
-        await Conversation.findOneAndDelete({ _id: conversationId, organizationId: orgId });
-    }
-
-    /**
-     * Archive a conversation (alternative to delete - keeps data)
-     */
-    async archiveConversation(conversationId: string, orgId: string, userId: string): Promise<IConversation> {
-        const conversation = await Conversation.findOne({ _id: conversationId, organizationId: orgId });
-
-        if (!conversation) {
-            throw new ApiError(404, 'Conversation not found');
-        }
-
-        // Add user to archivedBy array
-        if (!conversation.archivedBy.includes(new mongoose.Types.ObjectId(userId))) {
-            conversation.archivedBy.push(new mongoose.Types.ObjectId(userId));
-        }
-
-        // If all participants archived it, mark as archived
-        if (conversation.archivedBy.length === conversation.participants.length) {
-            conversation.isArchived = true;
-        }
-
-        await conversation.save();
-        return conversation;
-    }
-
-    /**
-     * Remove duplicate direct conversations (cleanup utility)
-     */
-    async removeDuplicateConversations(): Promise<number> {
-        const directConversations = await Conversation.find({ type: 'direct' });
-
-        const seen = new Map<string, string>();
-        const toDelete: string[] = [];
-
-        for (const conversation of directConversations) {
-            // Create a unique key for the participant pair
-            const participants = conversation.participants
-                .map(p => p.toString())
-                .sort()
-                .join('-');
-
-            if (seen.has(participants)) {
-                // Duplicate found - mark for deletion (keep the older one)
-                toDelete.push(conversation._id.toString());
-            } else {
-                seen.set(participants, conversation._id.toString());
-            }
-        }
-
-        // Delete duplicates
-        if (toDelete.length > 0) {
-            await Conversation.deleteMany({ _id: { $in: toDelete } });
-        }
-
-        return toDelete.length;
-    }
+interface CreateConversationData {
+  type: 'direct' | 'group' | 'channel' | 'external';
+  name?: string;
+  participants: string[];
+  externalEmails?: string[];
+  subject?: string;
 }
 
-export default new ConversationService();
+interface SendMessageData {
+  content: string;
+  type?: 'text' | 'appointment' | 'file' | 'email';
+  metadata?: any;
+}
+
+const createConversation = async (
+  userId: string,
+  orgId: string,
+  data: CreateConversationData
+): Promise<IConversation> => {
+  // Ensure creator is in participants
+  const participants = [...new Set([userId, ...data.participants])];
+
+  const externalEmails = (data.externalEmails || []).map(email => ({
+    email: email.toLowerCase().trim(),
+    addedAt: new Date(),
+  }));
+
+  const conversation = await Conversation.create({
+    type: data.type,
+    name: data.name,
+    participants,
+    externalEmails,
+    organizationId: orgId,
+    createdBy: userId,
+    metadata: {
+      subject: data.subject,
+    },
+  });
+
+  return conversation.populate('participants', 'name email avatar');
+};
+
+const getUserConversations = async (
+  userId: string,
+  orgId: string,
+  options: {
+    type?: string;
+    includeArchived?: boolean;
+    limit?: number;
+    skip?: number;
+  } = {}
+): Promise<{ conversations: IConversation[]; total: number }> => {
+  const filter: any = {
+    organizationId: orgId,
+    $or: [
+      { participants: userId },
+      { 'externalEmails.email': { $exists: true } }, // User can see external convos if they created them
+    ],
+  };
+
+  if (options.type) {
+    filter.type = options.type;
+  }
+
+  if (!options.includeArchived) {
+    filter.isArchived = { $ne: true };
+  }
+
+  const conversations = await Conversation.find(filter)
+    .populate('participants', 'name email avatar')
+    .populate('createdBy', 'name email avatar')
+    .sort({ lastMessageAt: -1, createdAt: -1 })
+    .limit(options.limit || 100)
+    .skip(options.skip || 0);
+
+  const total = await Conversation.countDocuments(filter);
+
+  return { conversations, total };
+};
+
+const getConversationById = async (
+  conversationId: string,
+  userId: string,
+  orgId: string
+): Promise<IConversation> => {
+  const conversation = await Conversation.findOne({
+    _id: conversationId,
+    organizationId: orgId,
+  })
+    .populate('participants', 'name email avatar')
+    .populate('messages.sender', 'name email avatar')
+    .populate('createdBy', 'name email avatar');
+
+  if (!conversation) {
+    throw new ApiError(404, 'Conversation not found');
+  }
+
+  // Check access
+  const hasAccess =
+    conversation.participants.some((p: any) => p._id.toString() === userId) ||
+    conversation.createdBy.toString() === userId;
+
+  if (!hasAccess) {
+    throw new ApiError(403, 'Not authorized to view this conversation');
+  }
+
+  return conversation;
+};
+
+const sendMessage = async (
+  conversationId: string,
+  userId: string,
+  orgId: string,
+  data: SendMessageData
+): Promise<IConversation> => {
+  const conversation = await getConversationById(conversationId, userId, orgId);
+
+  const message: any = {
+    _id: new mongoose.Types.ObjectId().toString(),
+    sender: userId,
+    content: data.content,
+    type: data.type || 'text',
+    metadata: data.metadata,
+    isFromExternal: false,
+    readBy: [userId],
+    createdAt: new Date(),
+  };
+
+  conversation.messages.push(message);
+  conversation.lastMessage = data.content;
+  conversation.lastMessageAt = new Date();
+  conversation.lastMessageBy = userId;
+
+  await conversation.save();
+
+  // If conversation has external emails, send via Gmail
+  if (conversation.type === 'external' && conversation.externalEmails.length > 0) {
+    try {
+      for (const external of conversation.externalEmails) {
+        const subject = conversation.metadata?.subject || 'Message from Action Auto';
+        
+        const result = await gmailConversationService.sendEmailToExternal(
+          userId,
+          external.email,
+          subject,
+          data.content,
+          conversation.gmailThreadId
+        );
+
+        // Update Gmail thread ID if this is first email
+        if (!conversation.gmailThreadId && result.threadId) {
+          conversation.gmailThreadId = result.threadId;
+          external.gmailThreadId = result.threadId;
+          await conversation.save();
+        }
+
+        // Update message metadata with Gmail info
+        message.metadata = {
+          ...message.metadata,
+          gmailMessageId: result.messageId,
+          emailThreadId: result.threadId,
+        };
+        await conversation.save();
+      }
+    } catch (error) {
+      console.error('Failed to send email to external recipients:', error);
+      // Don't throw - message is still saved locally
+    }
+  }
+
+  return conversation.populate('participants messages.sender', 'name email avatar');
+};
+
+const addExternalEmail = async (
+  conversationId: string,
+  userId: string,
+  orgId: string,
+  email: string
+): Promise<IConversation> => {
+  const conversation = await getConversationById(conversationId, userId, orgId);
+
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Check if email already exists
+  const emailExists = conversation.externalEmails.some(
+    (e: any) => e.email === normalizedEmail
+  );
+
+  if (emailExists) {
+    throw new ApiError(400, 'Email already in conversation');
+  }
+
+  // Check if this email belongs to a customer booking
+  const linkedBookings = await Appointment.find({
+    organizationId: orgId,
+    'customerBooking.isCustomerBooking': true,
+    'customerBooking.email': normalizedEmail,
+  }).select('_id');
+
+  // Add external email
+  conversation.externalEmails.push({
+    email: normalizedEmail,
+    addedAt: new Date(),
+  } as any);
+
+  // Link customer bookings if found
+  if (linkedBookings.length > 0) {
+    const bookingIds = linkedBookings.map(b => b._id.toString());
+    conversation.linkedCustomerBookings = [
+      ...new Set([...conversation.linkedCustomerBookings.map(String), ...bookingIds]),
+    ] as any;
+  }
+
+  await conversation.save();
+
+  return conversation;
+};
+
+const markAsRead = async (
+  conversationId: string,
+  userId: string,
+  orgId: string
+): Promise<void> => {
+  const conversation = await Conversation.findOne({
+    _id: conversationId,
+    organizationId: orgId,
+  });
+
+  if (!conversation) {
+    throw new ApiError(404, 'Conversation not found');
+  }
+
+  // Mark all messages as read by this user
+  conversation.messages.forEach((message: any) => {
+    if (!message.readBy.includes(userId)) {
+      message.readBy.push(userId);
+    }
+  });
+
+  await conversation.save();
+};
+
+const archiveConversation = async (
+  conversationId: string,
+  userId: string,
+  orgId: string
+): Promise<IConversation> => {
+  const conversation = await getConversationById(conversationId, userId, orgId);
+
+  if (conversation.createdBy.toString() !== userId) {
+    throw new ApiError(403, 'Only the creator can archive this conversation');
+  }
+
+  conversation.isArchived = true;
+  await conversation.save();
+
+  return conversation;
+};
+
+const syncGmailInbox = async (
+  userId: string,
+  orgId: string
+): Promise<number> => {
+  try {
+    const syncedCount = await gmailConversationService.syncInboxToConversations(
+      userId,
+      orgId
+    );
+    return syncedCount;
+  } catch (error) {
+    console.error('Failed to sync Gmail inbox:', error);
+    throw error;
+  }
+};
+
+const getConversationsForCustomerBooking = async (
+  appointmentId: string,
+  orgId: string
+): Promise<IConversation[]> => {
+  const conversations = await Conversation.find({
+    organizationId: orgId,
+    linkedCustomerBookings: appointmentId,
+  })
+    .populate('participants', 'name email avatar')
+    .populate('messages.sender', 'name email avatar')
+    .sort({ lastMessageAt: -1 });
+
+  return conversations;
+};
+
+export default {
+  createConversation,
+  getUserConversations,
+  getConversationById,
+  sendMessage,
+  addExternalEmail,
+  markAsRead,
+  archiveConversation,
+  syncGmailInbox,
+  getConversationsForCustomerBooking,
+};

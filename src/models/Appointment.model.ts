@@ -11,6 +11,20 @@ export interface IGuestResponse {
   guestPhone?: string;
 }
 
+// NEW: Customer booking information
+export interface ICustomerBooking {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  isCustomerBooking: boolean;
+  bookingHistory?: {
+    previousBookings: mongoose.Types.ObjectId[];
+    totalBookings: number;
+    lastBookedAt?: Date;
+  };
+}
+
 export interface IAppointment extends Document {
   title: string;
   description?: string;
@@ -20,7 +34,6 @@ export interface IAppointment extends Document {
   type: 'in-person' | 'phone' | 'video' | 'other';
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed';
 
-  // NEW: Entry classification
   entryType: EntryType;
   organizationId: string;
 
@@ -28,8 +41,11 @@ export interface IAppointment extends Document {
   createdBy: mongoose.Types.ObjectId;
   participants: mongoose.Types.ObjectId[];
 
-  // NEW: External guests
+  // External guests
   guestEmails: IGuestResponse[];
+
+  // NEW: Customer booking
+  customerBooking?: ICustomerBooking;
 
   // Related entities
   conversationId?: mongoose.Types.ObjectId;
@@ -41,11 +57,12 @@ export interface IAppointment extends Document {
   reminderSent: boolean;
   reminderTime?: Date;
 
-  // NEW: Google Calendar integration
+  // Google Calendar integration
   googleCalendarEventId?: string;
   meetingLink?: string;
+  syncedWithGoogleCalendar: boolean;
+  lastSyncedAt?: Date;
 
-  // Notes
   notes?: string;
 
   createdAt: Date;
@@ -63,6 +80,20 @@ const GuestResponseSchema = new Schema({
   googleCalendarEventId: String,
   guestName: String,
   guestPhone: String
+}, { _id: false });
+
+// NEW: Customer booking schema
+const CustomerBookingSchema = new Schema({
+  firstName: { type: String, required: true, trim: true },
+  lastName: { type: String, required: true, trim: true },
+  email: { type: String, required: true, lowercase: true, trim: true },
+  phone: { type: String, required: true, trim: true },
+  isCustomerBooking: { type: Boolean, default: true },
+  bookingHistory: {
+    previousBookings: [{ type: Schema.Types.ObjectId, ref: 'Appointment' }],
+    totalBookings: { type: Number, default: 0 },
+    lastBookedAt: Date
+  }
 }, { _id: false });
 
 const AppointmentSchema: Schema<IAppointment> = new Schema(
@@ -84,7 +115,6 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       index: true
     },
 
-    // Entry type classification
     entryType: {
       type: String,
       enum: ['event', 'task', 'reminder', 'appointment'],
@@ -109,8 +139,10 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       ref: 'User'
     }],
 
-    // External guests
     guestEmails: [GuestResponseSchema],
+
+    // NEW: Customer booking
+    customerBooking: CustomerBookingSchema,
 
     conversationId: {
       type: Schema.Types.ObjectId,
@@ -132,9 +164,10 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
 
-    // Google Calendar integration
     googleCalendarEventId: String,
     meetingLink: String,
+    syncedWithGoogleCalendar: { type: Boolean, default: false },
+    lastSyncedAt: Date,
 
     notes: { type: String, trim: true }
   },
@@ -149,6 +182,11 @@ AppointmentSchema.index({ participants: 1, startTime: -1 });
 AppointmentSchema.index({ status: 1, startTime: 1 });
 AppointmentSchema.index({ entryType: 1, startTime: 1 });
 AppointmentSchema.index({ 'guestEmails.email': 1 });
+// NEW: Customer booking indexes
+AppointmentSchema.index({ 'customerBooking.email': 1 });
+AppointmentSchema.index({ 'customerBooking.phone': 1 });
+AppointmentSchema.index({ 'customerBooking.firstName': 1, 'customerBooking.lastName': 1 });
+AppointmentSchema.index({ 'customerBooking.isCustomerBooking': 1, startTime: -1 });
 
 const Appointment = mongoose.model<IAppointment>('Appointment', AppointmentSchema);
 

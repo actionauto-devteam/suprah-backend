@@ -2,9 +2,7 @@ version: '3.8'
 
 services:
   ftp-worker:
-    build:
-      context: ..
-      dockerfile: Dockerfile.ftp
+    image: jolo0/actionauto-ftp:latest
     container_name: actionauto-ftp
     restart: unless-stopped
     

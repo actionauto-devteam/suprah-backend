@@ -1,28 +1,66 @@
-import express from 'express';
+import { Router } from 'express';
 import conversationController from '../controllers/conversation.controller';
-import auth from '../middleware/auth.middleware';
+import authenticate from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 
-const router = express.Router();
+const router = Router();
 
-router.use(auth());
+// All routes require authentication and organization context
+router.use(authenticate);
 router.use(requireOrg);
 
-router
-    .route('/')
-    .post(conversationController.createConversation)
-    .get(conversationController.getConversations);
+// Create new conversation
+router.post(
+  '/',
+  conversationController.createConversation
+);
 
-router
-    .route('/:id')
-    .delete(conversationController.deleteConversation);
+// Get all user conversations
+router.get(
+  '/',
+  conversationController.getUserConversations
+);
 
-router
-    .route('/:id/messages')
-    .post(conversationController.sendMessage);
+// Sync Gmail inbox
+router.post(
+  '/sync-gmail',
+  conversationController.syncGmailInbox
+);
 
-router
-    .route('/:id/read')
-    .post(conversationController.markAsRead);
+// Get specific conversation
+router.get(
+  '/:conversationId',
+  conversationController.getConversationById
+);
+
+// Send message in conversation
+router.post(
+  '/:conversationId/messages',
+  conversationController.sendMessage
+);
+
+// Add external email to conversation
+router.post(
+  '/:conversationId/external-email',
+  conversationController.addExternalEmail
+);
+
+// Mark conversation as read
+router.patch(
+  '/:conversationId/read',
+  conversationController.markAsRead
+);
+
+// Archive conversation
+router.patch(
+  '/:conversationId/archive',
+  conversationController.archiveConversation
+);
+
+// Get conversations for customer booking
+router.get(
+  '/booking/:appointmentId/conversations',
+  conversationController.getConversationsForBooking
+);
 
 export default router;

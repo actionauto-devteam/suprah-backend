@@ -1,148 +1,173 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IMessage {
-    sender: mongoose.Types.ObjectId;
-    content: string;
-    type: 'text' | 'file' | 'image' | 'appointment';
-    metadata?: any;
-    readBy: mongoose.Types.ObjectId[];
-    createdAt: Date;
+  _id: string;
+  sender: mongoose.Types.ObjectId | string;
+  senderEmail?: string; // For external emails
+  senderName?: string; // For external emails
+  content: string;
+  type: 'text' | 'appointment' | 'file' | 'email';
+  metadata?: {
+    appointmentId?: string;
+    fileUrl?: string;
+    fileName?: string;
+    emailSubject?: string;
+    emailThreadId?: string;
+    gmailMessageId?: string;
+  };
+  isFromExternal: boolean; // True if message is from external email
+  readBy: mongoose.Types.ObjectId[];
+  createdAt: Date;
+  updatedAt?: Date;
 }
 
 export interface IConversation extends Document {
-    type: 'direct' | 'group';
-    organizationId: string;
-    name?: string; // For group chats
-    participants: mongoose.Types.ObjectId[];
-    messages: IMessage[];
-
-    // Appointment tracking
-    hasAppointment: boolean;
-    appointmentId?: mongoose.Types.ObjectId;
-
-    // Metadata
-    lastMessage?: string;
-    lastMessageAt?: Date;
-    lastMessageBy?: mongoose.Types.ObjectId;
-
-    // Group chat specific
-    createdBy?: mongoose.Types.ObjectId;
-    avatar?: string;
-
-    // Archiving
-    isArchived: boolean;
-    archivedBy: mongoose.Types.ObjectId[];
-
-    createdAt: Date;
-    updatedAt: Date;
+  type: 'direct' | 'group' | 'channel' | 'external';
+  name?: string;
+  participants: mongoose.Types.ObjectId[];
+  externalEmails: Array<{
+    email: string;
+    name?: string;
+    addedAt: Date;
+    gmailThreadId?: string;
+    lastEmailAt?: Date;
+  }>;
+  messages: IMessage[];
+  lastMessage?: string;
+  lastMessageAt?: Date;
+  lastMessageBy?: mongoose.Types.ObjectId | string;
+  hasAppointment?: boolean;
+  appointmentId?: mongoose.Types.ObjectId;
+  organizationId: mongoose.Types.ObjectId;
+  createdBy: mongoose.Types.ObjectId;
+  isArchived: boolean;
+  linkedCustomerBookings: mongoose.Types.ObjectId[]; // Link to customer bookings
+  gmailThreadId?: string; // Gmail thread for external conversations
+  metadata?: {
+    subject?: string;
+    tags?: string[];
+    priority?: 'low' | 'normal' | 'high';
+  };
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-const MessageSchema: Schema = new Schema(
-    {
-        sender: {
-            type: Schema.Types.ObjectId,
-            ref: 'User',
-            required: true
-        },
-        content: {
-            type: String,
-            required: true,
-            trim: true
-        },
-        type: {
-            type: String,
-            enum: ['text', 'file', 'image', 'appointment'],
-            default: 'text'
-        },
-        metadata: {
-            type: Schema.Types.Mixed
-        },
-        readBy: [{
-            type: Schema.Types.ObjectId,
-            ref: 'User'
-        }],
-        createdAt: {
-            type: Date,
-            default: Date.now
-        }
-    }
-);
+const MessageSchema = new Schema({
+  sender: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  senderEmail: String,
+  senderName: String,
+  content: {
+    type: String,
+    required: true,
+  },
+  type: {
+    type: String,
+    enum: ['text', 'appointment', 'file', 'email'],
+    default: 'text',
+  },
+  metadata: {
+    appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment' },
+    fileUrl: String,
+    fileName: String,
+    emailSubject: String,
+    emailThreadId: String,
+    gmailMessageId: String,
+  },
+  isFromExternal: {
+    type: Boolean,
+    default: false,
+  },
+  readBy: [{
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  }],
+}, {
+  timestamps: true,
+});
 
-const ConversationSchema: Schema<IConversation> = new Schema(
-    {
-        type: {
-            type: String,
-            enum: ['direct', 'group'],
-            required: true,
-            default: 'direct'
-        },
-        organizationId: {
-            type: String,
-            required: true,
-            index: true
-        },
-        name: {
-            type: String,
-            trim: true
-        },
-        participants: [{
-            type: Schema.Types.ObjectId,
-            ref: 'User',
-            required: true
-        }],
-        messages: [MessageSchema],
-
-        hasAppointment: {
-            type: Boolean,
-            default: false,
-            index: true
-        },
-        appointmentId: {
-            type: Schema.Types.ObjectId,
-            ref: 'Appointment'
-        },
-
-        lastMessage: {
-            type: String,
-            trim: true
-        },
-        lastMessageAt: {
-            type: Date,
-            index: true
-        },
-        lastMessageBy: {
-            type: Schema.Types.ObjectId,
-            ref: 'User'
-        },
-
-        createdBy: {
-            type: Schema.Types.ObjectId,
-            ref: 'User'
-        },
-        avatar: {
-            type: String,
-            trim: true
-        },
-
-        isArchived: {
-            type: Boolean,
-            default: false
-        },
-        archivedBy: [{
-            type: Schema.Types.ObjectId,
-            ref: 'User'
-        }]
+const ConversationSchema = new Schema({
+  type: {
+    type: String,
+    enum: ['direct', 'group', 'channel', 'external'],
+    required: true,
+  },
+  name: String,
+  participants: [{
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  }],
+  externalEmails: [{
+    email: {
+      type: String,
+      lowercase: true,
+      trim: true,
     },
-    {
-        timestamps: true
-    }
-);
+    name: String,
+    addedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    gmailThreadId: String,
+    lastEmailAt: Date,
+  }],
+  messages: [MessageSchema],
+  lastMessage: String,
+  lastMessageAt: Date,
+  lastMessageBy: Schema.Types.Mixed, // Can be ObjectId or email string
+  hasAppointment: {
+    type: Boolean,
+    default: false,
+  },
+  appointmentId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Appointment',
+  },
+  organizationId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: true,
+  },
+  createdBy: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  isArchived: {
+    type: Boolean,
+    default: false,
+  },
+  linkedCustomerBookings: [{
+    type: Schema.Types.ObjectId,
+    ref: 'Appointment',
+  }],
+  gmailThreadId: String,
+  metadata: {
+    subject: String,
+    tags: [String],
+    priority: {
+      type: String,
+      enum: ['low', 'normal', 'high'],
+      default: 'normal',
+    },
+  },
+}, {
+  timestamps: true,
+});
 
-// Indexes for efficient queries
-ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
-ConversationSchema.index({ hasAppointment: 1, participants: 1 });
-ConversationSchema.index({ type: 1, participants: 1 });
+// Indexes for performance
+ConversationSchema.index({ organizationId: 1, createdAt: -1 });
+ConversationSchema.index({ participants: 1 });
+ConversationSchema.index({ 'externalEmails.email': 1 });
+ConversationSchema.index({ gmailThreadId: 1 });
+ConversationSchema.index({ linkedCustomerBookings: 1 });
 
-const Conversation = mongoose.model<IConversation>('Conversation', ConversationSchema);
+// Virtual for unread count
+ConversationSchema.virtual('unreadCount').get(function(this: IConversation) {
+  // This would be calculated based on user context
+  return 0;
+});
 
-export default Conversation;
+export default mongoose.model<IConversation>('Conversation', ConversationSchema);

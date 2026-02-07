@@ -3,9 +3,7 @@ version: '3.8'
 services:
   # API Service
   api:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: jolo0/actionauto-api:latest
     container_name: actionauto-api
     restart: unless-stopped
     env_file:
