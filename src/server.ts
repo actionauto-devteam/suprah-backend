@@ -24,37 +24,51 @@ app.use(express.json({
   }
 }));
 app.use(express.urlencoded({ extended: true }));
+
+// ========================================
+// FIXED CORS CONFIGURATION
+// ========================================
 app.use(cors({
   origin: (origin, callback) => {
+    // Parse allowed origins from config (comma-separated)
     const allowedOrigins = config.corsOrigin.split(',').map((o: string) => o.trim());
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) {
-      // For development, you might want to allow this, but restrictive for now
-      // return callback(null, true); 
-      // Strictly checking against allowed list:
-      if (config.env === 'development') {
-        return callback(null, true);
-      }
-      // Actually, let's just stick to the list or be permissive in dev if needed.
-      // The simplest implementation matching previous behavior but dynamic:
-      if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-        return callback(null, true);
-      } else {
-        return callback(new Error('Not allowed by CORS'));
-      }
+    
+    console.log('CORS Request from origin:', origin);
+    console.log('Allowed origins:', allowedOrigins);
+    
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) {
+      console.log('No origin - allowing request');
+      return callback(null, true);
     }
-    return callback(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      console.log('Origin allowed:', origin);
+      return callback(null, true);
+    }
+    
+    // In development, allow all origins
+    if (config.env === 'development') {
+      console.log('Development mode - allowing origin:', origin);
+      return callback(null, true);
+    }
+    
+    // Origin not allowed
+    console.log('CORS BLOCKED:', origin);
+    return callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400,
 }));
 
-// Simple implementation using map directly if we trust the input, but callback is safer for dynamic logic
-// Let's use the simpler version matching the user's previous array style but dynamic
-// Re-doing the replacement content to be cleaner and closer to original style but dynamic
+console.log('✓ CORS configured with origins:', config.corsOrigin);
+console.log('✓ Environment:', config.env);
 
 app.use(cookieParser());
-
 
 // Health check route for Railway
 app.get('/health', (req, res) => {
@@ -70,7 +84,7 @@ app.use(errorHandler);
 // Only listen if this file is run directly (not imported)
 if (require.main === module) {
   initSyncScheduler();
-  initCleanupScheduler(); // Add this line
+  initCleanupScheduler();
 
   app.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);

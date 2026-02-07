@@ -4,6 +4,7 @@ import User from '../models/User.model';
 import notificationService from './notification.service';
 import emailService from './email.service';
 import googleCalendarService from './googleCalendar.service';
+import customerBookingService from './customerbooking.service';
 import { ApiError } from '../utils/ApiError';
 import jwt from 'jsonwebtoken';
 
@@ -17,6 +18,13 @@ interface CreateAppointmentData {
   entryType: 'event' | 'task' | 'reminder' | 'appointment';
   participants: string[];
   guestEmails?: string[];
+  customerBooking?: {
+    isCustomerBooking: boolean;
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string;
+  };
   conversationId?: string;
   vehicleId?: string;
   quoteId?: string;
@@ -25,11 +33,7 @@ interface CreateAppointmentData {
   notes?: string;
 }
 
-/**
- * Create a new appointment
- */
 const createAppointment = async (userId: string, orgId: string, data: CreateAppointmentData) => {
-  // Validate times
   const start = new Date(data.startTime);
   const end = new Date(data.endTime);
 
@@ -41,40 +45,58 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     throw new ApiError(400, 'Cannot schedule appointments in the past');
   }
 
-  // Ensure creator is in participants
   const participants = [...new Set([userId, ...data.participants])];
 
-  // Prepare guest emails with pending status
   const guestEmails = (data.guestEmails || []).map(email => ({
     email: email.toLowerCase().trim(),
     status: 'pending' as const,
   }));
 
-  // Create appointment
+  let customerBooking = undefined;
+  if (data.customerBooking?.isCustomerBooking) {
+    customerBooking = {
+      firstName: data.customerBooking.firstName.trim(),
+      lastName: data.customerBooking.lastName.trim(),
+      email: data.customerBooking.email.toLowerCase().trim(),
+      phone: data.customerBooking.phone.trim(),
+      isCustomerBooking: true,
+      bookingHistory: {
+        previousBookings: [],
+        totalBookings: 1,
+        lastBookedAt: new Date()
+      }
+    };
+  }
+
   const appointment = await Appointment.create({
     ...data,
     createdBy: userId,
     organizationId: orgId,
     participants,
     guestEmails,
+    customerBooking,
     status: 'scheduled',
     entryType: data.entryType || 'appointment'
   });
 
-  // Get organizer details - FIXED: explicitly select name and email
   const organizer = await User.findById(userId).select('name email');
 
   if (!organizer) {
     throw new ApiError(404, 'Organizer not found');
   }
 
-  console.log('Organizer details:', { name: organizer.name, email: organizer.email }); // Debug log
+  console.log('Appointment created:', appointment._id);
 
-  // Send email invitations to guests
+  try {
+    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, userId);
+    console.log('Synced to organizer\'s Google Calendar');
+  } catch (error) {
+    console.error('Failed to sync to Google Calendar:', error);
+  }
+
   if (guestEmails.length > 0) {
     const invitationPromises = guestEmails.map(async (guest) => {
       try {
-        // Generate secure token for guest response
         const token = jwt.sign(
           { appointmentId: appointment._id, email: guest.email },
           process.env.JWT_SECRET || 'secret',
@@ -95,14 +117,12 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     await Promise.allSettled(invitationPromises);
   }
 
-  // Link to conversation if provided
   if (data.conversationId) {
     await Conversation.findByIdAndUpdate(data.conversationId, {
       hasAppointment: true,
       appointmentId: appointment._id
     });
 
-    // Add appointment message to conversation
     await Conversation.findByIdAndUpdate(data.conversationId, {
       $push: {
         messages: {
@@ -125,7 +145,6 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     });
   }
 
-  // Notify all registered participants
   const participantIds = participants.filter(p => p !== userId);
   await Promise.all(
     participantIds.map(participantId =>
@@ -146,117 +165,17 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     )
   );
 
+  if (customerBooking) {
+    try {
+      await customerBookingService.updateBookingHistory(appointment._id.toString());
+    } catch (error) {
+      console.error('Failed to update customer booking history:', error);
+    }
+  }
+
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
-/**
- * Handle guest response to appointment invitation
- */
-const handleGuestResponse = async (
-  appointmentId: string,
-  token: string,
-  status: 'accepted' | 'declined',
-  googleAccessToken?: string
-) => {
-  try {
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
-
-    if (decoded.appointmentId !== appointmentId) {
-      throw new ApiError(403, 'Invalid token for this appointment');
-    }
-
-    const appointment = await Appointment.findById(appointmentId);
-
-    if (!appointment) {
-      throw new ApiError(404, 'Appointment not found');
-    }
-
-    // Find guest in the list
-    const guestIndex = appointment.guestEmails.findIndex(
-      g => g.email === decoded.email
-    );
-
-    if (guestIndex === -1) {
-      throw new ApiError(404, 'Guest not found in appointment');
-    }
-
-    // Update guest status
-    appointment.guestEmails[guestIndex].status = status;
-    appointment.guestEmails[guestIndex].respondedAt = new Date();
-
-    // If accepted, create Google Calendar event
-    if (status === 'accepted' && googleAccessToken) {
-      try {
-        const eventId = await googleCalendarService.createEventForGuest(
-          appointment,
-          decoded.email,
-          googleAccessToken
-        );
-        if (eventId) {  // Add null check
-          appointment.guestEmails[guestIndex].googleCalendarEventId = eventId;
-        }
-      } catch (error) {
-        console.error('Failed to create Google Calendar event:', error);
-        // Continue anyway - the acceptance is still valid
-      }
-    }
-
-    await appointment.save();
-
-    // Notify organizer
-    await notificationService.createNotification({
-      userId: appointment.createdBy.toString(),
-      organizationId: appointment.organizationId,
-      type: 'guest_response',
-      title: 'Guest Response',
-      message: `${decoded.email} has ${status} your invitation to "${appointment.title}"`,
-      metadata: {
-        appointmentId: appointment._id,
-        guestEmail: decoded.email,
-        status
-      }
-    });
-
-    return appointment;
-  } catch (error) {
-    if (error instanceof jwt.JsonWebTokenError) {
-      throw new ApiError(403, 'Invalid or expired token');
-    }
-    throw error;
-  }
-};
-
-/**
- * Get appointment by ID with full details
- */
-const getAppointmentById = async (appointmentId: string, orgId: string, userId: string) => {
-  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
-    .populate('participants createdBy', 'name email avatar')
-    .populate('conversationId', 'type name')
-    .populate('vehicleId')
-    .populate('quoteId')
-    .populate('shipmentId');
-
-  if (!appointment) {
-    throw new ApiError(404, 'Appointment not found');
-  }
-
-  // Check if user has access
-  const hasAccess =
-    appointment.createdBy._id.toString() === userId ||
-    appointment.participants.some((p: any) => p._id.toString() === userId);
-
-  if (!hasAccess) {
-    throw new ApiError(403, 'Not authorized to view this appointment');
-  }
-
-  return appointment;
-};
-
-/**
- * Get user's appointments with filtering
- */
 const getUserAppointments = async (
   userId: string,
   orgId: string,
@@ -267,6 +186,8 @@ const getUserAppointments = async (
     endDate?: Date;
     limit?: number;
     skip?: number;
+    includeCustomerBookings?: boolean;
+    customerBookingsOnly?: boolean;
   } = {}
 ) => {
   const filter: any = {
@@ -280,6 +201,12 @@ const getUserAppointments = async (
 
   if (options.entryType) {
     filter.entryType = options.entryType;
+  }
+
+  if (options.customerBookingsOnly) {
+    filter['customerBooking.isCustomerBooking'] = true;
+  } else if (options.includeCustomerBookings === false) {
+    filter['customerBooking.isCustomerBooking'] = { $ne: true };
   }
 
   if (options.startDate || options.endDate) {
@@ -300,22 +227,50 @@ const getUserAppointments = async (
   return { appointments, total };
 };
 
-/**
- * Update appointment
- */
+const getCustomerBookings = async (
+  userId: string,
+  orgId: string,
+  options: {
+    startDate?: Date;
+    endDate?: Date;
+    status?: string;
+  } = {}
+) => {
+  const filter: any = {
+    organizationId: orgId,
+    'customerBooking.isCustomerBooking': true
+  };
+
+  if (options.status) {
+    filter.status = options.status;
+  }
+
+  if (options.startDate || options.endDate) {
+    filter.startTime = {};
+    if (options.startDate) filter.startTime.$gte = options.startDate;
+    if (options.endDate) filter.startTime.$lte = options.endDate;
+  }
+
+  const appointments = await Appointment.find(filter)
+    .populate('createdBy', 'name email avatar')
+    .sort({ startTime: -1 });
+
+  return { appointments, total: appointments.length };
+};
+
 const updateAppointment = async (
   appointmentId: string,
   orgId: string,
   userId: string,
   updateData: Partial<CreateAppointmentData & { status: string }>
 ) => {
-  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
+    .populate('createdBy', 'name email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
 
-  // Check if user is creator or participant
   const isCreator = appointment.createdBy._id.toString() === userId;
   const isParticipant = appointment.participants.some(p => p.toString() === userId);
 
@@ -323,16 +278,19 @@ const updateAppointment = async (
     throw new ApiError(403, 'Not authorized to update this appointment');
   }
 
-  // Only creator can make certain changes
   if (!isCreator && (updateData.participants || updateData.guestEmails)) {
     throw new ApiError(403, 'Only the creator can modify participants or guests');
   }
 
-  // Update appointment
   Object.assign(appointment, updateData);
   await appointment.save();
 
-  // Notify participants about update
+  try {
+    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, userId);
+  } catch (error) {
+    console.error('Failed to sync update to Google Calendar:', error);
+  }
+
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
@@ -355,7 +313,6 @@ const updateAppointment = async (
     )
   );
 
-  // Notify guests via email
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -370,17 +327,14 @@ const updateAppointment = async (
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
-/**
- * Cancel appointment
- */
 const cancelAppointment = async (appointmentId: string, orgId: string, userId: string) => {
-  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
+    .populate('createdBy', 'name email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
   }
 
-  // Only creator can cancel
   if (appointment.createdBy._id.toString() !== userId) {
     throw new ApiError(403, 'Only the creator can cancel this appointment');
   }
@@ -388,7 +342,17 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
   appointment.status = 'cancelled';
   await appointment.save();
 
-  // Update conversation if linked
+  if (appointment.googleCalendarEventId) {
+    try {
+      await googleCalendarService.deleteFromGoogleCalendar(
+        appointment.googleCalendarEventId,
+        userId
+      );
+    } catch (error) {
+      console.error('Failed to delete from Google Calendar:', error);
+    }
+  }
+
   if (appointment.conversationId) {
     await Conversation.findByIdAndUpdate(appointment.conversationId, {
       hasAppointment: false,
@@ -396,7 +360,6 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     });
   }
 
-  // Notify participants
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
@@ -419,7 +382,6 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     )
   );
 
-  // Notify external guests via email
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -434,11 +396,9 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
   return appointment;
 };
 
-/**
- * Delete appointment
- */
 const deleteAppointment = async (appointmentId: string, orgId: string, userId: string) => {
-  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId }).populate('createdBy', 'name email');
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
+    .populate('createdBy', 'name email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
@@ -448,7 +408,17 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     throw new ApiError(403, 'Only the creator can delete this appointment');
   }
 
-  // Update conversation if linked
+  if (appointment.googleCalendarEventId) {
+    try {
+      await googleCalendarService.deleteFromGoogleCalendar(
+        appointment.googleCalendarEventId,
+        userId
+      );
+    } catch (error) {
+      console.error('Failed to delete from Google Calendar:', error);
+    }
+  }
+
   if (appointment.conversationId) {
     await Conversation.findByIdAndUpdate(appointment.conversationId, {
       hasAppointment: false,
@@ -456,7 +426,6 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     });
   }
 
-  // Notify external guests via email about cancellation before deleting
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -471,127 +440,152 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
   await Appointment.findByIdAndDelete(appointmentId);
 };
 
-/**
- * Remove duplicate appointments (automated cleanup)
- */
-const removeDuplicateAppointments = async () => {
-  const duplicates = await Appointment.aggregate([
-    {
-      $group: {
-        _id: {
-          title: '$title',
-          startTime: '$startTime',
-          createdBy: '$createdBy'
-        },
-        ids: { $push: '$_id' },
-        count: { $sum: 1 }
-      }
-    },
-    {
-      $match: { count: { $gt: 1 } }
-    }
-  ]);
+const getAppointmentById = async (appointmentId: string, orgId: string, userId: string) => {
+  const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
+    .populate('participants createdBy', 'name email avatar')
+    .populate('conversationId', 'type name')
+    .populate('vehicleId')
+    .populate('quoteId')
+    .populate('shipmentId');
 
-  let removedCount = 0;
-
-  for (const dup of duplicates) {
-    // Keep the first one, delete the rest
-    const [keep, ...remove] = dup.ids;
-    await Appointment.deleteMany({ _id: { $in: remove } });
-    removedCount += remove.length;
+  if (!appointment) {
+    throw new ApiError(404, 'Appointment not found');
   }
 
-  return removedCount;
-};
+  const hasAccess =
+    appointment.createdBy._id.toString() === userId ||
+    appointment.participants.some((p: any) => p._id.toString() === userId);
 
-/**
- * Send appointment reminders (can be called by a cron job)
- */
-const sendAppointmentReminders = async () => {
-  // Find appointments starting in the next 24 hours that haven't sent reminders
-  const tomorrow = new Date();
-  tomorrow.setHours(tomorrow.getHours() + 24);
-
-  const appointments = await Appointment.find({
-    startTime: {
-      $gte: new Date(),
-      $lte: tomorrow
-    },
-    reminderSent: false,
-    status: { $in: ['scheduled', 'confirmed'] }
-  }).populate('participants createdBy', 'name email');
-
-  let sentCount = 0;
-
-  for (const appointment of appointments) {
-    try {
-      // Send to all participants
-      for (const participant of appointment.participants as any[]) {
-        try {
-          await emailService.sendAppointmentReminder(
-            appointment,
-            participant.email,
-            participant.name
-          );
-        } catch (error) {
-          console.error(`Failed to send reminder to ${participant.email}:`, error);
-        }
-      }
-
-      // Send to external guests
-      for (const guest of appointment.guestEmails) {
-        if (guest.status === 'accepted') {
-          try {
-            await emailService.sendAppointmentReminder(
-              appointment,
-              guest.email,
-              guest.email.split('@')[0] // Use email username as name
-            );
-          } catch (error) {
-            console.error(`Failed to send reminder to ${guest.email}:`, error);
-          }
-        }
-      }
-
-      // Mark reminder as sent
-      appointment.reminderSent = true;
-      await appointment.save();
-
-      sentCount++;
-    } catch (error) {
-      console.error(`Failed to send reminders for appointment ${appointment._id}:`, error);
-    }
+  if (!hasAccess) {
+    throw new ApiError(403, 'Not authorized to view this appointment');
   }
 
-  return sentCount;
+  return appointment;
 };
 
-/**
- * Mark past appointments as completed (can be called by a cron job)
- */
-const markPastAppointmentsCompleted = async () => {
-  const result = await Appointment.updateMany(
-    {
-      endTime: { $lt: new Date() },
-      status: { $in: ['scheduled', 'confirmed'] }
-    },
-    {
-      $set: { status: 'completed' }
-    }
-  );
+const handleGuestResponse = async (
+  appointmentId: string,
+  token: string,
+  status: 'accepted' | 'declined',
+  googleAccessToken?: string
+) => {
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
 
-  return result.modifiedCount;
+    if (decoded.appointmentId !== appointmentId) {
+      throw new ApiError(403, 'Invalid token for this appointment');
+    }
+
+    const appointment = await Appointment.findById(appointmentId);
+
+    if (!appointment) {
+      throw new ApiError(404, 'Appointment not found');
+    }
+
+    const guestIndex = appointment.guestEmails.findIndex(
+      g => g.email === decoded.email
+    );
+
+    if (guestIndex === -1) {
+      throw new ApiError(404, 'Guest not found in appointment');
+    }
+
+    appointment.guestEmails[guestIndex].status = status;
+    appointment.guestEmails[guestIndex].respondedAt = new Date();
+
+    if (status === 'accepted' && googleAccessToken) {
+      try {
+        const eventId = await googleCalendarService.syncAppointmentToGoogleCalendar(
+          appointment,
+          appointment.createdBy.toString()
+        );
+        if (eventId) {
+          appointment.guestEmails[guestIndex].googleCalendarEventId = eventId;
+        }
+      } catch (error) {
+        console.error('Failed to create Google Calendar event:', error);
+      }
+    }
+
+    await appointment.save();
+
+    await notificationService.createNotification({
+      userId: appointment.createdBy.toString(),
+      organizationId: appointment.organizationId,
+      type: 'guest_response',
+      title: 'Guest Response',
+      message: `${decoded.email} has ${status} your invitation to "${appointment.title}"`,
+      metadata: {
+        appointmentId: appointment._id,
+        guestEmail: decoded.email,
+        status
+      }
+    });
+
+    return appointment;
+  } catch (error) {
+    if (error instanceof jwt.JsonWebTokenError) {
+      throw new ApiError(403, 'Invalid or expired token');
+    }
+    throw error;
+  }
+};
+
+const removeDuplicateAppointments = async (): Promise<number> => {
+  try {
+    const duplicates = await Appointment.aggregate([
+      {
+        $match: {
+          googleCalendarEventId: { $exists: true, $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: '$googleCalendarEventId',
+          count: { $sum: 1 },
+          ids: { $push: '$_id' },
+          dates: { $push: '$createdAt' }
+        }
+      },
+      {
+        $match: {
+          count: { $gt: 1 }
+        }
+      }
+    ]);
+
+    let removedCount = 0;
+
+    for (const duplicate of duplicates) {
+      const sortedIds = duplicate.ids
+        .map((id: any, index: number) => ({
+          id,
+          date: duplicate.dates[index]
+        }))
+        .sort((a: any, b: any) => a.date - b.date);
+
+      for (let i = 1; i < sortedIds.length; i++) {
+        await Appointment.findByIdAndDelete(sortedIds[i].id);
+        removedCount++;
+      }
+    }
+
+    console.log(`Removed ${removedCount} duplicate appointments`);
+    return removedCount;
+  } catch (error) {
+    console.error('Failed to remove duplicate appointments:', error);
+    return 0;
+  }
 };
 
 export default {
   createAppointment,
   getUserAppointments,
+  getCustomerBookings,
   getAppointmentById,
   updateAppointment,
   cancelAppointment,
   deleteAppointment,
   handleGuestResponse,
-  removeDuplicateAppointments,
-  sendAppointmentReminders,
-  markPastAppointmentsCompleted
+  removeDuplicateAppointments
 };

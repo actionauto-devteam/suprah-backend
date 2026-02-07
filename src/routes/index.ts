@@ -10,6 +10,7 @@ import appointmentRoute from './appointment.route';
 import conversationRoute from './conversation.route';
 import userRoute from './user.route';
 import googleCalendarRoute from './googleCalendar.routes';
+import gmailRoute from './gmail.route';
 
 const router = express.Router();
 
@@ -58,10 +59,14 @@ const defaultRoutes = [
     path: '/google-calendar',
     route: googleCalendarRoute,
   },
+  {
+    path: '/gmail',
+    route: gmailRoute,
+  },
 ];
 
 defaultRoutes.forEach((route) => {
   router.use(route.path, route.route);
 });
 
-export default router;
+export default router;  

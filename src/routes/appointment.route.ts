@@ -5,7 +5,7 @@ import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
-// Public route for guest responses - MUST be before auth middleware
+// Public route for guest responses
 router.post('/:id/guest-response', appointmentController.handleGuestResponse);
 
 // Protected routes
@@ -26,5 +26,16 @@ router
 router
   .route('/:id/cancel')
   .post(appointmentController.cancelAppointment);
+
+// NEW: Customer booking routes
+router.get('/customer-bookings/list', appointmentController.getCustomerBookings);
+router.get('/customer-bookings/history', appointmentController.getCustomerHistory);
+router.get('/customer-bookings/date-stats', appointmentController.getDateStatistics);
+
+// NEW: Google Calendar sync
+router.post('/sync/google-calendar', appointmentController.syncWithGoogleCalendar);
+
+// Statistics
+router.get('/stats/overview', appointmentController.getAppointmentStats);
 
 export default router;

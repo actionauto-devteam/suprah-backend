@@ -1,17 +1,32 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import appointmentService from '../services/appointment.service';
+import customerBookingService from '../services/customerbooking.service';
+import enhancedGoogleCalendarService from '../services/googleCalendar.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
 
 /**
- * Create a new appointment
- * @route POST /api/appointments
- * @access Private
+ * Create a new appointment (with customer booking support)
  */
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
+    
+    // Check for duplicate customer booking
+    if (req.body.customerBooking?.isCustomerBooking) {
+        const duplicateCheck = await customerBookingService.checkDuplicateBooking(
+            req.body.customerBooking,
+            new Date(req.body.startTime)
+        );
+        
+        if (duplicateCheck.isDuplicate) {
+            return res.status(400).json(
+                new ApiResponse(400, null, duplicateCheck.reason!)
+            );
+        }
+    }
+    
     const appointment = await appointmentService.createAppointment(userId, orgId, req.body);
 
     res.status(201).json(
@@ -21,12 +36,10 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Get all appointments for the logged-in user
- * @route GET /api/appointments
- * @access Private
  */
 const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-    const { status, entryType, startDate, endDate, limit, skip } = req.query;
+    const { status, entryType, startDate, endDate, limit, skip, includeCustomerBookings } = req.query;
 
     const options: any = {};
     if (status) options.status = status;
@@ -35,6 +48,7 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     if (endDate) options.endDate = new Date(endDate as string);
     if (limit) options.limit = parseInt(limit as string);
     if (skip) options.skip = parseInt(skip as string);
+    if (includeCustomerBookings) options.includeCustomerBookings = includeCustomerBookings === 'true';
 
     const orgId = req.orgId as string;
     const result = await appointmentService.getUserAppointments(userId, orgId, options);
@@ -45,9 +59,85 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * Get customer bookings only
+ */
+const getCustomerBookings = asyncHandler(async (req: Request, res: Response) => {
+    const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
+    const { startDate, endDate, status } = req.query;
+
+    const options: any = {
+        customerBookingsOnly: true
+    };
+
+    if (startDate) options.startDate = new Date(startDate as string);
+    if (endDate) options.endDate = new Date(endDate as string);
+    if (status) options.status = status;
+
+    const result = await appointmentService.getCustomerBookings(userId, orgId, options);
+
+    res.json(
+        new ApiResponse(200, result, 'Customer bookings fetched successfully')
+    );
+});
+
+/**
+ * Get customer booking history
+ */
+const getCustomerHistory = asyncHandler(async (req: Request, res: Response) => {
+    const { email, phone, firstName, lastName } = req.query;
+
+    const result = await customerBookingService.getCustomerHistory(
+        email as string,
+        phone as string,
+        firstName as string,
+        lastName as string
+    );
+
+    res.json(
+        new ApiResponse(200, result, 'Customer history fetched successfully')
+    );
+});
+
+/**
+ * Get booking statistics for a specific date
+ */
+const getDateStatistics = asyncHandler(async (req: Request, res: Response) => {
+    const { date } = req.query;
+    const orgId = req.orgId as string;
+
+    if (!date) {
+        return res.status(400).json(
+            new ApiResponse(400, null, 'Date parameter is required')
+        );
+    }
+
+    const statistics = await customerBookingService.getDateStatistics(
+        new Date(date as string),
+        orgId
+    );
+
+    res.json(
+        new ApiResponse(200, statistics, 'Date statistics fetched successfully')
+    );
+});
+
+/**
+ * Sync with Google Calendar
+ */
+const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) => {
+    const userId = (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
+
+    const result = await enhancedGoogleCalendarService.fetchAllGoogleCalendarEvents(userId, orgId);
+
+    res.json(
+        new ApiResponse(200, result, 'Synced with Google Calendar successfully')
+    );
+});
+
+/**
  * Get a specific appointment by ID
- * @route GET /api/appointments/:id
- * @access Private
  */
 const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
@@ -63,12 +153,25 @@ const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Update an appointment
- * @route PATCH /api/appointments/:id
- * @access Private
  */
 const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { id } = req.params;
+
+    // Check for duplicate customer booking if updating customer booking info
+    if (req.body.customerBooking?.isCustomerBooking) {
+        const duplicateCheck = await customerBookingService.checkDuplicateBooking(
+            req.body.customerBooking,
+            new Date(req.body.startTime),
+            id
+        );
+        
+        if (duplicateCheck.isDuplicate) {
+            return res.status(400).json(
+                new ApiResponse(400, null, duplicateCheck.reason!)
+            );
+        }
+    }
 
     const orgId = req.orgId as string;
     const appointment = await appointmentService.updateAppointment(id, orgId, userId, req.body);
@@ -80,8 +183,6 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Cancel an appointment
- * @route POST /api/appointments/:id/cancel
- * @access Private
  */
 const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
@@ -97,8 +198,6 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Delete an appointment
- * @route DELETE /api/appointments/:id
- * @access Private
  */
 const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
@@ -113,9 +212,7 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Handle guest response to appointment invitation (Accept/Decline)
- * @route POST /api/appointments/:id/guest-response
- * @access Public (uses token authentication)
+ * Handle guest response to appointment invitation
  */
 const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
@@ -146,55 +243,12 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
 });
 
 /**
- * Remove duplicate appointments (Admin/Cleanup utility)
- * @route POST /api/appointments/cleanup/duplicates
- * @access Private (Admin only - add admin middleware if needed)
- */
-const removeDuplicates = asyncHandler(async (req: Request, res: Response) => {
-    const removedCount = await appointmentService.removeDuplicateAppointments();
-
-    res.json(
-        new ApiResponse(200, { removedCount }, `Removed ${removedCount} duplicate appointments`)
-    );
-});
-
-/**
- * Send appointment reminders (Cron job endpoint)
- * @route POST /api/appointments/reminders/send
- * @access Private (Admin/System only - add appropriate middleware)
- */
-const sendReminders = asyncHandler(async (req: Request, res: Response) => {
-    const sentCount = await appointmentService.sendAppointmentReminders();
-
-    res.json(
-        new ApiResponse(200, { sentCount }, `Sent ${sentCount} appointment reminders`)
-    );
-});
-
-/**
- * Mark past appointments as completed (Cron job endpoint)
- * @route POST /api/appointments/cleanup/mark-completed
- * @access Private (Admin/System only - add appropriate middleware)
- */
-const markPastCompleted = asyncHandler(async (req: Request, res: Response) => {
-    const updatedCount = await appointmentService.markPastAppointmentsCompleted();
-
-    res.json(
-        new ApiResponse(200, { updatedCount }, `Marked ${updatedCount} past appointments as completed`)
-    );
-});
-
-/**
- * Get appointment statistics for the user
- * @route GET /api/appointments/stats
- * @access Private
+ * Get appointment statistics
  */
 const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
-
     const orgId = req.orgId as string;
 
-    // Get all user appointments
     const { appointments } = await appointmentService.getUserAppointments(userId, orgId, {});
 
     const now = new Date();
@@ -213,6 +267,9 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
         ).length,
         completed: appointments.filter(a =>
             a.status === 'completed'
+        ).length,
+        customerBookings: appointments.filter(a =>
+            a.customerBooking?.isCustomerBooking
         ).length,
         byType: {
             appointment: appointments.filter(a => a.entryType === 'appointment').length,
@@ -233,108 +290,17 @@ const getAppointmentStats = asyncHandler(async (req: Request, res: Response) => 
     );
 });
 
-/**
- * Get upcoming appointments for dashboard/widget
- * @route GET /api/appointments/upcoming
- * @access Private
- */
-const getUpcomingAppointments = asyncHandler(async (req: Request, res: Response) => {
-    const userId = (req.user as IUser)._id.toString();
-    const limit = parseInt(req.query.limit as string) || 5;
-
-    const orgId = req.orgId as string;
-
-    const { appointments } = await appointmentService.getUserAppointments(userId, orgId, {
-        limit,
-        skip: 0
-    });
-
-    // Filter to only upcoming, non-cancelled
-    const upcoming = appointments
-        .filter(a => new Date(a.startTime) > new Date() && a.status !== 'cancelled')
-        .slice(0, limit);
-
-    res.json(
-        new ApiResponse(200, upcoming, 'Upcoming appointments fetched successfully')
-    );
-});
-
-/**
- * Get appointments for a specific date range (for calendar view)
- * @route GET /api/appointments/date-range
- * @access Private
- */
-const getAppointmentsByDateRange = asyncHandler(async (req: Request, res: Response) => {
-    const userId = (req.user as IUser)._id.toString();
-    const { startDate, endDate } = req.query;
-
-    if (!startDate || !endDate) {
-        return res.status(400).json(
-            new ApiResponse(400, null, 'Start date and end date are required')
-        );
-    }
-
-    const orgId = req.orgId as string;
-    const result = await appointmentService.getUserAppointments(userId, orgId, {
-        startDate: new Date(startDate as string),
-        endDate: new Date(endDate as string)
-    });
-
-    res.json(
-        new ApiResponse(200, result, 'Appointments in date range fetched successfully')
-    );
-});
-
-/**
- * Search appointments
- * @route GET /api/appointments/search
- * @access Private
- */
-const searchAppointments = asyncHandler(async (req: Request, res: Response) => {
-    const userId = (req.user as IUser)._id.toString();
-    const { q, entryType, status } = req.query;
-
-    if (!q || typeof q !== 'string') {
-        return res.status(400).json(
-            new ApiResponse(400, null, 'Search query is required')
-        );
-    }
-
-    // Get all appointments
-    const options: any = {};
-    if (entryType) options.entryType = entryType;
-    if (status) options.status = status;
-
-    const orgId = req.orgId as string;
-    const { appointments } = await appointmentService.getUserAppointments(userId, orgId, options);
-
-    // Filter by search query
-    const searchQuery = q.toLowerCase();
-    const filtered = appointments.filter(a =>
-        a.title.toLowerCase().includes(searchQuery) ||
-        a.description?.toLowerCase().includes(searchQuery) ||
-        a.location?.toLowerCase().includes(searchQuery) ||
-        a.notes?.toLowerCase().includes(searchQuery)
-    );
-
-    res.json(
-        new ApiResponse(200, { appointments: filtered, total: filtered.length }, 'Search completed successfully')
-    );
-});
-
 export default {
     createAppointment,
     getAppointments,
+    getCustomerBookings,
+    getCustomerHistory,
+    getDateStatistics,
+    syncWithGoogleCalendar,
     getAppointmentById,
     updateAppointment,
     cancelAppointment,
     deleteAppointment,
     handleGuestResponse,
-    removeDuplicates,
-    sendReminders,
-    markPastCompleted,
-    getAppointmentStats,
-    getUpcomingAppointments,
-    getAppointmentsByDateRange,
-    searchAppointments
+    getAppointmentStats
 };

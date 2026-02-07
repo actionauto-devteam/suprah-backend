@@ -1,22 +1,20 @@
 import cron from 'node-cron';
 import appointmentService from '../services/appointment.service';
-import conversationService from '../services/conversation.service';
 
-export function initCleanupScheduler() {
-  // Run cleanup every day at 2 AM
+export const initCleanupScheduler = () => {
+  // Run cleanup at 2 AM daily
   cron.schedule('0 2 * * *', async () => {
-    console.log('[Cleanup] Running automated cleanup...');
-    
     try {
-      const appointmentsRemoved = await appointmentService.removeDuplicateAppointments();
-      const conversationsRemoved = await conversationService.removeDuplicateConversations();
+      console.log('Running appointment duplicate cleanup...');
       
-      console.log(`[Cleanup] Removed ${appointmentsRemoved} duplicate appointments`);
-      console.log(`[Cleanup] Removed ${conversationsRemoved} duplicate conversations`);
+      // Remove duplicate appointments
+      const appointmentsRemoved = await appointmentService.removeDuplicateAppointments();
+      
+      console.log(`✓ Cleanup completed - Removed ${appointmentsRemoved} duplicate appointments`);
     } catch (error) {
-      console.error('[Cleanup] Cleanup failed:', error);
+      console.error('Cleanup scheduler error:', error);
     }
   });
-  
-  console.log('[Cleanup] Automated cleanup scheduler initialized');
-}
+
+  console.log('✓ Cleanup scheduler initialized - Runs daily at 2 AM');
+};
