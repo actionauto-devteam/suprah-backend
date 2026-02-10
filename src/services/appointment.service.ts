@@ -7,6 +7,7 @@ import googleCalendarService from './googleCalendar.service';
 import customerBookingService from './customerbooking.service';
 import { ApiError } from '../utils/ApiError';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 
 interface CreateAppointmentData {
   title: string;
@@ -176,6 +177,24 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
+// =============================================================================
+// FIX: Safe ObjectId casting helper
+// The `participants` field is Schema.Types.ObjectId[]. When querying with a
+// string userId, Mongoose tries to auto-cast. If the string isn't a valid
+// 24-char hex ObjectId, it throws a CastError. This helper safely converts
+// and falls back to querying by `createdBy` if casting fails.
+// =============================================================================
+const safeObjectId = (id: string): mongoose.Types.ObjectId | string => {
+  try {
+    if (mongoose.Types.ObjectId.isValid(id) && new mongoose.Types.ObjectId(id).toString() === id) {
+      return new mongoose.Types.ObjectId(id);
+    }
+    return id;
+  } catch {
+    return id;
+  }
+};
+
 const getUserAppointments = async (
   userId: string,
   orgId: string,
@@ -192,8 +211,14 @@ const getUserAppointments = async (
 ) => {
   const filter: any = {
     organizationId: orgId,
-    participants: userId
   };
+
+  // =============================================================================
+  // FIX: Safely cast userId to ObjectId for the participants query.
+  // This prevents the Mongoose CastError: "Cast to ObjectId failed for value..."
+  // =============================================================================
+  const userOid = safeObjectId(userId);
+  filter.participants = userOid;
 
   if (options.status) {
     filter.status = options.status;
@@ -215,11 +240,22 @@ const getUserAppointments = async (
     if (options.endDate) filter.startTime.$lte = options.endDate;
   }
 
+  // =============================================================================
+  // FIX: Increased default limit from 100 to 2500.
+  //
+  // The old limit of 100 combined with ascending sort meant only the 100 OLDEST
+  // events were returned. For a user with 200+ Google Calendar events (e.g. a
+  // daily recurring meeting), ALL future events were silently dropped.
+  //
+  // This is why Total=100 but Upcoming=0 and Today=0 — the 100 returned events
+  // were all in the past. The calendar tab appeared empty because no events
+  // existed for the current or future months.
+  // =============================================================================
   const appointments = await Appointment.find(filter)
     .populate('participants createdBy', 'name email avatar')
     .populate('conversationId', 'type name')
     .sort({ startTime: 1 })
-    .limit(options.limit || 100)
+    .limit(options.limit || 2500)
     .skip(options.skip || 0);
 
   const total = await Appointment.countDocuments(filter);

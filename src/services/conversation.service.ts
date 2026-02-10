@@ -23,6 +23,8 @@ const createConversation = async (
   orgId: string,
   data: CreateConversationData
 ): Promise<IConversation> => {
+  console.log('[conversationService] Creating conversation:', { userId, orgId, data });
+
   // Ensure creator is in participants
   const participants = [...new Set([userId, ...data.participants])];
 
@@ -36,12 +38,14 @@ const createConversation = async (
     name: data.name,
     participants,
     externalEmails,
-    organizationId: orgId,
+    organizationId: orgId, // This is now a string (Clerk org ID)
     createdBy: userId,
     metadata: {
       subject: data.subject,
     },
   });
+
+  console.log('[conversationService] Conversation created:', conversation._id);
 
   return conversation.populate('participants', 'name email avatar');
 };
@@ -56,11 +60,13 @@ const getUserConversations = async (
     skip?: number;
   } = {}
 ): Promise<{ conversations: IConversation[]; total: number }> => {
+  console.log('[conversationService] Fetching conversations for user:', userId, 'org:', orgId);
+
   const filter: any = {
-    organizationId: orgId,
+    organizationId: orgId, // Now compared as string
     $or: [
       { participants: userId },
-      { 'externalEmails.email': { $exists: true } }, // User can see external convos if they created them
+      { 'externalEmails.email': { $exists: true } },
     ],
   };
 
@@ -72,16 +78,23 @@ const getUserConversations = async (
     filter.isArchived = { $ne: true };
   }
 
-  const conversations = await Conversation.find(filter)
-    .populate('participants', 'name email avatar')
-    .populate('createdBy', 'name email avatar')
-    .sort({ lastMessageAt: -1, createdAt: -1 })
-    .limit(options.limit || 100)
-    .skip(options.skip || 0);
+  try {
+    const conversations = await Conversation.find(filter)
+      .populate('participants', 'name email avatar')
+      .populate('createdBy', 'name email avatar')
+      .sort({ lastMessageAt: -1, createdAt: -1 })
+      .limit(options.limit || 100)
+      .skip(options.skip || 0);
 
-  const total = await Conversation.countDocuments(filter);
+    const total = await Conversation.countDocuments(filter);
 
-  return { conversations, total };
+    console.log('[conversationService] Found conversations:', conversations.length);
+
+    return { conversations, total };
+  } catch (error) {
+    console.error('[conversationService] Error fetching conversations:', error);
+    throw error;
+  }
 };
 
 const getConversationById = async (
@@ -89,9 +102,11 @@ const getConversationById = async (
   userId: string,
   orgId: string
 ): Promise<IConversation> => {
+  console.log('[conversationService] Fetching conversation:', conversationId);
+
   const conversation = await Conversation.findOne({
     _id: conversationId,
-    organizationId: orgId,
+    organizationId: orgId, // String comparison
   })
     .populate('participants', 'name email avatar')
     .populate('messages.sender', 'name email avatar')
@@ -119,6 +134,8 @@ const sendMessage = async (
   orgId: string,
   data: SendMessageData
 ): Promise<IConversation> => {
+  console.log('[conversationService] Sending message to conversation:', conversationId);
+
   const conversation = await getConversationById(conversationId, userId, orgId);
 
   const message: any = {
@@ -169,7 +186,7 @@ const sendMessage = async (
         await conversation.save();
       }
     } catch (error) {
-      console.error('Failed to send email to external recipients:', error);
+      console.error('[conversationService] Failed to send email to external recipients:', error);
       // Don't throw - message is still saved locally
     }
   }
@@ -198,7 +215,7 @@ const addExternalEmail = async (
 
   // Check if this email belongs to a customer booking
   const linkedBookings = await Appointment.find({
-    organizationId: orgId,
+    organizationId: orgId, // String comparison
     'customerBooking.isCustomerBooking': true,
     'customerBooking.email': normalizedEmail,
   }).select('_id');
@@ -229,7 +246,7 @@ const markAsRead = async (
 ): Promise<void> => {
   const conversation = await Conversation.findOne({
     _id: conversationId,
-    organizationId: orgId,
+    organizationId: orgId, // String comparison
   });
 
   if (!conversation) {
@@ -267,14 +284,17 @@ const syncGmailInbox = async (
   userId: string,
   orgId: string
 ): Promise<number> => {
+  console.log('[conversationService] Syncing Gmail inbox for user:', userId, 'org:', orgId);
+  
   try {
     const syncedCount = await gmailConversationService.syncInboxToConversations(
       userId,
       orgId
     );
+    console.log('[conversationService] Gmail sync completed. Synced:', syncedCount);
     return syncedCount;
   } catch (error) {
-    console.error('Failed to sync Gmail inbox:', error);
+    console.error('[conversationService] Failed to sync Gmail inbox:', error);
     throw error;
   }
 };
@@ -283,8 +303,10 @@ const getConversationsForCustomerBooking = async (
   appointmentId: string,
   orgId: string
 ): Promise<IConversation[]> => {
+  console.log('[conversationService] Getting conversations for booking:', appointmentId);
+
   const conversations = await Conversation.find({
-    organizationId: orgId,
+    organizationId: orgId, // String comparison
     linkedCustomerBookings: appointmentId,
   })
     .populate('participants', 'name email avatar')

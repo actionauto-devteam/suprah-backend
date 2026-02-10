@@ -5,10 +5,11 @@ import Conversation from '../models/Conversation.model';
 import { ApiError } from '../utils/ApiError';
 
 class GmailConversationService {
-  private oauth2Client: any;
-
-  constructor() {
-    this.oauth2Client = new google.auth.OAuth2(
+  /**
+   * Create fresh OAuth2 client per request
+   */
+  private createOAuth2Client() {
+    return new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
@@ -17,32 +18,46 @@ class GmailConversationService {
 
   /**
    * Get Gmail client for user
+   * FIX: Fresh client per call, once() for token refresh
    */
   private async getGmailClient(userId: string) {
-    const user = await User.findById(userId).select('googleCalendar');
+    const user = await User.findById(userId)
+      .select('+googleCalendar.accessToken +googleCalendar.refreshToken');
 
     if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
       throw new ApiError(401, 'Gmail not connected');
     }
 
-    this.oauth2Client.setCredentials({
+    const oauth2Client = this.createOAuth2Client();
+
+    oauth2Client.setCredentials({
       access_token: user.googleCalendar.accessToken,
       refresh_token: user.googleCalendar.refreshToken,
       expiry_date: user.googleCalendar.expiryDate,
     });
 
-    // Handle token refresh
-    this.oauth2Client.on('tokens', async (tokens: any) => {
-      if (tokens.refresh_token) {
-        await User.findByIdAndUpdate(userId, {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.refreshToken': tokens.refresh_token,
-          'googleCalendar.expiryDate': tokens.expiry_date,
-        });
+    // FIX: Use once() to prevent memory leak
+    oauth2Client.once('tokens', async (tokens: any) => {
+      try {
+        const updateData: any = {};
+        if (tokens.access_token) {
+          updateData['googleCalendar.accessToken'] = tokens.access_token;
+        }
+        if (tokens.refresh_token) {
+          updateData['googleCalendar.refreshToken'] = tokens.refresh_token;
+        }
+        if (tokens.expiry_date) {
+          updateData['googleCalendar.expiryDate'] = tokens.expiry_date;
+        }
+        if (Object.keys(updateData).length > 0) {
+          await User.findByIdAndUpdate(userId, { $set: updateData });
+        }
+      } catch (err) {
+        console.error('Failed to save refreshed tokens:', err);
       }
     });
 
-    return google.gmail({ version: 'v1', auth: this.oauth2Client });
+    return google.gmail({ version: 'v1', auth: oauth2Client });
   }
 
   /**
@@ -115,7 +130,7 @@ class GmailConversationService {
       });
 
       const messages = response.data.messages || [];
-      
+
       return messages.map((msg: any) => {
         const headers = msg.payload.headers;
         const from = headers.find((h: any) => h.name === 'From')?.value || '';
@@ -127,7 +142,7 @@ class GmailConversationService {
         if (msg.payload.body.data) {
           body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
         } else if (msg.payload.parts) {
-          const textPart = msg.payload.parts.find((part: any) => 
+          const textPart = msg.payload.parts.find((part: any) =>
             part.mimeType === 'text/plain' || part.mimeType === 'text/html'
           );
           if (textPart?.body.data) {
@@ -157,7 +172,7 @@ class GmailConversationService {
   async syncInboxToConversations(userId: string, organizationId: string): Promise<number> {
     try {
       const gmail = await this.getGmailClient(userId);
-      
+
       // Get emails from last 7 days
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -183,11 +198,11 @@ class GmailConversationService {
 
           const message = messageResponse.data;
           const headers = message.payload?.headers || [];
-          
+
           const from = headers.find((h: any) => h.name === 'From')?.value || '';
           const to = headers.find((h: any) => h.name === 'To')?.value || '';
           const subject = headers.find((h: any) => h.name === 'Subject')?.value || '';
-          
+
           // Extract email address from "Name <email>" format
           const fromEmail = from.match(/<(.+?)>/)?.[1] || from;
           const toEmail = to.match(/<(.+?)>/)?.[1] || to;
@@ -275,7 +290,7 @@ class GmailConversationService {
     organizationId: string
   ): Promise<string[]> {
     const Appointment = (await import('../models/Appointment.model')).default;
-    
+
     const bookings = await Appointment.find({
       organizationId,
       'customerBooking.isCustomerBooking': true,

@@ -38,7 +38,7 @@ export interface IConversation extends Document {
   lastMessageBy?: mongoose.Types.ObjectId | string;
   hasAppointment?: boolean;
   appointmentId?: mongoose.Types.ObjectId;
-  organizationId: mongoose.Types.ObjectId;
+  organizationId: string; // ← CHANGED: Now accepts Clerk org ID strings
   createdBy: mongoose.Types.ObjectId;
   isArchived: boolean;
   linkedCustomerBookings: mongoose.Types.ObjectId[]; // Link to customer bookings
@@ -125,10 +125,13 @@ const ConversationSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'Appointment',
   },
+  // ============================================================
+  // FIX: Changed from ObjectId to String to accept Clerk org IDs
+  // ============================================================
   organizationId: {
-    type: Schema.Types.ObjectId,
-    ref: 'Organization',
+    type: String, // ← CHANGED from Schema.Types.ObjectId
     required: true,
+    index: true, // Keep index for performance
   },
   createdBy: {
     type: Schema.Types.ObjectId,

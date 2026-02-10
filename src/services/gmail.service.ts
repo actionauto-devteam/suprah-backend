@@ -15,10 +15,11 @@ interface IUserWithGoogleCalendar extends IUser {
 }
 
 class GmailService {
-  private oauth2Client: OAuth2Client;
-
-  constructor() {
-    this.oauth2Client = new google.auth.OAuth2(
+  /**
+   * Create a fresh OAuth2 client per request (avoids cross-user contamination)
+   */
+  private createOAuth2Client(): OAuth2Client {
+    return new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI || `${process.env.BACKEND_URL}/api/google-calendar/callback`
@@ -27,27 +28,46 @@ class GmailService {
 
   /**
    * Get authenticated Gmail client
+   * FIX: Create fresh OAuth client per call, use once() for token refresh
    */
   private async getGmailClient(userId: string) {
-    const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
+    const user = await User.findById(userId)
+      .select('+googleCalendar.accessToken +googleCalendar.refreshToken') as IUserWithGoogleCalendar | null;
 
     if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
       throw new ApiError(401, 'Gmail not connected. Please connect Google Calendar first.');
     }
 
-    // Check if token is expired
-    if (user.googleCalendar.expiryDate && user.googleCalendar.expiryDate < Date.now()) {
-      // Refresh token logic (should be in a separate service)
-      throw new ApiError(401, 'Token expired. Please reconnect Google Calendar.');
-    }
+    const oauth2Client = this.createOAuth2Client();
 
-    this.oauth2Client.setCredentials({
+    oauth2Client.setCredentials({
       access_token: user.googleCalendar.accessToken,
       refresh_token: user.googleCalendar.refreshToken,
       expiry_date: user.googleCalendar.expiryDate
     });
 
-    return google.gmail({ version: 'v1', auth: this.oauth2Client });
+    // FIX: Use once() to avoid memory leak from accumulating listeners
+    oauth2Client.once('tokens', async (tokens: any) => {
+      try {
+        const updateData: any = {};
+        if (tokens.access_token) {
+          updateData['googleCalendar.accessToken'] = tokens.access_token;
+        }
+        if (tokens.refresh_token) {
+          updateData['googleCalendar.refreshToken'] = tokens.refresh_token;
+        }
+        if (tokens.expiry_date) {
+          updateData['googleCalendar.expiryDate'] = tokens.expiry_date;
+        }
+        if (Object.keys(updateData).length > 0) {
+          await User.findByIdAndUpdate(userId, { $set: updateData });
+        }
+      } catch (err) {
+        console.error('Failed to save refreshed Gmail tokens:', err);
+      }
+    });
+
+    return google.gmail({ version: 'v1', auth: oauth2Client });
   }
 
   /**
@@ -160,25 +180,26 @@ class GmailService {
     externalName?: string
   ) {
     try {
-      // Check if conversation already exists
+      // Check if conversation already exists with this external email
       let conversation = await Conversation.findOne({
         organizationId,
-        type: 'direct',
+        type: 'external',
         participants: userId,
-        'externalParticipant.email': externalEmail.toLowerCase()
+        'externalEmails.email': externalEmail.toLowerCase()
       });
 
       if (!conversation) {
         // Create new conversation with external participant
         conversation = await Conversation.create({
-          type: 'direct',
+          type: 'external',
           organizationId,
           participants: [userId],
-          externalParticipant: {
+          createdBy: userId,
+          externalEmails: [{
             email: externalEmail.toLowerCase(),
             name: externalName || externalEmail.split('@')[0],
-            isExternal: true
-          },
+            addedAt: new Date()
+          }],
           messages: []
         });
 
@@ -204,20 +225,22 @@ class GmailService {
   ) {
     try {
       const message = {
+        _id: new mongoose.Types.ObjectId().toString(),
         sender: new mongoose.Types.ObjectId(senderId),
         content,
-        type: 'text' as const,
+        type: 'email' as const,
         metadata: {
           gmailMessageId,
           direction
         },
+        isFromExternal: direction === 'incoming',
         readBy: [new mongoose.Types.ObjectId(senderId)],
         createdAt: new Date()
       };
 
       await Conversation.findByIdAndUpdate(conversationId, {
         $push: { messages: message },
-        lastMessage: content,
+        lastMessage: content.substring(0, 100),
         lastMessageAt: new Date(),
         lastMessageBy: new mongoose.Types.ObjectId(senderId)
       });
@@ -322,7 +345,6 @@ class GmailService {
     if (match) {
       return match[1];
     }
-    // If no angle brackets, assume the whole value is an email
     return headerValue.trim();
   }
 
@@ -352,11 +374,9 @@ class GmailService {
         }
       }
 
-      // Try HTML if no plain text
       for (const part of payload.parts) {
         if (part.mimeType === 'text/html' && part.body?.data) {
           const html = Buffer.from(part.body.data, 'base64').toString('utf-8');
-          // Strip HTML tags (basic)
           return html.replace(/<[^>]*>/g, '');
         }
       }
@@ -369,7 +389,8 @@ class GmailService {
    * Check if user has Gmail connected
    */
   async isGmailConnected(userId: string): Promise<boolean> {
-    const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
+    const user = await User.findById(userId)
+      .select('+googleCalendar.accessToken') as IUserWithGoogleCalendar | null;
     return !!(user?.googleCalendar?.connected && user.googleCalendar.accessToken);
   }
 
@@ -382,7 +403,6 @@ class GmailService {
     organizationId: string
   ) {
     try {
-      // Find customer bookings with matching email
       const appointments = await mongoose.model('Appointment').find({
         organizationId,
         'customerBooking.email': externalEmail.toLowerCase(),
@@ -390,14 +410,9 @@ class GmailService {
       }).sort({ createdAt: -1 });
 
       if (appointments.length > 0) {
-        // Link conversation to the most recent booking
         await Conversation.findByIdAndUpdate(conversationId, {
-          $set: {
-            linkedCustomerBooking: {
-              email: externalEmail,
-              appointmentIds: appointments.map((a: any) => a._id),
-              totalBookings: appointments.length
-            }
+          $addToSet: {
+            linkedCustomerBookings: { $each: appointments.map((a: any) => a._id) }
           }
         });
 
