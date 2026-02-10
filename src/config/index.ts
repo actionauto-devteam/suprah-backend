@@ -9,6 +9,7 @@ const envVarsSchema = Joi.object()
   .keys({
     NODE_ENV: Joi.string().valid('production', 'development', 'test', 'staging').required(),
     PORT: Joi.number().default(5000),
+    BACKEND_URL: Joi.string().required().description('Backend URL'),
     MONGODB_URI: Joi.string().required().description('Mongo DB url'),
     MONGODB_URI_TEST: Joi.string().allow('').description('Mongo DB test url'),
     BCRYPT_SALT_ROUNDS: Joi.number().required().description('Bcrypt salt rounds'),
@@ -51,6 +52,7 @@ const config = {
   port: envVars.PORT,
   corsOrigin: envVars.CORS_ORIGIN,
   frontendUrl: envVars.CORS_ORIGIN,
+  backendUrl: envVars.BACKEND_URL,
   mongoose: {
     url: envVars.NODE_ENV === 'test' && envVars.MONGODB_URI_TEST ? envVars.MONGODB_URI_TEST : envVars.MONGODB_URI,
     options: {
