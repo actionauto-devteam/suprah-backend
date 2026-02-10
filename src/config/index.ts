@@ -28,11 +28,15 @@ const envVarsSchema = Joi.object()
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
     // Email Config (Restored for Appointments)
-    EMAIL_HOST: Joi.string().allow('').description('Email server host'),
-    EMAIL_PORT: Joi.number().allow('').description('Email server port'),
-    EMAIL_USER: Joi.string().allow('').description('Email server username'),
-    EMAIL_PASS: Joi.string().allow('').description('Email server password'),
-    EMAIL_FROM: Joi.string().allow('').description('Email from address'),
+    SMTP_HOST: Joi.string().allow('').description('Email server host'),
+    SMTP_PORT: Joi.number().allow('').description('Email server port'),
+    SMTP_SECURE: Joi.boolean().allow('').description('Email server secure'),
+    SMTP_USER: Joi.string().allow('').description('Email server username'),
+    SMTP_PASS: Joi.string().allow('').description('Email server password'),
+
+    GOOGLE_CLIENT_ID: Joi.string().allow('').description('Google Client ID'),
+    GOOGLE_CLIENT_SECRET: Joi.string().allow('').description('Google Client Secret'),
+    GOOGLE_REDIRECT_URI: Joi.string().allow('').description('Google Redirect URI'),
   })
   .unknown();
 
@@ -71,16 +75,21 @@ const config = {
     schedule: envVars.SYNC_SCHEDULE,
   },
   email: {
-    host: envVars.EMAIL_HOST,
-    port: envVars.EMAIL_PORT,
-    user: envVars.EMAIL_USER,
-    pass: envVars.EMAIL_PASS,
-    from: envVars.EMAIL_FROM,
+    host: envVars.SMTP_HOST,
+    port: envVars.SMTP_PORT,
+    secure: envVars.SMTP_SECURE,
+    user: envVars.SMTP_USER,
+    pass: envVars.SMTP_PASS,
   },
   clerk: {
     publishableKey: envVars.CLERK_PUBLISHABLE_KEY,
     secretKey: envVars.CLERK_SECRET_KEY,
     webhookSecret: envVars.CLERK_WEBHOOK_SECRET,
+  },
+  google: {
+    clientId: envVars.GOOGLE_CLIENT_ID,
+    clientSecret: envVars.GOOGLE_CLIENT_SECRET,
+    redirectUri: envVars.GOOGLE_REDIRECT_URI,
   },
 };
 

@@ -25,6 +25,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         const token = req.headers.authorization?.split(' ')[1];
 
         if (!token) {
+            console.log('Auth Middleware: No token provided for path:', req.path, 'Method:', req.method);
             throw new ApiError(401, 'Please authenticate');
         }
 
@@ -60,15 +61,27 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                 throw new ApiError(400, 'User must have an email address');
             }
 
-            // Create local user
-            user = await User.create({
-                clerkId: clerkUserId,
-                email,
-                name,
-                avatar: picture,
-                emailVerified: true,
-                role: 'user', // Default role
-            });
+            // Check if user exists by email (to avoid duplicate key error)
+            user = await User.findOne({ email });
+
+            if (user) {
+                // Link account: Update clerkId and other details
+                console.log(`Linking existing user ${email} to new Clerk ID ${clerkUserId}`);
+                user.clerkId = clerkUserId;
+                user.name = name;
+                user.avatar = picture;
+                await user.save();
+            } else {
+                // Create local user
+                user = await User.create({
+                    clerkId: clerkUserId,
+                    email,
+                    name,
+                    avatar: picture,
+                    emailVerified: true,
+                    role: 'user', // Default role
+                });
+            }
         }
 
         // 5. Attach user to request
@@ -136,6 +149,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
 
         next();
     } catch (error) {
+        console.error('Auth Middleware Verification Error:', error);
         if (error instanceof ApiError) {
             next(error);
         } else {

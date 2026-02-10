@@ -1,4 +1,7 @@
 import express, { Application } from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { setupSocket } from './socket';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import connectDB from './config/db';
@@ -9,14 +12,21 @@ import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
 
+
+
 const app: Application = express();
+const httpServer = createServer(app);
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`[Request] ${req.method} ${req.path} | Origin: ${req.headers.origin || 'None'}`);
+  next();
+});
+
+// Any other middleware...
 
 // Connect to MongoDB
 connectDB();
-
-// Middleware
-// Webhook route must be mounted before body parser or handle its own parsing
-app.use('/api/webhooks', webhookRoute);
 
 app.use(express.json({
   verify: (req: any, res, buf) => {
@@ -25,37 +35,37 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 
+// Webhook route...
+app.use('/api/webhooks', webhookRoute);
+
 // ========================================
 // FIXED CORS CONFIGURATION
 // ========================================
-app.use(cors({
-  origin: (origin, callback) => {
+const corsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Parse allowed origins from config (comma-separated)
     const allowedOrigins = config.corsOrigin.split(',').map((o: string) => o.trim());
-    
-    console.log('CORS Request from origin:', origin);
-    console.log('Allowed origins:', allowedOrigins);
-    
+
     // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) {
-      console.log('No origin - allowing request');
+      console.log('⚠️ CORS ALLOWED (No Origin)');
       return callback(null, true);
     }
-    
+
     // Check if origin is in allowed list
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      console.log('Origin allowed:', origin);
+      // console.log('✅ CORS ALLOWED:', origin); // Optional: Uncomment to reduce noise if needed, but useful for debugging
       return callback(null, true);
     }
-    
+
     // In development, allow all origins
     if (config.env === 'development') {
-      console.log('Development mode - allowing origin:', origin);
+      console.log('⚠️ CORS ALLOWED (Dev Mode):', origin);
       return callback(null, true);
     }
-    
+
     // Origin not allowed
-    console.log('CORS BLOCKED:', origin);
+    console.log('❌ CORS BLOCKED:', origin);
     return callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
   credentials: true,
@@ -63,7 +73,16 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 86400,
-}));
+};
+
+app.use(cors(corsOptions));
+
+// Initialize Socket.IO
+const io = new Server(httpServer, {
+  cors: corsOptions
+});
+
+setupSocket(io);
 
 console.log('✓ CORS configured with origins:', config.corsOrigin);
 console.log('✓ Environment:', config.env);
@@ -86,7 +105,7 @@ if (require.main === module) {
   initSyncScheduler();
   initCleanupScheduler();
 
-  app.listen(config.port, () => {
+  httpServer.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);
   });
 }

@@ -34,7 +34,7 @@ process.env.CLERK_SECRET_KEY = 'sk_test_123';
 beforeAll(async () => {
     // Check if we are already connected?
     if (mongoose.connection.readyState === 0) {
-        const url = process.env.MONGODB_URI_TEST || 'mongodb+srv://Vercel-Admin-action-auto-app:x6YwIrGT6fCk2Gmu@action-auto-app.abdbk4i.mongodb.net/test-db?retryWrites=true&w=majority';
+        const url = process.env.MONGODB_URI || '';
         await mongoose.connect(url);
     }
 });

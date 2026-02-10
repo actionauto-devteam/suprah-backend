@@ -34,7 +34,7 @@ class EmailService {
      */
     async sendEmail(options: EmailOptions): Promise<void> {
         const mailOptions: any = {
-            from: `Action Auto <${config.email.from}>`,
+            from: `Action Auto <${config.email.user}>`,
             to: options.to,
             subject: options.subject,
             text: options.text,
@@ -72,7 +72,7 @@ class EmailService {
         guestEmail: string,
         method: 'REQUEST' | 'CANCEL' = 'REQUEST'
     ): any {
-        const calendar = ical({ 
+        const calendar = ical({
             name: 'Action Auto Appointment',
             method: method === 'REQUEST' ? ICalCalendarMethod.REQUEST : ICalCalendarMethod.CANCEL
         });
@@ -118,21 +118,21 @@ class EmailService {
      */
     private buildEventDescription(appointment: IAppointment): string {
         let description = appointment.description || '';
-        
+
         if (appointment.notes) {
             description += `\n\nNotes:\n${appointment.notes}`;
         }
-        
+
         description += `\n\n--- Appointment Details ---`;
         description += `\nType: ${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)}`;
         description += `\nMeeting Type: ${appointment.type}`;
-        
+
         if (appointment.meetingLink) {
             description += `\n\nJoin Meeting: ${appointment.meetingLink}`;
         }
-        
+
         description += `\n\nOrganized by Action Auto Utah`;
-        
+
         return description.trim();
     }
 
