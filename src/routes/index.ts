@@ -11,6 +11,8 @@ import conversationRoute from './conversation.route';
 import userRoute from './user.route';
 import googleCalendarRoute from './googleCalendar.routes';
 import gmailRoute from './gmail.route';
+import organizationRoute from './organization.routes';
+import invitationRoute from './invitation.routes';
 
 const router = express.Router();
 
@@ -62,6 +64,14 @@ const defaultRoutes = [
   {
     path: '/gmail',
     route: gmailRoute,
+  },
+  {
+    path: '/organizations',
+    route: organizationRoute,
+  },
+  {
+    path: '/invitations',
+    route: invitationRoute,
   },
 ];
 

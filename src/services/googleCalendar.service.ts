@@ -1,3 +1,4 @@
+import mongoose, { Schema } from 'mongoose';
 import { google, calendar_v3 } from 'googleapis';
 import User from '../models/User.model';
 import Appointment from '../models/Appointment.model';
@@ -15,7 +16,7 @@ interface IUserWithGoogleCalendar extends IUser {
     watchResourceId?: string;
     watchExpiration?: Date;
   };
-  organizationId?: string;
+  organizationId?: mongoose.Types.ObjectId;
 }
 
 interface GoogleTokens {
@@ -166,15 +167,15 @@ class GoogleCalendarService {
   async fetchAllGoogleCalendarEvents(userId: string, orgId: string): Promise<number> {
     try {
       const calendar = await this.getCalendarClient(userId);
-      
+
       const oneYearAgo = new Date();
       oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-      
+
       const oneYearFromNow = new Date();
       oneYearFromNow.setFullYear(oneYearFromNow.getFullYear() + 1);
 
       console.log('Fetching Google Calendar events...');
-      
+
       const response = await calendar.events.list({
         calendarId: 'primary',
         timeMin: oneYearAgo.toISOString(),
@@ -550,7 +551,7 @@ class GoogleCalendarService {
       }
 
       if (resourceState === 'exists') {
-        await this.fetchAllGoogleCalendarEvents(user._id.toString(), user.organizationId || '');
+        await this.fetchAllGoogleCalendarEvents(user._id.toString(), user.organizationId?.toString() || '');
       }
     } catch (error) {
       console.error('Failed to process webhook notification:', error);
@@ -563,7 +564,7 @@ class GoogleCalendarService {
   async updateRSVPStatusFromGoogle(appointmentId: string, userId: string): Promise<void> {
     try {
       const appointment = await Appointment.findById(appointmentId);
-      
+
       if (!appointment || !appointment.googleCalendarEventId) {
         throw new ApiError(404, 'Appointment not found or not synced with Google Calendar');
       }
@@ -579,7 +580,7 @@ class GoogleCalendarService {
         const user = await User.findById(userId);
         const userEmail = user?.email;
         const attendee = event.data.attendees.find(a => a.email === userEmail);
-        
+
         if (attendee && attendee.responseStatus) {
           console.log(`RSVP status for ${userEmail}: ${attendee.responseStatus}`);
         }

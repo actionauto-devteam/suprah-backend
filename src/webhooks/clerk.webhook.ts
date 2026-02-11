@@ -85,48 +85,11 @@ export const handleClerkWebhook = async (req: Request, res: Response) => {
             );
         } else if (eventType === 'user.deleted') {
             await User.findOneAndDelete({ clerkId: id });
-        } else if (eventType === 'organization.created' || eventType === 'organization.updated') {
-            const { name, slug, image_url, public_metadata } = evt.data;
-            await Organization.findOneAndUpdate(
-                { clerkId: id },
-                {
-                    clerkId: id,
-                    name,
-                    slug,
-                    logoUrl: image_url,
-                    metadata: public_metadata,
-                },
-                { upsert: true, new: true }
-            );
-        } else if (eventType === 'organization.deleted') {
-            await Organization.findOneAndDelete({ clerkId: id });
-            // Optionally: Update all users in this org to have organizationId: null
-            await User.updateMany({ organizationId: id }, { $set: { organizationId: null, organizationRole: null } });
-        } else if (eventType === 'organizationMembership.created' || eventType === 'organizationMembership.updated') {
-            const orgId = evt.data.organization.id;
-            const userId = evt.data.public_user_data.user_id;
-            const role = evt.data.role;
-
-            await User.findOneAndUpdate(
-                { clerkId: userId },
-                {
-                    organizationId: orgId,
-                    organizationRole: role,
-                }
-            );
-        } else if (eventType === 'organizationMembership.deleted') {
-            const orgId = evt.data.organization.id;
-            const userId = evt.data.public_user_data.user_id;
-
-            // Only clear it if the user is currently assigned to THIS org
-            await User.findOneAndUpdate(
-                { clerkId: userId, organizationId: orgId },
-                {
-                    organizationId: null,
-                    organizationRole: null,
-                }
-            );
         }
+
+        // ORGANIZATION SYNC REMOVED - Managed locally now
+        // else if (eventType === 'organization.created' ...)
+        // else if (eventType === 'organizationMembership.created' ...)
 
         res.status(200).json({
             success: true,
