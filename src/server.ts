@@ -12,18 +12,20 @@ import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
 
-
-
 const app: Application = express();
 const httpServer = createServer(app);
 
-// Request logging middleware
+// ========================================
+// ENHANCED REQUEST LOGGING
+// ========================================
 app.use((req, res, next) => {
-  console.log(`[Request] ${req.method} ${req.path} | Origin: ${req.headers.origin || 'None'}`);
+  const timestamp = new Date().toISOString();
+  console.log(`\n📨 [${timestamp}] ${req.method} ${req.path}`);
+  console.log(`   Origin: ${req.headers.origin || 'None'}`);
+  console.log(`   Authorization: ${req.headers.authorization ? 'Present ✓' : 'Missing ✗'}`);
+  console.log(`   Content-Type: ${req.headers['content-type'] || 'None'}`);
   next();
 });
-
-// Any other middleware...
 
 // Connect to MongoDB
 connectDB();
@@ -35,7 +37,7 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 
-// Webhook route...
+// Webhook route (must be BEFORE CORS for raw body)
 app.use('/api/webhooks', webhookRoute);
 
 // ========================================
@@ -43,29 +45,24 @@ app.use('/api/webhooks', webhookRoute);
 // ========================================
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    // Parse allowed origins from config (comma-separated)
     const allowedOrigins = config.corsOrigin.split(',').map((o: string) => o.trim());
 
-    // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) {
-      console.log('⚠️ CORS ALLOWED (No Origin)');
+      console.log('   ⚠️  CORS: No origin (allowed)');
       return callback(null, true);
     }
 
-    // Check if origin is in allowed list
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      // console.log('✅ CORS ALLOWED:', origin); // Optional: Uncomment to reduce noise if needed, but useful for debugging
+      console.log(`   ✅ CORS: Origin allowed - ${origin}`);
       return callback(null, true);
     }
 
-    // In development, allow all origins
     if (config.env === 'development') {
-      console.log('⚠️ CORS ALLOWED (Dev Mode):', origin);
+      console.log(`   ✅ CORS: Dev mode allowed - ${origin}`);
       return callback(null, true);
     }
 
-    // Origin not allowed
-    console.log('❌ CORS BLOCKED:', origin);
+    console.log(`   ❌ CORS: Blocked - ${origin}`);
     return callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
   credentials: true,
@@ -84,14 +81,30 @@ const io = new Server(httpServer, {
 
 setupSocket(io);
 
-console.log('✓ CORS configured with origins:', config.corsOrigin);
-console.log('✓ Environment:', config.env);
+console.log('\n🔧 Server Configuration:');
+console.log('   CORS Origins:', config.corsOrigin);
+console.log('   Environment:', config.env);
+console.log('   Port:', config.port);
 
 app.use(cookieParser());
 
-// Health check route for Railway
+// ========================================
+// HEALTH CHECK - Enhanced for debugging
+// ========================================
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  console.log('   ✅ Health check endpoint hit');
+  res.status(200).json({ 
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    env: config.env,
+    corsOrigin: config.corsOrigin
+  });
+});
+
+// Add a test endpoint for the exact sync route
+app.post('/api/appointments/sync/google-calendar/test', (req, res) => {
+  console.log('   ✅ TEST ENDPOINT HIT - Route is accessible!');
+  res.json({ message: 'Route works! Now check auth middleware.' });
 });
 
 // API Routes
@@ -106,7 +119,11 @@ if (require.main === module) {
   initCleanupScheduler();
 
   httpServer.listen(config.port, () => {
-    console.log(`Server running on port ${config.port}`);
+    console.log('\n🚀 ================================');
+    console.log(`   Server running on http://localhost:${config.port}`);
+    console.log(`   Health: http://localhost:${config.port}/health`);
+    console.log(`   API: http://localhost:${config.port}/api`);
+    console.log('   ================================\n');
   });
 }
 
