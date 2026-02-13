@@ -22,12 +22,15 @@ declare global {
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
         // 1. Get the token from the header
+        console.log('Auth Middleware: Raw Authorization Header:', req.headers.authorization);
         const token = req.headers.authorization?.split(' ')[1];
 
         if (!token) {
             console.log('Auth Middleware: No token provided for path:', req.path, 'Method:', req.method);
             throw new ApiError(401, 'Please authenticate');
         }
+
+        console.log('Auth Middleware: Verifying token...', token.substring(0, 10) + '...');
 
         // 2. Verify the token using Clerk
         // Note: clerkClient.verifyToken verifies the signature and expiration
@@ -37,6 +40,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         // The verifyToken returns a decoded JWT payload.
         // The 'sub' claim is the clerk user ID.
         const clerkUserId = client.sub;
+        console.log('Auth Middleware: Clerk verification successful, sub:', clerkUserId);
 
         if (!clerkUserId) {
             throw new ApiError(401, 'Invalid token');
@@ -44,11 +48,17 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
 
         // 3. Find user in local database
         let user = await User.findOne({ clerkId: clerkUserId });
+        if (user) {
+            console.log('Auth Middleware: User found locally:', user._id);
+        } else {
+            console.log('Auth Middleware: User NOT found locally. Attempting JIT...');
+        }
 
         // 4. JIT (Just-In-Time) User Creation - "Bridge B"
         // If user doesn't exist locally (webhook failed or hasn't fired yet), create them.
         if (!user) {
             // Fetch full user details from Clerk API
+            console.log('Auth Middleware: Fetching user details from Clerk API...');
             const clerkUser = await clerkClient.users.getUser(clerkUserId as string);
 
             const email = clerkUser.emailAddresses[0]?.emailAddress;
@@ -73,6 +83,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                 await user.save();
             } else {
                 // Create local user
+                console.log(`Creating new local user for ${email}`);
                 user = await User.create({
                     clerkId: clerkUserId,
                     email,
@@ -85,54 +96,13 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         }
 
         // 5. Attach user to request
-        // Fallback: If orgId is not in the token, check the user record
-        let orgId = (client.org_id as string | undefined) || user?.organizationId;
-        let orgRole = (client.org_role as string | undefined) || (user?.organizationRole as string | undefined);
+        // WE NOW PRIORITIZE LOCAL DB FOR ORGANIZATION
+        // We ignore client.org_id because we are managing orgs locally now.
+        let orgId = user?.organizationId?.toString();
+        let orgRole = user?.organizationRole;
 
-        // 6. Hard Fallback: If still no orgId, fetch memberships from Clerk API (Direct Sync)
-        if (!orgId && user) {
-            try {
-                const memberships = await clerkClient.users.getOrganizationMembershipList({ userId: clerkUserId as string });
-                if (memberships.length > 0) {
-                    const firstMembership = memberships[0];
-                    orgId = firstMembership.organization.id;
-                    orgRole = firstMembership.role;
-
-                    // Update user locally
-                    user.organizationId = orgId;
-                    user.organizationRole = orgRole;
-                    await user.save();
-                }
-            } catch (membershipError) {
-                console.error('Error fetching memberships from Clerk:', membershipError);
-            }
-        }
-
-        // 7. JIT Organization Sync - If we have an orgId (from token or fallback) but no local record
-        if (orgId) {
-            let org = await Organization.findOne({ clerkId: orgId });
-            if (!org) {
-                try {
-                    const clerkOrg = await clerkClient.organizations.getOrganization({ organizationId: orgId });
-                    org = await Organization.create({
-                        clerkId: orgId,
-                        name: clerkOrg.name,
-                        slug: clerkOrg.slug,
-                        logoUrl: clerkOrg.imageUrl,
-                        metadata: clerkOrg.publicMetadata
-                    });
-                } catch (orgError) {
-                    console.error('Error JIT syncing organization:', orgError);
-                }
-            }
-
-            // Sync user membership if it doesn't match
-            if (user && user.organizationId !== orgId) {
-                user.organizationId = orgId;
-                user.organizationRole = orgRole;
-                await user.save();
-            }
-        }
+        // 6. & 7. REMOVED - We no longer sync Organizations from Clerk.
+        // The local database is now the Source of Truth for Organizations.
 
         req.user = user;
         req.orgId = orgId;

@@ -32,7 +32,7 @@ export const setupSocket = (io: Server) => {
         }
         throw jwtError;
       }
-      
+
       console.log(`Socket authenticated: ${socket.userId}`);
       next();
     } catch (error) {
@@ -94,7 +94,7 @@ export const setupSocket = (io: Server) => {
   });
 
   console.log('Socket.io initialized');
-  
+
   return io;
 };
 

@@ -51,7 +51,7 @@ const config = {
   env: envVars.NODE_ENV,
   port: envVars.PORT,
   corsOrigin: envVars.CORS_ORIGIN,
-  frontendUrl: envVars.CORS_ORIGIN,
+  frontendUrl: envVars.FRONTEND_URL,
   backendUrl: envVars.BACKEND_URL,
   mongoose: {
     url: envVars.NODE_ENV === 'test' && envVars.MONGODB_URI_TEST ? envVars.MONGODB_URI_TEST : envVars.MONGODB_URI,

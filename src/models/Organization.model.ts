@@ -1,23 +1,33 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IOrganization extends Document {
-    clerkId: string;
+    clerkId?: string; // Optional now
     name: string;
     slug: string;
+    ownerId: mongoose.Types.ObjectId; // Reference to User (ObjectId)
+    members?: mongoose.Types.ObjectId[]; // Array of User ObjectIds
     logoUrl?: string;
     metadata?: any;
     createdAt: Date;
     updatedAt: Date;
 }
 
-const OrganizationSchema: Schema<IOrganization> = new Schema(
+const OrganizationSchema = new Schema<IOrganization>(
     {
         clerkId: {
             type: String,
-            required: true,
-            unique: true,
+            sparse: true, // Allows null/undefined to not conflict
             index: true,
         },
+        ownerId: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
+            required: false, // Optional during migration
+        },
+        members: [{
+            type: Schema.Types.ObjectId,
+            ref: 'User',
+        }],
         name: {
             type: String,
             required: true,

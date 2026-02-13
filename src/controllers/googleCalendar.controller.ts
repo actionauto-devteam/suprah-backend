@@ -12,9 +12,9 @@ import { v4 as uuidv4 } from 'uuid';
  */
 const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-  
+
   const authUrl = googleCalendarService.getAuthUrl(userId);
-  
+
   res.json(
     new ApiResponse(200, { authUrl }, 'Authorization URL generated')
   );
@@ -27,20 +27,20 @@ const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
  */
 const handleCallback = asyncHandler(async (req: Request, res: Response) => {
   const { code, state } = req.query;
-  
+
   if (!code || !state) {
     return res.redirect(`${process.env.FRONTEND_URL}/appointments?calendar_error=missing_params`);
   }
 
   try {
     const userId = state as string;
-    
+
     // Exchange code for tokens
     const tokens = await googleCalendarService.getTokensFromCode(code as string);
-    
+
     // Save tokens to user record
     await googleCalendarService.saveUserTokens(userId, tokens);
-    
+
     // Set up webhook for calendar changes
     const channelId = uuidv4();
     try {
@@ -49,7 +49,7 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
     } catch (error) {
       console.error('⚠️ Failed to set up webhook (non-critical):', error);
     }
-    
+
     // Redirect back to frontend with success
     res.redirect(`${process.env.FRONTEND_URL}/appointments?calendar_connected=true`);
   } catch (error: any) {
@@ -65,10 +65,10 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
  */
 const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-  
+
   const tokens = await googleCalendarService.getUserTokens(userId);
   const connected = !!tokens;
-  
+
   res.json(
     new ApiResponse(200, { connected }, 'Calendar status fetched')
   );
@@ -81,9 +81,9 @@ const getStatus = asyncHandler(async (req: Request, res: Response) => {
  */
 const disconnect = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-  
+
   await googleCalendarService.disconnectCalendar(userId);
-  
+
   res.json(
     new ApiResponse(200, null, 'Google Calendar disconnected successfully')
   );
