@@ -1,0 +1,196 @@
+import { Request, Response } from "express";
+import { asyncHandler } from "../utils/asyncHandler";
+import { ApiResponse } from "../utils/ApiResponse";
+import { ApiError } from "../utils/ApiError";
+import DriverLocation, { DriverStatus } from "../models/DriverLocation.model";
+import Shipment from "../models/Shipment.model";
+import User, { IUser } from "../models/User.model";
+
+const getUserId = (req: Request): string => {
+  const user = req.user as IUser;
+  if (!user?._id) {
+    throw new ApiError(401, "User not authenticated");
+  }
+  return user._id.toString();
+};
+
+const updateLocation = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const userId = getUserId(req);
+  const { lat, lng, status, shipmentId } = req.body as {
+    lat: number;
+    lng: number;
+    status?: DriverStatus;
+    shipmentId?: string;
+  };
+
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    throw new ApiError(400, "Latitude and longitude are required");
+  }
+
+  if (status && !["on-route", "idle", "offline"].includes(status)) {
+    throw new ApiError(400, "Invalid driver status");
+  }
+
+  let resolvedShipmentId: string | undefined;
+  if (shipmentId) {
+    const shipment = await Shipment.findOne({
+      _id: shipmentId,
+      organizationId: orgId,
+    });
+    if (!shipment) {
+      throw new ApiError(404, "Shipment not found");
+    }
+    resolvedShipmentId = shipment._id.toString();
+  }
+
+  const updateData: any = {
+    organizationId: orgId,
+    userId,
+    coords: { lat, lng },
+    lastSeenAt: new Date(),
+  };
+
+  if (status) {
+    updateData.status = status;
+  }
+
+  if (resolvedShipmentId) {
+    updateData.shipmentId = resolvedShipmentId;
+  }
+
+  const location = await DriverLocation.findOneAndUpdate(
+    { organizationId: orgId, userId },
+    { $set: updateData },
+    { new: true, upsert: true },
+  );
+
+  res.json(new ApiResponse(200, location, "Driver location updated"));
+});
+
+const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const { status } = req.query;
+
+  const filter: any = { organizationId: orgId };
+  if (status && status !== "all") {
+    filter.status = status;
+  }
+
+  const locations = await DriverLocation.find(filter)
+    .populate("userId", "name email avatar")
+    .populate("shipmentId", "trackingNumber status")
+    .sort({ lastSeenAt: -1 });
+
+  const data = locations.map((location: any) => ({
+    id: location._id.toString(),
+    status: location.status,
+    coords: location.coords,
+    lastSeenAt: location.lastSeenAt,
+    driver: location.userId
+      ? {
+          id: location.userId._id.toString(),
+          name: location.userId.name,
+          email: location.userId.email,
+          avatar: location.userId.avatar,
+        }
+      : null,
+    shipment: location.shipmentId
+      ? {
+          id: location.shipmentId._id.toString(),
+          trackingNumber: location.shipmentId.trackingNumber,
+          status: location.shipmentId.status,
+        }
+      : null,
+  }));
+
+  res.json(new ApiResponse(200, data, "Driver locations fetched"));
+});
+
+const assignLoad = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const { shipmentId, driverId } = req.body as {
+    shipmentId?: string;
+    driverId?: string;
+  };
+
+  if (!shipmentId || !driverId) {
+    throw new ApiError(400, "Shipment ID and driver ID are required");
+  }
+
+  const driver = await User.findOne({ _id: driverId, organizationId: orgId });
+  if (!driver) {
+    throw new ApiError(404, "Driver not found");
+  }
+
+  const shipment = await Shipment.findOneAndUpdate(
+    { _id: shipmentId, organizationId: orgId },
+    { $set: { assignedDriverId: driver._id, assignedAt: new Date() } },
+    { new: true },
+  );
+
+  if (!shipment) {
+    throw new ApiError(404, "Shipment not found");
+  }
+
+  await DriverLocation.findOneAndUpdate(
+    { organizationId: orgId, userId: driver._id },
+    { $set: { shipmentId: shipment._id } },
+    { new: true },
+  );
+
+  res.json(new ApiResponse(200, shipment, "Load assigned"));
+});
+
+const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const userId = getUserId(req);
+  const { shipmentId } = req.body as { shipmentId?: string };
+
+  if (!shipmentId) {
+    throw new ApiError(400, "Shipment ID is required");
+  }
+
+  const shipment = await Shipment.findOne({
+    _id: shipmentId,
+    organizationId: orgId,
+  });
+  if (!shipment) {
+    throw new ApiError(404, "Shipment not found");
+  }
+
+  if (
+    !shipment.assignedDriverId ||
+    shipment.assignedDriverId.toString() !== userId
+  ) {
+    throw new ApiError(403, "You are not assigned to this load");
+  }
+
+  shipment.driverAcceptedAt = new Date();
+  if (shipment.status === "Available for Pickup") {
+    shipment.status = "Dispatched";
+  }
+  await shipment.save();
+
+  res.json(new ApiResponse(200, shipment, "Load accepted"));
+});
+
+const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const userId = getUserId(req);
+
+  const shipments = await Shipment.find({
+    organizationId: orgId,
+    assignedDriverId: userId,
+  }).sort({ assignedAt: -1 });
+
+  res.json(new ApiResponse(200, shipments, "Assigned loads fetched"));
+});
+
+export default {
+  updateLocation,
+  getActiveDrivers,
+  assignLoad,
+  acceptLoad,
+  getMyLoads,
+};

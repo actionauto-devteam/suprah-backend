@@ -1,77 +1,82 @@
-import express from 'express';
-import vehicleRoute from './vehicle.route';
-import dashboardRoute from './dashboard.route';
-import syncRoute from './sync.route';
-import shipmentRoute from './shipment.routes';
-import quoteRoute from './quote.routes';
-import notificationRoute from './notification.route';
-import profileRoute from './profile.route';
-import appointmentRoute from './appointment.route';
-import conversationRoute from './conversation.route';
-import userRoute from './user.route';
-import googleCalendarRoute from './googleCalendar.routes';
-import gmailRoute from './gmail.route';
-import organizationRoute from './organization.routes';
-import invitationRoute from './invitation.routes';
+import express from "express";
+import vehicleRoute from "./vehicle.route";
+import dashboardRoute from "./dashboard.route";
+import syncRoute from "./sync.route";
+import shipmentRoute from "./shipment.routes";
+import quoteRoute from "./quote.routes";
+import notificationRoute from "./notification.route";
+import profileRoute from "./profile.route";
+import appointmentRoute from "./appointment.route";
+import conversationRoute from "./conversation.route";
+import userRoute from "./user.route";
+import googleCalendarRoute from "./googleCalendar.routes";
+import gmailRoute from "./gmail.route";
+import organizationRoute from "./organization.routes";
+import invitationRoute from "./invitation.routes";
+import driverTrackingRoute from "./driverTracking.routes";
 
 const router = express.Router();
 
 const defaultRoutes = [
   {
-    path: '/vehicles',
+    path: "/vehicles",
     route: vehicleRoute,
   },
   {
-    path: '/dashboard',
+    path: "/dashboard",
     route: dashboardRoute,
   },
   {
-    path: '/sync',
+    path: "/sync",
     route: syncRoute,
   },
   {
-    path: '/shipments',
+    path: "/shipments",
     route: shipmentRoute,
   },
   {
-    path: '/quotes',
+    path: "/quotes",
     route: quoteRoute,
   },
   {
-    path: '/notifications',
+    path: "/notifications",
     route: notificationRoute,
   },
   {
-    path: '/profile',
+    path: "/profile",
     route: profileRoute,
   },
   {
-    path: '/appointments',
+    path: "/appointments",
     route: appointmentRoute,
   },
   {
-    path: '/conversations',
+    path: "/conversations",
     route: conversationRoute,
   },
   {
-    path: '/users',
+    path: "/users",
     route: userRoute,
   },
   {
-    path: '/google-calendar',
+    path: "/google-calendar",
     route: googleCalendarRoute,
   },
   {
-    path: '/gmail',
+    path: "/gmail",
     route: gmailRoute,
   },
   {
-    path: '/organizations',
+    path: "/organizations",
     route: organizationRoute,
   },
   {
-    path: '/invitations',
+    path: "/invitations",
     route: invitationRoute,
+  },
+  {
+    path: "/driver-tracking",
+    route: driverTrackingRoute,
   },
 ];
 
@@ -79,4 +84,4 @@ defaultRoutes.forEach((route) => {
   router.use(route.path, route.route);
 });
 
-export default router;  
+export default router;
