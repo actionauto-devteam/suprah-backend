@@ -17,7 +17,6 @@ const OrganizationSchema = new Schema<IOrganization>(
         clerkId: {
             type: String,
             sparse: true, // Allows null/undefined to not conflict
-            index: true,
         },
         ownerId: {
             type: Schema.Types.ObjectId,
