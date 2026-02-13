@@ -1,0 +1,153 @@
+// Controller for handling ADF XML data and Leads
+import { Request, Response } from 'express';
+import Lead from '../models/lead.model';
+import { parseStringPromise } from 'xml2js';
+
+// Handle incoming ADF XML (Auto-lead Data Format)
+export const receiveADF = async (req: Request, res: Response) => {
+  try {
+    // Access the raw body captured in server.ts
+    let xmlData = (req as any).rawBody || req.body;
+
+    if (!xmlData || typeof xmlData !== 'string') {
+      // Fallback: sometimes body parsers might have already parsed it, 
+      // or it's empty.
+      return res.status(400).json({ message: 'No valid XML data received' });
+    }
+
+    // Parse XML to JSON
+    const result = await parseStringPromise(xmlData, { 
+      explicitArray: false, 
+      ignoreAttrs: false, 
+      mergeAttrs: true 
+    });
+
+    const prospect = result.adf?.prospect;
+    if (!prospect) {
+      return res.status(400).json({ message: 'Invalid ADF format' });
+    }
+
+    const customer = prospect.customer?.contact;
+    const { vehicle } = prospect;
+
+    // Extract Name (ADF names can be complex)
+    let firstName = 'Unknown';
+    let lastName = '';
+
+    if (customer?.name) {
+      if (Array.isArray(customer.name)) {
+        firstName = customer.name.find((n: any) => n.part === 'first')?._ || firstName;
+        lastName = customer.name.find((n: any) => n.part === 'last')?._ || lastName;
+      } else if (customer.name.part === 'full') {
+        const parts = customer.name._.split(' ');
+        firstName = parts[0];
+        lastName = parts.slice(1).join(' ');
+      } else {
+        firstName = customer.name._ || customer.name;
+      }
+    }
+
+    // Create the Lead
+    const newLead = new Lead({
+      firstName,
+      lastName,
+      email: customer?.email?._ || customer?.email,
+      phone: customer?.phone?._ || customer?.phone,
+      vehicle: {
+        year: vehicle?.year?._ || vehicle?.year,
+        make: vehicle?.make?._ || vehicle?.make,
+        model: vehicle?.model?._ || vehicle?.model,
+      },
+      comments: `Request Date: ${prospect.requestdate}`,
+      source: 'ADF Email'
+    });
+
+    await newLead.save();
+    console.log(`[ADF] New Lead Saved: ${firstName} ${lastName}`);
+    
+    res.status(200).send('Lead processed successfully');
+  } catch (error) {
+    console.error('Error processing ADF:', error);
+    res.status(500).send('Internal Server Error');
+  }
+};
+
+// Get all leads for the frontend sidebar
+export const getAllLeads = async (req: Request, res: Response) => {
+  try {
+    const leads = await Lead.find().sort({ createdAt: -1 });
+    res.json(leads);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching leads' });
+  }
+};
+
+// Update lead status
+export const updateLead = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const lead = await Lead.findByIdAndUpdate(
+      id,
+      { status },
+      { new: true }
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    res.json(lead);
+  } catch (error) {
+    res.status(500).json({ message: 'Error updating lead' });
+  }
+};
+
+// Create a new inquiry (manual/test entry)
+export const createInquiry = async (req: Request, res: Response) => {
+  try {
+    console.log('[DEBUG] createInquiry called with body:', req.body);
+    
+    const { firstName, lastName, email, phone, vehicle, comments, source } = req.body;
+
+    // Validate required fields
+    if (!firstName || !email || !phone) {
+      console.log('[DEBUG] Missing required fields:', { firstName, email, phone });
+      return res.status(400).json({ 
+        message: 'Missing required fields: firstName, email, phone',
+        received: { firstName, email, phone }
+      });
+    }
+
+    const newLead = new Lead({
+      firstName,
+      lastName: lastName || '',
+      email,
+      phone,
+      vehicle: {
+        year: vehicle?.year || '',
+        make: vehicle?.make || '',
+        model: vehicle?.model || '',
+      },
+      comments: comments || '',
+      source: source || 'Manual Entry (Test)',
+      status: 'New',
+    });
+
+    const savedLead = await newLead.save();
+    console.log(`[SUCCESS] New Test Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
+    
+    res.status(201).json({
+      success: true,
+      message: 'Test inquiry created successfully',
+      data: savedLead
+    });
+  } catch (error) {
+    console.error('[ERROR] Error creating inquiry:', error);
+    res.status(500).json({ 
+      message: 'Error creating inquiry',
+      error: process.env.NODE_ENV === 'development' ? error : 'Internal server error'
+    });
+  }
+};
