@@ -1,19 +1,19 @@
-import express from "express";
-import vehicleRoute from "./vehicle.route";
-import dashboardRoute from "./dashboard.route";
-import syncRoute from "./sync.route";
-import shipmentRoute from "./shipment.routes";
-import quoteRoute from "./quote.routes";
-import notificationRoute from "./notification.route";
-import profileRoute from "./profile.route";
-import appointmentRoute from "./appointment.route";
-import conversationRoute from "./conversation.route";
-import userRoute from "./user.route";
-import googleCalendarRoute from "./googleCalendar.routes";
-import gmailRoute from "./gmail.route";
-import organizationRoute from "./organization.routes";
-import invitationRoute from "./invitation.routes";
-import driverTrackingRoute from "./driverTracking.routes";
+import express from 'express';
+import vehicleRoute from './vehicle.route';
+import dashboardRoute from './dashboard.route';
+import syncRoute from './sync.route';
+import shipmentRoute from './shipment.routes';
+import quoteRoute from './quote.routes';
+import notificationRoute from './notification.route';
+import profileRoute from './profile.route';
+import appointmentRoute from './appointment.route';
+import conversationRoute from './conversation.route';
+import userRoute from './user.route';
+import googleCalendarRoute from './googleCalendar.routes';
+import gmailRoute from './gmail.route';
+import organizationRoute from './organization.routes';
+import invitationRoute from './invitation.routes';
+import leadRoute from './lead.route';
 
 const router = express.Router();
 
@@ -75,8 +75,8 @@ const defaultRoutes = [
     route: invitationRoute,
   },
   {
-    path: "/driver-tracking",
-    route: driverTrackingRoute,
+    path: '/leads',
+    route: leadRoute,
   },
 ];
 

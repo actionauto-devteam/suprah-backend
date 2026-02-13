@@ -8,6 +8,7 @@ import connectDB from './config/db';
 import routes from './routes';
 import webhookRoute from './routes/webhook.route';
 import { errorHandler } from './middleware/error.middleware';
+import leadRoutes from './routes/lead.route';
 import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
@@ -34,6 +35,9 @@ app.use(express.json({
   }
 }));
 app.use(express.urlencoded({ extended: true }));
+
+// Add support for XML bodies (required for ADF emails)
+app.use(express.text({ type: ['application/xml', 'text/xml'] }));
 
 // Webhook route...
 app.use('/api/webhooks', webhookRoute);
