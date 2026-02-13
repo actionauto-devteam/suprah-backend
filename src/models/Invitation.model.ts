@@ -3,6 +3,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IInvitation extends Document {
     email: string;
     organizationId: mongoose.Types.ObjectId; // Stored as ObjectId
+    inviterId?: mongoose.Types.ObjectId;
     role: 'admin' | 'member';
     token: string;
     expiresAt: Date;
@@ -23,6 +24,11 @@ const InvitationSchema = new Schema<IInvitation>(
             type: Schema.Types.ObjectId,
             ref: 'Organization',
             required: true,
+        },
+        inviterId: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
+            required: false, // Optional to support legacy invites
         },
         role: {
             type: String,

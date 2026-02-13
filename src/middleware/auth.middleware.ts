@@ -22,12 +22,15 @@ declare global {
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
         // 1. Get the token from the header
+        console.log('Auth Middleware: Raw Authorization Header:', req.headers.authorization);
         const token = req.headers.authorization?.split(' ')[1];
 
         if (!token) {
             console.log('Auth Middleware: No token provided for path:', req.path, 'Method:', req.method);
             throw new ApiError(401, 'Please authenticate');
         }
+
+        console.log('Auth Middleware: Verifying token...', token.substring(0, 10) + '...');
 
         // 2. Verify the token using Clerk
         // Note: clerkClient.verifyToken verifies the signature and expiration
@@ -37,6 +40,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         // The verifyToken returns a decoded JWT payload.
         // The 'sub' claim is the clerk user ID.
         const clerkUserId = client.sub;
+        console.log('Auth Middleware: Clerk verification successful, sub:', clerkUserId);
 
         if (!clerkUserId) {
             throw new ApiError(401, 'Invalid token');
@@ -44,11 +48,17 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
 
         // 3. Find user in local database
         let user = await User.findOne({ clerkId: clerkUserId });
+        if (user) {
+            console.log('Auth Middleware: User found locally:', user._id);
+        } else {
+            console.log('Auth Middleware: User NOT found locally. Attempting JIT...');
+        }
 
         // 4. JIT (Just-In-Time) User Creation - "Bridge B"
         // If user doesn't exist locally (webhook failed or hasn't fired yet), create them.
         if (!user) {
             // Fetch full user details from Clerk API
+            console.log('Auth Middleware: Fetching user details from Clerk API...');
             const clerkUser = await clerkClient.users.getUser(clerkUserId as string);
 
             const email = clerkUser.emailAddresses[0]?.emailAddress;
@@ -73,6 +83,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                 await user.save();
             } else {
                 // Create local user
+                console.log(`Creating new local user for ${email}`);
                 user = await User.create({
                     clerkId: clerkUserId,
                     email,

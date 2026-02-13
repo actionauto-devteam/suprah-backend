@@ -117,7 +117,7 @@ export const getMembers = async (req: Request, res: Response) => {
     }
 
     const members = await User.find({ organizationId: id })
-        .select('name email avatar role organizationRole createdAt')
+        .select('name email avatar role organizationRole createdAt clerkId') // Added clerkId
         .sort({ createdAt: -1 });
 
     res.status(200).json({

@@ -46,6 +46,7 @@ export const createInvitation = async (req: Request, res: Response) => {
         await Invitation.create({
             email,
             organizationId,
+            inviterId: req.user._id, // Save inviter
             role: role || 'member',
             token,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
@@ -54,7 +55,9 @@ export const createInvitation = async (req: Request, res: Response) => {
     }
 
     const org = await Organization.findById(organizationId);
-    const inviteLink = `${config.corsOrigin}/accept-invite?token=${token}`;
+    const inviteLink = `${config.frontendUrl}/accept-invite?token=${token}`;
+
+    console.log(inviteLink);
 
     try {
         await emailService.sendEmail({
@@ -87,21 +90,51 @@ export const createInvitation = async (req: Request, res: Response) => {
 export const validateInvitation = async (req: Request, res: Response) => {
     const { token } = req.params;
 
-    const invite = await Invitation.findOne({ token, status: 'pending' }).populate('organizationId', 'name slug logoUrl');
+    console.log('[InvitationController] Validating token:', token);
+
+    // 1. Find by token only (ignore status for now)
+    const invite = await Invitation.findOne({ token })
+        .populate('organizationId', 'name slug logoUrl')
+        .populate('inviterId', 'name email avatar');
 
     if (!invite) {
-        throw new ApiError(404, 'Invitation not found or invalid');
+        console.log('[InvitationController] Token not found in DB');
+        throw new ApiError(404, 'Invitation not found');
     }
 
+    console.log('[InvitationController] Invite found. Status:', invite.status);
+
+    // 2. Check Expiration
     if (invite.expiresAt < new Date()) {
-        invite.status = 'expired';
-        await invite.save();
+        if (invite.status !== 'expired') {
+            invite.status = 'expired';
+            await invite.save();
+        }
         throw new ApiError(400, 'Invitation has expired');
     }
 
+    // 3. Check Status
+    if (invite.status === 'accepted') {
+        throw new ApiError(400, 'Invitation has already been accepted');
+    }
+
+    if (invite.status !== 'pending') {
+        throw new ApiError(400, `Invitation is ${invite.status}`);
+    }
+
+    // Format response for frontend
+    const responseData = {
+        organizationName: (invite.organizationId as any).name,
+        inviterName: (invite.inviterId as any)?.name || 'Someone',
+        email: invite.email,
+        role: invite.role,
+        _id: invite._id,
+        token: invite.token
+    };
+
     res.status(200).json({
         success: true,
-        data: invite,
+        data: responseData,
     });
 };
 

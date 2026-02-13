@@ -24,6 +24,10 @@ const OrganizationSchema = new Schema<IOrganization>(
             ref: 'User',
             required: false, // Optional during migration
         },
+        members: [{
+            type: Schema.Types.ObjectId,
+            ref: 'User',
+        }],
         name: {
             type: String,
             required: true,
