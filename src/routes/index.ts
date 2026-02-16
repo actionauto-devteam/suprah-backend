@@ -14,6 +14,7 @@ import gmailRoute from "./gmail.route";
 import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
+import adminRoute from "./admin.routes";
 
 const router = express.Router();
 
@@ -77,6 +78,10 @@ const defaultRoutes = [
   {
     path: "/driver-tracking",
     route: driverTrackingRoute,
+  },
+  {
+    path: "/admin",
+    route: adminRoute,
   },
 ];
 

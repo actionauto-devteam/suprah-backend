@@ -99,12 +99,21 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         // WE NOW PRIORITIZE LOCAL DB FOR ORGANIZATION
         // We ignore client.org_id because we are managing orgs locally now.
         let orgId = user?.organizationId?.toString();
-        let orgRole = user?.organizationRole;
+        let orgRole = (user as any)?.organizationRole;
 
-        // 6. & 7. REMOVED - We no longer sync Organizations from Clerk.
-        // The local database is now the Source of Truth for Organizations.
+        // --- PROXY LOGIC START ---
+        // If user is Super Admin, check for impersonation header
+        if (user?.role === 'super_admin') {
+            const impersonateId = req.headers['x-impersonate-org-id'] as string;
+            if (impersonateId) {
+                console.log(`[AUTH] Super Admin ${user.email} is impersonating Org: ${impersonateId}`);
+                orgId = impersonateId;
+                orgRole = 'admin'; // Force admin role in the target org
+            }
+        }
+        // --- PROXY LOGIC END ---
 
-        req.user = user;
+        req.user = user || undefined;
         req.orgId = orgId;
         req.orgRole = orgRole;
 
@@ -114,7 +123,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             sessionId: client.sid as string,
             orgId,
             orgRole,
-            getToken: async () => token
+            getToken: async () => token || null,
         };
 
         next();

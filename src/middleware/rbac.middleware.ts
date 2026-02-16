@@ -18,4 +18,4 @@ export const requireRole = (requiredRoles: string[]) => (req: Request, res: Resp
 /**
  * Shorthand for admin role requirement
  */
-export const requireAdmin = requireRole(['org:admin']);
+export const requireAdmin = requireRole(['admin']);

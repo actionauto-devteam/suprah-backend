@@ -16,7 +16,11 @@ export const createOrganization = async (req: Request, res: Response) => {
     // Check if slug exists
     const existingOrg = await Organization.findOne({ slug });
     if (existingOrg) {
-        throw new ApiError(400, 'Organization with this slug already exists');
+        res.status(400).json({
+            success: false,
+            message: 'Organization with this name already exists',
+        });
+        return;
     }
 
     const org = await Organization.create({
@@ -28,7 +32,7 @@ export const createOrganization = async (req: Request, res: Response) => {
 
     // Update user's organization
     user.organizationId = org._id as mongoose.Types.ObjectId;
-    user.organizationRole = 'admin';
+    (user as any).organizationRole = 'admin';
     await user.save();
 
     res.status(201).json({
@@ -42,7 +46,8 @@ export const getOrganization = async (req: Request, res: Response) => {
 
     // Ensure user has access to this org
     // This check might be redundant if we use org.middleware, but good for direct ID access
-    if (req.user?.organizationId?.toString() !== id && req.user?.role !== 'admin') {
+    // We check if the context (req.orgId) matches the requested ID, OR if the user is a super_admin
+    if (req.orgId !== id && req.user?.role !== 'super_admin') {
         throw new ApiError(403, 'You do not have access to this organization');
     }
 
@@ -64,11 +69,25 @@ export const updateOrganization = async (req: Request, res: Response) => {
     // Verify ownership or admin role
     const org = await Organization.findById(id);
     if (!org) {
-        throw new ApiError(404, 'Organization not found');
+        res.status(404).json({
+            success: false,
+            message: 'Organization not found',
+        });
+        return;
     }
 
-    if (org.ownerId.toString() !== req.user?._id.toString() && req.user?.organizationRole !== 'admin') {
-        throw new ApiError(403, 'Only the owner or admins can update the organization');
+    // Allow if Super Admin OR (Org Admin of this specific org)
+    // Note: req.orgRole is forced to 'admin' when proxying
+    const isSuperAdmin = req.user?.role === 'super_admin';
+    const isOrgAdmin = req.orgId === id && req.orgRole === 'admin';
+    const isOwner = org.ownerId.toString() === req.user?._id.toString();
+
+    if (!isSuperAdmin && !isOrgAdmin && !isOwner) {
+        res.status(403).json({
+            success: false,
+            message: 'Only the owner or admins can update the organization',
+        });
+        return;
     }
 
     org.name = name || org.name;
@@ -88,11 +107,19 @@ export const deleteOrganization = async (req: Request, res: Response) => {
 
     const org = await Organization.findById(id);
     if (!org) {
-        throw new ApiError(404, 'Organization not found');
+        res.status(404).json({
+            success: false,
+            message: 'Organization not found',
+        });
+        return;
     }
 
     if (org.ownerId.toString() !== req.user?._id.toString()) {
-        throw new ApiError(403, 'Only the owner can delete the organization');
+        res.status(403).json({
+            success: false,
+            message: 'Only the owner can delete the organization',
+        });
+        return;
     }
 
     await Organization.findByIdAndDelete(id);
@@ -112,8 +139,13 @@ export const deleteOrganization = async (req: Request, res: Response) => {
 export const getMembers = async (req: Request, res: Response) => {
     const { id } = req.params;
 
-    if (req.user?.organizationId?.toString() !== id) {
-        throw new ApiError(403, 'Unauthorized');
+    // Check if the current context matches the requested ID (or super_admin)
+    if (req.orgId !== id && req.user?.role !== 'super_admin') {
+        res.status(403).json({
+            success: false,
+            message: 'Unauthorized',
+        });
+        return;
     }
 
     const members = await User.find({ organizationId: id })
@@ -131,20 +163,33 @@ export const removeMember = async (req: Request, res: Response) => {
 
     const org = await Organization.findById(id);
     if (!org) {
-        throw new ApiError(404, 'Organization not found');
+        res.status(404).json({
+            success: false,
+            message: 'Organization not found',
+        });
+        return;
     }
 
     // Only admin/owner can remove
-    const isOwner = org.ownerId.toString() === req.user?._id.toString();
-    const isAdmin = req.user?.organizationRole === 'admin';
+    const isOwner = req.user?._id && org.ownerId.toString() === req.user._id.toString();
+    const isAdmin = req.orgRole === 'admin'; // Proxy aware
+    const isSuperAdmin = req.user?.role === 'super_admin';
 
-    if (!isOwner && !isAdmin) {
-        throw new ApiError(403, 'Unauthorized');
+    if (!isOwner && !isAdmin && !isSuperAdmin) {
+        res.status(403).json({
+            success: false,
+            message: 'Unauthorized',
+        });
+        return;
     }
 
     // Cannot remove owner
     if (org.ownerId.toString() === userId) {
-        throw new ApiError(400, 'Cannot remove the owner of the organization');
+        res.status(400).json({
+            success: false,
+            message: 'Cannot remove the owner of the organization',
+        });
+        return;
     }
 
     await User.findByIdAndUpdate(userId, {

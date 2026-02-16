@@ -9,10 +9,10 @@ export interface IUser extends Document {
   clerkId?: string;
   emailVerified: boolean;
   avatar?: string;
-  role: 'user' | 'admin';
+  role: 'user' | 'admin' | 'super_admin';
   isActive: boolean;
   organizationId?: mongoose.Types.ObjectId; // Changed from string to ObjectId
-  organizationRole?: string;
+
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   createdAt: Date;
@@ -59,7 +59,7 @@ export interface IUserModel extends Model<IUser> {
   isEmailTaken(email: string, excludeUserId?: string): Promise<boolean>;
 }
 
-const UserSchema: Schema<IUser> = new Schema(
+const UserSchema = new Schema(
   {
     name: {
       type: String,
@@ -94,7 +94,7 @@ const UserSchema: Schema<IUser> = new Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'admin'],
+      enum: ['user', 'admin', 'super_admin'],
       default: 'user',
     },
     isActive: {

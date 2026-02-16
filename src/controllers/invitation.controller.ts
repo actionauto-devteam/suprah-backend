@@ -9,15 +9,19 @@ import config from '../config';
 
 export const createInvitation = async (req: Request, res: Response) => {
     const { email, role } = req.body;
-    const organizationId = req.user?.organizationId;
+    const organizationId = req.orgId;
 
     if (!organizationId) {
         throw new ApiError(400, 'You must belong to an organization to invite members');
     }
 
     // specific check: only admin can invite
-    if (req.user?.organizationRole !== 'admin') {
+    if (req.orgRole !== 'admin') {
         throw new ApiError(403, 'Only admins can invite members');
+    }
+
+    if (!req.user) {
+        throw new ApiError(401, 'User context missing');
     }
 
     // Check if user is already a member
@@ -169,7 +173,7 @@ export const acceptInvitation = async (req: Request, res: Response) => {
 
     // Update user
     user.organizationId = invite.organizationId as any; // Cast because logic implies it is an ObjectId
-    user.organizationRole = invite.role;
+    (user as any).organizationRole = invite.role;
     await user.save();
 
     // Update invite
