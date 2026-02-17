@@ -10,7 +10,7 @@ export interface IDriverLocation extends Document {
     lat: number;
     lng: number;
   };
-  shipmentId?: mongoose.Types.ObjectId;
+  shipmentIds: mongoose.Types.ObjectId[];
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -38,10 +38,12 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
       lat: { type: Number, required: true },
       lng: { type: Number, required: true },
     },
-    shipmentId: {
-      type: Schema.Types.ObjectId,
-      ref: "Shipment",
-    },
+    shipmentIds: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Shipment",
+      },
+    ],
     lastSeenAt: {
       type: Date,
       default: Date.now,

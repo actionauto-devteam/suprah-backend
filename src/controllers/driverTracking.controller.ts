@@ -17,11 +17,10 @@ const getUserId = (req: Request): string => {
 const updateLocation = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const userId = getUserId(req);
-  const { lat, lng, status, shipmentId } = req.body as {
+  const { lat, lng, status } = req.body as {
     lat: number;
     lng: number;
     status?: DriverStatus;
-    shipmentId?: string;
   };
 
   if (typeof lat !== "number" || typeof lng !== "number") {
@@ -30,18 +29,6 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
 
   if (status && !["on-route", "idle", "offline"].includes(status)) {
     throw new ApiError(400, "Invalid driver status");
-  }
-
-  let resolvedShipmentId: string | undefined;
-  if (shipmentId) {
-    const shipment = await Shipment.findOne({
-      _id: shipmentId,
-      organizationId: orgId,
-    });
-    if (!shipment) {
-      throw new ApiError(404, "Shipment not found");
-    }
-    resolvedShipmentId = shipment._id.toString();
   }
 
   const updateData: any = {
@@ -53,10 +40,6 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
 
   if (status) {
     updateData.status = status;
-  }
-
-  if (resolvedShipmentId) {
-    updateData.shipmentId = resolvedShipmentId;
   }
 
   const location = await DriverLocation.findOneAndUpdate(
@@ -79,7 +62,7 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
 
   const locations = await DriverLocation.find(filter)
     .populate("userId", "name email avatar")
-    .populate("shipmentId", "trackingNumber status")
+    .populate("shipmentIds", "trackingNumber status origin destination")
     .sort({ lastSeenAt: -1 });
 
   const data = locations.map((location: any) => ({
@@ -95,13 +78,13 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
           avatar: location.userId.avatar,
         }
       : null,
-    shipment: location.shipmentId
-      ? {
-          id: location.shipmentId._id.toString(),
-          trackingNumber: location.shipmentId.trackingNumber,
-          status: location.shipmentId.status,
-        }
-      : null,
+    shipments: (location.shipmentIds || []).map((s: any) => ({
+      id: s._id.toString(),
+      trackingNumber: s.trackingNumber,
+      status: s.status,
+      origin: s.origin,
+      destination: s.destination,
+    })),
   }));
 
   res.json(new ApiResponse(200, data, "Driver locations fetched"));
@@ -135,7 +118,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
 
   await DriverLocation.findOneAndUpdate(
     { organizationId: orgId, userId: driver._id },
-    { $set: { shipmentId: shipment._id } },
+    { $addToSet: { shipmentIds: shipment._id } },
     { new: true },
   );
 
