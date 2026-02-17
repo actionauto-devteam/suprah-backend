@@ -1,6 +1,6 @@
 // Routes for ADF leads (Inquiries) - Main Entry Point
 import { Router } from 'express';
-import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry } from '../controllers/lead.controller';
+import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry, syncGmailInquiries } from '../controllers/lead.controller';
 
 const router = Router();
 
@@ -9,6 +9,9 @@ router.post('/', createInquiry);
 
 // POST /api/leads/adf - For incoming ADF emails
 router.post('/adf', receiveADF);
+
+// POST /api/leads/sync-gmail - Sync inquiries from Gmail
+router.post('/sync-gmail', syncGmailInquiries);
 
 // GET /api/leads - For the frontend list
 router.get('/', getAllLeads);
