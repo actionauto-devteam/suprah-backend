@@ -15,6 +15,7 @@ import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import paymentRoute from "./payment.routes";
+import leadRoute from "./lead.route";
 
 const router = express.Router();
 
@@ -66,6 +67,10 @@ const defaultRoutes = [
   {
     path: "/gmail",
     route: gmailRoute,
+  },
+  {
+    path: "/leads",
+    route: leadRoute,
   },
   {
     path: "/organizations",
