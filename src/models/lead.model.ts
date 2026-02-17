@@ -2,29 +2,62 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ILead extends Document {
+  // Contact Information
   firstName: string;
   lastName: string;
   email: string;
   phone: string;
+  senderEmail?: string;
+  senderName?: string;
+  
+  // Email Fields
+  subject?: string;
+  body?: string;
+  threadId?: string;
+  messageId?: string;
+  isRead?: boolean;
+  isPending?: boolean;
+  labels?: string[];
+  
+  // Lead Information
   source: string;
-  status: string;
+  status: 'New' | 'Contacted' | 'Pending' | 'Appointment Set' | 'Closed';
   vehicle: {
     year: string;
     make: string;
     model: string;
   };
   comments: string;
+  
   createdAt: Date;
   updatedAt: Date;
 }
 
 const LeadSchema: Schema = new Schema({
+  // Contact Information
   firstName: { type: String, default: 'Unknown' },
   lastName: { type: String, default: '' },
   email: { type: String },
   phone: { type: String },
-  source: { type: String, default: 'ADF Email' },
-  status: { type: String, default: 'New' }, // New, Contacted, Appointment Set, Closed
+  senderEmail: { type: String },
+  senderName: { type: String },
+  
+  // Email Fields
+  subject: { type: String },
+  body: { type: String },
+  threadId: { type: String },
+  messageId: { type: String, unique: true, sparse: true },
+  isRead: { type: Boolean, default: false },
+  isPending: { type: Boolean, default: false },
+  labels: [{ type: String }],
+  
+  // Lead Information
+  source: { type: String, default: 'Email' },
+  status: { 
+    type: String, 
+    enum: ['New', 'Contacted', 'Pending', 'Appointment Set', 'Closed'],
+    default: 'New'
+  },
   vehicle: {
     year: String,
     make: String,

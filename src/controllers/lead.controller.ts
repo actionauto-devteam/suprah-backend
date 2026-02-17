@@ -151,3 +151,82 @@ export const createInquiry = async (req: Request, res: Response) => {
     });
   }
 };
+
+// Mark lead as read
+export const markAsRead = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const lead = await Lead.findByIdAndUpdate(
+      id,
+      { isRead: true },
+      { new: true }
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Inquiry not found' });
+    }
+
+    res.json(lead);
+  } catch (error) {
+    console.error('[ERROR] Error marking as read:', error);
+    res.status(500).json({ message: 'Error marking inquiry as read' });
+  }
+};
+
+// Mark lead as pending
+export const markAsPending = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const lead = await Lead.findByIdAndUpdate(
+      id,
+      { isPending: true },
+      { new: true }
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Inquiry not found' });
+    }
+
+    res.json(lead);
+  } catch (error) {
+    console.error('[ERROR] Error marking as pending:', error);
+    res.status(500).json({ message: 'Error marking inquiry as pending' });
+  }
+};
+
+// Reply to an inquiry (send email)
+export const replyToInquiry = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ message: 'Reply message is required' });
+    }
+
+    const lead = await Lead.findByIdAndUpdate(
+      id,
+      { 
+        status: 'Contacted',
+        isRead: true,
+      },
+      { new: true }
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Inquiry not found' });
+    }
+
+    // Future: Send email via Gmail service
+    console.log(`[DEBUG] Reply sent to ${lead.email}: ${message}`);
+
+    res.json({
+      success: true,
+      message: 'Reply sent successfully',
+      data: lead
+    });
+  } catch (error) {
+    console.error('[ERROR] Error replying to inquiry:', error);
+    res.status(500).json({ message: 'Error sending reply' });
+  }
+};

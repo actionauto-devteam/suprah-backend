@@ -1,6 +1,6 @@
 // Routes for ADF leads (Inquiries) - Main Entry Point
 import { Router } from 'express';
-import { receiveADF, getAllLeads, updateLead, createInquiry } from '../controllers/lead.controller';
+import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry } from '../controllers/lead.controller';
 
 const router = Router();
 
@@ -15,5 +15,14 @@ router.get('/', getAllLeads);
 
 // PATCH /api/leads/:id - Update lead status
 router.patch('/:id', updateLead);
+
+// PATCH /api/leads/:id/read - Mark as read
+router.patch('/:id/read', markAsRead);
+
+// PATCH /api/leads/:id/pending - Mark as pending
+router.patch('/:id/pending', markAsPending);
+
+// POST /api/leads/:id/reply - Reply to inquiry
+router.post('/:id/reply', replyToInquiry);
 
 export default router;
