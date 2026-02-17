@@ -237,122 +237,151 @@ export const replyToInquiry = async (req: Request, res: Response) => {
 
 // Sync inquiries from Gmail
 export const syncGmailInquiries = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req.user as IUser)._id.toString();
+  try {
+    const userId = (req.user as IUser)._id.toString();
+    console.log(`[SYNC] Starting sync for user: ${userId}`);
 
-  // Get user with Gmail tokens
-  const user = await User.findById(userId)
-    .select('+googleCalendar.accessToken +googleCalendar.refreshToken +googleCalendar.expiryDate');
+    // Get user with Gmail tokens
+    const user = await User.findById(userId)
+      .select('+googleCalendar.accessToken +googleCalendar.refreshToken +googleCalendar.expiryDate');
 
-  if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
-    return res.status(400).json(
-      new ApiResponse(400, null, 'Gmail not connected. Please connect your Google account first.')
+    console.log(`[SYNC] User found:`, {
+      hasUser: !!user,
+      googleCalendarConnected: user?.googleCalendar?.connected,
+      hasAccessToken: !!user?.googleCalendar?.accessToken,
+      hasRefreshToken: !!user?.googleCalendar?.refreshToken,
+    });
+
+    if (!user) {
+      return res.status(404).json(new ApiResponse(404, null, 'User not found'));
+    }
+
+    if (!user?.googleCalendar?.connected) {
+      return res.status(400).json(
+        new ApiResponse(400, null, 'Gmail not connected. Please connect your Google account first.')
+      );
+    }
+
+    if (!user.googleCalendar.accessToken) {
+      return res.status(400).json(
+        new ApiResponse(400, null, 'Gmail access token missing. Please reconnect your Google account.')
+      );
+    }
+
+    // Create OAuth2 client
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
     );
-  }
 
-  // Create OAuth2 client
-  const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-  );
+    oauth2Client.setCredentials({
+      access_token: user.googleCalendar.accessToken,
+      refresh_token: user.googleCalendar.refreshToken,
+      expiry_date: user.googleCalendar.expiryDate
+    });
 
-  oauth2Client.setCredentials({
-    access_token: user.googleCalendar.accessToken,
-    refresh_token: user.googleCalendar.refreshToken,
-    expiry_date: user.googleCalendar.expiryDate
-  });
+    // Get Gmail client
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-  // Get Gmail client
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-
-  // Fetch emails (limit to inbox, unseen and unprocessed)
-  console.log('[SYNC] Fetching emails from Gmail...');
-  const response = await gmail.users.messages.list({
-    userId: 'me',
-    q: 'is:unread', // Get unread emails as inquiries
-    maxResults: 50
-  });
-
-  const messages = response.data.messages || [];
-  console.log(`[SYNC] Found ${messages.length} unread emails`);
-
-  let syncedCount = 0;
-  const errors: string[] = [];
-
-  // Process each message
-  for (const message of messages) {
+    // Fetch emails (limit to inbox, unseen and unprocessed)
+    console.log('[SYNC] Fetching emails from Gmail...');
+    let response;
     try {
-      const details = await gmail.users.messages.get({
+      response = await gmail.users.messages.list({
         userId: 'me',
-        id: message.id!,
-        format: 'full'
+        q: 'is:unread', // Get unread emails as inquiries
+        maxResults: 50
       });
+    } catch (gmailError: any) {
+      console.error(`[SYNC] Gmail API error:`, gmailError.message);
+      throw new Error(`Gmail API error: ${gmailError.message}`);
+    }
 
-      const headers = details.data.payload?.headers || [];
-      const getHeader = (name: string) => 
-        headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+    const messages = response.data.messages || [];
+    console.log(`[SYNC] Found ${messages.length} unread emails`);
 
-      const from = getHeader('from');
-      const subject = getHeader('subject');
-      const email = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
-      const senderName = from.replace(/<[^>]*>/g, '').trim() || email;
+    let syncedCount = 0;
+    const errors: string[] = [];
 
-      // Extract body
-      let body = '';
-      if (details.data.payload?.parts) {
-        const textPart = details.data.payload.parts.find((p: any) => p.mimeType === 'text/plain');
-        if (textPart?.body?.data) {
-          body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
-        }
-      } else if (details.data.payload?.body?.data) {
-        body = Buffer.from(details.data.payload.body.data, 'base64').toString('utf-8');
-      }
-
-      if (!email) {
-        errors.push(`Message ${message.id}: Could not extract email address`);
-        continue;
-      }
-
-      // Check if this email already exists as a lead
-      const existingLead = await Lead.findOne({ email });
-      if (!existingLead) {
-        // Extract name from sender (e.g., "John Doe <john@email.com>" → "John Doe")
-        const nameParts = senderName.split(' ').filter(p => p.length > 0);
-        const firstName = nameParts[0] || email.split('@')[0];
-        const lastName = nameParts.slice(1).join(' ') || '';
-
-        // Create new lead from email
-        const newLead = new Lead({
-          firstName,
-          lastName,
-          email,
-          senderName,
-          senderEmail: email,
-          subject,
-          body: body.substring(0, 500), // Limit to 500 chars
-          threadId: details.data.threadId,
-          messageId: message.id,
-          source: 'Gmail Inquiry',
-          status: 'New',
-          isRead: false,
-          vehicle: {
-            year: '',
-            make: '',
-            model: ''
-          }
+    // Process each message
+    for (const message of messages) {
+      try {
+        const details = await gmail.users.messages.get({
+          userId: 'me',
+          id: message.id!,
+          format: 'full'
         });
 
-        await newLead.save();
-        syncedCount++;
-        console.log(`[SYNC] Created lead from email: ${email}`);
-      }
-    } catch (error) {
-      console.error(`[SYNC] Error processing message ${message.id}:`, error);
-      errors.push(`Message ${message.id}: Processing failed`);
-    }
-  }
+        const headers = details.data.payload?.headers || [];
+        const getHeader = (name: string) => 
+          headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
-  res.json(
-    new ApiResponse(200, { syncedCount, totalFound: messages.length, errors: errors.length > 0 ? errors : undefined }, `Gmail sync completed. ${syncedCount} new inquiries added.`)
-  );
+        const from = getHeader('from');
+        const subject = getHeader('subject');
+        const email = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
+        const senderName = from.replace(/<[^>]*>/g, '').trim() || email;
+
+        // Extract body
+        let body = '';
+        if (details.data.payload?.parts) {
+          const textPart = details.data.payload.parts.find((p: any) => p.mimeType === 'text/plain');
+          if (textPart?.body?.data) {
+            body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+          }
+        } else if (details.data.payload?.body?.data) {
+          body = Buffer.from(details.data.payload.body.data, 'base64').toString('utf-8');
+        }
+
+        if (!email) {
+          errors.push(`Message ${message.id}: Could not extract email address`);
+          continue;
+        }
+
+        // Check if this email already exists as a lead
+        const existingLead = await Lead.findOne({ email });
+        if (!existingLead) {
+          // Extract name from sender (e.g., "John Doe <john@email.com>" → "John Doe")
+          const nameParts = senderName.split(' ').filter(p => p.length > 0);
+          const firstName = nameParts[0] || email.split('@')[0];
+          const lastName = nameParts.slice(1).join(' ') || '';
+
+          // Create new lead from email
+          const newLead = new Lead({
+            firstName,
+            lastName,
+            email,
+            senderName,
+            senderEmail: email,
+            subject,
+            body: body.substring(0, 500), // Limit to 500 chars
+            threadId: details.data.threadId,
+            messageId: message.id,
+            source: 'Gmail Inquiry',
+            status: 'New',
+            isRead: false,
+            vehicle: {
+              year: '',
+              make: '',
+              model: ''
+            }
+          });
+
+          await newLead.save();
+          syncedCount++;
+          console.log(`[SYNC] Created lead from email: ${email}`);
+        }
+      } catch (error) {
+        console.error(`[SYNC] Error processing message ${message.id}:`, error);
+        errors.push(`Message ${message.id}: Processing failed`);
+      }
+    }
+
+    res.json(
+      new ApiResponse(200, { syncedCount, totalFound: messages.length, errors: errors.length > 0 ? errors : undefined }, `Gmail sync completed. ${syncedCount} new inquiries added.`)
+    );
+  } catch (error: any) {
+    console.error('[SYNC] Unhandled error in sync:', error);
+    throw error;
+  }
 });
