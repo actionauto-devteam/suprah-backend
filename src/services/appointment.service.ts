@@ -95,6 +95,28 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     console.error('Failed to sync to Google Calendar:', error);
   }
 
+  // FIX: Send email invitations to customer bookings
+  if (customerBooking) {
+    try {
+      const token = jwt.sign(
+        { appointmentId: appointment._id, email: customerBooking.email },
+        process.env.JWT_SECRET || 'secret',
+        { expiresIn: '30d' }
+      );
+
+      await emailService.sendAppointmentInvitation(
+        appointment,
+        organizer,
+        customerBooking.email,
+        token
+      );
+      console.log(`✅ Sent customer booking invitation to ${customerBooking.email}`);
+    } catch (error) {
+      console.error(`❌ Failed to send customer booking invitation:`, error);
+    }
+  }
+
+  // Send invitations to guest emails
   if (guestEmails.length > 0) {
     const invitationPromises = guestEmails.map(async (guest) => {
       try {
@@ -360,6 +382,19 @@ const updateAppointment = async (
     }
   }
 
+  // FIX: Send update email to customer booking
+  if (appointment.customerBooking?.isCustomerBooking) {
+    const organizer = await User.findById(appointment.createdBy).select('name email');
+    if (organizer) {
+      try {
+        await emailService.sendAppointmentUpdate(appointment, organizer, appointment.customerBooking.email);
+        console.log(`✅ Sent customer booking update to ${appointment.customerBooking.email}`);
+      } catch (error) {
+        console.error(`❌ Failed to send customer booking update:`, error);
+      }
+    }
+  }
+
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
@@ -429,6 +464,19 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
+  // FIX: Send cancellation email to customer booking
+  if (appointment.customerBooking?.isCustomerBooking) {
+    const organizer = await User.findById(appointment.createdBy).select('name email');
+    if (organizer) {
+      try {
+        await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
+        console.log(`✅ Sent customer booking cancellation to ${appointment.customerBooking.email}`);
+      } catch (error) {
+        console.error(`❌ Failed to send customer booking cancellation:`, error);
+      }
+    }
+  }
+
   return appointment;
 };
 
@@ -470,6 +518,19 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
           emailService.sendAppointmentCancellation(appointment, organizer, guest.email)
         )
       );
+    }
+  }
+
+  // FIX: Send cancellation email to customer booking
+  if (appointment.customerBooking?.isCustomerBooking) {
+    const organizer = await User.findById(appointment.createdBy).select('name email');
+    if (organizer) {
+      try {
+        await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
+        console.log(`✅ Sent customer booking cancellation to ${appointment.customerBooking.email}`);
+      } catch (error) {
+        console.error(`❌ Failed to send customer booking cancellation:`, error);
+      }
     }
   }
 
