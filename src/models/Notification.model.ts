@@ -43,6 +43,9 @@ const NotificationSchema = new Schema(
         'password_changed',
         'email_changed',
         'profile_updated',
+        'driver_request',
+        'driver_request_approved',
+        'driver_request_rejected',
       ],
     },
     title: {

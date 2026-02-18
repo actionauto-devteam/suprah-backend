@@ -14,6 +14,7 @@ import gmailRoute from "./gmail.route";
 import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
+import driverRequestRoute from "./driverRequest.routes";
 import paymentRoute from "./payment.routes";
 import leadRoute from "./lead.route";
 
@@ -87,6 +88,10 @@ const defaultRoutes = [
   {
     path: "/payments",
     route: paymentRoute,
+  },
+  {
+    path: "/driver-requests",
+    route: driverRequestRoute,
   },
 ];
 

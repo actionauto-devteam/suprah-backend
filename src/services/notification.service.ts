@@ -30,6 +30,9 @@ const VALID_NOTIFICATION_TYPES = [
   'appointment_reminder',
   'guest_response', // NEW: For guest RSVP changes
   'message_received',
+  'driver_request',
+  'driver_request_approved',
+  'driver_request_rejected',
 ] as const;
 
 /**
