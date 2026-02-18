@@ -3,6 +3,7 @@ import { Request, Response } from 'express';
 import Lead from '../models/lead.model';
 import { parseStringPromise } from 'xml2js';
 import User, { IUser } from '../models/User.model';
+import AuditLog from '../models/AuditLog.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -20,10 +21,10 @@ export const receiveADF = async (req: Request, res: Response) => {
     }
 
     // Parse XML to JSON
-    const result = await parseStringPromise(xmlData, { 
-      explicitArray: false, 
-      ignoreAttrs: false, 
-      mergeAttrs: true 
+    const result = await parseStringPromise(xmlData, {
+      explicitArray: false,
+      ignoreAttrs: false,
+      mergeAttrs: true
     });
 
     const prospect = result.adf?.prospect;
@@ -68,7 +69,15 @@ export const receiveADF = async (req: Request, res: Response) => {
 
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${firstName} ${lastName}`);
-    
+
+    await AuditLog.create({
+      entityType: 'Lead',
+      entityId: newLead._id,
+      action: 'CREATE',
+      reason: 'New Lead via ADF/XML',
+      changes: { firstName, lastName, source: 'ADF Email' }
+    });
+
     res.status(200).send('Lead processed successfully');
   } catch (error) {
     console.error('Error processing ADF:', error);
@@ -98,6 +107,19 @@ export const updateLead = async (req: Request, res: Response) => {
       { new: true }
     );
 
+
+
+    if (lead) {
+      await AuditLog.create({
+        entityType: 'Lead',
+        entityId: lead._id,
+        action: 'UPDATE',
+        reason: 'Lead status updated',
+        performedBy: (req.user as any)?._id,
+        changes: { status }
+      });
+    }
+
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
@@ -112,13 +134,13 @@ export const updateLead = async (req: Request, res: Response) => {
 export const createInquiry = async (req: Request, res: Response) => {
   try {
     console.log('[DEBUG] createInquiry called with body:', req.body);
-    
+
     const { firstName, lastName, email, phone, vehicle, comments, source } = req.body;
 
     // Validate required fields
     if (!firstName || !email || !phone) {
       console.log('[DEBUG] Missing required fields:', { firstName, email, phone });
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Missing required fields: firstName, email, phone',
         received: { firstName, email, phone }
       });
@@ -141,7 +163,16 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const savedLead = await newLead.save();
     console.log(`[SUCCESS] New Test Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
-    
+
+    await AuditLog.create({
+      entityType: 'Lead',
+      entityId: savedLead._id,
+      action: 'CREATE',
+      reason: 'New Lead Manual Entry',
+      performedBy: (req.user as any)?._id,
+      changes: { firstName, lastName, source }
+    });
+
     res.status(201).json({
       success: true,
       message: 'Test inquiry created successfully',
@@ -149,7 +180,7 @@ export const createInquiry = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('[ERROR] Error creating inquiry:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error creating inquiry',
       error: process.env.NODE_ENV === 'development' ? error : 'Internal server error'
     });
@@ -210,12 +241,25 @@ export const replyToInquiry = async (req: Request, res: Response) => {
 
     const lead = await Lead.findByIdAndUpdate(
       id,
-      { 
+      {
         status: 'Contacted',
         isRead: true,
       },
       { new: true }
     );
+
+
+
+    if (lead) {
+      await AuditLog.create({
+        entityType: 'Lead',
+        entityId: lead._id,
+        action: 'UPDATE',
+        reason: 'Lead replied to',
+        performedBy: (req.user as any)?._id,
+        changes: { status: 'Contacted', isRead: true }
+      });
+    }
 
     if (!lead) {
       return res.status(404).json({ message: 'Inquiry not found' });
@@ -314,7 +358,7 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
         });
 
         const headers = details.data.payload?.headers || [];
-        const getHeader = (name: string) => 
+        const getHeader = (name: string) =>
           headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
         const from = getHeader('from');
@@ -370,6 +414,15 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
           await newLead.save();
           syncedCount++;
           console.log(`[SYNC] Created lead from email: ${email}`);
+
+          await AuditLog.create({
+            entityType: 'Lead',
+            entityId: newLead._id,
+            action: 'CREATE',
+            reason: 'New Lead via Gmail Sync',
+            performedBy: user._id,
+            changes: { email, subject }
+          });
         }
       } catch (error) {
         console.error(`[SYNC] Error processing message ${message.id}:`, error);

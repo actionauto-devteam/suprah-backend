@@ -20,5 +20,21 @@ router.use(requireSuperAdmin);
 router.get('/organizations', adminController.getAllOrganizations);
 router.get('/users', adminController.getAllUsers);
 router.get('/stats', adminController.getSystemStats);
+router.get('/financials', adminController.getFinancialStats);
+router.get('/audit-logs', adminController.getAuditLogs);
+router.get('/audit-logs/stats', adminController.getAuditLogStats);
+router.get('/sync-logs', adminController.getSyncLogs);
+router.get('/sync-logs/stats', adminController.getSyncStats);
+
+// User Management Actions
+router.post('/users/:id/suspend', adminController.suspendUser);
+router.post('/users/:id/activate', adminController.activateUser);
+router.put('/users/:id/role', adminController.updateUserRole);
+
+// Organization Management Actions
+router.put('/organizations/:id/status', adminController.suspendOrganization); // Simplified to toggle logic or specific status
+router.put('/organizations/:id/activate', adminController.activateOrganization); // Explicit activate
+router.put('/organizations/:id/suspend', adminController.suspendOrganization); // Explicit suspend
+router.put('/organizations/:id/subscription', adminController.updateOrganizationSubscription);
 
 export default router;

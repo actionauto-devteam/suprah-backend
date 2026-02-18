@@ -5,6 +5,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
 import User from '../models/User.model';
+import AuditLog from '../models/AuditLog.model';
 
 import Organization from '../models/Organization.model';
 
@@ -89,6 +90,17 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
         { new: true, runValidators: true }
     ).select('-password');
 
+    if (user) {
+        await AuditLog.create({
+            entityType: 'User',
+            entityId: user._id,
+            action: 'UPDATE',
+            reason: 'User profile updated',
+            performedBy: user._id,
+            changes: safeData
+        });
+    }
+
     if (!user) {
         return res.status(404).json(new ApiResponse(404, null, 'User not found'));
     }
@@ -141,6 +153,15 @@ const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
         },
         { new: true }
     ).select('-password');
+
+    await AuditLog.create({
+        entityType: 'User',
+        entityId: user!._id,
+        action: 'UPDATE',
+        reason: `User selected organization: ${organization.name}`,
+        performedBy: user!._id,
+        changes: { organizationId: organization._id, organizationRole: role }
+    });
 
     res.json(new ApiResponse(200, user, `Selected organization: ${organization.name}`));
 });

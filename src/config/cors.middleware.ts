@@ -32,6 +32,7 @@ export const setupCORS = (app: Application): void => {
       'Origin',
       'Access-Control-Request-Method',
       'Access-Control-Request-Headers',
+      'x-impersonate-org-id',
     ],
     exposedHeaders: ['Content-Range', 'X-Content-Range'],
     maxAge: 86400, // 24 hours

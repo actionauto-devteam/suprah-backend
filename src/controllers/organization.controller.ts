@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import AuditLog from '../models/AuditLog.model';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
@@ -28,6 +29,15 @@ export const createOrganization = async (req: Request, res: Response) => {
         slug,
         ownerId: user._id,
         // clerkId: ... // Optional, we can leave it empty or generate a placeholder if needed
+    });
+
+    await AuditLog.create({
+        entityType: 'Organization',
+        entityId: org._id,
+        action: 'CREATE',
+        reason: 'New organization registered',
+        performedBy: user._id,
+        changes: { name, slug, ownerId: user._id }
     });
 
     // Update user's organization
@@ -96,6 +106,15 @@ export const updateOrganization = async (req: Request, res: Response) => {
 
     await org.save();
 
+    await AuditLog.create({
+        entityType: 'Organization',
+        entityId: org._id,
+        action: 'UPDATE',
+        reason: 'Organization settings updated',
+        performedBy: req.user?._id,
+        changes: { name, logoUrl, metadata }
+    });
+
     res.status(200).json({
         success: true,
         data: org,
@@ -123,6 +142,14 @@ export const deleteOrganization = async (req: Request, res: Response) => {
     }
 
     await Organization.findByIdAndDelete(id);
+
+    await AuditLog.create({
+        entityType: 'Organization',
+        entityId: id,
+        action: 'DELETE',
+        reason: 'Organization deleted',
+        performedBy: req.user?._id
+    });
 
     // Detach all members
     await User.updateMany(
@@ -194,6 +221,15 @@ export const removeMember = async (req: Request, res: Response) => {
 
     await User.findByIdAndUpdate(userId, {
         $unset: { organizationId: 1, organizationRole: 1 }
+    });
+
+    await AuditLog.create({
+        entityType: 'Organization',
+        entityId: id,
+        action: 'UPDATE',
+        reason: 'Member removed from organization',
+        performedBy: req.user?._id,
+        changes: { removedUserId: userId }
     });
 
     res.status(200).json({

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
+import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
@@ -152,6 +153,15 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
                 : 'Shipment created successfully.'
         )
     );
+
+    await AuditLog.create({
+        entityType: 'Shipment',
+        entityId: shipment._id,
+        action: 'CREATE',
+        reason: 'Shipment created from quote',
+        performedBy: userId,
+        changes: { quoteId, trackingNumber }
+    });
 });
 
 /**
@@ -325,6 +335,15 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
+
+    await AuditLog.create({
+        entityType: 'Shipment',
+        entityId: shipment._id,
+        action: 'UPDATE',
+        reason: 'Shipment updated',
+        performedBy: userId,
+        changes: updateData
+    });
 });
 
 /**
@@ -448,6 +467,14 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
                 : 'Shipment deleted successfully. Quote has been restored.'
         )
     );
+
+    await AuditLog.create({
+        entityType: 'Shipment',
+        entityId: req.params.id,
+        action: 'DELETE',
+        reason: 'Shipment deleted',
+        performedBy: userId
+    });
 });
 
 /**

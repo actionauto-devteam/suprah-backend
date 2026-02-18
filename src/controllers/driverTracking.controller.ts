@@ -5,6 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import DriverLocation, { DriverStatus } from "../models/DriverLocation.model";
 import Shipment from "../models/Shipment.model";
 import User, { IUser } from "../models/User.model";
+import AuditLog from "../models/AuditLog.model";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -49,6 +50,17 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
   );
 
   res.json(new ApiResponse(200, location, "Driver location updated"));
+
+  if (status) {
+    await AuditLog.create({
+      entityType: 'Driver',
+      entityId: userId,
+      action: 'UPDATE',
+      reason: 'Driver status updated',
+      performedBy: userId,
+      changes: { status, lat, lng }
+    });
+  }
 });
 
 const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
@@ -72,11 +84,11 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
     lastSeenAt: location.lastSeenAt,
     driver: location.userId
       ? {
-          id: location.userId._id.toString(),
-          name: location.userId.name,
-          email: location.userId.email,
-          avatar: location.userId.avatar,
-        }
+        id: location.userId._id.toString(),
+        name: location.userId.name,
+        email: location.userId.email,
+        avatar: location.userId.avatar,
+      }
       : null,
     shipments: (location.shipmentIds || []).map((s: any) => ({
       id: s._id.toString(),
@@ -123,6 +135,15 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   );
 
   res.json(new ApiResponse(200, shipment, "Load assigned"));
+
+  await AuditLog.create({
+    entityType: 'Shipment',
+    entityId: shipment._id,
+    action: 'UPDATE',
+    reason: 'Load assigned to driver',
+    performedBy: (req.user as any)?._id, // Dispatcher/Admin
+    changes: { assignedDriverId: driver._id, status: 'Dispatched' } // Assuming logic implies dispatch
+  });
 });
 
 const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -156,6 +177,15 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   await shipment.save();
 
   res.json(new ApiResponse(200, shipment, "Load accepted"));
+
+  await AuditLog.create({
+    entityType: 'Shipment',
+    entityId: shipment._id,
+    action: 'UPDATE',
+    reason: 'Driver accepted load',
+    performedBy: userId,
+    changes: { status: shipment.status, driverAcceptedAt: shipment.driverAcceptedAt }
+  });
 });
 
 const getMyLoads = asyncHandler(async (req: Request, res: Response) => {

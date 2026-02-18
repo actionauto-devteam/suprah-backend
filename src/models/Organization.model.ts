@@ -8,6 +8,7 @@ export interface IOrganization extends Document {
     members?: mongoose.Types.ObjectId[]; // Array of User ObjectIds
     logoUrl?: string;
     metadata?: any;
+    status: 'active' | 'suspended' | 'archived';
     createdAt: Date;
     updatedAt: Date;
 }
@@ -44,6 +45,11 @@ const OrganizationSchema = new Schema<IOrganization>(
         metadata: {
             type: Schema.Types.Mixed,
             default: {},
+        },
+        status: {
+            type: String,
+            enum: ['active', 'suspended', 'archived'],
+            default: 'active',
         },
     },
     {

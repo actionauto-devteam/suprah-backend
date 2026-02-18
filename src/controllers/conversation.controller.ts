@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import conversationService from '../services/conversation.service';
 import { ApiResponse } from '../utils/ApiResponse';
+import AuditLog from '../models/AuditLog.model';
 import { IUser } from '../models/User.model';
 
 const createConversation = asyncHandler(async (req: Request, res: Response) => {
@@ -13,6 +14,15 @@ const createConversation = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(
     new ApiResponse(201, conversation, 'Conversation created successfully')
   );
+
+  await AuditLog.create({
+    entityType: 'Conversation',
+    entityId: conversation._id,
+    action: 'CREATE',
+    reason: 'New conversation started',
+    performedBy: userId,
+    changes: { participants: req.body.participants, subject: req.body.subject }
+  });
 });
 
 const getUserConversations = asyncHandler(async (req: Request, res: Response) => {
@@ -73,6 +83,15 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(
     new ApiResponse(201, conversation, 'Message sent successfully')
   );
+
+  await AuditLog.create({
+    entityType: 'Conversation',
+    entityId: conversationId,
+    action: 'UPDATE',
+    reason: 'Message sent',
+    performedBy: userId,
+    changes: { messageId: conversation.messages[conversation.messages.length - 1]?._id }
+  });
 });
 
 const addExternalEmail = asyncHandler(async (req: Request, res: Response) => {
@@ -119,6 +138,15 @@ const archiveConversation = asyncHandler(async (req: Request, res: Response) => 
   res.json(
     new ApiResponse(200, conversation, 'Conversation archived successfully')
   );
+
+  await AuditLog.create({
+    entityType: 'Conversation',
+    entityId: conversationId,
+    action: 'UPDATE',
+    reason: 'Conversation archived',
+    performedBy: userId,
+    changes: { archived: true }
+  });
 });
 
 const syncGmailInbox = asyncHandler(async (req: Request, res: Response) => {

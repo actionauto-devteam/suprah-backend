@@ -5,6 +5,7 @@ import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import emailService from '../services/email.service';
+import AuditLog from '../models/AuditLog.model';
 import config from '../config';
 
 export const createInvitation = async (req: Request, res: Response) => {
@@ -55,6 +56,15 @@ export const createInvitation = async (req: Request, res: Response) => {
             token,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
             status: 'pending',
+        });
+
+        await AuditLog.create({
+            entityType: 'Invitation',
+            entityId: token, // We don't have ID easily unless we grab form create, but token is unique enough or we use email
+            action: 'CREATE',
+            reason: `Invitation sent to ${email}`,
+            performedBy: req.user._id,
+            changes: { email, organizationId, role }
         });
     }
 
@@ -179,6 +189,24 @@ export const acceptInvitation = async (req: Request, res: Response) => {
     // Update invite
     invite.status = 'accepted';
     await invite.save();
+
+    await AuditLog.create({
+        entityType: 'Invitation',
+        entityId: invite._id,
+        action: 'UPDATE',
+        reason: `Invitation accepted by ${user.email}`,
+        performedBy: user._id,
+        changes: { status: 'accepted' }
+    });
+
+    await AuditLog.create({
+        entityType: 'User',
+        entityId: user._id,
+        action: 'UPDATE',
+        reason: `User joined organization ${invite.organizationId}`,
+        performedBy: user._id,
+        changes: { organizationId: invite.organizationId, role: invite.role }
+    });
 
     res.status(200).json({
         success: true,

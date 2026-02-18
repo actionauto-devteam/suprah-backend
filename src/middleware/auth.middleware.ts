@@ -22,7 +22,6 @@ declare global {
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
         // 1. Get the token from the header
-        console.log('Auth Middleware: Raw Authorization Header:', req.headers.authorization);
         const token = req.headers.authorization?.split(' ')[1];
 
         if (!token) {
@@ -49,7 +48,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         // 3. Find user in local database
         let user = await User.findOne({ clerkId: clerkUserId });
         if (user) {
-            console.log('Auth Middleware: User found locally:', user._id);
+            console.log('Auth Middleware: User found locally:', user._id, user.role);
         } else {
             console.log('Auth Middleware: User NOT found locally. Attempting JIT...');
         }
@@ -125,6 +124,26 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             orgRole,
             getToken: async () => token || null,
         };
+
+        // --- SUSPENSION CHECK START ---
+        if (user && !user.isActive) {
+            throw new ApiError(403, 'Account Suspended');
+        }
+
+        // Note: We need to fetch the org status if we want to enforce it here.
+        // Since we don't always fetch the full organization object in this middleware (we only have ID),
+        // we might rely on the invalidation of the user's access OR fetch it if orgId is present.
+        // For performance, we can skip fetching if not needed, but for security, if orgId is present, we SHOULD check.
+        if (req.orgId) {
+            const orgStatusCheck = await Organization.findById(req.orgId).select('status');
+            if (orgStatusCheck && orgStatusCheck.status === 'suspended') {
+                // Exception: Allow Super Admin to access suspended orgs (to fix them)
+                if (user?.role !== 'super_admin') {
+                    throw new ApiError(403, 'Organization Suspended');
+                }
+            }
+        }
+        // --- SUSPENSION CHECK END ---
 
         next();
     } catch (error) {

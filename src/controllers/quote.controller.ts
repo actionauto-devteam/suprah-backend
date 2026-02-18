@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
+import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
@@ -142,6 +143,15 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     res.status(201).json(
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
     );
+
+    await AuditLog.create({
+        entityType: 'Quote',
+        entityId: quote._id,
+        action: 'CREATE',
+        reason: 'New shipping quote created',
+        performedBy: userId,
+        changes: { firstName, lastName, vehicleId, fromZip, toZip }
+    });
 });
 
 /**
@@ -313,6 +323,15 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
+
+    await AuditLog.create({
+        entityType: 'Quote',
+        entityId: quote._id,
+        action: 'UPDATE',
+        reason: 'Quote details updated',
+        performedBy: userId,
+        changes: updateData
+    });
 });
 
 /**
@@ -359,6 +378,15 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, quote, 'Quote status updated successfully'));
+
+    await AuditLog.create({
+        entityType: 'Quote',
+        entityId: quote._id,
+        action: 'UPDATE',
+        reason: `Quote status changed to ${status}`,
+        performedBy: userId,
+        changes: { status }
+    });
 });
 
 /**
@@ -399,6 +427,14 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
+
+    await AuditLog.create({
+        entityType: 'Quote',
+        entityId: req.params.id,
+        action: 'DELETE',
+        reason: 'Quote deleted',
+        performedBy: userId
+    });
 });
 
 export default {
