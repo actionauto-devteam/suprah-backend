@@ -18,82 +18,52 @@ const getUserId = (req: Request): string => {
 
 /**
  * POST /api/driver-requests
- * Driver submits a request to join a dealer's organization
+ * Driver submits a registration request — no dealer email needed.
+ * Notifies all super_admin users automatically.
  * Auth required, NO org required
  */
 const createDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const { dealerEmail } = req.body as { dealerEmail?: string };
+    const currentUser = req.user as IUser;
 
-    if (!dealerEmail) {
-      throw new ApiError(400, "Dealer email is required");
-    }
-
-    // Find the dealer by email
-    const dealer = await User.findOne({
-      email: dealerEmail.trim().toLowerCase(),
-    });
-    if (!dealer || !dealer.organizationId) {
-      throw new ApiError(
-        404,
-        "No dealer found with that email. Please check the email and try again.",
-      );
-    }
-
-    const organizationId = dealer.organizationId;
-
-    // Check if driver already has a pending request to this org
+    // Prevent duplicate pending requests
     const existingRequest = await DriverRequest.findOne({
       driverUserId: userId,
-      organizationId,
       status: "pending",
     });
 
     if (existingRequest) {
-      throw new ApiError(
-        400,
-        "You already have a pending request to this organization",
-      );
+      throw new ApiError(400, "You already have a pending driver request");
     }
 
-    // Check if driver is already a member of this org
-    const currentUser = req.user as IUser;
-    if (
-      currentUser.organizationId &&
-      currentUser.organizationId.toString() === organizationId.toString()
-    ) {
-      throw new ApiError(400, "You are already a member of this organization");
+    // Also reject if already approved
+    const approvedRequest = await DriverRequest.findOne({
+      driverUserId: userId,
+      status: "approved",
+    });
+
+    if (approvedRequest) {
+      throw new ApiError(400, "Your driver account is already approved");
     }
 
-    // Set user accountType to driver
-    currentUser.accountType = "driver";
-    await currentUser.save();
-
-    // Create the request
+    // Create the request (no dealerEmail, no organizationId)
     const driverRequest = await DriverRequest.create({
       driverUserId: userId,
-      dealerEmail: dealerEmail.trim().toLowerCase(),
-      organizationId,
       status: "pending",
     });
 
-    // Notify all admins in the organization
-    const orgAdmins = await User.find({
-      organizationId,
-      organizationRole: "admin",
-    });
+    // Notify all super_admin users
+    const superAdmins = await User.find({ role: "super_admin" });
 
-    const org = await Organization.findById(organizationId);
-
-    for (const admin of orgAdmins) {
+    for (const admin of superAdmins) {
       try {
         await notificationService.createNotification({
           userId: admin._id.toString(),
-          organizationId: organizationId.toString(),
+          organizationId: admin.organizationId?.toString() || "global",
           type: "driver_request",
           title: "New Driver Request",
-          message: `${currentUser.name} (${currentUser.email}) wants to join as a driver.`,
+          message: `${currentUser.name} (${currentUser.email}) wants to register as a driver.`,
           metadata: {
             driverRequestId: driverRequest._id.toString(),
             driverName: currentUser.name,
@@ -121,7 +91,6 @@ const getMyDriverRequestStatus = asyncHandler(
     const userId = getUserId(req);
 
     const request = await DriverRequest.findOne({ driverUserId: userId })
-      .populate("organizationId", "name slug logoUrl")
       .sort({ createdAt: -1 });
 
     if (!request) {
@@ -132,8 +101,6 @@ const getMyDriverRequestStatus = asyncHandler(
     const data = {
       _id: request._id,
       status: request.status,
-      organizationId: request.organizationId,
-      dealerEmail: request.dealerEmail,
       createdAt: request.createdAt,
       reviewedAt: request.reviewedAt,
     };
@@ -144,21 +111,20 @@ const getMyDriverRequestStatus = asyncHandler(
 
 /**
  * GET /api/driver-requests
- * Admin lists driver requests for their organization
- * Auth + org + admin required
+ * Super admin lists all driver requests
+ * Auth required
  */
 const getDriverRequests = asyncHandler(
   async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const user = req.user as IUser;
 
-    if (user.organizationRole !== "admin") {
-      throw new ApiError(403, "Only admins can view driver requests");
+    if (user.role !== "super_admin") {
+      throw new ApiError(403, "Only super admins can view driver requests");
     }
 
     const { status } = req.query;
 
-    const filter: any = { organizationId: orgId };
+    const filter: any = {};
     if (status && status !== "all") {
       filter.status = status;
     }
@@ -174,20 +140,19 @@ const getDriverRequests = asyncHandler(
 
 /**
  * PATCH /api/driver-requests/:id/approve
- * Admin approves a driver request
+ * Super admin approves a driver request
+ * Auth required
  */
 const approveDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const adminUser = req.user as IUser;
 
-    if (adminUser.organizationRole !== "admin") {
-      throw new ApiError(403, "Only admins can approve driver requests");
+    if (adminUser.role !== "super_admin") {
+      throw new ApiError(403, "Only super admins can approve driver requests");
     }
 
     const request = await DriverRequest.findOne({
       _id: req.params.id,
-      organizationId: orgId,
       status: "pending",
     });
 
@@ -195,21 +160,17 @@ const approveDriverRequest = asyncHandler(
       throw new ApiError(404, "Driver request not found or already processed");
     }
 
-    // Update the driver user
+    // Update the driver user — set role to 'driver'
     const driverUser = await User.findById(request.driverUserId);
     if (!driverUser) {
       throw new ApiError(404, "Driver user not found");
     }
 
-    driverUser.organizationId = request.organizationId as any;
-    driverUser.organizationRole = "driver";
-    driverUser.accountType = "driver";
+    driverUser.role = "driver";
+    if (request.organizationId) {
+      driverUser.organizationId = request.organizationId;
+    }
     await driverUser.save();
-
-    // Add to organization members
-    await Organization.findByIdAndUpdate(orgId, {
-      $addToSet: { members: driverUser._id },
-    });
 
     // Update the request
     request.status = "approved";
@@ -221,11 +182,11 @@ const approveDriverRequest = asyncHandler(
     try {
       await notificationService.createNotification({
         userId: driverUser._id.toString(),
-        organizationId: orgId,
+        organizationId: "global",
         type: "driver_request_approved",
         title: "Request Approved",
         message:
-          "Your driver request has been approved. You can now log in to your dashboard.",
+          "Your driver request has been approved. You can now access your driver dashboard.",
         metadata: {
           driverRequestId: request._id.toString(),
         },
@@ -234,15 +195,12 @@ const approveDriverRequest = asyncHandler(
       // Non-critical
     }
 
-    // Send approval email to driver's Gmail
+    // Send approval email to driver
     try {
-      const org = await Organization.findById(orgId);
-      const orgName = org?.name || "the organization";
-
       await emailService.sendEmail({
         to: driverUser.email,
         subject: "Your Driver Account Has Been Approved - Action Auto",
-        text: `Hi ${driverUser.name},\n\nGreat news! Your driver account request for ${orgName} has been approved.\n\nYou can now log in to your Driver Dashboard and start receiving load assignments.\n\nLog in at: ${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in\n\nWelcome aboard!\n— Action Auto Team`,
+        text: `Hi ${driverUser.name},\n\nGreat news! Your driver account has been approved.\n\nYou can now log in to your Driver Dashboard and start receiving load assignments.\n\nLog in at: ${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in\n\nWelcome aboard!\n— Action Auto Team`,
         html: `
           <!DOCTYPE html>
           <html>
@@ -262,7 +220,7 @@ const approveDriverRequest = asyncHandler(
             <div class="container">
               <div class="header">
                 <h1>Account Approved!</h1>
-                <p style="margin: 8px 0 0 0; opacity: 0.9;">Welcome to ${orgName}</p>
+                <p style="margin: 8px 0 0 0; opacity: 0.9;">Welcome to Action Auto Driver Portal</p>
               </div>
               <div class="content">
                 <p style="font-size: 16px;">Hi <strong>${driverUser.name}</strong>,</p>
@@ -273,7 +231,7 @@ const approveDriverRequest = asyncHandler(
                 <p style="text-align: center;">
                   <a href="${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in" class="btn">Log In to Dashboard</a>
                 </p>
-                <p style="margin-top: 24px; color: #6b7280; font-size: 14px;">If you have any questions, reach out to your dealer admin.</p>
+                <p style="margin-top: 24px; color: #6b7280; font-size: 14px;">If you have any questions, reach out to your administrator.</p>
               </div>
               <div class="footer">
                 <p><strong>Action Auto - Driver Portal</strong></p>
@@ -286,7 +244,6 @@ const approveDriverRequest = asyncHandler(
       });
     } catch (emailErr) {
       console.error("Failed to send approval email:", emailErr);
-      // Non-critical — don't block the approval
     }
 
     res.json(new ApiResponse(200, request, "Driver request approved"));
@@ -295,20 +252,19 @@ const approveDriverRequest = asyncHandler(
 
 /**
  * PATCH /api/driver-requests/:id/reject
- * Admin rejects a driver request
+ * Super admin rejects a driver request
+ * Auth required
  */
 const rejectDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const adminUser = req.user as IUser;
 
-    if (adminUser.organizationRole !== "admin") {
-      throw new ApiError(403, "Only admins can reject driver requests");
+    if (adminUser.role !== "super_admin") {
+      throw new ApiError(403, "Only super admins can reject driver requests");
     }
 
     const request = await DriverRequest.findOne({
       _id: req.params.id,
-      organizationId: orgId,
       status: "pending",
     });
 
@@ -327,11 +283,11 @@ const rejectDriverRequest = asyncHandler(
       if (driverUser) {
         await notificationService.createNotification({
           userId: driverUser._id.toString(),
-          organizationId: orgId,
+          organizationId: "global",
           type: "driver_request_rejected",
           title: "Request Rejected",
           message:
-            "Your driver request has been rejected. Please contact the dealer for more information.",
+            "Your driver request has been rejected. Please contact the administrator for more information.",
           metadata: {
             driverRequestId: request._id.toString(),
           },

@@ -9,8 +9,7 @@ export interface IUser extends Document {
   clerkId?: string;
   emailVerified: boolean;
   avatar?: string;
-  accountType: 'dealer' | 'driver';
-  role: 'user' | 'admin' | 'super_admin';
+  role: "user" | "admin" | "super_admin" | "driver";
   isActive: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
@@ -19,7 +18,7 @@ export interface IUser extends Document {
   passwordResetExpires?: Date;
   createdAt: Date;
   updatedAt: Date;
-  theme: 'light' | 'dark';
+  theme: "light" | "dark";
 
   // Google Calendar Integration
   googleCalendar?: {
@@ -30,11 +29,10 @@ export interface IUser extends Document {
     connectedAt?: Date;
 
     // NEW: Webhook tracking
-    watchChannelId?: string;      // Current webhook channel ID
-    watchResourceId?: string;      // Current webhook resource ID
-    watchExpiration?: Date;        // When the webhook expires
+    watchChannelId?: string; // Current webhook channel ID
+    watchResourceId?: string; // Current webhook resource ID
+    watchExpiration?: Date; // When the webhook expires
   };
-
 
   notificationPreferences: {
     quoteCreated: boolean;
@@ -48,8 +46,8 @@ export interface IUser extends Document {
     profileUpdated: boolean;
   };
   subscription?: {
-    plan: 'free' | 'starter' | 'professional' | 'enterprise';
-    status: 'active' | 'inactive' | 'trial' | 'cancelled';
+    plan: "free" | "starter" | "professional" | "enterprise";
+    status: "active" | "inactive" | "trial" | "cancelled";
     startDate: Date;
     endDate?: Date;
     features: string[];
@@ -96,13 +94,8 @@ const UserSchema = new Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'admin', 'super_admin'],
+      enum: ['user', 'admin', 'super_admin', 'driver'],
       default: 'user',
-    },
-    accountType: {
-      type: String,
-      enum: ['dealer', 'driver'],
-      default: 'dealer',
     },
     isActive: {
       type: Boolean,

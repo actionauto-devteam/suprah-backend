@@ -3,7 +3,6 @@ import mongoose, { Document, Schema } from "mongoose";
 export type DriverStatus = "on-route" | "idle" | "offline";
 
 export interface IDriverLocation extends Document {
-  organizationId: string;
   userId: mongoose.Types.ObjectId;
   status: DriverStatus;
   coords: {
@@ -18,15 +17,11 @@ export interface IDriverLocation extends Document {
 
 const DriverLocationSchema = new Schema<IDriverLocation>(
   {
-    organizationId: {
-      type: String,
-      required: true,
-      index: true,
-    },
     userId: {
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      unique: true,
       index: true,
     },
     status: {
@@ -53,8 +48,6 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     timestamps: true,
   },
 );
-
-DriverLocationSchema.index({ organizationId: 1, userId: 1 }, { unique: true });
 
 const DriverLocation = mongoose.model<IDriverLocation>(
   "DriverLocation",

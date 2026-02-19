@@ -15,8 +15,8 @@ const getUserId = (req: Request): string => {
   return user._id.toString();
 };
 
+// POST /location — driver updates their own GPS coords (no org required)
 const updateLocation = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId as string;
   const userId = getUserId(req);
   const { lat, lng, status } = req.body as {
     lat: number;
@@ -33,7 +33,6 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const updateData: any = {
-    organizationId: orgId,
     userId,
     coords: { lat, lng },
     lastSeenAt: new Date(),
@@ -44,7 +43,7 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const location = await DriverLocation.findOneAndUpdate(
-    { organizationId: orgId, userId },
+    { userId },
     { $set: updateData },
     { new: true, upsert: true },
   );
@@ -53,55 +52,90 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
 
   if (status) {
     await AuditLog.create({
-      entityType: 'Driver',
+      entityType: "Driver",
       entityId: userId,
-      action: 'UPDATE',
-      reason: 'Driver status updated',
+      action: "UPDATE",
+      reason: "Driver status updated",
       performedBy: userId,
-      changes: { status, lat, lng }
+      changes: { status, lat, lng },
     });
   }
 });
 
+// GET /active — admin fetches all sharing drivers (global), with org-scoped shipment context
 const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status } = req.query;
 
-  const filter: any = { organizationId: orgId };
+  const orgShipments = await Shipment.find(
+    {
+      organizationId: orgId,
+      assignedDriverId: { $exists: true, $ne: null },
+      status: { $nin: ["Delivered", "Cancelled"] },
+    },
+    "_id assignedDriverId trackingNumber status origin destination",
+  ).sort({ assignedAt: -1 });
+
+  const filter: any = {};
   if (status && status !== "all") {
     filter.status = status;
   }
 
   const locations = await DriverLocation.find(filter)
-    .populate("userId", "name email avatar")
-    .populate("shipmentIds", "trackingNumber status origin destination")
+    .populate("userId", "name email avatar role")
     .sort({ lastSeenAt: -1 });
 
-  const data = locations.map((location: any) => ({
-    id: location._id.toString(),
-    status: location.status,
-    coords: location.coords,
-    lastSeenAt: location.lastSeenAt,
-    driver: location.userId
-      ? {
-        id: location.userId._id.toString(),
-        name: location.userId.name,
-        email: location.userId.email,
-        avatar: location.userId.avatar,
-      }
-      : null,
-    shipments: (location.shipmentIds || []).map((s: any) => ({
-      id: s._id.toString(),
-      trackingNumber: s.trackingNumber,
-      status: s.status,
-      origin: s.origin,
-      destination: s.destination,
-    })),
-  }));
+  const shipmentsByDriver = new Map<
+    string,
+    Array<{
+      id: string;
+      trackingNumber?: string;
+      status: string;
+      origin: string;
+      destination: string;
+    }>
+  >();
+
+  for (const shipment of orgShipments) {
+    const assignedDriverId = shipment.assignedDriverId?.toString();
+    if (!assignedDriverId) continue;
+
+    if (!shipmentsByDriver.has(assignedDriverId)) {
+      shipmentsByDriver.set(assignedDriverId, []);
+    }
+
+    shipmentsByDriver.get(assignedDriverId)!.push({
+      id: shipment._id.toString(),
+      trackingNumber: shipment.trackingNumber,
+      status: shipment.status,
+      origin: shipment.origin,
+      destination: shipment.destination,
+    });
+  }
+
+  const data = locations
+    .map((location: any) => ({
+      id: location._id.toString(),
+      status: location.status,
+      coords: location.coords,
+      lastSeenAt: location.lastSeenAt,
+      driver: location.userId
+        ? {
+            id: location.userId._id.toString(),
+            name: location.userId.name,
+            email: location.userId.email,
+            avatar: location.userId.avatar,
+          }
+        : null,
+      shipments:
+        shipmentsByDriver.get(location.userId?._id?.toString() || "") || [],
+    }))
+    .filter((item: any) => item.driver);
 
   res.json(new ApiResponse(200, data, "Driver locations fetched"));
 });
 
+// POST /assign-load — admin assigns a shipment to a driver (requireOrg applied in routes)
 const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { shipmentId, driverId } = req.body as {
@@ -113,7 +147,8 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Shipment ID and driver ID are required");
   }
 
-  const driver = await User.findOne({ _id: driverId, organizationId: orgId });
+  // Drivers are global; validate role only
+  const driver = await User.findOne({ _id: driverId, role: "driver" });
   if (!driver) {
     throw new ApiError(404, "Driver not found");
   }
@@ -129,7 +164,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await DriverLocation.findOneAndUpdate(
-    { organizationId: orgId, userId: driver._id },
+    { userId: driver._id },
     { $addToSet: { shipmentIds: shipment._id } },
     { new: true },
   );
@@ -137,17 +172,17 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, shipment, "Load assigned"));
 
   await AuditLog.create({
-    entityType: 'Shipment',
+    entityType: "Shipment",
     entityId: shipment._id,
-    action: 'UPDATE',
-    reason: 'Load assigned to driver',
-    performedBy: (req.user as any)?._id, // Dispatcher/Admin
-    changes: { assignedDriverId: driver._id, status: 'Dispatched' } // Assuming logic implies dispatch
+    action: "UPDATE",
+    reason: "Load assigned to driver",
+    performedBy: (req.user as any)?._id,
+    changes: { assignedDriverId: driver._id },
   });
 });
 
+// POST /accept-load — driver accepts a load (no org required)
 const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId as string;
   const userId = getUserId(req);
   const { shipmentId } = req.body as { shipmentId?: string };
 
@@ -155,10 +190,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Shipment ID is required");
   }
 
-  const shipment = await Shipment.findOne({
-    _id: shipmentId,
-    organizationId: orgId,
-  });
+  const shipment = await Shipment.findById(shipmentId);
   if (!shipment) {
     throw new ApiError(404, "Shipment not found");
   }
@@ -179,21 +211,23 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, shipment, "Load accepted"));
 
   await AuditLog.create({
-    entityType: 'Shipment',
+    entityType: "Shipment",
     entityId: shipment._id,
-    action: 'UPDATE',
-    reason: 'Driver accepted load',
+    action: "UPDATE",
+    reason: "Driver accepted load",
     performedBy: userId,
-    changes: { status: shipment.status, driverAcceptedAt: shipment.driverAcceptedAt }
+    changes: {
+      status: shipment.status,
+      driverAcceptedAt: shipment.driverAcceptedAt,
+    },
   });
 });
 
+// GET /my-loads — driver fetches their assigned loads (no org required)
 const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId as string;
   const userId = getUserId(req);
 
   const shipments = await Shipment.find({
-    organizationId: orgId,
     assignedDriverId: userId,
   }).sort({ assignedAt: -1 });
 

@@ -2,7 +2,6 @@ import mongoose, { Document, Schema } from "mongoose";
 
 export interface IDriverRequest extends Document {
   driverUserId: mongoose.Types.ObjectId;
-  dealerEmail: string;
   organizationId?: mongoose.Types.ObjectId;
   status: "pending" | "approved" | "rejected";
   reviewedBy?: mongoose.Types.ObjectId;
@@ -18,12 +17,6 @@ const DriverRequestSchema = new Schema<IDriverRequest>(
       ref: "User",
       required: true,
       index: true,
-    },
-    dealerEmail: {
-      type: String,
-      required: true,
-      trim: true,
-      lowercase: true,
     },
     organizationId: {
       type: Schema.Types.ObjectId,
