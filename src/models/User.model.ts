@@ -9,9 +9,11 @@ export interface IUser extends Document {
   clerkId?: string;
   emailVerified: boolean;
   avatar?: string;
+  accountType: 'dealer' | 'driver';
   role: 'user' | 'admin' | 'super_admin';
   isActive: boolean;
-  organizationId?: mongoose.Types.ObjectId; // Changed from string to ObjectId
+  organizationId?: mongoose.Types.ObjectId;
+  organizationRole?: string;
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -96,6 +98,11 @@ const UserSchema = new Schema(
       type: String,
       enum: ['user', 'admin', 'super_admin'],
       default: 'user',
+    },
+    accountType: {
+      type: String,
+      enum: ['dealer', 'driver'],
+      default: 'dealer',
     },
     isActive: {
       type: Boolean,
