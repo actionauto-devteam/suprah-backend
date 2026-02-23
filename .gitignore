@@ -5,6 +5,6 @@ dist
 .env.dev
 
 # FTP Server Credentials - DO NOT COMMIT
-FTP-SERVER-CREDENTIALS.md
+SERVER.md
 
 

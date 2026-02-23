@@ -1,0 +1,66 @@
+name: Build and Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main  # Adjust this if your main branch is named differently
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/actionauto-api:latest
+
+      - name: Build and push FTP image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.ftp
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/actionauto-ftp:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute deployment commands via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          password: ${{ secrets.VPS_SSH_PASSWORD }}
+          script: |
+            cd /opt/actionauto-ftp/deploy
+            
+            # Stop current services
+            docker compose -f docker-compose.api.yml down
+            docker compose -f docker-compose.ftp.yml down
+            
+            # Clean up old images and volumes to save disk space
+            docker system prune -a --volumes -f
+            
+            # Pull latest images
+            docker compose -f docker-compose.api.yml pull
+            docker compose -f docker-compose.ftp.yml pull
+            
+            # Start services
+            docker compose -f docker-compose.api.yml up -d
+            docker compose -f docker-compose.ftp.yml up -d
+            
+            # Verify status
+            docker ps
