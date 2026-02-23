@@ -10,7 +10,7 @@ const router = Router();
 router.post('/adf', receiveADF);
 
 // ============================================================
-// Protected routes - ALL must have auth BEFORE this line
+// Protected routes - ALL must have  auth BEFORE this line
 // ============================================================
 router.use(auth());
 router.use(requireOrg);

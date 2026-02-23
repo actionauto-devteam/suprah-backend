@@ -85,24 +85,36 @@ export const receiveADF = async (req: Request, res: Response) => {
   }
 };
 
-// Get all leads for the frontend sidebar
+// Get all leads for the frontend sidebar - FILTERED BY USER (not organization)
+// Each user sees ONLY the leads they synced themselves
 export const getAllLeads = async (req: Request, res: Response) => {
   try {
-    const leads = await Lead.find().sort({ createdAt: -1 });
+    const userId = (req.user as IUser)._id; // Get current user ID
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+    
+    if (!userId) {
+      return res.status(400).json({ message: 'User not found' });
+    }
+    
+    // Filter by createdBy (user who synced the lead) - USER-SPECIFIC, not organization-wide
+    const leads = await Lead.find({ createdBy: userId }).sort({ createdAt: -1 });
     res.json(leads);
   } catch (error) {
+    console.error('[ERROR] Error fetching leads:', error);
     res.status(500).json({ message: 'Error fetching leads' });
   }
 };
 
-// Update lead status
+// Update lead status - USER-SPECIFIC (user can only update their own leads)
 export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+    const userId = (req.user as IUser)._id;
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
 
-    const lead = await Lead.findByIdAndUpdate(
-      id,
+    const lead = await Lead.findOneAndUpdate(
+      { _id: id, createdBy: userId },
       { status },
       { new: true }
     );
@@ -130,12 +142,14 @@ export const updateLead = async (req: Request, res: Response) => {
   }
 };
 
-// Create a new inquiry (manual/test entry)
+// Create a new inquiry (manual/test entry) - USER-SPECIFIC
 export const createInquiry = async (req: Request, res: Response) => {
   try {
     console.log('[DEBUG] createInquiry called with body:', req.body);
 
     const { firstName, lastName, email, phone, vehicle, comments, source } = req.body;
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+    const userId = (req.user as IUser)._id;
 
     // Validate required fields
     if (!firstName || !email || !phone) {
@@ -147,6 +161,8 @@ export const createInquiry = async (req: Request, res: Response) => {
     }
 
     const newLead = new Lead({
+      // organization: orgId, // COMMENTED: For organization-wide sharing later
+      createdBy: userId,
       firstName,
       lastName: lastName || '',
       email,
@@ -187,12 +203,15 @@ export const createInquiry = async (req: Request, res: Response) => {
   }
 };
 
-// Mark lead as read
+// Mark lead as read - USER-SPECIFIC
 export const markAsRead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findByIdAndUpdate(
-      id,
+    const userId = (req.user as IUser)._id;
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+    
+    const lead = await Lead.findOneAndUpdate(
+      { _id: id, createdBy: userId },
       { isRead: true },
       { new: true }
     );
@@ -208,12 +227,15 @@ export const markAsRead = async (req: Request, res: Response) => {
   }
 };
 
-// Mark lead as pending
+// Mark lead as pending - USER-SPECIFIC
 export const markAsPending = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const lead = await Lead.findByIdAndUpdate(
-      id,
+    const userId = (req.user as IUser)._id;
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+    
+    const lead = await Lead.findOneAndUpdate(
+      { _id: id, createdBy: userId },
       { isPending: true },
       { new: true }
     );
@@ -229,18 +251,20 @@ export const markAsPending = async (req: Request, res: Response) => {
   }
 };
 
-// Reply to an inquiry (send email)
+// Reply to an inquiry (send email) - USER-SPECIFIC
 export const replyToInquiry = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { message } = req.body;
+    const userId = (req.user as IUser)._id;
+    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
 
     if (!message) {
       return res.status(400).json({ message: 'Reply message is required' });
     }
 
-    const lead = await Lead.findByIdAndUpdate(
-      id,
+    const lead = await Lead.findOneAndUpdate(
+      { _id: id, createdBy: userId },
       {
         status: 'Contacted',
         isRead: true,
@@ -328,14 +352,13 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
     // Get Gmail client
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // Fetch emails (limit to inbox, unseen and unprocessed)
+    // Fetch emails (limit to inbox, all emails - unread and read)
     console.log('[SYNC] Fetching emails from Gmail...');
     let response;
     try {
       response = await gmail.users.messages.list({
         userId: 'me',
-        q: 'is:unread', // Get unread emails as inquiries
-        maxResults: 50
+        maxResults: 100
       });
     } catch (gmailError: any) {
       console.error(`[SYNC] Gmail API error:`, gmailError.message);
@@ -343,7 +366,7 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
     }
 
     const messages = response.data.messages || [];
-    console.log(`[SYNC] Found ${messages.length} unread emails`);
+    console.log(`[SYNC] Found ${messages.length} emails in inbox`);
 
     let syncedCount = 0;
     const errors: string[] = [];
@@ -382,16 +405,20 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
           continue;
         }
 
-        // Check if this email already exists as a lead
-        const existingLead = await Lead.findOne({ email });
+        // Check if this email already exists as a lead for THIS USER
+        const userId = (req.user as IUser)._id;
+        // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+        const existingLead = await Lead.findOne({ createdBy: userId, messageId: message.id });
         if (!existingLead) {
           // Extract name from sender (e.g., "John Doe <john@email.com>" → "John Doe")
           const nameParts = senderName.split(' ').filter(p => p.length > 0);
           const firstName = nameParts[0] || email.split('@')[0];
           const lastName = nameParts.slice(1).join(' ') || '';
 
-          // Create new lead from email
+          // Create new lead from email - ASSOCIATED WITH USER ONLY (not organization)
           const newLead = new Lead({
+            // organization: orgId, // COMMENTED: For organization-wide sharing later
+            createdBy: userId,
             firstName,
             lastName,
             email,
