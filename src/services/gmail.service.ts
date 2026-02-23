@@ -1,9 +1,7 @@
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import User, { IUser } from '../models/User.model';
-import Conversation from '../models/Conversation.model';
 import { ApiError } from '../utils/ApiError';
-import mongoose from 'mongoose';
 
 interface IUserWithGoogleCalendar extends IUser {
   googleCalendar?: {
@@ -77,8 +75,7 @@ class GmailService {
     userId: string,
     to: string,
     subject: string,
-    body: string,
-    conversationId?: string
+    body: string
   ) {
     try {
       const gmail = await this.getGmailClient(userId);
@@ -112,17 +109,6 @@ class GmailService {
       });
 
       console.log(`✅ Sent email via Gmail: ${response.data.id}`);
-
-      // Save to conversation if provided
-      if (conversationId) {
-        await this.saveMessageToConversation(
-          conversationId,
-          userId,
-          body,
-          'outgoing',
-          response.data.id!
-        );
-      }
 
       return response.data;
     } catch (error: any) {
@@ -171,92 +157,11 @@ class GmailService {
   }
 
   /**
-   * Create or get conversation with external email
+   * Sync Gmail inbox emails
    */
-  async createExternalConversation(
-    userId: string,
-    organizationId: string,
-    externalEmail: string,
-    externalName?: string
-  ) {
+  async syncGmailInbox(userId: string) {
     try {
-      // Check if conversation already exists with this external email
-      let conversation = await Conversation.findOne({
-        organizationId,
-        type: 'external',
-        participants: userId,
-        'externalEmails.email': externalEmail.toLowerCase()
-      });
-
-      if (!conversation) {
-        // Create new conversation with external participant
-        conversation = await Conversation.create({
-          type: 'external',
-          organizationId,
-          participants: [userId],
-          createdBy: userId,
-          externalEmails: [{
-            email: externalEmail.toLowerCase(),
-            name: externalName || externalEmail.split('@')[0],
-            addedAt: new Date()
-          }],
-          messages: []
-        });
-
-        console.log(`✅ Created conversation with external email: ${externalEmail}`);
-      }
-
-      return conversation;
-    } catch (error: any) {
-      console.error('❌ Failed to create external conversation:', error.message);
-      throw new ApiError(500, 'Failed to create conversation');
-    }
-  }
-
-  /**
-   * Save message to conversation
-   */
-  private async saveMessageToConversation(
-    conversationId: string,
-    senderId: string,
-    content: string,
-    direction: 'incoming' | 'outgoing',
-    gmailMessageId: string
-  ) {
-    try {
-      const message = {
-        _id: new mongoose.Types.ObjectId().toString(),
-        sender: new mongoose.Types.ObjectId(senderId),
-        content,
-        type: 'email' as const,
-        metadata: {
-          gmailMessageId,
-          direction
-        },
-        isFromExternal: direction === 'incoming',
-        readBy: [new mongoose.Types.ObjectId(senderId)],
-        createdAt: new Date()
-      };
-
-      await Conversation.findByIdAndUpdate(conversationId, {
-        $push: { messages: message },
-        lastMessage: content.substring(0, 100),
-        lastMessageAt: new Date(),
-        lastMessageBy: new mongoose.Types.ObjectId(senderId)
-      });
-
-      console.log(`✅ Saved ${direction} message to conversation ${conversationId}`);
-    } catch (error) {
-      console.error('Failed to save message to conversation:', error);
-    }
-  }
-
-  /**
-   * Sync Gmail inbox with conversations
-   */
-  async syncGmailConversations(userId: string, organizationId: string) {
-    try {
-      console.log(`📧 Syncing Gmail conversations for user ${userId}`);
+      console.log(`📧 Syncing Gmail inbox for user ${userId}`);
 
       // Fetch recent emails (last 7 days)
       const sevenDaysAgo = new Date();
@@ -276,13 +181,11 @@ class GmailService {
           const to = headers.find((h: any) => h.name === 'To')?.value || '';
           const subject = headers.find((h: any) => h.name === 'Subject')?.value || '';
 
-          // Extract email address
           const fromEmail = this.extractEmail(from);
           const toEmail = this.extractEmail(to);
 
           if (!fromEmail || !toEmail) continue;
 
-          // Determine if this is incoming or outgoing
           const user = await User.findById(userId).select('email');
           if (!user) continue;
 
@@ -292,48 +195,25 @@ class GmailService {
             ? this.extractName(to) || toEmail
             : this.extractName(from) || fromEmail;
 
-          // Get or create conversation
-          const conversation = await this.createExternalConversation(
-            userId,
-            organizationId,
-            externalEmail,
-            externalName
-          );
+          const body = this.extractEmailBody(email.payload);
 
-          // Check if this message already exists
-          const existingMessage = conversation.messages.find(
-            (m: any) => m.metadata?.gmailMessageId === email.id
-          );
+          syncedCount++;
 
-          if (!existingMessage) {
-            // Extract email body
-            const body = this.extractEmailBody(email.payload);
-
-            // Save message
-            await this.saveMessageToConversation(
-              conversation._id.toString(),
-              userId,
-              body || subject,
-              isOutgoing ? 'outgoing' : 'incoming',
-              email.id!
-            );
-
-            syncedCount++;
-          }
+          console.log(`📧 Processed email from ${externalName} (${externalEmail}): ${subject}`);
         } catch (error) {
           console.error(`Failed to sync email ${email?.id || 'unknown'}:`, error);
         }
       }
 
-      console.log(`✅ Synced ${syncedCount} Gmail conversations`);
+      console.log(`✅ Synced ${syncedCount} Gmail emails`);
 
       return {
         totalEmails: emails.length,
-        syncedConversations: syncedCount
+        syncedCount
       };
     } catch (error: any) {
-      console.error('❌ Failed to sync Gmail conversations:', error.message);
-      throw new ApiError(500, 'Failed to sync Gmail conversations');
+      console.error('❌ Failed to sync Gmail inbox:', error.message);
+      throw new ApiError(500, 'Failed to sync Gmail inbox');
     }
   }
 
@@ -392,35 +272,6 @@ class GmailService {
     const user = await User.findById(userId)
       .select('+googleCalendar.accessToken') as IUserWithGoogleCalendar | null;
     return !!(user?.googleCalendar?.connected && user.googleCalendar.accessToken);
-  }
-
-  /**
-   * Link external email conversation to customer booking
-   */
-  async linkConversationToCustomerBooking(
-    conversationId: string,
-    externalEmail: string,
-    organizationId: string
-  ) {
-    try {
-      const appointments = await mongoose.model('Appointment').find({
-        organizationId,
-        'customerBooking.email': externalEmail.toLowerCase(),
-        'customerBooking.isCustomerBooking': true
-      }).sort({ createdAt: -1 });
-
-      if (appointments.length > 0) {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          $addToSet: {
-            linkedCustomerBookings: { $each: appointments.map((a: any) => a._id) }
-          }
-        });
-
-        console.log(`✅ Linked conversation to ${appointments.length} customer booking(s)`);
-      }
-    } catch (error) {
-      console.error('Failed to link conversation to customer booking:', error);
-    }
   }
 }
 
