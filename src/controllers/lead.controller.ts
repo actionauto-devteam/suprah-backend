@@ -358,7 +358,7 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
     try {
       response = await gmail.users.messages.list({
         userId: 'me',
-        maxResults: 100
+        maxResults: 500
       });
     } catch (gmailError: any) {
       console.error(`[SYNC] Gmail API error:`, gmailError.message);
