@@ -1,5 +1,4 @@
 import Appointment from '../models/Appointment.model';
-import Conversation from '../models/Conversation.model';
 import User from '../models/User.model';
 import notificationService from './notification.service';
 import emailService from './email.service';
@@ -26,7 +25,6 @@ interface CreateAppointmentData {
     email: string;
     phone: string;
   };
-  conversationId?: string;
   vehicleId?: string;
   quoteId?: string;
   shipmentId?: string;
@@ -95,7 +93,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     console.error('Failed to sync to Google Calendar:', error);
   }
 
-  // FIX: Send email invitations to customer bookings
+  // Send email invitations to customer bookings
   if (customerBooking) {
     try {
       const token = jwt.sign(
@@ -140,34 +138,6 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     await Promise.allSettled(invitationPromises);
   }
 
-  if (data.conversationId) {
-    await Conversation.findByIdAndUpdate(data.conversationId, {
-      hasAppointment: true,
-      appointmentId: appointment._id
-    });
-
-    await Conversation.findByIdAndUpdate(data.conversationId, {
-      $push: {
-        messages: {
-          sender: userId,
-          content: `${data.entryType.charAt(0).toUpperCase() + data.entryType.slice(1)} scheduled: ${data.title}`,
-          type: 'appointment',
-          metadata: {
-            appointmentId: appointment._id,
-            startTime: data.startTime,
-            endTime: data.endTime,
-            entryType: data.entryType
-          },
-          readBy: [userId],
-          createdAt: new Date()
-        }
-      },
-      lastMessage: `${data.entryType.charAt(0).toUpperCase() + data.entryType.slice(1)} scheduled: ${data.title}`,
-      lastMessageAt: new Date(),
-      lastMessageBy: userId
-    });
-  }
-
   const participantIds = participants.filter(p => p !== userId);
   await Promise.all(
     participantIds.map(participantId =>
@@ -201,10 +171,6 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
 
 // =============================================================================
 // FIX: Safe ObjectId casting helper
-// The `participants` field is Schema.Types.ObjectId[]. When querying with a
-// string userId, Mongoose tries to auto-cast. If the string isn't a valid
-// 24-char hex ObjectId, it throws a CastError. This helper safely converts
-// and falls back to querying by `createdBy` if casting fails.
 // =============================================================================
 const safeObjectId = (id: string): mongoose.Types.ObjectId | string => {
   try {
@@ -235,10 +201,6 @@ const getUserAppointments = async (
     organizationId: orgId,
   };
 
-  // =============================================================================
-  // FIX: Safely cast userId to ObjectId for the participants query.
-  // This prevents the Mongoose CastError: "Cast to ObjectId failed for value..."
-  // =============================================================================
   const userOid = safeObjectId(userId);
   filter.participants = userOid;
 
@@ -262,20 +224,8 @@ const getUserAppointments = async (
     if (options.endDate) filter.startTime.$lte = options.endDate;
   }
 
-  // =============================================================================
-  // FIX: Increased default limit from 100 to 2500.
-  //
-  // The old limit of 100 combined with ascending sort meant only the 100 OLDEST
-  // events were returned. For a user with 200+ Google Calendar events (e.g. a
-  // daily recurring meeting), ALL future events were silently dropped.
-  //
-  // This is why Total=100 but Upcoming=0 and Today=0 — the 100 returned events
-  // were all in the past. The calendar tab appeared empty because no events
-  // existed for the current or future months.
-  // =============================================================================
   const appointments = await Appointment.find(filter)
     .populate('participants createdBy', 'name email avatar')
-    .populate('conversationId', 'type name')
     .sort({ startTime: 1 })
     .limit(options.limit || 2500)
     .skip(options.skip || 0);
@@ -382,7 +332,7 @@ const updateAppointment = async (
     }
   }
 
-  // FIX: Send update email to customer booking
+  // Send update email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -424,13 +374,6 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
-  if (appointment.conversationId) {
-    await Conversation.findByIdAndUpdate(appointment.conversationId, {
-      hasAppointment: false,
-      $unset: { appointmentId: 1 }
-    });
-  }
-
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
@@ -464,7 +407,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
-  // FIX: Send cancellation email to customer booking
+  // Send cancellation email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -503,13 +446,6 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
-  if (appointment.conversationId) {
-    await Conversation.findByIdAndUpdate(appointment.conversationId, {
-      hasAppointment: false,
-      $unset: { appointmentId: 1 }
-    });
-  }
-
   if (appointment.guestEmails.length > 0) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -521,7 +457,7 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
-  // FIX: Send cancellation email to customer booking
+  // Send cancellation email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
     const organizer = await User.findById(appointment.createdBy).select('name email');
     if (organizer) {
@@ -540,7 +476,6 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
 const getAppointmentById = async (appointmentId: string, orgId: string, userId: string) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
     .populate('participants createdBy', 'name email avatar')
-    .populate('conversationId', 'type name')
     .populate('vehicleId')
     .populate('quoteId')
     .populate('shipmentId');
