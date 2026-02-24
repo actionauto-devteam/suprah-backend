@@ -32,6 +32,12 @@ export interface ILead extends Document {
     make: string;
     model: string;
   };
+  appointment?: {
+    date: Date;
+    time: string;
+    notes?: string;
+    location?: string;
+  };
   comments: string;
   
   createdAt: Date;
@@ -82,6 +88,12 @@ const LeadSchema: Schema = new Schema({
     year: String,
     make: String,
     model: String
+  },
+  appointment: {
+    date: Date,
+    time: String,
+    notes: String,
+    location: String
   },
   comments: String
 }, { timestamps: true });

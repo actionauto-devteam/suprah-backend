@@ -254,13 +254,12 @@ export const markAsPending = async (req: Request, res: Response) => {
 // Reply to an inquiry (send email) - USER-SPECIFIC
 export const replyToInquiry = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const { message } = req.body;
-    const userId = (req.user as IUser)._id;
-    // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
+    const { id } = req.params
+    const { message } = req.body
+    const userId = (req.user as IUser)._id
 
     if (!message) {
-      return res.status(400).json({ message: 'Reply message is required' });
+      return res.status(400).json({ message: 'Reply message is required' })
     }
 
     const lead = await Lead.findOneAndUpdate(
@@ -270,9 +269,11 @@ export const replyToInquiry = async (req: Request, res: Response) => {
         isRead: true,
       },
       { new: true }
-    );
+    )
 
-
+    if (!lead) {
+      return res.status(404).json({ message: 'Inquiry not found' })
+    }
 
     if (lead) {
       await AuditLog.create({
@@ -280,28 +281,69 @@ export const replyToInquiry = async (req: Request, res: Response) => {
         entityId: lead._id,
         action: 'UPDATE',
         reason: 'Lead replied to',
-        performedBy: (req.user as any)?._id,
-        changes: { status: 'Contacted', isRead: true }
-      });
-    }
+        performedBy: userId,
+        changes: { status: 'Contacted', isRead: true, message }
+      })
 
-    if (!lead) {
-      return res.status(404).json({ message: 'Inquiry not found' });
-    }
+      try {
+        const { google } = require('googleapis')
+        const user = await User.findById(userId)
+          .select('+googleCalendar.accessToken +googleCalendar.refreshToken +googleCalendar.expiryDate')
 
-    // Future: Send email via Gmail service
-    console.log(`[DEBUG] Reply sent to ${lead.email}: ${message}`);
+        if (user?.googleCalendar?.connected && user.googleCalendar.accessToken) {
+          const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET,
+            process.env.GOOGLE_REDIRECT_URI
+          )
+
+          oauth2Client.setCredentials({
+            access_token: user.googleCalendar.accessToken,
+            refresh_token: user.googleCalendar.refreshToken,
+            expiry_date: user.googleCalendar.expiryDate
+          })
+
+          const gmail = google.gmail({ version: 'v1', auth: oauth2Client })
+
+          const headers = [
+            `From: ${user.email}`,
+            `To: ${lead.senderEmail || lead.email}`,
+            `Subject: Re: ${lead.subject || 'Inquiry Response'}`,
+            `In-Reply-To: ${lead.messageId || ''}`,
+            `References: ${lead.threadId || ''}`,
+            'MIME-Version: 1.0',
+            'Content-Type: text/plain; charset="UTF-8"',
+            'Content-Transfer-Encoding: 7bit'
+          ].filter(h => !h.includes('In-Reply-To: undefined') && !h.includes('References: undefined')).join('\n')
+
+          const emailBody = [headers, '', message].join('\n')
+          const encodedMessage = Buffer.from(emailBody).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+          await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: {
+              raw: encodedMessage,
+              threadId: lead.threadId
+            }
+          })
+
+          console.log(`[REPLY] Email sent to ${lead.email}`)
+        }
+      } catch (gmailError) {
+        console.error('[REPLY] Failed to send Gmail reply:', gmailError)
+      }
+    }
 
     res.json({
       success: true,
       message: 'Reply sent successfully',
       data: lead
-    });
+    })
   } catch (error) {
-    console.error('[ERROR] Error replying to inquiry:', error);
-    res.status(500).json({ message: 'Error sending reply' });
+    console.error('[ERROR] Error replying to inquiry:', error)
+    res.status(500).json({ message: 'Error sending reply' })
   }
-};
+}
 
 // Sync inquiries from Gmail
 export const syncGmailInquiries = asyncHandler(async (req: Request, res: Response) => {
@@ -352,13 +394,14 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
     // Get Gmail client
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // Fetch emails (limit to inbox, all emails - unread and read)
+    // Fetch emails (from inbox)
     console.log('[SYNC] Fetching emails from Gmail...');
     let response;
     try {
       response = await gmail.users.messages.list({
         userId: 'me',
-        maxResults: 500
+        maxResults: 500,
+        q: 'in:inbox'
       });
     } catch (gmailError: any) {
       console.error(`[SYNC] Gmail API error:`, gmailError.message);
@@ -405,10 +448,18 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
           continue;
         }
 
-        // Check if this email already exists as a lead for THIS USER
+        if (email.toLowerCase() === user.email.toLowerCase()) {
+          console.log(`[SYNC] Skipping own email: ${email}`);
+          continue;
+        }
+
+        // Check if this thread already exists for THIS USER
         const userId = (req.user as IUser)._id;
-        // const orgId = (req as any).orgId; // COMMENTED: For organization-wide sharing later
-        const existingLead = await Lead.findOne({ createdBy: userId, messageId: message.id });
+        const existingLead = await Lead.findOne({ 
+          createdBy: userId, 
+          threadId: details.data.threadId 
+        });
+
         if (!existingLead) {
           // Extract name from sender (e.g., "John Doe <john@email.com>" → "John Doe")
           const nameParts = senderName.split(' ').filter(p => p.length > 0);
@@ -463,5 +514,118 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
   } catch (error: any) {
     console.error('[SYNC] Unhandled error in sync:', error);
     throw error;
+  }
+});
+
+export const setAppointmentForLead = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { date, time, notes, locationOrVehicle } = req.body;
+  const userId = (req.user as IUser)._id;
+
+  const lead = await Lead.findOneAndUpdate(
+    { _id: id, createdBy: userId },
+    {
+      status: 'Appointment Set',
+      appointment: {
+        date: new Date(date),
+        time,
+        notes: notes || '',
+        location: locationOrVehicle || ''
+      }
+    },
+    { new: true }
+  );
+
+  if (!lead) {
+    return res.status(404).json(new ApiResponse(404, null, 'Lead not found'));
+  }
+
+  await AuditLog.create({
+    entityType: 'Lead',
+    entityId: lead._id,
+    action: 'UPDATE',
+    reason: 'Appointment set from inquiry page',
+    performedBy: userId,
+    changes: { status: 'Appointment Set', appointment: { date, time, notes, locationOrVehicle } }
+  });
+
+  res.json(new ApiResponse(200, lead, 'Appointment saved successfully'));
+});
+
+export const getThreadMessages = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = (req.user as IUser)._id;
+
+  const lead = await Lead.findOne({ _id: id, createdBy: userId });
+
+  if (!lead || !lead.threadId) {
+    return res.status(404).json(new ApiResponse(404, null, 'Lead or thread not found'));
+  }
+
+  try {
+    const user = await User.findById(userId)
+      .select('+googleCalendar.accessToken +googleCalendar.refreshToken +googleCalendar.expiryDate');
+
+    if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
+      return res.status(400).json(new ApiResponse(400, null, 'Gmail not connected'));
+    }
+
+    const { google } = require('googleapis');
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+
+    oauth2Client.setCredentials({
+      access_token: user.googleCalendar.accessToken,
+      refresh_token: user.googleCalendar.refreshToken,
+      expiry_date: user.googleCalendar.expiryDate
+    });
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    const threadData = await gmail.users.threads.get({
+      userId: 'me',
+      id: lead.threadId,
+      format: 'full'
+    });
+
+    const messages = (threadData.data.messages || [])
+      .filter((msg: any) => msg.id !== lead.messageId)
+      .map((msg: any) => {
+        const headers = msg.payload?.headers || [];
+        const getHeader = (name: string) =>
+          headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+
+        const from = getHeader('from');
+        const email = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
+        const sender = from.replace(/<[^>]*>/g, '').trim() || email;
+
+        let body = '';
+        if (msg.payload?.parts) {
+          const textPart = msg.payload.parts.find((p: any) => p.mimeType === 'text/plain');
+          if (textPart?.body?.data) {
+            body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+          }
+        } else if (msg.payload?.body?.data) {
+          body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
+        }
+
+        return {
+          id: msg.id,
+          messageId: msg.id,
+          sender,
+          senderEmail: email,
+          message: body,
+          timestamp: new Date(parseInt(msg.internalDate || Date.now())),
+          isOwn: email === user.email
+        };
+      });
+
+    res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
+  } catch (error: any) {
+    console.error('[THREAD] Error fetching thread messages:', error);
+    res.status(400).json(new ApiResponse(400, null, 'Failed to fetch thread messages'));
   }
 });
