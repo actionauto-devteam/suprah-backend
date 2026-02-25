@@ -9,7 +9,7 @@ export interface IUser extends Document {
   clerkId?: string;
   emailVerified: boolean;
   avatar?: string;
-  role: "user" | "admin" | "super_admin" | "driver";
+  role: "customer" | "employee" | "admin" | "super_admin" | "driver";
   isActive: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
@@ -94,8 +94,8 @@ const UserSchema = new Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'admin', 'super_admin', 'driver'],
-      default: 'user',
+      enum: ['customer', 'employee', 'admin', 'super_admin', 'driver'],
+      default: 'customer',
     },
     isActive: {
       type: Boolean,

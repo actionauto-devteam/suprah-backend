@@ -18,6 +18,8 @@ import driverRequestRoute from "./driverRequest.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import leadRoute from "./lead.route";
+import serviceRoute from "./service.route";
+import ownedVehicleRoute from "./ownedVehicle.route";
 
 const router = express.Router();
 
@@ -97,6 +99,14 @@ const defaultRoutes = [
   {
     path: "/driver-requests",
     route: driverRequestRoute,
+  },
+  {
+    path: "/service",
+    route: serviceRoute,
+  },
+  {
+    path: "/customer/vehicles",
+    route: ownedVehicleRoute,
   },
 ];
 
