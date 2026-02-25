@@ -50,7 +50,7 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Status is required');
   }
 
-  const validStatuses = ['online', 'away', 'busy', 'offline', 'do_not_disturb'];
+  const validStatuses = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'];
   if (!validStatuses.includes(status)) {
     throw new ApiError(400, 'Invalid status value');
   }
