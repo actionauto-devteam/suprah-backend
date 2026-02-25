@@ -2,6 +2,21 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 import config from '../config';
 
+export type OnlineStatus = 'online' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
+
+export interface IPersonalInfo {
+  bio?: string;
+  phone?: string;
+  location?: string;
+  timezone?: string;
+  language?: string;
+  dateOfBirth?: Date;
+  jobTitle?: string;
+  department?: string;
+  linkedIn?: string;
+  website?: string;
+}
+
 export interface IUser extends Document {
   name: string;
   email: string;
@@ -13,6 +28,13 @@ export interface IUser extends Document {
   isActive: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
+  
+  // New profile fields
+  onlineStatus: OnlineStatus;
+  customStatus?: string;
+  personalInfo?: IPersonalInfo;
+  lastActive?: Date;
+  lastPasswordChange?: Date;
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -109,6 +131,37 @@ const UserSchema = new Schema(
     organizationRole: {
       type: String,
     },
+    
+    // New profile fields
+    onlineStatus: {
+      type: String,
+      enum: ['online', 'away', 'busy', 'offline', 'do_not_disturb'],
+      default: 'offline',
+    },
+    customStatus: {
+      type: String,
+      maxlength: 100,
+    },
+    personalInfo: {
+      bio: { type: String, maxlength: 500 },
+      phone: { type: String },
+      location: { type: String },
+      timezone: { type: String },
+      language: { type: String, default: 'en' },
+      dateOfBirth: { type: Date },
+      jobTitle: { type: String },
+      department: { type: String },
+      linkedIn: { type: String },
+      website: { type: String },
+    },
+    lastActive: {
+      type: Date,
+      default: Date.now,
+    },
+    lastPasswordChange: {
+      type: Date,
+    },
+    
     passwordResetToken: {
       type: String,
       private: true,
