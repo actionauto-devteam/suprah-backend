@@ -2,7 +2,7 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 import config from '../config';
 
-export type OnlineStatus = 'online' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
+export type OnlineStatus = 'online' | 'idle' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
 
 export interface IPersonalInfo {
   bio?: string;
@@ -135,7 +135,7 @@ const UserSchema = new Schema(
     // New profile fields
     onlineStatus: {
       type: String,
-      enum: ['online', 'away', 'busy', 'offline', 'do_not_disturb'],
+      enum: ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'],
       default: 'offline',
     },
     customStatus: {
