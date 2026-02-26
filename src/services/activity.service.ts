@@ -59,7 +59,7 @@ const getOrganizationActivities = async (
   organizationId: string,
   limit = 50,
   skip = 0
-): Promise<IUserActivity[]> => {
+): Promise<any[]> => {
   const activities = await UserActivity.find({ organizationId: new mongoose.Types.ObjectId(organizationId) })
     .populate('userId', 'name email avatar')
     .sort({ createdAt: -1 })
