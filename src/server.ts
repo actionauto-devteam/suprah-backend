@@ -32,12 +32,13 @@ connectDB();
 // Body Parsers
 // ========================================
 app.use(express.json({
+  limit: '50mb',
   verify: (req: any, res, buf) => {
     req.rawBody = buf.toString();
   }
 }));
 
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // XML body support (ADF emails)
 app.use(express.text({ type: ['application/xml', 'text/xml'] }));

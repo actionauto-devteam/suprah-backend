@@ -5,7 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 
 /**
- * Get user profile
+ * Get user profile with extended information
  */
 const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
@@ -21,18 +21,92 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
-  const { name, avatar, theme } = req.body;
+  const { name, avatar, theme, onlineStatus, customStatus, personalInfo } = req.body;
 
   const updateData: any = {};
   if (name !== undefined) updateData.name = name;
   if (avatar !== undefined) updateData.avatar = avatar;
   if (theme !== undefined) updateData.theme = theme;
+  if (onlineStatus !== undefined) updateData.onlineStatus = onlineStatus;
+  if (customStatus !== undefined) updateData.customStatus = customStatus;
+  if (personalInfo !== undefined) updateData.personalInfo = personalInfo;
 
   const orgId = (req as any).orgId;
   const profile = await profileService.updateProfile(userId, updateData, orgId);
 
   res.json(
     new ApiResponse(200, profile, 'Profile updated successfully')
+  );
+});
+
+/**
+ * Update online status
+ */
+const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  const { status, customStatus } = req.body;
+
+  if (!status) {
+    throw new ApiError(400, 'Status is required');
+  }
+
+  const validStatuses = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'];
+  if (!validStatuses.includes(status)) {
+    throw new ApiError(400, 'Invalid status value');
+  }
+
+  const user = await profileService.updateOnlineStatus(userId, status, customStatus);
+
+  res.json(
+    new ApiResponse(200, user, 'Online status updated successfully')
+  );
+});
+
+/**
+ * Update personal information
+ */
+const updatePersonalInfo = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  const orgId = (req as any).orgId;
+  const personalInfo = req.body;
+
+  const user = await profileService.updatePersonalInfo(userId, personalInfo, orgId);
+
+  res.json(
+    new ApiResponse(200, user, 'Personal information updated successfully')
+  );
+});
+
+/**
+ * Update avatar/profile picture
+ */
+const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  const orgId = (req as any).orgId;
+  const { avatar } = req.body;
+
+  if (!avatar) {
+    throw new ApiError(400, 'Avatar is required');
+  }
+
+  const user = await profileService.updateAvatar(userId, avatar, orgId);
+
+  res.json(
+    new ApiResponse(200, user, 'Avatar updated successfully')
+  );
+});
+
+/**
+ * Get recent activities
+ */
+const getRecentActivities = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  const limit = parseInt(req.query.limit as string) || 20;
+
+  const activities = await profileService.getRecentActivities(userId, limit);
+
+  res.json(
+    new ApiResponse(200, activities, 'Recent activities fetched successfully')
   );
 });
 
@@ -121,6 +195,10 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
 export default {
   getProfile,
   updateProfile,
+  updateOnlineStatus,
+  updatePersonalInfo,
+  updateAvatar,
+  getRecentActivities,
   changePassword,
   updateEmail,
   updateNotificationPreferences,

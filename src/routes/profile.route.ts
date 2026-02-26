@@ -13,6 +13,18 @@ router.get('/', profileController.getProfile);
 // Update user profile
 router.patch('/', profileController.updateProfile);
 
+// Update online status
+router.patch('/online-status', profileController.updateOnlineStatus);
+
+// Update personal information
+router.patch('/personal-info', profileController.updatePersonalInfo);
+
+// Update avatar/profile picture
+router.patch('/avatar', profileController.updateAvatar);
+
+// Get recent activities
+router.get('/activities', profileController.getRecentActivities);
+
 // Change password
 router.post('/change-password', profileController.changePassword);
 

@@ -1,6 +1,6 @@
 // Routes for ADF leads (Inquiries) - Main Entry Point
 import { Router } from 'express';
-import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry, syncGmailInquiries } from '../controllers/lead.controller';
+import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry, syncGmailInquiries, setAppointmentForLead, getThreadMessages } from '../controllers/lead.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 
@@ -10,7 +10,7 @@ const router = Router();
 router.post('/adf', receiveADF);
 
 // ============================================================
-// Protected routes - ALL must have auth BEFORE this line
+// Protected routes - ALL must have  auth BEFORE this line
 // ============================================================
 router.use(auth());
 router.use(requireOrg);
@@ -32,8 +32,10 @@ router
 // Dynamic :id routes (MUST come after all static routes)
 // ============================================================
 
+router.get('/:id/thread', getThreadMessages);
 router.patch('/:id/read', markAsRead);
 router.patch('/:id/pending', markAsPending);
+router.post('/:id/appointment', setAppointmentForLead);
 router.post('/:id/reply', replyToInquiry);
 router.patch('/:id', updateLead);
 

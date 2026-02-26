@@ -7,10 +7,8 @@ import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
 import profileRoute from "./profile.route";
 import appointmentRoute from "./appointment.route";
-import conversationRoute from "./conversation.route";
 import userRoute from "./user.route";
 import googleCalendarRoute from "./googleCalendar.routes";
-import gmailRoute from "./gmail.route";
 import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
@@ -18,6 +16,7 @@ import driverRequestRoute from "./driverRequest.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import leadRoute from "./lead.route";
+import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
 import ownedVehicleRoute from "./ownedVehicle.route";
 
@@ -57,10 +56,6 @@ const defaultRoutes = [
     route: appointmentRoute,
   },
   {
-    path: "/conversations",
-    route: conversationRoute,
-  },
-  {
     path: "/users",
     route: userRoute,
   },
@@ -69,16 +64,16 @@ const defaultRoutes = [
     route: googleCalendarRoute,
   },
   {
-    path: "/gmail",
-    route: gmailRoute,
+    path: "/organizations",
+    route: organizationRoute,
   },
   {
     path: "/leads",
     route: leadRoute,
   },
   {
-    path: "/organizations",
-    route: organizationRoute,
+    path: "/crm",
+    route: crmRoute,
   },
   {
     path: "/invitations",
