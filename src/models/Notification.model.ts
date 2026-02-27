@@ -46,6 +46,9 @@ const NotificationSchema = new Schema(
         'driver_request',
         'driver_request_approved',
         'driver_request_rejected',
+        'proof_submitted',
+        'delivery_confirmed',
+        'payment_received',
       ],
     },
     title: {
