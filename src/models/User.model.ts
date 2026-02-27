@@ -4,17 +4,25 @@ import config from '../config';
 
 export type OnlineStatus = 'online' | 'idle' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
 
+export interface ISocialLink {
+  label: string;
+  url: string;
+}
+
 export interface IPersonalInfo {
   bio?: string;
   phone?: string;
+  phoneCountryCode?: string;
   location?: string;
   timezone?: string;
   language?: string;
   dateOfBirth?: Date;
+  gender?: string;
   jobTitle?: string;
   department?: string;
   linkedIn?: string;
   website?: string;
+  socialLinks?: ISocialLink[];
 }
 
 export interface IUser extends Document {
@@ -145,14 +153,20 @@ const UserSchema = new Schema(
     personalInfo: {
       bio: { type: String, maxlength: 500 },
       phone: { type: String },
+      phoneCountryCode: { type: String, default: '' },
       location: { type: String },
       timezone: { type: String },
       language: { type: String, default: 'en' },
       dateOfBirth: { type: Date },
+      gender: { type: String, enum: ['', 'male', 'female', 'prefer-not-to-say'], default: '' },
       jobTitle: { type: String },
       department: { type: String },
       linkedIn: { type: String },
       website: { type: String },
+      socialLinks: [{
+        label: { type: String },
+        url: { type: String },
+      }],
     },
     lastActive: {
       type: Date,
