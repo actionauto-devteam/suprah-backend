@@ -15,6 +15,7 @@ import driverTrackingRoute from "./driverTracking.routes";
 import driverRequestRoute from "./driverRequest.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
+import driverPayoutRoute from "./driverPayout.routes";
 import leadRoute from "./lead.route";
 import crmRoute from "./crm.route";
 
@@ -92,6 +93,10 @@ const defaultRoutes = [
   {
     path: "/driver-requests",
     route: driverRequestRoute,
+  },
+  {
+    path: "/driver-payouts",
+    route: driverPayoutRoute,
   },
 ];
 

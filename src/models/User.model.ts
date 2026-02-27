@@ -82,6 +82,7 @@ export interface IUser extends Document {
     endDate?: Date;
     features: string[];
   };
+  stripeConnectAccountId?: string;
   isPasswordMatch(password: string): Promise<boolean>;
 }
 
@@ -214,6 +215,10 @@ const UserSchema = new Schema(
       passwordChanged: { type: Boolean, default: true },
       emailChanged: { type: Boolean, default: true },
       profileUpdated: { type: Boolean, default: true },
+    },
+    stripeConnectAccountId: {
+      type: String,
+      trim: true,
     },
     subscription: {
       plan: {

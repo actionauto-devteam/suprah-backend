@@ -399,6 +399,39 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * Update payment fields (status, notes, dueDate, etc.)
+ */
+const updatePayment = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const { id } = req.params;
+  const { status, notes, dueDate } = req.body;
+
+  const payment = await Payment.findOne({ _id: id, organizationId: orgId });
+
+  if (!payment) {
+    throw new ApiError(404, 'Payment not found');
+  }
+
+  const validStatuses = ['pending', 'processing', 'succeeded', 'failed', 'refunded', 'cancelled'];
+  if (status !== undefined) {
+    if (!validStatuses.includes(status)) {
+      throw new ApiError(400, `Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+    }
+    payment.status = status;
+    if (status === 'succeeded' && !payment.paidAt) {
+      payment.paidAt = new Date();
+    }
+  }
+
+  if (notes !== undefined) payment.notes = notes;
+  if (dueDate !== undefined) payment.dueDate = dueDate ? new Date(dueDate) : undefined;
+
+  await payment.save();
+
+  res.json(new ApiResponse(200, payment, 'Payment updated successfully'));
+});
+
+/**
  * Get payment statistics
  */
 const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
@@ -503,6 +536,7 @@ export default {
   getPayments,
   getPendingPayments,
   getPaymentById,
+  updatePayment,
   createPaymentIntent,
   confirmPayment,
   cancelPayment,

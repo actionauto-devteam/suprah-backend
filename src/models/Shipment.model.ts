@@ -70,6 +70,15 @@ export interface IShipment extends Document {
   assignedAt?: Date;
   driverAcceptedAt?: Date;
 
+  // Proof of Delivery
+  proofOfDelivery?: {
+    imageUrl: string;
+    submittedAt: Date;
+    note?: string;
+    confirmedAt?: Date;
+    confirmedBy?: mongoose.Types.ObjectId;
+  };
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -152,6 +161,14 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },
     driverAcceptedAt: { type: Date },
+
+    proofOfDelivery: {
+      imageUrl: { type: String, trim: true },
+      submittedAt: { type: Date },
+      note: { type: String, trim: true },
+      confirmedAt: { type: Date },
+      confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    },
   },
   {
     timestamps: true,
