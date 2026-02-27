@@ -1,5 +1,6 @@
 import express, { Application } from 'express';
 import { createServer } from 'http';
+import path from 'path';
 import { Server } from 'socket.io';
 import { setupSocket } from './socket';
 import cors from 'cors';
@@ -41,6 +42,11 @@ app.use(express.urlencoded({ extended: true }));
 
 // XML body support (ADF emails)
 app.use(express.text({ type: ['application/xml', 'text/xml'] }));
+
+// ========================================
+// Static file serving (proof-of-delivery images)
+// ========================================
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // ========================================
 // Webhook Routes

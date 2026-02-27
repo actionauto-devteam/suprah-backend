@@ -79,6 +79,21 @@ export const notificationTemplates = {
     title: `New message from ${data.from}`,
     message: data.preview,
   }),
+
+  proof_submitted: (data: { driverName: string; trackingNumber: string }) => ({
+    title: 'Proof of Delivery Submitted',
+    message: `${data.driverName} submitted proof of delivery for shipment ${data.trackingNumber}`,
+  }),
+
+  delivery_confirmed: (data: { trackingNumber: string }) => ({
+    title: 'Delivery Confirmed',
+    message: `Your delivery for shipment ${data.trackingNumber} has been confirmed by the dealer`,
+  }),
+
+  payment_received: (data: { amount: number; trackingNumber: string }) => ({
+    title: 'Payment Received',
+    message: `You received a payout of $${data.amount.toFixed(2)} for shipment ${data.trackingNumber}`,
+  }),
 };
 
 export type NotificationTemplateType = keyof typeof notificationTemplates;

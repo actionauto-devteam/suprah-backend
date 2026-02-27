@@ -2,10 +2,18 @@ import express from 'express';
 import shipmentController from '../controllers/shipment.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
+import { uploadProofImage } from '../middleware/upload.middleware';
 
 const router = express.Router();
 
 router.use(auth());
+
+// Submit proof: driver auth only — no org context needed.
+// The controller finds the shipment by ID and verifies driver assignment.
+router
+    .route('/:id/submit-proof')
+    .post(uploadProofImage, shipmentController.submitProofOfDelivery);
+
 router.use(requireOrg);
 
 router
@@ -27,5 +35,9 @@ router
 router
     .route('/:id/notes')
     .post(shipmentController.addShipmentNote);
+
+router
+    .route('/:id/confirm-delivery')
+    .post(shipmentController.confirmDelivery);
 
 export default router;

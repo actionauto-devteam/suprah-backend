@@ -4,6 +4,7 @@ import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import { clerkClient } from '@clerk/clerk-sdk-node';
 
 /**
  * Get all organizations with pagination and search
