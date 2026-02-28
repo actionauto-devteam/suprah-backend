@@ -7,6 +7,8 @@ import { ApiError } from '../utils/ApiError';
 import emailService from '../services/email.service';
 import AuditLog from '../models/AuditLog.model';
 import config from '../config';
+import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
 
 export const createInvitation = async (req: Request, res: Response) => {
     const { email, role } = req.body;
@@ -65,6 +67,26 @@ export const createInvitation = async (req: Request, res: Response) => {
             reason: `Invitation sent to ${email}`,
             performedBy: req.user._id,
             changes: { email, organizationId, role }
+        });
+
+        // Notify the inviter that invitation was sent
+        const org = await Organization.findById(organizationId);
+        const { title, message } = notificationTemplates.team_invite_sent({
+            email,
+            organizationName: org?.name || 'your organization',
+        });
+
+        await safeCreateNotification({
+            userId: req.user._id.toString(),
+            organizationId: organizationId?.toString() || 'global',
+            type: 'team_invite_sent',
+            title,
+            message,
+            metadata: {
+                invitedEmail: email,
+                role: role || 'member',
+                organizationName: org?.name,
+            },
         });
     }
 
@@ -189,6 +211,45 @@ export const acceptInvitation = async (req: Request, res: Response) => {
     // Update invite
     invite.status = 'accepted';
     await invite.save();
+
+    // Notify all admins in the organization that a new member joined
+    const org = await Organization.findById(invite.organizationId);
+    const { title, message } = notificationTemplates.team_member_joined({
+        memberName: user.name || user.email,
+        organizationName: org?.name || 'the organization',
+        role: invite.role,
+    });
+
+    await notifyOrgAdmins(
+        invite.organizationId?.toString() || '',
+        'team_member_joined',
+        title,
+        message,
+        {
+            newMemberId: user._id.toString(),
+            memberName: user.name || user.email,
+            memberEmail: user.email,
+            role: invite.role,
+        },
+        user._id.toString() // Exclude the user who just joined
+    );
+
+    // Also notify the original inviter specifically
+    if (invite.inviterId) {
+        await safeCreateNotification({
+            userId: invite.inviterId.toString(),
+            organizationId: invite.organizationId?.toString() || 'global',
+            type: 'team_member_joined',
+            title: 'Invitation Accepted',
+            message: `${user.name || user.email} accepted your invitation to join ${org?.name || 'the organization'}`,
+            metadata: {
+                newMemberId: user._id.toString(),
+                memberName: user.name || user.email,
+                memberEmail: user.email,
+                role: invite.role,
+            },
+        });
+    }
 
     await AuditLog.create({
         entityType: 'Invitation',

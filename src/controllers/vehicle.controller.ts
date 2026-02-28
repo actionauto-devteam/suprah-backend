@@ -3,6 +3,16 @@ import { asyncHandler } from '../utils/asyncHandler';
 import Vehicle from '../models/Vehicle.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
+import { IUser } from '../models/User.model';
+
+/**
+ * Helper to safely get user ID from request
+ */
+const getUserId = (req: Request): string | undefined => {
+  return (req.user as IUser)?._id?.toString();
+};
 
 const normalizeVehicle = (vehicle: any) => ({
   id: vehicle._id.toString(),
@@ -36,7 +46,38 @@ const normalizeVehicle = (vehicle: any) => ({
 });
 
 const createVehicle = asyncHandler(async (req: Request, res: Response) => {
-  const vehicle = await Vehicle.create(req.body);
+  const userId = getUserId(req);
+  const orgId = req.orgId as string;
+  
+  const vehicle = await Vehicle.create({
+    ...req.body,
+    organizationId: orgId,
+  });
+
+  const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
+
+  // Notify admins about new vehicle
+  if (orgId) {
+    const { title, message } = notificationTemplates.vehicle_added({
+      vehicleName,
+      stockNumber: vehicle.stockNumber,
+    });
+
+    await notifyOrgAdmins(
+      orgId,
+      'vehicle_added',
+      title,
+      message,
+      {
+        vehicleId: vehicle._id.toString(),
+        vehicleName,
+        stockNumber: vehicle.stockNumber,
+        vin: vehicle.vin,
+      },
+      userId // Exclude the user who created it
+    );
+  }
+
   res.status(201).json(
     new ApiResponse(201, normalizeVehicle(vehicle), 'Vehicle created successfully')
   );
@@ -218,6 +259,8 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  const orgId = req.orgId as string;
   const existingVehicle = await Vehicle.findById(req.params.id);
 
   if (!existingVehicle) {
@@ -225,6 +268,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const updateData = { ...req.body };
+  const oldStatus = existingVehicle.status;
 
   if (updateData.currentStep && updateData.currentStep !== existingVehicle.currentStep) {
     updateData.stepEnteredAt = new Date();
@@ -242,6 +286,53 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
+  }
+
+  const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
+
+  // Notify on status change (especially if sold)
+  if (orgId && updateData.status && updateData.status !== oldStatus) {
+    if (updateData.status === 'Sold') {
+      const { title, message } = notificationTemplates.vehicle_sold({
+        vehicleName,
+        stockNumber: vehicle.stockNumber,
+        price: vehicle.price,
+      });
+
+      await notifyOrgAdmins(
+        orgId,
+        'vehicle_sold',
+        title,
+        message,
+        {
+          vehicleId: vehicle._id.toString(),
+          vehicleName,
+          stockNumber: vehicle.stockNumber,
+          price: vehicle.price,
+        },
+        userId
+      );
+    } else {
+      const { title, message } = notificationTemplates.vehicle_status_changed({
+        vehicleName,
+        stockNumber: vehicle.stockNumber,
+        status: updateData.status,
+      });
+
+      await notifyOrgAdmins(
+        orgId,
+        'vehicle_status_changed',
+        title,
+        message,
+        {
+          vehicleId: vehicle._id.toString(),
+          vehicleName,
+          oldStatus,
+          newStatus: updateData.status,
+        },
+        userId
+      );
+    }
   }
 
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle updated successfully'));

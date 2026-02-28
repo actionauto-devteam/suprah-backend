@@ -12,27 +12,82 @@ interface CreateNotificationParams {
 }
 
 /**
- * Valid notification types
+ * Valid notification types - comprehensive list for entire system
  */
 const VALID_NOTIFICATION_TYPES = [
+  // Quotes
   'quote_created',
   'quote_updated',
   'quote_deleted',
+  'quote_converted',
+  
+  // Shipments
   'shipment_created',
   'shipment_updated',
   'shipment_deleted',
-  'password_changed',
-  'email_changed',
-  'profile_updated',
+  'shipment_status_changed',
+  'shipment_assigned',
+  'shipment_picked_up',
+  'shipment_delivered',
+  'proof_of_delivery',
+  
+  // Vehicles/Inventory
+  'vehicle_added',
+  'vehicle_updated',
+  'vehicle_sold',
+  'vehicle_status_changed',
+  'inventory_sync',
+  'new_inventory_alert',
+  
+  // Appointments
   'appointment_created',
   'appointment_updated',
   'appointment_cancelled',
   'appointment_reminder',
-  'guest_response', // NEW: For guest RSVP changes
-  'message_received',
+  'guest_response',
+  
+  // CRM & Leads
+  'new_lead',
+  'lead_assigned',
+  'lead_status_changed',
+  'crm_message',
+  'crm_task_assigned',
+  'crm_task_due',
+  
+  // Driver related
   'driver_request',
   'driver_request_approved',
   'driver_request_rejected',
+  'driver_assigned',
+  'driver_location_update',
+  'driver_payout',
+  
+  // Payments
+  'payment_received',
+  'payment_pending',
+  'payment_failed',
+  'payout_processed',
+  
+  // Team & Organization
+  'team_invite_sent',
+  'team_member_joined',
+  'team_member_left',
+  'role_changed',
+  
+  // Account & Security
+  'password_changed',
+  'email_changed',
+  'profile_updated',
+  'login_alert',
+  
+  // System & General
+  'system_announcement',
+  'message_received',
+  'reminder',
+  'general',
+  
+  // Legacy/Compatibility
+  'delivery_confirmed',
 ] as const;
 
 /**
@@ -165,31 +220,60 @@ const createNotificationBatch = async (notifications: CreateNotificationParams[]
 /**
  * Get all notifications for a user
  */
+/**
+ * Get notifications for a user
+ */
 const getUserNotifications = async (userId: string, orgId: string, options: {
   limit?: number;
   skip?: number;
   isRead?: boolean;
+  userRole?: string;  // NEW: For filtering broadcast notifications by role
 } = {}) => {
   try {
-    const { limit = 50, skip = 0, isRead } = options;
+    const { limit = 50, skip = 0, isRead, userRole } = options;
 
-    const filter: any = { userId, organizationId: orgId };
+    // Get personal notifications
+    const personFilter: any = { userId, organizationId: orgId };
     if (isRead !== undefined) {
-      filter.isRead = isRead;
+      personFilter.isRead = isRead;
     }
 
-    const notifications = await Notification.find(filter)
+    const personalNotifs = await Notification.find(personFilter)
       .sort({ createdAt: -1 })
       .limit(limit)
       .skip(skip);
 
-    const total = await Notification.countDocuments(filter);
-    const unreadCount = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
+    // Get broadcast notifications for this user's role
+    const broadcastFilter: any = {
+      organizationId: orgId,
+      isBroadcast: true,
+    };
+    if (userRole) {
+      broadcastFilter.roleTargets = { $in: [userRole] };
+    }
+    if (isRead !== undefined) {
+      broadcastFilter.isRead = isRead;
+    }
+
+    const broadcastNotifs = await Notification.find(broadcastFilter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip(skip);
+
+    // Combine and sort
+    const allNotifs = [...personalNotifs, ...broadcastNotifs]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+
+    const totalPersonal = await Notification.countDocuments(personFilter);
+    const totalBroadcast = await Notification.countDocuments(broadcastFilter);
+    const unreadPersonal = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
+    const unreadBroadcast = await Notification.countDocuments({ ...broadcastFilter, isRead: false });
 
     return {
-      notifications,
-      total,
-      unreadCount,
+      notifications: allNotifs,
+      total: totalPersonal + totalBroadcast,
+      unreadCount: unreadPersonal + unreadBroadcast,
     };
   } catch (error) {
     console.error('Error in getUserNotifications:', error);
@@ -322,4 +406,48 @@ export default {
   deleteAllRead,
   getUnreadCount,
   cleanupOldNotifications,
+  // Broadcast notifications to multiple users by role
+  broadcastNotification: async (params: {
+    organizationId: string;
+    roleTargets: string[];  // e.g., ['dealer', 'admin', 'driver']
+    type: string;
+    title: string;
+    message: string;
+    metadata?: any;
+  }) => {
+    try {
+      const { organizationId, roleTargets, type, title, message, metadata } = params;
+      
+      // Find all users in org with matching roles
+      const users = await User.find({
+        organizationId,
+        $or: roleTargets.map(role => ({ role })),
+      }).select('_id');
+
+      if (users.length === 0) {
+        console.log(`No users found in org ${organizationId} with roles ${roleTargets.join(',')}`);
+        return null;
+      }
+
+      // Create individual notifications for each user
+      const notifications = users.map(user => ({
+        userId: user._id,
+        organizationId,
+        roleTargets,
+        type,
+        title,
+        message,
+        metadata,
+        isRead: false,
+        isBroadcast: true,
+      }));
+
+      const created = await Notification.insertMany(notifications);
+      console.log(`Broadcast ${created.length} notifications to ${organizationId} (roles: ${roleTargets.join(',')})`);
+      return created;
+    } catch (error) {
+      console.error('Error in broadcastNotification:', error);
+      throw error;
+    }
+  },
 };

@@ -262,6 +262,12 @@ const updateNotificationPreferences = async (
     passwordChanged: boolean;
     emailChanged: boolean;
     profileUpdated: boolean;
+    loginAlerts: boolean;
+    appointmentCreated: boolean;
+    appointmentUpdated: boolean;
+    appointmentCancelled: boolean;
+    driverRequests: boolean;
+    crmActivity: boolean;
   }>
 ) => {
   const updateData: Record<string, boolean> = {};

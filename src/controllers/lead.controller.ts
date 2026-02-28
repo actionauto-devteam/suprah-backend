@@ -7,6 +7,8 @@ import AuditLog from '../models/AuditLog.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
+import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
 
 // Handle incoming ADF XML (Auto-lead Data Format)
 export const receiveADF = async (req: Request, res: Response) => {
@@ -70,6 +72,36 @@ export const receiveADF = async (req: Request, res: Response) => {
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${firstName} ${lastName}`);
 
+    // Notify all super_admins about the new lead (since ADF leads don't have org context)
+    const superAdmins = await User.find({ role: 'super_admin' });
+    const vehicleInterest = vehicle ? `${vehicle?.year?._ || vehicle?.year || ''} ${vehicle?.make?._ || vehicle?.make || ''} ${vehicle?.model?._ || vehicle?.model || ''}`.trim() : undefined;
+    
+    for (const admin of superAdmins) {
+      try {
+        const { title, message } = notificationTemplates.new_lead({
+          customerName: `${firstName} ${lastName}`.trim(),
+          source: 'ADF Email',
+          vehicleInterest: vehicleInterest || undefined,
+        });
+        
+        await safeCreateNotification({
+          userId: admin._id.toString(),
+          organizationId: admin.organizationId?.toString() || 'global',
+          type: 'new_lead',
+          title,
+          message,
+          metadata: {
+            leadId: newLead._id.toString(),
+            customerName: `${firstName} ${lastName}`.trim(),
+            email: customer?.email?._ || customer?.email,
+            source: 'ADF Email',
+          },
+        });
+      } catch {
+        // Non-critical
+      }
+    }
+
     await AuditLog.create({
       entityType: 'Lead',
       entityId: newLead._id,
@@ -119,9 +151,26 @@ export const updateLead = async (req: Request, res: Response) => {
       { new: true }
     );
 
-
-
     if (lead) {
+      // Notify about status change
+      const { title, message } = notificationTemplates.lead_status_changed({
+        customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        status,
+      });
+
+      await safeCreateNotification({
+        userId: userId.toString(),
+        organizationId: (req as any).orgId || 'global',
+        type: 'lead_status_changed',
+        title,
+        message,
+        metadata: {
+          leadId: lead._id.toString(),
+          customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+          newStatus: status,
+        },
+      });
+
       await AuditLog.create({
         entityType: 'Lead',
         entityId: lead._id,
@@ -179,6 +228,30 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const savedLead = await newLead.save();
     console.log(`[SUCCESS] New Test Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
+
+    // Notify the user who created the lead
+    if (userId) {
+      const vehicleInterest = vehicle ? `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim() : undefined;
+      const { title, message } = notificationTemplates.new_lead({
+        customerName: `${firstName} ${lastName || ''}`.trim(),
+        source: source || 'Manual Entry',
+        vehicleInterest: vehicleInterest || undefined,
+      });
+
+      await safeCreateNotification({
+        userId: userId.toString(),
+        organizationId: (req as any).orgId || 'global',
+        type: 'new_lead',
+        title,
+        message,
+        metadata: {
+          leadId: savedLead._id.toString(),
+          customerName: `${firstName} ${lastName || ''}`.trim(),
+          email,
+          source: source || 'Manual Entry',
+        },
+      });
+    }
 
     await AuditLog.create({
       entityType: 'Lead',

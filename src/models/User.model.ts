@@ -65,15 +65,26 @@ export interface IUser extends Document {
   };
 
   notificationPreferences: {
+    // CRM & Sales
     quoteCreated: boolean;
     quoteUpdated: boolean;
     quoteDeleted: boolean;
+    // Transportation
     shipmentCreated: boolean;
     shipmentUpdated: boolean;
     shipmentDeleted: boolean;
+    // Appointments
+    appointmentCreated: boolean;
+    appointmentUpdated: boolean;
+    appointmentCancelled: boolean;
+    // Account & Security
     passwordChanged: boolean;
     emailChanged: boolean;
     profileUpdated: boolean;
+    loginAlerts: boolean;
+    // Team & CRM
+    driverRequests: boolean;
+    crmActivity: boolean;
   };
   subscription?: {
     plan: "free" | "starter" | "professional" | "enterprise";
@@ -206,15 +217,26 @@ const UserSchema = new Schema(
     },
 
     notificationPreferences: {
+      // CRM & Sales
       quoteCreated: { type: Boolean, default: true },
       quoteUpdated: { type: Boolean, default: true },
       quoteDeleted: { type: Boolean, default: true },
+      // Transportation
       shipmentCreated: { type: Boolean, default: true },
       shipmentUpdated: { type: Boolean, default: true },
       shipmentDeleted: { type: Boolean, default: true },
+      // Appointments
+      appointmentCreated: { type: Boolean, default: true },
+      appointmentUpdated: { type: Boolean, default: true },
+      appointmentCancelled: { type: Boolean, default: true },
+      // Account & Security
       passwordChanged: { type: Boolean, default: true },
       emailChanged: { type: Boolean, default: true },
       profileUpdated: { type: Boolean, default: true },
+      loginAlerts: { type: Boolean, default: true },
+      // Team & CRM
+      driverRequests: { type: Boolean, default: true },
+      crmActivity: { type: Boolean, default: true },
     },
     stripeConnectAccountId: {
       type: String,
