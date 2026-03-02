@@ -28,7 +28,7 @@ export interface IUser extends Document {
   isActive: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
-  
+
   // New profile fields
   onlineStatus: OnlineStatus;
   customStatus?: string;
@@ -41,6 +41,11 @@ export interface IUser extends Document {
   createdAt: Date;
   updatedAt: Date;
   theme: "light" | "dark";
+
+  // Wallet and Referral Engine
+  referralCode?: string;
+  walletBalance: number;
+  totalEarned: number;
 
   // Google Calendar Integration
   googleCalendar?: {
@@ -131,7 +136,7 @@ const UserSchema = new Schema(
     organizationRole: {
       type: String,
     },
-    
+
     // New profile fields
     onlineStatus: {
       type: String,
@@ -161,7 +166,7 @@ const UserSchema = new Schema(
     lastPasswordChange: {
       type: Date,
     },
-    
+
     passwordResetToken: {
       type: String,
       private: true,
@@ -174,6 +179,24 @@ const UserSchema = new Schema(
       type: String,
       enum: ['light', 'dark'],
       default: 'light',
+    },
+
+    // Wallet and Referral Engine
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      uppercase: true
+    },
+    walletBalance: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    totalEarned: {
+      type: Number,
+      default: 0,
     },
 
     // Google Calendar Integration
@@ -240,12 +263,41 @@ UserSchema.statics.isEmailTaken = async function (
   return !!user;
 };
 
-// Pre-save hook to hash password
+// Pre-save hook to hash password and generate referral code
 UserSchema.pre<IUser>('save', async function (next) {
   const user = this;
+
+  // 1. Hash password if modified
   if (user.isModified('password') && user.password) {
     user.password = await bcrypt.hash(user.password, Number(config.bcryptSaltRounds));
   }
+
+  // 2. Auto-generate AAU referral code if new and missing
+  if (user.isNew && !user.referralCode) {
+    // Extract first name (or part of email if name is weird)
+    let baseName = user.name ? user.name.split(' ')[0].replace(/[^a-zA-Z]/g, '').toUpperCase() : 'USER';
+    if (baseName.length < 2) baseName = 'USER';
+
+    // Generate an incredibly aggressive unique generation loop to prevent collision
+    let codeUnique = false;
+    let attempts = 0;
+    while (!codeUnique && attempts < 10) {
+      const random3Digits = Math.floor(100 + Math.random() * 900); // 100-999
+      const candidateCode = `AAU-${baseName}-${random3Digits}`;
+
+      const existingUser = await mongoose.models.User.findOne({ referralCode: candidateCode });
+      if (!existingUser) {
+        user.referralCode = candidateCode;
+        codeUnique = true;
+      }
+      attempts++;
+    }
+    // Fallback if 10 collisions happen (incredibly rare)
+    if (!codeUnique) {
+      user.referralCode = `AAU-${baseName}-${Date.now().toString().slice(-4)}`;
+    }
+  }
+
   next();
 });
 

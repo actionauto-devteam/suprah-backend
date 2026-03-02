@@ -1,5 +1,6 @@
 import express from 'express';
 import adminController from '../controllers/admin.controller';
+import adminReferralController from '../controllers/admin.referral.controller';
 import auth from '../middleware/auth.middleware';
 import { ApiError } from '../utils/ApiError';
 
@@ -36,5 +37,10 @@ router.put('/organizations/:id/status', adminController.suspendOrganization); //
 router.put('/organizations/:id/activate', adminController.activateOrganization); // Explicit activate
 router.put('/organizations/:id/suspend', adminController.suspendOrganization); // Explicit suspend
 router.put('/organizations/:id/subscription', adminController.updateOrganizationSubscription);
+
+// Referral Engine & Digital Wallet Controls
+router.post('/referrals/:referralId/issue-reward', adminReferralController.issueReward);
+router.get('/referrals/withdrawals', adminReferralController.getPendingWithdrawals);
+router.post('/referrals/withdrawals/:transactionId/approve', adminReferralController.approveWithdrawal);
 
 export default router;
