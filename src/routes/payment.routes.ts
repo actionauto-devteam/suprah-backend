@@ -25,7 +25,8 @@ router.post('/confirm', paymentController.confirmPayment);
 
 router
   .route('/:id')
-  .get(paymentController.getPaymentById);
+  .get(paymentController.getPaymentById)
+  .patch(paymentController.updatePayment);
 
 router.post('/:id/cancel', paymentController.cancelPayment);
 router.post('/:id/refund', paymentController.refundPayment);

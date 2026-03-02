@@ -4,17 +4,25 @@ import config from '../config';
 
 export type OnlineStatus = 'online' | 'idle' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
 
+export interface ISocialLink {
+  label: string;
+  url: string;
+}
+
 export interface IPersonalInfo {
   bio?: string;
   phone?: string;
+  phoneCountryCode?: string;
   location?: string;
   timezone?: string;
   language?: string;
   dateOfBirth?: Date;
+  gender?: string;
   jobTitle?: string;
   department?: string;
   linkedIn?: string;
   website?: string;
+  socialLinks?: ISocialLink[];
 }
 
 export interface IUser extends Document {
@@ -62,15 +70,26 @@ export interface IUser extends Document {
   };
 
   notificationPreferences: {
+    // CRM & Sales
     quoteCreated: boolean;
     quoteUpdated: boolean;
     quoteDeleted: boolean;
+    // Transportation
     shipmentCreated: boolean;
     shipmentUpdated: boolean;
     shipmentDeleted: boolean;
+    // Appointments
+    appointmentCreated: boolean;
+    appointmentUpdated: boolean;
+    appointmentCancelled: boolean;
+    // Account & Security
     passwordChanged: boolean;
     emailChanged: boolean;
     profileUpdated: boolean;
+    loginAlerts: boolean;
+    // Team & CRM
+    driverRequests: boolean;
+    crmActivity: boolean;
   };
   subscription?: {
     plan: "free" | "starter" | "professional" | "enterprise";
@@ -79,6 +98,7 @@ export interface IUser extends Document {
     endDate?: Date;
     features: string[];
   };
+  stripeConnectAccountId?: string;
   isPasswordMatch(password: string): Promise<boolean>;
 }
 
@@ -150,14 +170,20 @@ const UserSchema = new Schema(
     personalInfo: {
       bio: { type: String, maxlength: 500 },
       phone: { type: String },
+      phoneCountryCode: { type: String, default: '' },
       location: { type: String },
       timezone: { type: String },
       language: { type: String, default: 'en' },
       dateOfBirth: { type: Date },
+      gender: { type: String, enum: ['', 'male', 'female', 'prefer-not-to-say'], default: '' },
       jobTitle: { type: String },
       department: { type: String },
       linkedIn: { type: String },
       website: { type: String },
+      socialLinks: [{
+        label: { type: String },
+        url: { type: String },
+      }],
     },
     lastActive: {
       type: Date,
@@ -214,15 +240,30 @@ const UserSchema = new Schema(
     },
 
     notificationPreferences: {
+      // CRM & Sales
       quoteCreated: { type: Boolean, default: true },
       quoteUpdated: { type: Boolean, default: true },
       quoteDeleted: { type: Boolean, default: true },
+      // Transportation
       shipmentCreated: { type: Boolean, default: true },
       shipmentUpdated: { type: Boolean, default: true },
       shipmentDeleted: { type: Boolean, default: true },
+      // Appointments
+      appointmentCreated: { type: Boolean, default: true },
+      appointmentUpdated: { type: Boolean, default: true },
+      appointmentCancelled: { type: Boolean, default: true },
+      // Account & Security
       passwordChanged: { type: Boolean, default: true },
       emailChanged: { type: Boolean, default: true },
       profileUpdated: { type: Boolean, default: true },
+      loginAlerts: { type: Boolean, default: true },
+      // Team & CRM
+      driverRequests: { type: Boolean, default: true },
+      crmActivity: { type: Boolean, default: true },
+    },
+    stripeConnectAccountId: {
+      type: String,
+      trim: true,
     },
     subscription: {
       plan: {

@@ -6,6 +6,8 @@ import DriverLocation, { DriverStatus } from "../models/DriverLocation.model";
 import Shipment from "../models/Shipment.model";
 import User, { IUser } from "../models/User.model";
 import AuditLog from "../models/AuditLog.model";
+import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
+import { notificationTemplates } from "../utils/notificationTemplates";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -169,6 +171,45 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     { new: true },
   );
 
+  // Notify the driver about the new load assignment
+  const loadInfo = `${shipment.origin} → ${shipment.destination}`;
+  const { title, message } = notificationTemplates.shipment_assigned({
+    trackingNumber: shipment.trackingNumber || 'N/A',
+    customerName: (shipment.preservedQuoteData as any)?.firstName 
+      ? `${(shipment.preservedQuoteData as any).firstName} ${(shipment.preservedQuoteData as any).lastName || ''}`
+      : undefined,
+  });
+
+  await safeCreateNotification({
+    userId: driver._id.toString(),
+    organizationId: orgId || 'global',
+    type: 'shipment_assigned',
+    title,
+    message,
+    metadata: {
+      shipmentId: shipment._id.toString(),
+      trackingNumber: shipment.trackingNumber,
+      origin: shipment.origin,
+      destination: shipment.destination,
+      loadInfo,
+    },
+  });
+
+  // Also notify org admins that a load was assigned
+  await notifyOrgAdmins(
+    orgId,
+    'driver_assigned',
+    'Load Assigned to Driver',
+    `${shipment.trackingNumber} assigned to ${driver.name || driver.email}`,
+    {
+      shipmentId: shipment._id.toString(),
+      trackingNumber: shipment.trackingNumber,
+      driverId: driver._id.toString(),
+      driverName: driver.name || driver.email,
+    },
+    (req.user as any)?._id?.toString() // Exclude the user who assigned
+  );
+
   res.json(new ApiResponse(200, shipment, "Load assigned"));
 
   await AuditLog.create({
@@ -207,6 +248,26 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
     shipment.status = "Dispatched";
   }
   await shipment.save();
+
+  // Get driver info for notification
+  const driver = await User.findById(userId).select('name email');
+
+  // Notify org admins that driver accepted the load
+  if (shipment.organizationId) {
+    await notifyOrgAdmins(
+      shipment.organizationId.toString(),
+      'shipment_status_changed',
+      'Load Accepted by Driver',
+      `${driver?.name || driver?.email || 'Driver'} accepted shipment ${shipment.trackingNumber}`,
+      {
+        shipmentId: shipment._id.toString(),
+        trackingNumber: shipment.trackingNumber,
+        driverId: userId,
+        driverName: driver?.name || driver?.email,
+        status: shipment.status,
+      }
+    );
+  }
 
   res.json(new ApiResponse(200, shipment, "Load accepted"));
 

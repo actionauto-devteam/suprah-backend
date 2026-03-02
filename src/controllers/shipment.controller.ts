@@ -2,12 +2,13 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
+import Payment from '../models/Payment.model';
 import AuditLog from '../models/AuditLog.model';
+import User, { IUser } from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
-import { IUser } from '../models/User.model';
 
 /**
  * Helper to safely get user ID from request
@@ -120,6 +121,30 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         await Quote.findOneAndDelete({ _id: quoteId, organizationId: orgId });
     } else {
         await Quote.findOneAndUpdate({ _id: quoteId, organizationId: orgId }, { status: 'booked' });
+    }
+
+    // Auto-create a pending Payment record linked to this shipment
+    if (userId && quote.rate && quote.rate > 0) {
+        const customerName = `${quote.firstName} ${quote.lastName}`.trim();
+        const vehicleLabel = quote.vehicleName || 'Vehicle';
+        try {
+            await Payment.create({
+                organizationId: orgId,
+                customerId: quote.email,
+                customerName,
+                customerEmail: quote.email,
+                customerPhone: quote.phone,
+                amount: quote.rate,
+                currency: 'usd',
+                description: `Vehicle Transport - ${vehicleLabel}`,
+                status: 'pending',
+                shipmentId: shipment._id,
+                createdBy: userId,
+            });
+        } catch (paymentErr) {
+            // Non-fatal: log but don't fail the shipment creation
+            console.error('[Shipment] Failed to auto-create payment:', paymentErr);
+        }
     }
 
     // Create notification safely
@@ -478,6 +503,115 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /shipments/:id/submit-proof
+ * Driver submits a proof-of-delivery image. Notifies org admins.
+ */
+const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) throw new ApiError(401, 'User not authenticated');
+
+    const { id: shipmentId } = req.params;
+    const { note } = req.body;
+    const file = (req as any).file as Express.Multer.File | undefined;
+
+    if (!file) {
+        throw new ApiError(400, 'Proof image is required');
+    }
+
+    // Find by ID only — no org filter. Security is enforced via assignedDriverId check below.
+    const shipment = await Shipment.findById(shipmentId);
+    if (!shipment) throw new ApiError(404, 'Shipment not found');
+
+    // Verify the logged-in user is the assigned driver
+    if (!shipment.assignedDriverId || shipment.assignedDriverId.toString() !== userId) {
+        throw new ApiError(403, 'Only the assigned driver can submit proof of delivery');
+    }
+
+    const imageUrl = `/uploads/proof-of-delivery/${shipmentId}/${file.filename}`;
+
+    shipment.proofOfDelivery = {
+        imageUrl,
+        submittedAt: new Date(),
+        note: note || undefined,
+    };
+
+    await shipment.save();
+
+    // Use the shipment's own organizationId for notifications
+    const shipmentOrgId = shipment.organizationId.toString();
+
+    const admins = await User.find({
+        organizationId: shipment.organizationId,
+        role: { $in: ['admin', 'user', 'super_admin'] },
+    }).select('_id');
+
+    for (const admin of admins) {
+        await safeCreateNotification({
+            userId: admin._id.toString(),
+            organizationId: shipmentOrgId,
+            type: 'proof_submitted',
+            title: 'Proof of Delivery Submitted',
+            message: `Driver submitted proof of delivery for shipment ${shipment.trackingNumber || shipmentId}`,
+            metadata: {
+                shipmentId,
+                trackingNumber: shipment.trackingNumber,
+                imageUrl,
+            },
+        });
+    }
+
+    res.json(new ApiResponse(200, shipment, 'Proof of delivery submitted successfully'));
+});
+
+/**
+ * POST /shipments/:id/confirm-delivery
+ * Org admin confirms the driver's proof of delivery. Sets status to Delivered.
+ */
+const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) throw new ApiError(401, 'User not authenticated');
+
+    const orgId = req.orgId as string;
+    const { id: shipmentId } = req.params;
+
+    const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
+    if (!shipment) throw new ApiError(404, 'Shipment not found');
+
+    if (!shipment.proofOfDelivery?.imageUrl) {
+        throw new ApiError(400, 'No proof of delivery has been submitted yet');
+    }
+
+    const updated = await Shipment.findOneAndUpdate(
+        { _id: shipmentId, organizationId: orgId },
+        {
+            status: 'Delivered',
+            delivered: new Date(),
+            'proofOfDelivery.confirmedAt': new Date(),
+            'proofOfDelivery.confirmedBy': userId,
+        },
+        { new: true }
+    );
+
+    // Notify the driver
+    if (shipment.assignedDriverId) {
+        const driverUserId = shipment.assignedDriverId.toString();
+        await safeCreateNotification({
+            userId: driverUserId,
+            organizationId: orgId,
+            type: 'delivery_confirmed',
+            title: 'Delivery Confirmed',
+            message: `Your delivery for shipment ${shipment.trackingNumber || shipmentId} has been confirmed`,
+            metadata: {
+                shipmentId,
+                trackingNumber: shipment.trackingNumber,
+            },
+        });
+    }
+
+    res.json(new ApiResponse(200, updated, 'Delivery confirmed successfully'));
+});
+
+/**
  * Get shipment statistics
  */
 const getShipmentStats = asyncHandler(async (req: Request, res: Response) => {
@@ -520,5 +654,7 @@ export default {
     updateShipment,
     addShipmentNote,
     deleteShipment,
-    getShipmentStats
+    getShipmentStats,
+    submitProofOfDelivery,
+    confirmDelivery,
 };

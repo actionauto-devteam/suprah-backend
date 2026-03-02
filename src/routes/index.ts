@@ -15,6 +15,7 @@ import driverTrackingRoute from "./driverTracking.routes";
 import driverRequestRoute from "./driverRequest.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
+import driverPayoutRoute from "./driverPayout.routes";
 import leadRoute from "./lead.route";
 import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
@@ -108,6 +109,9 @@ const defaultRoutes = [
     path: "/customer/wallet",
     route: walletRoute,
   }
+    path: "/driver-payouts",
+    route: driverPayoutRoute,
+  },
 ];
 
 defaultRoutes.forEach((route) => {

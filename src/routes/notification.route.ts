@@ -25,4 +25,10 @@ router.delete("/:id", notificationController.deleteNotification);
 // Delete all read notifications
 router.delete("/read/all", notificationController.deleteAllRead);
 
+// Broadcast notification to users with specific roles (admin only)
+router.post("/broadcast", notificationController.broadcastNotification);
+
+// Create a test notification (for testing UI)
+router.post("/create-test", notificationController.createTestNotification);
+
 export default router;
