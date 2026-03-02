@@ -8,7 +8,12 @@ const router = express.Router();
 // Stripe webhook (must be BEFORE auth middleware - uses raw body)
 router.post('/webhook', paymentController.handleStripeWebhook);
 
-// All other routes require authentication
+// Customer-facing routes (auth only, no org required)
+router.get('/my-payments', auth(), paymentController.getMyPaymentsAsCustomer);
+router.post('/create-customer-intent', auth(), paymentController.createCustomerPaymentIntent);
+router.post('/confirm-customer', auth(), paymentController.confirmCustomerPayment);
+
+// All other routes require authentication + org
 router.use(auth());
 router.use(requireOrg);
 
@@ -30,5 +35,6 @@ router
 
 router.post('/:id/cancel', paymentController.cancelPayment);
 router.post('/:id/refund', paymentController.refundPayment);
+router.post('/:id/request', paymentController.requestPaymentFromCustomer);
 
 export default router;

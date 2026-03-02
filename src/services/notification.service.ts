@@ -66,6 +66,7 @@ const VALID_NOTIFICATION_TYPES = [
   'payment_received',
   'payment_pending',
   'payment_failed',
+  'payment_request',
   'payout_processed',
   
   // Team & Organization
@@ -232,8 +233,9 @@ const getUserNotifications = async (userId: string, orgId: string, options: {
   try {
     const { limit = 50, skip = 0, isRead, userRole } = options;
 
-    // Get personal notifications
-    const personFilter: any = { userId, organizationId: orgId };
+    // Get personal notifications (filter by userId only — organizationId is not required
+    // because cross-org notifications are valid, e.g. dealer notifying a customer)
+    const personFilter: any = { userId };
     if (isRead !== undefined) {
       personFilter.isRead = isRead;
     }
@@ -267,7 +269,7 @@ const getUserNotifications = async (userId: string, orgId: string, options: {
 
     const totalPersonal = await Notification.countDocuments(personFilter);
     const totalBroadcast = await Notification.countDocuments(broadcastFilter);
-    const unreadPersonal = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
+    const unreadPersonal = await Notification.countDocuments({ userId, isRead: false });
     const unreadBroadcast = await Notification.countDocuments({ ...broadcastFilter, isRead: false });
 
     return {
@@ -287,7 +289,7 @@ const getUserNotifications = async (userId: string, orgId: string, options: {
 const markAsRead = async (notificationId: string, orgId: string, userId: string) => {
   try {
     const notification = await Notification.findOneAndUpdate(
-      { _id: notificationId, organizationId: orgId, userId },
+      { _id: notificationId, userId },
       { isRead: true },
       { new: true }
     );
@@ -309,7 +311,7 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
 const markAllAsRead = async (userId: string, orgId: string) => {
   try {
     await Notification.updateMany(
-      { userId, organizationId: orgId, isRead: false },
+      { userId, isRead: false },
       { isRead: true }
     );
 
@@ -327,7 +329,6 @@ const deleteNotification = async (notificationId: string, orgId: string, userId:
   try {
     const notification = await Notification.findOneAndDelete({
       _id: notificationId,
-      organizationId: orgId,
       userId,
     });
 
@@ -347,7 +348,7 @@ const deleteNotification = async (notificationId: string, orgId: string, userId:
  */
 const deleteAllRead = async (userId: string, orgId: string) => {
   try {
-    const result = await Notification.deleteMany({ userId, organizationId: orgId, isRead: true });
+    const result = await Notification.deleteMany({ userId, isRead: true });
     console.log(`Deleted ${result.deletedCount} read notifications for user ${userId}`);
     return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
   } catch (error) {
@@ -361,7 +362,7 @@ const deleteAllRead = async (userId: string, orgId: string) => {
  */
 const getUnreadCount = async (userId: string, orgId: string) => {
   try {
-    const count = await Notification.countDocuments({ userId, organizationId: orgId, isRead: false });
+    const count = await Notification.countDocuments({ userId, isRead: false });
     return count;
   } catch (error) {
     console.error('Error in getUnreadCount:', error);

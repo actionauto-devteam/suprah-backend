@@ -91,6 +91,7 @@ const NotificationSchema = new Schema(
         'payment_received',
         'payment_pending',
         'payment_failed',
+        'payment_request',
         'payout_processed',
         
         // Team & Organization

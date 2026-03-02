@@ -262,6 +262,11 @@ export const notificationTemplates = {
     message: `Payment of $${data.amount.toFixed(2)} failed${data.trackingNumber ? ` for shipment ${data.trackingNumber}` : ''}`,
   }),
 
+  payment_request: (data: { amount: number; dealerName: string; description: string }) => ({
+    title: 'Payment Request',
+    message: `You have a pending payment of $${data.amount.toFixed(2)} for "${data.description}" from ${data.dealerName}. Please log in to complete your payment.`,
+  }),
+
   payout_processed: (data: PaymentData) => ({
     title: 'Payout Processed',
     message: `Payout of $${data.amount.toFixed(2)} has been processed`,

@@ -6,7 +6,7 @@ import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import Payment from '../models/Payment.model';
-import { IUser } from '../models/User.model';
+import User, { IUser } from '../models/User.model';
 import config from '../config';
 
 // Initialize Stripe
@@ -531,6 +531,220 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
   res.json({ received: true });
 });
 
+/**
+ * Dealer sends a payment request notification to the customer
+ * POST /api/payments/:id/request  — auth + requireOrg
+ */
+const requestPaymentFromCustomer = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const { id } = req.params;
+
+  const payment = await Payment.findOne({ _id: id, organizationId: orgId });
+  if (!payment) throw new ApiError(404, 'Payment not found');
+
+  if (payment.status === 'succeeded') {
+    throw new ApiError(400, 'This payment has already been completed');
+  }
+
+  // Look up customer user by email
+  const customer = await User.findOne({ email: payment.customerEmail.toLowerCase() });
+  if (!customer) {
+    throw new ApiError(404, 'Customer has not registered an account yet. Ask them to sign up first.');
+  }
+
+  // Get dealer name from the requesting user
+  const dealer = req.user as IUser;
+  const dealerName = dealer?.name || 'the dealer';
+
+  await safeCreateNotification({
+    userId: customer._id as any,
+    organizationId: orgId,
+    type: 'payment_request',
+    title: 'Payment Request',
+    message: `You have a pending payment of $${payment.amount.toFixed(2)} for "${payment.description}" from ${dealerName}. Please log in to complete your payment.`,
+    metadata: {
+      paymentId: payment._id.toString(),
+      amount: payment.amount,
+      description: payment.description,
+      invoiceNumber: payment.invoiceNumber,
+    },
+  });
+
+  res.json(new ApiResponse(200, null, 'Payment request sent to customer successfully'));
+});
+
+/**
+ * Customer views their own payments (no org required)
+ * GET /api/payments/my-payments  — auth only
+ */
+const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+
+  const payments = await Payment.find({ customerEmail: user.email.toLowerCase() })
+    .sort({ createdAt: -1 });
+
+  const totalOwed = payments
+    .filter((p) => p.status === 'pending' || p.status === 'failed')
+    .reduce((sum, p) => sum + p.amount, 0);
+
+  const totalPaid = payments
+    .filter((p) => p.status === 'succeeded')
+    .reduce((sum, p) => sum + p.amount, 0);
+
+  const pendingCount = payments.filter((p) => p.status === 'pending' || p.status === 'failed').length;
+
+  res.json(
+    new ApiResponse(200, {
+      payments,
+      stats: { totalOwed, totalPaid, pendingCount },
+    }, 'Payments fetched successfully')
+  );
+});
+
+/**
+ * Customer creates a Stripe PaymentIntent to pay their invoice (no org required)
+ * POST /api/payments/create-customer-intent  — auth only
+ */
+const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+
+  const { paymentId } = req.body;
+  if (!paymentId) throw new ApiError(400, 'paymentId is required');
+
+  const payment = await Payment.findById(paymentId);
+  if (!payment) throw new ApiError(404, 'Payment not found');
+
+  // Security: only the customer whose email is on the payment can pay
+  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
+    throw new ApiError(403, 'You are not authorized to pay this invoice');
+  }
+
+  if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
+  if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
+
+  // Reuse existing PaymentIntent if still valid
+  if (payment.stripePaymentIntentId) {
+    try {
+      const existing = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+      if (existing.status !== 'canceled' && existing.status !== 'succeeded') {
+        return res.json(
+          new ApiResponse(200, {
+            clientSecret: existing.client_secret,
+            paymentIntentId: existing.id,
+          }, 'Existing payment intent retrieved')
+        );
+      }
+    } catch {
+      // Intent no longer valid, create a new one below
+    }
+  }
+
+  // Create or retrieve Stripe customer
+  let stripeCustomerId = payment.stripeCustomerId;
+  if (!stripeCustomerId) {
+    const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
+    if (customers.data.length > 0) {
+      stripeCustomerId = customers.data[0].id;
+    } else {
+      const customer = await stripe.customers.create({
+        name: payment.customerName,
+        email: payment.customerEmail,
+        phone: payment.customerPhone,
+      });
+      stripeCustomerId = customer.id;
+    }
+  }
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: Math.round(payment.amount * 100),
+    currency: payment.currency,
+    customer: stripeCustomerId,
+    description: payment.description,
+    metadata: {
+      paymentId: payment._id.toString(),
+      invoiceNumber: payment.invoiceNumber || '',
+    },
+    automatic_payment_methods: { enabled: true },
+  });
+
+  payment.stripePaymentIntentId = paymentIntent.id;
+  payment.stripeCustomerId = stripeCustomerId;
+  payment.status = 'processing';
+  await payment.save();
+
+  res.json(
+    new ApiResponse(200, {
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+    }, 'Payment intent created successfully')
+  );
+});
+
+/**
+ * Customer confirms their payment after Stripe (no org required)
+ * POST /api/payments/confirm-customer  — auth only
+ */
+const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  const payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId });
+  if (!payment) throw new ApiError(404, 'Payment record not found');
+
+  // Security check
+  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
+    throw new ApiError(403, 'Not authorized');
+  }
+
+  if (paymentIntent.status === 'succeeded') {
+    payment.status = 'succeeded';
+    payment.paidAt = new Date();
+    payment.stripeChargeId = paymentIntent.latest_charge as string;
+
+    if (payment.stripeChargeId) {
+      try {
+        const charge = await stripe.charges.retrieve(payment.stripeChargeId);
+        payment.receiptUrl = charge.receipt_url || undefined;
+        payment.paymentMethod = charge.payment_method_details?.type || undefined;
+      } catch {
+        // Non-critical
+      }
+    }
+
+    await payment.save();
+
+    // Notify the dealer (org admins)
+    await safeCreateNotification({
+      userId: payment.createdBy as any,
+      organizationId: payment.organizationId,
+      type: 'payment_received',
+      title: 'Payment Received',
+      message: `Payment of $${payment.amount.toFixed(2)} from ${payment.customerName} was successful.`,
+      metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
+    });
+
+    return res.json(new ApiResponse(200, payment, 'Payment confirmed successfully'));
+  }
+
+  if (paymentIntent.status === 'requires_payment_method') {
+    payment.status = 'failed';
+    payment.failureReason = paymentIntent.last_payment_error?.message || 'Payment method failed';
+    await payment.save();
+    return res.json(new ApiResponse(200, payment, 'Payment failed'));
+  }
+
+  payment.status = paymentIntent.status === 'canceled' ? 'cancelled' : 'processing';
+  await payment.save();
+  res.json(new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`));
+});
+
 export default {
   createPayment,
   getPayments,
@@ -543,4 +757,8 @@ export default {
   refundPayment,
   getPaymentStats,
   handleStripeWebhook,
+  requestPaymentFromCustomer,
+  getMyPaymentsAsCustomer,
+  createCustomerPaymentIntent,
+  confirmCustomerPayment,
 };
