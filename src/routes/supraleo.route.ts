@@ -1,5 +1,9 @@
 import express from 'express';
+<<<<<<< HEAD
 import supraleoController from '../controllers/supra.Leo.controller';
+=======
+import supraleoController from '../controllers/supraleo.controller';
+>>>>>>> bdb5ed52768b8b4dcefdacb9fcd48ff7e4084da3
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 
