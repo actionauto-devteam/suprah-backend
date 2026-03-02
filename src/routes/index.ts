@@ -108,10 +108,11 @@ const defaultRoutes = [
   {
     path: "/customer/wallet",
     route: walletRoute,
-  }
+  },
+  {
     path: "/driver-payouts",
     route: driverPayoutRoute,
-  },
+  }
 ];
 
 defaultRoutes.forEach((route) => {
