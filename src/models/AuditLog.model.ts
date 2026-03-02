@@ -1,9 +1,9 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IAuditLog extends Document {
-    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Driver' | 'Invitation';
+    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction';
     entityId?: mongoose.Types.ObjectId | string;
-    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS';
+    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL';
     changes?: any;
     reason: string;
     performedBy?: mongoose.Types.ObjectId;
@@ -27,11 +27,13 @@ const AuditLogSchema: Schema = new Schema(
                 'Billing',
                 'Shipment',
                 'Driver',
-                'Invitation'
+                'Invitation',
+                'Referral',
+                'Transaction'
             ]
         },
         entityId: { type: Schema.Types.Mixed },
-        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS'] },
+        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS', 'APPROVE_REWARD', 'APPROVE_WITHDRAWAL', 'REJECT_WITHDRAWAL'] },
         changes: { type: Schema.Types.Mixed },
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },

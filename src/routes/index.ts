@@ -18,6 +18,9 @@ import paymentRoute from "./payment.routes";
 import driverPayoutRoute from "./driverPayout.routes";
 import leadRoute from "./lead.route";
 import crmRoute from "./crm.route";
+import serviceRoute from "./service.route";
+import ownedVehicleRoute from "./ownedVehicle.route";
+import walletRoute from "./wallet.route";
 
 const router = express.Router();
 
@@ -95,6 +98,17 @@ const defaultRoutes = [
     route: driverRequestRoute,
   },
   {
+    path: "/service",
+    route: serviceRoute,
+  },
+  {
+    path: "/customer/vehicles",
+    route: ownedVehicleRoute,
+  },
+  {
+    path: "/customer/wallet",
+    route: walletRoute,
+  }
     path: "/driver-payouts",
     route: driverPayoutRoute,
   },

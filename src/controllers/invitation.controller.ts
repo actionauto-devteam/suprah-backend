@@ -206,6 +206,12 @@ export const acceptInvitation = async (req: Request, res: Response) => {
     // Update user
     user.organizationId = invite.organizationId as any; // Cast because logic implies it is an ObjectId
     (user as any).organizationRole = invite.role;
+
+    // Promote customer to employee upon joining an organization
+    if (user.role === 'customer') {
+        user.role = 'employee';
+    }
+
     await user.save();
 
     // Update invite

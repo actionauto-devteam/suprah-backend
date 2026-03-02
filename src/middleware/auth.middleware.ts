@@ -33,7 +33,9 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
 
         // 2. Verify the token using Clerk
         // Note: clerkClient.verifyToken verifies the signature and expiration
-        const client = await clerkClient.verifyToken(token);
+        const client = await clerkClient.verifyToken(token, {
+            clockSkewInMs: 300000 // Allow up to 5 minutes of clock drift between frontend JWT minter and backend validator
+        } as any);
 
         // For legacy/migration support, we still need the actual user details to identify them
         // The verifyToken returns a decoded JWT payload.
@@ -89,7 +91,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                     name,
                     avatar: picture,
                     emailVerified: true,
-                    role: 'user', // Default role
+                    role: 'customer', // Default role
                 });
             }
         }
