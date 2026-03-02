@@ -78,21 +78,48 @@ const updatePersonalInfo = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Update avatar/profile picture
+ * Update avatar/profile picture (file upload)
  */
 const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const orgId = (req as any).orgId;
-  const { avatar } = req.body;
+  const file = (req as any).file as Express.Multer.File | undefined;
 
-  if (!avatar) {
-    throw new ApiError(400, 'Avatar is required');
+  if (!file) {
+    throw new ApiError(400, 'Avatar image file is required');
   }
 
-  const user = await profileService.updateAvatar(userId, avatar, orgId);
+  const user = await profileService.updateAvatar(userId, file.filename, orgId);
 
   res.json(
     new ApiResponse(200, user, 'Avatar updated successfully')
+  );
+});
+
+/**
+ * Remove avatar/profile picture
+ */
+const removeAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  const orgId = (req as any).orgId;
+
+  const user = await profileService.removeAvatar(userId, orgId);
+
+  res.json(
+    new ApiResponse(200, user, 'Avatar removed successfully')
+  );
+});
+
+/**
+ * Get driver-specific stats
+ */
+const getDriverStats = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+
+  const stats = await profileService.getDriverStats(userId);
+
+  res.json(
+    new ApiResponse(200, stats, 'Driver stats fetched successfully')
   );
 });
 
@@ -198,6 +225,8 @@ export default {
   updateOnlineStatus,
   updatePersonalInfo,
   updateAvatar,
+  removeAvatar,
+  getDriverStats,
   getRecentActivities,
   changePassword,
   updateEmail,

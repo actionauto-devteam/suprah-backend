@@ -4,6 +4,8 @@ import bcrypt from 'bcryptjs';
 import config from '../config';
 import notificationService from './notification.service';
 import activityService from './activity.service';
+import fs from 'fs';
+import path from 'path';
 
 /**
  * Get user profile with extended information
@@ -204,12 +206,37 @@ const updatePersonalInfo = async (userId: string, personalInfo: Partial<IPersona
 };
 
 /**
- * Update avatar/profile picture
+ * Update avatar/profile picture (file-based)
+ * Saves avatar as a file in uploads/avatars/ and stores a URL in the DB.
+ * Deletes the old avatar file if the user already had one stored locally.
  */
-const updateAvatar = async (userId: string, avatar: string, orgId?: string) => {
+const updateAvatar = async (userId: string, avatarFilename: string, orgId?: string) => {
+  // Build the public URL for the avatar
+  const avatarUrl = `/uploads/avatars/${avatarFilename}`;
+
+  // Get the current user to check for existing avatar file
+  const existingUser = await User.findById(userId).select('avatar');
+  if (!existingUser) {
+    throw new ApiError(404, 'User not found');
+  }
+
+  // Delete old avatar file if it was a local upload
+  if (existingUser.avatar && existingUser.avatar.startsWith('/uploads/avatars/')) {
+    const oldFilename = existingUser.avatar.replace('/uploads/avatars/', '');
+    const oldFilePath = path.join(__dirname, '../../uploads/avatars', oldFilename);
+    try {
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    } catch (err) {
+      console.error('Failed to delete old avatar file:', err);
+      // Don't throw — non-critical
+    }
+  }
+
   const user = await User.findByIdAndUpdate(
     userId,
-    { $set: { avatar, lastActive: new Date() } },
+    { $set: { avatar: avatarUrl, lastActive: new Date() } },
     { new: true, runValidators: true }
   ).select('-password');
 
@@ -221,6 +248,94 @@ const updateAvatar = async (userId: string, avatar: string, orgId?: string) => {
   await activityService.logAvatarUpdate(userId, orgId);
 
   return user;
+};
+
+/**
+ * Remove avatar/profile picture
+ * Deletes the avatar file and sets avatar to null.
+ */
+const removeAvatar = async (userId: string, orgId?: string) => {
+  const existingUser = await User.findById(userId).select('avatar');
+  if (!existingUser) {
+    throw new ApiError(404, 'User not found');
+  }
+
+  // Delete the avatar file if it was a local upload
+  if (existingUser.avatar && existingUser.avatar.startsWith('/uploads/avatars/')) {
+    const filename = existingUser.avatar.replace('/uploads/avatars/', '');
+    const filePath = path.join(__dirname, '../../uploads/avatars', filename);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (err) {
+      console.error('Failed to delete avatar file:', err);
+    }
+  }
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $set: { avatar: null, lastActive: new Date() } },
+    { new: true, runValidators: true }
+  ).select('-password');
+
+  if (!user) {
+    throw new ApiError(404, 'User not found');
+  }
+
+  // Log activity
+  await activityService.logAvatarUpdate(userId, orgId);
+
+  return user;
+};
+
+/**
+ * Get driver-specific stats (deliveries, on-time rate, etc.)
+ */
+const getDriverStats = async (userId: string) => {
+  const Shipment = (await import('../models/Shipment.model')).default;
+
+  // Total deliveries assigned to this driver
+  const totalAssigned = await Shipment.countDocuments({ assignedDriverId: userId }).catch(() => 0);
+  
+  // Completed deliveries
+  const deliveriesCompleted = await Shipment.countDocuments({ 
+    assignedDriverId: userId, 
+    status: 'Delivered' 
+  }).catch(() => 0);
+
+  // Active deliveries (in transit)
+  const activeDeliveries = await Shipment.countDocuments({ 
+    assignedDriverId: userId, 
+    status: { $in: ['Dispatched', 'In Transit', 'Picked Up'] } 
+  }).catch(() => 0);
+
+  // Calculate on-time rate from delivered shipments
+  // A delivery is "on-time" if it was delivered before or on the estimated delivery date
+  let onTimeRate = 0;
+  if (deliveriesCompleted > 0) {
+    const onTimeCount = await Shipment.countDocuments({
+      assignedDriverId: userId,
+      status: 'Delivered',
+      $expr: {
+        $or: [
+          { $eq: ['$dates.estimatedDelivery', null] }, // No estimate = on-time by default
+          { $lte: ['$dates.delivered', '$dates.estimatedDelivery'] },
+        ],
+      },
+    }).catch(() => deliveriesCompleted); // Default to all on-time if query fails
+    onTimeRate = Math.round((onTimeCount / deliveriesCompleted) * 1000) / 10;
+  }
+
+  return {
+    deliveriesCompleted,
+    activeDeliveries,
+    totalAssigned,
+    onTimeRate,
+    // Rating is a placeholder — we don't have a rating system yet
+    rating: 0,
+    totalMiles: 0, // Would require tracking data we don't have yet
+  };
 };
 
 /**
@@ -319,9 +434,11 @@ export default {
   updateOnlineStatus,
   updatePersonalInfo,
   updateAvatar,
+  removeAvatar,
   changePassword,
   updateEmail,
   updateNotificationPreferences,
   updateTheme,
   getRecentActivities,
+  getDriverStats,
 };

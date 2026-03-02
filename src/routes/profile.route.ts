@@ -1,6 +1,7 @@
 import express from 'express';
 import profileController from '../controllers/profile.controller';
 import auth from '../middleware/auth.middleware';
+import { uploadAvatarImage } from '../middleware/upload.middleware';
 
 const router = express.Router();
 
@@ -19,8 +20,14 @@ router.patch('/online-status', profileController.updateOnlineStatus);
 // Update personal information
 router.patch('/personal-info', profileController.updatePersonalInfo);
 
-// Update avatar/profile picture
-router.patch('/avatar', profileController.updateAvatar);
+// Update avatar/profile picture (file upload)
+router.patch('/avatar', uploadAvatarImage, profileController.updateAvatar);
+
+// Remove avatar/profile picture
+router.delete('/avatar', profileController.removeAvatar);
+
+// Get driver stats
+router.get('/driver-stats', profileController.getDriverStats);
 
 // Get recent activities
 router.get('/activities', profileController.getRecentActivities);
