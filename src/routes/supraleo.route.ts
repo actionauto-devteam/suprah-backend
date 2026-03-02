@@ -1,5 +1,5 @@
 import express from 'express';
-import supraleoController from '../controllers/supraLeo.controller';
+import supraleoController from '../controllers/supraleo.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 
