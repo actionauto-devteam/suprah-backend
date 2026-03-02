@@ -12,7 +12,7 @@ router.use(requireOrg);
 // AI status & capabilities
 router.get('/status', supraleoController.getStatus);
 
-// Message preparation for TTS
+// Message preparation for TTS!!
 router.get('/prepare-message/:leadId', supraleoController.prepareMessage);
 router.post('/prepare-thread-message', supraleoController.prepareThreadMessage);
 
