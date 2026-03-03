@@ -21,6 +21,7 @@ import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
 import ownedVehicleRoute from "./ownedVehicle.route";
 import walletRoute from "./wallet.route";
+import supraleoRoute from "./supraleo.route";  // ← NEW
 
 const router = express.Router();
 
@@ -112,7 +113,11 @@ const defaultRoutes = [
   {
     path: "/driver-payouts",
     route: driverPayoutRoute,
-  }
+  },
+  {
+    path: "/supraleo",       
+    route: supraleoRoute,    
+  },
 ];
 
 defaultRoutes.forEach((route) => {
