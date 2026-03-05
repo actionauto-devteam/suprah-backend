@@ -1,37 +1,50 @@
-// Routes for ADF leads (Inquiries) - Main Entry Point
+// Routes for Leads — Centralized Ingestion
 import { Router } from 'express';
-import { receiveADF, getAllLeads, updateLead, createInquiry, markAsRead, markAsPending, replyToInquiry, syncGmailInquiries, setAppointmentForLead, getThreadMessages } from '../controllers/lead.controller';
+import {
+  receiveADF,
+  getAllLeads,
+  updateLead,
+  createInquiry,
+  markAsRead,
+  markAsPending,
+  replyToInquiry,
+  syncCentralGmail,
+  syncGmailInquiries,
+  setAppointmentForLead,
+  getThreadMessages,
+  getCentralSyncStatus,
+} from '../controllers/lead.controller';
 import auth from '../middleware/auth.middleware';
-import { requireOrg } from '../middleware/org.middleware';
 
 const router = Router();
 
-// ADF endpoint (public, for incoming emails)
+// ── ADF endpoint (public, for incoming email webhooks) ───────────────────────
 router.post('/adf', receiveADF);
 
-// ============================================================
-// Protected routes - ALL must have  auth BEFORE this line
-// ============================================================
+// ── All lead routes require authentication ───────────────────────────────────
+// NOTE: requireOrg is intentionally NOT used here.
+// Leads are already scoped to the individual user via createdBy: userId.
+// requireOrg would block users without an organizationId from accessing
+// their own leads, which is incorrect behaviour.
 router.use(auth());
-router.use(requireOrg);
 
-// ============================================================
-// Static routes MUST come BEFORE dynamic :id routes
-// ============================================================
+// ── Static routes BEFORE dynamic :id routes ──────────────────────────────────
 
-// Sync Gmail inquiries (static path)
+// Centralized sync — actionautoutah.dev@gmail.com
+router.post('/sync-central', syncCentralGmail);
+
+// Legacy endpoint — redirects to centralized sync
 router.post('/sync-gmail', syncGmailInquiries);
 
-// Base CRUD routes
-router
-  .route('/')
-  .post(createInquiry)
-  .get(getAllLeads);
+// Centralized ingestion status
+router.get('/sync-status', getCentralSyncStatus);
 
-// ============================================================
-// Dynamic :id routes (MUST come after all static routes)
-// ============================================================
+// Base CRUD
+router.route('/')
+  .get(getAllLeads)
+  .post(createInquiry);
 
+// ── Dynamic :id routes ────────────────────────────────────────────────────────
 router.get('/:id/thread', getThreadMessages);
 router.patch('/:id/read', markAsRead);
 router.patch('/:id/pending', markAsPending);

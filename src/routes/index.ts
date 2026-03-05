@@ -21,7 +21,8 @@ import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
 import ownedVehicleRoute from "./ownedVehicle.route";
 import walletRoute from "./wallet.route";
-import supraleoRoute from "./supraroute.route";  // ← NEW
+import supraleoRoute from "./supraroute.route";
+import crmBiometricRoute from "./crm-biometric.routes";
 
 const router = express.Router();
 
@@ -117,6 +118,10 @@ const defaultRoutes = [
   {
     path: "/supraleo",
     route: supraleoRoute,
+  },
+  {
+    path: "/crm/biometric",  
+    route: crmBiometricRoute,
   },
 ];
 
