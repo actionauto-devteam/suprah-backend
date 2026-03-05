@@ -20,7 +20,7 @@ const VALID_NOTIFICATION_TYPES = [
   'quote_updated',
   'quote_deleted',
   'quote_converted',
-  
+
   // Shipments
   'shipment_created',
   'shipment_updated',
@@ -30,7 +30,7 @@ const VALID_NOTIFICATION_TYPES = [
   'shipment_picked_up',
   'shipment_delivered',
   'proof_of_delivery',
-  
+
   // Vehicles/Inventory
   'vehicle_added',
   'vehicle_updated',
@@ -38,14 +38,14 @@ const VALID_NOTIFICATION_TYPES = [
   'vehicle_status_changed',
   'inventory_sync',
   'new_inventory_alert',
-  
+
   // Appointments
   'appointment_created',
   'appointment_updated',
   'appointment_cancelled',
   'appointment_reminder',
   'guest_response',
-  
+
   // CRM & Leads
   'new_lead',
   'lead_assigned',
@@ -53,7 +53,7 @@ const VALID_NOTIFICATION_TYPES = [
   'crm_message',
   'crm_task_assigned',
   'crm_task_due',
-  
+
   // Driver related
   'driver_request',
   'driver_request_approved',
@@ -61,32 +61,36 @@ const VALID_NOTIFICATION_TYPES = [
   'driver_assigned',
   'driver_location_update',
   'driver_payout',
-  
+
   // Payments
   'payment_received',
   'payment_pending',
   'payment_failed',
   'payment_request',
   'payout_processed',
-  
+
   // Team & Organization
   'team_invite_sent',
   'team_member_joined',
   'team_member_left',
   'role_changed',
-  
+
   // Account & Security
   'password_changed',
   'email_changed',
   'profile_updated',
   'login_alert',
-  
+
   // System & General
   'system_announcement',
   'message_received',
   'reminder',
   'general',
-  
+
+  // Referrals
+  'referral_joined',
+  'referral_rewarded',
+
   // Legacy/Compatibility
   'delivery_confirmed',
 ] as const;
@@ -418,7 +422,7 @@ export default {
   }) => {
     try {
       const { organizationId, roleTargets, type, title, message, metadata } = params;
-      
+
       // Find all users in org with matching roles
       const users = await User.find({
         organizationId,

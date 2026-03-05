@@ -8,6 +8,7 @@ import { notificationTemplates } from '../utils/notificationTemplates';
 import Payment from '../models/Payment.model';
 import User, { IUser } from '../models/User.model';
 import config from '../config';
+import ReferralService from '../services/referral.service';
 
 // Initialize Stripe
 const stripe = new Stripe(config.stripe.secretKey, {
@@ -304,6 +305,13 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
       });
     }
 
+    // Trigger Referral Reward Check
+    try {
+      await ReferralService.processPaymentReward(payment, userId);
+    } catch (error) {
+      console.error('[Referral] Error processing reward in confirmPayment:', error);
+    }
+
     return res.json(
       new ApiResponse(200, payment, 'Payment confirmed successfully')
     );
@@ -426,7 +434,19 @@ const updatePayment = asyncHandler(async (req: Request, res: Response) => {
   if (notes !== undefined) payment.notes = notes;
   if (dueDate !== undefined) payment.dueDate = dueDate ? new Date(dueDate) : undefined;
 
+  const wasSucceeded = payment.isModified('status') && payment.status === 'succeeded';
+
   await payment.save();
+
+  // Trigger Referral Reward Check if status just changed to succeeded
+  if (wasSucceeded) {
+    try {
+      const performingUserId = (req.user as any)?._id?.toString();
+      await ReferralService.processPaymentReward(payment, performingUserId);
+    } catch (error) {
+      console.error('[Referral] Error processing reward in updatePayment:', error);
+    }
+  }
 
   res.json(new ApiResponse(200, payment, 'Payment updated successfully'));
 });
@@ -509,6 +529,13 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
         payment.paidAt = new Date();
         payment.stripeChargeId = pi.latest_charge as string;
         await payment.save();
+
+        // Trigger Referral Reward Check
+        try {
+          await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK');
+        } catch (error) {
+          console.error('[Referral] Error processing reward in webhook:', error);
+        }
       }
       break;
     }
@@ -719,6 +746,13 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
     }
 
     await payment.save();
+
+    // Trigger Referral Reward Check
+    try {
+      await ReferralService.processPaymentReward(payment, user._id.toString());
+    } catch (error) {
+      console.error('[Referral] Error processing reward in confirmCustomerPayment:', error);
+    }
 
     // Notify the dealer (org admins)
     await safeCreateNotification({

@@ -5,6 +5,8 @@ import User from '../models/User.model';
 import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
 import AuditLog from '../models/AuditLog.model';
+import Shipment from '../models/Shipment.model';
+import Payment from '../models/Payment.model';
 import mongoose from 'mongoose';
 
 // 1. Issue a Manual Reward to a Referrer
@@ -128,8 +130,80 @@ const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { transaction, newBalance: updatedUser?.walletBalance }, 'Withdrawal approved and funds deducted'));
 });
 
+// 4. Reject a Withdrawal Request
+const rejectWithdrawal = asyncHandler(async (req: Request, res: Response) => {
+    const { transactionId } = req.params;
+    const { reason = 'Denied by administrator' } = req.body;
+
+    const transaction = await Transaction.findById(transactionId);
+    if (!transaction || transaction.type !== 'withdrawal' || transaction.status !== 'pending') {
+        return res.status(400).json(new ApiResponse(400, null, 'Invalid or non-pending withdrawal request'));
+    }
+
+    transaction.status = 'rejected';
+    transaction.note = `${transaction.note} (REJECTED: ${reason})`;
+    await transaction.save();
+
+    res.json(new ApiResponse(200, transaction, 'Withdrawal request rejected'));
+});
+
+// 5. Get Audit Detail for a Withdrawal (Credit Lineage)
+const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
+    const { transactionId } = req.params;
+
+    const transaction = await Transaction.findById(transactionId).lean();
+    if (!transaction) {
+        return res.status(404).json(new ApiResponse(404, null, 'Transaction not found'));
+    }
+
+    // Fetch all successful referral deposits for this user to show "Evidence of Earnings"
+    const earnings = await Transaction.find({
+        userClerkId: transaction.userClerkId,
+        type: 'deposit',
+        status: 'completed'
+    })
+        .sort({ createdAt: -1 })
+        .lean();
+
+    // Enriched earnings with user name from referral
+    const enrichedEarnings = await Promise.all(earnings.map(async (e) => {
+        let referralInfo = null;
+        if (e.referralId) {
+            const referral = await Referral.findById(e.referralId).lean();
+            if (referral) {
+                const referredUser = await User.findOne({ clerkId: referral.referredUserClerkId }).select('name email').lean();
+                referralInfo = {
+                    name: referredUser?.name || 'Unknown',
+                    email: referredUser?.email || 'N/A',
+                    dateJoined: referral.createdAt
+                };
+            }
+        }
+
+        // Fetch linked Shipment and Payment for "Full Receipt" verification
+        let shipmentInfo = null;
+        if (e.shipmentId) {
+            shipmentInfo = await Shipment.findById(e.shipmentId).select('trackingNumber status origin destination').lean();
+        }
+
+        let paymentInfo = null;
+        if (e.paymentId) {
+            paymentInfo = await Payment.findById(e.paymentId).select('amount status stripeChargeId receiptUrl createdAt invoiceNumber').lean();
+        }
+
+        return { ...e, referralInfo, shipmentInfo, paymentInfo };
+    }));
+
+    res.json(new ApiResponse(200, {
+        request: transaction,
+        lineage: enrichedEarnings
+    }, 'Audit lineage fetched successfully'));
+});
+
 export default {
     issueReward,
     getPendingWithdrawals,
-    approveWithdrawal
+    approveWithdrawal,
+    rejectWithdrawal,
+    getWithdrawalAudit
 };

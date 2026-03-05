@@ -4,6 +4,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import User, { IUser } from '../models/User.model';
 import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
+import ReferralService from '../services/referral.service';
 
 // 1. Get Wallet Dashboard Data
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
@@ -70,7 +71,13 @@ const linkReferral = asyncHandler(async (req: Request, res: Response) => {
         referralCodeUsed: referrer.referralCode
     });
 
-    // TODO: Trigger Email/Push Notification to `referrer.email` letting them know someone joined!
+    // Notify Referrer about the new signup
+    try {
+        await ReferralService.notifyReferralSignup(newReferral._id.toString());
+    } catch (error) {
+        console.error('[Referral] Error sending signup notification:', error);
+    }
+
     console.log(`[Referral Engine] SUCCESS: User ${newUserId} joined via ${referrer.name}'s link (${referralCode})!`);
 
     res.status(201).json(new ApiResponse(201, newReferral, 'Referral linked successfully'));
@@ -90,8 +97,16 @@ const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         return res.status(404).json(new ApiResponse(404, null, 'User not found'));
     }
 
-    if (user.walletBalance < amount) {
-        return res.status(400).json(new ApiResponse(400, null, 'Insufficient wallet balance'));
+    // Calculate "Net Available Balance" (Total Balance - Pending Withdrawals)
+    const pendingWithdrawals = await Transaction.aggregate([
+        { $match: { userClerkId, type: 'withdrawal', status: 'pending' } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]);
+    const totalPending = pendingWithdrawals.length > 0 ? pendingWithdrawals[0].total : 0;
+    const netAvailable = user.walletBalance - totalPending;
+
+    if (netAvailable < amount) {
+        return res.status(400).json(new ApiResponse(400, null, `Insufficient available balance. You have $${totalPending.toFixed(2)} in pending withdrawals.`));
     }
 
     // Create strictly pending transaction

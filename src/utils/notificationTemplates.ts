@@ -64,6 +64,11 @@ interface CRMData {
   message?: string;
 }
 
+interface ReferralData {
+  referredName: string;
+  amount?: number;
+}
+
 export const notificationTemplates = {
   // ==================== QUOTES ====================
   quote_created: (data: QuoteData) => ({
@@ -333,6 +338,17 @@ export const notificationTemplates = {
   general: (data: { title: string; message: string }) => ({
     title: data.title,
     message: data.message,
+  }),
+
+  // ==================== REFERRALS ====================
+  referral_joined: (data: ReferralData) => ({
+    title: 'New Referral Signup!',
+    message: `${data.referredName} just joined Action Auto using your referral code. You'll earn $100 when they purchase their first vehicle!`,
+  }),
+
+  referral_rewarded: (data: ReferralData) => ({
+    title: 'Referral Reward Earned!',
+    message: `Congratulations! ${data.referredName} has purchased a vehicle. $${data.amount || 100} has been added to your wallet.`,
   }),
 
   // Legacy support - keep delivery_confirmed for backwards compatibility

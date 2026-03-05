@@ -41,6 +41,8 @@ router.put('/organizations/:id/subscription', adminController.updateOrganization
 // Referral Engine & Digital Wallet Controls
 router.post('/referrals/:referralId/issue-reward', adminReferralController.issueReward);
 router.get('/referrals/withdrawals', adminReferralController.getPendingWithdrawals);
+router.get('/referrals/withdrawals/:transactionId/audit', adminReferralController.getWithdrawalAudit);
 router.post('/referrals/withdrawals/:transactionId/approve', adminReferralController.approveWithdrawal);
+router.post('/referrals/withdrawals/:transactionId/reject', adminReferralController.rejectWithdrawal);
 
 export default router;

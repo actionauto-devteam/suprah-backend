@@ -138,6 +138,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
                 currency: 'usd',
                 description: `Vehicle Transport - ${vehicleLabel}`,
                 status: 'pending',
+                quoteId,
                 shipmentId: shipment._id,
                 createdBy: userId,
             });
