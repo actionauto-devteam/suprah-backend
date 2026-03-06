@@ -2,7 +2,11 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 /**
  * Biometric Audit Log
- * Immutable log of all biometric-related events for compliance and forensics.
+ *
+ * Immutable log of all biometric and SSH key events.
+ * Separate from the general AuditLog model.
+ *
+ * File: models/BiometricAuditLog.model.ts
  */
 
 export type BiometricEventType =
@@ -71,7 +75,7 @@ const BiometricAuditLogSchema = new Schema<IBiometricAuditLog>(
   }
 );
 
-// TTL index: auto-delete logs after 2 years
+// TTL: auto-delete after 2 years
 BiometricAuditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 63072000 });
 BiometricAuditLogSchema.index({ userId: 1, event: 1, createdAt: -1 });
 

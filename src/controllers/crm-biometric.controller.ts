@@ -1,11 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import * as webauthnService from '../services/webauthn.service';
 import * as sshKeyService from '../services/sshKey.service';
+import * as sshAuthService from '../services/sshAuth.service';
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'crm_jwt_secret_change_me';
-const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '24h';
 
 function getIp(req: Request): string {
   return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
@@ -19,13 +17,11 @@ function getUserAgent(req: Request): string {
 //  WebAuthn – Registration
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * POST /api/crm/biometric/register/options
- * Generate WebAuthn registration options for the authenticated user.
- */
 export async function getRegistrationOptions(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
     const options = await webauthnService.generateRegistrationOptions(user);
     res.json({ success: true, data: options });
   } catch (err: any) {
@@ -33,14 +29,11 @@ export async function getRegistrationOptions(req: Request, res: Response, next: 
   }
 }
 
-/**
- * POST /api/crm/biometric/register/verify
- * Verify the WebAuthn registration response and store the credential.
- * Body: { credential, deviceName, deviceType }
- */
 export async function verifyRegistration(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
     const { credential, deviceName, deviceType } = req.body;
 
     if (!credential) {
@@ -63,14 +56,9 @@ export async function verifyRegistration(req: Request, res: Response, next: Next
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  WebAuthn – Authentication
+//  WebAuthn – Authentication (Public)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * POST /api/crm/biometric/auth/options
- * Generate WebAuthn authentication options.
- * Body: { username? }  (optional – for discoverable credentials)
- */
 export async function getAuthenticationOptions(req: Request, res: Response, next: NextFunction) {
   try {
     const { username } = req.body;
@@ -82,11 +70,6 @@ export async function getAuthenticationOptions(req: Request, res: Response, next
   }
 }
 
-/**
- * POST /api/crm/biometric/auth/verify
- * Verify the WebAuthn authentication response and issue a JWT.
- * Body: { credential, storeKey }
- */
 export async function verifyAuthentication(req: Request, res: Response, next: NextFunction) {
   try {
     const { credential, storeKey } = req.body;
@@ -102,19 +85,14 @@ export async function verifyAuthentication(req: Request, res: Response, next: Ne
       getUserAgent(req)
     );
 
-    // Issue JWT (same format as password login)
-  const token = jwt.sign(
-  { id: user._id, username: user.username, role: user.role },
-  JWT_SECRET as string,
-  { expiresIn: JWT_EXPIRES as any }
-);
+    const token = generateCrmToken(user._id.toString());
 
     res.json({
       success: true,
       data: {
         token,
         user: {
-          id: user._id,
+          _id: user._id,
           fullName: user.fullName,
           username: user.username,
           email: user.email,
@@ -130,46 +108,90 @@ export async function verifyAuthentication(req: Request, res: Response, next: Ne
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Credential Management
+//  SSH Key Login (Public – challenge-sign flow)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * GET /api/crm/biometric/credentials
- * List the authenticated user's active biometric credentials.
+ * POST /api/crm/biometric/ssh/challenge
+ * Body: { username }
+ * Returns: { challenge, storeKey }
  */
-export async function listCredentials(req: Request, res: Response, next: NextFunction) {
+export async function getSshChallenge(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
-    const credentials = await webauthnService.getUserCredentials(user._id);
-    res.json({ success: true, data: credentials });
-  } catch (err: any) {
-    next(err);
-  }
-}
+    const { username } = req.body;
 
-/**
- * DELETE /api/crm/biometric/credentials/:credentialId
- * Revoke a biometric credential.
- */
-export async function deleteCredential(req: Request, res: Response, next: NextFunction) {
-  try {
-    const user = (req as any).crmUser;
-    const { credentialId } = req.params;
-    const result = await webauthnService.revokeCredential(user._id, credentialId);
-    res.json({ success: true, data: result });
+    if (!username?.trim()) {
+      return res.status(400).json({ success: false, message: 'Employee ID is required.' });
+    }
+
+    const data = await sshAuthService.generateSshChallenge(username);
+    res.json({ success: true, data });
   } catch (err: any) {
     res.status(400).json({ success: false, message: err.message });
   }
 }
 
 /**
- * PATCH /api/crm/biometric/credentials/:credentialId
- * Rename a biometric credential.
- * Body: { deviceName }
+ * POST /api/crm/biometric/ssh/verify
+ * Body: { username, storeKey, signature }
+ * Returns: { token, user, authMethod }
  */
+export async function verifySshLogin(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { username, storeKey, signature } = req.body;
+
+    if (!username?.trim() || !storeKey || !signature?.trim()) {
+      return res.status(400).json({ success: false, message: 'Username, storeKey, and signature are required.' });
+    }
+
+    const data = await sshAuthService.verifySshSignature(
+      username,
+      storeKey,
+      signature,
+      getIp(req),
+      getUserAgent(req)
+    );
+
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(401).json({ success: false, message: err.message });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Credential Management
+// ══════════════════════════════════════════════════════════════════════════════
+
+export async function listCredentials(req: Request, res: Response, next: NextFunction) {
+  try {
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const credentials = await webauthnService.getUserCredentials(user._id.toString());
+    res.json({ success: true, data: credentials });
+  } catch (err: any) {
+    next(err);
+  }
+}
+
+export async function deleteCredential(req: Request, res: Response, next: NextFunction) {
+  try {
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const { credentialId } = req.params;
+    const result = await webauthnService.revokeCredential(user._id.toString(), credentialId);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+}
+
 export async function updateCredential(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
     const { credentialId } = req.params;
     const { deviceName } = req.body;
 
@@ -177,7 +199,7 @@ export async function updateCredential(req: Request, res: Response, next: NextFu
       return res.status(400).json({ success: false, message: 'Device name is required.' });
     }
 
-    const cred = await webauthnService.renameCredential(user._id, credentialId, deviceName.trim());
+    const cred = await webauthnService.renameCredential(user._id.toString(), credentialId, deviceName.trim());
     res.json({ success: true, data: cred });
   } catch (err: any) {
     res.status(400).json({ success: false, message: err.message });
@@ -188,33 +210,30 @@ export async function updateCredential(req: Request, res: Response, next: NextFu
 //  SSH Key Management
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * GET /api/crm/ssh-keys
- */
 export async function listSshKeys(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
-    const keys = await sshKeyService.getUserSshKeys(user._id);
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const keys = await sshKeyService.getUserSshKeys(user._id.toString());
     res.json({ success: true, data: keys });
   } catch (err: any) {
     next(err);
   }
 }
 
-/**
- * POST /api/crm/ssh-keys
- * Body: { title, publicKey, expiresAt?, allowedIPs? }
- */
 export async function addSshKey(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
     const { title, publicKey, expiresAt, allowedIPs } = req.body;
 
     if (!publicKey?.trim()) {
       return res.status(400).json({ success: false, message: 'Public key is required.' });
     }
 
-    const key = await sshKeyService.addSshKey(user._id, title || '', publicKey, {
+    const key = await sshKeyService.addSshKey(user._id.toString(), title || '', publicKey, {
       expiresAt: expiresAt ? new Date(expiresAt) : undefined,
       allowedIPs,
       ipAddress: getIp(req),
@@ -227,27 +246,24 @@ export async function addSshKey(req: Request, res: Response, next: NextFunction)
   }
 }
 
-/**
- * DELETE /api/crm/ssh-keys/:keyId
- */
 export async function deleteSshKey(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
-    const result = await sshKeyService.revokeSshKey(user._id, req.params.keyId, undefined, getIp(req));
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const result = await sshKeyService.revokeSshKey(user._id.toString(), req.params.keyId, undefined, getIp(req));
     res.json({ success: true, data: result });
   } catch (err: any) {
     res.status(400).json({ success: false, message: err.message });
   }
 }
 
-/**
- * GET /api/crm/ssh-keys/authorized-keys
- * Generate the authorized_keys content for the authenticated user.
- */
 export async function getAuthorizedKeys(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
-    const content = await sshKeyService.generateAuthorizedKeys(user._id);
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const content = await sshKeyService.generateAuthorizedKeys(user._id.toString());
     res.type('text/plain').send(content);
   } catch (err: any) {
     next(err);
@@ -258,13 +274,11 @@ export async function getAuthorizedKeys(req: Request, res: Response, next: NextF
 //  Audit Logs
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * GET /api/crm/biometric/audit-log
- * Admin/manager only: view biometric audit logs.
- */
 export async function getAuditLogs(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = (req as any).crmUser;
+    const user = req.crmUser;
+    if (!user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
     if (!['admin', 'manager'].includes(user.role)) {
       return res.status(403).json({ success: false, message: 'Insufficient permissions.' });
     }

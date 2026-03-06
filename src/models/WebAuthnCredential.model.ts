@@ -1,23 +1,24 @@
-import mongoose, { Document, Schema, Model } from 'mongoose';
+import mongoose, { Document, Schema } from 'mongoose';
 
 /**
  * WebAuthn Credential Model
  * Stores FIDO2/WebAuthn credentials linked to CRM users.
- * Supports fingerprint, face recognition, and security key authenticators.
+ *
+ * File: models/WebAuthnCredential.model.ts
  */
 
 export type BiometricType = 'fingerprint' | 'face' | 'security_key' | 'platform';
 
 export interface IWebAuthnCredential extends Document {
   userId: mongoose.Types.ObjectId;
-  credentialId: string;           // Base64URL-encoded credential ID
-  publicKey: string;              // Base64URL-encoded public key (COSE)
-  counter: number;                // Signature counter for replay protection
+  credentialId: string;
+  publicKey: string;
+  counter: number;
   deviceType: BiometricType;
-  deviceName: string;             // User-friendly label, e.g. "MacBook Touch ID"
-  transports?: string[];          // e.g. ['internal', 'usb', 'ble', 'nfc']
-  aaguid?: string;                // Authenticator Attestation GUID
-  backedUp: boolean;              // Whether credential is backed up (e.g. iCloud Keychain)
+  deviceName: string;
+  transports?: string[];
+  aaguid?: string;
+  backedUp: boolean;
   lastUsedAt?: Date;
   isActive: boolean;
   createdAt: Date;
@@ -84,7 +85,6 @@ const WebAuthnCredentialSchema = new Schema<IWebAuthnCredential>(
   }
 );
 
-// Compound index: fast lookup per user
 WebAuthnCredentialSchema.index({ userId: 1, isActive: 1 });
 
 const WebAuthnCredential = mongoose.model<IWebAuthnCredential>(
