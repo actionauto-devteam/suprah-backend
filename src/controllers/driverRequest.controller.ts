@@ -94,7 +94,7 @@ const getMyDriverRequestStatus = asyncHandler(
       .sort({ createdAt: -1 });
 
     if (!request) {
-      res.json(new ApiResponse(200, null, "No driver request found"));
+      res.json(new ApiResponse(200, { status: "no-request" }, "No driver request found"));
       return;
     }
 

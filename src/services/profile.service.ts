@@ -45,8 +45,8 @@ const getProfile = async (userId: string) => {
     isActive: user.isActive,
     isVerified: user.emailVerified,
     isPremium: user.subscription?.plan !== 'free',
-    accountType: user.subscription?.plan === 'enterprise' ? 'enterprise' : 
-                 user.subscription?.plan === 'professional' ? 'premium' : 'standard',
+    accountType: user.subscription?.plan === 'enterprise' ? 'enterprise' :
+      user.subscription?.plan === 'professional' ? 'premium' : 'standard',
     lastActive: user.lastActive,
     memberSince: user.createdAt,
     totalQuotes,
@@ -297,17 +297,17 @@ const getDriverStats = async (userId: string) => {
 
   // Total deliveries assigned to this driver
   const totalAssigned = await Shipment.countDocuments({ assignedDriverId: userId }).catch(() => 0);
-  
+
   // Completed deliveries
-  const deliveriesCompleted = await Shipment.countDocuments({ 
-    assignedDriverId: userId, 
-    status: 'Delivered' 
+  const deliveriesCompleted = await Shipment.countDocuments({
+    assignedDriverId: userId,
+    status: 'Delivered'
   }).catch(() => 0);
 
   // Active deliveries (in transit)
-  const activeDeliveries = await Shipment.countDocuments({ 
-    assignedDriverId: userId, 
-    status: { $in: ['Dispatched', 'In Transit', 'Picked Up'] } 
+  const activeDeliveries = await Shipment.countDocuments({
+    assignedDriverId: userId,
+    status: { $in: ['Dispatched', 'In Transit', 'Picked Up'] }
   }).catch(() => 0);
 
   // Calculate on-time rate from delivered shipments
@@ -340,26 +340,24 @@ const getDriverStats = async (userId: string) => {
 
 /**
  * Change password
- * @deprecated Handled by Clerk
  */
 const changePassword = async (
   userId: string,
   currentPassword: string,
   newPassword: string
 ) => {
-  throw new ApiError(400, "Password management is now handled by Clerk. Please use the User Profile to change your password.");
+  throw new ApiError(400, "Password management is handled through security settings and OTP verification.");
 };
 
 /**
  * Update email
- * @deprecated Handled by Clerk
  */
 const updateEmail = async (
   userId: string,
   newEmail: string,
   password: string
 ) => {
-  throw new ApiError(400, "Email management is now handled by Clerk.");
+  throw new ApiError(400, "Email changes must be verified through the native security workflow.");
 };
 
 /**

@@ -1,8 +1,8 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IReferral extends Document {
-    referrerClerkId: string; // The Clerk ID of the user who shared the link
-    referredUserClerkId: string; // The Clerk ID of the new user who signed up
+    referrerId: mongoose.Types.ObjectId; // The native _id of the referer
+    referredUserId: mongoose.Types.ObjectId; // The native _id of the new user
     referralCodeUsed: string; // The code that was intercepted (e.g. AAU-JOHN-555)
     createdAt: Date;
     updatedAt: Date;
@@ -10,15 +10,17 @@ export interface IReferral extends Document {
 
 const ReferralSchema = new Schema(
     {
-        referrerClerkId: {
-            type: String,
+        referrerId: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
             required: true,
             index: true,
         },
-        referredUserClerkId: {
-            type: String,
+        referredUserId: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
             required: true,
-            unique: true, // A user can only be referred ONCE
+            unique: true,
             index: true,
         },
         referralCodeUsed: {
