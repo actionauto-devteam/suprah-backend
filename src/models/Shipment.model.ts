@@ -5,14 +5,15 @@ import mongoose, { Document, Schema } from "mongoose";
 export interface IShipment extends Document {
   quoteId: mongoose.Types.ObjectId;
   organizationId: string;
+  orgId?: mongoose.Types.ObjectId;
 
   // Status
   status:
-    | "Available for Pickup"
-    | "Cancelled"
-    | "Delivered"
-    | "Dispatched"
-    | "In-Route";
+  | "Available for Pickup"
+  | "Cancelled"
+  | "Delivered"
+  | "Dispatched"
+  | "In-Route";
 
   // Route Information
   origin: string;
@@ -94,6 +95,11 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     organizationId: {
       type: String,
       required: true,
+      index: true,
+    },
+    orgId: {
+      type: Schema.Types.ObjectId,
+      ref: "Organization",
       index: true,
     },
 

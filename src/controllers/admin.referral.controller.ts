@@ -13,7 +13,6 @@ import mongoose from 'mongoose';
 const issueReward = asyncHandler(async (req: Request, res: Response) => {
     const { referralId } = req.params;
     const { amount = 200 } = req.body;
-    const adminClerkId = (req.user as any).clerkId; // Assuming admin check in middleware
 
     if (!amount || amount <= 0) {
         return res.status(400).json(new ApiResponse(400, null, 'Valid reward amount required'));
@@ -24,7 +23,9 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
         return res.status(404).json(new ApiResponse(404, null, 'Referral not found'));
     }
 
-    const referrer = await User.findOne({ clerkId: referral.referrerClerkId });
+    const referrer = await User.findOne({
+        _id: referral.referrerId
+    });
     if (!referrer) {
         return res.status(404).json(new ApiResponse(404, null, 'Referrer account no longer exists'));
     }
@@ -33,17 +34,17 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
 
     // A. Create the completed deposit transaction
     const deposit = await Transaction.create({
-        userClerkId: referrer.clerkId,
+        userId: referrer._id,
         type: 'deposit',
         status: 'completed',
         amount: Number(amount),
-        note: `Referral Bonus for linking ${referral.referredUserClerkId}`,
+        note: `Referral Bonus for linking native user`,
         referralId: referral._id
     });
 
     // B. Increment the wallet exactly by the deposit amount
-    const updatedUser = await User.findOneAndUpdate(
-        { clerkId: referrer.clerkId },
+    const updatedUser = await User.findByIdAndUpdate(
+        referrer._id,
         {
             $inc: {
                 walletBalance: Number(amount),
@@ -74,7 +75,9 @@ const getPendingWithdrawals = asyncHandler(async (req: Request, res: Response) =
 
     // Attach user information
     const enrichedWithdrawals = await Promise.all(pendingWithdrawals.map(async (trx) => {
-        const user = await User.findOne({ clerkId: trx.userClerkId }).select('name email').lean();
+        const user = await User.findOne({
+            _id: trx.userId
+        }).select('name email').lean();
         return { ...trx, user };
     }));
 
@@ -84,7 +87,6 @@ const getPendingWithdrawals = asyncHandler(async (req: Request, res: Response) =
 // 3. Approve a Withdrawal Request
 const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     const { transactionId } = req.params;
-    const adminClerkId = (req.user as any).clerkId;
 
     const transaction = await Transaction.findById(transactionId);
 
@@ -96,7 +98,9 @@ const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         return res.status(400).json(new ApiResponse(400, null, 'Transaction is not a pending withdrawal'));
     }
 
-    const user = await User.findOne({ clerkId: transaction.userClerkId });
+    const user = await User.findOne({
+        _id: transaction.userId
+    });
     if (!user) {
         return res.status(404).json(new ApiResponse(404, null, 'User no longer exists'));
     }
@@ -111,8 +115,8 @@ const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     await transaction.save();
 
     // B. Deduct money from wallet
-    const updatedUser = await User.findOneAndUpdate(
-        { clerkId: transaction.userClerkId },
+    const updatedUser = await User.findByIdAndUpdate(
+        user._id,
         { $inc: { walletBalance: -Math.abs(transaction.amount) } },
         { new: true }
     );
@@ -158,7 +162,7 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
 
     // Fetch all successful referral deposits for this user to show "Evidence of Earnings"
     const earnings = await Transaction.find({
-        userClerkId: transaction.userClerkId,
+        userId: transaction.userId,
         type: 'deposit',
         status: 'completed'
     })
@@ -171,7 +175,9 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
         if (e.referralId) {
             const referral = await Referral.findById(e.referralId).lean();
             if (referral) {
-                const referredUser = await User.findOne({ clerkId: referral.referredUserClerkId }).select('name email').lean();
+                const referredUser = await User.findOne({
+                    _id: referral.referredUserId
+                }).select('name email').lean();
                 referralInfo = {
                     name: referredUser?.name || 'Unknown',
                     email: referredUser?.email || 'N/A',
