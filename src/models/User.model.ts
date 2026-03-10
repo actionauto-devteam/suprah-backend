@@ -47,6 +47,7 @@ export interface IUser extends Document {
   personalInfo?: IPersonalInfo;
   lastActive?: Date;
   lastPasswordChange?: Date;
+  onboardingCompleted: boolean;
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -176,6 +177,10 @@ const UserSchema = new Schema(
     },
     organizationRole: {
       type: String,
+    },
+    onboardingCompleted: {
+      type: Boolean,
+      default: false, // Default false to force new users to onboard properly
     },
 
     // New profile fields

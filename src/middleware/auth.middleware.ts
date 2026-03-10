@@ -33,7 +33,6 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
         if (!token) {
-            console.log('Auth Middleware: No token provided for path:', req.path);
             throw new ApiError(401, 'Please authenticate');
         }
 
@@ -62,7 +61,6 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         if (user.role === 'super_admin') {
             const impersonateId = req.headers['x-impersonate-org-id'] as string;
             if (impersonateId) {
-                console.log(`[AUTH] Super Admin ${user.email} is impersonating Org: ${impersonateId}`);
                 orgId = impersonateId;
                 orgRole = 'admin'; // Assume admin role in the target org
             }
@@ -87,16 +85,23 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(403, 'Account Suspended');
         }
 
-        // 7. Email Verification Check
-        // We whitelist strictly '/api/users/me' so the frontend can still fetch basic user info to show the verification screen.
-        // We don't want to whitelist '/api/users/me/organizations' or other children.
-        const isMeEndpoint = req.originalUrl.endsWith('/api/users/me') || req.originalUrl.endsWith('/api/users/me/');
-        if (!user.emailVerified && !isMeEndpoint) {
+        // 7. Security Checks: Email Verification, Onboarding & Driver Approval
+        const isWhitelisted =
+            req.originalUrl.includes('/api/auth/complete-onboarding') ||
+            req.originalUrl.includes('/api/users/me') ||
+            req.originalUrl.includes('/api/notifications') ||
+            req.originalUrl.includes('/api/driver-requests/my-status');
+
+        if (!user.onboardingCompleted && !isWhitelisted) {
+            throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');
+        }
+
+        if (!user.emailVerified && !isWhitelisted) {
             throw new ApiError(403, 'Email not verified. Please verify your email to access this feature.');
         }
 
         // 8. Driver Approval Check
-        if (user.role === 'driver' && !user.isApproved && !isMeEndpoint) {
+        if (user.role === 'driver' && !user.isApproved && !isWhitelisted) {
             throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
         }
 

@@ -2,6 +2,7 @@ import jwt, { Secret } from 'jsonwebtoken';
 import config from '../config';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 export interface TokenPayload {
     sub: string;
@@ -46,7 +47,8 @@ class TokenService {
     generateRefreshToken(user: { _id: mongoose.Types.ObjectId }): string {
         const payload = {
             sub: user._id.toString(),
-            type: 'refresh'
+            type: 'refresh',
+            jti: crypto.randomBytes(16).toString('hex'), // Unique ID for each token
         };
 
         return jwt.sign(payload, this.refreshSecret, { expiresIn: this.refreshExpires as any });

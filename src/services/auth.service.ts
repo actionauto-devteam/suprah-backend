@@ -7,6 +7,8 @@ import emailService from './email.service';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 import Organization from '../models/Organization.model';
+import DriverRequest from '../models/DriverRequest.model';
+import notificationService from './notification.service';
 
 class AuthService {
     async register(userData: { name: string; email: string; password: string; role?: string }) {
@@ -25,7 +27,12 @@ class AuthService {
             role: roleToAssign,
             emailVerified: false,
             isApproved: roleToAssign !== 'driver',
+            onboardingCompleted: true, // Role picked during registration
         });
+
+        if (roleToAssign === 'driver') {
+            await this.ensureDriverRequest(user as any);
+        }
 
         // Generate and send OTP for verification
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -119,6 +126,7 @@ class AuthService {
                 name,
                 role: 'admin', // Owner is an admin of their org
                 emailVerified: false,
+                onboardingCompleted: true,
             });
             await user.save({ session });
 
@@ -327,7 +335,65 @@ class AuthService {
         return await this.generateAuthTokens(user);
     }
 
+    /**
+     * Complete onboarding - set role and mark as completed
+     */
+    async completeOnboarding(userId: string, role: string) {
+        const user = await User.findById(userId);
+        if (!user) {
+            throw new ApiError(404, 'User not found');
+        }
+
+        if (user.onboardingCompleted) {
+            throw new ApiError(400, 'Onboarding already completed');
+        }
+
+        const roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
+        user.role = roleToAssign as any;
+        user.onboardingCompleted = true;
+
+        // Drivers need approval
+        if (roleToAssign === 'driver') {
+            user.isApproved = false;
+            await this.ensureDriverRequest(user);
+        }
+
+        await user.save();
+        return this.sanitizeUser(user);
+    }
+
     // -- Private Helpers --
+
+    private async ensureDriverRequest(user: IUser) {
+        try {
+            const existingRequest = await DriverRequest.findOne({ driverUserId: user._id, status: 'pending' });
+            if (!existingRequest) {
+                const driverRequest = await DriverRequest.create({
+                    driverUserId: user._id,
+                    status: 'pending'
+                });
+
+                // Notify Super Admins
+                const superAdmins = await User.find({ role: 'super_admin' });
+                for (const admin of superAdmins) {
+                    await notificationService.createNotification({
+                        userId: admin._id.toString(),
+                        organizationId: admin.organizationId?.toString() || 'global',
+                        type: 'driver_request',
+                        title: 'New Driver Request',
+                        message: `${user.name} (${user.email}) has requested to join as a driver.`,
+                        metadata: {
+                            driverRequestId: driverRequest._id.toString(),
+                            driverName: user.name,
+                            driverEmail: user.email
+                        }
+                    }).catch(err => console.error('[AuthService] Notification failed:', err));
+                }
+            }
+        } catch (err) {
+            console.error('[AuthService] Failed to create driver request:', err);
+        }
+    }
 
     private async generateAuthTokens(user: IUser) {
         const accessToken = tokenService.generateAccessToken(user);

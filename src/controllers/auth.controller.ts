@@ -8,7 +8,8 @@ import {
     registerDealershipSchema,
     verifyEmailSchema,
     forgotPasswordSchema,
-    resetPasswordSchema
+    resetPasswordSchema,
+    completeOnboardingSchema
 } from '../validations/auth.validation';
 import { ApiError } from '../utils/ApiError';
 
@@ -177,6 +178,15 @@ class AuthController {
 
         await authService.resendOTP(email);
         res.json(new ApiResponse(200, null, 'Verification code resent successfully'));
+    });
+
+    completeOnboarding = asyncHandler(async (req: any, res: Response) => {
+        const { role } = completeOnboardingSchema.parse(req.body);
+        const result = await authService.completeOnboarding(req.user._id, role);
+
+        res.status(200).json(
+            new ApiResponse(200, result, 'Onboarding completed successfully')
+        );
     });
 
     handleOAuthCallback = async (user: any) => {

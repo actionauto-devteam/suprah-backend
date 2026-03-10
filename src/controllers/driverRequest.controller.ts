@@ -167,6 +167,8 @@ const approveDriverRequest = asyncHandler(
     }
 
     driverUser.role = "driver";
+    driverUser.isApproved = true;
+    driverUser.onboardingCompleted = true;
     if (request.organizationId) {
       driverUser.organizationId = request.organizationId;
     }
