@@ -66,6 +66,9 @@ export interface IShipment extends Document {
     date: Date;
   }>;
 
+  // Creator tracking
+  createdBy?: mongoose.Types.ObjectId;
+
   // Driver assignment
   assignedDriverId?: mongoose.Types.ObjectId;
   assignedAt?: Date;
@@ -163,6 +166,8 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
         date: { type: Date, default: Date.now },
       },
     ],
+
+    createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
 
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },
