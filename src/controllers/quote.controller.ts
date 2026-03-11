@@ -5,7 +5,7 @@ import Vehicle from '../models/Vehicle.model';
 import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import { safeCreateNotification } from '../utils/safeNotification';
+import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import {
@@ -139,6 +139,14 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    notifyAllOrganizations(
+        'quote_created',
+        'New Draft Created',
+        `A new transportation draft has been created for ${firstName} ${lastName} — ${vehicleData.vehicleName}.`,
+        { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName: vehicleData.vehicleName },
+        orgId
+    );
 
     res.status(201).json(
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
@@ -425,6 +433,14 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    notifyAllOrganizations(
+        'quote_deleted',
+        'Quote Deleted',
+        `Quote for ${customerName} (${vehicleName}) has been deleted.`,
+        { customerName, vehicleName },
+        orgId
+    );
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
 

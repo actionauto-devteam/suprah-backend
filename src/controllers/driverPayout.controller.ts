@@ -6,6 +6,8 @@ import { ApiError } from '../utils/ApiError';
 import DriverPayout from '../models/DriverPayout.model';
 import Shipment from '../models/Shipment.model';
 import User, { IUser } from '../models/User.model';
+import { safeCreateNotification } from '../utils/safeNotification';
+import { notifyOrgAdmins } from '../utils/safeNotification';
 import config from '../config';
 
 const stripe = new Stripe(config.stripe.secretKey, {
@@ -149,11 +151,22 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     payout.paidAt = new Date();
     await payout.save();
 
+    safeCreateNotification({
+      userId: driverId,
+      organizationId: orgId,
+      type: 'driver_payout',
+      title: 'Payout Received',
+      message: `You received a payout of $${amount.toFixed(2)} for shipment ${shipment.trackingNumber || shipmentId}`,
+      metadata: { shipmentId, amount },
+    });
+
     res.status(201).json(new ApiResponse(201, payout, 'Driver payout sent successfully'));
   } catch (stripeError: any) {
     payout.status = 'failed';
     payout.failureReason = stripeError?.message || 'Stripe transfer failed';
     await payout.save();
+
+    notifyOrgAdmins(orgId, 'general', 'Driver Payout Failed', `Payout of $${amount.toFixed(2)} to ${driver.name} failed: ${payout.failureReason}`, { shipmentId, driverId });
 
     throw new ApiError(402, `Payout failed: ${payout.failureReason}`);
   }

@@ -220,6 +220,16 @@ export const notificationTemplates = {
     message: `"${data.taskTitle}" is due${data.dueDate ? ` on ${data.dueDate}` : ' soon'}`,
   }),
 
+  crm_biometric: (data: { employeeName: string; action: string; device?: string }) => ({
+    title: 'Biometric Activity',
+    message: `${data.employeeName} ${data.action}${data.device ? ` via ${data.device}` : ''}`,
+  }),
+
+  crm_timeproof: (data: { employeeName: string; action: 'time-in' | 'time-out' }) => ({
+    title: `Employee ${data.action === 'time-in' ? 'Time In' : 'Time Out'}`,
+    message: `${data.employeeName} has clocked ${data.action === 'time-in' ? 'in' : 'out'}`,
+  }),
+
   // ==================== DRIVER RELATED ====================
   driver_request: (data: { driverName: string; email: string }) => ({
     title: 'New Driver Registration',

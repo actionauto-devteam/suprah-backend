@@ -3,6 +3,7 @@ import AuditLog from '../models/AuditLog.model';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
+import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import mongoose from 'mongoose';
 
 export const createOrganization = async (req: Request, res: Response) => {
@@ -231,6 +232,12 @@ export const removeMember = async (req: Request, res: Response) => {
         performedBy: req.user?._id,
         changes: { removedUserId: userId }
     });
+
+    const removedUser = await User.findById(userId);
+    if (removedUser) {
+        safeCreateNotification({ userId: removedUser.clerkId || '', organizationId: id, type: 'team_member_left', title: 'Removed from Organization', message: `You have been removed from ${org.name}.` });
+    }
+    notifyOrgAdmins(id, 'team_member_left', 'Member Removed', `A member has been removed from the organization.`, { removedUserId: userId });
 
     res.status(200).json({
         success: true,

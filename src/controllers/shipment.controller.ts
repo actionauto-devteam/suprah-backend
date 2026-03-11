@@ -7,7 +7,7 @@ import AuditLog from '../models/AuditLog.model';
 import User, { IUser } from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import { safeCreateNotification } from '../utils/safeNotification';
+import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 
 /**
@@ -169,6 +169,14 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    notifyAllOrganizations(
+        'shipment_created',
+        'New Shipment Created',
+        `A new shipment ${trackingNumber} has been created for ${quote.firstName} ${quote.lastName}.`,
+        { shipmentId: shipment._id.toString(), trackingNumber },
+        orgId
+    );
 
     res.status(201).json(
         new ApiResponse(
@@ -358,6 +366,31 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
                 status: shipment.status,
             },
         });
+
+        if (status && shipment.assignedDriverId) {
+            const driver = await User.findById(shipment.assignedDriverId);
+            if (driver) {
+                const nType = status === 'Delivered' ? 'shipment_delivered' : 'shipment_status_changed';
+                await safeCreateNotification({
+                    userId: driver.clerkId || '',
+                    organizationId: orgId,
+                    type: nType,
+                    title: status === 'Delivered' ? 'Shipment Delivered' : 'Shipment Status Updated',
+                    message: `Shipment ${shipment.trackingNumber || 'N/A'} is now "${status}".`,
+                    metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber, status },
+                });
+            }
+        }
+
+        if (status && ['Delivered', 'Cancelled'].includes(status)) {
+            notifyAllOrganizations(
+                status === 'Delivered' ? 'shipment_delivered' : 'shipment_status_changed',
+                status === 'Delivered' ? 'Shipment Delivered' : 'Shipment Cancelled',
+                `Shipment ${shipment.trackingNumber || 'N/A'} is now "${status}".`,
+                { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber, status },
+                orgId
+            );
+        }
     }
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
@@ -483,6 +516,14 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    notifyAllOrganizations(
+        'shipment_deleted',
+        'Shipment Deleted',
+        `Shipment ${trackingNumber} for ${customerName} has been deleted.`,
+        { trackingNumber, customerName },
+        orgId
+    );
 
     res.json(
         new ApiResponse(
