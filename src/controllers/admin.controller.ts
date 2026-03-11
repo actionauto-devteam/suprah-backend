@@ -1,13 +1,3 @@
-<<<<<<< HEAD
-import { Request, Response } from 'express';
-import { asyncHandler } from '../utils/asyncHandler';
-import Organization from '../models/Organization.model';
-import User from '../models/User.model';
-import { ApiResponse } from '../utils/ApiResponse';
-import { ApiError } from '../utils/ApiError';
-import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
-import { clerkClient } from '@clerk/clerk-sdk-node';
-=======
 import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import Organization from "../models/Organization.model";
@@ -15,7 +5,7 @@ import User from "../models/User.model";
 import Session from "../models/Session.model";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
->>>>>>> 8eaf27f3b89d5c8307c66489d08c312f8454e9ba
+import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 
 /**
  * Get all organizations with pagination and search
@@ -131,41 +121,19 @@ const getSystemStats = asyncHandler(async (req: Request, res: Response) => {
 // --- USER MANAGEMENT ---
 
 const suspendUser = asyncHandler(async (req: Request, res: Response) => {
-<<<<<<< HEAD
-    const { id } = req.params;
-    const user = await User.findByIdAndUpdate(id, { isActive: false }, { new: true });
-    if (!user) throw new ApiError(404, 'User not found');
-    safeCreateNotification({ userId: user.clerkId || '', organizationId: user.organizationId?.toString() || '', type: 'system_announcement', title: 'Account Suspended', message: 'Your account has been suspended by an administrator.' });
-    res.json(new ApiResponse(200, user, 'User suspended successfully'));
-});
-
-const activateUser = asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const user = await User.findByIdAndUpdate(id, { isActive: true }, { new: true });
-    if (!user) throw new ApiError(404, 'User not found');
-    safeCreateNotification({ userId: user.clerkId || '', organizationId: user.organizationId?.toString() || '', type: 'system_announcement', title: 'Account Activated', message: 'Your account has been reactivated by an administrator.' });
-    res.json(new ApiResponse(200, user, 'User activated successfully'));
-=======
   const { id } = req.params;
-  const user = await User.findByIdAndUpdate(
-    id,
-    { isActive: false },
-    { new: true },
-  );
+  const user = await User.findByIdAndUpdate(id, { isActive: false }, { new: true });
   if (!user) throw new ApiError(404, "User not found");
+  safeCreateNotification({ userId: user._id.toString(), organizationId: user.organizationId?.toString() || "", type: "system_announcement", title: "Account Suspended", message: "Your account has been suspended by an administrator." });
   res.json(new ApiResponse(200, user, "User suspended successfully"));
 });
 
 const activateUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const user = await User.findByIdAndUpdate(
-    id,
-    { isActive: true },
-    { new: true },
-  );
+  const user = await User.findByIdAndUpdate(id, { isActive: true }, { new: true });
   if (!user) throw new ApiError(404, "User not found");
+  safeCreateNotification({ userId: user._id.toString(), organizationId: user.organizationId?.toString() || "", type: "system_announcement", title: "Account Activated", message: "Your account has been reactivated by an administrator." });
   res.json(new ApiResponse(200, user, "User activated successfully"));
->>>>>>> 8eaf27f3b89d5c8307c66489d08c312f8454e9ba
 });
 
 const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
@@ -182,11 +150,8 @@ const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
   (user as any).organizationRole = organizationRole;
   await user.save();
 
-<<<<<<< HEAD
-    safeCreateNotification({ userId: user.clerkId || '', organizationId: user.organizationId?.toString() || '', type: 'role_changed', title: 'Role Updated', message: `Your role has been changed to ${organizationRole}.` });
+  safeCreateNotification({ userId: user._id.toString(), organizationId: user.organizationId?.toString() || "", type: "role_changed", title: "Role Updated", message: `Your role has been changed to ${organizationRole}.` });
 
-    res.json(new ApiResponse(200, user, 'User role updated successfully'));
-=======
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
 
@@ -194,7 +159,6 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const adminUser = req.user as any;
 
-  // Prevent self-deletion
   if (adminUser._id.toString() === id) {
     throw new ApiError(400, "You cannot delete your own account");
   }
@@ -202,19 +166,16 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const user = await User.findById(id);
   if (!user) throw new ApiError(404, "User not found");
 
-  // Prevent deletion of super admin accounts
   if (user.role === "super_admin") {
     throw new ApiError(403, "Cannot delete a super admin account");
   }
 
-  // Hard delete from MongoDB (user + all active sessions)
   await Promise.all([
     User.findByIdAndDelete(id),
     Session.deleteMany({ userId: id }),
   ]);
 
   res.json(new ApiResponse(200, null, "User deleted successfully"));
->>>>>>> 8eaf27f3b89d5c8307c66489d08c312f8454e9ba
 });
 
 // --- ORGANIZATION MANAGEMENT ---
@@ -222,44 +183,22 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
 const suspendOrganization = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-<<<<<<< HEAD
-    const org = await Organization.findByIdAndUpdate(id, { status: 'suspended' }, { new: true });
-    if (!org) throw new ApiError(404, 'Organization not found');
-    notifyOrgAdmins(id, 'system_announcement', 'Organization Suspended', 'Your organization has been suspended by a system administrator.');
-    res.json(new ApiResponse(200, org, 'Organization suspended successfully'));
-});
-=======
-    const org = await Organization.findByIdAndUpdate(
-      id,
-      { status: "suspended" },
-      { new: true },
-    );
+    const org = await Organization.findByIdAndUpdate(id, { status: "suspended" }, { new: true });
     if (!org) throw new ApiError(404, "Organization not found");
+    notifyOrgAdmins(id, "system_announcement", "Organization Suspended", "Your organization has been suspended by a system administrator.");
     res.json(new ApiResponse(200, org, "Organization suspended successfully"));
   },
 );
->>>>>>> 8eaf27f3b89d5c8307c66489d08c312f8454e9ba
 
 const activateOrganization = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-<<<<<<< HEAD
-    const org = await Organization.findByIdAndUpdate(id, { status: 'active' }, { new: true });
-    if (!org) throw new ApiError(404, 'Organization not found');
-    notifyOrgAdmins(id, 'system_announcement', 'Organization Activated', 'Your organization has been reactivated by a system administrator.');
-    res.json(new ApiResponse(200, org, 'Organization activated successfully'));
-});
-=======
-    const org = await Organization.findByIdAndUpdate(
-      id,
-      { status: "active" },
-      { new: true },
-    );
+    const org = await Organization.findByIdAndUpdate(id, { status: "active" }, { new: true });
     if (!org) throw new ApiError(404, "Organization not found");
+    notifyOrgAdmins(id, "system_announcement", "Organization Activated", "Your organization has been reactivated by a system administrator.");
     res.json(new ApiResponse(200, org, "Organization activated successfully"));
   },
 );
->>>>>>> 8eaf27f3b89d5c8307c66489d08c312f8454e9ba
 
 const updateOrganizationSubscription = asyncHandler(
   async (req: Request, res: Response) => {

@@ -65,7 +65,7 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
         changes: { amount, transactionId: deposit._id }
     });
 
-    safeCreateNotification({ userId: referrer.clerkId || '', organizationId: referrer.organizationId?.toString() || '', type: 'referral_rewarded', title: 'Referral Reward!', message: `You earned $${amount} from your referral. Your new balance is $${updatedUser?.walletBalance?.toFixed(2)}.` });
+    safeCreateNotification({ userId: referrer._id.toString(), organizationId: referrer.organizationId?.toString() || '', type: 'referral_rewarded', title: 'Referral Reward!', message: `You earned $${amount} from your referral. Your new balance is $${updatedUser?.walletBalance?.toFixed(2)}.` });
 
     res.json(new ApiResponse(200, { transaction: deposit, newBalance: updatedUser?.walletBalance }, 'Reward issued successfully'));
 });
@@ -134,7 +134,7 @@ const approveWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         changes: { transactionStatus: 'completed', deductedAmount: transaction.amount }
     });
 
-    safeCreateNotification({ userId: transaction.userClerkId, organizationId: user.organizationId?.toString() || '', type: 'payout_processed', title: 'Withdrawal Approved', message: `Your withdrawal of $${transaction.amount.toFixed(2)} has been approved.` });
+    safeCreateNotification({ userId: transaction.userId.toString(), organizationId: user.organizationId?.toString() || '', type: 'payout_processed', title: 'Withdrawal Approved', message: `Your withdrawal of $${transaction.amount.toFixed(2)} has been approved.` });
 
     res.json(new ApiResponse(200, { transaction, newBalance: updatedUser?.walletBalance }, 'Withdrawal approved and funds deducted'));
 });
@@ -153,7 +153,7 @@ const rejectWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     transaction.note = `${transaction.note} (REJECTED: ${reason})`;
     await transaction.save();
 
-    safeCreateNotification({ userId: transaction.userClerkId, organizationId: '', type: 'general', title: 'Withdrawal Rejected', message: `Your withdrawal request was rejected: ${reason}` });
+    safeCreateNotification({ userId: transaction.userId.toString(), organizationId: '', type: 'general', title: 'Withdrawal Rejected', message: `Your withdrawal request was rejected: ${reason}` });
 
     res.json(new ApiResponse(200, transaction, 'Withdrawal request rejected'));
 });
