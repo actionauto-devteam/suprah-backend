@@ -18,10 +18,7 @@ const envVarsSchema = Joi.object()
     JWT_ACCESS_EXPIRATION: Joi.string().allow('').description("JWT access token expiration time"),
     JWT_REFRESH_SECRET: Joi.string().allow('').description('JWT refresh secret key'),
     JWT_REFRESH_EXPIRATION: Joi.string().allow('').description('expiration time for refresh token'),
-    // Clerk
-    CLERK_PUBLISHABLE_KEY: Joi.string().required().description('Clerk Publishable Key'),
-    CLERK_SECRET_KEY: Joi.string().required().description('Clerk Secret Key'),
-    CLERK_WEBHOOK_SECRET: Joi.string().required().description('Clerk Webhook Secret'),
+
     CORS_ORIGIN: Joi.string().default('http://localhost:3000').description('CORS allowed origin'),
     DEALERSCLOUD_FTP_HOST: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_USER: Joi.string().allow('').default(''),
@@ -87,11 +84,7 @@ const config = {
     user: envVars.SMTP_USER,
     pass: envVars.SMTP_PASS,
   },
-  clerk: {
-    publishableKey: envVars.CLERK_PUBLISHABLE_KEY,
-    secretKey: envVars.CLERK_SECRET_KEY,
-    webhookSecret: envVars.CLERK_WEBHOOK_SECRET,
-  },
+
   google: {
     clientId: envVars.GOOGLE_CLIENT_ID,
     clientSecret: envVars.GOOGLE_CLIENT_SECRET,

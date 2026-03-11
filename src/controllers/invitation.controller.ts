@@ -176,10 +176,9 @@ export const validateInvitation = async (req: Request, res: Response) => {
 
 export const acceptInvitation = async (req: Request, res: Response) => {
     const { token } = req.body;
-    const userId = req.auth?.userId;
     const user = req.user;
 
-    if (!userId || !user) {
+    if (!user) {
         throw new ApiError(401, 'You must be logged in to accept an invitation');
     }
 

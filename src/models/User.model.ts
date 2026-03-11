@@ -29,11 +29,15 @@ export interface IUser extends Document {
   name: string;
   email: string;
   password?: string;
-  clerkId?: string;
+  passwordHash?: string;
+  otpCode?: string;
+  otpExpiresAt?: Date;
+  googleId?: string;
   emailVerified: boolean;
   avatar?: string;
   role: "customer" | "employee" | "admin" | "super_admin" | "driver";
   isActive: boolean;
+  isApproved: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
 
@@ -43,6 +47,7 @@ export interface IUser extends Document {
   personalInfo?: IPersonalInfo;
   lastActive?: Date;
   lastPasswordChange?: Date;
+  onboardingCompleted: boolean;
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -120,12 +125,6 @@ const UserSchema = new Schema(
       trim: true,
       lowercase: true,
     },
-    clerkId: {
-      type: String,
-      unique: true,
-      sparse: true,
-      trim: true,
-    },
     emailVerified: {
       type: Boolean,
       default: false,
@@ -134,6 +133,25 @@ const UserSchema = new Schema(
       type: String,
       required: false,
       private: true,
+    },
+    passwordHash: {
+      type: String,
+      required: false,
+      private: true,
+    },
+    otpCode: {
+      type: String,
+      private: true,
+    },
+    otpExpiresAt: {
+      type: Date,
+      private: true,
+    },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
     },
     avatar: {
       type: String,
@@ -148,6 +166,10 @@ const UserSchema = new Schema(
       type: Boolean,
       default: true,
     },
+    isApproved: {
+      type: Boolean,
+      default: true,
+    },
     organizationId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Organization',
@@ -155,6 +177,10 @@ const UserSchema = new Schema(
     },
     organizationRole: {
       type: String,
+    },
+    onboardingCompleted: {
+      type: Boolean,
+      default: false, // Default false to force new users to onboard properly
     },
 
     // New profile fields

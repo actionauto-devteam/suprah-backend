@@ -8,10 +8,9 @@ import mongoose from 'mongoose';
 
 export const createOrganization = async (req: Request, res: Response) => {
     const { name, slug } = req.body;
-    const userId = req.auth?.userId; // From Clerk (still used for Auth)
     const user = req.user; // Local user
 
-    if (!userId || !user) {
+    if (!user) {
         throw new ApiError(401, 'Unauthorized');
     }
 
@@ -29,7 +28,6 @@ export const createOrganization = async (req: Request, res: Response) => {
         name,
         slug,
         ownerId: user._id,
-        // clerkId: ... // Optional, we can leave it empty or generate a placeholder if needed
     });
 
     await AuditLog.create({
@@ -177,7 +175,7 @@ export const getMembers = async (req: Request, res: Response) => {
     }
 
     const members = await User.find({ organizationId: id })
-        .select('name email avatar role organizationRole createdAt clerkId') // Added clerkId
+        .select('name email avatar role organizationRole createdAt')
         .sort({ createdAt: -1 });
 
     res.status(200).json({

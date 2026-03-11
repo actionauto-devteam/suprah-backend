@@ -1,13 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
-import { clerkClient } from '@clerk/clerk-sdk-node';
 import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import Organization from '../models/Organization.model';
+import tokenService from '../services/token.service';
 
-// Extend Express Request type to include auth property from Clerk
+// Extend Express Request type to include auth property for backward compatibility
 declare global {
     namespace Express {
         interface Request {
+            user?: IUser;
+            orgId?: string;
+            orgRole?: string;
             auth?: {
                 userId: string;
                 sessionId: string;
@@ -19,141 +22,106 @@ declare global {
     }
 }
 
+/**
+ * Custom Authentication Middleware
+ * Replaces Clerk with local JWT verification
+ */
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
         // 1. Get the token from the header
-        const token = req.headers.authorization?.split(' ')[1];
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
         if (!token) {
-            console.log('Auth Middleware: No token provided for path:', req.path, 'Method:', req.method);
             throw new ApiError(401, 'Please authenticate');
         }
 
-        console.log('Auth Middleware: Verifying token...', token.substring(0, 10) + '...');
+        // 2. Verify the token using our TokenService
+        const payload = tokenService.verifyAccessToken(token);
 
-        // 2. Verify the token using Clerk
-        // Note: clerkClient.verifyToken verifies the signature and expiration
-        const client = await clerkClient.verifyToken(token, {
-            clockSkewInMs: 300000 // Allow up to 5 minutes of clock drift between frontend JWT minter and backend validator
-        } as any);
+        // The 'sub' claim in our token is the MongoDB User ID
+        const userId = payload.sub;
 
-        // For legacy/migration support, we still need the actual user details to identify them
-        // The verifyToken returns a decoded JWT payload.
-        // The 'sub' claim is the clerk user ID.
-        const clerkUserId = client.sub;
-        console.log('Auth Middleware: Clerk verification successful, sub:', clerkUserId);
-
-        if (!clerkUserId) {
-            throw new ApiError(401, 'Invalid token');
+        if (!userId) {
+            throw new ApiError(401, 'Invalid token payload');
         }
 
         // 3. Find user in local database
-        let user = await User.findOne({ clerkId: clerkUserId });
-        if (user) {
-            console.log('Auth Middleware: User found locally:', user._id, user.role);
-        } else {
-            console.log('Auth Middleware: User NOT found locally. Attempting JIT...');
-        }
+        const user = await User.findById(userId);
 
-        // 4. JIT (Just-In-Time) User Creation - "Bridge B"
-        // If user doesn't exist locally (webhook failed or hasn't fired yet), create them.
         if (!user) {
-            // Fetch full user details from Clerk API
-            console.log('Auth Middleware: Fetching user details from Clerk API...');
-            const clerkUser = await clerkClient.users.getUser(clerkUserId as string);
-
-            const email = clerkUser.emailAddresses[0]?.emailAddress;
-            const firstName = clerkUser.firstName || '';
-            const lastName = clerkUser.lastName || '';
-            const name = `${firstName} ${lastName}`.trim() || 'No Name';
-            const picture = clerkUser.imageUrl;
-
-            if (!email) {
-                throw new ApiError(400, 'User must have an email address');
-            }
-
-            // Check if user exists by email (to avoid duplicate key error)
-            user = await User.findOne({ email });
-
-            if (user) {
-                // Link account: Update clerkId and other details
-                console.log(`Linking existing user ${email} to new Clerk ID ${clerkUserId}`);
-                user.clerkId = clerkUserId;
-                user.name = name;
-                user.avatar = picture;
-                await user.save();
-            } else {
-                // Create local user
-                console.log(`Creating new local user for ${email}`);
-                user = await User.create({
-                    clerkId: clerkUserId,
-                    email,
-                    name,
-                    avatar: picture,
-                    emailVerified: true,
-                    role: 'customer', // Default role
-                });
-            }
+            throw new ApiError(401, 'User not found');
         }
 
-        // 5. Attach user to request
-        // WE NOW PRIORITIZE LOCAL DB FOR ORGANIZATION
-        // We ignore client.org_id because we are managing orgs locally now.
-        let orgId = user?.organizationId?.toString();
-        let orgRole = (user as any)?.organizationRole;
+        // 4. Attach user and org info to request
+        let orgId = user.organizationId?.toString();
+        let orgRole = (user as any).organizationRole;
 
-        // --- PROXY LOGIC START ---
-        // If user is Super Admin, check for impersonation header
-        if (user?.role === 'super_admin') {
+        // --- IMPERSONATION logic for Super Admins ---
+        if (user.role === 'super_admin') {
             const impersonateId = req.headers['x-impersonate-org-id'] as string;
             if (impersonateId) {
-                console.log(`[AUTH] Super Admin ${user.email} is impersonating Org: ${impersonateId}`);
                 orgId = impersonateId;
-                orgRole = 'admin'; // Force admin role in the target org
+                orgRole = 'admin'; // Assume admin role in the target org
             }
         }
-        // --- PROXY LOGIC END ---
 
-        req.user = user || undefined;
+        req.user = user;
         req.orgId = orgId;
         req.orgRole = orgRole;
 
-        // Optional: Attach Clerk auth info if needed by other middleware
+        // 5. Compatibility Layer: req.auth
+        // We populate this so existing controllers relying on req.auth won't break.
         req.auth = {
-            userId: clerkUserId as string,
-            sessionId: client.sid as string,
+            userId: userId, // Local _id as string
+            sessionId: 'local_session', // Dummy for now
             orgId,
             orgRole,
-            getToken: async () => token || null,
+            getToken: async () => token,
         };
 
-        // --- SUSPENSION CHECK START ---
-        if (user && !user.isActive) {
+        // 6. Security Checks
+        if (!user.isActive) {
             throw new ApiError(403, 'Account Suspended');
         }
 
-        // Note: We need to fetch the org status if we want to enforce it here.
-        // Since we don't always fetch the full organization object in this middleware (we only have ID),
-        // we might rely on the invalidation of the user's access OR fetch it if orgId is present.
-        // For performance, we can skip fetching if not needed, but for security, if orgId is present, we SHOULD check.
+        // 7. Security Checks: Email Verification, Onboarding & Driver Approval
+        const isWhitelisted =
+            req.originalUrl.includes('/api/auth/complete-onboarding') ||
+            req.originalUrl.includes('/api/users/me') ||
+            req.originalUrl.includes('/api/notifications') ||
+            req.originalUrl.includes('/api/driver-requests/my-status');
+
+        if (!user.onboardingCompleted && !isWhitelisted) {
+            throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');
+        }
+
+        if (!user.emailVerified && !isWhitelisted) {
+            throw new ApiError(403, 'Email not verified. Please verify your email to access this feature.');
+        }
+
+        // 8. Driver Approval Check
+        if (user.role === 'driver' && !user.isApproved && !isWhitelisted) {
+            throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
+        }
+
+        // 9. Organization Suspension Check
         if (req.orgId) {
-            const orgStatusCheck = await Organization.findById(req.orgId).select('status');
-            if (orgStatusCheck && orgStatusCheck.status === 'suspended') {
-                // Exception: Allow Super Admin to access suspended orgs (to fix them)
-                if (user?.role !== 'super_admin') {
+            const org = await Organization.findById(req.orgId).select('status');
+            if (org && org.status === 'suspended') {
+                // Super Admins can still access to fix things
+                if (user.role !== 'super_admin') {
                     throw new ApiError(403, 'Organization Suspended');
                 }
             }
         }
-        // --- SUSPENSION CHECK END ---
 
         next();
     } catch (error) {
-        console.error('Auth Middleware Verification Error:', error);
+        console.error('Auth Middleware Error:', error);
         if (error instanceof ApiError) {
             next(error);
         } else {
-            // Map Clerk errors or generic errors to 401
             next(new ApiError(401, 'Please authenticate'));
         }
     }

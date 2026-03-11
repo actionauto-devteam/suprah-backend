@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IPayment extends Document {
   organizationId: string;
+  orgId?: mongoose.Types.ObjectId;
   customerId: string;
 
   // Customer info
@@ -43,6 +44,11 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     organizationId: {
       type: String,
       required: true,
+      index: true,
+    },
+    orgId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Organization',
       index: true,
     },
     customerId: {

@@ -14,10 +14,7 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
     const { q, limit = 10, excludeSelf = 'true' } = req.query;
     const currentUserId = (req.user as IUser)._id.toString();
 
-    console.log('[UserController] Search request:', { q, limit, excludeSelf, currentUserId });
-
     if (!q || typeof q !== 'string' || q.trim().length === 0) {
-        console.log('[UserController] Empty search query, returning empty array');
         return res.json(new ApiResponse(200, [], 'No search query provided'));
     }
 
@@ -38,15 +35,11 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
             searchCriteria._id = { $ne: currentUserId };
         }
 
-        console.log('[UserController] Search criteria:', JSON.stringify(searchCriteria));
-
         const users = await User.find(searchCriteria)
             .select('_id name email avatar role')
             .limit(limitNum)
             .lean()
             .exec();
-
-        console.log('[UserController] Found users:', users.length);
 
         // Transform to plain objects with proper typing
         const transformedUsers = users.map(user => ({
@@ -82,7 +75,15 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
 
     // Don't allow updating sensitive fields through this method
-    const { password, email, role, ...safeData } = req.body;
+    const sensitiveFields = [
+        'password', 'email', 'role', 'googleId', 'emailVerified',
+        'isApproved', 'onboardingCompleted', 'otpCode', 'otpExpiresAt',
+        'organizationId', 'organizationRole', 'isActive', 'lastLogin',
+        '_id', '__v', 'createdAt', 'updatedAt'
+    ];
+
+    const safeData = { ...req.body };
+    sensitiveFields.forEach(field => delete safeData[field]);
 
     const user = await User.findByIdAndUpdate(
         userId,

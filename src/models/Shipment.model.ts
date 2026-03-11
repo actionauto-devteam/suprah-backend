@@ -5,14 +5,15 @@ import mongoose, { Document, Schema } from "mongoose";
 export interface IShipment extends Document {
   quoteId: mongoose.Types.ObjectId;
   organizationId: string;
+  orgId?: mongoose.Types.ObjectId;
 
   // Status
   status:
-    | "Available for Pickup"
-    | "Cancelled"
-    | "Delivered"
-    | "Dispatched"
-    | "In-Route";
+  | "Available for Pickup"
+  | "Cancelled"
+  | "Delivered"
+  | "Dispatched"
+  | "In-Route";
 
   // Route Information
   origin: string;
@@ -65,6 +66,9 @@ export interface IShipment extends Document {
     date: Date;
   }>;
 
+  // Creator tracking
+  createdBy?: mongoose.Types.ObjectId;
+
   // Driver assignment
   assignedDriverId?: mongoose.Types.ObjectId;
   assignedAt?: Date;
@@ -94,6 +98,11 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     organizationId: {
       type: String,
       required: true,
+      index: true,
+    },
+    orgId: {
+      type: Schema.Types.ObjectId,
+      ref: "Organization",
       index: true,
     },
 
@@ -157,6 +166,8 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
         date: { type: Date, default: Date.now },
       },
     ],
+
+    createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
 
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },

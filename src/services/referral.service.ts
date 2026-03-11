@@ -45,9 +45,9 @@ export class ReferralService {
         }
 
         // 3. Check if the customer was referred
-        const referral = await Referral.findOne({ referredUserClerkId: customer.clerkId });
+        const referral = await Referral.findOne({ referredUserId: customer._id });
         if (!referral) {
-            console.log(`[ReferralService] User ${customer.clerkId} was not referred. Skipping.`);
+            console.log(`[ReferralService] User ${customer._id} was not referred. Skipping.`);
             return;
         }
 
@@ -65,9 +65,9 @@ export class ReferralService {
         }
 
         // 5. Identify the Referrer
-        const referrer = await User.findOne({ clerkId: referral.referrerClerkId });
+        const referrer = await User.findById(referral.referrerId);
         if (!referrer) {
-            console.log(`[ReferralService] Referrer ${referral.referrerClerkId} not found. Skipping.`);
+            console.log(`[ReferralService] Referrer (ID: ${referral.referrerId}) not found. Skipping.`);
             return;
         }
 
@@ -76,7 +76,7 @@ export class ReferralService {
         // 6. Execute Reward
         // A. Create Transaction
         const transaction = await Transaction.create({
-            userClerkId: referrer.clerkId,
+            userId: referrer._id,
             type: 'deposit',
             status: 'completed',
             amount: rewardAmount,
@@ -87,8 +87,8 @@ export class ReferralService {
         });
 
         // B. Update Referrer Wallet
-        await User.findOneAndUpdate(
-            { clerkId: referrer.clerkId },
+        await User.findByIdAndUpdate(
+            referrer._id,
             {
                 $inc: {
                     walletBalance: rewardAmount,
@@ -96,6 +96,10 @@ export class ReferralService {
                 }
             }
         );
+
+        // G. Update Notification Preferences (Logic assumed to be elsewhere or here)
+        // Ensure we find the right referral for final updates
+        const finalReferral = await Referral.findById(referral._id);
 
         // C. Audit Log
         await AuditLog.create({
@@ -137,7 +141,7 @@ export class ReferralService {
             console.error('[ReferralService] Failed to send notification:', error);
         }
 
-        console.log(`[ReferralService] Successfully issued $${rewardAmount} reward to ${referrer.clerkId}`);
+        console.log(`[ReferralService] Successfully issued $${rewardAmount} reward to ${referrer._id}`);
         return transaction;
     }
 
@@ -148,8 +152,8 @@ export class ReferralService {
         const referral = await Referral.findById(referralId);
         if (!referral) return;
 
-        const referrer = await User.findOne({ clerkId: referral.referrerClerkId });
-        const referredUser = await User.findOne({ clerkId: referral.referredUserClerkId });
+        const referrer = await User.findById(referral.referrerId);
+        const referredUser = await User.findById(referral.referredUserId);
 
         if (!referrer || !referredUser) return;
 
@@ -167,7 +171,8 @@ export class ReferralService {
                     message,
                     metadata: {
                         referralId: referral._id.toString(),
-                        referredUserClerkId: referredUser.clerkId
+                        referrerId: referrer._id.toString(),
+                        referredUserId: referredUser._id.toString()
                     }
                 });
             }

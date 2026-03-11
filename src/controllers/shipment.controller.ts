@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
 import Payment from '../models/Payment.model';
+import Organization from '../models/Organization.model';
 import AuditLog from '../models/AuditLog.model';
 import User, { IUser } from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -78,6 +79,8 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 
     const trackingNumber = await generateTrackingNumber();
 
+    const isValidObjId = /^[0-9a-fA-F]{24}$/.test(orgId);
+
     const shipment = await Shipment.create({
         quoteId,
         status: 'Available for Pickup',
@@ -86,6 +89,8 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         requestedPickupDate: requestedPickupDate || new Date(),
         trackingNumber,
         organizationId: orgId,
+        ...(isValidObjId && { orgId }),
+        ...(userId && { createdBy: userId }),
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,
@@ -115,7 +120,8 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
                 path: 'vehicleId',
                 select: 'year make modelName vin stockNumber image location'
             }
-        });
+        })
+        .populate('createdBy', 'name email avatar');
 
     if (autoDeleteQuote) {
         await Quote.findOneAndDelete({ _id: quoteId, organizationId: orgId });
@@ -199,13 +205,12 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all shipments
+ * Get all shipments (cross-org — all orgs visible for transparency)
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
-    const orgId = req.orgId as string;
 
-    const filter: any = { organizationId: orgId };
+    const filter: any = {};
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -219,6 +224,8 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
                 select: 'year make modelName vin stockNumber image location'
             }
         })
+        .populate('createdBy', 'name email avatar')
+        .populate('orgId', 'name logoUrl')
         .sort({ createdAt: -1 });
 
     let filteredShipments = shipments;
@@ -242,7 +249,29 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
-    res.json(new ApiResponse(200, filteredShipments, 'Shipments fetched successfully'));
+    // Attach organization name to each shipment
+    const uniqueOrgIds = [...new Set(filteredShipments.map(s => s.organizationId?.toString()).filter(Boolean))];
+    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
+    const orgs = validObjectIds.length
+        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
+        : [];
+
+    const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+
+    const shipmentsWithOrg = filteredShipments.map(s => {
+        const sJson = s.toJSON() as any;
+        // Use populated orgId first (new shipments), fallback to string _id lookup (old shipments)
+        const orgFromPopulate = sJson.orgId && typeof sJson.orgId === 'object'
+            ? { name: sJson.orgId.name, logoUrl: sJson.orgId.logoUrl }
+            : null;
+        return {
+            ...sJson,
+            organization: orgFromPopulate || orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
+        };
+    });
+
+    res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
 });
 
 /**
@@ -654,13 +683,12 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get shipment statistics
+ * Get shipment statistics (cross-org — all orgs)
  */
 const getShipmentStats = asyncHandler(async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const stats = await Shipment.aggregate([
         {
-            $match: { organizationId: orgId }
+            $match: {}
         },
         {
             $group: {

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
+import Organization from '../models/Organization.model';
 import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -111,11 +112,13 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         rate,
         eta,
         status: 'pending',
-        organizationId: orgId
+        organizationId: orgId,
+        ...(userId && { createdBy: userId })
     });
 
     const populatedQuote = await Quote.findById(quote._id)
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar');
 
     // Create notification safely
     if (userId) {
@@ -163,13 +166,12 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all quotes
+ * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
-    const orgId = req.orgId as string;
 
-    const filter: any = { organizationId: orgId };
+    const filter: any = {};
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -187,9 +189,25 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
 
     const quotes = await Quote.find(filter)
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar')
         .sort({ createdAt: -1 });
 
-    res.json(new ApiResponse(200, quotes, 'Quotes fetched successfully'));
+    // Attach organization name to each quote
+    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))];
+    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
+    const orgs = validObjectIds.length
+        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
+        : [];
+
+    const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+
+    const quotesWithOrg = quotes.map(q => ({
+        ...(q.toJSON()),
+        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
+    }));
+
+    res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
 });
 
 /**
@@ -198,7 +216,8 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
 const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');

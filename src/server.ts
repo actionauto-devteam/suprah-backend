@@ -5,16 +5,23 @@ import { Server } from 'socket.io';
 import { setupSocket } from './socket';
 import { setSocketIO } from './utils/socketEmitter';
 import cors from 'cors';
+import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import connectDB from './config/db';
 import routes from './routes';
-import webhookRoute from './routes/webhook.route';
 import { errorHandler } from './middleware/error.middleware';
+import passport from './config/passport';
 import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
 
 const app: Application = express();
+
+// Use Helmet for secure HTTP headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow cross-origin for images/sockets
+  contentSecurityPolicy: config.env === 'production' ? undefined : false, // Disable CSP in dev to avoid blocking Vite/Hot Reload
+}));
 const httpServer = createServer(app);
 
 // ========================================
@@ -49,11 +56,6 @@ app.use(express.text({ type: ['application/xml', 'text/xml'] }));
 // Static file serving (proof-of-delivery images)
 // ========================================
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-
-// ========================================
-// Webhook Routes
-// ========================================
-app.use('/api/webhooks', webhookRoute);
 
 // ========================================
 // CORS CONFIGURATION
@@ -104,6 +106,7 @@ console.log('✓ CORS configured with origins:', config.corsOrigin);
 console.log('✓ Environment:', config.env);
 
 app.use(cookieParser());
+app.use(passport.initialize());
 
 // ========================================
 // Health Check

@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ITransaction extends Document {
-    userClerkId: string;
+    userId: mongoose.Types.ObjectId;
     type: 'deposit' | 'withdrawal' | 'adjustment';
     status: 'pending' | 'completed' | 'rejected';
     amount: number;
@@ -22,8 +22,9 @@ export interface ITransaction extends Document {
 
 const TransactionSchema = new Schema(
     {
-        userClerkId: {
-            type: String,
+        userId: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
             required: true,
             index: true,
         },
