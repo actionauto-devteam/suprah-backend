@@ -401,7 +401,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
             if (driver) {
                 const nType = status === 'Delivered' ? 'shipment_delivered' : 'shipment_status_changed';
                 await safeCreateNotification({
-                    userId: driver.clerkId || '',
+                    userId: driver._id.toString(),
                     organizationId: orgId,
                     type: nType,
                     title: status === 'Delivered' ? 'Shipment Delivered' : 'Shipment Status Updated',

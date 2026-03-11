@@ -233,7 +233,7 @@ export const removeMember = async (req: Request, res: Response) => {
 
     const removedUser = await User.findById(userId);
     if (removedUser) {
-        safeCreateNotification({ userId: removedUser.clerkId || '', organizationId: id, type: 'team_member_left', title: 'Removed from Organization', message: `You have been removed from ${org.name}.` });
+        safeCreateNotification({ userId: removedUser._id.toString(), organizationId: id, type: 'team_member_left', title: 'Removed from Organization', message: `You have been removed from ${org.name}.` });
     }
     notifyOrgAdmins(id, 'team_member_left', 'Member Removed', `A member has been removed from the organization.`, { removedUserId: userId });
 

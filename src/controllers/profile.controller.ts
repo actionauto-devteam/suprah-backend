@@ -156,7 +156,7 @@ const changePassword = asyncHandler(async (req: Request, res: Response) => {
   await profileService.changePassword(userId, currentPassword, newPassword);
 
   const u = (req as any).user;
-  safeCreateNotification({ userId: u.clerkId, organizationId: u.organizationId?.toString() || '', type: 'password_changed', title: 'Password Changed', message: 'Your password was changed successfully. If this wasn\'t you, contact support immediately.' });
+  safeCreateNotification({ userId: u._id.toString(), organizationId: u.organizationId?.toString() || '', type: 'password_changed', title: 'Password Changed', message: 'Your password was changed successfully. If this wasn\'t you, contact support immediately.' });
 
   res.json(
     new ApiResponse(200, null, 'Password changed successfully')
@@ -177,7 +177,7 @@ const updateEmail = asyncHandler(async (req: Request, res: Response) => {
   const user = await profileService.updateEmail(userId, email, password);
 
   const u = (req as any).user;
-  safeCreateNotification({ userId: u.clerkId, organizationId: u.organizationId?.toString() || '', type: 'email_changed', title: 'Email Updated', message: `Your email has been changed to ${email}.` });
+  safeCreateNotification({ userId: u._id.toString(), organizationId: u.organizationId?.toString() || '', type: 'email_changed', title: 'Email Updated', message: `Your email has been changed to ${email}.` });
 
   res.json(
     new ApiResponse(200, user, 'Email updated successfully')
