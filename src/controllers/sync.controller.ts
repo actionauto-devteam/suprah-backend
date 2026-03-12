@@ -2,13 +2,13 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import syncService from '../services/sync.service';
 import { ApiResponse } from '../utils/ApiResponse';
+import { notifyOrgAdmins } from '../utils/safeNotification';
 import SyncLog from '../models/SyncLog.model';
 
 const triggerSync = asyncHandler(async (req: Request, res: Response) => {
-    // Execute sync asynchronously or wait for it? 
-    // For manual trigger, waiting is often preferred so user sees results.
+    const orgId = req.orgId as string;
     const result = await syncService.syncInventory();
-
+    if (orgId) notifyOrgAdmins(orgId, 'inventory_sync', 'Inventory Synced', 'A manual inventory sync has been completed.');
     res.json(new ApiResponse(200, result, 'Manual inventory sync completed'));
 });
 

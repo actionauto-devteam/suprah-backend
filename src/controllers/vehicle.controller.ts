@@ -48,7 +48,7 @@ const normalizeVehicle = (vehicle: any) => ({
 const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
-  
+
   const vehicle = await Vehicle.create({
     ...req.body,
     organizationId: orgId,
@@ -339,10 +339,24 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  const orgId = req.orgId as string;
   const vehicle = await Vehicle.findByIdAndDelete(req.params.id);
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
+  }
+
+  if (orgId) {
+    const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
+    await notifyOrgAdmins(
+      orgId,
+      'vehicle_status_changed',
+      'Vehicle Deleted',
+      `${vehicleName} (Stock #${vehicle.stockNumber || 'N/A'}) was removed from inventory`,
+      { vehicleId: req.params.id, vehicleName },
+      userId
+    );
   }
 
   res.json(new ApiResponse(200, null, 'Vehicle deleted successfully'));

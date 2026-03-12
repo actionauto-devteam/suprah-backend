@@ -3,7 +3,7 @@ import Stripe from 'stripe';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import { safeCreateNotification } from '../utils/safeNotification';
+import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import Payment from '../models/Payment.model';
 import User, { IUser } from '../models/User.model';
@@ -67,6 +67,8 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
     notes,
     createdBy: userId,
   });
+
+  notifyOrgAdmins(orgId, 'payment_pending', 'New Payment Created', `A payment of $${amount.toFixed(2)} for ${customerName} is pending.`, { paymentId: payment._id.toString(), amount, customerName });
 
   res.status(201).json(
     new ApiResponse(201, payment, 'Payment record created successfully')
@@ -365,6 +367,8 @@ const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
   payment.status = 'cancelled';
   await payment.save();
 
+  notifyOrgAdmins(orgId, 'general', 'Payment Cancelled', `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} was cancelled.`, { paymentId: payment._id.toString() });
+
   res.json(new ApiResponse(200, payment, 'Payment cancelled successfully'));
 });
 
@@ -402,6 +406,8 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
 
   payment.status = 'refunded';
   await payment.save();
+
+  notifyOrgAdmins(orgId, 'general', 'Payment Refunded', `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} has been refunded.`, { paymentId: payment._id.toString() });
 
   res.json(new ApiResponse(200, payment, 'Payment refunded successfully'));
 });

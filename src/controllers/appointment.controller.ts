@@ -5,6 +5,8 @@ import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
+import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
+import { notificationTemplates } from '../utils/notificationTemplates';
 
 /**
  * Create a new appointment (with customer booking support)
@@ -12,22 +14,32 @@ import { IUser } from '../models/User.model';
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
-    
+
     // Check for duplicate customer booking
     if (req.body.customerBooking?.isCustomerBooking) {
         const duplicateCheck = await customerBookingService.checkDuplicateBooking(
             req.body.customerBooking,
             new Date(req.body.startTime)
         );
-        
+
         if (duplicateCheck.isDuplicate) {
             return res.status(400).json(
                 new ApiResponse(400, null, duplicateCheck.reason!)
             );
         }
     }
-    
+
     const appointment = await appointmentService.createAppointment(userId, orgId, req.body);
+
+    if (orgId) {
+        const { title, message } = notificationTemplates.appointment_created({
+            title: appointment.title || 'Untitled',
+            startTime: appointment.startTime ? new Date(appointment.startTime).toLocaleString() : undefined,
+        });
+        await notifyOrgAdmins(orgId, 'appointment_created', title, message, {
+            appointmentId: appointment._id?.toString(),
+        }, userId);
+    }
 
     res.status(201).json(
         new ApiResponse(201, appointment, 'Appointment created successfully')
@@ -165,7 +177,7 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
             new Date(req.body.startTime),
             id
         );
-        
+
         if (duplicateCheck.isDuplicate) {
             return res.status(400).json(
                 new ApiResponse(400, null, duplicateCheck.reason!)
@@ -175,6 +187,15 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
 
     const orgId = req.orgId as string;
     const appointment = await appointmentService.updateAppointment(id, orgId, userId, req.body);
+
+    if (orgId) {
+        const { title, message } = notificationTemplates.appointment_updated({
+            title: appointment.title || 'Untitled',
+        });
+        await notifyOrgAdmins(orgId, 'appointment_updated', title, message, {
+            appointmentId: appointment._id?.toString(),
+        }, userId);
+    }
 
     res.json(
         new ApiResponse(200, appointment, 'Appointment updated successfully')
@@ -191,6 +212,15 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const appointment = await appointmentService.cancelAppointment(id, orgId, userId);
 
+    if (orgId) {
+        const { title, message } = notificationTemplates.appointment_cancelled({
+            title: appointment.title || 'Untitled',
+        });
+        await notifyOrgAdmins(orgId, 'appointment_cancelled', title, message, {
+            appointmentId: appointment._id?.toString(),
+        }, userId);
+    }
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment cancelled successfully')
     );
@@ -205,6 +235,15 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
 
     const orgId = req.orgId as string;
     await appointmentService.deleteAppointment(id, orgId, userId);
+
+    if (orgId) {
+        const { title, message } = notificationTemplates.appointment_cancelled({
+            title: 'Appointment',
+        });
+        await notifyOrgAdmins(orgId, 'appointment_cancelled', title, message, {
+            appointmentId: id,
+        }, userId);
+    }
 
     res.json(
         new ApiResponse(200, null, 'Appointment deleted successfully')
@@ -236,6 +275,22 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
         status,
         googleAccessToken
     );
+
+    if (appointment.createdBy) {
+        const { title, message } = notificationTemplates.guest_response({
+            guestName: req.body.guestName || 'A guest',
+            appointmentTitle: appointment.title || 'your appointment',
+            response: status,
+        });
+        await safeCreateNotification({
+            userId: appointment.createdBy.toString(),
+            organizationId: appointment.organizationId || '',
+            type: 'guest_response',
+            title,
+            message,
+            metadata: { appointmentId: id, guestResponse: status },
+        });
+    }
 
     res.json(
         new ApiResponse(200, appointment, `Invitation ${status} successfully`)

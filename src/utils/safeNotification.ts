@@ -1,5 +1,6 @@
 import notificationService from '../services/notification.service';
 import User from '../models/User.model';
+import Organization from '../models/Organization.model';
 
 interface CreateNotificationParams {
   userId: string;
@@ -185,6 +186,35 @@ export async function notifyUsers(
     return { successful, total: userIds.length };
   } catch (error) {
     console.error('Failed to notify users:', error);
+    return null;
+  }
+}
+
+export async function notifyAllOrganizations(
+  type: string,
+  title: string,
+  message: string,
+  metadata?: any,
+  excludeOrgId?: string
+) {
+  try {
+    const orgs = await Organization.find({ status: 'active' }).select('_id');
+    const results = await Promise.all(
+      orgs
+        .filter(org => org._id.toString() !== excludeOrgId)
+        .map(org => safeBroadcastNotification({
+          organizationId: org._id.toString(),
+          roles: ['admin', 'super_admin'],
+          type,
+          title,
+          message,
+          metadata,
+        }))
+    );
+    console.log(`Cross-org notification sent to ${results.length} organizations`);
+    return results;
+  } catch (error) {
+    console.error('Failed to send cross-org notifications:', error);
     return null;
   }
 }

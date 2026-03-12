@@ -7,6 +7,7 @@ export interface IQuote extends Document {
     email: string;
     phone: string;
     organizationId: string;
+    createdBy?: mongoose.Types.ObjectId;
 
     // Vehicle Information (populated from Vehicle model or manually entered)
     vehicleId?: mongoose.Types.ObjectId;
@@ -57,6 +58,7 @@ const QuoteSchema: Schema<IQuote> = new Schema(
             required: true,
             index: true
         },
+        createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
 
         // Vehicle Information
         vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle' },

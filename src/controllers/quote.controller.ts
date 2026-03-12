@@ -2,10 +2,11 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
+import Organization from '../models/Organization.model';
 import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import { safeCreateNotification } from '../utils/safeNotification';
+import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import {
@@ -111,11 +112,13 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         rate,
         eta,
         status: 'pending',
-        organizationId: orgId
+        organizationId: orgId,
+        ...(userId && { createdBy: userId })
     });
 
     const populatedQuote = await Quote.findById(quote._id)
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar');
 
     // Create notification safely
     if (userId) {
@@ -140,6 +143,14 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
+    notifyAllOrganizations(
+        'quote_created',
+        'New Draft Created',
+        `A new transportation draft has been created for ${firstName} ${lastName} — ${vehicleData.vehicleName}.`,
+        { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName: vehicleData.vehicleName },
+        orgId
+    );
+
     res.status(201).json(
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
     );
@@ -155,11 +166,11 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all quotes
+ * Get all quotes for the current organization
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
-    const { status, search } = req.query;
     const orgId = req.orgId as string;
+    const { status, search } = req.query;
 
     const filter: any = { organizationId: orgId };
 
@@ -179,9 +190,25 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
 
     const quotes = await Quote.find(filter)
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar')
         .sort({ createdAt: -1 });
 
-    res.json(new ApiResponse(200, quotes, 'Quotes fetched successfully'));
+    // Attach organization name to each quote
+    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))];
+    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
+    const orgs = validObjectIds.length
+        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
+        : [];
+
+    const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+
+    const quotesWithOrg = quotes.map(q => ({
+        ...(q.toJSON()),
+        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
+    }));
+
+    res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
 });
 
 /**
@@ -190,7 +217,8 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
 const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('createdBy', 'name email avatar');
 
     if (!quote) {
         throw new ApiError(404, 'Quote not found');
@@ -425,6 +453,14 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    notifyAllOrganizations(
+        'quote_deleted',
+        'Quote Deleted',
+        `Quote for ${customerName} (${vehicleName}) has been deleted.`,
+        { customerName, vehicleName },
+        orgId
+    );
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
 

@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import path from 'path';
 import { Server } from 'socket.io';
 import { setupSocket } from './socket';
+import { setSocketIO } from './utils/socketEmitter';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
@@ -99,6 +100,7 @@ const io = new Server(httpServer, {
 });
 
 setupSocket(io);
+setSocketIO(io);
 
 console.log('✓ CORS configured with origins:', config.corsOrigin);
 console.log('✓ Environment:', config.env);
