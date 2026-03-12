@@ -205,12 +205,13 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all shipments (cross-org — all orgs visible for transparency)
+ * Get all shipments for the current organization
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
     const { status, search } = req.query;
 
-    const filter: any = {};
+    const filter: any = { organizationId: orgId };
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -683,12 +684,13 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get shipment statistics (cross-org — all orgs)
+ * Get shipment statistics for the current organization
  */
 const getShipmentStats = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
     const stats = await Shipment.aggregate([
         {
-            $match: {}
+            $match: { organizationId: orgId }
         },
         {
             $group: {

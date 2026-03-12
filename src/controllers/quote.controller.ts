@@ -166,12 +166,13 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all quotes (cross-org — all orgs visible for transparency)
+ * Get all quotes for the current organization
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
     const { status, search } = req.query;
 
-    const filter: any = {};
+    const filter: any = { organizationId: orgId };
 
     if (status && status !== 'all') {
         filter.status = status;
