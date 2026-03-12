@@ -63,6 +63,7 @@ export interface IVehicle extends Document {
         date: Date;
     }>;
     manualStatusLock: boolean;
+    organizationId: string;
     isDeleted: boolean;
 }
 
@@ -144,6 +145,7 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
             },
         ],
         manualStatusLock: { type: Boolean, default: false },
+        organizationId: { type: String, index: true },
         isDeleted: { type: Boolean, default: false },
     },
     {

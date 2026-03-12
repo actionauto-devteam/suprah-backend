@@ -86,6 +86,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         requestedPickupDate: requestedPickupDate || new Date(),
         trackingNumber,
         organizationId: orgId,
+        createdBy: userId,
         preservedQuoteData: {
             firstName: quote.firstName,
             lastName: quote.lastName,

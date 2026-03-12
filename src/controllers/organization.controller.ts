@@ -1,11 +1,12 @@
 import { Request, Response } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
 import AuditLog from '../models/AuditLog.model';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 
-export const createOrganization = async (req: Request, res: Response) => {
+export const createOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { name, slug } = req.body;
     const user = req.user; // Local user
 
@@ -47,9 +48,9 @@ export const createOrganization = async (req: Request, res: Response) => {
         success: true,
         data: org,
     });
-};
+});
 
-export const getOrganization = async (req: Request, res: Response) => {
+export const getOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     // Ensure user has access to this org
@@ -68,9 +69,9 @@ export const getOrganization = async (req: Request, res: Response) => {
         success: true,
         data: org,
     });
-};
+});
 
-export const updateOrganization = async (req: Request, res: Response) => {
+export const updateOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const { name, logoUrl, metadata } = req.body;
 
@@ -117,9 +118,9 @@ export const updateOrganization = async (req: Request, res: Response) => {
         success: true,
         data: org,
     });
-};
+});
 
-export const deleteOrganization = async (req: Request, res: Response) => {
+export const deleteOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const org = await Organization.findById(id);
@@ -159,9 +160,9 @@ export const deleteOrganization = async (req: Request, res: Response) => {
         success: true,
         message: 'Organization deleted',
     });
-};
+});
 
-export const getMembers = async (req: Request, res: Response) => {
+export const getMembers = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     // Check if the current context matches the requested ID (or super_admin)
@@ -177,13 +178,22 @@ export const getMembers = async (req: Request, res: Response) => {
         .select('name email avatar role organizationRole createdAt')
         .sort({ createdAt: -1 });
 
+    // Ensure global admins are displayed as organization admins
+    const results = members.map(m => {
+        const member = m.toObject();
+        if (member.role === 'admin') {
+            member.organizationRole = 'admin';
+        }
+        return member;
+    });
+
     res.status(200).json({
         success: true,
-        data: members,
+        data: results,
     });
-};
+});
 
-export const removeMember = async (req: Request, res: Response) => {
+export const removeMember = asyncHandler(async (req: Request, res: Response) => {
     const { id, userId } = req.params;
 
     const org = await Organization.findById(id);
@@ -234,4 +244,4 @@ export const removeMember = async (req: Request, res: Response) => {
         success: true,
         message: 'Member removed',
     });
-};
+});

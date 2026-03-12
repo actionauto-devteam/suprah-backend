@@ -66,9 +66,17 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             }
         }
 
+        // Boost global admins (but not super_admins, who handle authority via impersonation)
+        let finalOrgRole = orgRole;
+        if (user.role === 'admin') {
+            finalOrgRole = 'admin';
+        }
+
         req.user = user;
         req.orgId = orgId;
-        req.orgRole = orgRole;
+        req.orgRole = finalOrgRole;
+
+        console.log(`[AuthMiddleware] User: ${user.email}, GlobalRole: ${user.role}, OrgId: ${orgId}, OrgRole: ${orgRole}`);
 
         // 5. Compatibility Layer: req.auth
         // We populate this so existing controllers relying on req.auth won't break.
@@ -76,7 +84,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             userId: userId, // Local _id as string
             sessionId: 'local_session', // Dummy for now
             orgId,
-            orgRole,
+            orgRole: finalOrgRole,
             getToken: async () => token,
         };
 
@@ -90,6 +98,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             req.originalUrl.includes('/api/auth/complete-onboarding') ||
             req.originalUrl.includes('/api/users/me') ||
             req.originalUrl.includes('/api/notifications') ||
+            req.originalUrl.includes('/api/invitations/accept') ||
             req.originalUrl.includes('/api/driver-requests/my-status');
 
         if (!user.onboardingCompleted && !isWhitelisted) {

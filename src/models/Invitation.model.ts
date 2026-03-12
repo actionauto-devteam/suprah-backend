@@ -32,7 +32,7 @@ const InvitationSchema = new Schema<IInvitation>(
         },
         role: {
             type: String,
-            enum: ['admin', 'member'],
+            enum: ['admin', 'member', 'customer', 'driver'],
             default: 'member',
         },
         token: {
