@@ -66,10 +66,7 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
  */
 const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-
-  // FIX: Use isGoogleCalendarConnected which also validates refresh_token presence
   const connected = await googleCalendarService.isGoogleCalendarConnected(userId);
-
   res.json(new ApiResponse(200, { connected }, 'Calendar status fetched'));
 });
 
@@ -90,9 +87,9 @@ const disconnect = asyncHandler(async (req: Request, res: Response) => {
  * @access Public (validated via middleware)
  */
 const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
-  const channelId = req.headers['x-goog-channel-id'] as string;
-  const resourceState = req.headers['x-goog-resource-state'] as string;
-  const resourceId = req.headers['x-goog-resource-id'] as string;
+  const channelId        = req.headers['x-goog-channel-id']        as string;
+  const resourceState    = req.headers['x-goog-resource-state']    as string;
+  const resourceId       = req.headers['x-goog-resource-id']       as string;
   const channelExpiration = req.headers['x-goog-channel-expiration'] as string;
 
   console.log('📨 Received Google Calendar webhook:', {
@@ -134,15 +131,19 @@ const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Manually sync recent events from Google Calendar
+ * Manually sync ALL events from Google Calendar (full paginated sync).
+ * Fetches SYNC_PAST_YEARS back and SYNC_FUTURE_YEARS forward, handling
+ * pagination, recurring events, cancelled instances, and timezones.
+ *
  * @route POST /api/google-calendar/sync-events
  * @access Private
  */
 const syncEvents = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-  const syncedAppointments = await googleCalendarService.syncRecentEvents(userId);
 
-  // FIX: Return syncedAppointments count so the frontend can display it
+  // syncAllEvents performs the full paginated fetch across the configured window
+  const syncedAppointments = await googleCalendarService.syncAllEvents(userId);
+
   res.json(
     new ApiResponse(
       200,
