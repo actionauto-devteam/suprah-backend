@@ -28,20 +28,14 @@ interface GoogleTokens {
 }
 
 class GoogleCalendarService {
-  private oauth2Client: any;
-
-  constructor() {
-    this.oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
-    );
-  }
-
   /**
    * Get authorization URL for OAuth
+   * FIX: Changed prompt from 'select_account' to 'consent'
+   * so Google always returns a refresh_token
    */
   getAuthUrl(userId: string): string {
+    const oauth2Client = this.createOAuthClient();
+
     const scopes = [
       'https://www.googleapis.com/auth/calendar',
       'https://www.googleapis.com/auth/calendar.events',
@@ -50,12 +44,23 @@ class GoogleCalendarService {
       'https://www.googleapis.com/auth/gmail.modify'
     ];
 
-    return this.oauth2Client.generateAuthUrl({
+    return oauth2Client.generateAuthUrl({
       access_type: 'offline',
       scope: scopes,
-      prompt: 'select_account',
+      prompt: 'consent', // FIX: was 'select_account' — 'consent' forces Google to always return refresh_token
       state: userId
     });
+  }
+
+  /**
+   * Create a fresh OAuth2 client (per-request, avoids shared singleton race conditions)
+   */
+  private createOAuthClient() {
+    return new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
   }
 
   /**
@@ -63,8 +68,20 @@ class GoogleCalendarService {
    */
   async getTokensFromCode(code: string): Promise<GoogleTokens> {
     try {
-      const { tokens } = await this.oauth2Client.getToken(code);
-      return tokens;
+      const oauth2Client = this.createOAuthClient();
+      const { tokens } = await oauth2Client.getToken(code);
+
+      if (!tokens.access_token) {
+        throw new ApiError(400, 'No access token returned from Google');
+      }
+
+      return {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token ?? undefined,
+        expiry_date: tokens.expiry_date ?? undefined,
+        scope: tokens.scope ?? undefined,
+        token_type: tokens.token_type ?? undefined,
+      };
     } catch (error) {
       console.error('Failed to get tokens from code:', error);
       throw new ApiError(400, 'Failed to exchange authorization code for tokens');
@@ -73,18 +90,24 @@ class GoogleCalendarService {
 
   /**
    * Save user tokens to database
+   * FIX: Only overwrites refresh_token if a new one is actually returned,
+   * preventing wiping out a valid existing refresh_token
    */
   async saveUserTokens(userId: string, tokens: GoogleTokens): Promise<void> {
     try {
-      await User.findByIdAndUpdate(userId, {
-        $set: {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.refreshToken': tokens.refresh_token,
-          'googleCalendar.expiryDate': tokens.expiry_date,
-          'googleCalendar.connected': true,
-          'googleCalendar.connectedAt': new Date()
-        }
-      });
+      const updateFields: Record<string, any> = {
+        'googleCalendar.accessToken': tokens.access_token,
+        'googleCalendar.expiryDate': tokens.expiry_date,
+        'googleCalendar.connected': true,
+        'googleCalendar.connectedAt': new Date()
+      };
+
+      // FIX: Only write refresh_token if Google actually returned one
+      if (tokens.refresh_token) {
+        updateFields['googleCalendar.refreshToken'] = tokens.refresh_token;
+      }
+
+      await User.findByIdAndUpdate(userId, { $set: updateFields });
       console.log(`Saved Google Calendar tokens for user ${userId}`);
     } catch (error) {
       console.error('Failed to save user tokens:', error);
@@ -116,6 +139,10 @@ class GoogleCalendarService {
 
   /**
    * Get authorized calendar client for a user
+   * FIX: Creates a fresh OAuth2 client per call to avoid shared singleton
+   * race conditions when multiple users sync simultaneously.
+   * FIX: Guards against missing refresh_token and marks user as disconnected
+   * so the frontend can prompt reconnection.
    */
   private async getCalendarClient(userId: string): Promise<calendar_v3.Calendar> {
     const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
@@ -124,29 +151,42 @@ class GoogleCalendarService {
       throw new ApiError(401, 'Google Calendar not connected');
     }
 
-    this.oauth2Client.setCredentials({
+    // FIX: Guard — if refresh token is missing, mark disconnected and tell user to reconnect
+    if (!user.googleCalendar.refreshToken) {
+      await User.findByIdAndUpdate(userId, {
+        $set: { 'googleCalendar.connected': false }
+      });
+      throw new ApiError(
+        401,
+        'Google Calendar requires reconnection. Please disconnect and reconnect your calendar.'
+      );
+    }
+
+    // FIX: Fresh client per call — no more shared singleton mutations
+    const oauth2Client = this.createOAuthClient();
+
+    oauth2Client.setCredentials({
       access_token: user.googleCalendar.accessToken,
       refresh_token: user.googleCalendar.refreshToken,
       expiry_date: user.googleCalendar.expiryDate
     });
 
-    // Handle token refresh
-    this.oauth2Client.on('tokens', async (tokens: any) => {
-      if (tokens.refresh_token) {
-        await User.findByIdAndUpdate(userId, {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.refreshToken': tokens.refresh_token,
-          'googleCalendar.expiryDate': tokens.expiry_date
-        });
-      } else if (tokens.access_token) {
-        await User.findByIdAndUpdate(userId, {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.expiryDate': tokens.expiry_date
-        });
+    // Persist refreshed tokens when Google auto-rotates them
+    oauth2Client.on('tokens', async (tokens: any) => {
+      const update: Record<string, any> = {
+        'googleCalendar.expiryDate': tokens.expiry_date
+      };
+      if (tokens.access_token) {
+        update['googleCalendar.accessToken'] = tokens.access_token;
       }
+      // FIX: Only overwrite refresh_token if a new one was returned
+      if (tokens.refresh_token) {
+        update['googleCalendar.refreshToken'] = tokens.refresh_token;
+      }
+      await User.findByIdAndUpdate(userId, { $set: update });
     });
 
-    return google.calendar({ version: 'v3', auth: this.oauth2Client });
+    return google.calendar({ version: 'v3', auth: oauth2Client });
   }
 
   /**
@@ -155,7 +195,7 @@ class GoogleCalendarService {
   async isGoogleCalendarConnected(userId: string): Promise<boolean> {
     try {
       const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-      return !!(user?.googleCalendar?.connected && user.googleCalendar.accessToken);
+      return !!(user?.googleCalendar?.connected && user.googleCalendar.accessToken && user.googleCalendar.refreshToken);
     } catch (error) {
       return false;
     }
@@ -242,7 +282,10 @@ class GoogleCalendarService {
         entryType = 'task';
       } else if (event.summary?.toLowerCase().includes('reminder')) {
         entryType = 'reminder';
-      } else if (event.summary?.toLowerCase().includes('appointment') || event.summary?.toLowerCase().includes('meeting')) {
+      } else if (
+        event.summary?.toLowerCase().includes('appointment') ||
+        event.summary?.toLowerCase().includes('meeting')
+      ) {
         entryType = 'appointment';
       }
 
@@ -269,7 +312,10 @@ class GoogleCalendarService {
         googleCalendarEventId: event.id || '',
         syncedWithGoogleCalendar: true,
         lastSyncedAt: new Date(),
-        meetingLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri || ''
+        meetingLink:
+          event.hangoutLink ||
+          event.conferenceData?.entryPoints?.[0]?.uri ||
+          ''
       });
 
       console.log(`Created appointment from Google event: ${event.summary}`);
@@ -292,23 +338,22 @@ class GoogleCalendarService {
         googleCalendarEventId: event.id
       });
 
-      if (!appointment) {
-        return;
-      }
+      if (!appointment) return;
 
       const startTime = event.start?.dateTime || event.start?.date;
       const endTime = event.end?.dateTime || event.end?.date;
 
-      if (!startTime || !endTime) {
-        return;
-      }
+      if (!startTime || !endTime) return;
 
       appointment.title = event.summary || appointment.title;
       appointment.description = event.description || appointment.description;
       appointment.startTime = new Date(startTime);
       appointment.endTime = new Date(endTime);
       appointment.location = event.location || appointment.location;
-      appointment.meetingLink = event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri || appointment.meetingLink;
+      appointment.meetingLink =
+        event.hangoutLink ||
+        event.conferenceData?.entryPoints?.[0]?.uri ||
+        appointment.meetingLink;
       appointment.lastSyncedAt = new Date();
 
       if (event.status === 'cancelled') {
@@ -345,12 +390,17 @@ class GoogleCalendarService {
           timeZone: 'UTC'
         },
         location: appointment.location || undefined,
-        conferenceData: appointment.type === 'video' && appointment.meetingLink ? {
-          entryPoints: [{
-            entryPointType: 'video',
-            uri: appointment.meetingLink
-          }]
-        } : undefined
+        conferenceData:
+          appointment.type === 'video' && appointment.meetingLink
+            ? {
+                entryPoints: [
+                  {
+                    entryPointType: 'video',
+                    uri: appointment.meetingLink
+                  }
+                ]
+              }
+            : undefined
       };
 
       let response;
@@ -362,7 +412,6 @@ class GoogleCalendarService {
           requestBody: eventData,
           sendUpdates: 'all'
         });
-
         console.log(`Updated Google Calendar event: ${appointment.title}`);
       } else {
         response = await calendar.events.insert({
@@ -370,7 +419,6 @@ class GoogleCalendarService {
           requestBody: eventData,
           sendUpdates: 'all'
         });
-
         console.log(`Created Google Calendar event: ${appointment.title}`);
 
         await Appointment.findByIdAndUpdate(appointment._id, {
@@ -398,7 +446,10 @@ class GoogleCalendarService {
         if (participantId.toString() === appointment.createdBy.toString()) continue;
 
         const participant = await User.findById(participantId).select('googleCalendar');
-        if (!participant || !(participant as IUserWithGoogleCalendar).googleCalendar?.connected) {
+        if (
+          !participant ||
+          !(participant as IUserWithGoogleCalendar).googleCalendar?.connected
+        ) {
           console.log(`Skipping participant ${participantId} - Google Calendar not connected`);
           continue;
         }
@@ -438,7 +489,9 @@ class GoogleCalendarService {
     }
 
     description += `\n\n--- Appointment Details ---`;
-    description += `\nType: ${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)}`;
+    description += `\nType: ${
+      appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)
+    }`;
     description += `\nMeeting Type: ${appointment.type}`;
 
     if (appointment.meetingLink) {
@@ -462,9 +515,14 @@ class GoogleCalendarService {
    */
   async disconnectCalendar(userId: string): Promise<void> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
+      const user = await User.findById(userId).select(
+        'googleCalendar'
+      ) as IUserWithGoogleCalendar | null;
 
-      if (user?.googleCalendar?.watchChannelId && user?.googleCalendar?.watchResourceId) {
+      if (
+        user?.googleCalendar?.watchChannelId &&
+        user?.googleCalendar?.watchResourceId
+      ) {
         try {
           const calendar = await this.getCalendarClient(userId);
           await calendar.channels.stop({
@@ -475,7 +533,7 @@ class GoogleCalendarService {
           });
           console.log('Stopped webhook channel');
         } catch (error) {
-          console.error('Failed to stop webhook channel:', error);
+          console.error('Failed to stop webhook channel (non-critical):', error);
         }
       }
 
@@ -551,7 +609,10 @@ class GoogleCalendarService {
       }
 
       if (resourceState === 'exists') {
-        await this.fetchAllGoogleCalendarEvents(user._id.toString(), user.organizationId?.toString() || '');
+        await this.fetchAllGoogleCalendarEvents(
+          user._id.toString(),
+          user.organizationId?.toString() || ''
+        );
       }
     } catch (error) {
       console.error('Failed to process webhook notification:', error);
@@ -566,7 +627,10 @@ class GoogleCalendarService {
       const appointment = await Appointment.findById(appointmentId);
 
       if (!appointment || !appointment.googleCalendarEventId) {
-        throw new ApiError(404, 'Appointment not found or not synced with Google Calendar');
+        throw new ApiError(
+          404,
+          'Appointment not found or not synced with Google Calendar'
+        );
       }
 
       const calendar = await this.getCalendarClient(userId);
@@ -579,7 +643,7 @@ class GoogleCalendarService {
       if (event.data.attendees) {
         const user = await User.findById(userId);
         const userEmail = user?.email;
-        const attendee = event.data.attendees.find(a => a.email === userEmail);
+        const attendee = event.data.attendees.find((a) => a.email === userEmail);
 
         if (attendee && attendee.responseStatus) {
           console.log(`RSVP status for ${userEmail}: ${attendee.responseStatus}`);
@@ -653,7 +717,9 @@ class GoogleCalendarService {
    */
   async renewWebhook(userId: string): Promise<void> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
+      const user = await User.findById(userId).select(
+        'googleCalendar'
+      ) as IUserWithGoogleCalendar | null;
 
       if (!user?.googleCalendar?.watchChannelId) {
         console.log('No existing webhook to renew');
@@ -669,7 +735,7 @@ class GoogleCalendarService {
           }
         });
       } catch (error) {
-        console.log('Failed to stop old channel:', error);
+        console.log('Failed to stop old channel (non-critical):', error);
       }
 
       const newChannelId = `${userId}_${Date.now()}`;
