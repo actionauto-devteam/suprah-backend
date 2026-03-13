@@ -22,8 +22,8 @@ router.get('/:id', getOrganization);
 router.patch('/:id', requireAdmin, updateOrganization);
 router.delete('/:id', authorize(['super_admin']), deleteOrganization);
 
-// Member management (Requires admin role within the organization)
-router.get('/:id/members', requireAdmin, getMembers);
+// Member management (listing allowed for all members, removal for admin)
+router.get('/:id/members', getMembers);
 router.delete('/:id/members/:userId', requireAdmin, removeMember);
 
 export default router;

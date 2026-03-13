@@ -85,6 +85,7 @@ export interface IShipment extends Document {
 
   createdAt: Date;
   updatedAt: Date;
+  createdBy?: mongoose.Types.ObjectId;
 }
 
 const ShipmentSchema: Schema<IShipment> = new Schema(
@@ -180,11 +181,20 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
   },
   {
     timestamps: true,
   },
 );
+
+// Indexes
+ShipmentSchema.index({ createdBy: 1, createdAt: -1 });
+ShipmentSchema.index({ organizationId: 1, createdAt: -1 });
 
 // Virtual to get quote data from either the quote reference or preserved data
 ShipmentSchema.virtual("quoteData").get(function (this: IShipment) {

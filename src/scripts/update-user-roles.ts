@@ -51,9 +51,10 @@ async function run() {
                 continue;
             }
 
-            if (user.role !== newRole) {
+            if (user.role !== newRole || !user.onboardingCompleted) {
                 console.log(`[UPDATING] User ${user.email} from '${user.role}' to '${newRole}' (OrgRole: '${orgRole}')`);
                 user.role = newRole as any; // Cast for Mongoose enum
+                user.onboardingCompleted = true;
                 await user.save();
 
                 if (newRole === 'admin') updatedToAdmin++;

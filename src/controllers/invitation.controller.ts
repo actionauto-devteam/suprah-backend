@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { asyncHandler } from '../utils/asyncHandler';
 import crypto from 'crypto';
 import Invitation from '../models/Invitation.model';
 import Organization from '../models/Organization.model';
@@ -10,7 +11,7 @@ import config from '../config';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 
-export const createInvitation = async (req: Request, res: Response) => {
+export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { email, role } = req.body;
     const organizationId = req.orgId;
 
@@ -19,7 +20,8 @@ export const createInvitation = async (req: Request, res: Response) => {
     }
 
     // specific check: only admin can invite
-    if (req.orgRole !== 'admin') {
+    const isAdmin = req.orgRole === 'admin' || req.user?.role === 'admin' || req.user?.role === 'super_admin';
+    if (!isAdmin) {
         throw new ApiError(403, 'Only admins can invite members');
     }
 
@@ -121,9 +123,9 @@ export const createInvitation = async (req: Request, res: Response) => {
         message: 'Invitation sent',
         data: { token } // Return token for debug/manual sharing
     });
-};
+});
 
-export const validateInvitation = async (req: Request, res: Response) => {
+export const validateInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { token } = req.params;
 
     console.log('[InvitationController] Validating token:', token);
@@ -172,9 +174,9 @@ export const validateInvitation = async (req: Request, res: Response) => {
         success: true,
         data: responseData,
     });
-};
+});
 
-export const acceptInvitation = async (req: Request, res: Response) => {
+export const acceptInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { token } = req.body;
     const user = req.user;
 
@@ -203,14 +205,18 @@ export const acceptInvitation = async (req: Request, res: Response) => {
     }
 
     // Update user
-    user.organizationId = invite.organizationId as any; // Cast because logic implies it is an ObjectId
-    (user as any).organizationRole = invite.role;
+    user.organizationId = invite.organizationId as any;
 
-    // Promote customer to employee upon joining an organization
-    if (user.role === 'customer') {
+    // Boost organization role if the user is a global platform admin
+    const finalRole = (user.role === 'admin') ? 'admin' : invite.role;
+    (user as any).organizationRole = finalRole;
+
+    // Only promote customer to employee if the invitation is for an employee role
+    if (user.role === 'customer' && (invite.role === 'admin' || invite.role === 'member')) {
         user.role = 'employee';
     }
 
+    user.onboardingCompleted = true;
     await user.save();
 
     // Update invite
@@ -282,4 +288,108 @@ export const acceptInvitation = async (req: Request, res: Response) => {
             role: invite.role
         }
     });
-};
+});
+
+export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Response) => {
+    const { emails, role } = req.body;
+    const organizationId = req.orgId;
+
+    if (!organizationId) {
+        throw new ApiError(400, 'You must belong to an organization to invite members');
+    }
+
+    const isAdmin = req.orgRole === 'admin' || req.user?.role === 'admin' || req.user?.role === 'super_admin';
+    if (!isAdmin) {
+        throw new ApiError(403, 'Only admins can invite members');
+    }
+
+    if (!emails || !Array.isArray(emails)) {
+        throw new ApiError(400, 'An array of emails is required');
+    }
+
+    if (emails.length > 50) {
+        throw new ApiError(400, 'Maximum of 50 invitations allowed per request');
+    }
+
+    const org = await Organization.findById(organizationId);
+    if (!org) {
+        throw new ApiError(404, 'Organization not found');
+    }
+
+    const results = {
+        sent: [] as string[],
+        failed: [] as string[],
+        alreadyMember: [] as string[],
+    };
+
+    const inviterName = req.user?.name || 'Someone';
+
+    for (const email of emails) {
+        try {
+            if (!email || !email.includes('@')) {
+                results.failed.push(email);
+                continue;
+            }
+
+            const existingUser = await User.findOne({ email, organizationId });
+            if (existingUser) {
+                results.alreadyMember.push(email);
+                continue;
+            }
+
+            const existingInvite = await Invitation.findOne({ email, organizationId, status: 'pending' });
+            let token = existingInvite?.token || crypto.randomBytes(32).toString('hex');
+
+            if (existingInvite) {
+                existingInvite.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+                await existingInvite.save();
+            } else {
+                await Invitation.create({
+                    email,
+                    organizationId,
+                    inviterId: req.user?._id,
+                    role: role || 'member',
+                    token,
+                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                    status: 'pending',
+                });
+            }
+
+            const inviteLink = `${config.frontendUrl}/accept-invite?token=${token}`;
+
+            await emailService.sendEmail({
+                to: email,
+                subject: `You've been invited to join ${org.name} on Action Auto`,
+                text: `You have been invited to join the organization ${org.name}. Accept here: ${inviteLink}`,
+                html: `
+                    <div style="font-family: Arial, sans-serif; padding: 20px;">
+                        <h2>You've been invited!</h2>
+                        <p><strong>${inviterName}</strong> has invited you to join the organization <strong>${org.name}</strong>.</p>
+                        <p>Click the button below to accept the invitation:</p>
+                        <a href="${inviteLink}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Accept Invitation</a>
+                    </div>
+                `
+            });
+
+            results.sent.push(email);
+        } catch (error) {
+            console.error(`Failed to process invitation for ${email}:`, error);
+            results.failed.push(email);
+        }
+    }
+
+    await AuditLog.create({
+        entityType: 'Invitation',
+        entityId: 'bulk',
+        action: 'CREATE',
+        reason: `Bulk invitations attempted for ${emails.length} emails`,
+        performedBy: req.user?._id,
+        changes: { results }
+    });
+
+    res.status(200).json({
+        success: true,
+        message: 'Bulk invitations processed',
+        data: results
+    });
+});

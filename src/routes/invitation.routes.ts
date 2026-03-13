@@ -4,6 +4,7 @@ import {
     acceptInvitation,
     createInvitation,
     validateInvitation,
+    bulkCreateInvitations,
 } from '../controllers/invitation.controller';
 
 const router = express.Router();
@@ -16,5 +17,8 @@ router.post('/accept', auth(), acceptInvitation);
 
 // Create requires auth (admin only)
 router.post('/', auth(), createInvitation);
+
+// Bulk create requires auth (admin only)
+router.post('/bulk', auth(), bulkCreateInvitations);
 
 export default router;
