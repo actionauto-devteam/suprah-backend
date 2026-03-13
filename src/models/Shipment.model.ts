@@ -85,7 +85,6 @@ export interface IShipment extends Document {
 
   createdAt: Date;
   updatedAt: Date;
-  createdBy?: mongoose.Types.ObjectId;
 }
 
 const ShipmentSchema: Schema<IShipment> = new Schema(
@@ -168,7 +167,7 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
       },
     ],
 
-    createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+
 
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },
