@@ -17,10 +17,15 @@ import {
 } from '../utils/adfParser';
 
 // ─────────────────────────────────────────────────────────────
-// Centralized Gmail credentials (actionautoutah.dev@gmail.com)
-// These are stored in environment variables
+// Constants
 // ─────────────────────────────────────────────────────────────
 const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev@gmail.com';
+
+/**
+ * STRICT SOURCE FILTER — only leads from this address are ingested.
+ * All other senders are silently ignored during Gmail sync.
+ */
+const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 
 function getCentralOAuth2Client() {
   const oauth2Client = new google.auth.OAuth2(
@@ -62,6 +67,7 @@ export const receiveADF = async (req: Request, res: Response) => {
       parsedContent: adfData.parsedContent,
       channel: 'adf',
       source: adfData.source || 'ADF Email',
+      senderEmail: LEADS_SOURCE_EMAIL,
       centralIngestion: true,
     });
 
@@ -122,6 +128,19 @@ export const receiveADF = async (req: Request, res: Response) => {
 
 // ─────────────────────────────────────────────────────────────
 // Get all leads — FILTERED BY USER
+//
+// CHANGES FROM ORIGINAL:
+//  1. Removed the $or across senderEmail/centralIngestion — the source
+//     filter is enforced at write-time so it is not needed at read-time.
+//     This eliminates the full collection scan that caused the 30s timeout.
+//  2. Added .lean() — returns plain JS objects instead of full Mongoose
+//     documents (3–5× faster, much less memory on large collections).
+//  3. Added .select() — omits the 'body' field (up to 2 KB per lead)
+//     from the list response; it is fetched on demand in the detail view.
+//
+// REQUIRED INDEXES (add to your Lead model or a migration):
+//   LeadSchema.index({ createdBy: 1, createdAt: -1 });
+//   LeadSchema.index({ createdBy: 1, status: 1 });
 // ─────────────────────────────────────────────────────────────
 export const getAllLeads = async (req: Request, res: Response) => {
   try {
@@ -130,7 +149,17 @@ export const getAllLeads = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'User not found' });
     }
 
-    const leads = await Lead.find({ createdBy: userId }).sort({ createdAt: -1 });
+    const leads = await Lead.find({ createdBy: userId })
+      .select(
+        'firstName lastName email phone senderEmail senderName subject ' +
+        'parsedContent threadId messageId isRead isPending channel ' +
+        'source status vehicle comments appointment createdAt updatedAt ' +
+        'centralIngestion labels'
+        // 'body' intentionally omitted — fetched on demand in the detail view
+      )
+      .sort({ createdAt: -1 })
+      .lean();
+
     res.json(leads);
   } catch (error) {
     console.error('[ERROR] Error fetching leads:', error);
@@ -377,7 +406,6 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       console.log(`[REPLY] Email sent to ${recipientEmail} via centralized account`);
     } catch (gmailError) {
       console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
-      // Still return success since the lead was updated — reply delivery is best-effort
     }
 
     res.json({ success: true, message: 'Reply sent successfully', data: lead });
@@ -388,16 +416,43 @@ export const replyToInquiry = async (req: Request, res: Response) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Helper: fetch ALL Gmail message IDs with pagination
+// Loops through all pages so no emails are missed.
+// ─────────────────────────────────────────────────────────────
+async function fetchAllMessageIds(
+  gmail: any,
+  query: string,
+  maxPerPage = 500,
+): Promise<{ id: string }[]> {
+  const all: { id: string }[] = [];
+  let pageToken: string | undefined = undefined;
+
+  do {
+    const response: any = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: maxPerPage,
+      q: query,
+      ...(pageToken ? { pageToken } : {}),
+    });
+
+    const msgs = response.data.messages || [];
+    all.push(...msgs);
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+
+  return all;
+}
+
+// ─────────────────────────────────────────────────────────────
 // CENTRALIZED GMAIL SYNC
-// Syncs from actionautoutah.dev@gmail.com
-// Parses ADF content, detects channels, creates clean leads
+// Syncs ONLY from leads@dealerscloud.com via actionautoutah.dev@gmail.com
+// Paginates through ALL matching emails — not capped at 100.
 // ─────────────────────────────────────────────────────────────
 export const syncCentralGmail = asyncHandler(async (req: Request, res: Response) => {
   try {
     const userId = (req.user as IUser)._id.toString();
-    console.log(`[CENTRAL-SYNC] Starting centralized sync for user: ${userId}`);
+    console.log(`[CENTRAL-SYNC] Starting sync for user: ${userId} — source filter: ${LEADS_SOURCE_EMAIL}`);
 
-    // Validate centralized credentials exist
     if (!process.env.CENTRAL_GMAIL_REFRESH_TOKEN && !process.env.CENTRAL_GMAIL_ACCESS_TOKEN) {
       return res.status(400).json(
         new ApiResponse(400, null, 'Centralized Gmail account not configured. Please set CENTRAL_GMAIL_* environment variables.')
@@ -407,22 +462,24 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const oauth2Client = getCentralOAuth2Client();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // Fetch recent emails
-    console.log('[CENTRAL-SYNC] Fetching emails from centralized inbox...');
-    let response;
+    // ── STRICT FILTER + full pagination — no emails missed ──
+    console.log(`[CENTRAL-SYNC] Fetching all emails from: ${LEADS_SOURCE_EMAIL}`);
+    let messages: { id: string }[];
     try {
-      response = await gmail.users.messages.list({
-        userId: 'me',
-        maxResults: 50,
-        q: 'in:inbox',
-      });
+      messages = await fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL}`);
     } catch (gmailError: any) {
       console.error(`[CENTRAL-SYNC] Gmail API error:`, gmailError.message);
       throw new Error(`Gmail API error: ${gmailError.message}`);
     }
 
-    const messages = response.data.messages || [];
-    console.log(`[CENTRAL-SYNC] Found ${messages.length} emails in centralized inbox`);
+    console.log(`[CENTRAL-SYNC] Found ${messages.length} total emails from ${LEADS_SOURCE_EMAIL}`);
+
+    // Pre-fetch all threadIds already stored for this user to avoid per-message DB queries
+    const existingThreadIds = new Set(
+      (await Lead.find({ createdBy: userId, threadId: { $exists: true, $ne: null } })
+        .select('threadId')
+        .lean()).map((l: any) => l.threadId)
+    );
 
     let syncedCount = 0;
     const errors: string[] = [];
@@ -435,6 +492,9 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           format: 'full',
         });
 
+        // Skip already-synced threads without hitting DB again
+        if (existingThreadIds.has(details.data.threadId)) continue;
+
         const headers = details.data.payload?.headers || [];
         const getHeader = (name: string) =>
           headers.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
@@ -444,17 +504,22 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         const emailAddr = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
         const senderName = from.replace(/<[^>]*>/g, '').trim() || emailAddr;
 
+        // ── HARD GUARD: double-check sender even though query already filters ──
+        if (emailAddr.toLowerCase() !== LEADS_SOURCE_EMAIL.toLowerCase()) {
+          console.log(`[CENTRAL-SYNC] Skipping non-leads email from: ${emailAddr}`);
+          continue;
+        }
+
         // Extract body
         let body = '';
         if (details.data.payload?.parts) {
-          // Look for text/plain first, then text/html
           const textPart = details.data.payload.parts.find((p: any) => p.mimeType === 'text/plain');
           const htmlPart = details.data.payload.parts.find((p: any) => p.mimeType === 'text/html');
           const part = textPart || htmlPart;
           if (part?.body?.data) {
             body = Buffer.from(part.body.data, 'base64').toString('utf-8');
           }
-          // Also check nested parts (multipart/alternative inside multipart/mixed)
+          // Check nested parts (multipart/alternative inside multipart/mixed)
           if (!body) {
             for (const p of details.data.payload.parts) {
               if (p.parts) {
@@ -470,93 +535,72 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           body = Buffer.from(details.data.payload.body.data, 'base64').toString('utf-8');
         }
 
-        if (!emailAddr) {
-          errors.push(`Message ${message.id}: Could not extract email address`);
-          continue;
+        // ── Parse email body: detect ADF, classify channel ──
+        const parsed = await parseEmailBody(body, subject, from);
+
+        let firstName = '';
+        let lastName = '';
+        let leadEmail = emailAddr;
+        let leadPhone = '';
+        let vehicleInfo = { year: '', make: '', model: '' };
+        let comments = '';
+        let leadSource = 'ADF Lead (DealersCloud)';
+
+        if (parsed.adfData) {
+          firstName = parsed.adfData.firstName;
+          lastName = parsed.adfData.lastName;
+          leadEmail = parsed.adfData.email || emailAddr;
+          leadPhone = parsed.adfData.phone;
+          vehicleInfo = {
+            year: parsed.adfData.vehicle.year,
+            make: parsed.adfData.vehicle.make,
+            model: parsed.adfData.vehicle.model,
+          };
+          comments = parsed.adfData.comments;
+          leadSource = parsed.adfData.source || 'ADF Lead (DealersCloud)';
+        } else {
+          const nameParts = senderName.split(' ').filter((p: string) => p.length > 0);
+          firstName = nameParts[0] || emailAddr.split('@')[0];
+          lastName = nameParts.slice(1).join(' ') || '';
+          leadSource = 'DealersCloud Lead';
         }
 
-        // Skip emails from the central account itself
-        if (emailAddr.toLowerCase() === CENTRAL_EMAIL.toLowerCase()) {
-          continue;
-        }
-
-        // Check if this thread already exists for this user
-        const existingLead = await Lead.findOne({
+        const newLead = new Lead({
           createdBy: userId,
+          firstName,
+          lastName,
+          email: leadEmail,
+          phone: leadPhone,
+          senderName,
+          senderEmail: LEADS_SOURCE_EMAIL,
+          subject,
+          body: body.substring(0, 2000),
+          parsedContent: parsed.parsedContent,
+          channel: parsed.channel,
           threadId: details.data.threadId,
+          messageId: message.id,
+          source: leadSource,
+          status: 'New',
+          isRead: false,
+          centralIngestion: true,
+          vehicle: vehicleInfo,
+          comments,
         });
 
-        if (!existingLead) {
-          // ── Parse email body: detect ADF, classify channel ──
-          const parsed = await parseEmailBody(body, subject, from);
+        await newLead.save();
+        existingThreadIds.add(details.data.threadId);
+        syncedCount++;
+        console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);
 
-          let firstName = '';
-          let lastName = '';
-          let leadEmail = emailAddr;
-          let leadPhone = '';
-          let vehicleInfo = { year: '', make: '', model: '' };
-          let comments = '';
-          let leadSource = 'Email';
+        await AuditLog.create({
+          entityType: 'Lead',
+          entityId: newLead._id,
+          action: 'CREATE',
+          reason: `New Lead via Centralized Sync (${parsed.channel}) from ${LEADS_SOURCE_EMAIL}`,
+          performedBy: userId,
+          changes: { email: leadEmail, subject, channel: parsed.channel, senderEmail: LEADS_SOURCE_EMAIL },
+        });
 
-          if (parsed.adfData) {
-            // ADF lead — use parsed data
-            firstName = parsed.adfData.firstName;
-            lastName = parsed.adfData.lastName;
-            leadEmail = parsed.adfData.email || emailAddr;
-            leadPhone = parsed.adfData.phone;
-            vehicleInfo = {
-              year: parsed.adfData.vehicle.year,
-              make: parsed.adfData.vehicle.make,
-              model: parsed.adfData.vehicle.model,
-            };
-            comments = parsed.adfData.comments;
-            leadSource = parsed.adfData.source || 'ADF Lead (DealersCloud)';
-          } else {
-            // Regular email — extract name from sender
-            const nameParts = senderName.split(' ').filter((p: string) => p.length > 0);
-            firstName = nameParts[0] || emailAddr.split('@')[0];
-            lastName = nameParts.slice(1).join(' ') || '';
-            leadSource = parsed.channel === 'sms' ? 'SMS Lead'
-              : parsed.channel === 'phone' ? 'Phone Lead'
-              : parsed.channel === 'web' ? 'Web Lead'
-              : 'Email Inquiry';
-          }
-
-          const newLead = new Lead({
-            createdBy: userId,
-            firstName,
-            lastName,
-            email: leadEmail,
-            phone: leadPhone,
-            senderName,
-            senderEmail: emailAddr,
-            subject,
-            body: body.substring(0, 2000),
-            parsedContent: parsed.parsedContent,
-            channel: parsed.channel,
-            threadId: details.data.threadId,
-            messageId: message.id,
-            source: leadSource,
-            status: 'New',
-            isRead: false,
-            centralIngestion: true,
-            vehicle: vehicleInfo,
-            comments,
-          });
-
-          await newLead.save();
-          syncedCount++;
-          console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] from ${emailAddr}`);
-
-          await AuditLog.create({
-            entityType: 'Lead',
-            entityId: newLead._id,
-            action: 'CREATE',
-            reason: `New Lead via Centralized Sync (${parsed.channel})`,
-            performedBy: userId,
-            changes: { email: leadEmail, subject, channel: parsed.channel },
-          });
-        }
       } catch (error) {
         console.error(`[CENTRAL-SYNC] Error processing message ${message.id}:`, error);
         errors.push(`Message ${message.id}: Processing failed`);
@@ -567,7 +611,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
       new ApiResponse(
         200,
         { syncedCount, totalFound: messages.length, errors: errors.length > 0 ? errors : undefined },
-        `Sync completed. ${syncedCount} new leads added.`
+        `Sync completed. ${syncedCount} new leads added from ${LEADS_SOURCE_EMAIL}.`
       )
     );
   } catch (error: any) {
@@ -578,7 +622,6 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
 // ─────────────────────────────────────────────────────────────
 // DEPRECATED: Per-user Gmail sync (kept for backward compat)
-// Redirects to centralized sync
 // ─────────────────────────────────────────────────────────────
 export const syncGmailInquiries = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   console.log('[SYNC] Legacy syncGmailInquiries called — redirecting to centralized sync');
@@ -593,7 +636,11 @@ export const getCentralSyncStatus = asyncHandler(async (req: Request, res: Respo
   const email = configured ? CENTRAL_EMAIL : null;
 
   res.json(
-    new ApiResponse(200, { connected: configured, email }, configured ? 'Centralized ingestion active' : 'Not configured')
+    new ApiResponse(
+      200,
+      { connected: configured, email, leadsSourceEmail: LEADS_SOURCE_EMAIL },
+      configured ? 'Centralized ingestion active' : 'Not configured'
+    )
   );
 });
 

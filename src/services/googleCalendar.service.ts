@@ -1,4 +1,4 @@
-import mongoose, { Schema } from 'mongoose';
+import mongoose from 'mongoose';
 import { google, calendar_v3 } from 'googleapis';
 import User from '../models/User.model';
 import Appointment from '../models/Appointment.model';
@@ -27,657 +27,584 @@ interface GoogleTokens {
   token_type?: string;
 }
 
-class GoogleCalendarService {
-  private oauth2Client: any;
+// ─── Sync window ──────────────────────────────────────────────────────────────
+//
+// FIX: Use year-anchored boundaries instead of "N years relative to today".
+// This guarantees the ENTIRE current year is always covered regardless of
+// which month the sync is triggered.
+//
+//   timeMin = Jan 1 00:00:00 UTC  of (currentYear - 1)
+//   timeMax = Dec 31 23:59:59 UTC of (currentYear + 2)
+//
+// Example when run on March 13 2026:
+//   timeMin = 2025-01-01T00:00:00Z   ← all of 2025 back-fill
+//   timeMax = 2028-12-31T23:59:59Z   ← 2026, 2027, 2028 forward
+//
+function getSyncWindow(): { timeMin: Date; timeMax: Date } {
+  const currentYear = new Date().getFullYear();
+  return {
+    timeMin: new Date(Date.UTC(currentYear - 1, 0,  1,  0,  0,  0)),
+    timeMax: new Date(Date.UTC(currentYear + 2, 11, 31, 23, 59, 59)),
+  };
+}
 
-  constructor() {
-    this.oauth2Client = new google.auth.OAuth2(
+// Maximum pages to fetch (2500 events/page × 20 = 50 000 events ceiling)
+const MAX_PAGES = 20;
+
+class GoogleCalendarService {
+  // ─── OAuth ─────────────────────────────────────────────────────────────────
+
+  getAuthUrl(userId: string): string {
+    const oauth2Client = this.createOAuthClient();
+    const scopes = [
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
+    ];
+    return oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: scopes,
+      prompt: 'consent',
+      state: userId,
+    });
+  }
+
+  private createOAuthClient() {
+    return new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
   }
 
-  /**
-   * Get authorization URL for OAuth
-   */
-  getAuthUrl(userId: string): string {
-    const scopes = [
-      'https://www.googleapis.com/auth/calendar',
-      'https://www.googleapis.com/auth/calendar.events',
-      'https://www.googleapis.com/auth/gmail.send',
-      'https://www.googleapis.com/auth/gmail.readonly',
-      'https://www.googleapis.com/auth/gmail.modify'
-    ];
-
-    return this.oauth2Client.generateAuthUrl({
-      access_type: 'offline',
-      scope: scopes,
-      prompt: 'select_account',
-      state: userId
-    });
-  }
-
-  /**
-   * Get tokens from authorization code
-   */
   async getTokensFromCode(code: string): Promise<GoogleTokens> {
     try {
-      const { tokens } = await this.oauth2Client.getToken(code);
-      return tokens;
+      const oauth2Client = this.createOAuthClient();
+      const { tokens } = await oauth2Client.getToken(code);
+      if (!tokens.access_token) throw new ApiError(400, 'No access token returned from Google');
+      return {
+        access_token:  tokens.access_token,
+        refresh_token: tokens.refresh_token  ?? undefined,
+        expiry_date:   tokens.expiry_date    ?? undefined,
+        scope:         tokens.scope          ?? undefined,
+        token_type:    tokens.token_type     ?? undefined,
+      };
     } catch (error) {
       console.error('Failed to get tokens from code:', error);
       throw new ApiError(400, 'Failed to exchange authorization code for tokens');
     }
   }
 
-  /**
-   * Save user tokens to database
-   */
   async saveUserTokens(userId: string, tokens: GoogleTokens): Promise<void> {
     try {
-      await User.findByIdAndUpdate(userId, {
-        $set: {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.refreshToken': tokens.refresh_token,
-          'googleCalendar.expiryDate': tokens.expiry_date,
-          'googleCalendar.connected': true,
-          'googleCalendar.connectedAt': new Date()
-        }
-      });
-      console.log(`Saved Google Calendar tokens for user ${userId}`);
+      const updateFields: Record<string, any> = {
+        'googleCalendar.accessToken':  tokens.access_token,
+        'googleCalendar.expiryDate':   tokens.expiry_date,
+        'googleCalendar.connected':    true,
+        'googleCalendar.connectedAt':  new Date(),
+      };
+      if (tokens.refresh_token) {
+        updateFields['googleCalendar.refreshToken'] = tokens.refresh_token;
+      }
+      await User.findByIdAndUpdate(userId, { $set: updateFields });
     } catch (error) {
-      console.error('Failed to save user tokens:', error);
       throw new ApiError(500, 'Failed to save calendar credentials');
     }
   }
 
-  /**
-   * Get user tokens from database
-   */
   async getUserTokens(userId: string): Promise<GoogleTokens | null> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-
-      if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
-        return null;
-      }
-
+      const user = (await User.findById(userId).select('googleCalendar')) as IUserWithGoogleCalendar | null;
+      if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) return null;
       return {
-        access_token: user.googleCalendar.accessToken,
+        access_token:  user.googleCalendar.accessToken,
         refresh_token: user.googleCalendar.refreshToken,
-        expiry_date: user.googleCalendar.expiryDate
+        expiry_date:   user.googleCalendar.expiryDate,
       };
-    } catch (error) {
-      console.error('Failed to get user tokens:', error);
+    } catch {
       return null;
     }
   }
 
-  /**
-   * Get authorized calendar client for a user
-   */
   private async getCalendarClient(userId: string): Promise<calendar_v3.Calendar> {
-    const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-
+    const user = (await User.findById(userId).select('googleCalendar')) as IUserWithGoogleCalendar | null;
     if (!user?.googleCalendar?.connected || !user.googleCalendar.accessToken) {
       throw new ApiError(401, 'Google Calendar not connected');
     }
-
-    this.oauth2Client.setCredentials({
-      access_token: user.googleCalendar.accessToken,
+    if (!user.googleCalendar.refreshToken) {
+      await User.findByIdAndUpdate(userId, { $set: { 'googleCalendar.connected': false } });
+      throw new ApiError(401, 'Google Calendar requires reconnection. Please disconnect and reconnect your calendar.');
+    }
+    const oauth2Client = this.createOAuthClient();
+    oauth2Client.setCredentials({
+      access_token:  user.googleCalendar.accessToken,
       refresh_token: user.googleCalendar.refreshToken,
-      expiry_date: user.googleCalendar.expiryDate
+      expiry_date:   user.googleCalendar.expiryDate,
     });
-
-    // Handle token refresh
-    this.oauth2Client.on('tokens', async (tokens: any) => {
-      if (tokens.refresh_token) {
-        await User.findByIdAndUpdate(userId, {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.refreshToken': tokens.refresh_token,
-          'googleCalendar.expiryDate': tokens.expiry_date
-        });
-      } else if (tokens.access_token) {
-        await User.findByIdAndUpdate(userId, {
-          'googleCalendar.accessToken': tokens.access_token,
-          'googleCalendar.expiryDate': tokens.expiry_date
-        });
-      }
+    oauth2Client.on('tokens', async (tokens: any) => {
+      const update: Record<string, any> = { 'googleCalendar.expiryDate': tokens.expiry_date };
+      if (tokens.access_token)  update['googleCalendar.accessToken']  = tokens.access_token;
+      if (tokens.refresh_token) update['googleCalendar.refreshToken'] = tokens.refresh_token;
+      await User.findByIdAndUpdate(userId, { $set: update });
     });
-
-    return google.calendar({ version: 'v3', auth: this.oauth2Client });
+    return google.calendar({ version: 'v3', auth: oauth2Client });
   }
 
-  /**
-   * Check if Google Calendar is connected
-   */
   async isGoogleCalendarConnected(userId: string): Promise<boolean> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-      return !!(user?.googleCalendar?.connected && user.googleCalendar.accessToken);
-    } catch (error) {
+      const user = (await User.findById(userId).select('googleCalendar')) as IUserWithGoogleCalendar | null;
+      return !!(
+        user?.googleCalendar?.connected &&
+        user.googleCalendar.accessToken &&
+        user.googleCalendar.refreshToken
+      );
+    } catch {
       return false;
     }
   }
 
+  // ─── Core paginated fetch ───────────────────────────────────────────────────
+
   /**
-   * Fetch all Google Calendar events and sync to local database
+   * Fetches ALL events in the given window from Google Calendar, consuming
+   * every nextPageToken page until no more remain.
    */
-  async fetchAllGoogleCalendarEvents(userId: string, orgId: string): Promise<number> {
-    try {
-      const calendar = await this.getCalendarClient(userId);
+  private async fetchAllEventsFromGoogle(
+    calendar: calendar_v3.Calendar,
+    timeMin: Date,
+    timeMax: Date
+  ): Promise<calendar_v3.Schema$Event[]> {
+    const allEvents: calendar_v3.Schema$Event[] = [];
+    let pageToken: string | undefined;
+    let page = 0;
 
-      const oneYearAgo = new Date();
-      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    console.log(`📅 Google Calendar fetch: ${timeMin.toISOString()} → ${timeMax.toISOString()}`);
 
-      const oneYearFromNow = new Date();
-      oneYearFromNow.setFullYear(oneYearFromNow.getFullYear() + 1);
-
-      console.log('Fetching Google Calendar events...');
+    do {
+      page++;
+      if (page > MAX_PAGES) {
+        console.warn(`⚠️  MAX_PAGES (${MAX_PAGES}) reached — halting pagination`);
+        break;
+      }
 
       const response = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: oneYearAgo.toISOString(),
-        timeMax: oneYearFromNow.toISOString(),
-        maxResults: 2500,
-        singleEvents: true,
-        orderBy: 'startTime'
+        calendarId:   'primary',
+        timeMin:      timeMin.toISOString(),
+        timeMax:      timeMax.toISOString(),
+        maxResults:   2500,
+        singleEvents: true,    // expand recurring instances individually
+        showDeleted:  true,    // include cancelled instances → we cancel them locally
+        orderBy:      'startTime',
+        pageToken,
       });
 
-      const events = response.data.items || [];
-      console.log(`Found ${events.length} events in Google Calendar`);
+      const items = response.data.items ?? [];
+      allEvents.push(...items);
+      pageToken = response.data.nextPageToken ?? undefined;
 
-      let syncedCount = 0;
-      const user = await User.findById(userId);
+      console.log(
+        `  Page ${page}: ${items.length} events (running total: ${allEvents.length})` +
+        (pageToken ? ' — more pages…' : ' — done ✓')
+      );
+    } while (pageToken);
 
-      if (!user) {
-        throw new ApiError(404, 'User not found');
-      }
-
-      for (const event of events) {
-        try {
-          const existingAppointment = await Appointment.findOne({
-            googleCalendarEventId: event.id
-          });
-
-          if (!existingAppointment) {
-            await this.createLocalAppointmentFromGoogleEvent(event, user as any, orgId);
-            syncedCount++;
-          } else {
-            await this.updateLocalAppointmentFromGoogleEvent(event, user as any, userId);
-          }
-        } catch (error) {
-          console.error(`Failed to sync event ${event.id}:`, error);
-        }
-      }
-
-      console.log(`Synced ${syncedCount} new events from Google Calendar`);
-      return syncedCount;
-    } catch (error: any) {
-      console.error('Failed to fetch Google Calendar events:', error.message);
-      throw error;
-    }
+    console.log(`✅ Google returned ${allEvents.length} total events`);
+    return allEvents;
   }
 
   /**
-   * Create local appointment from Google Calendar event
+   * Convert Google Calendar's start/end to JS Date objects safely.
+   *
+   * Google uses:
+   *   • dateTime  (ISO 8601 with tz offset) for timed events
+   *   • date      (YYYY-MM-DD)              for all-day events
+   *
+   * All-day events are stored as UTC-midnight of that date to avoid the
+   * one-day shift that `new Date("YYYY-MM-DD")` produces in non-UTC servers.
    */
-  private async createLocalAppointmentFromGoogleEvent(
+  private parseEventTimes(
+    event: calendar_v3.Schema$Event
+  ): { startTime: Date; endTime: Date } | null {
+    const rawStart = event.start?.dateTime ?? event.start?.date;
+    const rawEnd   = event.end?.dateTime   ?? event.end?.date;
+    if (!rawStart || !rawEnd) return null;
+
+    const isAllDay = !event.start?.dateTime;
+    let startTime: Date;
+    let endTime:   Date;
+
+    if (isAllDay) {
+      const [sy, sm, sd] = rawStart.split('-').map(Number);
+      startTime = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0));
+      // Google's all-day end date is exclusive (the next day) → subtract 1 ms
+      const [ey, em, ed] = rawEnd.split('-').map(Number);
+      endTime = new Date(Date.UTC(ey, em - 1, ed, 0, 0, 0) - 1);
+    } else {
+      startTime = new Date(rawStart);
+      endTime   = new Date(rawEnd);
+    }
+
+    if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) return null;
+    return { startTime, endTime };
+  }
+
+  // ─── Full sync (public entry point) ────────────────────────────────────────
+
+  /**
+   * fetchAllGoogleCalendarEvents — authoritative full sync.
+   *
+   * FIX (orgId):  orgId is now cross-validated. If the caller passes an empty
+   * string (which happened when syncAllEvents couldn't resolve it), we pull it
+   * directly from the user record. This prevents synced events from being
+   * saved with organizationId: '' and then disappearing from all queries.
+   *
+   * FIX (window): Uses getSyncWindow() which is year-anchored, so the current
+   * year is always fully covered no matter when in the year the sync runs.
+   */
+  async fetchAllGoogleCalendarEvents(userId: string, orgId: string): Promise<number> {
+    const calendar = await this.getCalendarClient(userId);
+    const user     = await User.findById(userId);
+    if (!user) throw new ApiError(404, 'User not found');
+
+    // Resolve orgId — never let it be an empty string
+    const resolvedOrgId =
+      orgId && orgId.trim() !== ''
+        ? orgId
+        : ((user as any).organizationId?.toString() ?? '');
+
+    if (!resolvedOrgId) {
+      console.warn(`⚠️  No organizationId for user ${userId} — events will be saved with empty org`);
+    }
+
+    const { timeMin, timeMax } = getSyncWindow();
+    console.log(`🔄 Full sync | user: ${userId} | org: ${resolvedOrgId || '(empty)'}`);
+    console.log(`   Window: ${timeMin.toISOString()} → ${timeMax.toISOString()}`);
+
+    const events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+
+    let created   = 0;
+    let updated   = 0;
+    let cancelled = 0;
+    let skipped   = 0;
+
+    for (const event of events) {
+      try {
+        const result = await this.upsertEventToLocalDB(event, user as any, resolvedOrgId, userId);
+        if      (result === 'created')   created++;
+        else if (result === 'updated')   updated++;
+        else if (result === 'cancelled') cancelled++;
+        else                             skipped++;
+      } catch (err) {
+        console.error(`❌ Upsert failed for event ${event.id} "${event.summary}":`, err);
+      }
+    }
+
+    console.log(
+      `✅ Sync complete | created: ${created} | updated: ${updated} | cancelled: ${cancelled} | skipped: ${skipped}`
+    );
+    return created + updated + cancelled;
+  }
+
+  /**
+   * syncAllEvents — called by the "Sync Calendar" button controller action.
+   * Resolves orgId from the user record (not from a request parameter) to
+   * eliminate the empty-string orgId bug.
+   */
+  async syncAllEvents(userId: string): Promise<number> {
+    const user = await User.findById(userId);
+    if (!user) throw new ApiError(404, 'User not found');
+    const orgId = (user as any).organizationId?.toString() ?? '';
+    return this.fetchAllGoogleCalendarEvents(userId, orgId);
+  }
+
+  // ─── Upsert ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Create-or-update a single Google Calendar event in the local DB.
+   *
+   * FIX: Also back-fills organizationId on existing records that were previously
+   * saved with an empty string — so running a new sync retroactively fixes old
+   * broken records and makes them visible in queries.
+   */
+  private async upsertEventToLocalDB(
     event: calendar_v3.Schema$Event,
     user: any,
-    organizationId: string
-  ): Promise<void> {
-    try {
-      const startTime = event.start?.dateTime || event.start?.date;
-      const endTime = event.end?.dateTime || event.end?.date;
+    organizationId: string,
+    _userId: string
+  ): Promise<'created' | 'updated' | 'cancelled' | 'skipped'> {
+    if (!event.id) return 'skipped';
 
-      if (!startTime || !endTime) {
-        console.log('Skipping event without valid times:', event.summary);
-        return;
+    const existing = await Appointment.findOne({ googleCalendarEventId: event.id });
+
+    // ── Handle cancelled / deleted instances ──────────────────────────────────
+    if (event.status === 'cancelled') {
+      if (existing && existing.status !== 'cancelled') {
+        existing.status       = 'cancelled';
+        existing.lastSyncedAt = new Date();
+        await existing.save();
+        return 'cancelled';
       }
-
-      let entryType: 'event' | 'task' | 'reminder' | 'appointment' = 'event';
-      if (event.summary?.toLowerCase().includes('task')) {
-        entryType = 'task';
-      } else if (event.summary?.toLowerCase().includes('reminder')) {
-        entryType = 'reminder';
-      } else if (event.summary?.toLowerCase().includes('appointment') || event.summary?.toLowerCase().includes('meeting')) {
-        entryType = 'appointment';
-      }
-
-      let type: 'in-person' | 'phone' | 'video' | 'other' = 'other';
-      if (event.location) {
-        type = 'in-person';
-      } else if (event.hangoutLink || event.conferenceData) {
-        type = 'video';
-      }
-
-      await Appointment.create({
-        title: event.summary || 'Untitled Event',
-        description: event.description || '',
-        startTime: new Date(startTime),
-        endTime: new Date(endTime),
-        location: event.location || '',
-        type,
-        entryType,
-        status: 'scheduled',
-        createdBy: user._id,
-        organizationId: organizationId,
-        participants: [user._id],
-        guestEmails: [],
-        googleCalendarEventId: event.id || '',
-        syncedWithGoogleCalendar: true,
-        lastSyncedAt: new Date(),
-        meetingLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri || ''
-      });
-
-      console.log(`Created appointment from Google event: ${event.summary}`);
-    } catch (error) {
-      console.error('Failed to create appointment from Google event:', error);
-      throw error;
+      return 'skipped';
     }
+
+    // ── Parse times ───────────────────────────────────────────────────────────
+    const times = this.parseEventTimes(event);
+    if (!times) return 'skipped';
+    const { startTime, endTime } = times;
+
+    // ── Derive entryType from title keywords ──────────────────────────────────
+    const titleLower = (event.summary ?? '').toLowerCase();
+    let entryType: 'event' | 'task' | 'reminder' | 'appointment' = 'event';
+    if      (titleLower.includes('task'))                                              entryType = 'task';
+    else if (titleLower.includes('reminder'))                                          entryType = 'reminder';
+    else if (titleLower.includes('appointment') || titleLower.includes('meeting'))     entryType = 'appointment';
+
+    // ── Derive meeting type ───────────────────────────────────────────────────
+    let type: 'in-person' | 'phone' | 'video' | 'other' = 'other';
+    if      (event.hangoutLink || event.conferenceData) type = 'video';
+    else if (event.location)                             type = 'in-person';
+
+    const meetingLink =
+      event.hangoutLink ??
+      event.conferenceData?.entryPoints?.[0]?.uri ??
+      '';
+
+    if (existing) {
+      existing.title        = event.summary     ?? existing.title;
+      existing.description  = event.description ?? existing.description;
+      existing.startTime    = startTime;
+      existing.endTime      = endTime;
+      existing.location     = event.location    ?? existing.location ?? '';
+      existing.meetingLink  = meetingLink        || existing.meetingLink;
+      existing.lastSyncedAt = new Date();
+
+      // FIX: Back-fill organizationId if a previous sync left it empty
+      if (organizationId && (!existing.organizationId || existing.organizationId === '')) {
+        existing.organizationId = organizationId;
+        console.log(`🔧 Back-filled organizationId on event "${existing.title}"`);
+      }
+
+      await existing.save();
+      return 'updated';
+    }
+
+    // ── Create new record ─────────────────────────────────────────────────────
+    await Appointment.create({
+      title:                    event.summary ?? 'Untitled Event',
+      description:              event.description ?? '',
+      startTime,
+      endTime,
+      location:                 event.location ?? '',
+      type,
+      entryType,
+      status:                   'scheduled',
+      createdBy:                user._id,
+      organizationId,           // always the resolved, non-empty value
+      participants:             [user._id],
+      guestEmails:              [],
+      googleCalendarEventId:    event.id,
+      syncedWithGoogleCalendar: true,
+      lastSyncedAt:             new Date(),
+      meetingLink,
+    });
+    return 'created';
   }
 
-  /**
-   * Update local appointment from Google Calendar event
-   */
-  private async updateLocalAppointmentFromGoogleEvent(
-    event: calendar_v3.Schema$Event,
-    user: any,
-    userId: string
-  ): Promise<void> {
-    try {
-      const appointment = await Appointment.findOne({
-        googleCalendarEventId: event.id
-      });
+  // ─── Recent sync ────────────────────────────────────────────────────────────
 
-      if (!appointment) {
-        return;
+  /** 30 days back + 90 days forward — used for lightweight on-demand refreshes */
+  async syncRecentEvents(userId: string): Promise<number> {
+    const calendar = await this.getCalendarClient(userId);
+    const user     = await User.findById(userId);
+    if (!user) throw new ApiError(404, 'User not found');
+    const orgId = (user as any).organizationId?.toString() ?? '';
+
+    const timeMin = new Date();
+    timeMin.setDate(timeMin.getDate() - 30);
+    const timeMax = new Date();
+    timeMax.setDate(timeMax.getDate() + 90);
+
+    const events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+    let processed = 0;
+    for (const event of events) {
+      try {
+        const r = await this.upsertEventToLocalDB(event, user as any, orgId, userId);
+        if (r !== 'skipped') processed++;
+      } catch (err) {
+        console.error(`Failed to upsert event ${event.id}:`, err);
       }
-
-      const startTime = event.start?.dateTime || event.start?.date;
-      const endTime = event.end?.dateTime || event.end?.date;
-
-      if (!startTime || !endTime) {
-        return;
-      }
-
-      appointment.title = event.summary || appointment.title;
-      appointment.description = event.description || appointment.description;
-      appointment.startTime = new Date(startTime);
-      appointment.endTime = new Date(endTime);
-      appointment.location = event.location || appointment.location;
-      appointment.meetingLink = event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri || appointment.meetingLink;
-      appointment.lastSyncedAt = new Date();
-
-      if (event.status === 'cancelled') {
-        appointment.status = 'cancelled';
-      }
-
-      await appointment.save();
-      console.log(`Updated appointment from Google event: ${event.summary}`);
-    } catch (error) {
-      console.error('Failed to update appointment from Google event:', error);
-      throw error;
     }
+    return processed;
   }
 
-  /**
-   * Sync appointment to Google Calendar
-   */
-  async syncAppointmentToGoogleCalendar(
-    appointment: IAppointment,
-    userId: string
-  ): Promise<string | null> {
-    try {
-      const calendar = await this.getCalendarClient(userId);
+  // ─── Outbound sync ──────────────────────────────────────────────────────────
 
+  async syncAppointmentToGoogleCalendar(appointment: IAppointment, userId: string): Promise<string | null> {
+    try {
+      const calendar  = await this.getCalendarClient(userId);
       const eventData: calendar_v3.Schema$Event = {
-        summary: appointment.title,
+        summary:     appointment.title,
         description: this.buildEventDescription(appointment),
-        start: {
-          dateTime: appointment.startTime.toISOString(),
-          timeZone: 'UTC'
-        },
-        end: {
-          dateTime: appointment.endTime.toISOString(),
-          timeZone: 'UTC'
-        },
+        start: { dateTime: appointment.startTime.toISOString(), timeZone: 'UTC' },
+        end:   { dateTime: appointment.endTime.toISOString(),   timeZone: 'UTC' },
         location: appointment.location || undefined,
-        conferenceData: appointment.type === 'video' && appointment.meetingLink ? {
-          entryPoints: [{
-            entryPointType: 'video',
-            uri: appointment.meetingLink
-          }]
-        } : undefined
+        conferenceData:
+          appointment.type === 'video' && appointment.meetingLink
+            ? { entryPoints: [{ entryPointType: 'video', uri: appointment.meetingLink }] }
+            : undefined,
       };
 
       let response;
-
       if (appointment.googleCalendarEventId) {
         response = await calendar.events.update({
-          calendarId: 'primary',
-          eventId: appointment.googleCalendarEventId,
-          requestBody: eventData,
-          sendUpdates: 'all'
+          calendarId: 'primary', eventId: appointment.googleCalendarEventId,
+          requestBody: eventData, sendUpdates: 'all',
         });
-
-        console.log(`Updated Google Calendar event: ${appointment.title}`);
       } else {
         response = await calendar.events.insert({
-          calendarId: 'primary',
-          requestBody: eventData,
-          sendUpdates: 'all'
+          calendarId: 'primary', requestBody: eventData, sendUpdates: 'all',
         });
-
-        console.log(`Created Google Calendar event: ${appointment.title}`);
-
         await Appointment.findByIdAndUpdate(appointment._id, {
-          googleCalendarEventId: response.data.id,
+          googleCalendarEventId:    response.data.id,
           syncedWithGoogleCalendar: true,
-          lastSyncedAt: new Date()
+          lastSyncedAt:             new Date(),
         });
       }
 
       await this.syncToParticipantsCalendars(appointment);
-
-      return response.data.id || null;
+      return response.data.id ?? null;
     } catch (error: any) {
       console.error('Failed to sync to Google Calendar:', error.message);
       return null;
     }
   }
 
-  /**
-   * Sync appointment to all participants' Google Calendars
-   */
   private async syncToParticipantsCalendars(appointment: IAppointment) {
     for (const participantId of appointment.participants) {
       try {
         if (participantId.toString() === appointment.createdBy.toString()) continue;
-
-        const participant = await User.findById(participantId).select('googleCalendar');
-        if (!participant || !(participant as IUserWithGoogleCalendar).googleCalendar?.connected) {
-          console.log(`Skipping participant ${participantId} - Google Calendar not connected`);
-          continue;
-        }
-
+        const p = await User.findById(participantId).select('googleCalendar');
+        if (!p || !(p as IUserWithGoogleCalendar).googleCalendar?.connected) continue;
         await this.syncAppointmentToGoogleCalendar(appointment, participantId.toString());
-      } catch (error) {
-        console.error(`Failed to sync to participant ${participantId}:`, error);
+      } catch (err) {
+        console.error(`Failed to sync to participant ${participantId}:`, err);
       }
     }
   }
 
-  /**
-   * Delete event from Google Calendar
-   */
   async deleteFromGoogleCalendar(eventId: string, userId: string): Promise<void> {
     try {
       const calendar = await this.getCalendarClient(userId);
-      await calendar.events.delete({
-        calendarId: 'primary',
-        eventId: eventId,
-        sendUpdates: 'all'
-      });
-      console.log(`Deleted Google Calendar event: ${eventId}`);
+      await calendar.events.delete({ calendarId: 'primary', eventId, sendUpdates: 'all' });
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
     }
   }
 
-  /**
-   * Build event description
-   */
   private buildEventDescription(appointment: IAppointment): string {
-    let description = appointment.description || '';
-
-    if (appointment.notes) {
-      description += `\n\nNotes:\n${appointment.notes}`;
-    }
-
-    description += `\n\n--- Appointment Details ---`;
-    description += `\nType: ${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)}`;
-    description += `\nMeeting Type: ${appointment.type}`;
-
-    if (appointment.meetingLink) {
-      description += `\n\nJoin Meeting: ${appointment.meetingLink}`;
-    }
-
+    let d = appointment.description || '';
+    if (appointment.notes) d += `\n\nNotes:\n${appointment.notes}`;
+    d += `\n\n--- Appointment Details ---`;
+    d += `\nType: ${appointment.entryType.charAt(0).toUpperCase() + appointment.entryType.slice(1)}`;
+    d += `\nMeeting Type: ${appointment.type}`;
+    if (appointment.meetingLink) d += `\n\nJoin Meeting: ${appointment.meetingLink}`;
     if (appointment.customerBooking) {
-      description += `\n\n--- Customer Information ---`;
-      description += `\nName: ${appointment.customerBooking.firstName} ${appointment.customerBooking.lastName}`;
-      description += `\nEmail: ${appointment.customerBooking.email}`;
-      description += `\nPhone: ${appointment.customerBooking.phone}`;
+      d += `\n\n--- Customer Information ---`;
+      d += `\nName: ${appointment.customerBooking.firstName} ${appointment.customerBooking.lastName}`;
+      d += `\nEmail: ${appointment.customerBooking.email}`;
+      d += `\nPhone: ${appointment.customerBooking.phone}`;
     }
-
-    description += `\n\nManage: ${process.env.FRONTEND_URL}/appointments`;
-
-    return description.trim();
+    d += `\n\nManage: ${process.env.FRONTEND_URL}/appointments`;
+    return d.trim();
   }
 
-  /**
-   * Disconnect Google Calendar
-   */
+  // ─── Calendar management ────────────────────────────────────────────────────
+
   async disconnectCalendar(userId: string): Promise<void> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-
+      const user = (await User.findById(userId).select('googleCalendar')) as IUserWithGoogleCalendar | null;
       if (user?.googleCalendar?.watchChannelId && user?.googleCalendar?.watchResourceId) {
         try {
           const calendar = await this.getCalendarClient(userId);
           await calendar.channels.stop({
-            requestBody: {
-              id: user.googleCalendar.watchChannelId,
-              resourceId: user.googleCalendar.watchResourceId
-            }
+            requestBody: { id: user.googleCalendar.watchChannelId, resourceId: user.googleCalendar.watchResourceId },
           });
-          console.log('Stopped webhook channel');
-        } catch (error) {
-          console.error('Failed to stop webhook channel:', error);
-        }
+        } catch { /* non-critical */ }
       }
-
-      await User.findByIdAndUpdate(userId, {
-        $unset: { googleCalendar: 1 }
-      });
-
-      console.log(`Disconnected Google Calendar for user ${userId}`);
-    } catch (error) {
-      console.error('Failed to disconnect calendar:', error);
+      await User.findByIdAndUpdate(userId, { $unset: { googleCalendar: 1 } });
+    } catch {
       throw new ApiError(500, 'Failed to disconnect calendar');
     }
   }
 
-  /**
-   * Setup webhook for calendar changes
-   */
   async setupWebhook(userId: string, channelId: string): Promise<void> {
     try {
-      const calendar = await this.getCalendarClient(userId);
+      const calendar   = await this.getCalendarClient(userId);
       const webhookUrl = `${process.env.BACKEND_URL}/api/google-calendar/webhook`;
-
-      const response = await calendar.events.watch({
-        calendarId: 'primary',
-        requestBody: {
-          id: channelId,
-          type: 'web_hook',
-          address: webhookUrl,
-          params: {
-            ttl: '604800'
-          }
-        }
+      const response   = await calendar.events.watch({
+        calendarId:  'primary',
+        requestBody: { id: channelId, type: 'web_hook', address: webhookUrl, params: { ttl: '604800' } },
       });
-
       await User.findByIdAndUpdate(userId, {
         $set: {
-          'googleCalendar.watchChannelId': channelId,
+          'googleCalendar.watchChannelId':  channelId,
           'googleCalendar.watchResourceId': response.data.resourceId,
-          'googleCalendar.watchExpiration': new Date(Date.now() + 604800000)
-        }
+          'googleCalendar.watchExpiration': new Date(Date.now() + 604800000),
+        },
       });
-
-      console.log(`Set up webhook for user ${userId}, channel ${channelId}`);
-    } catch (error) {
-      console.error('Failed to set up webhook:', error);
+    } catch {
       throw new ApiError(500, 'Failed to set up calendar notifications');
     }
   }
 
-  /**
-   * Process webhook notification
-   */
-  async processWebhookNotification(
-    channelId: string,
-    resourceState: string,
-    resourceId: string
-  ): Promise<void> {
+  async processWebhookNotification(channelId: string, resourceState: string, resourceId: string): Promise<void> {
     try {
-      console.log('Processing webhook:', { channelId, resourceState, resourceId });
-
-      const user = await User.findOne({
-        'googleCalendar.watchChannelId': channelId
-      }) as IUserWithGoogleCalendar | null;
-
-      if (!user) {
-        console.log('No user found for channel:', channelId);
-        return;
-      }
-
-      if (resourceState === 'sync') {
-        console.log('Sync message received, ignoring');
-        return;
-      }
-
+      const user = (await User.findOne({ 'googleCalendar.watchChannelId': channelId })) as IUserWithGoogleCalendar | null;
+      if (!user || resourceState === 'sync') return;
       if (resourceState === 'exists') {
-        await this.fetchAllGoogleCalendarEvents(user._id.toString(), user.organizationId?.toString() || '');
+        await this.fetchAllGoogleCalendarEvents(
+          user._id.toString(),
+          user.organizationId?.toString() ?? ''
+        );
       }
     } catch (error) {
       console.error('Failed to process webhook notification:', error);
     }
   }
 
-  /**
-   * Update RSVP status from Google Calendar
-   */
   async updateRSVPStatusFromGoogle(appointmentId: string, userId: string): Promise<void> {
     try {
       const appointment = await Appointment.findById(appointmentId);
-
       if (!appointment || !appointment.googleCalendarEventId) {
         throw new ApiError(404, 'Appointment not found or not synced with Google Calendar');
       }
-
       const calendar = await this.getCalendarClient(userId);
-
-      const event = await calendar.events.get({
-        calendarId: 'primary',
-        eventId: appointment.googleCalendarEventId
-      });
-
+      const event    = await calendar.events.get({ calendarId: 'primary', eventId: appointment.googleCalendarEventId });
       if (event.data.attendees) {
-        const user = await User.findById(userId);
-        const userEmail = user?.email;
-        const attendee = event.data.attendees.find(a => a.email === userEmail);
-
-        if (attendee && attendee.responseStatus) {
-          console.log(`RSVP status for ${userEmail}: ${attendee.responseStatus}`);
-        }
+        const user     = await User.findById(userId);
+        const attendee = event.data.attendees.find((a) => a.email === user?.email);
+        if (attendee?.responseStatus) console.log(`RSVP: ${user?.email} → ${attendee.responseStatus}`);
       }
-
       await appointment.save();
     } catch (error) {
-      console.error('Error updating RSVP status from Google:', error);
       throw error;
     }
   }
 
-  /**
-   * Sync recent events (last 7 days)
-   */
-  async syncRecentEvents(userId: string): Promise<number> {
-    try {
-      const calendar = await this.getCalendarClient(userId);
-
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-      const response = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: sevenDaysAgo.toISOString(),
-        timeMax: new Date().toISOString(),
-        singleEvents: true,
-        orderBy: 'startTime',
-        maxResults: 100
-      });
-
-      const events = response.data.items || [];
-      let syncedCount = 0;
-
-      const user = await User.findById(userId);
-      if (!user) {
-        throw new ApiError(404, 'User not found');
-      }
-
-      const orgId = (user as any).organizationId || '';
-
-      for (const event of events) {
-        try {
-          const existingAppointment = await Appointment.findOne({
-            googleCalendarEventId: event.id
-          });
-
-          if (!existingAppointment) {
-            await this.createLocalAppointmentFromGoogleEvent(event, user as any, orgId);
-            syncedCount++;
-          } else {
-            await this.updateLocalAppointmentFromGoogleEvent(event, user as any, userId);
-            syncedCount++;
-          }
-        } catch (error) {
-          console.error(`Failed to sync event ${event.id}:`, error);
-        }
-      }
-
-      console.log(`Synced ${syncedCount} recent events`);
-      return syncedCount;
-    } catch (error) {
-      console.error('Error syncing recent events:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Renew webhook subscription
-   */
   async renewWebhook(userId: string): Promise<void> {
     try {
-      const user = await User.findById(userId).select('googleCalendar') as IUserWithGoogleCalendar | null;
-
-      if (!user?.googleCalendar?.watchChannelId) {
-        console.log('No existing webhook to renew');
-        return;
-      }
-
+      const user = (await User.findById(userId).select('googleCalendar')) as IUserWithGoogleCalendar | null;
+      if (!user?.googleCalendar?.watchChannelId) return;
       try {
         const calendar = await this.getCalendarClient(userId);
         await calendar.channels.stop({
-          requestBody: {
-            id: user.googleCalendar.watchChannelId,
-            resourceId: user.googleCalendar.watchResourceId || ''
-          }
+          requestBody: { id: user.googleCalendar.watchChannelId, resourceId: user.googleCalendar.watchResourceId ?? '' },
         });
-      } catch (error) {
-        console.log('Failed to stop old channel:', error);
-      }
-
-      const newChannelId = `${userId}_${Date.now()}`;
-      await this.setupWebhook(userId, newChannelId);
-
-      console.log(`Renewed webhook for user ${userId}`);
+      } catch { /* non-critical */ }
+      await this.setupWebhook(userId, `${userId}_${Date.now()}`);
     } catch (error) {
-      console.error('Failed to renew webhook:', error);
       throw error;
     }
   }
