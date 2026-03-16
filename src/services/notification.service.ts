@@ -2,6 +2,7 @@ import Notification from '../models/Notification.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import { emitToUser } from '../utils/socketEmitter';
+import PushService from './push.service';
 
 interface CreateNotificationParams {
   userId: string;
@@ -117,6 +118,43 @@ const createNotification = async (params: CreateNotificationParams) => {
   });
 
   emitToUser(userId, 'notification:new', notification);
+
+  // Trigger Web Push Notification
+  try {
+    const urlMap: Record<string, string> = {
+      shipment_assigned: '/driver/loads',
+      message_received: '/driver/notifications',
+      quote_created: '/transportation?tab=drafts',
+      shipment_delivered: '/transportation?tab=shipments',
+      new_lead: '/crm/dashboard',
+      driver_request: '/crm/dashboard',
+    };
+
+    const pushPayload: any = {
+      title,
+      body: message,
+      data: {
+        url: urlMap[type] || '/notifications',
+        notificationId: notification._id,
+      },
+    };
+
+    // Add interactive actions for driver join requests
+    if (type === 'driver_request') {
+      pushPayload.actions = [
+        { action: 'approve', title: 'Approve' },
+        { action: 'reject', title: 'Reject' }
+      ];
+      // Include the ID in data so the SW can call the API
+      pushPayload.data.driverRequestId = metadata?.driverRequestId || notification._id;
+    }
+
+    PushService.send(userId, pushPayload).catch(err =>
+      console.error(`[PushService] Failed to send push to user ${userId}:`, err)
+    );
+  } catch (error) {
+    console.error('[NotificationService] Error triggering web push:', error);
+  }
 
   return notification;
 };
@@ -276,6 +314,33 @@ const broadcastNotification = async (params: {
       emitToUser(user._id.toString(), 'notification:new', userNotif);
     }
   });
+
+  // Trigger Web Push Broadcast
+  try {
+    const urlMap: Record<string, string> = {
+      shipment_assigned: '/driver/loads',
+      message_received: '/driver/notifications',
+      quote_created: '/transportation?tab=drafts',
+      shipment_delivered: '/transportation?tab=shipments',
+      new_lead: '/crm/dashboard',
+      driver_request: '/crm/dashboard',
+    };
+
+    const broadcastPayload = {
+      title,
+      body: message,
+      data: {
+        url: urlMap[type] || '/notifications',
+      },
+    };
+
+    const userIds = users.map(u => u._id.toString());
+    PushService.broadcast(userIds, broadcastPayload).catch(err =>
+      console.error('[PushService] Broadcast failed:', err)
+    );
+  } catch (error) {
+    console.error('[NotificationService] Error triggering web push broadcast:', error);
+  }
 
   return created;
 };

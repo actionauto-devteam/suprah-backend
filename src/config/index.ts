@@ -39,6 +39,10 @@ const envVarsSchema = Joi.object()
     STRIPE_SECRET_KEY: Joi.string().required().description('Stripe Secret Key'),
     STRIPE_PUBLISHABLE_KEY: Joi.string().required().description('Stripe Publishable Key'),
     STRIPE_WEBHOOK_SECRET: Joi.string().allow('').description('Stripe Webhook Secret'),
+    // Push Notifications
+    VAPID_PUBLIC_KEY: Joi.string().required().description('VAPID Public Key'),
+    VAPID_PRIVATE_KEY: Joi.string().required().description('VAPID Private Key'),
+    VAPID_SUBJECT: Joi.string().required().description('VAPID Subject (mailto)'),
   })
   .unknown();
 
@@ -94,6 +98,11 @@ const config = {
     secretKey: envVars.STRIPE_SECRET_KEY,
     publishableKey: envVars.STRIPE_PUBLISHABLE_KEY,
     webhookSecret: envVars.STRIPE_WEBHOOK_SECRET || '',
+  },
+  push: {
+    vapidPublicKey: envVars.VAPID_PUBLIC_KEY,
+    vapidPrivateKey: envVars.VAPID_PRIVATE_KEY,
+    vapidSubject: envVars.VAPID_SUBJECT,
   },
 };
 
