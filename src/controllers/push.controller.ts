@@ -18,15 +18,16 @@ export class PushController {
             throw new ApiError(400, 'Invalid subscription object. Expected endpoint and keys (p256dh, auth).');
         }
 
-        // Cleanup existing entry for this specific endpoint to avoid duplicates
-        await User.updateOne(
-            { _id: userId },
+        // ENFORCE SINGLE OWNERSHIP: Remove this specific endpoint from ALL users
+        // (to prevent Account A's notifications from going to Account B's device)
+        await User.updateMany(
+            { 'pushSubscriptions.endpoint': subscription.endpoint },
             {
                 $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
             }
         );
 
-        // Add the new/updated subscription
+        // Add the new/updated subscription to the CURRENT user
         await User.updateOne(
             { _id: userId },
             {

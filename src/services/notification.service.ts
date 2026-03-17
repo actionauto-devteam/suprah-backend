@@ -127,7 +127,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       quote_created: '/transportation?tab=drafts',
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
-      driver_request: '/crm/dashboard',
+      driver_request: '/notifications',
     };
 
     const pushPayload: any = {
@@ -323,7 +323,7 @@ const broadcastNotification = async (params: {
       quote_created: '/transportation?tab=drafts',
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
-      driver_request: '/crm/dashboard',
+      driver_request: '/notifications',
     };
 
     const broadcastPayload = {
