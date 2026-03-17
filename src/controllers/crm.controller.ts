@@ -223,10 +223,106 @@ const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { logs, total: logs.length }, 'Time logs fetched'));
 });
 
+/**
+ * Generate the next available Employee ID based on the current year
+ * and the highest existing sequence in the database.
+ */
+const resolveNextEmployeeId = async (): Promise<string> => {
+  const year = new Date().getFullYear();
+  const lastUser = await CrmUser.findOne(
+    { username: new RegExp(`^${year}-`) },
+    { username: 1 },
+    { sort: { username: -1 } }
+  );
+
+  if (!lastUser) return `${year}-00001`;
+
+  const seq = parseInt(lastUser.username.split('-')[1], 10);
+  return `${year}-${String(seq + 1).padStart(5, '0')}`;
+};
+
+/**
+ * Get next available Employee ID
+ * GET /api/crm/next-employee-id
+ */
+const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
+  const employeeId = await resolveNextEmployeeId();
+  res.json(new ApiResponse(200, { employeeId }, 'Next employee ID fetched'));
+});
+
+/**
+ * Create a new CRM user
+ * POST /api/crm/users
+ * Admin only
+ */
+const createUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can create CRM users');
+  }
+
+  const { fullName, email, password, role } = req.body;
+
+  if (!fullName?.trim() || !email?.trim() || !password || !role) {
+    throw new ApiError(400, 'fullName, email, password, and role are required');
+  }
+
+  const emailTaken = await CrmUser.findOne({ email: email.trim().toLowerCase() });
+  if (emailTaken) {
+    throw new ApiError(409, 'An account with that email already exists');
+  }
+
+  const employeeId = await resolveNextEmployeeId();
+
+  const user = await CrmUser.create({
+    fullName: fullName.trim(),
+    username: employeeId,
+    email: email.trim().toLowerCase(),
+    password,
+    role,
+    isActive: true,
+  });
+
+  res.status(201).json(
+    new ApiResponse(201, {
+      _id: user._id,
+      fullName: user.fullName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+    }, 'User created successfully')
+  );
+});
+
+/**
+ * Get all CRM users
+ * GET /api/crm/users
+ * Admin only
+ */
+const getUsers = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can view CRM users');
+  }
+
+  const users = await CrmUser.find({})
+    .select('fullName username email role isActive lastLoginAt createdAt')
+    .sort({ createdAt: -1 });
+
+  res.json(new ApiResponse(200, { users, total: users.length }, 'Users fetched successfully'));
+});
+
 export default {
   login,
   logout,
   getMe,
   timeClock,
   getTimeLogs,
+  getNextEmployeeId,
+  createUser,
+  getUsers,
 };
