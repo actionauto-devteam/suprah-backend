@@ -224,11 +224,14 @@ const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Generate the next available Employee ID based on the current year
- * and the highest existing sequence in the database.
+ * Generate the next available Employee ID for a given organization,
+ * based on the current year and the highest existing sequence in that org.
  */
-const resolveNextEmployeeId = async (): Promise<string> => {
+const resolveNextEmployeeId = async (organizationId: string | undefined): Promise<string> => {
   const year = new Date().getFullYear();
+
+  // Always search globally — employee IDs must be unique across all organizations
+  // so that login-by-username always resolves to exactly one user.
   const lastUser = await CrmUser.findOne(
     { username: new RegExp(`^${year}-`) },
     { username: 1 },
@@ -246,7 +249,17 @@ const resolveNextEmployeeId = async (): Promise<string> => {
  * GET /api/crm/next-employee-id
  */
 const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
-  const employeeId = await resolveNextEmployeeId();
+  const actor = req.crmUser;
+
+  if (!actor) {
+    throw new ApiError(401, 'Not authenticated');
+  }
+
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
+  const employeeId = await resolveNextEmployeeId(actor.organizationId?.toString());
   res.json(new ApiResponse(200, { employeeId }, 'Next employee ID fetched'));
 });
 
@@ -262,6 +275,10 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Only admins can create CRM users');
   }
 
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
   const { fullName, email, password, role } = req.body;
 
   if (!fullName?.trim() || !email?.trim() || !password || !role) {
@@ -273,9 +290,10 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(409, 'An account with that email already exists');
   }
 
-  const employeeId = await resolveNextEmployeeId();
+  const employeeId = await resolveNextEmployeeId(actor.organizationId?.toString());
 
   const user = await CrmUser.create({
+    organizationId: actor.organizationId,
     fullName: fullName.trim(),
     username: employeeId,
     email: email.trim().toLowerCase(),
@@ -309,11 +327,117 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Only admins can view CRM users');
   }
 
-  const users = await CrmUser.find({})
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
+  const users = await CrmUser.find({ organizationId: actor.organizationId })
     .select('fullName username email role isActive lastLoginAt createdAt')
     .sort({ createdAt: -1 });
 
   res.json(new ApiResponse(200, { users, total: users.length }, 'Users fetched successfully'));
+});
+
+/**
+ * Update a CRM user (fullName, email, role)
+ * PATCH /api/crm/users/:id
+ * Admin only
+ */
+const updateUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can edit CRM users');
+  }
+
+  const { id } = req.params;
+  const { fullName, email, role } = req.body;
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  if (fullName?.trim()) user.fullName = fullName.trim();
+
+  if (email?.trim()) {
+    const emailTaken = await CrmUser.findOne({
+      email: email.trim().toLowerCase(),
+      _id: { $ne: id },
+    });
+    if (emailTaken) throw new ApiError(409, 'An account with that email already exists');
+    user.email = email.trim().toLowerCase();
+  }
+
+  if (role && ['employee', 'manager', 'admin'].includes(role)) {
+    user.role = role;
+  }
+
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(
+    new ApiResponse(200, {
+      _id: user._id,
+      fullName: user.fullName,
+      email: user.email,
+      role: user.role,
+    }, 'User updated successfully')
+  );
+});
+
+/**
+ * Toggle active / inactive status of a CRM user
+ * PATCH /api/crm/users/:id/status
+ * Admin only
+ */
+const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can change user status');
+  }
+
+  const { id } = req.params;
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'You cannot deactivate your own account');
+  }
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  user.isActive = !user.isActive;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(
+    new ApiResponse(
+      200,
+      { isActive: user.isActive },
+      `User ${user.isActive ? 'reactivated' : 'deactivated'} successfully`
+    )
+  );
+});
+
+/**
+ * Delete a CRM user
+ * DELETE /api/crm/users/:id
+ * Admin only
+ */
+const deleteUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can delete CRM users');
+  }
+
+  const { id } = req.params;
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'You cannot delete your own account');
+  }
+
+  const user = await CrmUser.findOneAndDelete({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  res.json(new ApiResponse(200, null, 'User deleted successfully'));
 });
 
 export default {
@@ -325,4 +449,7 @@ export default {
   getNextEmployeeId,
   createUser,
   getUsers,
+  updateUser,
+  toggleUserStatus,
+  deleteUser,
 };

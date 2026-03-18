@@ -1,0 +1,80 @@
+/**
+ * Migration: Assign correct organizationId to existing CrmUser records
+ *
+ * How it works:
+ *   For each CrmUser without an organizationId, it finds the matching main
+ *   User account by email and copies that User's organizationId over.
+ *   This ensures each CRM user is linked to their own correct organization.
+ *
+ * Usage:
+ *   npx ts-node src/scripts/migrate-crmuser-organization.ts
+ */
+
+import mongoose from 'mongoose';
+import config from '../config';
+import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
+
+const run = async () => {
+  const databaseUri = config.mongoose?.url || process.env.MONGODB_URI || '';
+  if (!databaseUri) {
+    console.error('ERROR: Database URI not found in config or environment variables.');
+    process.exit(1);
+  }
+
+  await mongoose.connect(databaseUri);
+  console.log('Connected to database.');
+
+  // Step 0: Drop the old global unique index on username (replaced by compound index)
+  try {
+    await mongoose.connection.collection('crmusers').dropIndex('username_1');
+    console.log('Dropped old username_1 unique index.');
+  } catch {
+    console.log('username_1 index not found — already removed or never existed, skipping.');
+  }
+
+  // Step 1: Reset any wrongly bulk-assigned organizationIds so we start clean
+  const resetResult = await CrmUser.updateMany(
+    {},
+    { $unset: { organizationId: '' } }
+  );
+  console.log(`Reset ${resetResult.modifiedCount} CrmUser record(s) — cleared existing organizationId values.`);
+
+  // Step 2: Find all CrmUsers
+  const crmUsers = await CrmUser.find({}).select('fullName email username');
+  console.log(`\nFound ${crmUsers.length} CrmUser record(s) to process.\n`);
+
+  let matched = 0;
+  let unmatched = 0;
+
+  for (const crmUser of crmUsers) {
+    // Find the main User account with the same email
+    const mainUser = await User.findOne({ email: crmUser.email }).select('organizationId');
+
+    if (mainUser?.organizationId) {
+      await CrmUser.updateOne(
+        { _id: crmUser._id },
+        { $set: { organizationId: mainUser.organizationId } }
+      );
+      console.log(`✓  ${crmUser.fullName} (${crmUser.email}) → org: ${mainUser.organizationId}`);
+      matched++;
+    } else {
+      console.log(`✗  ${crmUser.fullName} (${crmUser.email}) → no matching User or org found — skipped`);
+      unmatched++;
+    }
+  }
+
+  console.log(`\n─────────────────────────────────────────`);
+  console.log(`Migration complete.`);
+  console.log(`  Matched & updated : ${matched}`);
+  console.log(`  Skipped (no match) : ${unmatched}`);
+  console.log(`─────────────────────────────────────────\n`);
+
+  await mongoose.disconnect();
+  process.exit(0);
+};
+
+run().catch((err) => {
+  console.error('Migration failed:', err);
+  process.exit(1);
+});
