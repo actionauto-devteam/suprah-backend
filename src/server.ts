@@ -53,9 +53,9 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.text({ type: ['application/xml', 'text/xml'] }));
 
 // ========================================
-// Static file serving (proof-of-delivery images)
+// Static file serving (Limited to non-sensitive assets)
 // ========================================
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
 
 // ========================================
 // CORS CONFIGURATION

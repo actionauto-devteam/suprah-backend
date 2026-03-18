@@ -69,13 +69,13 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status } = req.query;
 
-  const orgShipments = await Shipment.find(
+  // 1. Fetch ALL active shipments globally to determine driver availability
+  const activeShipments = await Shipment.find(
     {
-      organizationId: orgId,
       assignedDriverId: { $exists: true, $ne: null },
       status: { $nin: ["Delivered", "Cancelled"] },
     },
-    "_id assignedDriverId trackingNumber status origin destination",
+    "_id assignedDriverId trackingNumber status organizationId origin destination",
   ).sort({ assignedAt: -1 });
 
   const filter: any = {};
@@ -83,22 +83,15 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
     filter.status = status;
   }
 
+  // 2. Fetch all drivers who are currently sharing their location (global list)
   const locations = await DriverLocation.find(filter)
     .populate("userId", "name email avatar role")
     .sort({ lastSeenAt: -1 });
 
-  const shipmentsByDriver = new Map<
-    string,
-    Array<{
-      id: string;
-      trackingNumber?: string;
-      status: string;
-      origin: string;
-      destination: string;
-    }>
-  >();
+  const shipmentsByDriver = new Map<string, any[]>();
 
-  for (const shipment of orgShipments) {
+  // 3. Populate shipments for each driver, redacting if it belongs to another organization
+  for (const shipment of activeShipments) {
     const assignedDriverId = shipment.assignedDriverId?.toString();
     if (!assignedDriverId) continue;
 
@@ -106,13 +99,26 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
       shipmentsByDriver.set(assignedDriverId, []);
     }
 
-    shipmentsByDriver.get(assignedDriverId)!.push({
-      id: shipment._id.toString(),
-      trackingNumber: shipment.trackingNumber,
-      status: shipment.status,
-      origin: shipment.origin,
-      destination: shipment.destination,
-    });
+    const isOurShipment = shipment.organizationId?.toString() === orgId;
+
+    if (isOurShipment) {
+      shipmentsByDriver.get(assignedDriverId)!.push({
+        id: shipment._id.toString(),
+        trackingNumber: shipment.trackingNumber,
+        status: shipment.status,
+        origin: shipment.origin,
+        destination: shipment.destination,
+        owned: true,
+      });
+    } else {
+      // Redacted entry for competitor shipments
+      shipmentsByDriver.get(assignedDriverId)!.push({
+        id: "redacted", // Hide the actual shipment ID
+        status: "Occupied (External Load)",
+        owned: false,
+        // Sensitive fields (trackingNumber, origin, destination) are OMITTED
+      });
+    }
   }
 
   const data = locations
@@ -123,18 +129,18 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
       lastSeenAt: location.lastSeenAt,
       driver: location.userId
         ? {
-            id: location.userId._id.toString(),
-            name: location.userId.name,
-            email: location.userId.email,
-            avatar: location.userId.avatar,
-          }
+          id: location.userId._id.toString(),
+          name: location.userId.name,
+          email: location.userId.email,
+          avatar: location.userId.avatar,
+        }
         : null,
       shipments:
         shipmentsByDriver.get(location.userId?._id?.toString() || "") || [],
     }))
     .filter((item: any) => item.driver);
 
-  res.json(new ApiResponse(200, data, "Driver locations fetched"));
+  res.json(new ApiResponse(200, data, "Driver locations fetched (redacted for privacy)"));
 });
 
 // POST /assign-load — admin assigns a shipment to a driver (requireOrg applied in routes)
@@ -175,7 +181,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   const loadInfo = `${shipment.origin} → ${shipment.destination}`;
   const { title, message } = notificationTemplates.shipment_assigned({
     trackingNumber: shipment.trackingNumber || 'N/A',
-    customerName: (shipment.preservedQuoteData as any)?.firstName 
+    customerName: (shipment.preservedQuoteData as any)?.firstName
       ? `${(shipment.preservedQuoteData as any).firstName} ${(shipment.preservedQuoteData as any).lastName || ''}`
       : undefined,
   });

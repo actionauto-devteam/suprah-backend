@@ -24,6 +24,7 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
         const limitNum = parseInt(limit as string);
 
         const searchCriteria: any = {
+            organizationId: req.orgId,
             $or: [
                 { name: searchRegex },
                 { email: searchRegex }
@@ -60,8 +61,9 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
 const getProfile = asyncHandler(async (req: Request, res: Response) => {
     // ... (existing getProfile logic unchanged)
     const userId = req.params.id || (req.user as IUser)._id.toString();
+    const orgId = req.orgId as string;
 
-    const user = await User.findById(userId).select('-password');
+    const user = await User.findOne({ _id: userId, organizationId: orgId }).select('-password');
 
     if (!user) {
         return res.status(404).json(new ApiResponse(404, null, 'User not found'));

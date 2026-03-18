@@ -52,12 +52,14 @@ interface PendingChallenge {
 const challengeStore = new Map<string, PendingChallenge>();
 
 // Cleanup expired challenges every 60s
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, val] of challengeStore) {
-    if (val.expiresAt < now) challengeStore.delete(key);
-  }
-}, 60_000);
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of challengeStore) {
+      if (val.expiresAt < now) challengeStore.delete(key);
+    }
+  }, 60_000);
+}
 
 // ── Utility helpers ──────────────────────────────────────────────────────────
 

@@ -10,6 +10,12 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import cacheService from '../services/cache.service';
+import { storageService } from '../services/storage.service';
+import fs from 'fs';
+import path from 'path';
+
+const SHIPMENT_CACHE_TTL = 60 * 5; // 5 minutes
 
 /**
  * Helper to safely get user ID from request
@@ -194,6 +200,10 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         )
     );
 
+    // Invalidate shipment and quote caches on creation
+    await cacheService.invalidateByPrefix(`shipments:${orgId}`);
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+
     await AuditLog.create({
         entityType: 'Shipment',
         entityId: shipment._id,
@@ -215,6 +225,17 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
 
     if (status && status !== 'all') {
         filter.status = status;
+    }
+
+    // Only cache the unfiltered/status-only queries — skip caching search queries
+    const isCacheable = !search;
+    const cacheKey = `shipments:${orgId}:list:${status || 'all'}`;
+
+    if (isCacheable) {
+        const cached = await cacheService.get(cacheKey);
+        if (cached) {
+            return res.json(new ApiResponse(200, cached, 'Shipments fetched successfully'));
+        }
     }
 
     const shipments = await Shipment.find(filter)
@@ -262,7 +283,6 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
 
     const shipmentsWithOrg = filteredShipments.map(s => {
         const sJson = s.toJSON() as any;
-        // Use populated orgId first (new shipments), fallback to string _id lookup (old shipments)
         const orgFromPopulate = sJson.orgId && typeof sJson.orgId === 'object'
             ? { name: sJson.orgId.name, logoUrl: sJson.orgId.logoUrl }
             : null;
@@ -271,6 +291,10 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             organization: orgFromPopulate || orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
         };
     });
+
+    if (isCacheable) {
+        await cacheService.set(cacheKey, shipmentsWithOrg, SHIPMENT_CACHE_TTL);
+    }
 
     res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
 });
@@ -351,8 +375,8 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
-    const shipment = await Shipment.findByIdAndUpdate(
-        req.params.id,
+    const shipment = await Shipment.findOneAndUpdate(
+        { _id: req.params.id, organizationId: orgId },
         updateData,
         { new: true, runValidators: true }
     ).populate({
@@ -424,6 +448,9 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
+
+    // Invalidate shipment cache on update
+    await cacheService.invalidateByPrefix(`shipments:${orgId}`);
 
     await AuditLog.create({
         entityType: 'Shipment',
@@ -599,7 +626,24 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
         throw new ApiError(403, 'Only the assigned driver can submit proof of delivery');
     }
 
-    const imageUrl = `/uploads/proof-of-delivery/${shipmentId}/${file.filename}`;
+    // Delete old proof if it exists
+    if (shipment.proofOfDelivery?.imageUrl) {
+        if (shipment.proofOfDelivery.imageUrl.startsWith('http')) {
+            await storageService.delete(shipment.proofOfDelivery.imageUrl);
+        } else if (shipment.proofOfDelivery.imageUrl.startsWith('/uploads/proof-of-delivery/')) {
+            const oldPath = path.join(__dirname, '../../', shipment.proofOfDelivery.imageUrl);
+            try {
+                if (fs.existsSync(oldPath)) {
+                    fs.unlinkSync(oldPath);
+                }
+            } catch (err) {
+                console.error('Failed to delete legacy local proof file:', err);
+            }
+        }
+    }
+
+    // Upload new image to R2
+    const imageUrl = await storageService.upload(file, 'proofs');
 
     shipment.proofOfDelivery = {
         imageUrl,

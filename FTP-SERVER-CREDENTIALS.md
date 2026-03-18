@@ -200,4 +200,18 @@ docker compose -f docker-compose.api.yml restart nginx
 
    docker logs -f actionauto-api
    docker logs -f actionauto-ftp
+
+   docker compose -f docker-compose.local.yml up -d --build
+   docker compose -f docker-compose.local.yml --env-file ../.env up -d --build
    ```
+
+[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3000
+  }
+]
+
+

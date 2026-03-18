@@ -31,12 +31,14 @@ interface SshChallenge {
 const sshChallengeStore = new Map<string, SshChallenge>();
 
 // Cleanup every 60s
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, val] of sshChallengeStore) {
-    if (val.expiresAt < now) sshChallengeStore.delete(key);
-  }
-}, 60_000);
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of sshChallengeStore) {
+      if (val.expiresAt < now) sshChallengeStore.delete(key);
+    }
+  }, 60_000);
+}
 
 // ── Public API ───────────────────────────────────────────────────────────────
 

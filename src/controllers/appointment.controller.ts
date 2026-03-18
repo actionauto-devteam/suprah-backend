@@ -17,8 +17,10 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
 
     // Check for duplicate customer booking
     if (req.body.customerBooking?.isCustomerBooking) {
+        // Inject organizationId for duplicate check
+        const bookingData = { ...req.body.customerBooking, organizationId: orgId };
         const duplicateCheck = await customerBookingService.checkDuplicateBooking(
-            req.body.customerBooking,
+            bookingData,
             new Date(req.body.startTime)
         );
 
@@ -99,7 +101,9 @@ const getCustomerBookings = asyncHandler(async (req: Request, res: Response) => 
 const getCustomerHistory = asyncHandler(async (req: Request, res: Response) => {
     const { email, phone, firstName, lastName } = req.query;
 
+    const orgId = req.orgId as string;
     const result = await customerBookingService.getCustomerHistory(
+        orgId,
         email as string,
         phone as string,
         firstName as string,
@@ -172,8 +176,11 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
 
     // Check for duplicate customer booking if updating customer booking info
     if (req.body.customerBooking?.isCustomerBooking) {
+        const orgId = req.orgId as string;
+        // Inject organizationId for duplicate check
+        const bookingData = { ...req.body.customerBooking, organizationId: orgId };
         const duplicateCheck = await customerBookingService.checkDuplicateBooking(
-            req.body.customerBooking,
+            bookingData,
             new Date(req.body.startTime),
             id
         );

@@ -1,4 +1,5 @@
 import passport from 'passport';
+import mongoose from 'mongoose';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import config from './index';
 import User from '../models/User.model';
@@ -15,8 +16,51 @@ passport.use(
         },
         async (req: any, _accessToken: string, _refreshToken: string, profile: any, done: any) => {
             try {
-                const email = profile.emails?.[0].value;
+                // 1. Extract context from state first
+                let requestedRole: string | undefined;
+                let inviteToken: string | undefined;
+                try {
+                    if (req.query.state) {
+                        const state = JSON.parse(req.query.state as string);
+                        requestedRole = state.role;
+                        inviteToken = state.inviteToken;
+                    }
+                } catch (e) {
+                    console.error('Passport Google Strategy: Failed to parse state', e);
+                }
 
+                // 2. Prepare default values based on requested role
+                let roleToAssign = requestedRole === 'dealership' ? 'admin' : (requestedRole || 'customer');
+                let orgId = undefined;
+                let orgRole = undefined;
+                let onboardingCompleted = !!requestedRole;
+                let isApproved = roleToAssign !== 'driver';
+
+                // 3. Process Invitation if present
+                if (inviteToken) {
+                    const InvitationModel = mongoose.model('Invitation');
+                    const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
+
+                    if (invite) {
+                        // Normalize roles
+                        if (invite.role === 'admin' || invite.role === 'member') {
+                            roleToAssign = invite.role === 'admin' ? 'admin' : 'employee';
+                        } else {
+                            roleToAssign = invite.role;
+                        }
+
+                        orgId = invite.organizationId;
+                        orgRole = invite.role;
+                        onboardingCompleted = true;
+                        isApproved = true;
+
+                        // Mark invite as accepted
+                        invite.status = 'accepted';
+                        await invite.save();
+                    }
+                }
+
+                const email = profile.emails?.[0].value;
                 if (!email) {
                     console.error('[Google Auth] No email found in profile');
                     return done(new Error('No email found in Google profile'), undefined);
@@ -31,56 +75,42 @@ passport.use(
 
                 if (user) {
                     // Update Google ID if it was missing (account linking)
-                    if (!user.googleId) {
-                        user.googleId = profile.id;
+                    if (!user.googleId) user.googleId = profile.id;
+
+                    // If we have an invite, promote the existing user
+                    if (inviteToken && orgId) {
+                        user.role = roleToAssign as any;
+                        user.organizationId = orgId;
+                        user.organizationRole = orgRole;
+                        user.onboardingCompleted = true;
+                        user.isApproved = true;
                     }
 
-                    // If it's an existing user who "migrated" but never picked a role beyond the default customer
-                    // we might want to flag them for onboarding if we just added this field.
-                    // Check if onboardingCompleted is explicitly true or not.
+                    // Legacy onboarding check
                     if (user.onboardingCompleted === undefined || user.onboardingCompleted === null) {
-                        // For legacy users, if they are already not just a default customer, they are done.
-                        // If they ARE a customer, let them re-verify their role via onboarding.
-                        if (user.role === 'customer') {
-                            user.onboardingCompleted = false;
-                        } else {
-                            user.onboardingCompleted = true;
-                        }
+                        user.onboardingCompleted = user.role !== 'customer';
                     }
 
                     await user.save();
                     return done(null, user);
                 }
 
-                // Extract requested role from state
-                let requestedRole: string | undefined;
-                try {
-                    if (req.query.state) {
-                        const state = JSON.parse(req.query.state as string);
-                        requestedRole = state.role;
-                    }
-                } catch (e) {
-                    console.error('Passport Google Strategy: Failed to parse state', e);
-                }
-
-                // If user picked a role on Sign-Up, onboarding is completed.
-                // If they came from Sign-In without a role, it's not completed.
-                const onboardingCompleted = !!requestedRole;
-                const roleToAssign = requestedRole === 'dealership' ? 'admin' : (requestedRole || 'customer');
-
                 // Create new user if not found
                 user = await User.create({
                     googleId: profile.id,
                     email: email.toLowerCase(),
-                    name: profile.displayName || email.split('@')[0], // Fallback if name is missing
+                    name: profile.displayName || email.split('@')[0],
                     avatar: profile.photos?.[0].value,
                     role: roleToAssign,
+                    organizationId: orgId,
+                    organizationRole: orgRole,
                     emailVerified: true,
+                    isApproved,
                     onboardingCompleted,
                 });
 
-                // If specialized as a driver, create an approval request immediately
-                if (roleToAssign === 'driver') {
+                // If specialized as a driver WITHOUT an invitation, create an approval request
+                if (roleToAssign === 'driver' && !inviteToken) {
                     try {
                         const driverRequest = await DriverRequest.create({
                             driverUserId: user._id,

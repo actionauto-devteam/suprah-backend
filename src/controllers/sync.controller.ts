@@ -13,7 +13,8 @@ const triggerSync = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getSyncStatus = asyncHandler(async (req: Request, res: Response) => {
-    const recentLogs = await SyncLog.find({})
+    const orgId = req.orgId as string;
+    const recentLogs = await SyncLog.find({ organizationId: orgId })
         .sort({ startTime: -1 })
         .limit(10);
 

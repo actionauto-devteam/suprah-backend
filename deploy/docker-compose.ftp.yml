@@ -1,4 +1,4 @@
-version: '3.8'
+
 
 services:
   ftp-worker:
@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     
     env_file:
-      - .env
+      - ../.env
     
     ports:
       # FTP Control Port
@@ -40,6 +40,11 @@ services:
       # Bcrypt Configuration (required by config validation)
       BCRYPT_SALT_ROUNDS: ${BCRYPT_SALT_ROUNDS}
 
+      # Redis (for cache invalidation after FTP sync)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
       # Clerk Configuration (required by config validation)
       CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY}
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
@@ -54,6 +59,7 @@ services:
     
     networks:
       - ftp-network
+      - app-network  # Must be on app-network to reach Redis
     
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "21"]
@@ -69,3 +75,5 @@ volumes:
 networks:
   ftp-network:
     driver: bridge
+  app-network:
+    external: true  # Connects to the network created by docker-compose.yml

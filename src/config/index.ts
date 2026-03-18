@@ -2,7 +2,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import Joi from 'joi';
 
-// Load .env file
+// Load .env files (local overrides the main .env)
+dotenv.config({ path: path.join(__dirname, '../../.env.local'), override: true });
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const envVarsSchema = Joi.object()
@@ -39,6 +40,18 @@ const envVarsSchema = Joi.object()
     STRIPE_SECRET_KEY: Joi.string().required().description('Stripe Secret Key'),
     STRIPE_PUBLISHABLE_KEY: Joi.string().required().description('Stripe Publishable Key'),
     STRIPE_WEBHOOK_SECRET: Joi.string().allow('').description('Stripe Webhook Secret'),
+    // Redis
+    REDIS_ENABLED: Joi.boolean().default(true).description('Redis enabled toggle'),
+    REDIS_HOST: Joi.string().default('127.0.0.1').description('Redis host'),
+    REDIS_PORT: Joi.number().default(6379).description('Redis port'),
+    REDIS_PASSWORD: Joi.string().allow('').default('').description('Redis password'),
+
+    // Cloudflare R2
+    R2_ACCESS_KEY_ID: Joi.string().allow('').description('R2 Access Key'),
+    R2_SECRET_ACCESS_KEY: Joi.string().allow('').description('R2 Secret Access Key'),
+    R2_ENDPOINT: Joi.string().allow('').description('R2 Endpoint'),
+    R2_BUCKET_NAME: Joi.string().allow('').description('R2 Bucket Name'),
+    R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
   })
   .unknown();
 
@@ -94,6 +107,19 @@ const config = {
     secretKey: envVars.STRIPE_SECRET_KEY,
     publishableKey: envVars.STRIPE_PUBLISHABLE_KEY,
     webhookSecret: envVars.STRIPE_WEBHOOK_SECRET || '',
+  },
+  redis: {
+    enabled: envVars.REDIS_ENABLED,
+    host: envVars.REDIS_HOST,
+    port: envVars.REDIS_PORT,
+    password: envVars.REDIS_PASSWORD || undefined,
+  },
+  r2: {
+    accessKeyId: envVars.R2_ACCESS_KEY_ID,
+    secretAccessKey: envVars.R2_SECRET_ACCESS_KEY,
+    endpoint: envVars.R2_ENDPOINT,
+    bucketName: envVars.R2_BUCKET_NAME,
+    publicUrl: envVars.R2_PUBLIC_URL,
   },
 };
 
