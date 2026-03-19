@@ -150,23 +150,21 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const data = locations
+    .filter((location: any) => location.userId && location.userId.role === "driver")
     .map((location: any) => ({
       id: location._id.toString(),
       status: location.status,
       coords: location.coords,
       lastSeenAt: location.lastSeenAt,
-      driver: location.userId
-        ? {
-          id: location.userId._id.toString(),
-          name: location.userId.name,
-          email: location.userId.email,
-          avatar: location.userId.avatar,
-        }
-        : null,
+      driver: {
+        id: location.userId._id.toString(),
+        name: location.userId.name,
+        email: location.userId.email,
+        avatar: location.userId.avatar,
+      },
       shipments:
-        shipmentsByDriver.get(location.userId?._id?.toString() || "") || [],
-    }))
-    .filter((item: any) => item.driver);
+        shipmentsByDriver.get(location.userId._id.toString()) || [],
+    }));
 
   res.json(new ApiResponse(200, data, "Driver locations fetched"));
 });
@@ -185,6 +183,9 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   const driver = await User.findById(driverId);
   if (!driver) {
     throw new ApiError(404, "Driver not found");
+  }
+  if (driver.role !== "driver") {
+    throw new ApiError(400, "User is not a driver");
   }
 
   const driverLocation = await DriverLocation.findOne({ userId: driverId });
@@ -430,6 +431,7 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
 
   const newDriver = await User.findById(newDriverId);
   if (!newDriver) throw new ApiError(404, "Driver not found");
+  if (newDriver.role !== "driver") throw new ApiError(400, "User is not a driver");
 
   const driverLocation = await DriverLocation.findOne({ userId: newDriverId });
   const driverOrgId = newDriver.organizationId?.toString() || driverLocation?.organizationId?.toString();
