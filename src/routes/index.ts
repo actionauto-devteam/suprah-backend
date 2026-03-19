@@ -26,6 +26,7 @@ import crmBiometricRoute from "./crm-biometric.routes";
 import supraSpaceRoute from "./supraspace.route";
 import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
+import devToolsRoute from "./devTools.routes";
 
 const router = express.Router();
 
@@ -123,9 +124,9 @@ const defaultRoutes = [
     route: supraleoRoute,
   },
   {
-  path: "/crm/timeproof",
-  route: crmTimeprofRoute,
- },
+    path: "/crm/timeproof",
+    route: crmTimeprofRoute,
+  },
 
   {
     path: "/crm/biometric",
@@ -138,6 +139,10 @@ const defaultRoutes = [
   {
     path: "/auth",
     route: authRoute,
+  },
+  {
+    path: "/dev",
+    route: devToolsRoute,
   },
 ];
 

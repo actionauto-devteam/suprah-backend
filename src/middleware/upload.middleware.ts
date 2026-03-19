@@ -69,5 +69,5 @@ const avatarFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.F
 export const uploadAvatarImage = multer({
   storage: avatarStorage,
   fileFilter: avatarFileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max for avatars
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1 MB max for avatars
 }).single('avatar');
