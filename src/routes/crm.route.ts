@@ -23,5 +23,8 @@ router.get('/time-logs', crmController.getTimeLogs);
 router.get('/next-employee-id', crmController.getNextEmployeeId);
 router.get('/users', crmController.getUsers);
 router.post('/users', crmController.createUser);
+router.patch('/users/:id', crmController.updateUser);
+router.patch('/users/:id/status', crmController.toggleUserStatus);
+router.delete('/users/:id', crmController.deleteUser);
 
 export default router;
