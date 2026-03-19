@@ -44,12 +44,26 @@ export const setupSocket = (io: Server) => {
   io.on('connection', (socket: AuthSocket) => {
     console.log(`User connected: ${socket.userId}`);
 
-    // Join user's personal room
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
     }
 
-    // Join conversation room
+    if (socket.organizationId) {
+      socket.join(`org:${socket.organizationId}`);
+    }
+
+    socket.on('join_shipment_tracking', (shipmentId: string) => {
+      if (shipmentId) {
+        socket.join(`shipment:${shipmentId}`);
+      }
+    });
+
+    socket.on('leave_shipment_tracking', (shipmentId: string) => {
+      if (shipmentId) {
+        socket.leave(`shipment:${shipmentId}`);
+      }
+    });
+
     socket.on('join_conversation', (conversationId: string) => {
       socket.join(`conversation:${conversationId}`);
       console.log(`User ${socket.userId} joined conversation ${conversationId}`);

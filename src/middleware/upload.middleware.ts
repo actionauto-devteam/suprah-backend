@@ -41,5 +41,5 @@ export const uploadProofImage = multer({
 export const uploadAvatarImage = multer({
   storage: storage,
   fileFilter: avatarFileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max for avatars
+  limits: { fileSize: 1 * 1024 * 1024 }, // 1 MB max for avatars
 }).single('avatar');
