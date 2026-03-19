@@ -10,8 +10,10 @@ const router = express.Router();
 // Public routes — no authentication required
 // ─────────────────────────────────────────────────────────────────────────────
 
-router.post('/login',  crmController.login);
-router.post('/logout', crmController.logout);
+router.post('/login',          crmController.login);
+router.post('/logout',         crmController.logout);
+router.post('/forgot-password', crmController.forgotPassword);
+router.post('/reset-password',  crmController.confirmResetPassword);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Authentication wall — every route below requires a valid CRM JWT
