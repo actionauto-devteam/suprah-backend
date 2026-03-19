@@ -11,6 +11,8 @@ export interface ICrmUser extends Document {
   role: 'employee' | 'manager' | 'admin';
   isActive: boolean;
   lastLoginAt?: Date;
+  resetOtp?: string;
+  resetOtpExpiry?: Date;
   createdAt: Date;
   updatedAt: Date;
   isPasswordMatch(password: string): Promise<boolean>;
@@ -66,6 +68,14 @@ const CrmUserSchema = new Schema<ICrmUser>(
     lastLoginAt: {
       type: Date,
       default: null,
+    },
+    resetOtp: {
+      type: String,
+      select: false,
+    },
+    resetOtpExpiry: {
+      type: Date,
+      select: false,
     },
   },
   {
