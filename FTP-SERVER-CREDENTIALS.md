@@ -215,3 +215,5 @@ docker compose -f docker-compose.api.yml restart nginx
 ]
 
 
+igPBdQYfD51mpLhd
+mongodb+srv://actionautoutahdev_db_user:igPBdQYfD51mpLhd@supra-ai.oxoiscm.mongodb.net/?appName=Supra-ai
