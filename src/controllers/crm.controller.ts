@@ -440,6 +440,37 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, 'User deleted successfully'));
 });
 
+/**
+ * Reset a CRM user's password (admin only)
+ * PATCH /api/crm/users/:id/reset-password
+ */
+const resetPassword = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can reset user passwords');
+  }
+
+  const { id } = req.params;
+  const { newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 8) {
+    throw new ApiError(400, 'Password must be at least 8 characters');
+  }
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'Use the change password feature to update your own password');
+  }
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId }).select('+password');
+  if (!user) throw new ApiError(404, 'User not found');
+
+  user.password = newPassword;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, null, 'Password reset successfully'));
+});
+
 export default {
   login,
   logout,
@@ -452,4 +483,5 @@ export default {
   updateUser,
   toggleUserStatus,
   deleteUser,
+  resetPassword,
 };
