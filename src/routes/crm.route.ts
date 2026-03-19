@@ -35,8 +35,9 @@ router.get('/next-employee-id',    crmController.getNextEmployeeId);
 router.get('/users',               crmController.getUsers);
 router.post('/users',              crmController.createUser);
 router.patch('/users/:id',         crmController.updateUser);
-router.patch('/users/:id/status',  crmController.toggleUserStatus);
-router.delete('/users/:id',        crmController.deleteUser);
+router.patch('/users/:id/status',         crmController.toggleUserStatus);
+router.patch('/users/:id/reset-password', crmController.resetPassword);
+router.delete('/users/:id',               crmController.deleteUser);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feed posts — org-scoped social timeline
