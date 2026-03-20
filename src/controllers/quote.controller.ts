@@ -9,12 +9,15 @@ import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
+import cacheService from '../services/cache.service';
 import {
     getCoordinatesFromZip,
     calculateDistance,
     calculateRate,
     calculateETA
 } from '../utils/calculations';
+
+const QUOTE_CACHE_TTL = 60 * 5; // 5 minutes
 
 /**
  * Helper to safely get user ID from request
@@ -155,6 +158,9 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
     );
 
+    // Invalidate quote cache after creation
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+
     await AuditLog.create({
         entityType: 'Quote',
         entityId: quote._id,
@@ -176,6 +182,17 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
 
     if (status && status !== 'all') {
         filter.status = status;
+    }
+
+    // Skip caching for search queries to avoid stale filtered results
+    const isCacheable = !search;
+    const cacheKey = `quotes:${orgId}:list:${status || 'all'}`;
+
+    if (isCacheable) {
+        const cached = await cacheService.get(cacheKey);
+        if (cached) {
+            return res.json(new ApiResponse(200, cached, 'Quotes fetched successfully'));
+        }
     }
 
     if (search) {
@@ -207,6 +224,10 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         ...(q.toJSON()),
         organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
     }));
+
+    if (isCacheable) {
+        await cacheService.set(cacheKey, quotesWithOrg, QUOTE_CACHE_TTL);
+    }
 
     res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
 });
@@ -352,6 +373,9 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 
+    // Invalidate quote cache on update
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+
     await AuditLog.create({
         entityType: 'Quote',
         entityId: quote._id,
@@ -406,6 +430,9 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, quote, 'Quote status updated successfully'));
+
+    // Invalidate quote cache on status change
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
     await AuditLog.create({
         entityType: 'Quote',

@@ -11,44 +11,87 @@ import DriverRequest from '../models/DriverRequest.model';
 import notificationService from './notification.service';
 
 class AuthService {
-    async register(userData: { name: string; email: string; password: string; role?: string }) {
-        const { email, password, name, role } = userData;
+    async register(userData: { name: string; email: string; password: string; role?: string; inviteToken?: string }) {
+        const { email, password, name, role, inviteToken } = userData;
 
         const existingUser = await User.findOne({ email: email?.toLowerCase() });
         if (existingUser) {
             throw new ApiError(400, 'User with this email already exists');
         }
 
-        const roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
-        const user = await User.create({
-            email: email?.toLowerCase(),
-            password, // Hashed via pre-save hook
-            name,
-            role: roleToAssign,
-            emailVerified: false,
-            isApproved: roleToAssign !== 'driver',
-            onboardingCompleted: true, // Role picked during registration
-        });
+        let roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
+        let orgId = undefined;
+        let orgRole = undefined;
+        let onboardingCompleted = true; // Default true if role is picked
+        let isApproved = true;
 
-        if (roleToAssign === 'driver') {
-            await this.ensureDriverRequest(user as any);
+        try {
+            // If registering via invitation
+            if (inviteToken) {
+                const InvitationModel = mongoose.model('Invitation');
+                const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
+
+                if (invite) {
+                    roleToAssign = invite.role;
+                    orgId = invite.organizationId;
+                    orgRole = invite.role;
+                    onboardingCompleted = true;
+                    isApproved = true;
+
+                    // Mark invite as accepted
+                    invite.status = 'accepted';
+                    await invite.save();
+                } else {
+                    console.error('[AuthService] Invitation not found or already accepted:', inviteToken);
+                }
+            }
+
+            if (roleToAssign === 'driver' && !inviteToken) {
+                isApproved = false;
+            }
+
+            // Map internal roles correctly for DB
+            // 'member' invite -> 'employee' global role
+            let finalGlobalRole = roleToAssign;
+            if (roleToAssign === 'member') {
+                finalGlobalRole = 'employee';
+            }
+
+            const user = await User.create({
+                email: email?.toLowerCase(),
+                password, // Hashed via pre-save hook
+                name,
+                role: finalGlobalRole,
+                organizationId: orgId,
+                organizationRole: orgRole,
+                emailVerified: false,
+                isApproved,
+                onboardingCompleted,
+            });
+
+            if (finalGlobalRole === 'driver' && !inviteToken) {
+                await this.ensureDriverRequest(user as any);
+            }
+
+            // Generate and send OTP for verification
+            const otp = Math.floor(100000 + Math.random() * 900000).toString();
+            user.otpCode = otp;
+            user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+            await user.save();
+
+            await emailService.sendEmail({
+                to: user.email,
+                subject: 'Verify Your Action Auto Account',
+                text: `Your verification code is: ${otp}`,
+                html: `<h1>Account Verification</h1><p>Welcome to Action Auto! Your verification code is: <strong>${otp}</strong></p>`
+            });
+
+            // Do NOT return tokens yet - user must verify first
+            return { user: this.sanitizeUser(user) };
+        } catch (error) {
+            console.error('[AuthService] Register Error:', error);
+            throw error;
         }
-
-        // Generate and send OTP for verification
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
-        await user.save();
-
-        await emailService.sendEmail({
-            to: user.email,
-            subject: 'Verify Your Action Auto Account',
-            text: `Your verification code is: ${otp}`,
-            html: `<h1>Account Verification</h1><p>Welcome to Action Auto! Your verification code is: <strong>${otp}</strong></p>`
-        });
-
-        // Do NOT return tokens yet - user must verify first
-        return { user: this.sanitizeUser(user) };
     }
 
     /**

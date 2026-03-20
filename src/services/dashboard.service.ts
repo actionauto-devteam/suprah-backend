@@ -7,6 +7,7 @@ import Appointment from '../models/Appointment.model';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import User from '../models/User.model';
 import Vehicle from '../models/Vehicle.model';
+import DriverLocation from '../models/DriverLocation.model';
 
 export class DashboardService {
     /**
@@ -208,7 +209,13 @@ export class DashboardService {
 
             const [calls, conversations, appointments, shipments] = await Promise.all([
                 Lead.countDocuments({ organizationId: orgId, createdBy: userId, channel: 'phone' }),
-                SupraSpaceConversation.countDocuments({ members: userId }),
+                SupraSpaceConversation.countDocuments({
+                    members: userId,
+                    $or: [
+                        { organizationId: orgId },
+                        { organizationId: new mongoose.Types.ObjectId(orgId) as any }
+                    ]
+                }),
                 Appointment.countDocuments({ organizationId: orgId, createdBy: userId }),
                 Shipment.countDocuments({ organizationId: orgId, createdBy: userId })
             ]);
@@ -231,20 +238,41 @@ export class DashboardService {
      * Driver and Shipment logistics
      */
     private static async getLogisticsData(orgId: string) {
-        const [driverStats, shipmentStats] = await Promise.all([
-            User.aggregate([
-                { $match: { organizationId: orgId, role: 'driver' } },
-                { $group: { _id: '$isActive', count: { $sum: 1 } } }
-            ]),
+        const fiveMinutesAgo = new Date();
+        fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+
+        const [activeDriversCount, totalDriversCount, shipmentStats] = await Promise.all([
+            DriverLocation.countDocuments({
+                $or: [
+                    { organizationId: orgId },
+                    { organizationId: new mongoose.Types.ObjectId(orgId) as any }
+                ],
+                status: { $ne: 'offline' },
+                lastSeenAt: { $gte: fiveMinutesAgo }
+            }),
+            User.countDocuments({
+                $or: [
+                    { organizationId: orgId },
+                    { organizationId: new mongoose.Types.ObjectId(orgId) as any }
+                ],
+                role: 'driver'
+            }),
             Shipment.aggregate([
-                { $match: { organizationId: orgId } },
+                {
+                    $match: {
+                        $or: [
+                            { organizationId: orgId },
+                            { organizationId: new mongoose.Types.ObjectId(orgId) as any }
+                        ]
+                    }
+                },
                 { $group: { _id: '$status', count: { $sum: 1 } } }
             ])
         ]);
 
         const drivers = {
-            active: driverStats.find(s => s._id === true)?.count || 0,
-            ready: driverStats.find(s => s._id === false)?.count || 0 // Assuming ready means inactive for now
+            active: activeDriversCount,
+            ready: totalDriversCount
         };
 
         const shipments: Record<string, number> = {

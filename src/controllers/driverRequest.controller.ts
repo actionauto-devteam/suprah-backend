@@ -93,9 +93,22 @@ const getMyDriverRequestStatus = asyncHandler(
     const request = await DriverRequest.findOne({ driverUserId: userId })
       .sort({ createdAt: -1 });
 
+    const user = req.user as IUser;
+
+    // If no request found but user is already an approved driver (e.g. via invitation)
+    // we return approved status so the frontend doesn't redirect.
     if (!request) {
+      if (user.role === 'driver' && user.isApproved) {
+        return res.json(new ApiResponse(200, { status: "approved" }, "Driver is auto-approved"));
+      }
       res.json(new ApiResponse(200, { status: "no-request" }, "No driver request found"));
       return;
+    }
+
+    // Even if a request exists, if the user is already approved, reflect that
+    if (user.role === 'driver' && user.isApproved && request.status !== 'approved') {
+      request.status = 'approved'; // Sync if needed
+      // Note: we don't necessarily need to save here, but returning approved is key
     }
 
     const data = {

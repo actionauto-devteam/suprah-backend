@@ -6,6 +6,7 @@ interface CustomerBookingData {
   lastName: string;
   email: string;
   phone: string;
+  organizationId?: string;
 }
 
 interface DuplicateCheckResult {
@@ -42,8 +43,9 @@ class CustomerBookingService {
     const normalizedEmail = customerData.email.toLowerCase().trim();
     const normalizedPhone = this.normalizePhone(customerData.phone);
 
-    // Find all active bookings for this customer
+    // Find all active bookings for this customer within this organization
     const query: any = {
+      organizationId: customerData.organizationId, // Required field
       'customerBooking.isCustomerBooking': true,
       status: { $in: ['scheduled', 'confirmed'] },
       startTime: { $gte: new Date() }, // Only check future bookings
@@ -124,12 +126,14 @@ class CustomerBookingService {
    * Get customer booking history
    */
   async getCustomerHistory(
+    orgId: string,
     email?: string,
     phone?: string,
     firstName?: string,
     lastName?: string
   ) {
     const query: any = {
+      organizationId: orgId,
       'customerBooking.isCustomerBooking': true
     };
 

@@ -11,6 +11,7 @@ export interface ISyncLog extends Document {
     vehiclesDeleted: number;
     errorMessage?: string;
     stackTrace?: string;
+    organizationId?: string;
 }
 
 const SyncLogSchema: Schema = new Schema(
@@ -29,6 +30,7 @@ const SyncLogSchema: Schema = new Schema(
         vehiclesDeleted: { type: Number, default: 0 },
         errorMessage: { type: String },
         stackTrace: { type: String },
+        organizationId: { type: String, index: true },
     },
     {
         timestamps: true,

@@ -6,6 +6,9 @@ import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
+import cacheService from '../services/cache.service';
+
+const VEH_CACHE_TTL = 60 * 60; // 1 hour
 
 /**
  * Helper to safely get user ID from request
@@ -81,6 +84,9 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(
     new ApiResponse(201, normalizeVehicle(vehicle), 'Vehicle created successfully')
   );
+
+  // Invalidate vehicle cache after new vehicle is added
+  await cacheService.invalidateByPrefix('veh:');
 });
 
 const getVehicles = asyncHandler(async (req: Request, res: Response) => {
@@ -101,7 +107,7 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     limit = '20'
   } = req.query;
 
-  const filter: any = {};
+  const filter: any = { organizationId: req.orgId, isDeleted: false };
 
   if (status && status !== 'all') {
     filter.status = status;
@@ -248,7 +254,8 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
-  const vehicle = await Vehicle.findById(req.params.id)
+  const orgId = req.orgId as string;
+  const vehicle = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId })
     .populate('assignedTo', 'email name');
 
   if (!vehicle) {
@@ -261,7 +268,7 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
-  const existingVehicle = await Vehicle.findById(req.params.id);
+  const existingVehicle = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId });
 
   if (!existingVehicle) {
     throw new ApiError(404, 'Vehicle not found');
@@ -278,8 +285,8 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     updateData.manualStatusLock = true;
   }
 
-  const vehicle = await Vehicle.findByIdAndUpdate(
-    req.params.id,
+  const vehicle = await Vehicle.findOneAndUpdate(
+    { _id: req.params.id, organizationId: orgId },
     updateData,
     { new: true, runValidators: true }
   ).populate('assignedTo', 'email name');
@@ -336,12 +343,15 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle updated successfully'));
+
+  // Invalidate vehicle cache on any update
+  await cacheService.invalidateByPrefix('veh:');
 });
 
 const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
-  const vehicle = await Vehicle.findByIdAndDelete(req.params.id);
+  const vehicle = await Vehicle.findOneAndDelete({ _id: req.params.id, organizationId: orgId });
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
@@ -360,11 +370,15 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json(new ApiResponse(200, null, 'Vehicle deleted successfully'));
+
+  // Invalidate vehicle cache on delete
+  await cacheService.invalidateByPrefix('veh:');
 });
 
 const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   const { text } = req.body;
   const userId = (req as any).user?._id;
+  const orgId = req.orgId as string;
 
   if (!text) {
     throw new ApiError(400, 'Note text is required');
@@ -374,8 +388,8 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(401, 'User not authenticated');
   }
 
-  const vehicle = await Vehicle.findByIdAndUpdate(
-    req.params.id,
+  const vehicle = await Vehicle.findOneAndUpdate(
+    { _id: req.params.id, organizationId: orgId },
     {
       $push: {
         notes: {
@@ -397,33 +411,53 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getFilters = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const cacheKey = `veh:filters:${orgId}`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    return res.json(new ApiResponse(200, cached, 'Filters fetched successfully'));
+  }
+
+  const query = { organizationId: orgId, isDeleted: false };
+
   const [makes, models, years, locations, bodyStyles, driveTrains] = await Promise.all([
-    Vehicle.distinct('make'),
-    Vehicle.distinct('modelName'),
-    Vehicle.distinct('year'),
-    Vehicle.distinct('dealerCity'),
-    Vehicle.distinct('bodyStyle'),
-    Vehicle.distinct('driveTrain')
+    Vehicle.distinct('make', query),
+    Vehicle.distinct('modelName', query),
+    Vehicle.distinct('year', query),
+    Vehicle.distinct('dealerCity', query),
+    Vehicle.distinct('bodyStyle', query),
+    Vehicle.distinct('driveTrain', query)
   ]);
 
-  res.json(new ApiResponse(200, {
+  const data = {
     makes: makes.filter(Boolean).sort(),
     models: models.filter(Boolean).sort(),
     years: years.filter(Boolean).sort((a, b) => b - a),
     locations: locations.filter(Boolean).sort(),
     bodyStyles: bodyStyles.filter(Boolean).sort(),
     driveTrains: driveTrains.filter(Boolean).sort()
-  }, 'Filters fetched successfully'));
+  };
+
+  await cacheService.set(cacheKey, data, VEH_CACHE_TTL);
+
+  res.json(new ApiResponse(200, data, 'Filters fetched successfully'));
 });
 
 const getStats = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const cacheKey = `veh:stats:${orgId}`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    return res.json(new ApiResponse(200, cached, 'Statistics fetched successfully'));
+  }
+
   const [total, byStatus, vehicles] = await Promise.all([
-    Vehicle.countDocuments({ isDeleted: false }),
+    Vehicle.countDocuments({ organizationId: orgId, isDeleted: false }),
     Vehicle.aggregate([
-      { $match: { isDeleted: false } },
+      { $match: { organizationId: orgId, isDeleted: false } },
       { $group: { _id: '$status', count: { $sum: 1 } } }
     ]),
-    Vehicle.find({ isDeleted: false }).select('price daysOnLot')
+    Vehicle.find({ organizationId: orgId, isDeleted: false }).select('price daysOnLot')
   ]);
 
   const statusBreakdown = byStatus.reduce((acc: any, item: any) => {
@@ -443,22 +477,22 @@ const getStats = asyncHandler(async (req: Request, res: Response) => {
 
   const totalValue = prices.reduce((sum, p) => sum + p, 0);
 
-  res.json(new ApiResponse(200, {
-    total,
-    byStatus: statusBreakdown,
-    averagePrice,
-    averageDaysOnLot,
-    totalValue
-  }, 'Statistics fetched successfully'));
+  const data = { total, byStatus: statusBreakdown, averagePrice, averageDaysOnLot, totalValue };
+
+  await cacheService.set(cacheKey, data, VEH_CACHE_TTL);
+
+  res.json(new ApiResponse(200, data, 'Statistics fetched successfully'));
 });
 
 const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
   const salesTrend = await Vehicle.aggregate([
     {
       $match: {
+        organizationId: orgId,
         status: 'Sold',
         dateSold: { $gte: sixMonthsAgo }
       }
@@ -484,7 +518,7 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
   }));
 
   const inventoryByMake = await Vehicle.aggregate([
-    { $match: { isDeleted: false, status: { $ne: 'Sold' } } },
+    { $match: { organizationId: orgId, isDeleted: false, status: { $ne: 'Sold' } } },
     { $group: { _id: '$make', count: { $sum: 1 } } },
     { $sort: { count: -1 } },
     { $limit: 10 }
@@ -496,7 +530,7 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
   }));
 
   const priceDistribution = await Vehicle.aggregate([
-    { $match: { isDeleted: false, status: { $ne: 'Sold' }, price: { $gt: 0 } } },
+    { $match: { organizationId: orgId, isDeleted: false, status: { $ne: 'Sold' }, price: { $gt: 0 } } },
     {
       $bucket: {
         groupBy: '$price',
@@ -519,11 +553,13 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
 
   const [currentVehicles, lastMonthVehicles] = await Promise.all([
     Vehicle.find({
+      organizationId: orgId,
       isDeleted: false,
       status: { $ne: 'Sold' },
       dateAdded: { $gte: lastMonth }
     }).select('daysOnLot'),
     Vehicle.find({
+      organizationId: orgId,
       isDeleted: false,
       status: 'Sold',
       dateSold: { $gte: lastMonth, $lt: now }
@@ -559,6 +595,7 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
     throw new ApiError(400, 'Status is required');
   }
 
+  const orgId = req.orgId as string;
   const updateData: any = { status };
 
   if (currentStep) {
@@ -568,8 +605,8 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
 
   updateData.manualStatusLock = true;
 
-  const vehicle = await Vehicle.findByIdAndUpdate(
-    req.params.id,
+  const vehicle = await Vehicle.findOneAndUpdate(
+    { _id: req.params.id, organizationId: orgId },
     updateData,
     { new: true, runValidators: true }
   ).populate('assignedTo', 'email name');
@@ -582,9 +619,10 @@ const updateVehicleStatus = asyncHandler(async (req: Request, res: Response) => 
 });
 
 const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
   const { status, search, make, model, year, location, minPrice, maxPrice, minMileage, maxMileage } = req.query;
 
-  const filter: any = {};
+  const filter: any = { organizationId: orgId };
 
   if (status) {
     if (status !== 'all') {
@@ -640,13 +678,14 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getDashboard = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
   const [recentVehicles, stats, alerts] = await Promise.all([
-    Vehicle.find({ isDeleted: false })
+    Vehicle.find({ organizationId: orgId, isDeleted: false })
       .sort({ createdAt: -1 })
       .limit(5)
       .populate('assignedTo', 'email name'),
     Vehicle.aggregate([
-      { $match: { isDeleted: false } },
+      { $match: { organizationId: orgId, isDeleted: false } },
       {
         $group: {
           _id: '$status',
@@ -656,6 +695,7 @@ const getDashboard = asyncHandler(async (req: Request, res: Response) => {
       }
     ]),
     Vehicle.find({
+      organizationId: orgId,
       isDeleted: false,
       status: 'In Recon',
       daysOnLot: { $gt: 30 }
@@ -680,6 +720,7 @@ const getDashboard = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const autocomplete = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
   const { q } = req.query;
 
   if (!q || (q as string).length < 2) {
@@ -687,12 +728,13 @@ const autocomplete = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const regex = { $regex: q, $options: 'i' };
+  const query = { organizationId: orgId, isDeleted: false };
 
   const [vins, makes, models, stockNumbers] = await Promise.all([
-    Vehicle.distinct('vin', { vin: regex, isDeleted: false }),
-    Vehicle.distinct('make', { make: regex, isDeleted: false }),
-    Vehicle.distinct('modelName', { modelName: regex, isDeleted: false }),
-    Vehicle.distinct('stockNumber', { stockNumber: regex, isDeleted: false })
+    Vehicle.distinct('vin', { ...query, vin: regex }),
+    Vehicle.distinct('make', { ...query, make: regex }),
+    Vehicle.distinct('modelName', { ...query, modelName: regex }),
+    Vehicle.distinct('stockNumber', { ...query, stockNumber: regex })
   ]);
 
   const suggestions = [
@@ -706,7 +748,8 @@ const autocomplete = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
-  const vehicle = await Vehicle.findById(req.params.id);
+  const orgId = req.orgId as string;
+  const vehicle = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId });
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
@@ -724,12 +767,13 @@ const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
 
 const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   const { customerName, duration = 24 } = req.body;
+  const orgId = req.orgId as string;
 
   if (!customerName) {
     throw new ApiError(400, 'Customer name is required');
   }
 
-  const vehicle = await Vehicle.findById(req.params.id);
+  const vehicle = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId });
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');

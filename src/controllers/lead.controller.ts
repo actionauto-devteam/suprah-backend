@@ -58,6 +58,7 @@ export const receiveADF = async (req: Request, res: Response) => {
     }
 
     const newLead = new Lead({
+      organizationId: req.query.orgId || req.body.organizationId || 'global',
       firstName: adfData.firstName,
       lastName: adfData.lastName,
       email: adfData.email,
@@ -144,12 +145,12 @@ export const receiveADF = async (req: Request, res: Response) => {
 // ─────────────────────────────────────────────────────────────
 export const getAllLeads = async (req: Request, res: Response) => {
   try {
-    const userId = (req.user as IUser)._id;
-    if (!userId) {
-      return res.status(400).json({ message: 'User not found' });
+    const orgId = req.orgId;
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
     }
 
-    const leads = await Lead.find({ createdBy: userId })
+    const leads = await Lead.find({ organizationId: orgId })
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
@@ -175,9 +176,10 @@ export const updateLead = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { status } = req.body;
     const userId = (req.user as IUser)._id;
+    const orgId = req.orgId;
 
     const lead = await Lead.findOneAndUpdate(
-      { _id: id, createdBy: userId },
+      { _id: id, organizationId: orgId },
       { status },
       { new: true }
     );
@@ -238,6 +240,7 @@ export const createInquiry = async (req: Request, res: Response) => {
     const detectedChannel = channel || detectChannel('', comments || '', '', source || '');
 
     const newLead = new Lead({
+      organizationId: req.orgId,
       createdBy: userId,
       firstName,
       lastName: lastName || '',
@@ -307,9 +310,9 @@ export const createInquiry = async (req: Request, res: Response) => {
 export const markAsRead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const userId = (req.user as IUser)._id;
+    const orgId = req.orgId;
     const lead = await Lead.findOneAndUpdate(
-      { _id: id, createdBy: userId },
+      { _id: id, organizationId: orgId },
       { isRead: true },
       { new: true }
     );
@@ -324,9 +327,9 @@ export const markAsRead = async (req: Request, res: Response) => {
 export const markAsPending = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const userId = (req.user as IUser)._id;
+    const orgId = req.orgId;
     const lead = await Lead.findOneAndUpdate(
-      { _id: id, createdBy: userId },
+      { _id: id, organizationId: orgId },
       { isPending: true },
       { new: true }
     );
@@ -346,13 +349,14 @@ export const replyToInquiry = async (req: Request, res: Response) => {
     const { id } = req.params;
     const { message } = req.body;
     const userId = (req.user as IUser)._id;
+    const orgId = req.orgId;
 
     if (!message) {
       return res.status(400).json({ message: 'Reply message is required' });
     }
 
     const lead = await Lead.findOneAndUpdate(
-      { _id: id, createdBy: userId },
+      { _id: id, organizationId: orgId },
       { status: 'Contacted', isRead: true },
       { new: true }
     );
@@ -476,7 +480,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
     // Pre-fetch all threadIds already stored for this user to avoid per-message DB queries
     const existingThreadIds = new Set(
-      (await Lead.find({ createdBy: userId, threadId: { $exists: true, $ne: null } })
+      (await Lead.find({ organizationId: req.orgId, threadId: { $exists: true, $ne: null } })
         .select('threadId')
         .lean()).map((l: any) => l.threadId)
     );
@@ -566,6 +570,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         }
 
         const newLead = new Lead({
+          organizationId: req.orgId,
           createdBy: userId,
           firstName,
           lastName,
@@ -652,8 +657,9 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   const { date, time, notes, locationOrVehicle } = req.body;
   const userId = (req.user as IUser)._id;
 
+  const orgId = req.orgId;
   const lead = await Lead.findOneAndUpdate(
-    { _id: id, createdBy: userId },
+    { _id: id, organizationId: orgId },
     {
       status: 'Appointment Set',
       appointment: {
@@ -689,7 +695,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
   const { id } = req.params;
   const userId = (req.user as IUser)._id;
 
-  const lead = await Lead.findOne({ _id: id, createdBy: userId });
+  const lead = await Lead.findOne({ _id: id, organizationId: req.orgId });
   if (!lead || !lead.threadId) {
     return res.status(404).json(new ApiResponse(404, null, 'Lead or thread not found'));
   }

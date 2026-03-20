@@ -1,6 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ITransaction extends Document {
+    organizationId: mongoose.Types.ObjectId;
     userId: mongoose.Types.ObjectId;
     type: 'deposit' | 'withdrawal' | 'adjustment';
     status: 'pending' | 'completed' | 'rejected';
@@ -22,6 +23,12 @@ export interface ITransaction extends Document {
 
 const TransactionSchema = new Schema(
     {
+        organizationId: {
+            type: Schema.Types.ObjectId,
+            ref: 'Organization',
+            required: true,
+            index: true,
+        },
         userId: {
             type: Schema.Types.ObjectId,
             ref: 'User',

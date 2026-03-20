@@ -200,4 +200,20 @@ docker compose -f docker-compose.api.yml restart nginx
 
    docker logs -f actionauto-api
    docker logs -f actionauto-ftp
+
+   docker compose -f docker-compose.local.yml up -d --build
+   docker compose -f docker-compose.local.yml --env-file ../.env up -d --build
    ```
+
+[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3000
+  }
+]
+
+
+igPBdQYfD51mpLhd
+mongodb+srv://actionautoutahdev_db_user:igPBdQYfD51mpLhd@supra-ai.oxoiscm.mongodb.net/?appName=Supra-ai

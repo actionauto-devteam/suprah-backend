@@ -1,19 +1,22 @@
 
 
 services:
-  # API Service
+  # API Service (Built from local source)
   api:
-    image: jolo0/actionauto-api:latest
-    container_name: actionauto-api
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: actionauto-api-local
     restart: unless-stopped
     env_file:
       - ../.env
     environment:
       - PORT=5000
-      - NODE_ENV=production
+      - NODE_ENV=development
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - CORS_ORIGIN=https://www.suprah-app.com,https://suprah-app.com,http://localhost:3000,https://action-auto-app.vercel.app,https://action-auto-app.vercel.app/,https://api.suprah-app.com
+    ports:
+      - "5000:5000"
     volumes:
       - ftp-uploads:/app/ftp-uploads
     networks:
@@ -21,12 +24,14 @@ services:
     depends_on:
       - redis
 
-  # Redis Cache & Session Store
+  # Redis Cache
   redis:
     image: redis:7-alpine
-    container_name: actionauto-redis
+    container_name: actionauto-redis-local
     restart: unless-stopped
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
     volumes:
       - redis-data:/data
     networks:
@@ -37,32 +42,35 @@ services:
           memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "PING"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
-      start_period: 10s
 
-  # Nginx Reverse Proxy
-  nginx:
-    image: nginx:alpine
-    container_name: actionauto-nginx
+  # FTP Worker (Built from local source)
+  ftp-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile.ftp
+    container_name: actionauto-ftp-local
     restart: unless-stopped
+    env_file:
+      - ../.env
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d
-      - ./nginx/ssl:/etc/nginx/ssl
+      - "21:21"
+      - "21000-21010:21000-21010"
+    environment:
+      - NODE_ENV=development
+      - FTP_PASSIVE_URL=127.0.0.1
+      - REDIS_HOST=redis
     depends_on:
-      - api
+      redis:
+        condition: service_healthy
     networks:
       - app-network
 
 volumes:
   ftp-uploads:
-    driver: local
   redis-data:
-    driver: local
 
 networks:
   app-network:

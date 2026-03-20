@@ -10,6 +10,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export type BiometricType = 'fingerprint' | 'face' | 'security_key' | 'platform';
 
 export interface IWebAuthnCredential extends Document {
+  organizationId: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
   credentialId: string;
   publicKey: string;
@@ -27,6 +28,12 @@ export interface IWebAuthnCredential extends Document {
 
 const WebAuthnCredentialSchema = new Schema<IWebAuthnCredential>(
   {
+    organizationId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Organization',
+      required: true,
+      index: true,
+    },
     userId: {
       type: Schema.Types.ObjectId,
       ref: 'CrmUser',
