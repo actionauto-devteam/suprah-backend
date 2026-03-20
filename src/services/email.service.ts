@@ -770,6 +770,61 @@ See you there!
             html
         });
     }
+
+    /**
+     * Send CRM password reset OTP email
+     */
+    async sendCrmPasswordResetEmail(to: string, fullName: string, otp: string): Promise<void> {
+        const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; color: #333; }
+                    .container { max-width: 480px; margin: 32px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+                    .header { background: #10b981; padding: 32px 24px; text-align: center; }
+                    .header h1 { margin: 0; color: white; font-size: 22px; font-weight: 700; }
+                    .header p { margin: 8px 0 0 0; color: rgba(255,255,255,0.85); font-size: 13px; }
+                    .content { padding: 32px 24px; }
+                    .otp-box { background: #f0fdf4; border: 2px dashed #10b981; border-radius: 12px; text-align: center; padding: 24px; margin: 24px 0; }
+                    .otp-code { font-size: 40px; font-weight: 800; letter-spacing: 10px; color: #059669; font-family: monospace; }
+                    .otp-note { font-size: 12px; color: #6b7280; margin-top: 10px; }
+                    .warning { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 4px; font-size: 13px; color: #92400e; margin-top: 20px; }
+                    .footer { text-align: center; font-size: 11px; color: #9ca3af; padding: 20px 24px; background: #f9fafb; border-top: 1px solid #e5e7eb; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>Password Reset</h1>
+                        <p>Action Auto CRM System</p>
+                    </div>
+                    <div class="content">
+                        <p style="font-size:15px;">Hi <strong>${fullName}</strong>,</p>
+                        <p style="font-size:14px; color:#4b5563;">We received a request to reset your CRM account password. Use the code below to continue:</p>
+                        <div class="otp-box">
+                            <div class="otp-code">${otp}</div>
+                            <div class="otp-note">This code expires in <strong>15 minutes</strong></div>
+                        </div>
+                        <div class="warning">
+                            If you did not request a password reset, you can safely ignore this email. Your password will not be changed.
+                        </div>
+                    </div>
+                    <div class="footer">
+                        <p><strong>Action Auto CRM</strong> &middot; Do not share this code with anyone</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        await this.sendEmail({
+            to,
+            subject: `Your CRM Password Reset Code: ${otp}`,
+            text: `Hi ${fullName},\n\nYour CRM password reset code is: ${otp}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, ignore this email.\n\n— Action Auto CRM`,
+            html,
+        });
+    }
 }
 
 // Export as singleton instance to maintain compatibility with existing code
@@ -781,4 +836,5 @@ export default {
     sendAppointmentUpdate: emailService.sendAppointmentUpdate.bind(emailService),
     sendAppointmentCancellation: emailService.sendAppointmentCancellation.bind(emailService),
     sendAppointmentReminder: emailService.sendAppointmentReminder.bind(emailService),
+    sendCrmPasswordResetEmail: emailService.sendCrmPasswordResetEmail.bind(emailService),
 };

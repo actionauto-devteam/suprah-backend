@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import TimeLog from '../models/TimeLog.model';
 import { generateCrmToken, CRM_TOKEN_COOKIE } from '../middleware/crmAuth.middleware';
+import emailService from '../services/email.service';
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -441,6 +442,71 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * Forgot Password — send OTP to email
+ * POST /api/crm/forgot-password (public)
+ */
+const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email?.trim()) {
+    throw new ApiError(400, 'Email is required');
+  }
+
+  const user = await CrmUser.findOne({ email: email.trim().toLowerCase() }).select('+resetOtp +resetOtpExpiry');
+
+  // Always return 200 to prevent email enumeration
+  if (!user) {
+    return res.json(new ApiResponse(200, null, 'If that email exists, a reset code has been sent.'));
+  }
+
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  user.resetOtp = otp;
+  user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  await user.save({ validateModifiedOnly: true });
+
+  await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp);
+
+  res.json(new ApiResponse(200, null, 'If that email exists, a reset code has been sent.'));
+});
+
+/**
+ * Confirm Password Reset — verify OTP and set new password
+ * POST /api/crm/reset-password (public)
+ */
+const confirmResetPassword = asyncHandler(async (req: Request, res: Response) => {
+  const { email, otp, newPassword } = req.body;
+
+  if (!email?.trim() || !otp?.trim() || !newPassword) {
+    throw new ApiError(400, 'Email, OTP, and new password are required');
+  }
+
+  if (newPassword.length < 8) {
+    throw new ApiError(400, 'Password must be at least 8 characters');
+  }
+
+  const user = await CrmUser.findOne({ email: email.trim().toLowerCase() }).select('+resetOtp +resetOtpExpiry +password');
+
+  if (!user || !user.resetOtp || !user.resetOtpExpiry) {
+    throw new ApiError(400, 'Invalid or expired reset code');
+  }
+
+  if (new Date() > user.resetOtpExpiry) {
+    throw new ApiError(400, 'Reset code has expired. Please request a new one.');
+  }
+
+  if (user.resetOtp !== otp.trim()) {
+    throw new ApiError(400, 'Invalid reset code');
+  }
+
+  user.password = newPassword;
+  user.resetOtp = undefined;
+  user.resetOtpExpiry = undefined;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, null, 'Password reset successfully'));
+});
+
+/**
  * Reset a CRM user's password (admin only)
  * PATCH /api/crm/users/:id/reset-password
  */
@@ -474,6 +540,8 @@ const resetPassword = asyncHandler(async (req: Request, res: Response) => {
 export default {
   login,
   logout,
+  forgotPassword,
+  confirmResetPassword,
   getMe,
   timeClock,
   getTimeLogs,
