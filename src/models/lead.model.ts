@@ -5,10 +5,9 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ILead extends Document {
   // Organization & User
-  // COMMENTED: organization field for future organization-wide sharing feature
-  // organization?: mongoose.Types.ObjectId;
+  organizationId: mongoose.Types.ObjectId;
   createdBy: mongoose.Types.ObjectId;  // User ID who synced/created the lead
-  
+
   // Contact Information
   firstName: string;
   lastName: string;
@@ -16,7 +15,7 @@ export interface ILead extends Document {
   phone: string;
   senderEmail?: string;
   senderName?: string;
-  
+
   // Email Fields
   subject?: string;
   body?: string;
@@ -27,11 +26,11 @@ export interface ILead extends Document {
   isRead?: boolean;
   isPending?: boolean;
   labels?: string[];
-  
+
   // Communication Channel
   /** Detected communication channel: email, sms, adf, phone, web */
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
-  
+
   // Lead Information
   source: string;
   status: 'New' | 'Contacted' | 'Pending' | 'Appointment Set' | 'Closed';
@@ -51,23 +50,29 @@ export interface ILead extends Document {
     location?: string;
   };
   comments: string;
-  
+
   /** Whether this lead was ingested via the centralized account */
   centralIngestion?: boolean;
-  
+
   createdAt: Date;
   updatedAt: Date;
 }
 
 const LeadSchema: Schema = new Schema({
   // Organization & User - CRITICAL for data isolation
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: true,
+    index: true
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
     index: true
   },
-  
+
   // Contact Information
   firstName: { type: String, default: 'Unknown' },
   lastName: { type: String, default: '' },
@@ -75,7 +80,7 @@ const LeadSchema: Schema = new Schema({
   phone: { type: String },
   senderEmail: { type: String },
   senderName: { type: String },
-  
+
   // Email Fields
   subject: { type: String },
   body: { type: String },
@@ -85,7 +90,7 @@ const LeadSchema: Schema = new Schema({
   isRead: { type: Boolean, default: false },
   isPending: { type: Boolean, default: false },
   labels: [{ type: String }],
-  
+
   // Communication Channel
   channel: {
     type: String,
@@ -93,11 +98,11 @@ const LeadSchema: Schema = new Schema({
     default: 'email',
     index: true
   },
-  
+
   // Lead Information
   source: { type: String, default: 'Email' },
-  status: { 
-    type: String, 
+  status: {
+    type: String,
     enum: ['New', 'Contacted', 'Pending', 'Appointment Set', 'Closed'],
     default: 'New'
   },
@@ -117,7 +122,7 @@ const LeadSchema: Schema = new Schema({
     location: String
   },
   comments: String,
-  
+
   centralIngestion: { type: Boolean, default: false },
 }, { timestamps: true });
 

@@ -90,7 +90,7 @@ const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Avatar image file is required');
   }
 
-  const user = await profileService.updateAvatar(userId, file.filename, orgId);
+  const user = await profileService.updateAvatar(userId, file, orgId);
 
   res.json(
     new ApiResponse(200, user, 'Avatar updated successfully')

@@ -11,10 +11,12 @@ router.use(auth());
 router.post("/location", driverTrackingController.updateLocation);
 router.get("/my-loads", driverTrackingController.getMyLoads);
 router.post("/accept-load", driverTrackingController.acceptLoad);
+router.post("/drop-load", driverTrackingController.dropLoad);
 
-// Admin routes — org required
 router.use(requireOrg);
 router.get("/active", driverTrackingController.getActiveDrivers);
 router.post("/assign-load", driverTrackingController.assignLoad);
+router.post("/remove-load", driverTrackingController.removeLoad);
+router.post("/reassign-load", driverTrackingController.reassignLoad);
 
 export default router;

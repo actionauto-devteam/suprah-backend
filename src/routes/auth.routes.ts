@@ -28,9 +28,10 @@ router.post('/reset-password', authController.resetPassword);
 router.get('/google', (req, res, next) => {
     const role = req.query.role as string;
     const redirect_url = req.query.redirect_url as string;
+    const inviteToken = req.query.inviteToken as string;
     passport.authenticate('google', {
         scope: ['profile', 'email'],
-        state: JSON.stringify({ role, redirect_url }),
+        state: JSON.stringify({ role, redirect_url, inviteToken }),
         session: false
     })(req, res, next);
 });

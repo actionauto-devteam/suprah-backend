@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import TimeLog from '../models/TimeLog.model';
 import { generateCrmToken, CRM_TOKEN_COOKIE } from '../middleware/crmAuth.middleware';
+import emailService from '../services/email.service';
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -223,10 +224,332 @@ const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { logs, total: logs.length }, 'Time logs fetched'));
 });
 
+/**
+ * Generate the next available Employee ID for a given organization,
+ * based on the current year and the highest existing sequence in that org.
+ */
+const resolveNextEmployeeId = async (organizationId: string | undefined): Promise<string> => {
+  const year = new Date().getFullYear();
+
+  // Always search globally — employee IDs must be unique across all organizations
+  // so that login-by-username always resolves to exactly one user.
+  const lastUser = await CrmUser.findOne(
+    { username: new RegExp(`^${year}-`) },
+    { username: 1 },
+    { sort: { username: -1 } }
+  );
+
+  if (!lastUser) return `${year}-00001`;
+
+  const seq = parseInt(lastUser.username.split('-')[1], 10);
+  return `${year}-${String(seq + 1).padStart(5, '0')}`;
+};
+
+/**
+ * Get next available Employee ID
+ * GET /api/crm/next-employee-id
+ */
+const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor) {
+    throw new ApiError(401, 'Not authenticated');
+  }
+
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
+  const employeeId = await resolveNextEmployeeId(actor.organizationId?.toString());
+  res.json(new ApiResponse(200, { employeeId }, 'Next employee ID fetched'));
+});
+
+/**
+ * Create a new CRM user
+ * POST /api/crm/users
+ * Admin only
+ */
+const createUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can create CRM users');
+  }
+
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
+  const { fullName, email, password, role } = req.body;
+
+  if (!fullName?.trim() || !email?.trim() || !password || !role) {
+    throw new ApiError(400, 'fullName, email, password, and role are required');
+  }
+
+  const emailTaken = await CrmUser.findOne({ email: email.trim().toLowerCase() });
+  if (emailTaken) {
+    throw new ApiError(409, 'An account with that email already exists');
+  }
+
+  const employeeId = await resolveNextEmployeeId(actor.organizationId?.toString());
+
+  const user = await CrmUser.create({
+    organizationId: actor.organizationId,
+    fullName: fullName.trim(),
+    username: employeeId,
+    email: email.trim().toLowerCase(),
+    password,
+    role,
+    isActive: true,
+  });
+
+  res.status(201).json(
+    new ApiResponse(201, {
+      _id: user._id,
+      fullName: user.fullName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+    }, 'User created successfully')
+  );
+});
+
+/**
+ * Get all CRM users
+ * GET /api/crm/users
+ * Admin only
+ */
+const getUsers = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can view CRM users');
+  }
+
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Your account is not linked to any organization. Contact your administrator.');
+  }
+
+  const users = await CrmUser.find({ organizationId: actor.organizationId })
+    .select('fullName username email role isActive lastLoginAt createdAt')
+    .sort({ createdAt: -1 });
+
+  res.json(new ApiResponse(200, { users, total: users.length }, 'Users fetched successfully'));
+});
+
+/**
+ * Update a CRM user (fullName, email, role)
+ * PATCH /api/crm/users/:id
+ * Admin only
+ */
+const updateUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can edit CRM users');
+  }
+
+  const { id } = req.params;
+  const { fullName, email, role } = req.body;
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  if (fullName?.trim()) user.fullName = fullName.trim();
+
+  if (email?.trim()) {
+    const emailTaken = await CrmUser.findOne({
+      email: email.trim().toLowerCase(),
+      _id: { $ne: id },
+    });
+    if (emailTaken) throw new ApiError(409, 'An account with that email already exists');
+    user.email = email.trim().toLowerCase();
+  }
+
+  if (role && ['employee', 'manager', 'admin'].includes(role)) {
+    user.role = role;
+  }
+
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(
+    new ApiResponse(200, {
+      _id: user._id,
+      fullName: user.fullName,
+      email: user.email,
+      role: user.role,
+    }, 'User updated successfully')
+  );
+});
+
+/**
+ * Toggle active / inactive status of a CRM user
+ * PATCH /api/crm/users/:id/status
+ * Admin only
+ */
+const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can change user status');
+  }
+
+  const { id } = req.params;
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'You cannot deactivate your own account');
+  }
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  user.isActive = !user.isActive;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(
+    new ApiResponse(
+      200,
+      { isActive: user.isActive },
+      `User ${user.isActive ? 'reactivated' : 'deactivated'} successfully`
+    )
+  );
+});
+
+/**
+ * Delete a CRM user
+ * DELETE /api/crm/users/:id
+ * Admin only
+ */
+const deleteUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can delete CRM users');
+  }
+
+  const { id } = req.params;
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'You cannot delete your own account');
+  }
+
+  const user = await CrmUser.findOneAndDelete({ _id: id, organizationId: actor.organizationId });
+  if (!user) throw new ApiError(404, 'User not found');
+
+  res.json(new ApiResponse(200, null, 'User deleted successfully'));
+});
+
+/**
+ * Forgot Password — send OTP to email
+ * POST /api/crm/forgot-password (public)
+ */
+const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email?.trim()) {
+    throw new ApiError(400, 'Email is required');
+  }
+
+  const user = await CrmUser.findOne({ email: email.trim().toLowerCase() }).select('+resetOtp +resetOtpExpiry');
+
+  // Always return 200 to prevent email enumeration
+  if (!user) {
+    return res.json(new ApiResponse(200, null, 'If that email exists, a reset code has been sent.'));
+  }
+
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  user.resetOtp = otp;
+  user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  await user.save({ validateModifiedOnly: true });
+
+  await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp);
+
+  res.json(new ApiResponse(200, null, 'If that email exists, a reset code has been sent.'));
+});
+
+/**
+ * Confirm Password Reset — verify OTP and set new password
+ * POST /api/crm/reset-password (public)
+ */
+const confirmResetPassword = asyncHandler(async (req: Request, res: Response) => {
+  const { email, otp, newPassword } = req.body;
+
+  if (!email?.trim() || !otp?.trim() || !newPassword) {
+    throw new ApiError(400, 'Email, OTP, and new password are required');
+  }
+
+  if (newPassword.length < 8) {
+    throw new ApiError(400, 'Password must be at least 8 characters');
+  }
+
+  const user = await CrmUser.findOne({ email: email.trim().toLowerCase() }).select('+resetOtp +resetOtpExpiry +password');
+
+  if (!user || !user.resetOtp || !user.resetOtpExpiry) {
+    throw new ApiError(400, 'Invalid or expired reset code');
+  }
+
+  if (new Date() > user.resetOtpExpiry) {
+    throw new ApiError(400, 'Reset code has expired. Please request a new one.');
+  }
+
+  if (user.resetOtp !== otp.trim()) {
+    throw new ApiError(400, 'Invalid reset code');
+  }
+
+  user.password = newPassword;
+  user.resetOtp = undefined;
+  user.resetOtpExpiry = undefined;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, null, 'Password reset successfully'));
+});
+
+/**
+ * Reset a CRM user's password (admin only)
+ * PATCH /api/crm/users/:id/reset-password
+ */
+const resetPassword = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can reset user passwords');
+  }
+
+  const { id } = req.params;
+  const { newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 8) {
+    throw new ApiError(400, 'Password must be at least 8 characters');
+  }
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, 'Use the change password feature to update your own password');
+  }
+
+  const user = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId }).select('+password');
+  if (!user) throw new ApiError(404, 'User not found');
+
+  user.password = newPassword;
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, null, 'Password reset successfully'));
+});
+
 export default {
   login,
   logout,
+  forgotPassword,
+  confirmResetPassword,
   getMe,
   timeClock,
   getTimeLogs,
+  getNextEmployeeId,
+  createUser,
+  getUsers,
+  updateUser,
+  toggleUserStatus,
+  deleteUser,
+  resetPassword,
 };

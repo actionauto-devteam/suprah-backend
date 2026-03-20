@@ -1,9 +1,10 @@
 import mongoose, { Document, Schema } from "mongoose";
 
-export type DriverStatus = "on-route" | "idle" | "offline";
+export type DriverStatus = "on-route" | "idle" | "on-break" | "waiting" | "offline";
 
 export interface IDriverLocation extends Document {
   userId: mongoose.Types.ObjectId;
+  organizationId: mongoose.Types.ObjectId;
   status: DriverStatus;
   coords: {
     lat: number;
@@ -24,9 +25,15 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
       unique: true,
       index: true,
     },
+    organizationId: {
+      type: Schema.Types.ObjectId,
+      ref: "Organization",
+      required: true,
+      index: true,
+    },
     status: {
       type: String,
-      enum: ["on-route", "idle", "offline"],
+      enum: ["on-route", "idle", "on-break", "waiting", "offline"],
       default: "idle",
     },
     coords: {

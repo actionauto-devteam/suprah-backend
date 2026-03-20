@@ -153,7 +153,20 @@ export const validateInvitation = asyncHandler(async (req: Request, res: Respons
 
     // 3. Check Status
     if (invite.status === 'accepted') {
-        throw new ApiError(400, 'Invitation has already been accepted');
+        // Return a successful validation even if accepted, but flag it
+        // This allows the frontend to show "You are already a member" or redirect
+        return res.status(200).json({
+            success: true,
+            data: {
+                organizationName: (invite.organizationId as any).name,
+                inviterName: (invite.inviterId as any)?.name || 'Someone',
+                email: invite.email,
+                role: invite.role,
+                _id: invite._id,
+                token: invite.token,
+                isAlreadyAccepted: true
+            },
+        });
     }
 
     if (invite.status !== 'pending') {
@@ -184,10 +197,22 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(401, 'You must be logged in to accept an invitation');
     }
 
-    const invite = await Invitation.findOne({ token, status: 'pending' });
+    let invite = await Invitation.findOne({ token, status: 'pending' });
 
     if (!invite) {
-        throw new ApiError(404, 'Invitation not found or invalid');
+        // Check if it's already accepted by this user
+        const acceptedInvite = await Invitation.findOne({ token, status: 'accepted' });
+        if (acceptedInvite && acceptedInvite.organizationId?.toString() === user.organizationId?.toString()) {
+            return res.status(200).json({
+                success: true,
+                message: 'You are already a member of this organization',
+                data: {
+                    organizationId: acceptedInvite.organizationId,
+                    role: acceptedInvite.role
+                }
+            });
+        }
+        throw new ApiError(404, 'Invitation not found or already used');
     }
 
     if (invite.expiresAt < new Date()) {
@@ -211,9 +236,14 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
     const finalRole = (user.role === 'admin') ? 'admin' : invite.role;
     (user as any).organizationRole = finalRole;
 
-    // Only promote customer to employee if the invitation is for an employee role
-    if (user.role === 'customer' && (invite.role === 'admin' || invite.role === 'member')) {
-        user.role = 'employee';
+    // Promote customer to their invited role
+    if (user.role === 'customer') {
+        if (invite.role === 'admin' || invite.role === 'member') {
+            user.role = 'employee';
+        } else if (invite.role === 'driver') {
+            user.role = 'driver';
+            user.isApproved = true; // Invited drivers are trusted by the dealership that invited them
+        }
     }
 
     user.onboardingCompleted = true;

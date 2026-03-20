@@ -26,6 +26,7 @@ import crmBiometricRoute from "./crm-biometric.routes";
 import supraSpaceRoute from "./supraspace.route";
 import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
+import devToolsRoute from "./devTools.routes";
 import pushRoute from "./push.route";
 
 const router = express.Router();
@@ -139,6 +140,10 @@ const defaultRoutes = [
   {
     path: "/auth",
     route: authRoute,
+  },
+  {
+    path: "/dev",
+    route: devToolsRoute,
   },
   {
     path: "/push",

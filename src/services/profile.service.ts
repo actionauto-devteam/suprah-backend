@@ -4,12 +4,56 @@ import bcrypt from 'bcryptjs';
 import config from '../config';
 import notificationService from './notification.service';
 import activityService from './activity.service';
+import { storageService } from './storage.service';
 import fs from 'fs';
 import path from 'path';
 
 /**
- * Get user profile with extended information
+ * Update avatar/profile picture
+ * Uploads to Cloudflare R2 and updates DB. Deletes old avatar if it exists.
  */
+const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
+  const existingUser = await User.findById(userId).select('avatar');
+  if (!existingUser) {
+    throw new ApiError(404, 'User not found');
+  }
+
+  // Upload new avatar to R2
+  const avatarUrl = await storageService.upload(file, 'avatars');
+
+  // Delete old avatar (from R2 or local)
+  if (existingUser.avatar) {
+    if (existingUser.avatar.startsWith('http')) {
+      await storageService.delete(existingUser.avatar);
+    } else if (existingUser.avatar.startsWith('/uploads/avatars/')) {
+      // Cleanup legacy local file
+      const oldFilename = existingUser.avatar.replace('/uploads/avatars/', '');
+      const oldFilePath = path.join(__dirname, '../../uploads/avatars', oldFilename);
+      try {
+        if (fs.existsSync(oldFilePath)) {
+          fs.unlinkSync(oldFilePath);
+        }
+      } catch (err) {
+        console.error('Failed to delete old local avatar file:', err);
+      }
+    }
+  }
+
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { $set: { avatar: avatarUrl, lastActive: new Date() } },
+    { new: true, runValidators: true }
+  ).select('-password');
+
+  if (!user) {
+    throw new ApiError(404, 'User not found');
+  }
+
+  // Log activity
+  await activityService.logAvatarUpdate(userId, orgId);
+
+  return user;
+};
 const getProfile = async (userId: string) => {
   const user = await User.findById(userId).select('-password');
 
@@ -25,10 +69,12 @@ const getProfile = async (userId: string) => {
   const Shipment = (await import('../models/Shipment.model')).default;
   const Appointment = (await import('../models/Appointment.model')).default;
 
+  const orgId = user.organizationId?.toString();
+
   const [totalQuotes, totalShipments, totalAppointments] = await Promise.all([
-    Quote.countDocuments({ userId }).catch(() => 0),
-    Shipment.countDocuments({ userId }).catch(() => 0),
-    Appointment.countDocuments({ userId }).catch(() => 0),
+    Quote.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
+    Shipment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
+    Appointment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
   ]);
 
   // Build security status
@@ -206,53 +252,8 @@ const updatePersonalInfo = async (userId: string, personalInfo: Partial<IPersona
 };
 
 /**
- * Update avatar/profile picture (file-based)
- * Saves avatar as a file in uploads/avatars/ and stores a URL in the DB.
- * Deletes the old avatar file if the user already had one stored locally.
- */
-const updateAvatar = async (userId: string, avatarFilename: string, orgId?: string) => {
-  // Build the public URL for the avatar
-  const avatarUrl = `/uploads/avatars/${avatarFilename}`;
-
-  // Get the current user to check for existing avatar file
-  const existingUser = await User.findById(userId).select('avatar');
-  if (!existingUser) {
-    throw new ApiError(404, 'User not found');
-  }
-
-  // Delete old avatar file if it was a local upload
-  if (existingUser.avatar && existingUser.avatar.startsWith('/uploads/avatars/')) {
-    const oldFilename = existingUser.avatar.replace('/uploads/avatars/', '');
-    const oldFilePath = path.join(__dirname, '../../uploads/avatars', oldFilename);
-    try {
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
-      }
-    } catch (err) {
-      console.error('Failed to delete old avatar file:', err);
-      // Don't throw — non-critical
-    }
-  }
-
-  const user = await User.findByIdAndUpdate(
-    userId,
-    { $set: { avatar: avatarUrl, lastActive: new Date() } },
-    { new: true, runValidators: true }
-  ).select('-password');
-
-  if (!user) {
-    throw new ApiError(404, 'User not found');
-  }
-
-  // Log activity
-  await activityService.logAvatarUpdate(userId, orgId);
-
-  return user;
-};
-
-/**
  * Remove avatar/profile picture
- * Deletes the avatar file and sets avatar to null.
+ * Deletes from R2 or local and sets avatar to null.
  */
 const removeAvatar = async (userId: string, orgId?: string) => {
   const existingUser = await User.findById(userId).select('avatar');
@@ -260,16 +261,20 @@ const removeAvatar = async (userId: string, orgId?: string) => {
     throw new ApiError(404, 'User not found');
   }
 
-  // Delete the avatar file if it was a local upload
-  if (existingUser.avatar && existingUser.avatar.startsWith('/uploads/avatars/')) {
-    const filename = existingUser.avatar.replace('/uploads/avatars/', '');
-    const filePath = path.join(__dirname, '../../uploads/avatars', filename);
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+  // Delete from R2 or local
+  if (existingUser.avatar) {
+    if (existingUser.avatar.startsWith('http')) {
+      await storageService.delete(existingUser.avatar);
+    } else if (existingUser.avatar.startsWith('/uploads/avatars/')) {
+      const filename = existingUser.avatar.replace('/uploads/avatars/', '');
+      const filePath = path.join(__dirname, '../../uploads/avatars', filename);
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (err) {
+        console.error('Failed to delete legacy local avatar file:', err);
       }
-    } catch (err) {
-      console.error('Failed to delete avatar file:', err);
     }
   }
 
@@ -294,6 +299,11 @@ const removeAvatar = async (userId: string, orgId?: string) => {
  */
 const getDriverStats = async (userId: string) => {
   const Shipment = (await import('../models/Shipment.model')).default;
+
+  // Drivers are global, but we scope stats to the current requesting organization if applicable
+  // If we want global stats, we'd omit organizationId, but for multi-tenancy, orgs should see what the driver did for THEM.
+  // Note: This function might need an orgId parameter passed from the controller.
+  // For now, consistent with other services, we'll look for or require it.
 
   // Total deliveries assigned to this driver
   const totalAssigned = await Shipment.countDocuments({ assignedDriverId: userId }).catch(() => 0);

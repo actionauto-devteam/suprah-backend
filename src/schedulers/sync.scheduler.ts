@@ -13,6 +13,7 @@ export const initSyncScheduler = () => {
     cron.schedule(schedule, async () => {
         console.log(`[Scheduler] Starting automated inventory sync...`);
         try {
+            // syncInventory() handles cache invalidation (veh:*) internally on success
             const result = await syncService.syncInventory();
             console.log(`[Scheduler] Sync completed successfully:`, result);
         } catch (error: any) {
@@ -20,3 +21,4 @@ export const initSyncScheduler = () => {
         }
     });
 };
+

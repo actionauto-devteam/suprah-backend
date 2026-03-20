@@ -2,6 +2,7 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
 export interface ICrmUser extends Document {
+  organizationId: mongoose.Types.ObjectId;
   fullName: string;
   username: string; // Employee ID (e.g., 2026-00001)
   email: string;
@@ -10,17 +11,25 @@ export interface ICrmUser extends Document {
   role: 'employee' | 'manager' | 'admin';
   isActive: boolean;
   lastLoginAt?: Date;
+  resetOtp?: string;
+  resetOtpExpiry?: Date;
   createdAt: Date;
   updatedAt: Date;
   isPasswordMatch(password: string): Promise<boolean>;
 }
 
 export interface ICrmUserModel extends Model<ICrmUser> {
-  isUsernameTaken(username: string, excludeId?: string): Promise<boolean>;
+  isUsernameTaken(username: string, organizationId: string, excludeId?: string): Promise<boolean>;
 }
 
 const CrmUserSchema = new Schema<ICrmUser>(
   {
+    organizationId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Organization',
+      required: false, // optional for existing records; required for all new records going forward
+      index: true,
+    },
     fullName: {
       type: String,
       required: true,
@@ -29,9 +38,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
     username: {
       type: String,
       required: true,
-      unique: true,
       trim: true,
-      index: true,
     },
     email: {
       type: String,
@@ -62,18 +69,30 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: Date,
       default: null,
     },
+    resetOtp: {
+      type: String,
+      select: false,
+    },
+    resetOtpExpiry: {
+      type: Date,
+      select: false,
+    },
   },
   {
     timestamps: true,
   }
 );
 
-// Static: check if username is taken
+// Compound unique: username must be unique per organization
+CrmUserSchema.index({ organizationId: 1, username: 1 }, { unique: true });
+
+// Static: check if username is taken within the same organization
 CrmUserSchema.statics.isUsernameTaken = async function (
   username: string,
+  organizationId: string,
   excludeId?: string
 ): Promise<boolean> {
-  const user = await this.findOne({ username, _id: { $ne: excludeId } });
+  const user = await this.findOne({ username, organizationId, _id: { $ne: excludeId } });
   return !!user;
 };
 

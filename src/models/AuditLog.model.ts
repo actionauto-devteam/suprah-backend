@@ -8,6 +8,7 @@ export interface IAuditLog extends Document {
     reason: string;
     performedBy?: mongoose.Types.ObjectId;
     timestamp: Date;
+    organizationId?: string;
 }
 
 const AuditLogSchema: Schema = new Schema(
@@ -38,6 +39,7 @@ const AuditLogSchema: Schema = new Schema(
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         timestamp: { type: Date, default: Date.now },
+        organizationId: { type: String, index: true },
     },
     {
         timestamps: true,

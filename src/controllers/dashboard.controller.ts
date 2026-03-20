@@ -2,38 +2,33 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { DashboardService } from '../services/dashboard.service';
 import { ApiResponse } from '../utils/ApiResponse';
+import cacheService from '../services/cache.service';
 
-// Simple in-memory cache
-const dashboardCache = new Map<string, { data: any, expiry: number }>();
-const CACHE_TTL = 60 * 1000; // 60 seconds
+const CACHE_TTL_SECONDS = 60 * 10; // 10 minutes
 
 /**
- * Get unified dashboard metrics with caching
+ * Get unified dashboard metrics with Redis caching
  */
 const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const { period, month } = req.query;
 
-    // Create a unique cache key based on org and filters
-    const cacheKey = `${orgId}-${period}-${month}`;
-    const now = Date.now();
+    const cacheKey = `dash:metrics:${orgId}:${period || '1Y'}:${month || 'all'}`;
 
-    const cached = dashboardCache.get(cacheKey);
-    if (cached && cached.expiry > now) {
-        return res.json(new ApiResponse(200, cached.data, 'Dashboard metrics fetched from cache'));
+    // 1. Try cache first
+    const cached = await cacheService.get(cacheKey);
+    if (cached) {
+        return res.json(new ApiResponse(200, cached, 'Dashboard metrics fetched from cache'));
     }
 
-    // Fetch fresh data from service
+    // 2. Cache miss — fetch from DB
     const metrics = await DashboardService.getDashboardMetrics(
         orgId,
         period as string || '1Y'
     );
 
-    // Update cache
-    dashboardCache.set(cacheKey, {
-        data: metrics,
-        expiry: now + CACHE_TTL
-    });
+    // 3. Store in Redis
+    await cacheService.set(cacheKey, metrics, CACHE_TTL_SECONDS);
 
     res.json(new ApiResponse(200, metrics, 'Dashboard metrics fetched successfully'));
 });
