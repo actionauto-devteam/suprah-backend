@@ -15,6 +15,7 @@ import {
   extractADFFromBody,
   detectChannel,
 } from '../utils/adfParser';
+import SystemConfig from '../models/SystemConfig.model';
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -27,17 +28,48 @@ const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev
  */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 
-function getCentralOAuth2Client() {
+async function getCentralOAuth2Client() {
   const oauth2Client = new google.auth.OAuth2(
     process.env.CENTRAL_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID,
     process.env.CENTRAL_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET,
     process.env.CENTRAL_GOOGLE_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI,
   );
-  oauth2Client.setCredentials({
+
+  // Try to load tokens from SystemConfig first
+  const config = await SystemConfig.findOne({ key: 'central_gmail_tokens' });
+  let credentials = {
     access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
     refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
     expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
+  };
+
+  if (config) {
+    console.log('[CENTRAL-AUTH] Using persistent tokens from database');
+    credentials = { ...credentials, ...(config.value as any) };
+  } else {
+    console.log('[CENTRAL-AUTH] Using tokens from environment variables');
+  }
+
+  oauth2Client.setCredentials(credentials);
+
+  // Persistence listener: update database when tokens are refreshed
+  oauth2Client.on('tokens', async (tokens) => {
+    try {
+      console.log('[CENTRAL-AUTH] Tokens refreshed, updating database...');
+      await SystemConfig.findOneAndUpdate(
+        { key: 'central_gmail_tokens' },
+        {
+          key: 'central_gmail_tokens',
+          value: tokens,
+          description: 'OAuth2 tokens for centralized Gmail lead ingestion'
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } catch (err) {
+      console.error('[CENTRAL-AUTH] Failed to persist refreshed tokens:', err);
+    }
   });
+
   return oauth2Client;
 }
 
@@ -376,7 +408,7 @@ export const replyToInquiry = async (req: Request, res: Response) => {
 
     // Send reply via centralized Gmail account
     try {
-      const oauth2Client = getCentralOAuth2Client();
+      const oauth2Client = await getCentralOAuth2Client();
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
       const user = await User.findById(userId);
       const senderDisplay = user?.email || CENTRAL_EMAIL;
@@ -463,7 +495,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
       );
     }
 
-    const oauth2Client = getCentralOAuth2Client();
+    const oauth2Client = await getCentralOAuth2Client();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // ── STRICT FILTER + full pagination — no emails missed ──
@@ -701,7 +733,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
   }
 
   try {
-    const oauth2Client = getCentralOAuth2Client();
+    const oauth2Client = await getCentralOAuth2Client();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     const threadData = await gmail.users.threads.get({

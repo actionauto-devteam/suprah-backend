@@ -56,11 +56,11 @@ jobs:
             
             # Pull latest images
             docker compose -f docker-compose.api.yml pull
-            docker compose -f docker-compose.ftp.yml pull
+            # docker compose -f docker-compose.ftp.yml pull
             
             # Start services
             docker compose -f docker-compose.api.yml up -d
-            docker compose -f docker-compose.ftp.yml up -d
+            # docker compose -f docker-compose.ftp.yml up -d
             
             # Verify status
             docker ps
