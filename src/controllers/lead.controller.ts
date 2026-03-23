@@ -73,6 +73,34 @@ async function getCentralOAuth2Client() {
   return oauth2Client;
 }
 
+/**
+ * Robust retry wrapper with exponential backoff for Google API calls.
+ * Handles 403 (Quota Exceeded) and 429 (Too Many Requests).
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 1000): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const isQuotaError = error.code === 403 && error.message?.includes('Quota exceeded');
+      const isRateLimitError = error.code === 429;
+
+      if ((isQuotaError || isRateLimitError) && attempt < maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt);
+        console.warn(`[GMAIL-RETRY] Quota hit. Retrying in ${delay}ms (Attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ─────────────────────────────────────────────────────────────
 // Handle incoming ADF XML (public endpoint for email webhooks)
 // ─────────────────────────────────────────────────────────────
@@ -503,7 +531,9 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     console.log(`[CENTRAL-SYNC] Fetching recent emails (30d) from: ${LEADS_SOURCE_EMAIL}`);
     let messages: { id: string, threadId: string }[];
     try {
-      messages = await fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:30d`);
+      messages = await withRetry(() =>
+        fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:30d`)
+      );
     } catch (gmailError: any) {
       console.error(`[CENTRAL-SYNC] Gmail API error:`, gmailError.message);
       throw new Error(`Gmail API error: ${gmailError.message}`);
@@ -532,11 +562,16 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         // 🚀 CRITICAL OPTIMIZATION: Check if thread is already processed BEFORE calling messages.get
         if (existingThreadIds.has(message.threadId)) continue;
 
-        const details = await gmail.users.messages.get({
-          userId: 'me',
-          id: message.id!,
-          format: 'full',
-        });
+        // 🐢 RATE LIMITING: Wait 250ms between full message fetches to avoid quota bursts
+        await sleep(250);
+
+        const details = await withRetry(() =>
+          gmail.users.messages.get({
+            userId: 'me',
+            id: message.id!,
+            format: 'full',
+          })
+        );
 
         const headers = details.data.payload?.headers || [];
         const getHeader = (name: string) =>
