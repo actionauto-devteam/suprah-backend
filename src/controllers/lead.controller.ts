@@ -459,8 +459,8 @@ async function fetchAllMessageIds(
   gmail: any,
   query: string,
   maxPerPage = 500,
-): Promise<{ id: string }[]> {
-  const all: { id: string }[] = [];
+): Promise<{ id: string, threadId: string }[]> {
+  const all: { id: string, threadId: string }[] = [];
   let pageToken: string | undefined = undefined;
 
   do {
@@ -498,19 +498,20 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const oauth2Client = await getCentralOAuth2Client();
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // ── STRICT FILTER + full pagination — no emails missed ──
-    console.log(`[CENTRAL-SYNC] Fetching all emails from: ${LEADS_SOURCE_EMAIL}`);
-    let messages: { id: string }[];
+    // ── STRICT FILTER + full pagination ──
+    // Use newer_than:30d to avoid fetching the entire history every time
+    console.log(`[CENTRAL-SYNC] Fetching recent emails (30d) from: ${LEADS_SOURCE_EMAIL}`);
+    let messages: { id: string, threadId: string }[];
     try {
-      messages = await fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL}`);
+      messages = await fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:30d`);
     } catch (gmailError: any) {
       console.error(`[CENTRAL-SYNC] Gmail API error:`, gmailError.message);
       throw new Error(`Gmail API error: ${gmailError.message}`);
     }
 
-    console.log(`[CENTRAL-SYNC] Found ${messages.length} total emails from ${LEADS_SOURCE_EMAIL}`);
+    console.log(`[CENTRAL-SYNC] Found ${messages.length} recent emails from ${LEADS_SOURCE_EMAIL}`);
 
-    // Pre-fetch all threadIds already stored for this user to avoid per-message DB queries
+    // Pre-fetch all threadIds already stored for this user
     const existingThreadIds = new Set(
       (await Lead.find({ organizationId: req.orgId, threadId: { $exists: true, $ne: null } })
         .select('threadId')
@@ -522,14 +523,15 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
     for (const message of messages) {
       try {
+        // 🚀 CRITICAL OPTIMIZATION: Check if thread is already processed BEFORE calling messages.get
+        // This saves 5 quota units per already-synced message.
+        if (existingThreadIds.has(message.threadId)) continue;
+
         const details = await gmail.users.messages.get({
           userId: 'me',
           id: message.id!,
           format: 'full',
         });
-
-        // Skip already-synced threads without hitting DB again
-        if (existingThreadIds.has(details.data.threadId)) continue;
 
         const headers = details.data.payload?.headers || [];
         const getHeader = (name: string) =>
