@@ -527,12 +527,12 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // ── STRICT FILTER + full pagination ──
-    // Use newer_than:30d to avoid fetching the entire history every time
-    console.log(`[CENTRAL-SYNC] Fetching recent emails (30d) from: ${LEADS_SOURCE_EMAIL}`);
+    // Use newer_than:7d to keep it light and avoid scanning old history repetitively
+    console.log(`[CENTRAL-SYNC] Fetching recent emails (7d) from: ${LEADS_SOURCE_EMAIL}`);
     let messages: { id: string, threadId: string }[];
     try {
       messages = await withRetry(() =>
-        fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:30d`)
+        fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:7d`)
       );
     } catch (gmailError: any) {
       console.error(`[CENTRAL-SYNC] Gmail API error:`, gmailError.message);
@@ -550,11 +550,11 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
     let syncedCount = 0;
     const errors: string[] = [];
-    const MAX_SYNC_PER_RUN = 50; // Safety limit per click to avoid quota kills
+    const MAX_SYNC_PER_RUN = 20; // Lower limit per burst for better success probability
 
     for (const message of messages) {
       if (syncedCount >= MAX_SYNC_PER_RUN) {
-        console.log(`[CENTRAL-SYNC] Reached limit of ${MAX_SYNC_PER_RUN} per run. Stopping this batch.`);
+        console.log(`[CENTRAL-SYNC] Reached safe limit of ${MAX_SYNC_PER_RUN} per run. Stopping this batch.`);
         break;
       }
 
@@ -562,16 +562,27 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         // 🚀 CRITICAL OPTIMIZATION: Check if thread is already processed BEFORE calling messages.get
         if (existingThreadIds.has(message.threadId)) continue;
 
-        // 🐢 RATE LIMITING: Wait 250ms between full message fetches to avoid quota bursts
-        await sleep(250);
+        // 🐢 AGGRESSIVE RATE LIMITING: Wait 1s between full message fetches (Gmail "Queries per minute" is tight)
+        await sleep(1000);
 
-        const details = await withRetry(() =>
-          gmail.users.messages.get({
-            userId: 'me',
-            id: message.id!,
-            format: 'full',
-          })
-        );
+        let details: any;
+        try {
+          details = await withRetry(() =>
+            gmail.users.messages.get({
+              userId: 'me',
+              id: message.id!,
+              format: 'full',
+            })
+          );
+        } catch (retryError: any) {
+          // If persistent quota error after retries, stop the loop (Partial Success is better than crash)
+          const isQuota = retryError.code === 403 || retryError.code === 429;
+          if (isQuota) {
+            console.warn(`[CENTRAL-SYNC] Persistent Quota hit. Ending this sync session early with partial results.`);
+            break;
+          }
+          throw retryError;
+        }
 
         const headers = details.data.payload?.headers || [];
         const getHeader = (name: string) =>
@@ -588,6 +599,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         // ── RELAXED GUARD: Gmail query already filters by sender, so we can be lenient ──
         if (emailAddr && !emailAddr.includes(LEADS_SOURCE_EMAIL.toLowerCase())) {
           console.log(`[CENTRAL-SYNC] Skipping unexpected secondary sender in thread: ${emailAddr}`);
+          existingThreadIds.add(message.threadId); // Don't look at this thread again in this run
           continue;
         }
 
@@ -669,22 +681,32 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           comments,
         });
 
-        await newLead.save();
-        existingThreadIds.add(details.data.threadId);
-        syncedCount++;
-        console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);
+        try {
+          await newLead.save();
+          existingThreadIds.add(details.data.threadId);
+          syncedCount++;
+          console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);
 
-        await AuditLog.create({
-          entityType: 'Lead',
-          entityId: newLead._id,
-          action: 'CREATE',
-          reason: `New Lead via Centralized Sync (${parsed.channel}) from ${LEADS_SOURCE_EMAIL}`,
-          performedBy: userId,
-          changes: { email: leadEmail, subject, channel: parsed.channel, senderEmail: LEADS_SOURCE_EMAIL },
-        });
+          await AuditLog.create({
+            entityType: 'Lead',
+            entityId: newLead._id,
+            action: 'CREATE',
+            reason: `New Lead via Centralized Sync (${parsed.channel}) from ${LEADS_SOURCE_EMAIL}`,
+            performedBy: userId,
+            changes: { email: leadEmail, subject, channel: parsed.channel, senderEmail: LEADS_SOURCE_EMAIL },
+          });
+        } catch (saveError: any) {
+          // Handle Duplicate Key error (E11000) gracefully
+          if (saveError.code === 11000) {
+            console.log(`[CENTRAL-SYNC] Skipping already synced lead (Duplicate Key): ${message.id}`);
+            existingThreadIds.add(message.threadId);
+            continue;
+          }
+          throw saveError;
+        }
 
-      } catch (error) {
-        console.error(`[CENTRAL-SYNC] Error processing message ${message.id}:`, error);
+      } catch (error: any) {
+        console.error(`[CENTRAL-SYNC] Error processing message ${message.id}:`, error.message);
         errors.push(`Message ${message.id}: Processing failed`);
       }
     }
