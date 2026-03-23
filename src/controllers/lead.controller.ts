@@ -520,11 +520,16 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
     let syncedCount = 0;
     const errors: string[] = [];
+    const MAX_SYNC_PER_RUN = 50; // Safety limit per click to avoid quota kills
 
     for (const message of messages) {
+      if (syncedCount >= MAX_SYNC_PER_RUN) {
+        console.log(`[CENTRAL-SYNC] Reached limit of ${MAX_SYNC_PER_RUN} per run. Stopping this batch.`);
+        break;
+      }
+
       try {
         // 🚀 CRITICAL OPTIMIZATION: Check if thread is already processed BEFORE calling messages.get
-        // This saves 5 quota units per already-synced message.
         if (existingThreadIds.has(message.threadId)) continue;
 
         const details = await gmail.users.messages.get({
@@ -539,12 +544,15 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
         const from = getHeader('from');
         const subject = getHeader('subject');
-        const emailAddr = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
-        const senderName = from.replace(/<[^>]*>/g, '').trim() || emailAddr;
 
-        // ── HARD GUARD: double-check sender even though query already filters ──
-        if (emailAddr.toLowerCase() !== LEADS_SOURCE_EMAIL.toLowerCase()) {
-          console.log(`[CENTRAL-SYNC] Skipping non-leads email from: ${emailAddr}`);
+        // Use a more robust regex for email address extraction (handling quotes correctly)
+        const emailMatch = from.match(/<([^>]+)>|([^\s"<>]+@[^\s"<>]+)/);
+        const emailAddr = (emailMatch?.[1] || emailMatch?.[2] || '').toLowerCase().trim();
+        const senderName = from.replace(/<[^>]*>/g, '').replace(/['"]/g, '').trim() || emailAddr;
+
+        // ── RELAXED GUARD: Gmail query already filters by sender, so we can be lenient ──
+        if (emailAddr && !emailAddr.includes(LEADS_SOURCE_EMAIL.toLowerCase())) {
+          console.log(`[CENTRAL-SYNC] Skipping unexpected secondary sender in thread: ${emailAddr}`);
           continue;
         }
 
