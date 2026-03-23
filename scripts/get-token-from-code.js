@@ -5,10 +5,17 @@ const path = require('path');
 // Load .env from root
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-const CODE = '4/0AfrIepC-H5IRkCHLIuNPlOCe2Fy6MVT4I_-XcWlRaY_15G530zzQTf1NB-65MTq49CaTBg';
 const REDIRECT_URI = 'http://localhost:5000/api/google-calendar/callback';
 
 async function exchange() {
+    const code = process.argv[2];
+
+    if (!code) {
+        console.error('❌ Please provide the authorization code as an argument.');
+        console.log('Usage: node scripts/get-token-from-code.js 4/0AfrIepC...');
+        process.exit(1);
+    }
+
     console.log('\n--- 🧪 Token Exchange (JS Version) ---');
 
     const clientId = process.env.CENTRAL_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
@@ -23,7 +30,7 @@ async function exchange() {
 
     try {
         console.log('Exchanging code for tokens...');
-        const res = await oauth2Client.getToken(CODE);
+        const res = await oauth2Client.getToken(code);
         const tokens = res.tokens;
 
         console.log('\n✅ Tokens retrieved successfully:');
