@@ -56,6 +56,8 @@ app.use(express.text({ type: ['application/xml', 'text/xml'] }));
 // Static file serving (Limited to non-sensitive assets)
 // ========================================
 app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
+app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
+app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
 
 // ========================================
 // CORS CONFIGURATION
