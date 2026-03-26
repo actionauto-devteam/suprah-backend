@@ -375,6 +375,25 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
 
+    const { trailerTypeRequired, vehicleCount, isPostedToBoard, preDispatchNotes } = req.body;
+    if (trailerTypeRequired !== undefined) updateData.trailerTypeRequired = trailerTypeRequired;
+    if (vehicleCount !== undefined) updateData.vehicleCount = vehicleCount;
+    if (isPostedToBoard !== undefined) updateData.isPostedToBoard = Boolean(isPostedToBoard);
+    if (preDispatchNotes !== undefined) updateData.preDispatchNotes = preDispatchNotes;
+
+    const {
+        carrierPayAmount, copCodAmount, specialInstructions, loadSpecificTerms,
+        desiredDeliveryDate, internalLoadId, originContact, destinationContact,
+    } = req.body;
+    if (carrierPayAmount !== undefined) updateData.carrierPayAmount = carrierPayAmount;
+    if (copCodAmount !== undefined) updateData.copCodAmount = copCodAmount;
+    if (specialInstructions !== undefined) updateData.specialInstructions = specialInstructions;
+    if (loadSpecificTerms !== undefined) updateData.loadSpecificTerms = loadSpecificTerms;
+    if (desiredDeliveryDate !== undefined) updateData.desiredDeliveryDate = desiredDeliveryDate ? new Date(desiredDeliveryDate) : null;
+    if (internalLoadId !== undefined) updateData.internalLoadId = internalLoadId;
+    if (originContact !== undefined) updateData.originContact = originContact;
+    if (destinationContact !== undefined) updateData.destinationContact = destinationContact;
+
     const shipment = await Shipment.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
         updateData,
