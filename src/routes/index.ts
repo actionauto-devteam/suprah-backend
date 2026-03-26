@@ -13,6 +13,7 @@ import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import driverRequestRoute from "./driverRequest.routes";
+import driverProfileRoute from "./driverProfile.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import driverPayoutRoute from "./driverPayout.routes";
@@ -102,6 +103,10 @@ const defaultRoutes = [
   {
     path: "/driver-requests",
     route: driverRequestRoute,
+  },
+  {
+    path: "/driver-profile",
+    route: driverProfileRoute,
   },
   {
     path: "/service",

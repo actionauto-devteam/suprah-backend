@@ -12,11 +12,17 @@ router.post("/location", driverTrackingController.updateLocation);
 router.get("/my-loads", driverTrackingController.getMyLoads);
 router.post("/accept-load", driverTrackingController.acceptLoad);
 router.post("/drop-load", driverTrackingController.dropLoad);
+router.get("/available-loads", driverTrackingController.getAvailableLoads);
+router.post("/request-load", driverTrackingController.requestLoad);
+router.get("/my-requests", driverTrackingController.getMyRequests);
 
 router.use(requireOrg);
 router.get("/active", driverTrackingController.getActiveDrivers);
 router.post("/assign-load", driverTrackingController.assignLoad);
 router.post("/remove-load", driverTrackingController.removeLoad);
 router.post("/reassign-load", driverTrackingController.reassignLoad);
+router.get("/load-requests", driverTrackingController.getLoadRequests);
+router.post("/approve-request", driverTrackingController.approveLoadRequest);
+router.post("/reject-request", driverTrackingController.rejectLoadRequest);
 
 export default router;

@@ -6,6 +6,7 @@ import DriverLocation, { DriverStatus } from "../models/DriverLocation.model";
 import Shipment from "../models/Shipment.model";
 import User, { IUser } from "../models/User.model";
 import AuditLog from "../models/AuditLog.model";
+import DriverProfile from "../models/DriverProfile.model";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { getSocketIO } from "../utils/socketEmitter";
@@ -155,22 +156,47 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  const driverUserIds = locations
+    .filter((location: any) => location.userId && location.userId.role === "driver")
+    .map((location: any) => location.userId._id);
+
+  const driverProfiles = await DriverProfile.find(
+    { userId: { $in: driverUserIds } },
+    "userId trailerType maxVehicleCapacity operationalStatus profileCompletionScore isComplianceExpired truckMake truckModel"
+  ).lean();
+
+  const profileByUserId = new Map(
+    driverProfiles.map((p: any) => [p.userId.toString(), p])
+  );
+
   const data = locations
     .filter((location: any) => location.userId && location.userId.role === "driver")
-    .map((location: any) => ({
-      id: location._id.toString(),
-      status: location.status,
-      coords: location.coords,
-      lastSeenAt: location.lastSeenAt,
-      driver: {
-        id: location.userId._id.toString(),
-        name: location.userId.name,
-        email: location.userId.email,
-        avatar: location.userId.avatar,
-      },
-      shipments:
-        shipmentsByDriver.get(location.userId._id.toString()) || [],
-    }));
+    .map((location: any) => {
+      const dProfile = profileByUserId.get(location.userId._id.toString());
+      return {
+        id: location._id.toString(),
+        status: location.status,
+        coords: location.coords,
+        lastSeenAt: location.lastSeenAt,
+        driver: {
+          id: location.userId._id.toString(),
+          name: location.userId.name,
+          email: location.userId.email,
+          avatar: location.userId.avatar,
+        },
+        equipment: dProfile ? {
+          trailerType: dProfile.trailerType,
+          maxVehicleCapacity: dProfile.maxVehicleCapacity,
+          operationalStatus: dProfile.operationalStatus,
+          truckMake: dProfile.truckMake,
+          truckModel: dProfile.truckModel,
+          isComplianceExpired: dProfile.isComplianceExpired,
+          profileCompletionScore: dProfile.profileCompletionScore,
+        } : null,
+        shipments:
+          shipmentsByDriver.get(location.userId._id.toString()) || [],
+      };
+    });
 
   res.json(new ApiResponse(200, data, "Driver locations fetched (redacted for privacy)"));
 });
@@ -498,6 +524,352 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
+const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
+
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
+
+  const driverProfile = await DriverProfile.findOne({ userId: user._id });
+
+  const filter: any = {
+    organizationId: orgId,
+    status: "Available for Pickup",
+    isPostedToBoard: true,
+    $or: [
+      { assignedDriverId: { $exists: false } },
+      { assignedDriverId: null },
+    ],
+  };
+
+  if (driverProfile?.trailerType && driverProfile.trailerType !== "other") {
+    filter.$and = [
+      {
+        $or: [
+          { trailerTypeRequired: { $exists: false } },
+          { trailerTypeRequired: null },
+          { trailerTypeRequired: "" },
+          { trailerTypeRequired: driverProfile.trailerType },
+        ],
+      },
+    ];
+  }
+
+  if (driverProfile?.maxVehicleCapacity) {
+    filter.$and = filter.$and || [];
+    filter.$and.push({
+      $or: [
+        { vehicleCount: { $exists: false } },
+        { vehicleCount: null },
+        { vehicleCount: { $lte: driverProfile.maxVehicleCapacity } },
+      ],
+    });
+  }
+
+  const loads = await Shipment.find(filter)
+    .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery desiredDeliveryDate trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
+    .sort({ createdAt: -1 })
+    .limit(50);
+
+  const mapped = loads.map((load: any) => {
+    const myRequest = load.pendingDriverRequests?.find(
+      (r: any) => r.driverId.toString() === user._id.toString()
+    );
+    return {
+      ...load.toObject(),
+      myRequestStatus: myRequest?.status || null,
+      myRequestedAt: myRequest?.requestedAt || null,
+    };
+  });
+
+  res.json(new ApiResponse(200, mapped, "Available loads fetched"));
+});
+
+const requestLoad = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
+
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
+
+  const { shipmentId } = req.body as { shipmentId?: string };
+  if (!shipmentId) throw new ApiError(400, "Shipment ID is required");
+
+  const driverProfile = await DriverProfile.findOne({ userId: user._id });
+  if (driverProfile?.isComplianceExpired) {
+    throw new ApiError(403, "Your compliance documents are expired. Please update before requesting loads.");
+  }
+  if (driverProfile?.operationalStatus && driverProfile.operationalStatus !== "active") {
+    throw new ApiError(403, "Your operational status must be Active to request loads");
+  }
+
+  const shipment = await Shipment.findOne({
+    _id: shipmentId,
+    organizationId: orgId,
+    status: "Available for Pickup",
+    isPostedToBoard: true,
+    $or: [
+      { assignedDriverId: { $exists: false } },
+      { assignedDriverId: null },
+    ],
+  });
+
+  if (!shipment) throw new ApiError(404, "Load not available");
+
+  const alreadyRequested = shipment.pendingDriverRequests?.some(
+    (r: any) => r.driverId.toString() === user._id.toString() && r.status === "pending"
+  );
+  if (alreadyRequested) throw new ApiError(400, "You have already requested this load");
+
+  if (shipment.vehicleCount && driverProfile?.maxVehicleCapacity) {
+    if (shipment.vehicleCount > driverProfile.maxVehicleCapacity) {
+      throw new ApiError(400, `This load requires ${shipment.vehicleCount} vehicle capacity. Your trailer supports ${driverProfile.maxVehicleCapacity}.`);
+    }
+  }
+
+  await Shipment.findByIdAndUpdate(shipmentId, {
+    $push: {
+      pendingDriverRequests: {
+        driverId: user._id,
+        driverName: user.name || user.email,
+        requestedAt: new Date(),
+        status: "pending",
+      },
+    },
+  });
+
+  await notifyOrgAdmins(
+    orgId, "shipment_status_changed", "Load Requested by Driver",
+    `${user.name || user.email} requested shipment ${shipment.trackingNumber || "N/A"}`,
+    { shipmentId: shipment._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email },
+  );
+
+  const io = getSocketIO();
+  if (io) io.to(`org:${orgId}`).emit("driver:load_requested", { shipmentId, driverId: user._id.toString(), driverName: user.name || user.email });
+
+  res.json(new ApiResponse(200, null, "Load request submitted — pending dispatcher approval"));
+
+  await AuditLog.create({
+    entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+    reason: "Driver requested load from board", performedBy: user._id,
+    changes: { requestedBy: user._id.toString() },
+  });
+});
+
+const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
+
+  const shipments = await Shipment.find({
+    organizationId: orgId,
+    "pendingDriverRequests.driverId": user._id,
+  })
+    .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
+    .sort({ createdAt: -1 });
+
+  const mapped = shipments.map((s: any) => {
+    const myReq = s.pendingDriverRequests?.find(
+      (r: any) => r.driverId.toString() === user._id.toString()
+    );
+    return {
+      ...s.toObject(),
+      myRequestStatus: myReq?.status || null,
+      myRequestedAt: myReq?.requestedAt || null,
+      rejectionReason: myReq?.rejectionReason || null,
+    };
+  });
+
+  res.json(new ApiResponse(200, mapped, "My load requests fetched"));
+});
+
+const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const adminId = (req.user as any)?._id;
+  const { shipmentId, driverId } = req.body as { shipmentId?: string; driverId?: string };
+
+  if (!shipmentId || !driverId) throw new ApiError(400, "Shipment ID and driver ID are required");
+
+  const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  const pendingReq = shipment.pendingDriverRequests?.find(
+    (r: any) => r.driverId.toString() === driverId && r.status === "pending"
+  );
+  if (!pendingReq) throw new ApiError(404, "No pending request from this driver");
+
+  const driver = await User.findById(driverId).select("name email");
+  if (!driver) throw new ApiError(404, "Driver not found");
+
+  shipment.pendingDriverRequests = (shipment.pendingDriverRequests || []).map((r: any) => {
+    if (r.driverId.toString() === driverId) {
+      r.status = "approved";
+      r.reviewedAt = new Date();
+      r.reviewedBy = adminId;
+      return r;
+    }
+    if (r.status === "pending") {
+      r.status = "rejected";
+      r.reviewedAt = new Date();
+      r.reviewedBy = adminId;
+      r.rejectionReason = "Another driver was approved for this load";
+      return r;
+    }
+    return r;
+  }) as any;
+
+  shipment.assignedDriverId = driver._id as any;
+  shipment.assignedAt = new Date();
+  shipment.status = "Dispatched";
+  await shipment.save();
+
+  await DriverLocation.findOneAndUpdate(
+    { userId: driverId },
+    { $addToSet: { shipmentIds: shipment._id } },
+  );
+
+  const loadInfo = `${shipment.origin} → ${shipment.destination}`;
+  await safeCreateNotification({
+    userId: driverId,
+    organizationId: orgId,
+    type: "shipment_assigned",
+    title: "Load Request Approved",
+    message: `Your request for ${shipment.trackingNumber || "N/A"} (${loadInfo}) has been approved. You are now dispatched.`,
+    metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber },
+  });
+
+  const rejectedDrivers = (shipment.pendingDriverRequests || []).filter(
+    (r: any) => r.status === "rejected" && r.driverId.toString() !== driverId
+  );
+  for (const rej of rejectedDrivers) {
+    await safeCreateNotification({
+      userId: rej.driverId.toString(),
+      organizationId: orgId,
+      type: "shipment_status_changed",
+      title: "Load Request Update",
+      message: `Your request for ${shipment.trackingNumber || "N/A"} was not approved — another driver was selected.`,
+      metadata: { shipmentId: shipment._id.toString() },
+    });
+  }
+
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit("driver:loads_updated", { action: "approved", shipmentId, driverId });
+  }
+
+  res.json(new ApiResponse(200, shipment, "Load request approved — driver dispatched"));
+
+  await AuditLog.create({
+    entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+    reason: "Admin approved driver load request", performedBy: adminId,
+    changes: { assignedDriverId: driverId, status: "Dispatched" },
+  });
+});
+
+const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const adminId = (req.user as any)?._id;
+  const { shipmentId, driverId, reason } = req.body as { shipmentId?: string; driverId?: string; reason?: string };
+
+  if (!shipmentId || !driverId) throw new ApiError(400, "Shipment ID and driver ID are required");
+
+  const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  const pendingReq = shipment.pendingDriverRequests?.find(
+    (r: any) => r.driverId.toString() === driverId && r.status === "pending"
+  );
+  if (!pendingReq) throw new ApiError(404, "No pending request from this driver");
+
+  shipment.pendingDriverRequests = (shipment.pendingDriverRequests || []).map((r: any) => {
+    if (r.driverId.toString() === driverId && r.status === "pending") {
+      r.status = "rejected";
+      r.reviewedAt = new Date();
+      r.reviewedBy = adminId;
+      r.rejectionReason = reason || "Request declined by dispatcher";
+      return r;
+    }
+    return r;
+  }) as any;
+  await shipment.save();
+
+  await safeCreateNotification({
+    userId: driverId,
+    organizationId: orgId,
+    type: "shipment_status_changed",
+    title: "Load Request Declined",
+    message: `Your request for ${shipment.trackingNumber || "N/A"} was declined${reason ? `: ${reason}` : ""}.`,
+    metadata: { shipmentId: shipment._id.toString() },
+  });
+
+  const io = getSocketIO();
+  if (io) io.to(`org:${orgId}`).emit("driver:load_request_updated", { shipmentId, driverId, action: "rejected" });
+
+  res.json(new ApiResponse(200, null, "Load request rejected"));
+
+  await AuditLog.create({
+    entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+    reason: "Admin rejected driver load request", performedBy: adminId,
+    changes: { rejectedDriverId: driverId, reason },
+  });
+});
+
+const getLoadRequests = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+
+  const shipments = await Shipment.find({
+    organizationId: orgId,
+    "pendingDriverRequests.status": "pending",
+  })
+    .select("_id origin destination trackingNumber status trailerTypeRequired vehicleCount carrierPayAmount pendingDriverRequests createdAt requestedPickupDate")
+    .sort({ "pendingDriverRequests.requestedAt": -1 })
+    .limit(50);
+
+  const requests: any[] = [];
+  for (const s of shipments) {
+    const pending = (s.pendingDriverRequests || []).filter((r: any) => r.status === "pending");
+    const driverIds = pending.map((r: any) => r.driverId);
+    const profiles = await DriverProfile.find(
+      { userId: { $in: driverIds } },
+      "userId trailerType maxVehicleCapacity operationalStatus isComplianceExpired truckMake truckModel profileCompletionScore"
+    ).lean();
+    const profileMap = new Map(profiles.map((p: any) => [p.userId.toString(), p]));
+
+    for (const r of pending) {
+      const prof = profileMap.get(r.driverId.toString());
+      requests.push({
+        shipmentId: s._id.toString(),
+        trackingNumber: s.trackingNumber,
+        origin: s.origin,
+        destination: s.destination,
+        trailerTypeRequired: s.trailerTypeRequired,
+        vehicleCount: s.vehicleCount,
+        carrierPayAmount: s.carrierPayAmount,
+        requestedPickupDate: s.requestedPickupDate,
+        driverId: r.driverId.toString(),
+        driverName: r.driverName,
+        requestedAt: r.requestedAt,
+        equipment: prof ? {
+          trailerType: prof.trailerType,
+          maxVehicleCapacity: prof.maxVehicleCapacity,
+          operationalStatus: prof.operationalStatus,
+          isComplianceExpired: prof.isComplianceExpired,
+          truckMake: prof.truckMake,
+          truckModel: prof.truckModel,
+          profileCompletionScore: prof.profileCompletionScore,
+        } : null,
+      });
+    }
+  }
+
+  res.json(new ApiResponse(200, requests, "Pending load requests fetched"));
+});
+
 export default {
   updateLocation,
   getActiveDrivers,
@@ -507,4 +879,10 @@ export default {
   removeLoad,
   dropLoad,
   reassignLoad,
+  getAvailableLoads,
+  requestLoad,
+  getMyRequests,
+  approveLoadRequest,
+  rejectLoadRequest,
+  getLoadRequests,
 };
