@@ -24,6 +24,7 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@aws-sdk/client-s3": "^3.1010.0",
     "@clerk/clerk-sdk-node": "^4.13.23",
     "@simplewebauthn/server": "^9.0.3",
