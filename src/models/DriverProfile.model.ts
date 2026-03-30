@@ -51,6 +51,9 @@ export interface IComplianceDocument {
   verified: boolean;
   verifiedBy?: mongoose.Types.ObjectId;
   verifiedAt?: Date;
+  rejectionReason?: string;
+  rejectedAt?: Date;
+  reviewStatus: "pending" | "approved" | "rejected";
 }
 
 export interface IDriverProfile extends Document {
@@ -65,6 +68,13 @@ export interface IDriverProfile extends Document {
   trailerLength: number;
   dotNumber: string;
   mcNumber: string;
+  vin: string;
+  plateNumber: string;
+  truckColor: string;
+  gvwr: number;
+  trailerAxles: number;
+  trailerGvwr: number;
+  engineType: string;
   specialFeatures: string[];
 
   driversLicenseNumber: string;
@@ -75,6 +85,14 @@ export interface IDriverProfile extends Document {
   insuranceProvider: string;
   insurancePolicyNumber: string;
   documents: IComplianceDocument[];
+
+  ssnLast4: string;
+  backgroundCheckConsent: boolean;
+  backgroundCheckConsentDate?: Date;
+  verificationAgreement: boolean;
+  verificationAgreementDate?: Date;
+  verificationStatus: "not_started" | "in_progress" | "under_review" | "verified" | "rejected";
+  verificationNotes?: string;
 
   operationalStatus: OperationalStatus;
   homeBase: {
@@ -125,6 +143,9 @@ const ComplianceDocumentSchema = new Schema<IComplianceDocument>(
     verified: { type: Boolean, default: false },
     verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },
     verifiedAt: { type: Date },
+    rejectionReason: { type: String, trim: true },
+    rejectedAt: { type: Date },
+    reviewStatus: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
   },
   { _id: true },
 );
@@ -174,20 +195,16 @@ const DriverProfileSchema = new Schema<IDriverProfile>(
     trailerLength: { type: Number, min: 0, max: 80 },
     dotNumber: { type: String, trim: true, default: "" },
     mcNumber: { type: String, trim: true, default: "" },
+    vin: { type: String, trim: true, default: "" },
+    plateNumber: { type: String, trim: true, default: "" },
+    truckColor: { type: String, trim: true, default: "" },
+    gvwr: { type: Number, min: 0, max: 100000 },
+    trailerAxles: { type: Number, min: 1, max: 10, default: 2 },
+    trailerGvwr: { type: Number, min: 0, max: 100000 },
+    engineType: { type: String, trim: true, default: "" },
     specialFeatures: {
       type: [String],
       default: [],
-      enum: [
-        "lift_gate",
-        "winch",
-        "enclosed",
-        "air_ride",
-        "gps_tracking",
-        "eld_equipped",
-        "hazmat_certified",
-        "oversized_capable",
-        "inoperable_vehicle_capable",
-      ],
     },
 
     driversLicenseNumber: { type: String, trim: true, default: "" },
@@ -198,6 +215,18 @@ const DriverProfileSchema = new Schema<IDriverProfile>(
     insuranceProvider: { type: String, trim: true, default: "" },
     insurancePolicyNumber: { type: String, trim: true, default: "" },
     documents: { type: [ComplianceDocumentSchema], default: [] },
+
+    ssnLast4: { type: String, trim: true, default: "" },
+    backgroundCheckConsent: { type: Boolean, default: false },
+    backgroundCheckConsentDate: { type: Date },
+    verificationAgreement: { type: Boolean, default: false },
+    verificationAgreementDate: { type: Date },
+    verificationStatus: {
+      type: String,
+      enum: ["not_started", "in_progress", "under_review", "verified", "rejected"],
+      default: "not_started",
+    },
+    verificationNotes: { type: String, trim: true, default: "" },
 
     operationalStatus: {
       type: String,

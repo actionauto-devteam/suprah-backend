@@ -524,6 +524,59 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
+const startRoute = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
+
+  const { shipmentId } = req.body as { shipmentId?: string };
+  if (!shipmentId) throw new ApiError(400, "Shipment ID is required");
+
+  const shipment = await Shipment.findById(shipmentId);
+  if (!shipment) throw new ApiError(404, "Shipment not found");
+
+  if (!shipment.assignedDriverId || shipment.assignedDriverId.toString() !== user._id.toString()) {
+    throw new ApiError(403, "You are not assigned to this load");
+  }
+
+  if (shipment.status === "In-Route") {
+    return res.json(new ApiResponse(200, shipment, "Already in route"));
+  }
+
+  if (shipment.status !== "Dispatched") {
+    throw new ApiError(400, "Load must be in Dispatched status to start route");
+  }
+
+  shipment.status = "In-Route";
+  shipment.pickedUp = new Date();
+  await shipment.save();
+
+  await DriverLocation.findOneAndUpdate(
+    { userId: user._id },
+    { $set: { status: "on-route" as DriverStatus } },
+  );
+
+  const orgId = shipment.organizationId?.toString();
+  if (orgId) {
+    await notifyOrgAdmins(
+      orgId, "shipment_status_changed", "Driver Started Route",
+      `${user.name || user.email} started route for ${shipment.trackingNumber || "N/A"}`,
+      { shipmentId: shipment._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email },
+    );
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit("driver:loads_updated", { action: "in-route", shipmentId, driverId: user._id.toString() });
+  }
+
+  res.json(new ApiResponse(200, shipment, "Route started — status updated to In-Route"));
+
+  await AuditLog.create({
+    entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+    reason: "Driver started route", performedBy: user._id,
+    changes: { status: "In-Route", pickedUp: shipment.pickedUp },
+  });
+});
+
 const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?._id) throw new ApiError(401, "User not authenticated");
@@ -870,6 +923,47 @@ const getLoadRequests = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, requests, "Pending load requests fetched"));
 });
 
+const getDriverDashboardStats = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
+
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
+
+  const [assigned, requestedShipments, profile] = await Promise.all([
+    Shipment.find({ assignedDriverId: user._id })
+      .select("status carrierPayAmount assignedAt driverAcceptedAt")
+      .lean(),
+    Shipment.find({
+      organizationId: orgId,
+      "pendingDriverRequests.driverId": user._id,
+      "pendingDriverRequests.status": "pending",
+    })
+      .select("_id")
+      .lean(),
+    DriverProfile.findOne({ userId: user._id })
+      .select("profileCompletionScore isComplianceExpired operationalStatus")
+      .lean(),
+  ]);
+
+  const active = assigned.filter((s: any) => s.status !== "Delivered" && s.status !== "Cancelled");
+  const completed = assigned.filter((s: any) => s.status === "Delivered");
+  const totalEarnings = completed.reduce((sum: number, s: any) => sum + (s.carrierPayAmount || 0), 0);
+  const pendingRequestsCount = requestedShipments.length;
+
+  res.json(new ApiResponse(200, {
+    totalLoads: assigned.length,
+    activeLoads: active.length,
+    completedLoads: completed.length,
+    pendingRequests: pendingRequestsCount,
+    totalEarnings,
+    profileCompletionScore: profile?.profileCompletionScore || 0,
+    isComplianceExpired: profile?.isComplianceExpired || false,
+    operationalStatus: profile?.operationalStatus || "inactive",
+  }, "Dashboard stats fetched"));
+});
+
 export default {
   updateLocation,
   getActiveDrivers,
@@ -879,10 +973,12 @@ export default {
   removeLoad,
   dropLoad,
   reassignLoad,
+  startRoute,
   getAvailableLoads,
   requestLoad,
   getMyRequests,
   approveLoadRequest,
   rejectLoadRequest,
   getLoadRequests,
+  getDriverDashboardStats,
 };

@@ -49,6 +49,13 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
     trailerLength,
     dotNumber,
     mcNumber,
+    vin,
+    plateNumber,
+    truckColor,
+    gvwr,
+    trailerAxles,
+    trailerGvwr,
+    engineType,
     specialFeatures,
   } = req.body;
 
@@ -60,6 +67,13 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   if (trailerLength !== undefined) profile.trailerLength = trailerLength;
   if (dotNumber !== undefined) profile.dotNumber = dotNumber;
   if (mcNumber !== undefined) profile.mcNumber = mcNumber;
+  if (vin !== undefined) profile.vin = vin;
+  if (plateNumber !== undefined) profile.plateNumber = plateNumber;
+  if (truckColor !== undefined) profile.truckColor = truckColor;
+  if (gvwr !== undefined) profile.gvwr = gvwr;
+  if (trailerAxles !== undefined) profile.trailerAxles = trailerAxles;
+  if (trailerGvwr !== undefined) profile.trailerGvwr = trailerGvwr;
+  if (engineType !== undefined) profile.engineType = engineType;
   if (specialFeatures !== undefined) profile.specialFeatures = specialFeatures;
 
   await profile.save();
@@ -161,6 +175,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     uploadedAt: new Date(),
     expiresAt: expiresAt ? new Date(expiresAt) : undefined,
     verified: false,
+    reviewStatus: "pending",
   });
 
   await profile.save();
@@ -194,7 +209,7 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
   if (!doc) throw new ApiError(404, "Document not found");
 
   if (doc.fileKey) {
-    await storageService.delete(doc.fileKey).catch(() => {});
+    await storageService.delete(doc.fileKey).catch(() => { });
   }
 
   profile.documents = profile.documents.filter(
@@ -284,6 +299,164 @@ const getDriverProfileById = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, profile, "Driver profile fetched"));
 });
 
+const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!["admin", "super_admin"].includes(user.role)) {
+    throw new ApiError(403, "Only admins can verify documents");
+  }
+
+  const orgId = req.orgId as string;
+  if (!orgId) throw new ApiError(403, "Organization context required");
+
+  const { driverId, documentId } = req.params;
+  const { verified } = req.body;
+
+  if (typeof verified !== "boolean") {
+    throw new ApiError(400, "verified field must be a boolean");
+  }
+
+  const profile = await DriverProfile.findOne({
+    userId: driverId,
+    organizationId: orgId,
+  });
+  if (!profile) throw new ApiError(404, "Driver profile not found");
+
+  const doc = profile.documents.find(
+    (d: any) => d._id?.toString() === documentId,
+  );
+  if (!doc) throw new ApiError(404, "Document not found");
+
+  doc.verified = verified;
+  if (verified) {
+    doc.verifiedBy = user._id as any;
+    doc.verifiedAt = new Date();
+  } else {
+    doc.verifiedBy = undefined;
+    doc.verifiedAt = undefined;
+  }
+
+  await profile.save();
+
+  res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
+
+  await AuditLog.create({
+    entityType: "DriverProfile",
+    entityId: profile._id,
+    action: "UPDATE",
+    reason: `Document ${verified ? "verified" : "verification revoked"}`,
+    performedBy: user._id,
+    changes: { documentId, verified },
+  });
+});
+
+const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!["admin", "super_admin"].includes(user.role)) {
+    throw new ApiError(403, "Only admins can reject documents");
+  }
+
+  const orgId = req.orgId as string;
+  if (!orgId) throw new ApiError(403, "Organization context required");
+
+  const { driverId, documentId } = req.params;
+  const { reason } = req.body;
+
+  if (!reason || typeof reason !== "string" || reason.trim().length < 3) {
+    throw new ApiError(400, "A rejection reason is required (min 3 chars)");
+  }
+
+  const profile = await DriverProfile.findOne({
+    userId: driverId,
+    organizationId: orgId,
+  });
+  if (!profile) throw new ApiError(404, "Driver profile not found");
+
+  const doc = profile.documents.find(
+    (d: any) => d._id?.toString() === documentId,
+  );
+  if (!doc) throw new ApiError(404, "Document not found");
+
+  doc.verified = false;
+  doc.verifiedBy = undefined;
+  doc.verifiedAt = undefined;
+  doc.rejectionReason = reason.trim();
+  doc.rejectedAt = new Date();
+  (doc as any).reviewStatus = "rejected";
+
+  await profile.save();
+
+  res.json(new ApiResponse(200, profile, "Document rejected"));
+
+  await AuditLog.create({
+    entityType: "DriverProfile",
+    entityId: profile._id,
+    action: "UPDATE",
+    reason: "Compliance document rejected",
+    performedBy: user._id,
+    changes: { documentId, rejectionReason: reason.trim() },
+  });
+});
+
+const updateIdentityVerification = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
+
+  const orgId = user.organizationId?.toString() || "";
+  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+
+  const { ssnLast4, backgroundCheckConsent, verificationAgreement } = req.body;
+
+  if (ssnLast4 !== undefined) {
+    const cleaned = ssnLast4.replace(/\D/g, "");
+    if (cleaned.length !== 4) throw new ApiError(400, "SSN must be exactly 4 digits");
+    profile.ssnLast4 = cleaned;
+  }
+
+  if (backgroundCheckConsent === true && !profile.backgroundCheckConsent) {
+    profile.backgroundCheckConsent = true;
+    profile.backgroundCheckConsentDate = new Date();
+  }
+
+  if (verificationAgreement === true && !profile.verificationAgreement) {
+    profile.verificationAgreement = true;
+    profile.verificationAgreementDate = new Date();
+  }
+
+  const requiredDocs = [
+    "drivers_license", "medical_card", "insurance_certificate",
+    "vehicle_registration", "operating_authority", "w9_form",
+  ];
+  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
+  const allUploaded = requiredDocs.every(t => uploadedTypes.has(t));
+  const allVerified = requiredDocs.every(t =>
+    profile.documents.some((d: any) => d.type === t && d.verified)
+  );
+
+  if (allVerified && profile.ssnLast4 && profile.backgroundCheckConsent && profile.verificationAgreement) {
+    profile.verificationStatus = "verified";
+  } else if (allUploaded && profile.ssnLast4 && profile.backgroundCheckConsent && profile.verificationAgreement) {
+    profile.verificationStatus = "under_review";
+  } else if (profile.documents.length > 0 || profile.ssnLast4) {
+    profile.verificationStatus = "in_progress";
+  }
+
+  await profile.save();
+
+  res.json(new ApiResponse(200, profile, "Identity verification updated"));
+
+  await AuditLog.create({
+    entityType: "DriverProfile",
+    entityId: profile._id,
+    action: "UPDATE",
+    reason: "Identity verification information updated",
+    performedBy: user._id,
+    changes: { ssnLast4: ssnLast4 ? "****" : undefined, backgroundCheckConsent, verificationAgreement },
+  });
+});
+
 export default {
   getProfile,
   updateEquipment,
@@ -293,4 +466,7 @@ export default {
   updateLogistics,
   getOrgDriverProfiles,
   getDriverProfileById,
+  verifyDocument,
+  rejectDocument,
+  updateIdentityVerification,
 };
