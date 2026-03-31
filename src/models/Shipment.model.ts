@@ -205,8 +205,6 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
       },
     ],
 
-
-
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },
     driverAcceptedAt: { type: Date },

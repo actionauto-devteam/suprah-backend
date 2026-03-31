@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -14,6 +13,7 @@ import {
   calculateRate,
   calculateETA,
 } from "../utils/calculations";
+import { maskLoadForDriver } from "../utils/loadMask";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -226,10 +226,17 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // ── Query ───────────────────────────────────────────────────────────────────
-  const [loads, total] = await Promise.all([
+  const user = getUser(req);
+  const isDriver = user?.role === "driver";
+
+  const [rawLoads, total] = await Promise.all([
     Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     Load.countDocuments(filter),
   ]);
+
+  const loads = isDriver
+    ? rawLoads.map((l) => maskLoadForDriver(l as unknown as Record<string, unknown>))
+    : rawLoads;
 
   return res.status(200).json(
     new ApiResponse(200, {
@@ -252,8 +259,9 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
 const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
 
+  // organizationId is stored as String on the Load model — do NOT cast to ObjectId
   const agg = await Load.aggregate([
-    { $match: { organizationId: new mongoose.Types.ObjectId(organizationId) } },
+    { $match: { organizationId } },
     { $group: { _id: "$status", count: { $sum: 1 } } },
   ]);
 
@@ -278,9 +286,14 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
 
 const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
+  const user           = getUser(req);
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
+  const raw = await Load.findOne({ _id: req.params.id, organizationId }).lean();
+  if (!raw) throw new ApiError(404, "Load not found");
+
+  const load = user?.role === "driver"
+    ? maskLoadForDriver(raw as unknown as Record<string, unknown>)
+    : raw;
 
   return res.status(200).json(new ApiResponse(200, load, "Load fetched successfully"));
 });
