@@ -2,6 +2,7 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import config from '../config';
 import { ApiError } from '../utils/ApiError';
 import path from 'path';
+import fs from 'fs';
 
 class StorageService {
     private s3Client: S3Client | null = null;
@@ -37,29 +38,36 @@ class StorageService {
      * @returns The public URL of the uploaded file
      */
     async upload(file: Express.Multer.File, folder: string): Promise<string> {
-        if (!this.isConfigured || !this.s3Client) {
-            throw new ApiError(503, 'Cloud storage is not configured. Please contact the administrator.');
-        }
-
         const extension = path.extname(file.originalname).toLowerCase();
-        const fileName = `${folder}/${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+        const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
 
-        try {
-            const command = new PutObjectCommand({
-                Bucket: config.r2.bucketName,
-                Key: fileName,
-                Body: file.buffer,
-                ContentType: file.mimetype,
-            });
-
-            await this.s3Client.send(command);
-
-            // Return the full public URL
-            return `${config.r2.publicUrl}/${fileName}`;
-        } catch (error: any) {
-            console.error('[StorageService] Upload Error:', error);
-            throw new ApiError(500, `Failed to upload file to cloud storage: ${error.message}`);
+        if (this.isConfigured && this.s3Client) {
+            try {
+                const key = `${folder}/${fileName}`;
+                const command = new PutObjectCommand({
+                    Bucket: config.r2.bucketName,
+                    Key: key,
+                    Body: file.buffer,
+                    ContentType: file.mimetype,
+                });
+                await this.s3Client.send(command);
+                return `${config.r2.publicUrl}/${key}`;
+            } catch (error: any) {
+                console.warn('[StorageService] R2 upload failed, falling back to local storage:', error.message);
+            }
         }
+
+        return this.saveLocally(file.buffer, folder, fileName);
+    }
+
+    private saveLocally(buffer: Buffer, folder: string, fileName: string): string {
+        const uploadDir = path.join(__dirname, '../../uploads', folder);
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        const filePath = path.join(uploadDir, fileName);
+        fs.writeFileSync(filePath, buffer);
+        return `/uploads/${folder}/${fileName}`;
     }
 
     /**
