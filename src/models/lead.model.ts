@@ -42,6 +42,8 @@ export interface ILead extends Document {
     stock?: string;
     trim?: string;
     condition?: string;
+    odometer?: string;
+    price?: string;
   };
   appointment?: {
     date: Date;
@@ -63,14 +65,12 @@ const LeadSchema: Schema = new Schema({
   organizationId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Organization',
-    required: true,
-    index: true
+    required: true
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
 
   // Contact Information
@@ -114,6 +114,8 @@ const LeadSchema: Schema = new Schema({
     stock: String,
     trim: String,
     condition: String,
+    odometer: String,
+    price: String,
   },
   appointment: {
     date: Date,
@@ -125,6 +127,9 @@ const LeadSchema: Schema = new Schema({
 
   centralIngestion: { type: Boolean, default: false },
 }, { timestamps: true });
+
+// Index for efficient per-organization queries (used for pagination)
+LeadSchema.index({ organizationId: 1, createdAt: -1 });
 
 // Index for efficient per-user queries
 LeadSchema.index({ createdBy: 1, createdAt: -1 });

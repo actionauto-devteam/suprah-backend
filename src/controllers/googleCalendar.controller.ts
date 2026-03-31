@@ -3,61 +3,6 @@ import { asyncHandler } from '../utils/asyncHandler';
 import googleCalendarService from '../services/googleCalendar.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
-import { v4 as uuidv4 } from 'uuid';
-
-/**
- * Initiate Google Calendar OAuth flow
- * @route GET /api/google-calendar/auth
- * @access Private
- */
-const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req.user as IUser)._id.toString();
-  const authUrl = googleCalendarService.getAuthUrl(userId);
-  res.json(new ApiResponse(200, { authUrl }, 'Authorization URL generated'));
-});
-
-/**
- * Handle Google Calendar OAuth callback
- * @route GET /api/google-calendar/callback
- * @access Public (called by Google)
- */
-const handleCallback = asyncHandler(async (req: Request, res: Response) => {
-  const { code, state } = req.query;
-
-  if (!code || !state) {
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/appointments?calendar_error=missing_params`
-    );
-  }
-
-  try {
-    const userId = state as string;
-
-    // Exchange code for tokens
-    const tokens = await googleCalendarService.getTokensFromCode(code as string);
-
-    // Save tokens — refresh_token is preserved if not returned again
-    await googleCalendarService.saveUserTokens(userId, tokens);
-
-    // Set up webhook for real-time calendar changes (non-critical)
-    const channelId = uuidv4();
-    try {
-      await googleCalendarService.setupWebhook(userId, channelId);
-      console.log('✅ Webhook set up successfully');
-    } catch (error) {
-      console.error('⚠️ Failed to set up webhook (non-critical):', error);
-    }
-
-    res.redirect(`${process.env.FRONTEND_URL}/appointments?calendar_connected=true`);
-  } catch (error: any) {
-    console.error('❌ OAuth callback error:', error);
-    res.redirect(
-      `${process.env.FRONTEND_URL}/appointments?calendar_error=${encodeURIComponent(
-        error.message
-      )}`
-    );
-  }
-});
 
 /**
  * Check Google Calendar connection status
@@ -87,9 +32,9 @@ const disconnect = asyncHandler(async (req: Request, res: Response) => {
  * @access Public (validated via middleware)
  */
 const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
-  const channelId        = req.headers['x-goog-channel-id']        as string;
-  const resourceState    = req.headers['x-goog-resource-state']    as string;
-  const resourceId       = req.headers['x-goog-resource-id']       as string;
+  const channelId = req.headers['x-goog-channel-id'] as string;
+  const resourceState = req.headers['x-goog-resource-state'] as string;
+  const resourceId = req.headers['x-goog-resource-id'] as string;
   const channelExpiration = req.headers['x-goog-channel-expiration'] as string;
 
   console.log('📨 Received Google Calendar webhook:', {
@@ -132,16 +77,11 @@ const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * Manually sync ALL events from Google Calendar (full paginated sync).
- * Fetches SYNC_PAST_YEARS back and SYNC_FUTURE_YEARS forward, handling
- * pagination, recurring events, cancelled instances, and timezones.
- *
  * @route POST /api/google-calendar/sync-events
  * @access Private
  */
 const syncEvents = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
-
-  // syncAllEvents performs the full paginated fetch across the configured window
   const syncedAppointments = await googleCalendarService.syncAllEvents(userId);
 
   res.json(
@@ -154,8 +94,6 @@ const syncEvents = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export default {
-  initiateAuth,
-  handleCallback,
   getStatus,
   disconnect,
   handleWebhook,

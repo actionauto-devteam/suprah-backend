@@ -60,7 +60,12 @@ class TokenService {
     verifyAccessToken(token: string): TokenPayload {
         try {
             return jwt.verify(token, this.accessSecret) as TokenPayload;
-        } catch (error) {
+        } catch (error: any) {
+            console.error('[TokenService] Access Token Verification Failed:', {
+                name: error.name,
+                message: error.message,
+                expiredAt: error.expiredAt
+            });
             throw new ApiError(401, 'Invalid or expired access token');
         }
     }
