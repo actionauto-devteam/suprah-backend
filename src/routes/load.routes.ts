@@ -8,6 +8,13 @@ const router = express.Router();
 router.use(auth());
 router.use(requireOrg);
 
+// Static routes first — must be before /:id to avoid param conflicts
+router.get("/vin/:vin",         loadController.lookupVin);
+router.get("/vehicles",         loadController.getInventoryVehicles);
+router.get("/stats",            loadController.getLoadStats);
+router.post("/calculate-rate",  loadController.calculateLoadRate);
+
+// CRUD
 router
   .route("/")
   .post(loadController.createLoad)

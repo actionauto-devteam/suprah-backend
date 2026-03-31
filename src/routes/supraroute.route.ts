@@ -1,19 +1,26 @@
 import express from 'express';
-import supraleoController from '../controllers/supraLeo.controller';
-import auth from '../middleware/auth.middleware';
-import { requireOrg } from '../middleware/org.middleware';
+import crmAuth from '../middleware/crmAuth.middleware';
+import supraLeoController from '../controllers/supraLeo.controller';
 
 const router = express.Router();
 
-// All Supra Leo routes require authentication
-router.use(auth());
-router.use(requireOrg);
+// All routes require CRM authentication
+router.use(crmAuth());
 
-// AI status & capabilities
-router.get('/status', supraleoController.getStatus);
+// ── Status ────────────────────────────────────────────────────────────────────
+router.get('/status', supraLeoController.getStatus);
 
-// Message preparation for TTS!!
-router.get('/prepare-message/:leadId', supraleoController.prepareMessage);
-router.post('/prepare-thread-message', supraleoController.prepareThreadMessage);
+// ── Chat (persistent AI conversation) ────────────────────────────────────────
+router.post('/chat', supraLeoController.chat);
+router.get('/chat/history', supraLeoController.getChatHistory);
+router.delete('/chat/history', supraLeoController.clearChatHistory);
+
+// ── Reminders & Context ───────────────────────────────────────────────────────
+router.get('/reminders/:module', supraLeoController.getReminders);
+router.get('/context/:module', supraLeoController.getModuleContext);
+
+// ── TTS / Speech helpers ──────────────────────────────────────────────────────
+router.get('/prepare-message/:leadId', supraLeoController.prepareMessage);
+router.post('/prepare-thread-message', supraLeoController.prepareThreadMessage);
 
 export default router;
