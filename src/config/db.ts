@@ -8,7 +8,9 @@ const connectDB = async () => {
     console.log('MongoDB Connected...');
 
     // Auto-seed CRM users into database on server start
-    await seedCrmUsers();
+    if (process.env.NODE_ENV !== 'test') {
+      await seedCrmUsers();
+    }
   } catch (err: any) {
     console.error(err.message);
     // Exit process with failure

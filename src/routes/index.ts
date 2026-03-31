@@ -27,6 +27,7 @@ import supraSpaceRoute from "./supraspace.route";
 import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
 import devToolsRoute from "./devTools.routes";
+import orgLeadRoute from "./orgLead.route";
 
 const router = express.Router();
 
@@ -143,6 +144,10 @@ const defaultRoutes = [
   {
     path: "/dev",
     route: devToolsRoute,
+  },
+  {
+    path: "/org-lead",
+    route: orgLeadRoute,
   },
 ];
 

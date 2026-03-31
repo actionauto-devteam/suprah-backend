@@ -10,7 +10,7 @@ import mongoose from 'mongoose';
  * The internal organization ID for Action Auto Utah.
  * All vehicles synced via FTP are owned by this org.
  */
-const ACTION_AUTO_ORG_ID = '698f516abb63af8f6eb7be4c';
+const ACTION_AUTO_ORG_ID = '698f474596361c239f73c608';
 
 export class SyncService {
     /**

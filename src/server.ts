@@ -41,16 +41,16 @@ connectDB();
 // Body Parsers
 // ========================================
 app.use(express.json({
-  limit: '50mb',
+  limit: '512kb',
   verify: (req: any, res, buf) => {
     req.rawBody = buf.toString();
   }
 }));
 
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 
 // XML body support (ADF emails)
-app.use(express.text({ type: ['application/xml', 'text/xml'] }));
+app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '512kb' }));
 
 // ========================================
 // Static file serving (Limited to non-sensitive assets)

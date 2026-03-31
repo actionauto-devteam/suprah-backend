@@ -31,17 +31,23 @@ process.env.CLERK_SECRET_KEY = 'sk_test_123';
 // For now, we assume a local mongodb or we could use mongodb-memory-server if installed.
 // Since we didn't install mongodb-memory-server, we will use a separate test db string.
 
+jest.setTimeout(60000); // Global timeout for all tests
+process.env.NODE_ENV = 'test';
+process.env.SKIP_RATE_LIMIT = 'true';
+
 beforeAll(async () => {
+    jest.setTimeout(60000); // Global timeout for all tests
     // Check if we are already connected?
     if (mongoose.connection.readyState === 0) {
-        const url = process.env.MONGODB_URI || '';
+        const url = process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
         await mongoose.connect(url);
     }
 });
 
 afterAll(async () => {
-    // await mongoose.connection.dropDatabase(); // Be careful with this if using a shared cluster
-    await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close();
+    }
 });
 
 // Clear collections between tests
