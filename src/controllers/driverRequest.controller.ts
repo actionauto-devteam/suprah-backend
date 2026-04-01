@@ -182,8 +182,9 @@ const approveDriverRequest = asyncHandler(
     driverUser.role = "driver";
     driverUser.isApproved = true;
     driverUser.onboardingCompleted = true;
-    if (request.organizationId) {
-      driverUser.organizationId = request.organizationId;
+    const orgToAssign = request.organizationId || adminUser.organizationId;
+    if (orgToAssign) {
+      driverUser.organizationId = orgToAssign as any;
     }
     await driverUser.save();
 

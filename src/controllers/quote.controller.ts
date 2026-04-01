@@ -172,13 +172,13 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all quotes for the current organization
+ * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const { status, search } = req.query;
+    const orgId = req.orgId as string;
 
-    const filter: any = { organizationId: orgId };
+    const filter: any = {};
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -211,23 +211,19 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         .sort({ createdAt: -1 });
 
     // Attach organization name to each quote
-    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))];
-    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
-    const orgs = validObjectIds.length
-        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
-        : [];
+    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))]
+        .filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+    const orgs = await Organization.find({ _id: { $in: uniqueOrgIds } }).select('name logoUrl');
 
     const orgMap = new Map<string, { name: string; logoUrl?: string }>();
-    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+    orgs.forEach(o => {
+        orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
+    });
 
     const quotesWithOrg = quotes.map(q => ({
         ...(q.toJSON()),
         organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
     }));
-
-    if (isCacheable) {
-        await cacheService.set(cacheKey, quotesWithOrg, QUOTE_CACHE_TTL);
-    }
 
     res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
 });

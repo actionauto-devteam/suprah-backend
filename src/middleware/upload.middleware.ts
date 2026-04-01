@@ -43,3 +43,24 @@ export const uploadAvatarImage = multer({
   fileFilter: avatarFileFilter,
   limits: { fileSize: 1 * 1024 * 1024 }, // 1 MB max for avatars
 }).single('avatar');
+
+const driverDocumentFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const allowedMimeTypes = [
+    'image/jpeg', 'image/png', 'image/webp',
+    'application/pdf',
+  ];
+  const allowedExts = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new ApiError(400, 'Only images (jpg, png, webp) and PDF files are allowed') as any, false);
+  }
+};
+
+export const uploadDriverDocument = multer({
+  storage: storage,
+  fileFilter: driverDocumentFilter,
+  limits: { fileSize: 5 * 1024 * 1024 },
+}).single('document');
