@@ -604,41 +604,8 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
     $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
   };
 
-  if (driverProfile?.trailerType && driverProfile.trailerType !== "other") {
-    const trailerMatch = {
-      $or: [
-        { trailerTypeRequired: { $exists: false } },
-        { trailerTypeRequired: null },
-        { trailerTypeRequired: "" },
-        { trailerTypeRequired: driverProfile.trailerType },
-      ],
-    };
-    shipmentFilter.$and = [trailerMatch];
-
-    const loadTrailerMatch = {
-      $or: [
-        { "vehicles.0": { $exists: false } },
-        { "vehicles.0.trailerType": driverProfile.trailerType },
-      ],
-    };
-    loadFilter.$and = [loadTrailerMatch];
-  }
-
-  if (driverProfile?.maxVehicleCapacity) {
-    const capFilter = {
-      $or: [
-        { vehicleCount: { $exists: false } },
-        { vehicleCount: null },
-        { vehicleCount: { $lte: driverProfile.maxVehicleCapacity } },
-      ],
-    };
-    shipmentFilter.$and = shipmentFilter.$and || [];
-    shipmentFilter.$and.push(capFilter);
-
-    const loadCapFilter = { $expr: { $lte: [{ $size: { $ifNull: ["$vehicles", []] } }, driverProfile.maxVehicleCapacity] } };
-    loadFilter.$and = loadFilter.$and || [];
-    loadFilter.$and.push(loadCapFilter);
-  }
+  // DEMO MODE: trailer type + capacity filters disabled so all org loads show for any driver
+  // REVERT: restore the trailer/capacity filter blocks here after demo
 
   const [shipments, loads] = await Promise.all([
     Shipment.find(shipmentFilter)
