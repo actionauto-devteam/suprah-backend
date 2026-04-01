@@ -36,7 +36,9 @@ export const locationBlockSchema = z.object({
 // ─── Vehicle ──────────────────────────────────────────────────────────────────
 
 const TRAILER_TYPES = [
-  "Open", "Enclosed", "Driveaway", "Flatbed", "Hotshot", "Single", "Multiple",
+  "open_3car_wedge", "open_2car", "5car_open", "9car_stinger", "7car_stinger",
+  "enclosed_2car", "enclosed_3car", "flatbed", "dually_flatbed", "hotshot",
+  "gooseneck", "lowboy", "step_deck", "rgn", "double_drop", "power_only", "other",
 ] as const;
 
 export const loadVehicleSchema = z.object({

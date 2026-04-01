@@ -105,7 +105,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     if (pc && dc) {
       computedMiles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
       const units        = vehicles.length || 1;
-      const hasEnclosed   = vehicles.some((v) => v.trailerType === "Enclosed");
+      const hasEnclosed   = vehicles.some((v) => v.trailerType === "enclosed_2car" || v.trailerType === "enclosed_3car");
       const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
       estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
     }
@@ -298,4 +298,20 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, load, "Load fetched successfully"));
 });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById };
+const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+
+  if (load.status === "In-Transit") {
+    throw new ApiError(400, "Cannot delete a load that is currently In-Transit");
+  }
+
+  await Load.deleteOne({ _id: load._id });
+
+  return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
+});
+
+export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad };

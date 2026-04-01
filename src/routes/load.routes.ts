@@ -27,6 +27,7 @@ router
 
 router
   .route("/:id")
-  .get(loadController.getLoadById);             // drivers can read (masking applied in controller)
+  .get(loadController.getLoadById)              // drivers can read (masking applied in controller)
+  .delete(staffOnly, loadController.deleteLoad); // staff only
 
 export default router;

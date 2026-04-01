@@ -653,6 +653,7 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
       .lean(),
   ]);
 
+
   const mappedShipments = shipments.map((s: any) => {
     const myRequest = s.pendingDriverRequests?.find((r: any) => r.driverId.toString() === userId);
     return {
