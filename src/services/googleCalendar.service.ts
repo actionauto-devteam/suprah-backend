@@ -167,20 +167,41 @@ class GoogleCalendarService {
 
   // ─── Sync Logic ────────────────────────────────────────────────────────────
 
-  async fetchAllGoogleCalendarEvents(id: string, providedOrgId?: string): Promise<number> {
+  async fetchAllGoogleCalendarEvents(id: string, providedOrgId?: string, triggeringUserId?: string): Promise<number> {
     const calendar = await this.getCalendarClient(id);
 
     // Resolve organization ID
     let organizationId = providedOrgId;
     let user: any = null;
 
+    // 1. Resolve organizationId if missing
     if (!organizationId) {
-      // If no orgId provided, assume id is a userId and look it up
       user = await User.findById(id).select('organizationId');
       if (user) organizationId = (user as any).organizationId?.toString();
     }
 
     if (!organizationId) throw new ApiError(400, 'Organization ID could not be resolved for sync.');
+
+    // 2. Resolve User context (mandatory for Appointment creation)
+    const userIdToLookup = triggeringUserId || (organizationId === id ? null : id);
+    if (userIdToLookup) {
+      user = await User.findById(userIdToLookup);
+    }
+
+    // 3. Fallback: If no user context, find first active admin in the organization
+    if (!user && organizationId) {
+      console.log(`[CalendarSync] No triggering user found, searching for organization admin fallback for org: ${organizationId}`);
+      user = await User.findOne({ organizationId, role: 'admin', isActive: true });
+      
+      // Final fallback: any active user in the organization
+      if (!user) {
+        user = await User.findOne({ organizationId, isActive: true });
+      }
+    }
+
+    if (!user) {
+      throw new ApiError(400, 'Could not find a valid user context to attribute synced events to.');
+    }
 
     const { timeMin, timeMax } = getSyncWindow();
     const events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
@@ -197,9 +218,9 @@ class GoogleCalendarService {
     return processed;
   }
 
-  async syncAllEvents(id: string): Promise<number> {
+  async syncAllEvents(id: string, triggeringUserId?: string): Promise<number> {
     // In our new flow, 'id' is typically an organizationId passed from the controller
-    return this.fetchAllGoogleCalendarEvents(id, id);
+    return this.fetchAllGoogleCalendarEvents(id, id, triggeringUserId);
   }
 
   private async upsertEventToLocalDB(

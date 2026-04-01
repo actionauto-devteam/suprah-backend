@@ -106,7 +106,8 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
         appointment,
         organizer,
         customerBooking.email,
-        token
+        token,
+        appointment.organizationId.toString()
       );
       console.log(`✅ Sent customer booking invitation to ${customerBooking.email}`);
     } catch (error) {
@@ -128,7 +129,8 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
           appointment,
           organizer,
           guest.email,
-          token
+          token,
+          appointment.organizationId.toString()
         );
       } catch (error) {
         console.error(`Failed to send invitation to ${guest.email}:`, error);

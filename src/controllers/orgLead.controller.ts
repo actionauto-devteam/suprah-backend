@@ -9,6 +9,7 @@ import { IUser } from '../models/User.model';
 import { v4 as uuidv4 } from 'uuid';
 import googleCalendarService from '../services/googleCalendar.service';
 import { google } from 'googleapis';
+import { cacheService } from '../services/cache.service';
 
 /**
  * Initiate Google OAuth flow for an organization
@@ -76,6 +77,9 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
             { upsert: true, new: true }
         );
 
+        // Invalidate Cache
+        await cacheService.del(`config:org:${orgId}`);
+
         // --- NEW: Set up Calendar Webhook (non-critical) ---
         try {
             const channelId = uuidv4();
@@ -97,7 +101,17 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
  */
 const getConfig = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId;
-    let config = await OrgLeadConfig.findOne({ organizationId: orgId });
+    const cacheKey = `config:org:${orgId}`;
+    let config = await cacheService.get(cacheKey);
+
+    if (!config) {
+        config = await OrgLeadConfig.findOne({ organizationId: orgId }).lean();
+        if (config) {
+            await cacheService.set(cacheKey, config, 3600); // 1hr
+        }
+    } else {
+        console.log(`[Cache] Redis HIT for OrgConfig: ${orgId}`);
+    }
 
     if (!config) {
         // Return empty config with default webhook secret if none exists
@@ -135,6 +149,9 @@ const updateConfig = asyncHandler(async (req: Request, res: Response) => {
         { new: true, upsert: true }
     );
 
+    // Invalidate Cache
+    await cacheService.del(`config:org:${orgId}`);
+
     res.json(new ApiResponse(200, config, 'Configuration updated'));
 });
 
@@ -151,6 +168,9 @@ const generateSecret = asyncHandler(async (req: Request, res: Response) => {
         { $set: { webhookSecret: encryptedSecret } },
         { upsert: true }
     );
+
+    // Invalidate Cache
+    await cacheService.del(`config:org:${orgId}`);
 
     // Return the raw secret ONCE so the user can copy it
     res.json(new ApiResponse(200, { webhookSecret: newSecret }, 'Webhook secret generated. Copy it now, it will not be shown again.'));
@@ -175,7 +195,7 @@ const sync = asyncHandler(async (req: Request, res: Response) => {
     // 2. Sync Calendar Events (Uses OrgLeadConfig tokens via orgId)
     let calendarProcessed = 0;
     try {
-        calendarProcessed = await googleCalendarService.syncAllEvents(orgId);
+        calendarProcessed = await googleCalendarService.syncAllEvents(orgId, userId);
     } catch (err: any) {
         console.warn(`[ManualSync] Calendar sync failed (ignorable if not connected): ${err.message}`);
     }
@@ -207,6 +227,9 @@ const disconnect = asyncHandler(async (req: Request, res: Response) => {
             }
         }
     );
+
+    // Invalidate Cache
+    await cacheService.del(`config:org:${orgId}`);
 
     res.json(new ApiResponse(200, {}, 'Google integration disconnected successfully for the organization'));
 });
