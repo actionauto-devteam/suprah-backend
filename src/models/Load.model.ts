@@ -194,6 +194,19 @@ export interface ILoad extends Document {
   additionalInfo?:  ILoadAdditionalInfo;
   contract?:        ILoadContract;
 
+  assignedDriverId?: mongoose.Types.ObjectId;
+  assignedAt?:       Date;
+
+  pendingDriverRequests?: Array<{
+    driverId:        mongoose.Types.ObjectId;
+    driverName:      string;
+    requestedAt:     Date;
+    status:          "pending" | "approved" | "rejected";
+    reviewedAt?:     Date;
+    reviewedBy?:     mongoose.Types.ObjectId;
+    rejectionReason?: string;
+  }>;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -226,6 +239,21 @@ const LoadSchema = new Schema<ILoad>(
     pricing:        { type: LoadPricingSchema },
     additionalInfo: { type: LoadAdditionalInfoSchema },
     contract:       { type: LoadContractSchema },
+
+    assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    assignedAt:       { type: Date },
+
+    pendingDriverRequests: [
+      {
+        driverId:        { type: Schema.Types.ObjectId, ref: "User", required: true },
+        driverName:      { type: String, required: true },
+        requestedAt:     { type: Date, default: Date.now },
+        status:          { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+        reviewedAt:      { type: Date },
+        reviewedBy:      { type: Schema.Types.ObjectId, ref: "User" },
+        rejectionReason: { type: String, trim: true },
+      },
+    ],
   },
   { timestamps: true }
 );
@@ -243,6 +271,7 @@ LoadSchema.pre("save", function (next) {
 LoadSchema.index({ organizationId: 1, createdAt: -1 });
 LoadSchema.index({ organizationId: 1, status: 1 });
 LoadSchema.index({ organizationId: 1, "additionalInfo.visibility": 1 });
+LoadSchema.index({ "pendingDriverRequests.driverId": 1, "pendingDriverRequests.status": 1 });
 
 const Load = mongoose.model<ILoad>("Load", LoadSchema);
 

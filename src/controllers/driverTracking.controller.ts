@@ -4,6 +4,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import DriverLocation, { DriverStatus } from "../models/DriverLocation.model";
 import Shipment from "../models/Shipment.model";
+import Load from "../models/Load.model";
 import User, { IUser } from "../models/User.model";
 import AuditLog from "../models/AuditLog.model";
 import DriverProfile from "../models/DriverProfile.model";
@@ -583,61 +584,108 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
   const orgId = user.organizationId?.toString();
-  if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
+  if (!orgId) {
+    return res.json(new ApiResponse(200, [], "No organization assigned — contact your dispatcher"));
+  }
 
   const driverProfile = await DriverProfile.findOne({ userId: user._id });
+  const userId = user._id.toString();
 
-  const filter: any = {
+  const shipmentFilter: any = {
     organizationId: orgId,
     status: "Available for Pickup",
     isPostedToBoard: true,
-    $or: [
-      { assignedDriverId: { $exists: false } },
-      { assignedDriverId: null },
-    ],
+    $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
+  };
+
+  const loadFilter: any = {
+    organizationId: orgId,
+    status: "Posted",
+    $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
   };
 
   if (driverProfile?.trailerType && driverProfile.trailerType !== "other") {
-    filter.$and = [
-      {
-        $or: [
-          { trailerTypeRequired: { $exists: false } },
-          { trailerTypeRequired: null },
-          { trailerTypeRequired: "" },
-          { trailerTypeRequired: driverProfile.trailerType },
-        ],
-      },
-    ];
+    const trailerMatch = {
+      $or: [
+        { trailerTypeRequired: { $exists: false } },
+        { trailerTypeRequired: null },
+        { trailerTypeRequired: "" },
+        { trailerTypeRequired: driverProfile.trailerType },
+      ],
+    };
+    shipmentFilter.$and = [trailerMatch];
+
+    const loadTrailerMatch = {
+      $or: [
+        { "vehicles.0": { $exists: false } },
+        { "vehicles.0.trailerType": driverProfile.trailerType },
+      ],
+    };
+    loadFilter.$and = [loadTrailerMatch];
   }
 
   if (driverProfile?.maxVehicleCapacity) {
-    filter.$and = filter.$and || [];
-    filter.$and.push({
+    const capFilter = {
       $or: [
         { vehicleCount: { $exists: false } },
         { vehicleCount: null },
         { vehicleCount: { $lte: driverProfile.maxVehicleCapacity } },
       ],
-    });
+    };
+    shipmentFilter.$and = shipmentFilter.$and || [];
+    shipmentFilter.$and.push(capFilter);
+
+    const loadCapFilter = { $expr: { $lte: [{ $size: { $ifNull: ["$vehicles", []] } }, driverProfile.maxVehicleCapacity] } };
+    loadFilter.$and = loadFilter.$and || [];
+    loadFilter.$and.push(loadCapFilter);
   }
 
-  const loads = await Shipment.find(filter)
-    .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery desiredDeliveryDate trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
-    .sort({ createdAt: -1 })
-    .limit(50);
+  const [shipments, loads] = await Promise.all([
+    Shipment.find(shipmentFilter)
+      .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery desiredDeliveryDate trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
+      .sort({ createdAt: -1 })
+      .limit(40)
+      .lean(),
+    Load.find(loadFilter)
+      .select("_id loadNumber status pickupLocation deliveryLocation vehicles dates pricing pendingDriverRequests createdAt")
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean(),
+  ]);
 
-  const mapped = loads.map((load: any) => {
-    const myRequest = load.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === user._id.toString()
-    );
+  const mappedShipments = shipments.map((s: any) => {
+    const myRequest = s.pendingDriverRequests?.find((r: any) => r.driverId.toString() === userId);
     return {
-      ...load.toObject(),
+      ...s,
+      __docType: "shipment",
       myRequestStatus: myRequest?.status || null,
       myRequestedAt: myRequest?.requestedAt || null,
     };
   });
 
-  res.json(new ApiResponse(200, mapped, "Available loads fetched"));
+  const mappedLoads = loads.map((l: any) => {
+    const myRequest = l.pendingDriverRequests?.find((r: any) => r.driverId.toString() === userId);
+    return {
+      _id: l._id,
+      __docType: "load",
+      origin: `${l.pickupLocation?.city || ""}${l.pickupLocation?.state ? `, ${l.pickupLocation.state}` : ""}`,
+      destination: `${l.deliveryLocation?.city || ""}${l.deliveryLocation?.state ? `, ${l.deliveryLocation.state}` : ""}`,
+      trackingNumber: l.loadNumber,
+      status: l.status,
+      requestedPickupDate: l.dates?.firstAvailable,
+      trailerTypeRequired: l.vehicles?.[0]?.trailerType,
+      vehicleCount: l.vehicles?.length || 0,
+      carrierPayAmount: l.pricing?.carrierPayAmount,
+      estimatedRate: l.pricing?.estimatedRate,
+      miles: l.pricing?.miles,
+      pendingDriverRequests: l.pendingDriverRequests,
+      createdAt: l.createdAt,
+      myRequestStatus: myRequest?.status || null,
+      myRequestedAt: myRequest?.requestedAt || null,
+    };
+  });
+
+  res.json(new ApiResponse(200, [...mappedShipments, ...mappedLoads], "Available loads fetched"));
 });
 
 const requestLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -648,8 +696,8 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   const orgId = user.organizationId?.toString();
   if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
 
-  const { shipmentId } = req.body as { shipmentId?: string };
-  if (!shipmentId) throw new ApiError(400, "Shipment ID is required");
+  const { shipmentId, loadId } = req.body as { shipmentId?: string; loadId?: string };
+  if (!shipmentId && !loadId) throw new ApiError(400, "A shipment ID or load ID is required");
 
   const driverProfile = await DriverProfile.findOne({ userId: user._id });
   if (driverProfile?.isComplianceExpired) {
@@ -659,17 +707,57 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, "Your operational status must be Active to request loads");
   }
 
+  const requestEntry = {
+    driverId: user._id,
+    driverName: user.name || user.email,
+    requestedAt: new Date(),
+    status: "pending" as const,
+  };
+
+  if (loadId) {
+    const load = await Load.findOne({
+      _id: loadId,
+      organizationId: orgId,
+      status: "Posted",
+      $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
+    });
+    if (!load) throw new ApiError(404, "Load not available");
+
+    const alreadyRequested = load.pendingDriverRequests?.some(
+      (r: any) => r.driverId.toString() === user._id.toString() && r.status === "pending"
+    );
+    if (alreadyRequested) throw new ApiError(400, "You have already requested this load");
+
+    if (driverProfile?.maxVehicleCapacity && load.vehicles?.length > driverProfile.maxVehicleCapacity) {
+      throw new ApiError(400, `This load has ${load.vehicles.length} vehicles. Your trailer supports ${driverProfile.maxVehicleCapacity}.`);
+    }
+
+    await Load.findByIdAndUpdate(loadId, { $push: { pendingDriverRequests: requestEntry } });
+
+    await notifyOrgAdmins(orgId, "shipment_status_changed", "Load Requested by Driver",
+      `${user.name || user.email} requested load ${load.loadNumber}`,
+      { loadId: load._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email });
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit("driver:load_requested", { loadId, driverId: user._id.toString(), driverName: user.name || user.email });
+
+    res.json(new ApiResponse(200, null, "Load request submitted — pending dispatcher approval"));
+
+    await AuditLog.create({
+      entityType: "Load", entityId: load._id, action: "UPDATE",
+      reason: "Driver requested load from board", performedBy: user._id,
+      changes: { requestedBy: user._id.toString() },
+    });
+    return;
+  }
+
   const shipment = await Shipment.findOne({
     _id: shipmentId,
     organizationId: orgId,
     status: "Available for Pickup",
     isPostedToBoard: true,
-    $or: [
-      { assignedDriverId: { $exists: false } },
-      { assignedDriverId: null },
-    ],
+    $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
   });
-
   if (!shipment) throw new ApiError(404, "Load not available");
 
   const alreadyRequested = shipment.pendingDriverRequests?.some(
@@ -683,22 +771,11 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  await Shipment.findByIdAndUpdate(shipmentId, {
-    $push: {
-      pendingDriverRequests: {
-        driverId: user._id,
-        driverName: user.name || user.email,
-        requestedAt: new Date(),
-        status: "pending",
-      },
-    },
-  });
+  await Shipment.findByIdAndUpdate(shipmentId, { $push: { pendingDriverRequests: requestEntry } });
 
-  await notifyOrgAdmins(
-    orgId, "shipment_status_changed", "Load Requested by Driver",
+  await notifyOrgAdmins(orgId, "shipment_status_changed", "Load Requested by Driver",
     `${user.name || user.email} requested shipment ${shipment.trackingNumber || "N/A"}`,
-    { shipmentId: shipment._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email },
-  );
+    { shipmentId: shipment._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email });
 
   const io = getSocketIO();
   if (io) io.to(`org:${orgId}`).emit("driver:load_requested", { shipmentId, driverId: user._id.toString(), driverName: user.name || user.email });
@@ -744,9 +821,61 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
 const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const adminId = (req.user as any)?._id;
-  const { shipmentId, driverId } = req.body as { shipmentId?: string; driverId?: string };
+  const { shipmentId, loadId, driverId } = req.body as { shipmentId?: string; loadId?: string; driverId?: string };
 
-  if (!shipmentId || !driverId) throw new ApiError(400, "Shipment ID and driver ID are required");
+  if ((!shipmentId && !loadId) || !driverId) throw new ApiError(400, "A shipment/load ID and driver ID are required");
+
+  if (loadId) {
+    const load = await Load.findOne({ _id: loadId, organizationId: orgId });
+    if (!load) throw new ApiError(404, "Load not found");
+
+    const pendingReq = load.pendingDriverRequests?.find(
+      (r: any) => r.driverId.toString() === driverId && r.status === "pending"
+    );
+    if (!pendingReq) throw new ApiError(404, "No pending request from this driver");
+
+    const driver = await User.findById(driverId).select("name email");
+    if (!driver) throw new ApiError(404, "Driver not found");
+
+    load.pendingDriverRequests = (load.pendingDriverRequests || []).map((r: any) => {
+      if (r.driverId.toString() === driverId) {
+        r.status = "approved"; r.reviewedAt = new Date(); r.reviewedBy = adminId;
+      } else if (r.status === "pending") {
+        r.status = "rejected"; r.reviewedAt = new Date(); r.reviewedBy = adminId;
+        r.rejectionReason = "Another driver was approved for this load";
+      }
+      return r;
+    }) as any;
+
+    load.assignedDriverId = driver._id as any;
+    load.assignedAt = new Date();
+    load.status = "Assigned";
+    await load.save();
+
+    await DriverLocation.findOneAndUpdate(
+      { userId: driverId },
+      { $addToSet: { shipmentIds: load._id } },
+    );
+
+    await safeCreateNotification({
+      userId: driverId, organizationId: orgId, type: "shipment_assigned",
+      title: "Load Request Approved",
+      message: `Your request for ${load.loadNumber} has been approved. You are now assigned.`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+    });
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit("driver:loads_updated", { action: "approved", loadId, driverId });
+
+    res.json(new ApiResponse(200, load, "Load request approved — driver assigned"));
+
+    await AuditLog.create({
+      entityType: "Load", entityId: load._id, action: "UPDATE",
+      reason: "Admin approved driver load request", performedBy: adminId,
+      changes: { assignedDriverId: driverId, status: "Assigned" },
+    });
+    return;
+  }
 
   const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
   if (!shipment) throw new ApiError(404, "Shipment not found");
@@ -827,9 +956,47 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
 const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const adminId = (req.user as any)?._id;
-  const { shipmentId, driverId, reason } = req.body as { shipmentId?: string; driverId?: string; reason?: string };
+  const { shipmentId, loadId, driverId, reason } = req.body as { shipmentId?: string; loadId?: string; driverId?: string; reason?: string };
 
-  if (!shipmentId || !driverId) throw new ApiError(400, "Shipment ID and driver ID are required");
+  if ((!shipmentId && !loadId) || !driverId) throw new ApiError(400, "A shipment/load ID and driver ID are required");
+
+  if (loadId) {
+    const load = await Load.findOne({ _id: loadId, organizationId: orgId });
+    if (!load) throw new ApiError(404, "Load not found");
+
+    const pendingReq = load.pendingDriverRequests?.find(
+      (r: any) => r.driverId.toString() === driverId && r.status === "pending"
+    );
+    if (!pendingReq) throw new ApiError(404, "No pending request from this driver");
+
+    load.pendingDriverRequests = (load.pendingDriverRequests || []).map((r: any) => {
+      if (r.driverId.toString() === driverId && r.status === "pending") {
+        r.status = "rejected"; r.reviewedAt = new Date(); r.reviewedBy = adminId;
+        r.rejectionReason = reason || "Request declined by dispatcher";
+      }
+      return r;
+    }) as any;
+    await load.save();
+
+    await safeCreateNotification({
+      userId: driverId, organizationId: orgId, type: "shipment_status_changed",
+      title: "Load Request Declined",
+      message: `Your request for ${load.loadNumber} was declined${reason ? `: ${reason}` : ""}.`,
+      metadata: { loadId: load._id.toString() },
+    });
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit("driver:load_request_updated", { loadId, driverId, action: "rejected" });
+
+    res.json(new ApiResponse(200, null, "Load request rejected"));
+
+    await AuditLog.create({
+      entityType: "Load", entityId: load._id, action: "UPDATE",
+      reason: "Admin rejected driver load request", performedBy: adminId,
+      changes: { rejectedDriverId: driverId, reason },
+    });
+    return;
+  }
 
   const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
   if (!shipment) throw new ApiError(404, "Shipment not found");
@@ -875,47 +1042,69 @@ const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
 const getLoadRequests = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
-  const shipments = await Shipment.find({
-    organizationId: orgId,
-    "pendingDriverRequests.status": "pending",
-  })
-    .select("_id origin destination trackingNumber status trailerTypeRequired vehicleCount carrierPayAmount pendingDriverRequests createdAt requestedPickupDate")
-    .sort({ "pendingDriverRequests.requestedAt": -1 })
-    .limit(50);
+  const [shipments, loads] = await Promise.all([
+    Shipment.find({ organizationId: orgId, "pendingDriverRequests.status": "pending" })
+      .select("_id origin destination trackingNumber status trailerTypeRequired vehicleCount carrierPayAmount pendingDriverRequests createdAt requestedPickupDate")
+      .sort({ createdAt: -1 }).limit(40).lean(),
+    Load.find({ organizationId: orgId, "pendingDriverRequests.status": "pending" })
+      .select("_id loadNumber status pickupLocation deliveryLocation vehicles pricing pendingDriverRequests createdAt dates")
+      .sort({ createdAt: -1 }).limit(20).lean(),
+  ]);
+
+  const allDriverIds = new Set<string>();
+  for (const s of shipments) {
+    (s.pendingDriverRequests || []).filter((r: any) => r.status === "pending").forEach((r: any) => allDriverIds.add(r.driverId.toString()));
+  }
+  for (const l of loads) {
+    (l.pendingDriverRequests || []).filter((r: any) => r.status === "pending").forEach((r: any) => allDriverIds.add(r.driverId.toString()));
+  }
+
+  const profiles = await DriverProfile.find(
+    { userId: { $in: Array.from(allDriverIds) } },
+    "userId trailerType maxVehicleCapacity operationalStatus isComplianceExpired truckMake truckModel profileCompletionScore"
+  ).lean();
+  const profileMap = new Map(profiles.map((p: any) => [p.userId.toString(), p]));
 
   const requests: any[] = [];
+
   for (const s of shipments) {
     const pending = (s.pendingDriverRequests || []).filter((r: any) => r.status === "pending");
-    const driverIds = pending.map((r: any) => r.driverId);
-    const profiles = await DriverProfile.find(
-      { userId: { $in: driverIds } },
-      "userId trailerType maxVehicleCapacity operationalStatus isComplianceExpired truckMake truckModel profileCompletionScore"
-    ).lean();
-    const profileMap = new Map(profiles.map((p: any) => [p.userId.toString(), p]));
-
     for (const r of pending) {
       const prof = profileMap.get(r.driverId.toString());
       requests.push({
         shipmentId: s._id.toString(),
-        trackingNumber: s.trackingNumber,
-        origin: s.origin,
-        destination: s.destination,
-        trailerTypeRequired: s.trailerTypeRequired,
-        vehicleCount: s.vehicleCount,
-        carrierPayAmount: s.carrierPayAmount,
-        requestedPickupDate: s.requestedPickupDate,
+        trackingNumber: (s as any).trackingNumber,
+        origin: (s as any).origin,
+        destination: (s as any).destination,
+        trailerTypeRequired: (s as any).trailerTypeRequired,
+        vehicleCount: (s as any).vehicleCount,
+        carrierPayAmount: (s as any).carrierPayAmount,
+        requestedPickupDate: (s as any).requestedPickupDate,
         driverId: r.driverId.toString(),
         driverName: r.driverName,
         requestedAt: r.requestedAt,
-        equipment: prof ? {
-          trailerType: prof.trailerType,
-          maxVehicleCapacity: prof.maxVehicleCapacity,
-          operationalStatus: prof.operationalStatus,
-          isComplianceExpired: prof.isComplianceExpired,
-          truckMake: prof.truckMake,
-          truckModel: prof.truckModel,
-          profileCompletionScore: prof.profileCompletionScore,
-        } : null,
+        equipment: prof ? { trailerType: prof.trailerType, maxVehicleCapacity: prof.maxVehicleCapacity, operationalStatus: prof.operationalStatus, isComplianceExpired: prof.isComplianceExpired, truckMake: prof.truckMake, truckModel: prof.truckModel, profileCompletionScore: prof.profileCompletionScore } : null,
+      });
+    }
+  }
+
+  for (const l of loads) {
+    const pending = (l.pendingDriverRequests || []).filter((r: any) => r.status === "pending");
+    for (const r of pending) {
+      const prof = profileMap.get(r.driverId.toString());
+      requests.push({
+        loadId: l._id.toString(),
+        trackingNumber: (l as any).loadNumber,
+        origin: `${(l as any).pickupLocation?.city || ""}${(l as any).pickupLocation?.state ? `, ${(l as any).pickupLocation.state}` : ""}`,
+        destination: `${(l as any).deliveryLocation?.city || ""}${(l as any).deliveryLocation?.state ? `, ${(l as any).deliveryLocation.state}` : ""}`,
+        trailerTypeRequired: (l as any).vehicles?.[0]?.trailerType,
+        vehicleCount: (l as any).vehicles?.length || 0,
+        carrierPayAmount: (l as any).pricing?.carrierPayAmount,
+        requestedPickupDate: (l as any).dates?.firstAvailable,
+        driverId: r.driverId.toString(),
+        driverName: r.driverName,
+        requestedAt: r.requestedAt,
+        equipment: prof ? { trailerType: prof.trailerType, maxVehicleCapacity: prof.maxVehicleCapacity, operationalStatus: prof.operationalStatus, isComplianceExpired: prof.isComplianceExpired, truckMake: prof.truckMake, truckModel: prof.truckModel, profileCompletionScore: prof.profileCompletionScore } : null,
       });
     }
   }
