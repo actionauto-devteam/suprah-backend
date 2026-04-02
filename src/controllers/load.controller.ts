@@ -7,7 +7,6 @@ import Vehicle from "../models/Vehicle.model";
 import User, { IUser } from "../models/User.model";
 import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
 import {
-  getCoordinatesFromZip,
   getCoordinatesForPair,
   calculateDistance,
   calculateRate,
