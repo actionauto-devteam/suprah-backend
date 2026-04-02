@@ -4,7 +4,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
 import Vehicle from "../models/Vehicle.model";
-import { IUser } from "../models/User.model";
+import User, { IUser } from "../models/User.model";
 import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
 import {
   getCoordinatesFromZip,
@@ -14,6 +14,8 @@ import {
   calculateETA,
 } from "../utils/calculations";
 import { maskLoadForDriver } from "../utils/loadMask";
+import { storageService } from "../services/storage.service";
+import { safeCreateNotification } from "../utils/safeNotification";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -314,4 +316,54 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
 });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad };
+// ─── Submit Proof of Delivery ─────────────────────────────────────────────────
+// POST /api/loads/:id/submit-proof
+// Driver submits a proof-of-delivery image for a Load-type assignment.
+
+const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const userId = user._id.toString();
+  const { note } = req.body;
+  const file = (req as any).file as Express.Multer.File | undefined;
+
+  if (!file) throw new ApiError(400, "Proof image is required");
+
+  const load = await Load.findById(req.params.id);
+  if (!load) throw new ApiError(404, "Load not found");
+
+  if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
+    throw new ApiError(403, "Only the assigned driver can submit proof of delivery");
+  }
+
+  // Replace old image if one exists
+  if (load.proofOfDelivery?.imageUrl?.startsWith("http")) {
+    try { await storageService.delete(load.proofOfDelivery.imageUrl); } catch { /* non-fatal */ }
+  }
+
+  const imageUrl = await storageService.upload(file, "proofs");
+
+  (load as any).proofOfDelivery = {
+    imageUrl,
+    submittedAt: new Date(),
+    note: note || undefined,
+  };
+
+  await load.save();
+
+  const orgId = load.organizationId?.toString();
+  if (orgId) {
+    const admins = await User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin", "employee"] } }).select("_id");
+    for (const admin of admins) {
+      await safeCreateNotification({
+        userId: admin._id.toString(), organizationId: orgId,
+        type: "proof_submitted", title: "Proof of Delivery Submitted",
+        message: `Driver submitted proof of delivery for load ${load.loadNumber || req.params.id}`,
+        metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber, imageUrl },
+      });
+    }
+  }
+
+  return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
+});
+
+export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad, submitProofOfDelivery };

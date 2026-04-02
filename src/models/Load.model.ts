@@ -197,6 +197,14 @@ export interface ILoad extends Document {
   assignedDriverId?: mongoose.Types.ObjectId;
   assignedAt?:       Date;
 
+  proofOfDelivery?: {
+    imageUrl:    string;
+    submittedAt: Date;
+    note?:       string;
+    confirmedAt?: Date;
+    confirmedBy?: mongoose.Types.ObjectId;
+  };
+
   pendingDriverRequests?: Array<{
     driverId:        mongoose.Types.ObjectId;
     driverName:      string;
@@ -242,6 +250,14 @@ const LoadSchema = new Schema<ILoad>(
 
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
     assignedAt:       { type: Date },
+
+    proofOfDelivery: {
+      imageUrl:    { type: String, trim: true },
+      submittedAt: { type: Date },
+      note:        { type: String, trim: true },
+      confirmedAt: { type: Date },
+      confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    },
 
     pendingDriverRequests: [
       {

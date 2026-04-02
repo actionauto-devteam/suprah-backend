@@ -182,6 +182,7 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
 
   if (!notification) {
     throw new ApiError(404, 'Notification not found');
+    
   }
 
   emitToUser(userId, 'notification:read', { notificationId });

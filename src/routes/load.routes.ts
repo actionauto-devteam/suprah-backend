@@ -3,6 +3,7 @@ import loadController from "../controllers/load.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
+import { uploadProofImage } from "../middleware/upload.middleware";
 
 const router = express.Router();
 
@@ -29,5 +30,8 @@ router
   .route("/:id")
   .get(loadController.getLoadById)              // drivers can read (masking applied in controller)
   .delete(staffOnly, loadController.deleteLoad); // staff only
+
+// Driver submits proof — no org required (same pattern as shipment submit-proof)
+router.post("/:id/submit-proof", uploadProofImage, loadController.submitProofOfDelivery);
 
 export default router;

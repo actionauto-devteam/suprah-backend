@@ -20,7 +20,7 @@ export const locationBlockSchema = z.object({
   companyName:          z.string().trim().max(100).optional(),
   contactName:          z.string().trim().max(100).optional(),
   email:                z.string().trim().email("Invalid email").optional().or(z.literal("")),
-  phone:                z.string().trim().max(20).optional(),
+  phone:                z.string().trim().regex(/^\d{10}$/, "Phone must be exactly 10 digits").optional().or(z.literal("")),
   cellPhone:            z.string().trim().max(20).optional(),
   phoneExt:             z.string().trim().max(6).optional(),
   street:               z.string().trim().max(200).optional(),
