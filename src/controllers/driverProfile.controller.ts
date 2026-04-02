@@ -56,6 +56,10 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
     trailerAxles,
     trailerGvwr,
     engineType,
+    trailerMake,
+    trailerModel,
+    trailerYear,
+    hitchType,
     specialFeatures,
   } = req.body;
 
@@ -74,6 +78,10 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   if (trailerAxles !== undefined) profile.trailerAxles = trailerAxles;
   if (trailerGvwr !== undefined) profile.trailerGvwr = trailerGvwr;
   if (engineType !== undefined) profile.engineType = engineType;
+  if (trailerMake !== undefined) profile.trailerMake = trailerMake;
+  if (trailerModel !== undefined) profile.trailerModel = trailerModel;
+  if (trailerYear !== undefined) profile.trailerYear = trailerYear;
+  if (hitchType !== undefined) profile.hitchType = hitchType;
   if (specialFeatures !== undefined) profile.specialFeatures = specialFeatures;
 
   await profile.save();

@@ -75,6 +75,10 @@ export interface IDriverProfile extends Document {
   trailerAxles: number;
   trailerGvwr: number;
   engineType: string;
+  trailerMake: string;
+  trailerModel: string;
+  trailerYear: number;
+  hitchType: string;
   specialFeatures: string[];
 
   driversLicenseNumber: string;
@@ -202,6 +206,14 @@ const DriverProfileSchema = new Schema<IDriverProfile>(
     trailerAxles: { type: Number, min: 1, max: 10, default: 2 },
     trailerGvwr: { type: Number, min: 0, max: 100000 },
     engineType: { type: String, trim: true, default: "" },
+    trailerMake: { type: String, trim: true, default: "" },
+    trailerModel: { type: String, trim: true, default: "" },
+    trailerYear: { type: Number, min: 1990, max: 2030 },
+    hitchType: {
+      type: String,
+      enum: ["fifth_wheel", "gooseneck", "bumper_pull", "pintle", ""],
+      default: "",
+    },
     specialFeatures: {
       type: [String],
       default: [],
