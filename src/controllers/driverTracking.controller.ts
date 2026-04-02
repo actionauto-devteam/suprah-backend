@@ -633,6 +633,8 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
 
   const mappedLoads = loads.map((l: any) => {
     const myRequest = l.pendingDriverRequests?.find((r: any) => r.driverId.toString() === userId);
+    const firstVehicle = l.vehicles?.[0];
+    const vehicleName = firstVehicle ? `${firstVehicle.year || ""} ${firstVehicle.make || ""} ${firstVehicle.model || ""}`.trim() : undefined;
     return {
       _id: l._id,
       __docType: "load",
@@ -641,11 +643,14 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
       trackingNumber: l.loadNumber,
       status: l.status,
       requestedPickupDate: l.dates?.firstAvailable,
-      trailerTypeRequired: l.vehicles?.[0]?.trailerType,
+      scheduledDelivery: l.dates?.deliveryDeadline,
+      trailerTypeRequired: firstVehicle?.trailerType,
       vehicleCount: l.vehicles?.length || 0,
       carrierPayAmount: l.pricing?.carrierPayAmount,
       estimatedRate: l.pricing?.estimatedRate,
       miles: l.pricing?.miles,
+      vehicles: l.vehicles,
+      preservedQuoteData: vehicleName ? { vehicleName, units: l.vehicles?.length } : undefined,
       pendingDriverRequests: l.pendingDriverRequests,
       createdAt: l.createdAt,
       myRequestStatus: myRequest?.status || null,
@@ -764,26 +769,64 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
   const orgId = user.organizationId?.toString();
   if (!orgId) throw new ApiError(403, "Driver must be assigned to an organization");
 
-  const shipments = await Shipment.find({
-    organizationId: orgId,
-    "pendingDriverRequests.driverId": user._id,
-  })
-    .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
-    .sort({ createdAt: -1 });
+  const [shipments, loads] = await Promise.all([
+    Shipment.find({
+      organizationId: orgId,
+      "pendingDriverRequests.driverId": user._id,
+    })
+      .select("_id origin destination trackingNumber status requestedPickupDate scheduledPickup scheduledDelivery trailerTypeRequired vehicleCount carrierPayAmount preservedQuoteData pendingDriverRequests createdAt")
+      .sort({ createdAt: -1 }),
+    Load.find({
+      organizationId: orgId,
+      "pendingDriverRequests.driverId": user._id,
+    })
+      .select("_id loadNumber status pickupLocation deliveryLocation vehicles dates pricing pendingDriverRequests createdAt")
+      .sort({ createdAt: -1 }),
+  ]);
 
-  const mapped = shipments.map((s: any) => {
+  const userId = user._id.toString();
+
+  const mappedShipments = shipments.map((s: any) => {
     const myReq = s.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === user._id.toString()
+      (r: any) => r.driverId.toString() === userId
     );
     return {
       ...s.toObject(),
+      __docType: "shipment",
       myRequestStatus: myReq?.status || null,
       myRequestedAt: myReq?.requestedAt || null,
       rejectionReason: myReq?.rejectionReason || null,
     };
   });
 
-  res.json(new ApiResponse(200, mapped, "My load requests fetched"));
+  const mappedLoads = loads.map((l: any) => {
+    const myReq = l.pendingDriverRequests?.find(
+      (r: any) => r.driverId.toString() === userId
+    );
+    const firstVehicle = l.vehicles?.[0];
+    const vehicleName = firstVehicle ? `${firstVehicle.year || ""} ${firstVehicle.make || ""} ${firstVehicle.model || ""}`.trim() : undefined;
+    return {
+      _id: l._id,
+      __docType: "load",
+      origin: `${l.pickupLocation?.city || ""}${l.pickupLocation?.state ? `, ${l.pickupLocation.state}` : ""}`,
+      destination: `${l.deliveryLocation?.city || ""}${l.deliveryLocation?.state ? `, ${l.deliveryLocation.state}` : ""}`,
+      trackingNumber: l.loadNumber,
+      status: l.status,
+      requestedPickupDate: l.dates?.firstAvailable,
+      trailerTypeRequired: firstVehicle?.trailerType,
+      vehicleCount: l.vehicles?.length || 0,
+      carrierPayAmount: l.pricing?.carrierPayAmount,
+      vehicles: l.vehicles,
+      preservedQuoteData: vehicleName ? { vehicleName, units: l.vehicles?.length } : undefined,
+      pendingDriverRequests: l.pendingDriverRequests,
+      createdAt: l.createdAt,
+      myRequestStatus: myReq?.status || null,
+      myRequestedAt: myReq?.requestedAt || null,
+      rejectionReason: myReq?.rejectionReason || null,
+    };
+  });
+
+  res.json(new ApiResponse(200, [...mappedShipments, ...mappedLoads], "My load requests fetched"));
 });
 
 const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
