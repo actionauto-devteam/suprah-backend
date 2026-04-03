@@ -13,6 +13,7 @@ import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import driverRequestRoute from "./driverRequest.routes";
+import driverProfileRoute from "./driverProfile.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import driverPayoutRoute from "./driverPayout.routes";
@@ -27,7 +28,7 @@ import supraSpaceRoute from "./supraspace.route";
 import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
 import devToolsRoute from "./devTools.routes";
-import orgLeadRoute from "./orgLead.route";
+import loadRoute from "./load.routes";
 
 const router = express.Router();
 
@@ -105,6 +106,10 @@ const defaultRoutes = [
     route: driverRequestRoute,
   },
   {
+    path: "/driver-profile",
+    route: driverProfileRoute,
+  },
+  {
     path: "/service",
     route: serviceRoute,
   },
@@ -146,8 +151,8 @@ const defaultRoutes = [
     route: devToolsRoute,
   },
   {
-    path: "/org-lead",
-    route: orgLeadRoute,
+    path: "/loads",
+    route: loadRoute,
   },
 ];
 

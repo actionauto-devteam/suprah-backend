@@ -2,6 +2,7 @@ import express from "express";
 import authMiddleware from "../middleware/auth.middleware";
 import User from "../models/User.model";
 import DriverRequest from "../models/DriverRequest.model";
+import DriverProfile from "../models/DriverProfile.model";
 import { ApiResponse } from "../utils/ApiResponse";
 import { asyncHandler } from "../utils/asyncHandler";
 import config from "../config";
@@ -30,7 +31,11 @@ router.post(
     }
 
     const originalRole = user.role;
-    const updated = await User.findByIdAndUpdate(user._id, { role }, { new: true }).select("-password");
+    const updated = await User.findByIdAndUpdate(
+      user._id,
+      { role, ...(role === "driver" ? { isApproved: true } : {}) },
+      { new: true }
+    ).select("-password");
 
     if (role === "driver") {
       await DriverRequest.findOneAndUpdate(
@@ -43,6 +48,16 @@ router.post(
           reviewedAt: new Date(),
         },
         { upsert: true, new: true }
+      );
+
+      await DriverProfile.findOneAndUpdate(
+        { userId: user._id },
+        {
+          userId: user._id,
+          organizationId: user.organizationId?.toString() || "",
+          operationalStatus: "active",
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
       );
     }
 

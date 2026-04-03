@@ -95,7 +95,6 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         requestedPickupDate: requestedPickupDate || new Date(),
         trackingNumber,
         organizationId: orgId,
-        ...(isValidObjId && { orgId }),
         ...(userId && { createdBy: userId }),
         preservedQuoteData: {
             firstName: quote.firstName,
@@ -215,13 +214,13 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get all shipments for the current organization
+ * Get all shipments (cross-org — all orgs visible for transparency)
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const { status, search } = req.query;
+    const orgId = req.orgId as string;
 
-    const filter: any = { organizationId: orgId };
+    const filter: any = {};
 
     if (status && status !== 'all') {
         filter.status = status;
@@ -247,7 +246,6 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             }
         })
         .populate('createdBy', 'name email avatar')
-        .populate('orgId', 'name logoUrl')
         .sort({ createdAt: -1 });
 
     let filteredShipments = shipments;
@@ -273,28 +271,18 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
 
     // Attach organization name to each shipment
     const uniqueOrgIds = [...new Set(filteredShipments.map(s => s.organizationId?.toString()).filter(Boolean))];
-    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
-    const orgs = validObjectIds.length
-        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
-        : [];
+    const validOrgIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+    const orgs = await Organization.find({ _id: { $in: validOrgIds } }).select('name logoUrl');
 
     const orgMap = new Map<string, { name: string; logoUrl?: string }>();
-    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
-
-    const shipmentsWithOrg = filteredShipments.map(s => {
-        const sJson = s.toJSON() as any;
-        const orgFromPopulate = sJson.orgId && typeof sJson.orgId === 'object'
-            ? { name: sJson.orgId.name, logoUrl: sJson.orgId.logoUrl }
-            : null;
-        return {
-            ...sJson,
-            organization: orgFromPopulate || orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
-        };
+    orgs.forEach(o => {
+        orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
     });
 
-    if (isCacheable) {
-        await cacheService.set(cacheKey, shipmentsWithOrg, SHIPMENT_CACHE_TTL);
-    }
+    const shipmentsWithOrg = filteredShipments.map(s => ({
+        ...(s.toJSON()),
+        organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
+    }));
 
     res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
 });
@@ -374,6 +362,25 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if (carrierInfo) updateData.carrierInfo = carrierInfo;
+
+    const { trailerTypeRequired, vehicleCount, isPostedToBoard, preDispatchNotes } = req.body;
+    if (trailerTypeRequired !== undefined) updateData.trailerTypeRequired = trailerTypeRequired;
+    if (vehicleCount !== undefined) updateData.vehicleCount = vehicleCount;
+    if (isPostedToBoard !== undefined) updateData.isPostedToBoard = Boolean(isPostedToBoard);
+    if (preDispatchNotes !== undefined) updateData.preDispatchNotes = preDispatchNotes;
+
+    const {
+        carrierPayAmount, copCodAmount, specialInstructions, loadSpecificTerms,
+        desiredDeliveryDate, internalLoadId, originContact, destinationContact,
+    } = req.body;
+    if (carrierPayAmount !== undefined) updateData.carrierPayAmount = carrierPayAmount;
+    if (copCodAmount !== undefined) updateData.copCodAmount = copCodAmount;
+    if (specialInstructions !== undefined) updateData.specialInstructions = specialInstructions;
+    if (loadSpecificTerms !== undefined) updateData.loadSpecificTerms = loadSpecificTerms;
+    if (desiredDeliveryDate !== undefined) updateData.desiredDeliveryDate = desiredDeliveryDate ? new Date(desiredDeliveryDate) : null;
+    if (internalLoadId !== undefined) updateData.internalLoadId = internalLoadId;
+    if (originContact !== undefined) updateData.originContact = originContact;
+    if (destinationContact !== undefined) updateData.destinationContact = destinationContact;
 
     const shipment = await Shipment.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
