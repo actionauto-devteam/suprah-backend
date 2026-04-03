@@ -1,5 +1,7 @@
 import Appointment from '../models/Appointment.model';
 import User from '../models/User.model';
+import Lead from '../models/lead.model';
+import { getSocketIO } from '../utils/socketEmitter';
 import notificationService from './notification.service';
 import emailService from './email.service';
 import googleCalendarService from './googleCalendar.service';
@@ -165,6 +167,27 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
       await customerBookingService.updateBookingHistory(appointment._id.toString());
     } catch (error) {
       console.error('Failed to update customer booking history:', error);
+    }
+  }
+
+  // Senior Fix: Transition Lead to "Appointment Set"
+  if (data.customerBooking?.isCustomerBooking || data.participants.length > 0) {
+    try {
+      // Look for a lead matching the email or context
+      const leadEmail = data.customerBooking?.email || (data as any).email;
+      if (leadEmail) {
+        const updatedLead = await Lead.findOneAndUpdate(
+          { email: leadEmail, organizationId: orgId },
+          { status: 'Appointment Set' },
+          { new: true }
+        );
+        if (updatedLead) {
+          const io = getSocketIO();
+          if (io) io.to(`org:${orgId}`).emit('lead:update', updatedLead);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to transition lead to Appointment Set:', error);
     }
   }
 
@@ -369,7 +392,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     try {
       await googleCalendarService.deleteFromGoogleCalendar(
         appointment.googleCalendarEventId,
-        userId
+        orgId // Changed from userId
       );
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
@@ -441,7 +464,7 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     try {
       await googleCalendarService.deleteFromGoogleCalendar(
         appointment.googleCalendarEventId,
-        userId
+        orgId // Use orgId instead of userId
       );
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);

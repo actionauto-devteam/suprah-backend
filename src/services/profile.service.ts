@@ -7,6 +7,7 @@ import activityService from './activity.service';
 import { storageService } from './storage.service';
 import fs from 'fs';
 import path from 'path';
+import OrgLeadConfig from '../models/OrgLeadConfig.model';
 
 /**
  * Update avatar/profile picture
@@ -100,10 +101,11 @@ const getProfile = async (userId: string) => {
     totalAppointments,
   };
 
-  // Build Google Calendar status
+  // Build Google Calendar status from Organization config
+  const orgConfig = orgId ? await OrgLeadConfig.findOne({ organizationId: orgId }) : null;
   const googleCalendar = {
-    connected: user.googleCalendar?.connected || false,
-    connectedAt: user.googleCalendar?.connectedAt,
+    connected: orgConfig?.calendarConnected || false,
+    connectedAt: orgConfig?.updatedAt, // Using updatedAt as proxy for connection time
   };
 
   return {

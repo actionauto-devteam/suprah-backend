@@ -74,14 +74,20 @@ async function getCentralOAuth2Client(orgId?: string) {
     }
   }
 
-  // 3. Last fallback to Environment Variables
+  // 3. Environment Variables (Super Admin / Development only)
+  // [ENFORCEMENT] In production, all organizations must use OrgLeadConfig.
   if (!credentials) {
-    console.log('[CENTRAL-AUTH] Using tokens from environment variables');
-    credentials = {
-      access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
-      refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
-      expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
-    };
+    if (process.env.CENTRAL_GMAIL_REFRESH_TOKEN) {
+      console.warn('[CENTRAL-AUTH] WARNING: Falling back to environmental refresh token. This is deprecated for production.');
+      credentials = {
+        access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
+        refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
+        expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
+      };
+    } else {
+      console.error('[CENTRAL-AUTH] ERROR: No Gmail credentials found (OrgLeadConfig, SystemConfig, or Env). Ingestion will fail.');
+      throw new Error('Gmail authentication context missing. Please configure organization Gmail settings.');
+    }
   }
 
   oauth2Client.setCredentials(credentials);
@@ -258,6 +264,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const search = req.query.search as string;
+    const status = req.query.status as string;
     const skip = (page - 1) * limit;
 
     const query: any = { organizationId: orgId };
@@ -271,6 +278,10 @@ export const getAllLeads = async (req: Request, res: Response) => {
         { 'vehicle.make': { $regex: search, $options: 'i' } },
         { 'vehicle.model': { $regex: search, $options: 'i' } },
       ];
+    }
+
+    if (status && status !== 'All') {
+      query.status = status;
     }
 
     const totalLeads = await Lead.countDocuments(query);
@@ -470,7 +481,7 @@ export const markAsPending = async (req: Request, res: Response) => {
     const orgId = req.orgId;
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
-      { isPending: true },
+      { isPending: true, status: 'Pending' },
       { new: true }
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
@@ -606,9 +617,9 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
     const isConfigured = !!(config && config.gmailConnected && config.refreshToken);
 
-    if (!isConfigured && !process.env.CENTRAL_GMAIL_REFRESH_TOKEN) {
+    if (!isConfigured) {
       return res.status(400).json(
-        new ApiResponse(400, null, 'Gmail ingestion not configured for this organization. Please connect Google first.')
+        new ApiResponse(400, null, 'Gmail ingestion not configured for this organization. Please connect Google via Settings.')
       );
     }
 

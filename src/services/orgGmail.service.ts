@@ -189,6 +189,90 @@ class OrgGmailService {
         }
     }
 
+    async isGmailConnected(orgId: string): Promise<boolean> {
+        const config = await OrgLeadConfig.findOne({ organizationId: orgId });
+        return !!(config && config.gmailConnected && config.accessToken && config.refreshToken);
+    }
+
+    /**
+     * Send email via Gmail API using Org credentials
+     */
+    async sendEmail(orgId: string, to: string, subject: string, body: string) {
+        const config = await OrgLeadConfig.findOne({ organizationId: orgId });
+        if (!config || !config.gmailConnected) {
+            throw new ApiError(400, 'Gmail not connected for this organization');
+        }
+
+        const oauth2Client = this.createOAuth2Client();
+        oauth2Client.setCredentials({
+            access_token: decrypt(config.accessToken),
+            refresh_token: decrypt(config.refreshToken),
+            expiry_date: config.expiryDate
+        });
+
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+        const messageParts = [
+            `From: ${config.gmailAddress}`,
+            `To: ${to}`,
+            `Subject: ${subject}`,
+            'Content-Type: text/plain; charset=utf-8',
+            'MIME-Version: 1.0',
+            '',
+            body
+        ];
+
+        const message = messageParts.join('\n');
+        const encodedMessage = Buffer.from(message)
+            .toString('base64')
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '');
+
+        const response = await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: {
+                raw: encodedMessage
+            }
+        });
+
+        return response.data;
+    }
+
+    /**
+     * Fetch emails for dashboard display
+     */
+    async fetchEmails(orgId: string, query: string = '', maxResults: number = 20) {
+        const config = await OrgLeadConfig.findOne({ organizationId: orgId });
+        if (!config || !config.gmailConnected) {
+            throw new ApiError(400, 'Gmail not connected for this organization');
+        }
+
+        const oauth2Client = this.createOAuth2Client();
+        oauth2Client.setCredentials({
+            access_token: decrypt(config.accessToken),
+            refresh_token: decrypt(config.refreshToken),
+            expiry_date: config.expiryDate
+        });
+
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+        const response = await gmail.users.messages.list({
+            userId: 'me',
+            q: query,
+            maxResults
+        });
+
+        const messages = response.data.messages || [];
+        const details = await Promise.all(
+            messages.map(async (m) => {
+                const res = await gmail.users.messages.get({ userId: 'me', id: m.id! });
+                return res.data;
+            })
+        );
+
+        return details;
+    }
+
     private extractBody(message: any): string {
         const parts = message.payload?.parts || [];
         let body = '';
