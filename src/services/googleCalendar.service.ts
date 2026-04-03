@@ -40,23 +40,11 @@ class GoogleCalendarService {
 
 
 
-  private async getCalendarClient(id: string): Promise<calendar_v3.Calendar> {
-    let orgId = id;
-
-    // 1. Try to find the organization configuration FIRST (id might be an orgId)
-    let config = await OrgLeadConfig.findOne({ organizationId: id });
-
-    // 2. If not found, it might be a userId - look up the user's organization
-    if (!config) {
-      const user = await User.findById(id).select('organizationId');
-      if (user && (user as any).organizationId) {
-        orgId = (user as any).organizationId.toString();
-        config = await OrgLeadConfig.findOne({ organizationId: orgId });
-      }
-    }
+  private async getCalendarClient(orgId: string): Promise<calendar_v3.Calendar> {
+    const config = await OrgLeadConfig.findOne({ organizationId: orgId });
 
     if (!config) {
-      throw new ApiError(404, `Calendar configuration not found for ID: ${id}. Ensure the organization is connected.`);
+      throw new ApiError(404, `Calendar configuration not found for Organization: ${orgId}. Ensure the organization is connected.`);
     }
 
     if (!config.calendarConnected || !config.accessToken || !config.refreshToken) {
@@ -167,20 +155,41 @@ class GoogleCalendarService {
 
   // ─── Sync Logic ────────────────────────────────────────────────────────────
 
-  async fetchAllGoogleCalendarEvents(id: string, providedOrgId?: string): Promise<number> {
+  async fetchAllGoogleCalendarEvents(id: string, providedOrgId?: string, triggeringUserId?: string): Promise<number> {
     const calendar = await this.getCalendarClient(id);
 
     // Resolve organization ID
     let organizationId = providedOrgId;
     let user: any = null;
 
+    // 1. Resolve organizationId if missing
     if (!organizationId) {
-      // If no orgId provided, assume id is a userId and look it up
       user = await User.findById(id).select('organizationId');
       if (user) organizationId = (user as any).organizationId?.toString();
     }
 
     if (!organizationId) throw new ApiError(400, 'Organization ID could not be resolved for sync.');
+
+    // 2. Resolve User context (mandatory for Appointment creation)
+    const userIdToLookup = triggeringUserId || (organizationId === id ? null : id);
+    if (userIdToLookup) {
+      user = await User.findById(userIdToLookup);
+    }
+
+    // 3. Fallback: If no user context, find first active admin in the organization
+    if (!user && organizationId) {
+      console.log(`[CalendarSync] No triggering user found, searching for organization admin fallback for org: ${organizationId}`);
+      user = await User.findOne({ organizationId, role: 'admin', isActive: true });
+      
+      // Final fallback: any active user in the organization
+      if (!user) {
+        user = await User.findOne({ organizationId, isActive: true });
+      }
+    }
+
+    if (!user) {
+      throw new ApiError(400, 'Could not find a valid user context to attribute synced events to.');
+    }
 
     const { timeMin, timeMax } = getSyncWindow();
     const events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
@@ -197,9 +206,8 @@ class GoogleCalendarService {
     return processed;
   }
 
-  async syncAllEvents(id: string): Promise<number> {
-    // In our new flow, 'id' is typically an organizationId passed from the controller
-    return this.fetchAllGoogleCalendarEvents(id, id);
+  async syncAllEvents(orgId: string, triggeringUserId?: string): Promise<number> {
+    return this.fetchAllGoogleCalendarEvents(orgId, orgId, triggeringUserId);
   }
 
   private async upsertEventToLocalDB(
@@ -270,9 +278,9 @@ class GoogleCalendarService {
 
   // ─── Outbound Sync ──────────────────────────────────────────────────────────
 
-  async syncAppointmentToGoogleCalendar(appointment: IAppointment, userId: string): Promise<string | null> {
+  async syncAppointmentToGoogleCalendar(appointment: IAppointment, orgId: string): Promise<string | null> {
     try {
-      const calendar = await this.getCalendarClient(userId);
+      const calendar = await this.getCalendarClient(orgId);
       const eventData: calendar_v3.Schema$Event = {
         summary: appointment.title,
         description: this.buildEventDescription(appointment),
@@ -306,9 +314,9 @@ class GoogleCalendarService {
     }
   }
 
-  async deleteFromGoogleCalendar(eventId: string, userId: string): Promise<void> {
+  async deleteFromGoogleCalendar(eventId: string, orgId: string): Promise<void> {
     try {
-      const calendar = await this.getCalendarClient(userId);
+      const calendar = await this.getCalendarClient(orgId);
       await calendar.events.delete({ calendarId: 'primary', eventId });
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
@@ -333,9 +341,9 @@ class GoogleCalendarService {
     await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { calendarConnected: false } });
   }
 
-  async setupWebhook(userId: string, channelId: string): Promise<void> {
+  async setupWebhook(orgId: string, channelId: string): Promise<void> {
     try {
-      const calendar   = await this.getCalendarClient(userId);
+      const calendar   = await this.getCalendarClient(orgId);
       const webhookUrl = `${process.env.BACKEND_URL}/api/google-calendar/webhook`;
       const response   = await calendar.events.watch({
         calendarId:  'primary',

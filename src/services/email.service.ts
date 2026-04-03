@@ -4,6 +4,9 @@ import { ApiError } from '../utils/ApiError';
 import { IAppointment } from '../models/Appointment.model';
 import { IUser } from '../models/User.model';
 import ical, { ICalAttendeeStatus, ICalAttendeeRole, ICalEventStatus, ICalAlarmType, ICalCalendarMethod } from 'ical-generator';
+import { google } from 'googleapis';
+import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import { decrypt } from '../utils/crypto';
 
 interface EmailOptions {
     to: string;
@@ -11,13 +14,14 @@ interface EmailOptions {
     text: string;
     html?: string;
     icalEvent?: any; // ICS attachment
+    organizationId?: string; // Multi-tenant support
 }
 
 class EmailService {
     private transporter: nodemailer.Transporter;
 
     constructor() {
-        // Initialize transporter using existing config
+        // Initialize transporter using existing config (Fallback)
         this.transporter = nodemailer.createTransport({
             host: config.email.host,
             port: config.email.port,
@@ -29,10 +33,101 @@ class EmailService {
         });
     }
 
+    private async getOrgOAuth2Client(organizationId: string) {
+        const orgConfig = await OrgLeadConfig.findOne({ organizationId, isActive: true });
+        if (!orgConfig || !orgConfig.refreshToken || !orgConfig.gmailConnected) {
+            return null;
+        }
+
+        const oauth2Client = new google.auth.OAuth2(
+            config.google.clientId,
+            config.google.clientSecret,
+            config.google.redirectUri
+        );
+
+        oauth2Client.setCredentials({
+            refresh_token: decrypt(orgConfig.refreshToken),
+        });
+
+        // Update tokens in DB on refresh
+        oauth2Client.on('tokens', async (tokens) => {
+            if (tokens.refresh_token) {
+                // This shouldn't happen often but let's be safe
+            }
+        });
+
+        return oauth2Client;
+    }
+
+    /**
+     * Internal method to send email via Gmail API (OAuth2)
+     */
+    private async sendEmailViaGmailApi(oauth2Client: any, options: EmailOptions): Promise<void> {
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+        
+        // Construct standard RFC 2822 email
+        const boundary = "__action_auto_boundary__";
+        const parts = [
+            `To: ${options.to}`,
+            `Subject: ${options.subject}`,
+            `MIME-Version: 1.0`,
+            `Content-Type: multipart/alternative; boundary="${boundary}"`,
+            ``,
+            `--${boundary}`,
+            `Content-Type: text/plain; charset="utf-8"`,
+            `Content-Transfer-Encoding: 7bit`,
+            ``,
+            options.text,
+            ``,
+            `--${boundary}`,
+            `Content-Type: text/html; charset="utf-8"`,
+            `Content-Transfer-Encoding: 7bit`,
+            ``,
+            options.html || options.text,
+            ``
+        ];
+
+        if (options.icalEvent) {
+            parts.push(`--${boundary}`);
+            parts.push(`Content-Type: text/calendar; charset="utf-8"; method=REQUEST`);
+            parts.push(`Content-Transfer-Encoding: 7bit`);
+            parts.push(``);
+            parts.push(options.icalEvent.toString());
+        }
+
+        parts.push(`--${boundary}--`);
+
+        const raw = Buffer.from(parts.join('\r\n'))
+            .toString('base64')
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '');
+
+        await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: { raw }
+        });
+    }
+
     /**
      * Generic email sending method with ICS support
      */
     async sendEmail(options: EmailOptions): Promise<void> {
+        // Attempt Org-Level Gmail API first
+        if (options.organizationId) {
+            try {
+                const oauth2Client = await this.getOrgOAuth2Client(options.organizationId);
+                if (oauth2Client) {
+                    console.log(`[EmailService] Sending via Gmail API for org: ${options.organizationId}`);
+                    await this.sendEmailViaGmailApi(oauth2Client, options);
+                    return;
+                }
+            } catch (apiError: any) {
+                console.warn(`[EmailService] Gmail API send failed, falling back to SMTP:`, apiError.message);
+            }
+        }
+
+        // Fallback to SMTP
         const mailOptions: any = {
             from: `Action Auto <${config.email.user}>`,
             to: options.to,
@@ -56,9 +151,9 @@ class EmailService {
 
         try {
             const info = await this.transporter.sendMail(mailOptions);
-            console.log('Message sent: %s', info.messageId);
+            console.log('Message sent via SMTP: %s', info.messageId);
         } catch (error) {
-            console.error('Error sending email:', error);
+            console.error('Error sending email via SMTP:', error);
             throw new ApiError(500, 'There was an error sending the email.');
         }
     }
@@ -144,7 +239,8 @@ class EmailService {
         appointment: IAppointment,
         organizer: IUser,
         guestEmail: string,
-        token: string
+        token: string,
+        organizationId?: string
     ): Promise<void> {
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
@@ -396,7 +492,8 @@ Questions? Contact ${organizer.email}
             subject: `Invitation: ${appointment.title}`,
             text,
             html,
-            icalEvent: icsCalendar
+            icalEvent: icsCalendar,
+            organizationId
         });
 
         console.log(`Sent invitation with ICS attachment to ${guestEmail}`);
@@ -408,7 +505,8 @@ Questions? Contact ${organizer.email}
     async sendAppointmentUpdate(
         appointment: IAppointment,
         organizer: IUser,
-        guestEmail: string
+        guestEmail: string,
+        organizationId?: string
     ): Promise<void> {
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
@@ -533,7 +631,8 @@ Questions? Contact ${organizer.email}
             subject: `Updated: ${appointment.title}`,
             text,
             html,
-            icalEvent: icsCalendar
+            icalEvent: icsCalendar,
+            organizationId
         });
 
         console.log(`Sent update with ICS attachment to ${guestEmail}`);
@@ -545,7 +644,8 @@ Questions? Contact ${organizer.email}
     async sendAppointmentCancellation(
         appointment: IAppointment,
         organizer: IUser,
-        guestEmail: string
+        guestEmail: string,
+        organizationId?: string
     ): Promise<void> {
         // Generate cancellation ICS file
         const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'CANCEL');
@@ -646,7 +746,8 @@ Questions? Contact ${organizer.email}
             subject: `Cancelled: ${appointment.title}`,
             text,
             html,
-            icalEvent: icsCalendar
+            icalEvent: icsCalendar,
+            organizationId
         });
 
         console.log(`Sent cancellation with ICS attachment to ${guestEmail}`);
@@ -658,7 +759,8 @@ Questions? Contact ${organizer.email}
     async sendAppointmentReminder(
         appointment: IAppointment,
         recipientEmail: string,
-        recipientName: string
+        recipientName: string,
+        organizationId?: string
     ): Promise<void> {
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
@@ -767,7 +869,8 @@ See you there!
             to: recipientEmail,
             subject: `Reminder: ${appointment.title}`,
             text,
-            html
+            html,
+            organizationId
         });
     }
 

@@ -19,6 +19,8 @@ import SystemConfig from '../models/SystemConfig.model';
 import { getSocketIO } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
+import { cacheService } from '../services/cache.service';
+import googleCalendarService from '../services/googleCalendar.service';
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -42,9 +44,19 @@ async function getCentralOAuth2Client(orgId?: string) {
 
   // 1. Prioritize OrgLeadConfig if orgId is provided (New multi-tenant path)
   if (orgId) {
-    const orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true });
+    const cacheKey = `config:org:${orgId}`;
+    let orgConfig = await cacheService.get(cacheKey);
+
+    if (!orgConfig) {
+      orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
+      if (orgConfig) {
+        await cacheService.set(cacheKey, orgConfig, 3600); // 1hr
+      }
+    }
+
     if (orgConfig && orgConfig.gmailConnected && orgConfig.refreshToken) {
-      console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}`);
+      const isCached = !!(await cacheService.get(cacheKey));
+      console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}${isCached ? ' (Cached)' : ''}`);
       credentials = {
         access_token:  orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
         refresh_token: decrypt(orgConfig.refreshToken),
@@ -62,14 +74,20 @@ async function getCentralOAuth2Client(orgId?: string) {
     }
   }
 
-  // 3. Last fallback to Environment Variables
+  // 3. Environment Variables (Super Admin / Development only)
+  // [ENFORCEMENT] In production, all organizations must use OrgLeadConfig.
   if (!credentials) {
-    console.log('[CENTRAL-AUTH] Using tokens from environment variables');
-    credentials = {
-      access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
-      refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
-      expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
-    };
+    if (process.env.CENTRAL_GMAIL_REFRESH_TOKEN) {
+      console.warn('[CENTRAL-AUTH] WARNING: Falling back to environmental refresh token. This is deprecated for production.');
+      credentials = {
+        access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
+        refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
+        expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
+      };
+    } else {
+      console.error('[CENTRAL-AUTH] ERROR: No Gmail credentials found (OrgLeadConfig, SystemConfig, or Env). Ingestion will fail.');
+      throw new Error('Gmail authentication context missing. Please configure organization Gmail settings.');
+    }
   }
 
   oauth2Client.setCredentials(credentials);
@@ -83,6 +101,7 @@ async function getCentralOAuth2Client(orgId?: string) {
         if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
         if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
         await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
+        await cacheService.del(`config:org:${orgId}`); // Invalidate cache
       } else {
         console.log('[CENTRAL-AUTH] Tokens refreshed, updating SystemConfig...');
         await SystemConfig.findOneAndUpdate(
@@ -245,6 +264,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const search = req.query.search as string;
+    const status = req.query.status as string;
     const skip = (page - 1) * limit;
 
     const query: any = { organizationId: orgId };
@@ -258,6 +278,10 @@ export const getAllLeads = async (req: Request, res: Response) => {
         { 'vehicle.make': { $regex: search, $options: 'i' } },
         { 'vehicle.model': { $regex: search, $options: 'i' } },
       ];
+    }
+
+    if (status && status !== 'All') {
+      query.status = status;
     }
 
     const totalLeads = await Lead.countDocuments(query);
@@ -325,6 +349,12 @@ export const updateLead = async (req: Request, res: Response) => {
         performedBy: (req.user as any)?._id,
         changes: { status },
       });
+
+      // Socket broadcast
+      const io = getSocketIO();
+      if (io) {
+        io.to(`org:${orgId}`).emit('lead:update', lead);
+      }
     }
 
     if (!lead) {
@@ -431,6 +461,13 @@ export const markAsRead = async (req: Request, res: Response) => {
       { new: true }
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+
+    // Socket broadcast
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json(lead);
   } catch (error) {
     console.error('[ERROR] Error marking as read:', error);
@@ -444,10 +481,17 @@ export const markAsPending = async (req: Request, res: Response) => {
     const orgId = req.orgId;
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
-      { isPending: true },
+      { isPending: true, status: 'Pending' },
       { new: true }
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+
+    // Socket broadcast
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json(lead);
   } catch (error) {
     console.error('[ERROR] Error marking as pending:', error);
@@ -522,6 +566,13 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
     }
 
+    // Cache Invalidation & Socket Broadcast
+    await cacheService.del(`lead:thread:${id}`);
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json({ success: true, message: 'Reply sent successfully', data: lead });
   } catch (error) {
     console.error('[ERROR] Error replying to inquiry:', error);
@@ -566,9 +617,9 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
     const isConfigured = !!(config && config.gmailConnected && config.refreshToken);
 
-    if (!isConfigured && !process.env.CENTRAL_GMAIL_REFRESH_TOKEN) {
+    if (!isConfigured) {
       return res.status(400).json(
-        new ApiResponse(400, null, 'Gmail ingestion not configured for this organization. Please connect Google first.')
+        new ApiResponse(400, null, 'Gmail ingestion not configured for this organization. Please connect Google via Settings.')
       );
     }
 
@@ -815,6 +866,34 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     return res.status(404).json(new ApiResponse(404, null, 'Lead not found'));
   }
 
+  // 1. Sync to Google Calendar (New Stability Update)
+  try {
+      const startTime = new Date(date);
+      const [hours, minutes] = time.split(':');
+      startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+      
+      const endTime = new Date(startTime);
+      endTime.setHours(startTime.getHours() + 1); // Default 1hr
+
+      const appointmentData = {
+          title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
+          description: notes,
+          startTime,
+          endTime,
+          location: locationOrVehicle,
+          organizationId: orgId,
+          createdBy: userId,
+          participants: [userId.toString()],
+          entryType: 'appointment' as const,
+          status: 'scheduled' as const
+      };
+
+      await googleCalendarService.syncAppointmentToGoogleCalendar(appointmentData as any, userId.toString());
+  } catch (syncError) {
+      console.warn('[LeadSync] Google Calendar sync failed for lead appointment:', syncError);
+  }
+
+  // 2. Audit Log
   await AuditLog.create({
     entityType: 'Lead',
     entityId: lead._id,
@@ -824,7 +903,13 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     changes: { status: 'Appointment Set', appointment: { date, time, notes, locationOrVehicle } },
   });
 
-  res.json(new ApiResponse(200, lead, 'Appointment saved successfully'));
+  // 3. Socket broadcast
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit('lead:update', lead);
+  }
+
+  res.json(new ApiResponse(200, lead, 'Appointment saved and synced successfully'));
 });
 
 export const getThreadMessages = asyncHandler(async (req: Request, res: Response) => {
@@ -837,6 +922,12 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
   }
 
   try {
+    const threadCacheKey = `lead:thread:${id}`;
+    const cachedThread = await cacheService.get(threadCacheKey);
+    if (cachedThread) {
+      return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
+    }
+
     const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
@@ -880,6 +971,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
         };
       });
 
+    await cacheService.set(threadCacheKey, { messages }, 1800); // 30 mins
     res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
   } catch (error: any) {
     console.error('[THREAD] Error fetching thread messages:', error);

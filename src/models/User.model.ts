@@ -60,20 +60,6 @@ export interface IUser extends Document {
   walletBalance: number;
   totalEarned: number;
 
-  // Google Calendar Integration
-  googleCalendar?: {
-    connected: boolean;
-    accessToken?: string;
-    refreshToken?: string;
-    expiryDate?: number;
-    connectedAt?: Date;
-
-    // NEW: Webhook tracking
-    watchChannelId?: string; // Current webhook channel ID
-    watchResourceId?: string; // Current webhook resource ID
-    watchExpiration?: Date; // When the webhook expires
-  };
-
   notificationPreferences: {
     // CRM & Sales
     quoteCreated: boolean;
@@ -249,20 +235,6 @@ const UserSchema = new Schema(
     totalEarned: {
       type: Number,
       default: 0,
-    },
-
-    // Google Calendar Integration
-    googleCalendar: {
-      connected: { type: Boolean, default: false },
-      accessToken: { type: String, select: false },
-      refreshToken: { type: String, select: false },
-      expiryDate: { type: Number },
-      connectedAt: { type: Date },
-
-      // NEW fields for webhook tracking
-      watchChannelId: { type: String },
-      watchResourceId: { type: String },
-      watchExpiration: { type: Date },
     },
 
     notificationPreferences: {
