@@ -18,6 +18,7 @@ import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import driverPayoutRoute from "./driverPayout.routes";
 import leadRoute from "./lead.route";
+import orgLeadRoute from "./orgLead.route";
 import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
 import ownedVehicleRoute from "./ownedVehicle.route";
@@ -153,6 +154,10 @@ const defaultRoutes = [
   {
     path: "/loads",
     route: loadRoute,
+  },
+  {
+    path: "/org-lead",
+    route: orgLeadRoute,
   },
 ];
 
