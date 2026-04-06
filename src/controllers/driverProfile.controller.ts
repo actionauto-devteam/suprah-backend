@@ -288,7 +288,8 @@ const getOrgDriverProfiles = asyncHandler(async (req: Request, res: Response) =>
   if (!orgId) throw new ApiError(403, "Organization context required");
 
   const profiles = await DriverProfile.find({ organizationId: orgId })
-    .select("userId trailerType maxVehicleCapacity operationalStatus profileCompletionScore isComplianceExpired truckMake truckModel specialFeatures homeBase serviceRadius")
+    .select("userId trailerType maxVehicleCapacity operationalStatus profileCompletionScore isComplianceExpired truckMake truckModel specialFeatures homeBase serviceRadius verificationStatus")
+    .populate("userId", "name email avatar")
     .lean();
 
   res.json(new ApiResponse(200, profiles, "Organization driver profiles fetched"));
@@ -301,7 +302,7 @@ const getDriverProfileById = asyncHandler(async (req: Request, res: Response) =>
   const profile = await DriverProfile.findOne({
     userId: req.params.driverId,
     organizationId: orgId,
-  });
+  }).populate("userId", "name email avatar");
 
   if (!profile) throw new ApiError(404, "Driver profile not found");
   res.json(new ApiResponse(200, profile, "Driver profile fetched"));
