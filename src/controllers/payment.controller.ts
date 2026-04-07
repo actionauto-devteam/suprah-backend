@@ -4,58 +4,41 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
-import { notificationTemplates } from '../utils/notificationTemplates';
 import Payment from '../models/Payment.model';
 import User, { IUser } from '../models/User.model';
 import config from '../config';
 import ReferralService from '../services/referral.service';
 
-// Initialize Stripe
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-01-28.clover',
 });
 
-/**
- * Helper to safely get user ID from request
- */
 const getUserId = (req: Request): string => {
   const userId = (req.user as IUser)?._id?.toString();
   if (!userId) throw new ApiError(401, 'User not authenticated');
   return userId;
 };
 
-/**
- * Create a new pending payment record
- */
+// ─── Create Payment ───────────────────────────────────────────────────────────
 const createPayment = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
   const {
-    customerName,
-    customerEmail,
-    customerPhone,
-    amount,
-    currency = 'usd',
-    description,
-    quoteId,
-    shipmentId,
-    dueDate,
-    notes,
+    customerName, customerEmail, customerPhone,
+    amount, currency = 'usd', description,
+    quoteId, shipmentId, dueDate, notes,
   } = req.body;
 
   if (!customerName || !customerEmail || !amount || !description) {
     throw new ApiError(400, 'customerName, customerEmail, amount, and description are required');
   }
-
-  if (amount <= 0) {
-    throw new ApiError(400, 'Amount must be greater than zero');
-  }
+  if (amount <= 0) throw new ApiError(400, 'Amount must be greater than zero');
 
   const payment = await Payment.create({
     organizationId: orgId,
     customerId: customerEmail,
     customerName,
-    customerEmail,
+    customerEmail: customerEmail.toLowerCase(),
     customerPhone,
     amount,
     currency,
@@ -68,57 +51,50 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
     createdBy: userId,
   });
 
-  notifyOrgAdmins(orgId, 'payment_pending', 'New Payment Created', `A payment of $${amount.toFixed(2)} for ${customerName} is pending.`, { paymentId: payment._id.toString(), amount, customerName });
-
-  res.status(201).json(
-    new ApiResponse(201, payment, 'Payment record created successfully')
+  notifyOrgAdmins(
+    orgId, 'payment_pending', 'New Payment Created',
+    `A payment of $${amount.toFixed(2)} for ${customerName} is pending.`,
+    { paymentId: payment._id.toString(), amount, customerName }
   );
+
+  res.status(201).json(new ApiResponse(201, payment, 'Payment record created successfully'));
 });
 
-/**
- * Get all payments for the organization (with filters)
- */
+// ─── Get Payments ─────────────────────────────────────────────────────────────
 const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status, search, limit = '50', skip = '0' } = req.query;
 
-  const filter: any = { organizationId: orgId };
+  const filter: Record<string, unknown> = { organizationId: orgId };
+  if (status && status !== 'all') filter.status = status;
 
-  if (status && status !== 'all') {
-    filter.status = status;
-  }
-
-  let payments = await Payment.find(filter)
-    .populate('quoteId', 'firstName lastName vehicleName')
-    .populate('shipmentId', 'trackingNumber')
-    .populate('createdBy', 'name email')
-    .sort({ createdAt: -1 })
-    .limit(parseInt(limit as string))
-    .skip(parseInt(skip as string));
-
-  // Client-side search filtering
+  // Push search to DB when possible
   if (search) {
-    const searchLower = (search as string).toLowerCase();
-    payments = payments.filter((p) => {
-      return (
-        p.customerName?.toLowerCase().includes(searchLower) ||
-        p.customerEmail?.toLowerCase().includes(searchLower) ||
-        p.invoiceNumber?.toLowerCase().includes(searchLower) ||
-        p.description?.toLowerCase().includes(searchLower)
-      );
-    });
+    const regex = new RegExp(search as string, 'i');
+    filter.$or = [
+      { customerName: regex },
+      { customerEmail: regex },
+      { invoiceNumber: regex },
+      { description: regex },
+    ];
   }
 
-  const total = await Payment.countDocuments(filter);
+  const [payments, total] = await Promise.all([
+    Payment.find(filter)
+      .populate('quoteId', 'firstName lastName vehicleName')
+      .populate('shipmentId', 'trackingNumber')
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit as string))
+      .skip(parseInt(skip as string))
+      .lean(),
+    Payment.countDocuments(filter),
+  ]);
 
-  res.json(
-    new ApiResponse(200, { payments, total }, 'Payments fetched successfully')
-  );
+  res.json(new ApiResponse(200, { payments, total }, 'Payments fetched successfully'));
 });
 
-/**
- * Get pending payments only (for billing sidebar)
- */
+// ─── Get Pending Payments ─────────────────────────────────────────────────────
 const getPendingPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
@@ -128,16 +104,13 @@ const getPendingPayments = asyncHandler(async (req: Request, res: Response) => {
   })
     .populate('quoteId', 'firstName lastName vehicleName')
     .populate('shipmentId', 'trackingNumber')
-    .sort({ dueDate: 1, createdAt: -1 });
+    .sort({ dueDate: 1, createdAt: -1 })
+    .lean();
 
-  res.json(
-    new ApiResponse(200, payments, 'Pending payments fetched successfully')
-  );
+  res.json(new ApiResponse(200, payments, 'Pending payments fetched successfully'));
 });
 
-/**
- * Get a single payment by ID
- */
+// ─── Get Payment by ID ────────────────────────────────────────────────────────
 const getPaymentById = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
@@ -147,79 +120,49 @@ const getPaymentById = asyncHandler(async (req: Request, res: Response) => {
     .populate('shipmentId', 'trackingNumber status')
     .populate('createdBy', 'name email');
 
-  if (!payment) {
-    throw new ApiError(404, 'Payment not found');
-  }
+  if (!payment) throw new ApiError(404, 'Payment not found');
 
   res.json(new ApiResponse(200, payment, 'Payment fetched successfully'));
 });
 
-/**
- * Create a Stripe PaymentIntent for a pending payment
- */
+// ─── Create Payment Intent ────────────────────────────────────────────────────
 const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { paymentId } = req.body;
 
-  if (!paymentId) {
-    throw new ApiError(400, 'paymentId is required');
-  }
+  if (!paymentId) throw new ApiError(400, 'paymentId is required');
 
   const payment = await Payment.findOne({ _id: paymentId, organizationId: orgId });
+  if (!payment) throw new ApiError(404, 'Payment not found');
+  if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
+  if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
 
-  if (!payment) {
-    throw new ApiError(404, 'Payment not found');
-  }
-
-  if (payment.status === 'succeeded') {
-    throw new ApiError(400, 'This payment has already been completed');
-  }
-
-  if (payment.status === 'cancelled') {
-    throw new ApiError(400, 'This payment has been cancelled');
-  }
-
-  // If a PaymentIntent already exists and is still valid, return it
+  // Reuse existing intent if valid
   if (payment.stripePaymentIntentId) {
     try {
-      const existingIntent = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
-      if (existingIntent.status !== 'canceled' && existingIntent.status !== 'succeeded') {
-        return res.json(
-          new ApiResponse(200, {
-            clientSecret: existingIntent.client_secret,
-            paymentIntentId: existingIntent.id,
-          }, 'Existing payment intent retrieved')
-        );
+      const existing = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+      if (existing.status !== 'canceled' && existing.status !== 'succeeded') {
+        return res.json(new ApiResponse(200, {
+          clientSecret: existing.client_secret,
+          paymentIntentId: existing.id,
+        }, 'Existing payment intent retrieved'));
       }
-    } catch {
-      // Intent no longer valid, create a new one
-    }
+    } catch { /* expired — create new */ }
   }
 
-  // Create or get Stripe customer
   let stripeCustomerId = payment.stripeCustomerId;
   if (!stripeCustomerId) {
-    const customers = await stripe.customers.list({
-      email: payment.customerEmail,
-      limit: 1,
-    });
-
-    if (customers.data.length > 0) {
-      stripeCustomerId = customers.data[0].id;
-    } else {
-      const customer = await stripe.customers.create({
-        name: payment.customerName,
-        email: payment.customerEmail,
-        phone: payment.customerPhone,
-        metadata: {
-          organizationId: orgId,
-        },
-      });
-      stripeCustomerId = customer.id;
-    }
+    const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
+    stripeCustomerId = customers.data.length > 0
+      ? customers.data[0].id
+      : (await stripe.customers.create({
+          name: payment.customerName,
+          email: payment.customerEmail,
+          phone: payment.customerPhone,
+          metadata: { organizationId: orgId },
+        })).id;
   }
 
-  // Create PaymentIntent (amount in cents)
   const paymentIntent = await stripe.paymentIntents.create({
     amount: Math.round(payment.amount * 100),
     currency: payment.currency,
@@ -230,47 +173,37 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
       organizationId: orgId,
       invoiceNumber: payment.invoiceNumber || '',
     },
-    automatic_payment_methods: {
-      enabled: true,
-    },
+    automatic_payment_methods: { enabled: true },
   });
 
-  // Update payment record
-  payment.stripePaymentIntentId = paymentIntent.id;
-  payment.stripeCustomerId = stripeCustomerId;
-  payment.status = 'processing';
-  await payment.save();
+  await Payment.findByIdAndUpdate(payment._id, {
+    stripePaymentIntentId: paymentIntent.id,
+    stripeCustomerId,
+    status: 'processing',
+  });
 
-  res.json(
-    new ApiResponse(200, {
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-    }, 'Payment intent created successfully')
-  );
+  res.json(new ApiResponse(200, {
+    clientSecret: paymentIntent.client_secret,
+    paymentIntentId: paymentIntent.id,
+  }, 'Payment intent created successfully'));
 });
 
-/**
- * Confirm payment was successful (called after Stripe confirms on client)
- */
+// ─── Confirm Payment ──────────────────────────────────────────────────────────
 const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
   const { paymentIntentId } = req.body;
 
-  if (!paymentIntentId) {
-    throw new ApiError(400, 'paymentIntentId is required');
-  }
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
 
-  // Verify with Stripe
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
-  const payment = await Payment.findOne({
-    stripePaymentIntentId: paymentIntentId,
-    organizationId: orgId,
-  });
+  const payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId, organizationId: orgId });
+  if (!payment) throw new ApiError(404, 'Payment record not found');
 
-  if (!payment) {
-    throw new ApiError(404, 'Payment record not found');
+  // Idempotency: already confirmed
+  if (payment.status === 'succeeded') {
+    return res.json(new ApiResponse(200, payment, 'Payment already confirmed'));
   }
 
   if (paymentIntent.status === 'succeeded') {
@@ -278,209 +211,144 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
     payment.paidAt = new Date();
     payment.stripeChargeId = paymentIntent.latest_charge as string;
 
-    // Get receipt URL if available
     if (payment.stripeChargeId) {
       try {
         const charge = await stripe.charges.retrieve(payment.stripeChargeId);
         payment.receiptUrl = charge.receipt_url || undefined;
         payment.paymentMethod = charge.payment_method_details?.type || undefined;
-      } catch {
-        // Non-critical, continue
-      }
+      } catch { /* non-critical */ }
     }
 
     await payment.save();
 
-    // Notification
-    if (userId) {
-      await safeCreateNotification({
-        userId,
-        organizationId: orgId,
-        type: 'payment_received',
-        title: 'Payment Received',
-        message: `Payment of $${payment.amount.toFixed(2)} from ${payment.customerName} was successful.`,
-        metadata: {
-          paymentId: payment._id.toString(),
-          amount: payment.amount,
-          customerName: payment.customerName,
-        },
-      });
+    await safeCreateNotification({
+      userId,
+      organizationId: orgId,
+      type: 'payment_received',
+      title: 'Payment Received',
+      message: `Payment of $${payment.amount.toFixed(2)} from ${payment.customerName} was successful.`,
+      metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
+    });
+
+    try { await ReferralService.processPaymentReward(payment, userId); } catch (e) {
+      console.error('[Referral] confirmPayment:', e);
     }
 
-    // Trigger Referral Reward Check
-    try {
-      await ReferralService.processPaymentReward(payment, userId);
-    } catch (error) {
-      console.error('[Referral] Error processing reward in confirmPayment:', error);
-    }
-
-    return res.json(
-      new ApiResponse(200, payment, 'Payment confirmed successfully')
-    );
+    return res.json(new ApiResponse(200, payment, 'Payment confirmed successfully'));
   }
 
   if (paymentIntent.status === 'requires_payment_method') {
     payment.status = 'failed';
     payment.failureReason = paymentIntent.last_payment_error?.message || 'Payment method failed';
     await payment.save();
-
-    return res.json(
-      new ApiResponse(200, payment, 'Payment failed - new payment method required')
-    );
+    return res.json(new ApiResponse(200, payment, 'Payment failed - new payment method required'));
   }
 
-  // For other statuses, update accordingly
   payment.status = paymentIntent.status === 'canceled' ? 'cancelled' : 'processing';
   await payment.save();
-
-  res.json(
-    new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`)
-  );
+  res.json(new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`));
 });
 
-/**
- * Cancel a pending payment
- */
+// ─── Cancel Payment ───────────────────────────────────────────────────────────
 const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
 
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
+  if (!payment) throw new ApiError(404, 'Payment not found');
+  if (payment.status === 'succeeded') throw new ApiError(400, 'Cannot cancel a completed payment. Use refund instead.');
 
-  if (!payment) {
-    throw new ApiError(404, 'Payment not found');
-  }
-
-  if (payment.status === 'succeeded') {
-    throw new ApiError(400, 'Cannot cancel a completed payment. Use refund instead.');
-  }
-
-  // Cancel Stripe PaymentIntent if exists
   if (payment.stripePaymentIntentId) {
-    try {
-      await stripe.paymentIntents.cancel(payment.stripePaymentIntentId);
-    } catch {
-      // May already be cancelled, continue
-    }
+    try { await stripe.paymentIntents.cancel(payment.stripePaymentIntentId); } catch { /* already cancelled */ }
   }
 
   payment.status = 'cancelled';
   await payment.save();
 
-  notifyOrgAdmins(orgId, 'general', 'Payment Cancelled', `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} was cancelled.`, { paymentId: payment._id.toString() });
+  notifyOrgAdmins(orgId, 'general', 'Payment Cancelled',
+    `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} was cancelled.`,
+    { paymentId: payment._id.toString() }
+  );
 
   res.json(new ApiResponse(200, payment, 'Payment cancelled successfully'));
 });
 
-/**
- * Refund a completed payment
- */
+// ─── Refund Payment ───────────────────────────────────────────────────────────
 const refundPayment = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
-  const { amount } = req.body; // Optional partial refund amount
+  const { amount } = req.body;
 
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
+  if (!payment) throw new ApiError(404, 'Payment not found');
+  if (payment.status !== 'succeeded') throw new ApiError(400, 'Can only refund completed payments');
+  if (!payment.stripePaymentIntentId) throw new ApiError(400, 'No Stripe payment intent found');
 
-  if (!payment) {
-    throw new ApiError(404, 'Payment not found');
-  }
-
-  if (payment.status !== 'succeeded') {
-    throw new ApiError(400, 'Can only refund completed payments');
-  }
-
-  if (!payment.stripePaymentIntentId) {
-    throw new ApiError(400, 'No Stripe payment intent found for this payment');
-  }
-
-  const refundParams: Stripe.RefundCreateParams = {
-    payment_intent: payment.stripePaymentIntentId,
-  };
-
-  if (amount) {
-    refundParams.amount = Math.round(amount * 100);
-  }
+  const refundParams: Stripe.RefundCreateParams = { payment_intent: payment.stripePaymentIntentId };
+  if (amount) refundParams.amount = Math.round(amount * 100);
 
   await stripe.refunds.create(refundParams);
 
   payment.status = 'refunded';
   await payment.save();
 
-  notifyOrgAdmins(orgId, 'general', 'Payment Refunded', `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} has been refunded.`, { paymentId: payment._id.toString() });
+  notifyOrgAdmins(orgId, 'general', 'Payment Refunded',
+    `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} has been refunded.`,
+    { paymentId: payment._id.toString() }
+  );
 
   res.json(new ApiResponse(200, payment, 'Payment refunded successfully'));
 });
 
-/**
- * Update payment fields (status, notes, dueDate, etc.)
- */
+// ─── Update Payment ───────────────────────────────────────────────────────────
 const updatePayment = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
   const { status, notes, dueDate } = req.body;
 
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
-
-  if (!payment) {
-    throw new ApiError(404, 'Payment not found');
-  }
+  if (!payment) throw new ApiError(404, 'Payment not found');
 
   const validStatuses = ['pending', 'processing', 'succeeded', 'failed', 'refunded', 'cancelled'];
+  const previousStatus = payment.status;
+
   if (status !== undefined) {
     if (!validStatuses.includes(status)) {
       throw new ApiError(400, `Invalid status. Must be one of: ${validStatuses.join(', ')}`);
     }
     payment.status = status;
-    if (status === 'succeeded' && !payment.paidAt) {
-      payment.paidAt = new Date();
-    }
+    if (status === 'succeeded' && !payment.paidAt) payment.paidAt = new Date();
   }
 
   if (notes !== undefined) payment.notes = notes;
   if (dueDate !== undefined) payment.dueDate = dueDate ? new Date(dueDate) : undefined;
 
-  const wasSucceeded = payment.isModified('status') && payment.status === 'succeeded';
-
   await payment.save();
 
-  // Trigger Referral Reward Check if status just changed to succeeded
-  if (wasSucceeded) {
+  // FIX: check previousStatus BEFORE save so isModified isn't needed
+  if (previousStatus !== 'succeeded' && payment.status === 'succeeded') {
     try {
-      const performingUserId = (req.user as any)?._id?.toString();
-      await ReferralService.processPaymentReward(payment, performingUserId);
-    } catch (error) {
-      console.error('[Referral] Error processing reward in updatePayment:', error);
-    }
+      const performingUserId = (req.user as IUser)?._id?.toString();
+      await ReferralService.processPaymentReward(payment, performingUserId || 'MANUAL');
+    } catch (e) { console.error('[Referral] updatePayment:', e); }
   }
 
   res.json(new ApiResponse(200, payment, 'Payment updated successfully'));
 });
 
-/**
- * Get payment statistics
- */
+// ─── Payment Stats ────────────────────────────────────────────────────────────
 const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
   const stats = await Payment.aggregate([
     { $match: { organizationId: orgId } },
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 },
-        totalAmount: { $sum: '$amount' },
-      },
-    },
+    { $group: { _id: '$status', count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
   ]);
 
   const formatted: Record<string, { count: number; totalAmount: number }> = {
-    pending: { count: 0, totalAmount: 0 },
-    processing: { count: 0, totalAmount: 0 },
-    succeeded: { count: 0, totalAmount: 0 },
-    failed: { count: 0, totalAmount: 0 },
-    refunded: { count: 0, totalAmount: 0 },
-    cancelled: { count: 0, totalAmount: 0 },
+    pending: { count: 0, totalAmount: 0 }, processing: { count: 0, totalAmount: 0 },
+    succeeded: { count: 0, totalAmount: 0 }, failed: { count: 0, totalAmount: 0 },
+    refunded: { count: 0, totalAmount: 0 }, cancelled: { count: 0, totalAmount: 0 },
   };
 
   let totalCount = 0;
@@ -494,34 +362,35 @@ const getPaymentStats = asyncHandler(async (req: Request, res: Response) => {
     }
   });
 
-  res.json(
-    new ApiResponse(200, {
-      byStatus: formatted,
-      totalCount,
-      totalRevenue,
-      pendingAmount: formatted.pending.totalAmount + formatted.failed.totalAmount,
-    }, 'Payment statistics fetched successfully')
-  );
+  res.json(new ApiResponse(200, {
+    byStatus: formatted,
+    totalCount,
+    totalRevenue,
+    pendingAmount: formatted.pending.totalAmount + formatted.failed.totalAmount,
+  }, 'Payment statistics fetched successfully'));
 });
 
-/**
- * Stripe webhook handler (for async payment events)
- */
+// ─── Billing Balance (NEW — fixes the 404 on dashboard) ──────────────────────
+const getBillingBalance = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+
+  const result = await Payment.aggregate([
+    { $match: { organizationId: orgId, status: 'succeeded' } },
+    { $group: { _id: null, balance: { $sum: '$amount' } } },
+  ]);
+
+  const balance = result[0]?.balance ?? 0;
+  res.json(new ApiResponse(200, { balance }, 'Balance fetched successfully'));
+});
+
+// ─── Stripe Webhook ───────────────────────────────────────────────────────────
 const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => {
   const sig = req.headers['stripe-signature'] as string;
-
-  if (!sig) {
-    throw new ApiError(400, 'Missing Stripe signature');
-  }
+  if (!sig) throw new ApiError(400, 'Missing Stripe signature');
 
   let event: Stripe.Event;
-
   try {
-    event = stripe.webhooks.constructEvent(
-      (req as any).rawBody,
-      sig,
-      config.stripe.webhookSecret
-    );
+    event = stripe.webhooks.constructEvent((req as any).rawBody, sig, config.stripe.webhookSecret);
   } catch (err: any) {
     throw new ApiError(400, `Webhook signature verification failed: ${err.message}`);
   }
@@ -530,33 +399,38 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
     case 'payment_intent.succeeded': {
       const pi = event.data.object as Stripe.PaymentIntent;
       const payment = await Payment.findOne({ stripePaymentIntentId: pi.id });
+      // Idempotency guard
       if (payment && payment.status !== 'succeeded') {
         payment.status = 'succeeded';
         payment.paidAt = new Date();
         payment.stripeChargeId = pi.latest_charge as string;
         await payment.save();
-
-        // Trigger Referral Reward Check
-        try {
-          await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK');
-        } catch (error) {
-          console.error('[Referral] Error processing reward in webhook:', error);
+        try { await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK'); } catch (e) {
+          console.error('[Referral] webhook:', e);
         }
       }
       break;
     }
-
     case 'payment_intent.payment_failed': {
       const pi = event.data.object as Stripe.PaymentIntent;
       const payment = await Payment.findOne({ stripePaymentIntentId: pi.id });
-      if (payment) {
+      if (payment && payment.status !== 'succeeded') {
         payment.status = 'failed';
         payment.failureReason = pi.last_payment_error?.message || 'Payment failed';
         await payment.save();
       }
       break;
     }
-
+    case 'charge.refunded': {
+      const charge = event.data.object as Stripe.Charge;
+      if (charge.payment_intent) {
+        await Payment.findOneAndUpdate(
+          { stripePaymentIntentId: charge.payment_intent },
+          { status: 'refunded' }
+        );
+      }
+      break;
+    }
     default:
       break;
   }
@@ -564,28 +438,20 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
   res.json({ received: true });
 });
 
-/**
- * Dealer sends a payment request notification to the customer
- * POST /api/payments/:id/request  — auth + requireOrg
- */
+// ─── Request Payment from Customer ───────────────────────────────────────────
 const requestPaymentFromCustomer = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
 
   const payment = await Payment.findOne({ _id: id, organizationId: orgId });
   if (!payment) throw new ApiError(404, 'Payment not found');
+  if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
 
-  if (payment.status === 'succeeded') {
-    throw new ApiError(400, 'This payment has already been completed');
-  }
-
-  // Look up customer user by email
   const customer = await User.findOne({ email: payment.customerEmail.toLowerCase() });
   if (!customer) {
     throw new ApiError(404, 'Customer has not registered an account yet. Ask them to sign up first.');
   }
 
-  // Get dealer name from the requesting user
   const dealer = req.user as IUser;
   const dealerName = dealer?.name || 'the dealer';
 
@@ -606,39 +472,25 @@ const requestPaymentFromCustomer = asyncHandler(async (req: Request, res: Respon
   res.json(new ApiResponse(200, null, 'Payment request sent to customer successfully'));
 });
 
-/**
- * Customer views their own payments (no org required)
- * GET /api/payments/my-payments  — auth only
- */
+// ─── Customer: My Payments ────────────────────────────────────────────────────
 const getMyPaymentsAsCustomer = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?.email) throw new ApiError(401, 'User not authenticated');
 
   const payments = await Payment.find({ customerEmail: user.email.toLowerCase() })
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean();
 
-  const totalOwed = payments
-    .filter((p) => p.status === 'pending' || p.status === 'failed')
-    .reduce((sum, p) => sum + p.amount, 0);
+  const totalOwed = payments.filter(p => p.status === 'pending' || p.status === 'failed').reduce((s, p) => s + p.amount, 0);
+  const totalPaid = payments.filter(p => p.status === 'succeeded').reduce((s, p) => s + p.amount, 0);
+  const pendingCount = payments.filter(p => p.status === 'pending' || p.status === 'failed').length;
 
-  const totalPaid = payments
-    .filter((p) => p.status === 'succeeded')
-    .reduce((sum, p) => sum + p.amount, 0);
-
-  const pendingCount = payments.filter((p) => p.status === 'pending' || p.status === 'failed').length;
-
-  res.json(
-    new ApiResponse(200, {
-      payments,
-      stats: { totalOwed, totalPaid, pendingCount },
-    }, 'Payments fetched successfully')
-  );
+  res.json(new ApiResponse(200, {
+    payments, stats: { totalOwed, totalPaid, pendingCount },
+  }, 'Payments fetched successfully'));
 });
 
-/**
- * Customer creates a Stripe PaymentIntent to pay their invoice (no org required)
- * POST /api/payments/create-customer-intent  — auth only
- */
+// ─── Customer: Create Payment Intent ─────────────────────────────────────────
 const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?.email) throw new ApiError(401, 'User not authenticated');
@@ -648,46 +500,34 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
 
   const payment = await Payment.findById(paymentId);
   if (!payment) throw new ApiError(404, 'Payment not found');
-
-  // Security: only the customer whose email is on the payment can pay
   if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
     throw new ApiError(403, 'You are not authorized to pay this invoice');
   }
-
   if (payment.status === 'succeeded') throw new ApiError(400, 'This payment has already been completed');
   if (payment.status === 'cancelled') throw new ApiError(400, 'This payment has been cancelled');
 
-  // Reuse existing PaymentIntent if still valid
   if (payment.stripePaymentIntentId) {
     try {
       const existing = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
       if (existing.status !== 'canceled' && existing.status !== 'succeeded') {
-        return res.json(
-          new ApiResponse(200, {
-            clientSecret: existing.client_secret,
-            paymentIntentId: existing.id,
-          }, 'Existing payment intent retrieved')
-        );
+        return res.json(new ApiResponse(200, {
+          clientSecret: existing.client_secret,
+          paymentIntentId: existing.id,
+        }, 'Existing payment intent retrieved'));
       }
-    } catch {
-      // Intent no longer valid, create a new one below
-    }
+    } catch { /* create new */ }
   }
 
-  // Create or retrieve Stripe customer
   let stripeCustomerId = payment.stripeCustomerId;
   if (!stripeCustomerId) {
     const customers = await stripe.customers.list({ email: payment.customerEmail, limit: 1 });
-    if (customers.data.length > 0) {
-      stripeCustomerId = customers.data[0].id;
-    } else {
-      const customer = await stripe.customers.create({
-        name: payment.customerName,
-        email: payment.customerEmail,
-        phone: payment.customerPhone,
-      });
-      stripeCustomerId = customer.id;
-    }
+    stripeCustomerId = customers.data.length > 0
+      ? customers.data[0].id
+      : (await stripe.customers.create({
+          name: payment.customerName,
+          email: payment.customerEmail,
+          phone: payment.customerPhone,
+        })).id;
   }
 
   const paymentIntent = await stripe.paymentIntents.create({
@@ -695,30 +535,23 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
     currency: payment.currency,
     customer: stripeCustomerId,
     description: payment.description,
-    metadata: {
-      paymentId: payment._id.toString(),
-      invoiceNumber: payment.invoiceNumber || '',
-    },
+    metadata: { paymentId: payment._id.toString(), invoiceNumber: payment.invoiceNumber || '' },
     automatic_payment_methods: { enabled: true },
   });
 
-  payment.stripePaymentIntentId = paymentIntent.id;
-  payment.stripeCustomerId = stripeCustomerId;
-  payment.status = 'processing';
-  await payment.save();
+  await Payment.findByIdAndUpdate(payment._id, {
+    stripePaymentIntentId: paymentIntent.id,
+    stripeCustomerId,
+    status: 'processing',
+  });
 
-  res.json(
-    new ApiResponse(200, {
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-    }, 'Payment intent created successfully')
-  );
+  res.json(new ApiResponse(200, {
+    clientSecret: paymentIntent.client_secret,
+    paymentIntentId: paymentIntent.id,
+  }, 'Payment intent created successfully'));
 });
 
-/**
- * Customer confirms their payment after Stripe (no org required)
- * POST /api/payments/confirm-customer  — auth only
- */
+// ─── Customer: Confirm Payment ────────────────────────────────────────────────
 const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?.email) throw new ApiError(401, 'User not authenticated');
@@ -727,13 +560,13 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
   if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
 
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-
   const payment = await Payment.findOne({ stripePaymentIntentId: paymentIntentId });
   if (!payment) throw new ApiError(404, 'Payment record not found');
+  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) throw new ApiError(403, 'Not authorized');
 
-  // Security check
-  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
-    throw new ApiError(403, 'Not authorized');
+  // Idempotency
+  if (payment.status === 'succeeded') {
+    return res.json(new ApiResponse(200, payment, 'Payment already confirmed'));
   }
 
   if (paymentIntent.status === 'succeeded') {
@@ -746,21 +579,15 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
         const charge = await stripe.charges.retrieve(payment.stripeChargeId);
         payment.receiptUrl = charge.receipt_url || undefined;
         payment.paymentMethod = charge.payment_method_details?.type || undefined;
-      } catch {
-        // Non-critical
-      }
+      } catch { /* non-critical */ }
     }
 
     await payment.save();
 
-    // Trigger Referral Reward Check
-    try {
-      await ReferralService.processPaymentReward(payment, user._id.toString());
-    } catch (error) {
-      console.error('[Referral] Error processing reward in confirmCustomerPayment:', error);
+    try { await ReferralService.processPaymentReward(payment, user._id.toString()); } catch (e) {
+      console.error('[Referral] confirmCustomerPayment:', e);
     }
 
-    // Notify the dealer (org admins)
     await safeCreateNotification({
       userId: payment.createdBy as any,
       organizationId: payment.organizationId,
@@ -796,6 +623,7 @@ export default {
   cancelPayment,
   refundPayment,
   getPaymentStats,
+  getBillingBalance,
   handleStripeWebhook,
   requestPaymentFromCustomer,
   getMyPaymentsAsCustomer,
