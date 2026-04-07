@@ -1,14 +1,21 @@
-import { Request, Response } from "express";
-import { asyncHandler } from "../utils/asyncHandler";
-import Organization from "../models/Organization.model";
-import User from "../models/User.model";
-import { ApiResponse } from "../utils/ApiResponse";
-import { ApiError } from "../utils/ApiError";
+import { Request, Response } from 'express';
+import pidusage from 'pidusage';
+import fs from 'fs';
+import path from 'path';
+import Organization from '../models/Organization.model';
+import User from '../models/User.model';
+import AuditLog from '../models/AuditLog.model';
+import SyncLog from '../models/SyncLog.model';
+import { ApiError } from '../utils/ApiError';
+import { ApiResponse } from '../utils/ApiResponse';
+import { asyncHandler } from '../utils/asyncHandler';
+
+import { metrics, getPercentile } from '../utils/metrics';
 
 /**
  * Get all organizations with pagination and search
  */
-const getAllOrganizations = asyncHandler(
+export const getAllOrganizations = asyncHandler(
   async (req: Request, res: Response) => {
     const { page = 1, limit = 10, search } = req.query;
     const pageNum = Number(page);
@@ -52,7 +59,7 @@ const getAllOrganizations = asyncHandler(
 /**
  * Get all users with pagination and search
  */
-const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
+export const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
   const { page = 1, limit = 10, search } = req.query;
   const pageNum = Number(page);
   const limitNum = Number(limit);
@@ -69,7 +76,7 @@ const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
   const [users, total] = await Promise.all([
     User.find(filter)
       .sort({ createdAt: -1 })
-      .select("-password") // Exclude password if it existed
+      .select("-password")
       .skip(skip)
       .limit(limitNum)
       .populate("organizationId", "name"),
@@ -96,9 +103,9 @@ const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * Get system-wide statistics
+ * Get system-wide statistics (DB counts)
  */
-const getSystemStats = asyncHandler(async (req: Request, res: Response) => {
+export const getSystemStats = asyncHandler(async (req: Request, res: Response) => {
   const [orgCount, userCount] = await Promise.all([
     Organization.countDocuments(),
     User.countDocuments(),
@@ -116,9 +123,85 @@ const getSystemStats = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+// --- REAL-TIME MONITORING ---
+
+/**
+ * Get real-time process performance stats (CPU, RAM)
+ */
+export const getProcessStats = asyncHandler(async (req: Request, res: Response) => {
+  const stats = await pidusage(process.pid);
+  
+  const formattedStats = {
+    performance: {
+      cpu: Math.round(stats.cpu * 100) / 100,
+      memory: Math.round((stats.memory / 1024 / 1024) * 100) / 100, // MB
+      uptime: Math.round(stats.elapsed / 1000), // seconds
+    },
+    goldenSignals: {
+      traffic: {
+        requestsTotal: metrics.requestsTotal,
+        requestsPerMinute: Math.round((metrics.requestsTotal / (process.uptime() / 60)) * 100) / 100
+      },
+      errors: {
+        total: metrics.errorsTotal,
+        rate: metrics.requestsTotal > 0 
+          ? Math.round((metrics.errorsTotal / metrics.requestsTotal) * 10000) / 100 
+          : 0,
+        count4xx: metrics.errors4xx,
+        count5xx: metrics.errors5xx
+      },
+      latency: {
+        p50: getPercentile(metrics.latencies, 50),
+        p95: getPercentile(metrics.latencies, 95),
+        p99: getPercentile(metrics.latencies, 99)
+      }
+    },
+    timestamp: new Date().toISOString()
+  };
+
+  return res.status(200).json(
+    new ApiResponse(200, formattedStats, "Process stats retrieved successfully")
+  );
+});
+
+/**
+ * Retrieves the last X lines of the application log file safely.
+ */
+export const getSystemLogs = asyncHandler(async (req: Request, res: Response) => {
+  const logPath = path.join(process.cwd(), 'logs', 'app.log');
+  const lineCount = parseInt(req.query.lines as string) || 200;
+
+  if (!fs.existsSync(logPath)) {
+    throw new ApiError(404, "Log file not found");
+  }
+
+  const fileContent = fs.readFileSync(logPath, 'utf8');
+  const lines = fileContent.trim().split('\n');
+  const lastLines = lines.slice(-lineCount);
+
+  return res.status(200).json(
+    new ApiResponse(200, lastLines, "Logs retrieved successfully")
+  );
+});
+
+/**
+ * Clear application logs
+ */
+export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) => {
+  const logPath = path.join(process.cwd(), 'logs', 'app.log');
+  
+  if (fs.existsSync(logPath)) {
+    fs.writeFileSync(logPath, '');
+  }
+
+  return res.status(200).json(
+    new ApiResponse(200, null, "Logs cleared successfully")
+  );
+});
+
 // --- USER MANAGEMENT ---
 
-const suspendUser = asyncHandler(async (req: Request, res: Response) => {
+export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = await User.findByIdAndUpdate(
     id,
@@ -129,7 +212,7 @@ const suspendUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, user, "User suspended successfully"));
 });
 
-const activateUser = asyncHandler(async (req: Request, res: Response) => {
+export const activateUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = await User.findByIdAndUpdate(
     id,
@@ -140,9 +223,9 @@ const activateUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, user, "User activated successfully"));
 });
 
-const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
+export const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { organizationRole } = req.body; // Promoting member to admin, etc.
+  const { organizationRole } = req.body;
 
   if (!organizationRole)
     throw new ApiError(400, "organizationRole is required");
@@ -150,18 +233,16 @@ const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
   const user = await User.findById(id);
   if (!user) throw new ApiError(404, "User not found");
 
-  // We use the casted assignment strategy we established earlier
   (user as any).organizationRole = organizationRole;
   await user.save();
 
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
 
-const deleteUser = asyncHandler(async (req: Request, res: Response) => {
+export const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const adminUser = req.user as any;
 
-  // Prevent self-deletion
   if (adminUser._id.toString() === id) {
     throw new ApiError(400, "You cannot delete your own account");
   }
@@ -169,12 +250,10 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const user = await User.findById(id);
   if (!user) throw new ApiError(404, "User not found");
 
-  // Prevent deletion of super admin accounts
   if (user.role === "super_admin") {
     throw new ApiError(403, "Cannot delete a super admin account");
   }
 
-  // Hard delete from MongoDB
   await User.findByIdAndDelete(id);
 
   res.json(new ApiResponse(200, null, "User deleted successfully"));
@@ -182,7 +261,7 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
 
 // --- ORGANIZATION MANAGEMENT ---
 
-const suspendOrganization = asyncHandler(
+export const suspendOrganization = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const org = await Organization.findByIdAndUpdate(
@@ -195,7 +274,7 @@ const suspendOrganization = asyncHandler(
   },
 );
 
-const activateOrganization = asyncHandler(
+export const activateOrganization = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const org = await Organization.findByIdAndUpdate(
@@ -208,16 +287,10 @@ const activateOrganization = asyncHandler(
   },
 );
 
-const updateOrganizationSubscription = asyncHandler(
+export const updateOrganizationSubscription = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
     const { plan, status } = req.body;
-
-    // We update the subscription object on the User (Owner) or Org?
-    // Plan says "Edit Subscription".
-    // Currently subscription is on the USER (IUser.subscription).
-    // But we are editing an ORGANIZATION. logic is a bit split.
-    // For now, let's assume we update the owner's subscription for this org.
 
     const org = await Organization.findById(id);
     if (!org) throw new ApiError(404, "Organization not found");
@@ -225,10 +298,10 @@ const updateOrganizationSubscription = asyncHandler(
     const owner = await User.findById(org.ownerId);
     if (!owner) throw new ApiError(404, "Organization owner not found");
 
-        if (plan) owner.subscription!.plan = plan;
-        if (status) owner.subscription!.status = status;
+    if (plan) owner.subscription!.plan = plan;
+    if (status) owner.subscription!.status = status;
 
-        await owner.save();
+    await owner.save();
 
     res.json(
       new ApiResponse(
@@ -242,9 +315,7 @@ const updateOrganizationSubscription = asyncHandler(
 
 // --- FINANCIALS ---
 
-const getFinancialStats = asyncHandler(async (req: Request, res: Response) => {
-  // Aggregate MRR from all users
-  // This is a rough calculation based on plan types
+export const getFinancialStats = asyncHandler(async (req: Request, res: Response) => {
   const users = await User.find({ "subscription.status": "active" }).select(
     "subscription.plan",
   );
@@ -267,7 +338,7 @@ const getFinancialStats = asyncHandler(async (req: Request, res: Response) => {
       200,
       {
         mrr,
-        totalRevenue: mrr * 12, // Projected
+        totalRevenue: mrr * 12,
         activeSubscriptions: users.length,
       },
       "Financial stats fetched successfully",
@@ -277,10 +348,7 @@ const getFinancialStats = asyncHandler(async (req: Request, res: Response) => {
 
 // --- AUDIT LOGS & SYNC LOGS ---
 
-import AuditLog from "../models/AuditLog.model";
-import SyncLog from "../models/SyncLog.model";
-
-const getAuditLogs = asyncHandler(async (req: Request, res: Response) => {
+export const getAuditLogs = asyncHandler(async (req: Request, res: Response) => {
   const {
     page = 1,
     limit = 20,
@@ -306,7 +374,7 @@ const getAuditLogs = asyncHandler(async (req: Request, res: Response) => {
       .sort({ timestamp: -1 })
       .skip(skip)
       .limit(limitNum)
-      .populate("performedBy", "name email"), // Assuming User model has name/email
+      .populate("performedBy", "name email"),
     AuditLog.countDocuments(filter),
   ]);
 
@@ -329,8 +397,7 @@ const getAuditLogs = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-const getAuditLogStats = asyncHandler(async (req: Request, res: Response) => {
-  // Aggregation for Activity Graph (Last 30 days)
+export const getAuditLogStats = asyncHandler(async (req: Request, res: Response) => {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -371,7 +438,7 @@ const getAuditLogStats = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, stats, "Audit log stats fetched successfully"));
 });
 
-const getSyncLogs = asyncHandler(async (req: Request, res: Response) => {
+export const getSyncLogs = asyncHandler(async (req: Request, res: Response) => {
   const { page = 1, limit = 10 } = req.query;
   const pageNum = Number(page);
   const limitNum = Number(limit);
@@ -401,11 +468,9 @@ const getSyncLogs = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-const getSyncStats = asyncHandler(async (req: Request, res: Response) => {
-  // Latest Sync
+export const getSyncStats = asyncHandler(async (req: Request, res: Response) => {
   const latestSync = await SyncLog.findOne().sort({ startTime: -1 });
 
-  // Success Rate (Last 30 runs)
   const last30Runs = await SyncLog.find().sort({ startTime: -1 }).limit(30);
   const successCount = last30Runs.filter(
     (run) => run.status === "COMPLETED",
@@ -430,6 +495,9 @@ export default {
   getAllOrganizations,
   getAllUsers,
   getSystemStats,
+  getProcessStats,
+  getSystemLogs,
+  clearSystemLogs,
   suspendUser,
   activateUser,
   updateUserRole,

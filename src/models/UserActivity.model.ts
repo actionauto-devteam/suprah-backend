@@ -102,8 +102,8 @@ const UserActivitySchema = new Schema(
 UserActivitySchema.index({ userId: 1, createdAt: -1 });
 UserActivitySchema.index({ organizationId: 1, createdAt: -1 });
 
-// Auto-delete activities older than 90 days (optional)
-UserActivitySchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
+// Auto-delete activities older than 14 days (Staging optimization)
+UserActivitySchema.index({ createdAt: 1 }, { expireAfterSeconds: 14 * 24 * 60 * 60 });
 
 const UserActivity = mongoose.model<IUserActivity>('UserActivity', UserActivitySchema);
 

@@ -31,6 +31,7 @@ import { Server as IOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
+import logger from '../utils/logger';
 
 let io: IOServer;
 
@@ -95,7 +96,7 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       if (err instanceof jwt.TokenExpiredError) {
         return next(new Error('CRM session expired. Please log in again.'));
       }
-      console.error('[SupraSpace Socket] Auth error:', err);
+      logger.error(err, '[SupraSpace Socket] Auth error');
       next(new Error('Invalid CRM token'));
     }
   });
@@ -111,7 +112,7 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     // Announce online presence to all connected clients
     io.emit('presence:update', { userId, status: 'online' });
 
-    console.log(`[SupraSpace] ✅ ${user.fullName} (${user.username}) connected — ${socket.id}`);
+    logger.info({ userId, fullName: user.fullName }, '[SupraSpace] User connected');
 
     // ── Join a conversation room ──────────────────────────────────────────
     socket.on('join:conversation', ({ conversationId }: { conversationId: string }) => {
@@ -151,19 +152,19 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
           conversationId,
           userId,
         });
-      } catch (err) {
-        console.error('[SupraSpace] mark:read error:', err);
+      } catch (err: any) {
+        logger.error(err, '[SupraSpace] mark:read error');
       }
     });
 
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
       io.emit('presence:update', { userId, status: 'offline' });
-      console.log(`[SupraSpace] ❌ ${user.fullName} disconnected (${reason})`);
+      logger.info({ userId, reason }, '[SupraSpace] User disconnected');
     });
   });
 
-  console.log('[SupraSpace] Socket.io initialized on path /socket/supraspace');
+  logger.info('[SupraSpace] Socket.io initialized on path /socket/supraspace');
   return io;
 }
 
