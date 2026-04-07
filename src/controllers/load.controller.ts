@@ -15,6 +15,7 @@ import {
 import { maskLoadForDriver } from "../utils/loadMask";
 import { storageService } from "../services/storage.service";
 import { safeCreateNotification } from "../utils/safeNotification";
+import activityService from "../services/activity.service";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,6 +146,15 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     contract: contractWithTimestamp,
     status: "Posted",
   });
+
+  // Log activity
+  await activityService.logLoadActivity(
+    user._id.toString(),
+    organizationId,
+    'load_posted',
+    load._id.toString(),
+    `Created load ${loadNumber}`
+  );
 
   return res.status(201).json(new ApiResponse(201, load, "Load created successfully"));
 });
@@ -312,6 +322,16 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
 
   await Load.deleteOne({ _id: load._id });
 
+  // Log activity
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId,
+    type: 'shipment_deleted', // Assuming similar mapping or add quote_deleted/load_deleted
+    title: 'Load Deleted',
+    description: `Deleted load ${load.loadNumber}`,
+    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
+  });
+
   return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
 });
 
@@ -348,6 +368,15 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
   };
 
   await load.save();
+
+  // Log activity
+  await activityService.logLoadActivity(
+    userId,
+    load.organizationId?.toString(),
+    'load_delivered', // Triggering 'delivered' status log
+    load._id.toString(),
+    `Submitted proof of delivery for load ${load.loadNumber}`
+  );
 
   const orgId = load.organizationId?.toString();
   if (orgId) {

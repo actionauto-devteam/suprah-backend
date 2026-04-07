@@ -1,4 +1,5 @@
 import axios from "axios";
+import logger from "./logger";
 
 interface Coordinates {
     lat: number;
@@ -49,7 +50,7 @@ export async function getCoordinatesFromZip(zipCode: string): Promise<Coordinate
             };
         }
     } catch (error) {
-        console.error("Error fetching coordinates for ZIP", zipCode, error);
+        logger.error({ error, zipCode }, "Error fetching coordinates for ZIP");
     }
 
     return null;

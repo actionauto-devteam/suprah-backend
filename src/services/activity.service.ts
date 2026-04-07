@@ -149,6 +149,114 @@ const logAvatarUpdate = async (
   });
 };
 
+/**
+ * Log Driver/Load related activities
+ */
+const logLoadActivity = async (
+  userId: string,
+  organizationId: string | undefined,
+  type: ActivityType,
+  loadId: string,
+  description: string,
+  metadata?: Record<string, any>
+): Promise<IUserActivity> => {
+  const titles: Record<string, string> = {
+    load_posted: 'New Load Posted',
+    load_assigned: 'Load Assigned',
+    load_delivered: 'Load Delivered',
+  };
+
+  return createActivity({
+    userId,
+    organizationId,
+    type,
+    title: titles[type] || 'Load Activity',
+    description,
+    metadata: { ...metadata, loadId },
+  });
+};
+
+/**
+ * Log Compliance/Document activities
+ */
+const logComplianceActivity = async (
+  userId: string,
+  organizationId: string | undefined,
+  type: ActivityType,
+  documentType: string,
+  status: string
+): Promise<IUserActivity> => {
+  const titles: Record<string, string> = {
+    compliance_uploaded: 'Compliance Document Uploaded',
+    doc_verified: 'Document Verified',
+  };
+
+  return createActivity({
+    userId,
+    organizationId,
+    type,
+    title: titles[type] || 'Compliance Update',
+    description: `${documentType} is now ${status}`,
+    metadata: { documentType, status },
+  });
+};
+
+/**
+ * Log Financial/Wallet activities
+ */
+const logFinancialActivity = async (
+  userId: string,
+  organizationId: string | undefined,
+  type: ActivityType,
+  amount: number,
+  description: string,
+  metadata?: Record<string, any>
+): Promise<IUserActivity> => {
+  const titles: Record<string, string> = {
+    payout_received: 'Payout Received',
+    referral_applied: 'Referral Bonus Applied',
+    withdrawal_requested: 'Withdrawal Requested',
+    wallet_adjustment: 'Wallet Adjusted',
+  };
+
+  return createActivity({
+    userId,
+    organizationId,
+    type,
+    title: titles[type] || 'Financial Activity',
+    description: `${description} (${amount > 0 ? '+' : ''}${amount})`,
+    metadata: { ...metadata, amount },
+  });
+};
+
+/**
+ * Log Admin Management actions
+ */
+const logAdminAction = async (
+  adminId: string,
+  organizationId: string | undefined,
+  type: ActivityType,
+  targetUserId: string,
+  description: string
+): Promise<IUserActivity> => {
+  const titles: Record<string, string> = {
+    user_suspended: 'User Suspended',
+    user_activated: 'User Activated',
+    org_suspended: 'Organization Suspended',
+    subscription_changed: 'Subscription Updated',
+    logs_cleared: 'System Logs Cleared',
+  };
+
+  return createActivity({
+    userId: adminId,
+    organizationId,
+    type,
+    title: titles[type] || 'Admin Action',
+    description,
+    metadata: { targetUserId },
+  });
+};
+
 export default {
   createActivity,
   getRecentActivities,
@@ -158,4 +266,8 @@ export default {
   logProfileUpdate,
   logLogin,
   logAvatarUpdate,
+  logLoadActivity,
+  logComplianceActivity,
+  logFinancialActivity,
+  logAdminAction,
 };

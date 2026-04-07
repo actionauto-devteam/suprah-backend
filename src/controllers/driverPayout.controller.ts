@@ -8,6 +8,7 @@ import Shipment from '../models/Shipment.model';
 import User, { IUser } from '../models/User.model';
 import { safeCreateNotification } from '../utils/safeNotification';
 import { notifyOrgAdmins } from '../utils/safeNotification';
+import activityService from '../services/activity.service';
 import config from '../config';
 
 const stripe = new Stripe(config.stripe.secretKey, {
@@ -159,6 +160,16 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
       message: `You received a payout of $${amount.toFixed(2)} for shipment ${shipment.trackingNumber || shipmentId}`,
       metadata: { shipmentId, amount },
     });
+
+    // Log activity (Persona: Driver receiving money)
+    await activityService.logFinancialActivity(
+      driverId,
+      orgId,
+      'payout_received',
+      amount,
+      `Received payout for shipment ${shipment.trackingNumber || shipmentId}`,
+      { shipmentId: shipment._id.toString(), payoutId: payout._id.toString() }
+    );
 
     res.status(201).json(new ApiResponse(201, payout, 'Driver payout sent successfully'));
   } catch (stripeError: any) {

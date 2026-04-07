@@ -1,79 +1,137 @@
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 import path from 'path';
+import dotenv from 'dotenv';
 
-// Define log level based on environment
-const level = process.env.NODE_ENV === 'development' ? 'debug' : 'info';
+// Ensure .env is loaded before configuring the logger
+dotenv.config();
 
-// Configure transports
-const transport = pino.transport({
-  targets: [
-    // 1. Pretty print to console for development
-    ...(process.env.NODE_ENV === 'development'
-      ? [
-          {
-            target: 'pino-pretty',
-            options: {
-              colorize: true,
-              ignore: 'pid,hostname',
-              translateTime: 'SYS:standard',
-            },
-            level: 'debug',
-          },
-        ]
-      : [
-          {
-            target: 'pino/file',
-            options: { destination: 1 }, // stdout for production (Docker/PM2 logs)
-            level: 'info',
-          },
-        ]),
-    // 2. Rolling file transport for persistent logs (Self-Hosted logic)
-    {
-      target: 'pino-roll',
+const env = process.env.NODE_ENV || 'development';
+const isDev = env === 'development';
+const logLevel = isDev ? 'debug' : 'info';
+
+const logDir = path.join(process.cwd(), 'logs');
+const logFile = path.join(logDir, 'app.log');
+
+// Configure transport targets
+const transport = isDev
+  ? pino.transport({
+      target: 'pino-pretty',
       options: {
-        file: path.join(process.cwd(), 'logs', 'app.log'),
-        frequency: 'daily',
-        size: '20m', // Roll when file hits 20MB
-        mkdir: true,
-        limit: {
-          count: 7, // Keep 7 days of logs
-        },
+        colorize: true,
+        ignore: 'pid,hostname',
+        translateTime: 'SYS:standard',
       },
-      level: 'info',
-    },
-  ],
-});
+    })
+  : pino.transport({
+      targets: [
+        {
+          target: 'pino/file',
+          options: { destination: 1 },
+          level: 'info',
+        },
+        {
+          target: 'pino-roll',
+          options: {
+            file: logFile,
+            frequency: 'daily',
+            size: '20m',
+            mkdir: true,
+          },
+          level: 'info',
+        },
+      ],
+    });
 
 // Create the logger instance
-const logger = pino(
-  {
-    level,
-    base: {
-      env: process.env.NODE_ENV,
-    },
-    // PII Masking: Redact sensitive fields from the logs
-    redact: {
-      paths: [
-        'req.headers.authorization',
-        'req.body.password',
-        'req.body.token',
-        'req.body.creditCard',
-        'req.body.ssn',
-        'res.headers["set-cookie"]'
-      ],
-      censor: '[REDACTED]',
-      remove: false
-    },
-    formatters: {
-      level: (label) => {
-        return { level: label.toUpperCase() };
+let logger: pino.Logger;
+
+if (isDev) {
+  // In development, we combine formatted terminal output with file logging
+  // multistream allows us to bypass worker thread capture issues in ts-node-dev
+  const prettyStream = require('pino-pretty')({
+    colorize: true,
+    ignore: 'pid,hostname',
+    translateTime: 'SYS:standard',
+  });
+  
+  // Create a file stream for development as well
+  const fs = require('fs');
+  const fileStream = fs.createWriteStream(logFile, { flags: 'a' });
+
+  logger = pino(
+    {
+      level: logLevel,
+      base: { env },
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.body.password',
+          'req.body.password_confirmation',
+          'req.body.token',
+          'req.body.creditCard',
+          'req.body.ssn',
+          'req.body.dob',
+          'req.body.routingNumber',
+          'req.body.accountNumber',
+          'req.body.cvv',
+          'req.body.pin',
+          'res.headers["set-cookie"]'
+        ],
+        censor: '[REDACTED]',
+        remove: false
       },
+      formatters: {
+        level: (label) => {
+          return { level: label.toUpperCase() };
+        },
+      },
+      timestamp: pino.stdTimeFunctions.isoTime,
     },
-    timestamp: pino.stdTimeFunctions.isoTime,
-  },
-  transport
-);
+    pino.multistream([
+      { stream: prettyStream, level: logLevel },
+      { stream: fileStream, level: 'info' }
+    ])
+  );
+} else {
+  // In production, use high-performance transports (JSON stdout + Rolling File)
+  logger = pino(
+    {
+      level: logLevel,
+      base: { env },
+      redact: {
+        paths: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.body.password',
+          'req.body.password_confirmation',
+          'req.body.token',
+          'req.body.creditCard',
+          'req.body.ssn',
+          'req.body.dob',
+          'req.body.routingNumber',
+          'req.body.accountNumber',
+          'req.body.cvv',
+          'req.body.pin',
+          'res.headers["set-cookie"]'
+        ],
+        censor: '[REDACTED]',
+        remove: false
+      },
+      formatters: {
+        level: (label) => {
+          return { level: label.toUpperCase() };
+        },
+      },
+      timestamp: pino.stdTimeFunctions.isoTime,
+    },
+    transport
+  );
+}
+
+// Initial startup log to verify log visibility
+logger.info({ env, logLevel }, 'Logger initialized');
 
 // Create HTTP logger middleware
 export const httpLogger = pinoHttp({

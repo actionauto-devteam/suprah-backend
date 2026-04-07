@@ -12,6 +12,7 @@ import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNot
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
 import { storageService } from '../services/storage.service';
+import activityService from '../services/activity.service';
 import fs from 'fs';
 import path from 'path';
 
@@ -198,6 +199,18 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
                 : 'Shipment created successfully.'
         )
     );
+
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'shipment_created',
+            title: 'Shipment Created',
+            description: `Converted quote to shipment ${trackingNumber}`,
+            metadata: { shipmentId: shipment._id.toString(), trackingNumber }
+        });
+    }
 
     // Invalidate shipment and quote caches on creation
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
@@ -456,6 +469,18 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
 
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: status === 'Delivered' ? 'load_delivered' : 'shipment_updated',
+            title: status === 'Delivered' ? 'Shipment Delivered' : 'Shipment Updated',
+            description: `Updated shipment ${shipment.trackingNumber} to status: ${status || 'Updated'}`,
+            metadata: { shipmentId: shipment._id.toString(), status, originalStatus: shipment.status }
+        });
+    }
+
     // Invalidate shipment cache on update
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
 
@@ -599,6 +624,18 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
         )
     );
 
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'shipment_deleted',
+            title: 'Shipment Deleted',
+            description: `Deleted shipment ${trackingNumber}`,
+            metadata: { shipmentId: req.params.id, trackingNumber }
+        });
+    }
+
     await AuditLog.create({
         entityType: 'Shipment',
         entityId: req.params.id,
@@ -659,6 +696,17 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     };
 
     await shipment.save();
+
+    // Log activity (Persona: Driver delivering)
+    if (userId) {
+        await activityService.logLoadActivity(
+            userId,
+            shipment.organizationId?.toString(),
+            'load_delivered',
+            shipment._id.toString(),
+            `Submitted proof of delivery for shipment ${shipment.trackingNumber}`
+        );
+    }
 
     // Use the shipment's own organizationId for notifications
     const shipmentOrgId = shipment.organizationId.toString();
@@ -728,6 +776,18 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
                 shipmentId,
                 trackingNumber: shipment.trackingNumber,
             },
+        });
+    }
+
+    // Log activity (Persona: Admin confirming delivery)
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'load_delivered',
+            title: 'Delivery Confirmed',
+            description: `Admin confirmed proof of delivery for shipment ${shipment.trackingNumber}`,
+            metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber }
         });
     }
 

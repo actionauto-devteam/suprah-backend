@@ -9,6 +9,7 @@ import SyncLog from '../models/SyncLog.model';
 import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { asyncHandler } from '../utils/asyncHandler';
+import activityService from '../services/activity.service';
 
 import { metrics, getPercentile } from '../utils/metrics';
 
@@ -165,7 +166,7 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
 });
 
 /**
- * Retrieves the last X lines of the application log file safely.
+ * Retrieves the last X lines of the application log file safely using a memory-efficient buffer.
  */
 export const getSystemLogs = asyncHandler(async (req: Request, res: Response) => {
   const logPath = path.join(process.cwd(), 'logs', 'app.log');
@@ -175,12 +176,41 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
     throw new ApiError(404, "Log file not found");
   }
 
-  const fileContent = fs.readFileSync(logPath, 'utf8');
-  const lines = fileContent.trim().split('\n');
-  const lastLines = lines.slice(-lineCount);
+  // Use a chunk-based approach to read from the end of the file
+  const CHUNK_SIZE = 16 * 1024; // 16KB
+  const stats = fs.statSync(logPath);
+  let fileSize = stats.size;
+  let fd = fs.openSync(logPath, 'r');
+  let buffer = Buffer.alloc(CHUNK_SIZE);
+  let lines: string[] = [];
+  let currentPos = fileSize;
+
+  try {
+    while (lines.length < lineCount && currentPos > 0) {
+      const readSize = Math.min(CHUNK_SIZE, currentPos);
+      currentPos -= readSize;
+      
+      fs.readSync(fd, buffer, 0, readSize, currentPos);
+      const chunk = buffer.toString('utf8', 0, readSize);
+      const chunkLines = chunk.split('\n');
+      
+      if (lines.length > 0 && !chunk.endsWith('\n')) {
+        // Handle line split across chunks
+        const lastLineOfChunk = chunkLines.pop() || '';
+        lines[0] = lastLineOfChunk + lines[0];
+      }
+      
+      lines = [...chunkLines, ...lines];
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  // Slice to the requested number of lines from the end
+  const result = lines.slice(-lineCount);
 
   return res.status(200).json(
-    new ApiResponse(200, lastLines, "Logs retrieved successfully")
+    new ApiResponse(200, result, "Logs retrieved successfully")
   );
 });
 
@@ -192,6 +222,18 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
   
   if (fs.existsSync(logPath)) {
     fs.writeFileSync(logPath, '');
+  }
+
+  // Log activity
+  const adminUser = req.user as any;
+  if (adminUser) {
+    await activityService.logAdminAction(
+      adminUser._id.toString(),
+      undefined,
+      'logs_cleared',
+      adminUser._id.toString(),
+      'Admin cleared system-wide application logs'
+    );
   }
 
   return res.status(200).json(
@@ -209,6 +251,17 @@ export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
     { new: true },
   );
   if (!user) throw new ApiError(404, "User not found");
+
+  // Log activity
+  const adminUser = req.user as any;
+  await activityService.logAdminAction(
+    adminUser._id.toString(),
+    undefined,
+    'user_suspended',
+    user._id.toString(),
+    `Suspended user: ${user.email}`
+  );
+
   res.json(new ApiResponse(200, user, "User suspended successfully"));
 });
 
@@ -220,6 +273,17 @@ export const activateUser = asyncHandler(async (req: Request, res: Response) => 
     { new: true },
   );
   if (!user) throw new ApiError(404, "User not found");
+
+  // Log activity
+  const adminUser = req.user as any;
+  await activityService.logAdminAction(
+    adminUser._id.toString(),
+    undefined,
+    'user_activated',
+    user._id.toString(),
+    `Activated user: ${user.email}`
+  );
+
   res.json(new ApiResponse(200, user, "User activated successfully"));
 });
 
@@ -270,6 +334,17 @@ export const suspendOrganization = asyncHandler(
       { new: true },
     );
     if (!org) throw new ApiError(404, "Organization not found");
+
+    // Log activity
+    const adminUser = req.user as any;
+    await activityService.logAdminAction(
+      adminUser._id.toString(),
+      undefined,
+      'org_suspended',
+      org.ownerId?.toString() || id,
+      `Suspended organization: ${org.name}`
+    );
+
     res.json(new ApiResponse(200, org, "Organization suspended successfully"));
   },
 );
@@ -302,6 +377,16 @@ export const updateOrganizationSubscription = asyncHandler(
     if (status) owner.subscription!.status = status;
 
     await owner.save();
+
+    // Log activity
+    const adminUser = req.user as any;
+    await activityService.logAdminAction(
+      adminUser._id.toString(),
+      undefined,
+      'subscription_changed',
+      owner._id.toString(),
+      `Changed subscription for ${org.name} to plan: ${plan || 'N/A'}, status: ${status || 'N/A'}`
+    );
 
     res.json(
       new ApiResponse(

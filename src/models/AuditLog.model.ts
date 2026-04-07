@@ -46,4 +46,7 @@ const AuditLogSchema: Schema = new Schema(
     }
 );
 
+// Self-cleaning index: delete records after 30 days
+AuditLogSchema.index({ timestamp: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+
 export default mongoose.model<IAuditLog>('AuditLog', AuditLogSchema);

@@ -1,3 +1,4 @@
+import logger from '../utils/logger';
 import CrmUser from '../models/CrmUser.model';
 
 const CRM_USERS = [
@@ -25,7 +26,7 @@ const DEFAULT_PASSWORD = 'superadmin@123!';
  */
 const seedCrmUsers = async (): Promise<void> => {
   try {
-    console.log('[CRM Seed] Checking CRM users...');
+    logger.info('[CRM Seed] Checking CRM users...');
 
     let created = 0;
     let existing = 0;
@@ -51,17 +52,17 @@ const seedCrmUsers = async (): Promise<void> => {
     }
 
     if (created > 0) {
-      console.log(`[CRM Seed] Created ${created} new CRM users`);
+      logger.info(`[CRM Seed] Created ${created} new CRM users`);
     }
 
     if (existing > 0) {
-      console.log(`[CRM Seed] ⏭  ${existing} CRM users already exist`);
+      logger.info(`[CRM Seed] ⏭  ${existing} CRM users already exist`);
     }
 
     const total = await CrmUser.countDocuments();
-    console.log(`[CRM Seed] Total CRM users in database: ${total}`);
+    logger.info(`[CRM Seed] Total CRM users in database: ${total}`);
   } catch (error) {
-    console.error('[CRM Seed] Failed to seed CRM users:', error);
+    logger.error({ error }, '[CRM Seed] Failed to seed CRM users');
     // Don't throw — server should still start even if seed fails
   }
 };

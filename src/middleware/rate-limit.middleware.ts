@@ -22,6 +22,7 @@ export const authLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { ip: false }
 });
 
 /**
@@ -44,6 +45,7 @@ export const otpLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { ip: false }
 });
 
 /**
@@ -67,6 +69,7 @@ export const adfLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { ip: false }
 });
 
 /**
@@ -89,6 +92,7 @@ export const syncLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { ip: false }
 });
 
 /**
@@ -111,4 +115,5 @@ export const replyLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { ip: false }
 });

@@ -21,6 +21,24 @@ export type ActivityType =
   | 'google_calendar_connected'
   | 'google_calendar_disconnected'
   | 'avatar_updated'
+  // Driver Actions
+  | 'load_posted'
+  | 'load_assigned'
+  | 'load_delivered'
+  | 'compliance_uploaded'
+  | 'doc_verified'
+  | 'payout_received'
+  // Customer Actions
+  | 'referral_applied'
+  | 'withdrawal_requested'
+  | 'wallet_adjustment'
+  | 'payment_completed'
+  // Admin Actions
+  | 'user_suspended'
+  | 'user_activated'
+  | 'org_suspended'
+  | 'subscription_changed'
+  | 'logs_cleared'
   | 'other';
 
 export interface IUserActivity extends Document {
@@ -41,12 +59,10 @@ const UserActivitySchema = new Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      index: true,
     },
     organizationId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Organization',
-      index: true,
     },
     type: {
       type: String,
@@ -71,6 +87,21 @@ const UserActivitySchema = new Schema(
         'google_calendar_connected',
         'google_calendar_disconnected',
         'avatar_updated',
+        'load_posted',
+        'load_assigned',
+        'load_delivered',
+        'compliance_uploaded',
+        'doc_verified',
+        'payout_received',
+        'referral_applied',
+        'withdrawal_requested',
+        'wallet_adjustment',
+        'payment_completed',
+        'user_suspended',
+        'user_activated',
+        'org_suspended',
+        'subscription_changed',
+        'logs_cleared',
         'other',
       ],
       required: true,

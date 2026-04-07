@@ -6,6 +6,7 @@ import DriverProfile from "../models/DriverProfile.model";
 import { IUser } from "../models/User.model";
 import storageService from "../services/storage.service";
 import AuditLog from "../models/AuditLog.model";
+import activityService from "../services/activity.service";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -188,6 +189,15 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  // Log activity
+  await activityService.logComplianceActivity(
+    user._id.toString(),
+    orgId,
+    'compliance_uploaded',
+    label,
+    'Pending Review'
+  );
+
   res.json(new ApiResponse(200, profile, "Document uploaded"));
 
   await AuditLog.create({
@@ -346,6 +356,15 @@ const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  // Log activity (Persona: Admin acting on Driver)
+  await activityService.logComplianceActivity(
+    driverId,
+    orgId,
+    'doc_verified',
+    doc.label,
+    verified ? 'Verified' : 'Unverified'
+  );
+
   res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
 
   await AuditLog.create({
@@ -394,6 +413,16 @@ const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
   (doc as any).reviewStatus = "rejected";
 
   await profile.save();
+
+  // Log activity (Persona: Admin acting on Driver)
+  await activityService.createActivity({
+    userId: driverId,
+    organizationId: orgId,
+    type: 'other',
+    title: 'Document Rejected',
+    description: `Document ${doc.label} was rejected: ${reason.trim()}`,
+    metadata: { documentId, reason: reason.trim(), adminId: user._id.toString() }
+  });
 
   res.json(new ApiResponse(200, profile, "Document rejected"));
 
