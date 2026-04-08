@@ -6,6 +6,7 @@ import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
 import ReferralService from '../services/referral.service';
 import activityService from '../services/activity.service';
+import logger from '../utils/logger';
 
 // 1. Get Wallet Dashboard Data
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
@@ -100,6 +101,8 @@ const linkReferral = asyncHandler(async (req: Request, res: Response) => {
         metadata: { referrerId: referrer._id.toString(), referralCode }
     });
 
+    logger.info({ userId: newUserId, referrerId: referrer._id, referralCode }, 'Referral linked successfully');
+
     res.status(201).json(new ApiResponse(201, newReferral, 'Referral linked successfully'));
 });
 
@@ -158,6 +161,8 @@ const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         `Requested withdrawal of $${amount.toFixed(2)} via ${methodType}`,
         { transactionId: withdrawal._id.toString(), methodType }
     );
+
+    logger.info({ userId: userId, amount, methodType }, 'Withdrawal request submitted');
 
     res.status(201).json(new ApiResponse(201, withdrawal, 'Withdrawal request submitted for Admin review'));
 });

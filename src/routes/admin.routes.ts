@@ -19,6 +19,7 @@ router.get("/financials", adminController.getFinancialStats);
 // --- MONITORING & SYSTEM (PHASE 2) ---
 router.get("/system/stats", adminController.getProcessStats); // CPU/RAM
 router.get("/system/logs", adminController.getSystemLogs);
+router.get("/system/logs/stats", adminController.getLogStats);
 router.post("/system/logs/clear", adminController.clearSystemLogs);
 
 // --- LOGS & AUDIT ---

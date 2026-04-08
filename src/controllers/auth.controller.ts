@@ -12,6 +12,8 @@ import {
     completeOnboardingSchema
 } from '../validations/auth.validation';
 import { ApiError } from '../utils/ApiError';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 
 class AuthController {
     /**
@@ -20,6 +22,8 @@ class AuthController {
     register = asyncHandler(async (req: Request, res: Response) => {
         const validatedData = registerSchema.parse(req.body);
         const result = await authService.register(validatedData);
+
+        logger.info({ email: validatedData.email }, 'User registered');
 
         res.status(201).json(
             new ApiResponse(201, result, 'Registration successful. Please verify your email.')
@@ -41,6 +45,13 @@ class AuthController {
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
+        await activityService.logLogin(
+            result.user._id.toString(),
+            result.user.organizationId?.toString(),
+            req.ip,
+            req.get('user-agent')
+        );
+
         res.status(200).json(
             new ApiResponse(200, { user: result.user, accessToken: result.accessToken }, 'Email verified successfully')
         );
@@ -60,6 +71,15 @@ class AuthController {
             sameSite: isProduction ? 'none' : 'lax',
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
+
+        await activityService.logLogin(
+            result.user._id.toString(),
+            result.user.organizationId?.toString(),
+            req.ip,
+            req.get('user-agent')
+        );
+
+        logger.info({ userId: result.user._id, email }, 'User login successful');
 
         res.json(new ApiResponse(200, {
             user: result.user,
@@ -103,6 +123,16 @@ class AuthController {
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
+        await activityService.createActivity({
+            userId: result.user._id.toString(),
+            organizationId: result.user.organizationId?.toString(),
+            type: 'password_change',
+            title: 'Account Upgraded',
+            description: 'Legacy account upgraded with new password',
+            ipAddress: req.ip,
+            userAgent: req.get('user-agent'),
+        });
+
         res.json(new ApiResponse(200, {
             user: result.user,
             accessToken: result.accessToken
@@ -139,9 +169,22 @@ class AuthController {
      */
     logout = asyncHandler(async (req: Request, res: Response) => {
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+        const user = req.user as any;
 
         if (refreshToken) {
             await authService.logout(refreshToken);
+        }
+
+        if (user) {
+            await activityService.createActivity({
+                userId: user._id.toString(),
+                organizationId: user.organizationId?.toString(),
+                type: 'logout',
+                title: 'Signed Out',
+                description: 'User successfully signed out',
+                ipAddress: req.ip,
+            });
+            logger.info({ userId: user._id }, 'User logout');
         }
 
         res.clearCookie('refreshToken');
@@ -162,7 +205,19 @@ class AuthController {
      */
     resetPassword = asyncHandler(async (req: Request, res: Response) => {
         const { email, otp, newPassword } = resetPasswordSchema.parse(req.body);
-        const result = await authService.resetPassword(email, otp, newPassword);
+        const result = await authService.resetPassword(email, otp, newPassword) as any;
+
+        await activityService.createActivity({
+            userId: result.user._id.toString(),
+            organizationId: result.user.organizationId?.toString(),
+            type: 'password_change',
+            title: 'Password Reset',
+            description: 'Password was successfully reset via OTP',
+            ipAddress: req.ip,
+        });
+
+        logger.info({ email }, 'Password reset successful');
+
         res.status(200).json(new ApiResponse(200, result, 'Password reset successfully'));
     });
 

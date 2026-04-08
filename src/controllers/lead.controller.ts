@@ -2,9 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import Lead from '../models/lead.model';
 import { parseStringPromise } from 'xml2js';
 import User, { IUser } from '../models/User.model';
-import AuditLog from '../models/AuditLog.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
@@ -234,18 +235,17 @@ export const receiveADF = async (req: Request, res: Response) => {
       }
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: newLead._id,
-      action: 'CREATE',
-      reason: 'New Lead via ADF/XML webhook',
-      changes: {
-        firstName: adfData.firstName,
-        lastName: adfData.lastName,
-        source: 'ADF Email',
-        channel: 'adf',
-      },
+    await activityService.createActivity({
+      userId: systemUser._id.toString(),
+      organizationId: orgId || 'global',
+      type: 'other',
+      title: 'New Lead Ingested',
+      description: `New lead ${adfData.firstName} ${adfData.lastName} from ${newLead.source}`,
+      metadata: { leadId: newLead._id.toString(), channel: 'adf' },
+      ipAddress: req.ip
     });
+
+    logger.info({ leadId: newLead._id, orgId, source: newLead.source }, 'New lead via ADF webhook');
 
     res.status(200).send('Lead processed successfully');
   } catch (error) {
@@ -341,14 +341,16 @@ export const updateLead = async (req: Request, res: Response) => {
         },
       });
 
-      await AuditLog.create({
-        entityType: 'Lead',
-        entityId: lead._id,
-        action: 'UPDATE',
-        reason: 'Lead status updated',
-        performedBy: (req.user as any)?._id,
-        changes: { status },
+      await activityService.createActivity({
+        userId: userId.toString(),
+        organizationId: orgId || 'global',
+        type: 'other',
+        title: 'Lead Status Updated',
+        description: `Lead ${lead.firstName} status changed to ${status}`,
+        metadata: { leadId: lead._id.toString(), status }
       });
+
+      logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
 
       // Socket broadcast
       const io = getSocketIO();
@@ -432,14 +434,16 @@ export const createInquiry = async (req: Request, res: Response) => {
       });
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: savedLead._id,
-      action: 'CREATE',
-      reason: 'New Lead Manual Entry',
-      performedBy: (req.user as any)?._id,
-      changes: { firstName, lastName, source, channel: detectedChannel },
+    await activityService.createActivity({
+      userId: userId.toString(),
+      organizationId: req.orgId || 'global',
+      type: 'other',
+      title: 'Manual Lead Created',
+      description: `Manual lead ${firstName} ${lastName} created by ${userId}`,
+      metadata: { leadId: savedLead._id.toString(), source: savedLead.source }
     });
+
+    logger.info({ leadId: savedLead._id, userId, orgId: req.orgId }, 'Manual lead created');
 
     res.status(201).json({ success: true, message: 'Inquiry created successfully', data: savedLead });
   } catch (error) {
@@ -520,14 +524,16 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Inquiry not found' });
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: lead._id,
-      action: 'UPDATE',
-      reason: 'Lead replied to',
-      performedBy: userId,
-      changes: { status: 'Contacted', isRead: true, message },
+    await activityService.createActivity({
+      userId: userId.toString(),
+      organizationId: orgId || 'global',
+      type: 'other',
+      title: 'Lead Replied',
+      description: `Reply sent to lead ${lead.firstName}`,
+      metadata: { leadId: lead._id.toString() }
     });
+
+    logger.info({ leadId: lead._id, userId }, 'Staff replied to lead');
 
     try {
       const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
@@ -778,14 +784,16 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
             io.to(`org:${req.orgId}`).emit('lead:new', newLead);
           }
 
-          await AuditLog.create({
-            entityType: 'Lead',
-            entityId: newLead._id,
-            action: 'CREATE',
-            reason: `New Lead via Centralized Sync (${parsed.channel}) from ${LEADS_SOURCE_EMAIL}`,
-            performedBy: userId,
-            changes: { email: leadEmail, subject, channel: parsed.channel, senderEmail: LEADS_SOURCE_EMAIL },
+          await activityService.createActivity({
+            userId: userId,
+            organizationId: req.orgId || 'global',
+            type: 'other',
+            title: 'Lead Synced from Gmail',
+            description: `Lead ${firstName} ${lastName} synced from DealtCloud filter`,
+            metadata: { leadId: newLead._id.toString(), threadId: details.data.threadId }
           });
+
+          logger.info({ leadId: newLead._id, threadId: details.data.threadId }, 'Lead synced via Gmail');
         } catch (saveError: any) {
           if (saveError.code === 11000) {
             console.log(`[CENTRAL-SYNC] Skipping already synced lead (Duplicate Key): ${message.id}`);
@@ -894,14 +902,16 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   }
 
   // 2. Audit Log
-  await AuditLog.create({
-    entityType: 'Lead',
-    entityId: lead._id,
-    action: 'UPDATE',
-    reason: 'Appointment set from inquiry page',
-    performedBy: userId,
-    changes: { status: 'Appointment Set', appointment: { date, time, notes, locationOrVehicle } },
+  await activityService.createActivity({
+    userId: userId.toString(),
+    organizationId: orgId || 'global',
+    type: 'other',
+    title: 'Appointment Set for Lead',
+    description: `Scheduled ${lead.firstName}'s appointment for ${date} at ${time}`,
+    metadata: { leadId: lead._id.toString(), date, time }
   });
+
+  logger.info({ leadId: lead._id, userId, date, time }, 'Appointment set for lead');
 
   // 3. Socket broadcast
   const io = getSocketIO();

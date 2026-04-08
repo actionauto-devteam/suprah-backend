@@ -3,9 +3,10 @@ import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
-import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
@@ -161,14 +162,18 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate quote cache after creation
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'CREATE',
-        reason: 'New shipping quote created',
-        performedBy: userId,
-        changes: { firstName, lastName, vehicleId, fromZip, toZip }
+    await activityService.createActivity({
+        userId: userId || 'GUEST',
+        organizationId: orgId,
+        type: 'quote_created',
+        title: 'Draft Created',
+        description: `New transportation draft created for ${firstName} ${lastName}`,
+        metadata: { quoteId: quote._id.toString(), vehicleName: vehicleData.vehicleName, rate },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent')
     });
+
+    logger.info({ quoteId: quote._id, orgId }, 'New shipping quote created');
 });
 
 /**
@@ -372,14 +377,17 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate quote cache on update
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'UPDATE',
-        reason: 'Quote details updated',
-        performedBy: userId,
-        changes: updateData
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Draft Updated',
+        description: `Quote details modified for ${quote.firstName} ${quote.lastName}`,
+        metadata: { quoteId: quote._id.toString(), status: quote.status },
+        ipAddress: req.ip
     });
+
+    logger.info({ quoteId: quote._id, orgId }, 'Quote details updated');
 });
 
 /**
@@ -430,14 +438,16 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate quote cache on status change
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'UPDATE',
-        reason: `Quote status changed to ${status}`,
-        performedBy: userId,
-        changes: { status }
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Status Changed',
+        description: `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
+        metadata: { quoteId: quote._id.toString(), status }
     });
+
+    logger.info({ quoteId: quote._id, status }, 'Quote status updated');
 });
 
 /**
@@ -487,13 +497,15 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: req.params.id,
-        action: 'DELETE',
-        reason: 'Quote deleted',
-        performedBy: userId
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_deleted',
+        title: 'Draft Deleted',
+        description: `Quote for ${customerName} was removed from the system`
     });
+
+    logger.warn({ quoteId: req.params.id, orgId }, 'Quote deleted');
 });
 
 export default {

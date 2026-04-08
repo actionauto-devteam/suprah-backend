@@ -1,11 +1,12 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
-import AuditLog from '../models/AuditLog.model';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import mongoose from 'mongoose';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 
 export const createOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { name, slug } = req.body;
@@ -31,14 +32,16 @@ export const createOrganization = asyncHandler(async (req: Request, res: Respons
         ownerId: user._id,
     });
 
-    await AuditLog.create({
-        entityType: 'Organization',
-        entityId: org._id,
-        action: 'CREATE',
-        reason: 'New organization registered',
-        performedBy: user._id,
-        changes: { name, slug, ownerId: user._id }
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: org._id.toString(),
+        type: 'other',
+        title: 'Organization Created',
+        description: `New organization registered: ${name}`,
+        metadata: { slug }
     });
+
+    logger.info({ orgId: org._id, ownerId: user._id }, 'New organization created');
 
     // Update user's organization
     user.organizationId = org._id as mongoose.Types.ObjectId;
@@ -106,14 +109,16 @@ export const updateOrganization = asyncHandler(async (req: Request, res: Respons
 
     await org.save();
 
-    await AuditLog.create({
-        entityType: 'Organization',
-        entityId: org._id,
-        action: 'UPDATE',
-        reason: 'Organization settings updated',
-        performedBy: req.user?._id,
-        changes: { name, logoUrl, metadata }
+    await activityService.createActivity({
+        userId: (req.user?._id as any).toString(),
+        organizationId: org._id.toString(),
+        type: 'settings_change',
+        title: 'Organization Settings Updated',
+        description: `Settings modified for ${org.name}`,
+        metadata: { name, logoUrl }
     });
+
+    logger.info({ orgId: org._id }, 'Organization settings updated');
 
     res.status(200).json({
         success: true,
@@ -143,13 +148,15 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
 
     await Organization.findByIdAndDelete(id);
 
-    await AuditLog.create({
-        entityType: 'Organization',
-        entityId: id,
-        action: 'DELETE',
-        reason: 'Organization deleted',
-        performedBy: req.user?._id
+    await activityService.createActivity({
+        userId: (req.user?._id as any).toString(),
+        organizationId: id,
+        type: 'other',
+        title: 'Organization Deleted',
+        description: `Organization ${org.name} was removed from the system`
     });
+
+    logger.warn({ orgId: id, performedBy: req.user?._id }, 'Organization deleted');
 
     // Detach all members
     await User.updateMany(
@@ -232,14 +239,16 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
         $unset: { organizationId: 1, organizationRole: 1 }
     });
 
-    await AuditLog.create({
-        entityType: 'Organization',
-        entityId: id,
-        action: 'UPDATE',
-        reason: 'Member removed from organization',
-        performedBy: req.user?._id,
-        changes: { removedUserId: userId }
+    await activityService.createActivity({
+        userId: (req.user?._id as any).toString(),
+        organizationId: id,
+        type: 'other',
+        title: 'Member Removed',
+        description: 'Team member was removed from the organization',
+        metadata: { removedUserId: userId }
     });
+
+    logger.info({ orgId: id, removedUserId: userId }, 'Member removed from organization');
 
     const removedUser = await User.findById(userId);
     if (removedUser) {

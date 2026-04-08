@@ -9,11 +9,12 @@
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [System Components](#system-components)
-3. [Data Flow](#data-flow)
-4. [Change Audit](#change-audit)
-5. [API Reference](#api-reference)
-6. [Verification Checklist](#verification-checklist)
+2. [Multi-Repo Synchronization](#multi-repo-synchronization)
+3. [System Components](#system-components)
+4. [Data Flow](#data-flow)
+5. [Change Audit](#change-audit)
+6. [API Reference](#api-reference)
+7. [Verification Checklist](#verification-checklist)
 
 ---
 
@@ -64,6 +65,19 @@ graph TB
     ROL --> SL
     ERR -->|"500+ errors"| SIO --> DASH
 ```
+
+---
+
+## Multi-Repo Synchronization (Frontend ↔ Backend)
+
+The Monitoring & Logging system is split across two primary repositories. Developers must ensure that any path changes in the backend are mirrored in the frontend service layer to prevent **404 regressions**.
+
+| Feature | Backend Endpoint (`ActionAutoBackend`) | Frontend Service (`actionautoutah`) |
+| :--- | :--- | :--- |
+| **System Stats** | `GET /api/admin/system/stats` | `admin.service.ts` -> `getProcessStats()` |
+| **Cloud Logs** | `GET /api/admin/system/logs` | `admin.service.ts` -> `getSystemLogs()` |
+| **Log Cleansing** | `POST /api/admin/system/logs/clear` | `admin.service.ts` -> `clearSystemLogs()` |
+| **Activity Feed** | `GET /api/activity/organization` | `admin.service.ts` -> `getGlobalActivity()` |
 
 ---
 

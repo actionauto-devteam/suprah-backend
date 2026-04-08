@@ -5,6 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
 import Vehicle from "../models/Vehicle.model";
 import User, { IUser } from "../models/User.model";
+import logger from "../utils/logger";
 import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
 import {
   getCoordinatesForPair,
@@ -155,6 +156,8 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     load._id.toString(),
     `Created load ${loadNumber}`
   );
+
+  logger.info({ loadId: load._id, loadNumber, orgId: organizationId }, 'Load created successfully');
 
   return res.status(201).json(new ApiResponse(201, load, "Load created successfully"));
 });
@@ -332,6 +335,8 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
   });
 
+  logger.warn({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load deleted');
+
   return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
 });
 
@@ -390,6 +395,8 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
       });
     }
   }
+
+  logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
 
   return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
 });

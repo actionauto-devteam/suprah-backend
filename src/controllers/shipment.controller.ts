@@ -4,10 +4,10 @@ import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
 import Payment from '../models/Payment.model';
 import Organization from '../models/Organization.model';
-import AuditLog from '../models/AuditLog.model';
 import User, { IUser } from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import logger from '../utils/logger';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
@@ -216,14 +216,7 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: shipment._id,
-        action: 'CREATE',
-        reason: 'Shipment created from quote',
-        performedBy: userId,
-        changes: { quoteId, trackingNumber }
-    });
+    logger.info({ shipmentId: shipment._id, trackingNumber }, 'Converted quote to shipment');
 });
 
 /**
@@ -484,14 +477,7 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate shipment cache on update
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: shipment._id,
-        action: 'UPDATE',
-        reason: 'Shipment updated',
-        performedBy: userId,
-        changes: updateData
-    });
+    logger.info({ shipmentId: shipment._id, status }, 'Shipment details updated');
 });
 
 /**
@@ -636,13 +622,7 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: req.params.id,
-        action: 'DELETE',
-        reason: 'Shipment deleted',
-        performedBy: userId
-    });
+    logger.warn({ shipmentId: req.params.id, trackingNumber }, 'Shipment deleted');
 });
 
 /**
@@ -696,6 +676,8 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     };
 
     await shipment.save();
+
+    logger.info({ shipmentId: shipment._id, userId }, 'Proof of delivery submitted');
 
     // Log activity (Persona: Driver delivering)
     if (userId) {
@@ -790,6 +772,8 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
             metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber }
         });
     }
+
+    logger.info({ shipmentId: shipment._id, userId }, 'Delivery confirmed by admin');
 
     res.json(new ApiResponse(200, updated, 'Delivery confirmed successfully'));
 });

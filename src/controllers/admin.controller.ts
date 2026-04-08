@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import os from 'os';
 import pidusage from 'pidusage';
 import fs from 'fs';
 import path from 'path';
@@ -10,6 +11,8 @@ import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { asyncHandler } from '../utils/asyncHandler';
 import activityService from '../services/activity.service';
+import logger from '../utils/logger';
+import { SystemLog } from '../models/SystemLog.model';
 
 import { metrics, getPercentile } from '../utils/metrics';
 
@@ -136,6 +139,7 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
     performance: {
       cpu: Math.round(stats.cpu * 100) / 100,
       memory: Math.round((stats.memory / 1024 / 1024) * 100) / 100, // MB
+      memoryTotal: Math.round((os.totalmem() / 1024 / 1024) * 100) / 100, // MB
       uptime: Math.round(stats.elapsed / 1000), // seconds
     },
     goldenSignals: {
@@ -168,49 +172,124 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
 /**
  * Retrieves the last X lines of the application log file safely using a memory-efficient buffer.
  */
+/**
+ * Retrieves system logs from the indexed database with advanced filtering.
+ */
 export const getSystemLogs = asyncHandler(async (req: Request, res: Response) => {
-  const logPath = path.join(process.cwd(), 'logs', 'app.log');
-  const lineCount = parseInt(req.query.lines as string) || 200;
+  const { 
+    level, 
+    search, 
+    from, 
+    to, 
+    page = 1, 
+    limit = 50,
+    requestId,
+    userId,
+    organizationId
+  } = req.query;
 
-  if (!fs.existsSync(logPath)) {
-    throw new ApiError(404, "Log file not found");
+  const pageNum = Number(page);
+  const limitNum = Number(limit);
+  const skip = (pageNum - 1) * limitNum;
+
+  const filter: any = {};
+
+  // Level filter (supports csv: info,error,warn)
+  if (level) {
+    const levels = (level as string).split(',').map(l => l.trim().toUpperCase());
+    filter.level = levels.length > 1 ? { $in: levels } : levels[0];
   }
 
-  // Use a chunk-based approach to read from the end of the file
-  const CHUNK_SIZE = 16 * 1024; // 16KB
-  const stats = fs.statSync(logPath);
-  let fileSize = stats.size;
-  let fd = fs.openSync(logPath, 'r');
-  let buffer = Buffer.alloc(CHUNK_SIZE);
-  let lines: string[] = [];
-  let currentPos = fileSize;
+  // Time range filter
+  if (from || to) {
+    filter.timestamp = {};
+    if (from) filter.timestamp.$gte = new Date(from as string);
+    if (to) filter.timestamp.$lte = new Date(to as string);
+  }
 
-  try {
-    while (lines.length < lineCount && currentPos > 0) {
-      const readSize = Math.min(CHUNK_SIZE, currentPos);
-      currentPos -= readSize;
-      
-      fs.readSync(fd, buffer, 0, readSize, currentPos);
-      const chunk = buffer.toString('utf8', 0, readSize);
-      const chunkLines = chunk.split('\n');
-      
-      if (lines.length > 0 && !chunk.endsWith('\n')) {
-        // Handle line split across chunks
-        const lastLineOfChunk = chunkLines.pop() || '';
-        lines[0] = lastLineOfChunk + lines[0];
-      }
-      
-      lines = [...chunkLines, ...lines];
+  // Search filter (High-performance Unified Text Search)
+  if (search) {
+    const searchTerm = search as string;
+    
+    // If it looks like a specific ID (Request ID, User ID), we use prioritized match
+    if (searchTerm.includes('_') || searchTerm.length > 20) {
+      filter.$or = [
+        { 'req.id': searchTerm },
+        { 'req.userId': searchTerm },
+        { message: { $regex: searchTerm, $options: 'i' } }
+      ];
+    } else {
+      // Use the Compound Text Index for general keyword searches
+      filter.$text = { $search: searchTerm };
     }
-  } finally {
-    fs.closeSync(fd);
   }
 
-  // Slice to the requested number of lines from the end
-  const result = lines.slice(-lineCount);
+  // Context filters
+  if (requestId) filter['req.id'] = requestId;
+  if (userId) filter['req.userId'] = userId;
+  if (organizationId) filter['req.organizationId'] = organizationId;
+
+  const [logs, total] = await Promise.all([
+    SystemLog.find(filter)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(limitNum),
+    SystemLog.countDocuments(filter)
+  ]);
+
+  const totalPages = Math.ceil(total / limitNum);
 
   return res.status(200).json(
-    new ApiResponse(200, result, "Logs retrieved successfully")
+    new ApiResponse(200, {
+      logs,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages
+      }
+    }, "Logs retrieved successfully")
+  );
+});
+
+/**
+ * Get log frequency statistics for the visual histogram.
+ */
+export const getLogStats = asyncHandler(async (req: Request, res: Response) => {
+  const { from, to, interval = 'hour' } = req.query;
+  
+  const startTime = from ? new Date(from as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const endTime = to ? new Date(to as string) : new Date();
+
+  // Create a time-series aggregation for logs
+  const stats = await SystemLog.aggregate([
+    { 
+      $match: { 
+        timestamp: { $gte: startTime, $lte: endTime } 
+      } 
+    },
+    {
+      $group: {
+        _id: {
+          $dateToString: { 
+            format: interval === 'day' ? "%Y-%m-%d" : "%Y-%m-%dT%H:00:00Z", 
+            date: "$timestamp" 
+          }
+        },
+        count: { $sum: 1 },
+        errors: { 
+          $sum: { $cond: [{ $in: ["$level", ["ERROR", "FATAL"]] }, 1, 0] } 
+        },
+        warnings: { 
+          $sum: { $cond: [{ $eq: ["$level", "WARN"] }, 1, 0] } 
+        }
+      }
+    },
+    { $sort: { "_id": 1 } }
+  ]);
+
+  return res.status(200).json(
+    new ApiResponse(200, stats, "Log stats retrieved successfully")
   );
 });
 
@@ -224,6 +303,9 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
     fs.writeFileSync(logPath, '');
   }
 
+  // Also purge the database indexed logs
+  await SystemLog.deleteMany({});
+
   // Log activity
   const adminUser = req.user as any;
   if (adminUser) {
@@ -234,6 +316,8 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
       adminUser._id.toString(),
       'Admin cleared system-wide application logs'
     );
+
+    logger.warn({ adminId: adminUser._id }, 'System application logs cleared by administrator');
   }
 
   return res.status(200).json(
@@ -262,6 +346,8 @@ export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
     `Suspended user: ${user.email}`
   );
 
+  logger.warn({ adminId: adminUser._id, targetUserId: user._id, targetEmail: user.email }, 'User suspended by administrator');
+
   res.json(new ApiResponse(200, user, "User suspended successfully"));
 });
 
@@ -284,6 +370,8 @@ export const activateUser = asyncHandler(async (req: Request, res: Response) => 
     `Activated user: ${user.email}`
   );
 
+  logger.info({ adminId: adminUser._id, targetUserId: user._id, targetEmail: user.email }, 'User activated by administrator');
+
   res.json(new ApiResponse(200, user, "User activated successfully"));
 });
 
@@ -299,6 +387,8 @@ export const updateUserRole = asyncHandler(async (req: Request, res: Response) =
 
   (user as any).organizationRole = organizationRole;
   await user.save();
+
+  logger.info({ adminId: (req.user as any)._id, targetUserId: user._id, newRole: organizationRole }, 'User organization role updated');
 
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
@@ -344,6 +434,8 @@ export const suspendOrganization = asyncHandler(
       org.ownerId?.toString() || id,
       `Suspended organization: ${org.name}`
     );
+
+    logger.warn({ adminId: adminUser._id, orgId: id, orgName: org.name }, 'Organization suspended by administrator');
 
     res.json(new ApiResponse(200, org, "Organization suspended successfully"));
   },
@@ -582,6 +674,7 @@ export default {
   getSystemStats,
   getProcessStats,
   getSystemLogs,
+  getLogStats,
   clearSystemLogs,
   suspendUser,
   activateUser,

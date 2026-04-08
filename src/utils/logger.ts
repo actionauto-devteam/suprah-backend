@@ -8,54 +8,46 @@ dotenv.config();
 
 const env = process.env.NODE_ENV || 'development';
 const isDev = env === 'development';
-const logLevel = isDev ? 'debug' : 'info';
+const isTest = env === 'test';
+const logLevel = (isDev || isTest) ? 'debug' : 'info';
 
 const logDir = path.join(process.cwd(), 'logs');
 const logFile = path.join(logDir, 'app.log');
 
-// Configure transport targets
-const transport = isDev
-  ? pino.transport({
-      target: 'pino-pretty',
-      options: {
-        colorize: true,
-        ignore: 'pid,hostname',
-        translateTime: 'SYS:standard',
-      },
-    })
-  : pino.transport({
-      targets: [
-        {
-          target: 'pino/file',
-          options: { destination: 1 },
-          level: 'info',
-        },
-        {
-          target: 'pino-roll',
-          options: {
-            file: logFile,
-            frequency: 'daily',
-            size: '20m',
-            mkdir: true,
-          },
-          level: 'info',
-        },
-      ],
-    });
-
-// Create the logger instance
+// Define logger variable
 let logger: pino.Logger;
 
+// Custom dev-stream for MongoDB ingestion (uses model directly to avoid worker overhead in dev)
+const mongoDevStream = {
+  write: (chunk: string) => {
+    try {
+      const { SystemLog } = require('../models/SystemLog.model');
+      const mongoose = require('mongoose');
+      if (mongoose.connection.readyState === 1) {
+        const logData = JSON.parse(chunk);
+        SystemLog.create({
+          timestamp: new Date(logData.time || Date.now()),
+          level: logData.level || 'INFO',
+          message: logData.msg || '',
+          req: logData.req,
+          res: logData.res,
+          err: logData.err,
+          context: logData.context,
+          env: logData.env || process.env.NODE_ENV,
+        }).catch((e: any) => console.error('[Mongo-Log-Dev] Error:', e));
+      }
+    } catch (e) { /* Ignore parsing errors for non-JSON chunks */ }
+  }
+};
+
 if (isDev) {
-  // In development, we combine formatted terminal output with file logging
-  // multistream allows us to bypass worker thread capture issues in ts-node-dev
+  // In development, combine formatted terminal output with file logging + MongoDB
   const prettyStream = require('pino-pretty')({
     colorize: true,
     ignore: 'pid,hostname',
     translateTime: 'SYS:standard',
   });
   
-  // Create a file stream for development as well
   const fs = require('fs');
   const fileStream = fs.createWriteStream(logFile, { flags: 'a' });
 
@@ -68,34 +60,51 @@ if (isDev) {
           'req.headers.authorization',
           'req.headers.cookie',
           'req.body.password',
-          'req.body.password_confirmation',
-          'req.body.token',
-          'req.body.creditCard',
-          'req.body.ssn',
-          'req.body.dob',
-          'req.body.routingNumber',
-          'req.body.accountNumber',
-          'req.body.cvv',
-          'req.body.pin',
-          'res.headers["set-cookie"]'
         ],
         censor: '[REDACTED]',
         remove: false
       },
       formatters: {
-        level: (label) => {
-          return { level: label.toUpperCase() };
-        },
+        level: (label) => ({ level: label.toUpperCase() }),
       },
       timestamp: pino.stdTimeFunctions.isoTime,
     },
     pino.multistream([
       { stream: prettyStream, level: logLevel },
-      { stream: fileStream, level: 'info' }
+      { stream: fileStream, level: 'info' },
+      { stream: mongoDevStream as any, level: 'info' }
     ])
   );
+} else if (isTest) {
+  // In test environment, use a silent logger to keep output clean and avoid worker conflicts
+  logger = pino({ level: 'silent' });
 } else {
-  // In production, use high-performance transports (JSON stdout + Rolling File)
+  // In production, use high-performance transports (JSON stdout + Rolling File + MongoDB Worker)
+  const transport = pino.transport({
+    targets: [
+      {
+        target: 'pino/file',
+        options: { destination: 1 },
+        level: 'info',
+      },
+      {
+        target: 'pino-roll',
+        options: {
+          file: logFile,
+          frequency: 'daily',
+          size: '20m',
+          mkdir: true,
+        },
+        level: 'info',
+      },
+      {
+        target: path.join(__dirname, 'pino-mongodb-transport.ts'),
+        options: {},
+        level: 'info',
+      },
+    ],
+  });
+
   logger = pino(
     {
       level: logLevel,
@@ -105,24 +114,12 @@ if (isDev) {
           'req.headers.authorization',
           'req.headers.cookie',
           'req.body.password',
-          'req.body.password_confirmation',
-          'req.body.token',
-          'req.body.creditCard',
-          'req.body.ssn',
-          'req.body.dob',
-          'req.body.routingNumber',
-          'req.body.accountNumber',
-          'req.body.cvv',
-          'req.body.pin',
-          'res.headers["set-cookie"]'
         ],
         censor: '[REDACTED]',
         remove: false
       },
       formatters: {
-        level: (label) => {
-          return { level: label.toUpperCase() };
-        },
+        level: (label) => ({ level: label.toUpperCase() }),
       },
       timestamp: pino.stdTimeFunctions.isoTime,
     },

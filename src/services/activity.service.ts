@@ -53,22 +53,33 @@ const getRecentActivities = async (
 };
 
 /**
- * Get activities for an organization
+ * Get activities for an organization (or global if ID is missing)
  */
 const getOrganizationActivities = async (
-  organizationId: string,
+  organizationId?: string,
   limit = 50,
   skip = 0
 ): Promise<any[]> => {
-  const activities = await UserActivity.find({ organizationId: new mongoose.Types.ObjectId(organizationId) })
+  const query: any = {};
+  
+  if (organizationId) {
+    query.organizationId = new mongoose.Types.ObjectId(organizationId);
+  }
+
+  const activities = await UserActivity.find(query)
     .populate('userId', 'name email avatar')
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .lean();
 
-  return activities;
+  // Map createdAt to timestamp for frontend compatibility
+  return activities.map(activity => ({
+    ...activity,
+    timestamp: activity.createdAt,
+  }));
 };
+
 
 /**
  * Get activity count for a user

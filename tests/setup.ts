@@ -35,9 +35,9 @@ jest.setTimeout(60000); // Global timeout for all tests
 process.env.NODE_ENV = 'test';
 process.env.SKIP_RATE_LIMIT = 'true';
 
+// Connection logic
 beforeAll(async () => {
-    jest.setTimeout(60000); // Global timeout for all tests
-    // Check if we are already connected?
+    jest.setTimeout(60000); 
     if (mongoose.connection.readyState === 0) {
         const url = process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
         await mongoose.connect(url);
@@ -50,10 +50,41 @@ afterAll(async () => {
     }
 });
 
-// Clear collections between tests
+const clearMongooseRegistry = () => {
+    // 1. Clear Mongoose Model Registry
+    Object.keys(mongoose.models).forEach(modelName => {
+        delete mongoose.models[modelName];
+    });
+
+    // 2. Clear Mongoose Connection Model Registry (Crucial for isolated tests)
+    if (mongoose.connection && (mongoose.connection as any).models) {
+        Object.keys((mongoose.connection as any).models).forEach(modelName => {
+            delete (mongoose.connection as any).models[modelName];
+        });
+    }
+    
+    // 3. Clear Mongoose Schema Registry
+    const anyMongoose = mongoose as any;
+    if (anyMongoose.modelSchemas) {
+        Object.keys(anyMongoose.modelSchemas).forEach(schemaName => {
+            delete anyMongoose.modelSchemas[schemaName];
+        });
+    }
+};
+
+// Double-Registry Purge: Clean state before AND after every test
+beforeEach(async () => {
+    clearMongooseRegistry();
+});
+
 afterEach(async () => {
-    // const collections = mongoose.connection.collections;
-    // for (const key in collections) {
-    //     await collections[key].deleteMany({});
-    // }
+    clearMongooseRegistry();
+
+    // Clear collections (If connection is active)
+    if (mongoose.connection.readyState !== 0) {
+        const collections = mongoose.connection.collections;
+        for (const key in collections) {
+            await collections[key].deleteMany({});
+        }
+    }
 });

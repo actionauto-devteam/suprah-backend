@@ -5,8 +5,8 @@ import { ApiError } from "../utils/ApiError";
 import DriverProfile from "../models/DriverProfile.model";
 import { IUser } from "../models/User.model";
 import storageService from "../services/storage.service";
-import AuditLog from "../models/AuditLog.model";
 import activityService from "../services/activity.service";
+import logger from "../utils/logger";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -89,13 +89,15 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Equipment updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Equipment information updated",
-    performedBy: user._id,
-    changes: req.body,
+  logger.info({ profileId: profile._id, userId: user._id }, 'Equipment information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Equipment Updated',
+    description: `Driver ${user.name} updated equipment details`,
+    metadata: { profileId: profile._id.toString(), trailerType }
   });
 });
 
@@ -129,19 +131,15 @@ const updateCompliance = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Compliance updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance information updated",
-    performedBy: user._id,
-    changes: {
-      licenseState,
-      licenseExpirationDate,
-      medicalCardExpirationDate,
-      insuranceExpirationDate,
-      insuranceProvider,
-    },
+  logger.info({ profileId: profile._id, userId: user._id }, 'Compliance information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Compliance Updated',
+    description: `Driver ${user.name} updated license/insurance details`,
+    metadata: { profileId: profile._id.toString(), licenseState }
   });
 });
 
@@ -200,14 +198,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Document uploaded"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document uploaded",
-    performedBy: user._id,
-    changes: { documentType: type, fileName: file.originalname },
-  });
+  logger.info({ profileId: profile._id, type, label }, 'Compliance document uploaded');
 });
 
 const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -238,13 +229,15 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Document deleted"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document deleted",
-    performedBy: user._id,
-    changes: { deletedDocumentId: documentId },
+  logger.warn({ profileId: profile._id, documentId }, 'Compliance document deleted');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: profile.organizationId.toString(),
+    type: 'other',
+    title: 'Document Deleted',
+    description: `Driver ${user.name} removed a compliance document`,
+    metadata: { profileId: profile._id.toString(), documentId }
   });
 });
 
@@ -283,13 +276,15 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Logistics updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Logistics information updated",
-    performedBy: user._id,
-    changes: req.body,
+  logger.info({ profileId: profile._id, userId: user._id }, 'Logistics information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Logistics Updated',
+    description: `Driver ${user.name} updated service area/routes`,
+    metadata: { profileId: profile._id.toString(), serviceRadius }
   });
 });
 
@@ -368,14 +363,7 @@ const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: `Document ${verified ? "verified" : "verification revoked"}`,
-    performedBy: user._id,
-    changes: { documentId, verified },
-  });
+  logger.info({ profileId: profile._id, driverId, documentId, verified }, 'Document verification status changed');
 });
 
 const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -427,14 +415,7 @@ const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Document rejected"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document rejected",
-    performedBy: user._id,
-    changes: { documentId, rejectionReason: reason.trim() },
-  });
+  logger.warn({ profileId: profile._id, driverId, documentId, reason }, 'Compliance document rejected');
 });
 
 const updateIdentityVerification = asyncHandler(async (req: Request, res: Response) => {
@@ -485,13 +466,15 @@ const updateIdentityVerification = asyncHandler(async (req: Request, res: Respon
 
   res.json(new ApiResponse(200, profile, "Identity verification updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Identity verification information updated",
-    performedBy: user._id,
-    changes: { ssnLast4: ssnLast4 ? "****" : undefined, backgroundCheckConsent, verificationAgreement },
+  logger.info({ profileId: profile._id, userId: user._id }, 'Identity verification updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Identity Verification Update',
+    description: `Driver ${user.name} updated tax/identity info`,
+    metadata: { profileId: profile._id.toString(), status: profile.verificationStatus }
   });
 });
 

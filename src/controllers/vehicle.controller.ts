@@ -7,6 +7,8 @@ import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotificati
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import cacheService from '../services/cache.service';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 
 const VEH_CACHE_TTL = 60 * 60; // 1 hour
 
@@ -80,6 +82,18 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
       userId // Exclude the user who created it
     );
   }
+
+  await activityService.createActivity({
+    userId: userId || 'SYSTEM',
+    organizationId: orgId,
+    type: 'vehicle_added',
+    title: 'Vehicle Added',
+    description: `Added ${vehicleName} to inventory`,
+    metadata: { vehicleId: vehicle._id.toString(), vin: vehicle.vin, stockNumber: vehicle.stockNumber },
+    ipAddress: req.ip
+  });
+
+  logger.info({ vehicleId: vehicle._id, vin: vehicle.vin, orgId }, 'New vehicle added to inventory');
 
   res.status(201).json(
     new ApiResponse(201, normalizeVehicle(vehicle), 'Vehicle created successfully')
@@ -342,6 +356,17 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  await activityService.createActivity({
+    userId: userId || 'SYSTEM',
+    organizationId: orgId,
+    type: 'vehicle_updated',
+    title: 'Vehicle Updated',
+    description: `Updated status of ${vehicleName} to ${updateData.status || vehicle.status}`,
+    metadata: { vehicleId: vehicle._id.toString(), status: updateData.status, oldStatus }
+  });
+
+  logger.info({ vehicleId: vehicle._id, status: vehicle.status, orgId }, 'Vehicle updated');
+
   res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle updated successfully'));
 
   // Invalidate vehicle cache on any update
@@ -368,6 +393,17 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
       userId
     );
   }
+
+  await activityService.createActivity({
+    userId: userId || 'SYSTEM',
+    organizationId: orgId,
+    type: 'vehicle_updated',
+    title: 'Vehicle Removed',
+    description: `Vehicle ${vehicle.year} ${vehicle.make} ${vehicle.modelName} was deleted from inventory`,
+    metadata: { vehicleId: req.params.id, vin: vehicle.vin }
+  });
+
+  logger.warn({ vehicleId: req.params.id, vin: vehicle.vin, orgId }, 'Vehicle deleted from inventory');
 
   res.json(new ApiResponse(200, null, 'Vehicle deleted successfully'));
 
@@ -794,6 +830,17 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   } as any);
 
   await vehicle.save();
+
+  logger.info({ vehicleId: vehicle._id, customerName, userId }, 'Vehicle reserved for customer');
+
+  await activityService.createActivity({
+    userId: userId || 'SYSTEM',
+    organizationId: orgId,
+    type: 'vehicle_updated',
+    title: 'Vehicle Reserved',
+    description: `Reserved ${vehicle.year} ${vehicle.make} ${vehicle.modelName} for ${customerName}`,
+    metadata: { vehicleId: vehicle._id.toString(), customerName, reservedUntil }
+  });
 
   res.json(new ApiResponse(200, {
     ...normalizeVehicle(vehicle),
