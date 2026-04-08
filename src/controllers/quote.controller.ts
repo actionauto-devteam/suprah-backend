@@ -10,6 +10,7 @@ import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNot
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import cacheService from '../services/cache.service';
+import { getSocketIO } from '../utils/socketEmitter';
 import {
     getCoordinatesFromZip,
     calculateDistance,
@@ -158,6 +159,10 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
     );
 
+    // Real-time: notify org members
+    const _ioC = getSocketIO();
+    if (_ioC) _ioC.to(`org:${orgId}`).emit('quote:change', { action: 'created' });
+
     // Invalidate quote cache after creation
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
@@ -176,17 +181,27 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const skip  = (page - 1) * limit;
     const orgId = req.orgId as string;
 
     const filter: any = {};
-
     if (status && status !== 'all') {
         filter.status = status;
     }
+    if (search) {
+        filter.$or = [
+            { firstName: { $regex: search, $options: 'i' } },
+            { lastName:  { $regex: search, $options: 'i' } },
+            { email:     { $regex: search, $options: 'i' } },
+            { vin:       { $regex: search, $options: 'i' } },
+            { stockNumber: { $regex: search, $options: 'i' } },
+        ];
+    }
 
-    // Skip caching for search queries to avoid stale filtered results
     const isCacheable = !search;
-    const cacheKey = `quotes:${orgId}:list:${status || 'all'}`;
+    const cacheKey = `quotes:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {
         const cached = await cacheService.get(cacheKey);
@@ -195,37 +210,39 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    if (search) {
-        filter.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { vin: { $regex: search, $options: 'i' } },
-            { stockNumber: { $regex: search, $options: 'i' } }
-        ];
-    }
-
-    const quotes = await Quote.find(filter)
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
-        .populate('createdBy', 'name email avatar')
-        .sort({ createdAt: -1 });
+    const [total, quotes] = await Promise.all([
+        Quote.countDocuments(filter),
+        Quote.find(filter)
+            .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit),
+    ]);
 
     // Attach organization name to each quote
     const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))]
         .filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
     const orgs = await Organization.find({ _id: { $in: uniqueOrgIds } }).select('name logoUrl');
-
     const orgMap = new Map<string, { name: string; logoUrl?: string }>();
-    orgs.forEach(o => {
-        orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
-    });
+    orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
 
     const quotesWithOrg = quotes.map(q => ({
         ...(q.toJSON()),
-        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
+        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' },
     }));
 
-    res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
+    const totalPages = Math.ceil(total / limit);
+    const responseData = {
+        quotes: quotesWithOrg,
+        pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    };
+
+    if (isCacheable) {
+        await cacheService.set(cacheKey, responseData, QUOTE_CACHE_TTL);
+    }
+
+    res.json(new ApiResponse(200, responseData, 'Quotes fetched successfully'));
 });
 
 /**
@@ -369,6 +386,10 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 
+    // Real-time: notify org members
+    const _ioU = getSocketIO();
+    if (_ioU) _ioU.to(`org:${orgId}`).emit('quote:change', { action: 'updated' });
+
     // Invalidate quote cache on update
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
@@ -486,6 +507,10 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     );
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
+
+    // Real-time: notify org members
+    const _ioD = getSocketIO();
+    if (_ioD) _ioD.to(`org:${orgId}`).emit('quote:change', { action: 'deleted' });
 
     await AuditLog.create({
         entityType: 'Quote',
