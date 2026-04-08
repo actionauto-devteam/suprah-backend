@@ -6,24 +6,47 @@ import ActivityLog from '../models/ActivityLog.model';
 import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 import { UserBadge, BADGE_DEFINITIONS } from '../models/Badge.model';
 import CrmUser from '../models/CrmUser.model';
+import { ICrmUser } from '../models/CrmUser.model';
 import { rebuildRanks } from '../services/activityLogger.service';
 import { evaluateBadges } from '../services/badge.service';
 import { getPeriodKey, getPeriodRange } from '../services/kpiEngine.service';
 import mongoose from 'mongoose';
 import { Parser } from 'json2csv';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Guard helper — mirrors the pattern used in crm.controller.ts
+// Throws a clean 403 if the CRM user has no organizationId (legacy records).
+// ─────────────────────────────────────────────────────────────────────────────
+function requireOrgId(actor: ICrmUser): string {
+  const orgId = actor.organizationId?.toString();
+  if (!orgId) {
+    throw new ApiError(
+      403,
+      'Your account is not linked to any organization. Contact your administrator.'
+    );
+  }
+  return orgId;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth helper — throws 401 if no crmUser on request
+// ─────────────────────────────────────────────────────────────────────────────
+function requireCrmUser(req: Request): ICrmUser {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, 'Not authenticated');
+  return actor;
+}
+
 // ─── Leaderboard ─────────────────────────────────────────────────────────────
 
 /**
  * GET /api/analytics/leaderboard
- * Query: periodType, periodKey, limit, metric
- * Access: admin=all, manager=team, employee=self only
+ * Query: periodType, periodKey, limit
+ * Access: admin = all users | manager = all users | employee = self only
  */
 export const getLeaderboard = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor) throw new ApiError(401, 'Not authenticated');
-
-  const orgId      = actor.organizationId?.toString();
+  const actor      = requireCrmUser(req);
+  const orgId      = requireOrgId(actor);
   const periodType = (req.query.periodType as string) || 'weekly';
   const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
   const limit      = Math.min(parseInt(req.query.limit as string) || 20, 100);
@@ -32,18 +55,18 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'periodType must be daily, weekly, or monthly');
   }
 
-  // Rebuild ranks on-demand (lightweight since it's org-scoped)
+  // Rebuild ranks on-demand for admins
   if (actor.role === 'admin') {
-    await rebuildRanks(orgId!, periodType as any, periodKey);
+    await rebuildRanks(orgId, periodType as any, periodKey);
   }
 
   const query: any = {
-    organizationId: new mongoose.Types.ObjectId(orgId!),
+    organizationId: new mongoose.Types.ObjectId(orgId),
     periodType,
     periodKey,
   };
 
-  // RBAC: employees only see their own data
+  // RBAC: employees only see their own entry
   if (actor.role === 'employee') {
     query.userId = actor._id;
   }
@@ -53,18 +76,23 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: Response) =
     .limit(limit)
     .lean();
 
-  // Enrich with user details
+  // Enrich with CrmUser details
   const userIds = [...new Set(docs.map(d => d.userId.toString()))];
-  const users   = await CrmUser.find({ _id: { $in: userIds } })
+  const users   = await CrmUser.find({
+    _id:            { $in: userIds },
+    organizationId: new mongoose.Types.ObjectId(orgId),
+  })
     .select('fullName username avatar role')
     .lean();
+
   const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
 
-  // Fetch badges
+  // Fetch all badges for these users in this org
   const badges = await UserBadge.find({
-    organizationId: new mongoose.Types.ObjectId(orgId!),
-    userId: { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) },
+    organizationId: new mongoose.Types.ObjectId(orgId),
+    userId:         { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) },
   }).lean();
+
   const badgeMap: Record<string, string[]> = {};
   for (const b of badges) {
     const key = b.userId.toString();
@@ -73,99 +101,104 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: Response) =
   }
 
   const leaderboard = docs.map((doc, idx) => ({
-    rank:        doc.rank || idx + 1,
-    prevRank:    doc.prevRank,
-    rankChange:  doc.prevRank ? doc.prevRank - (doc.rank || idx + 1) : null,
-    user:        userMap[doc.userId.toString()] || { fullName: 'Unknown', username: '-' },
-    kpis:        doc.kpis,
-    badges:      badgeMap[doc.userId.toString()] || [],
+    rank:       doc.rank || idx + 1,
+    prevRank:   doc.prevRank,
+    rankChange: doc.prevRank ? doc.prevRank - (doc.rank || idx + 1) : null,
+    user:       userMap[doc.userId.toString()] || { fullName: 'Unknown', username: '-' },
+    kpis:       doc.kpis,
+    badges:     badgeMap[doc.userId.toString()] || [],
     periodKey,
     periodType,
   }));
 
-  res.json(new ApiResponse(200, { leaderboard, total: leaderboard.length, periodKey, periodType }, 'Leaderboard fetched'));
+  res.json(
+    new ApiResponse(200, { leaderboard, total: leaderboard.length, periodKey, periodType }, 'Leaderboard fetched')
+  );
 });
 
 // ─── Personal Stats ───────────────────────────────────────────────────────────
 
 /**
  * GET /api/analytics/my-stats
+ * Access: all authenticated CRM users (own data only)
  */
 export const getMyStats = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor) throw new ApiError(401, 'Not authenticated');
-
-  const orgId = actor.organizationId?.toString();
+  const actor  = requireCrmUser(req);
+  const orgId  = requireOrgId(actor);
   const userId = actor._id.toString();
 
-  // Fetch all 3 period types for current periods
-  const now = new Date();
+  const now     = new Date();
   const periods = ['daily', 'weekly', 'monthly'] as const;
   const stats: Record<string, any> = {};
 
   for (const p of periods) {
     const key = getPeriodKey(now, p);
     const agg = await AnalyticsAggregate.findOne({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
+      organizationId: new mongoose.Types.ObjectId(orgId),
       userId:         new mongoose.Types.ObjectId(userId),
-      periodType: p,
-      periodKey:  key,
+      periodType:     p,
+      periodKey:      key,
     }).lean();
     stats[p] = agg?.kpis || null;
   }
 
-  // Recent activity (last 20)
+  // Last 20 activity logs for this user
   const recentActivity = await ActivityLog.find({
-    organizationId: new mongoose.Types.ObjectId(orgId!),
+    organizationId: new mongoose.Types.ObjectId(orgId),
     userId:         new mongoose.Types.ObjectId(userId),
-  }).sort({ timestamp: -1 }).limit(20).lean();
+  })
+    .sort({ timestamp: -1 })
+    .limit(20)
+    .lean();
 
-  // Badges
+  // All badges earned by this user in this org
   const myBadges = await UserBadge.find({
-    organizationId: new mongoose.Types.ObjectId(orgId!),
+    organizationId: new mongoose.Types.ObjectId(orgId),
     userId:         new mongoose.Types.ObjectId(userId),
-  }).sort({ awardedAt: -1 }).lean();
+  })
+    .sort({ awardedAt: -1 })
+    .lean();
 
   const enrichedBadges = myBadges.map(b => ({
     ...b,
     definition: BADGE_DEFINITIONS.find(d => d.id === b.badgeId),
   }));
 
-  res.json(new ApiResponse(200, {
-    stats,
-    recentActivity,
-    badges: enrichedBadges,
-  }, 'Personal stats fetched'));
+  res.json(
+    new ApiResponse(200, { stats, recentActivity, badges: enrichedBadges }, 'Personal stats fetched')
+  );
 });
 
-// ─── Team/Org Analytics ───────────────────────────────────────────────────────
+// ─── Org-Wide Analytics Overview ─────────────────────────────────────────────
 
 /**
  * GET /api/analytics/overview
- * Admin/Manager only
+ * Access: admin, manager only
  */
 export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor) throw new ApiError(401, 'Not authenticated');
-  if (actor.role === 'employee') throw new ApiError(403, 'Access denied');
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
 
-  const orgId = actor.organizationId?.toString();
+  if (actor.role === 'employee') {
+    throw new ApiError(403, 'Access denied. Managers and admins only.');
+  }
+
   const periodType = (req.query.periodType as string) || 'weekly';
   const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
   const { start, end } = getPeriodRange(periodKey, periodType as any);
 
-  // Org-wide KPI totals for the period
+  // Aggregate KPI totals across all users in the org for the period
   const orgTotals = await AnalyticsAggregate.aggregate([
     {
       $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId!),
+        organizationId: new mongoose.Types.ObjectId(orgId),
         periodType,
         periodKey,
-      }
+      },
     },
     {
       $group: {
-        _id: null,
+        _id:                   null,
         totalLeadsCreated:     { $sum: '$kpis.leadsCreated' },
         totalLeadsConverted:   { $sum: '$kpis.leadsConverted' },
         totalAppointments:     { $sum: '$kpis.appointmentsCompleted' },
@@ -177,85 +210,94 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Respo
         avgConversionRate:     { $avg: '$kpis.conversionRate' },
         avgResponseTime:       { $avg: '$kpis.avgResponseTimeMin' },
         activeUsers:           { $sum: 1 },
-      }
-    }
+      },
+    },
   ]);
 
-  // Trend: daily activity counts for the last 30 days
+  // 30-day daily trend
   const trendStart = new Date();
   trendStart.setDate(trendStart.getDate() - 30);
 
   const trend = await ActivityLog.aggregate([
     {
       $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId!),
-        timestamp: { $gte: trendStart },
-      }
+        organizationId: new mongoose.Types.ObjectId(orgId),
+        timestamp:      { $gte: trendStart },
+      },
     },
     {
       $group: {
-        _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
+        _id:   { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
         count: { $sum: 1 },
         score: { $sum: '$score' },
-      }
+      },
     },
-    { $sort: { _id: 1 } }
+    { $sort: { _id: 1 } },
   ]);
 
-  // Activity breakdown by type
+  // Action breakdown for current period
   const byAction = await ActivityLog.aggregate([
     {
       $match: {
-        organizationId: new mongoose.Types.ObjectId(orgId!),
-        timestamp: { $gte: start, $lt: end },
-      }
+        organizationId: new mongoose.Types.ObjectId(orgId),
+        timestamp:      { $gte: start, $lt: end },
+      },
     },
     {
       $group: {
-        _id: '$actionType',
+        _id:   '$actionType',
         count: { $sum: 1 },
-      }
+      },
     },
-    { $sort: { count: -1 } }
+    { $sort: { count: -1 } },
   ]);
 
-  res.json(new ApiResponse(200, {
-    totals:    orgTotals[0] || {},
-    trend,
-    byAction,
-    period:    { type: periodType, key: periodKey, start, end },
-  }, 'Analytics overview fetched'));
+  res.json(
+    new ApiResponse(200, {
+      totals:  orgTotals[0] || {},
+      trend,
+      byAction,
+      period:  { type: periodType, key: periodKey, start, end },
+    }, 'Analytics overview fetched')
+  );
 });
 
 // ─── Activity Feed (Tracking Board) ──────────────────────────────────────────
 
 /**
  * GET /api/analytics/activity-feed
- * Admin/Manager: see all. Employee: see own.
+ * Access: admin/manager = all users in org | employee = own logs only
  */
 export const getActivityFeed = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor) throw new ApiError(401, 'Not authenticated');
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
 
-  const orgId = actor.organizationId?.toString();
   const page  = parseInt(req.query.page  as string) || 1;
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
   const skip  = (page - 1) * limit;
 
   const filter: any = {
-    organizationId: new mongoose.Types.ObjectId(orgId!),
+    organizationId: new mongoose.Types.ObjectId(orgId),
   };
 
+  // RBAC: employees only see their own activity
   if (actor.role === 'employee') {
     filter.userId = actor._id;
   } else if (req.query.userId) {
+    // Admin/manager can filter by a specific user
     filter.userId = new mongoose.Types.ObjectId(req.query.userId as string);
   }
 
-  if (req.query.actionType)  filter.actionType   = req.query.actionType;
-  if (req.query.startDate)   filter.timestamp    = { $gte: new Date(req.query.startDate as string) };
+  if (req.query.actionType) filter.actionType = req.query.actionType;
+
+  if (req.query.startDate) {
+    filter.timestamp = { $gte: new Date(req.query.startDate as string) };
+  }
   if (req.query.endDate) {
-    filter.timestamp = { ...filter.timestamp, $lte: new Date(req.query.endDate as string) };
+    filter.timestamp = {
+      ...filter.timestamp,
+      $lte: new Date(req.query.endDate as string),
+    };
   }
 
   const [logs, total] = await Promise.all([
@@ -267,58 +309,78 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: Response) 
     ActivityLog.countDocuments(filter),
   ]);
 
-  // Enrich with user names
+  // Enrich logs with CrmUser details
   const userIds = [...new Set(logs.map(l => l.userId.toString()))];
-  const users   = await CrmUser.find({ _id: { $in: userIds } }).select('fullName username avatar').lean();
-  const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
+  const users   = await CrmUser.find({
+    _id:            { $in: userIds },
+    organizationId: new mongoose.Types.ObjectId(orgId),
+  })
+    .select('fullName username avatar')
+    .lean();
+
+  const userMap  = Object.fromEntries(users.map(u => [u._id.toString(), u]));
   const enriched = logs.map(l => ({ ...l, user: userMap[l.userId.toString()] }));
 
-  res.json(new ApiResponse(200, {
-    logs: enriched,
-    total,
-    page,
-    pages: Math.ceil(total / limit),
-  }, 'Activity feed fetched'));
+  res.json(
+    new ApiResponse(200, {
+      logs:  enriched,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    }, 'Activity feed fetched')
+  );
 });
 
-// ─── User Detail (for manager drill-down) ────────────────────────────────────
+// ─── User Detail Drill-Down ───────────────────────────────────────────────────
 
 /**
  * GET /api/analytics/users/:userId/stats
- * Admin/Manager only
+ * Access: admin, manager only
  */
 export const getUserStats = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor) throw new ApiError(401, 'Not authenticated');
-  if (actor.role === 'employee') throw new ApiError(403, 'Access denied');
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
 
-  const orgId  = actor.organizationId?.toString();
-  const userId = req.params.userId;
-  const periodType = (req.query.periodType as string) || 'monthly';
-  const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
+  if (actor.role === 'employee') {
+    throw new ApiError(403, 'Access denied. Managers and admins only.');
+  }
 
+  const { userId }   = req.params;
+  const periodType   = (req.query.periodType as string) || 'monthly';
+  const periodKey    = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
+
+  // Confirm the target user belongs to the same org
   const user = await CrmUser.findOne({
-    _id: userId,
-    organizationId: new mongoose.Types.ObjectId(orgId!),
-  }).select('fullName username email avatar role').lean();
+    _id:            userId,
+    organizationId: new mongoose.Types.ObjectId(orgId),
+  })
+    .select('fullName username email avatar role isActive lastLoginAt createdAt')
+    .lean();
 
-  if (!user) throw new ApiError(404, 'User not found');
+  if (!user) throw new ApiError(404, 'User not found in your organization');
 
   const [aggregate, badges, recentActivity] = await Promise.all([
     AnalyticsAggregate.findOne({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
+      organizationId: new mongoose.Types.ObjectId(orgId),
       userId:         new mongoose.Types.ObjectId(userId),
       periodType,
       periodKey,
     }).lean(),
+
     UserBadge.find({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
+      organizationId: new mongoose.Types.ObjectId(orgId),
       userId:         new mongoose.Types.ObjectId(userId),
-    }).sort({ awardedAt: -1 }).lean(),
+    })
+      .sort({ awardedAt: -1 })
+      .lean(),
+
     ActivityLog.find({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
+      organizationId: new mongoose.Types.ObjectId(orgId),
       userId:         new mongoose.Types.ObjectId(userId),
-    }).sort({ timestamp: -1 }).limit(30).lean(),
+    })
+      .sort({ timestamp: -1 })
+      .limit(30)
+      .lean(),
   ]);
 
   const enrichedBadges = badges.map(b => ({
@@ -326,29 +388,33 @@ export const getUserStats = asyncHandler(async (req: Request, res: Response) => 
     definition: BADGE_DEFINITIONS.find(d => d.id === b.badgeId),
   }));
 
-  res.json(new ApiResponse(200, {
-    user,
-    kpis:           aggregate?.kpis || null,
-    rank:           aggregate?.rank,
-    prevRank:       aggregate?.prevRank,
-    badges:         enrichedBadges,
-    recentActivity,
-  }, 'User stats fetched'));
+  res.json(
+    new ApiResponse(200, {
+      user,
+      kpis:           aggregate?.kpis || null,
+      rank:           aggregate?.rank,
+      prevRank:       aggregate?.prevRank,
+      badges:         enrichedBadges,
+      recentActivity,
+    }, 'User stats fetched')
+  );
 });
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ─── CSV Export ───────────────────────────────────────────────────────────────
 
 /**
  * GET /api/analytics/export
- * Exports leaderboard or activity data as CSV.
- * Admin only.
+ * Access: admin only
  */
 export const exportAnalytics = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor || actor.role !== 'admin') throw new ApiError(403, 'Admin only');
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
 
-  const orgId      = actor.organizationId?.toString();
-  const exportType = (req.query.type as string) || 'leaderboard';
+  if (actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can export analytics data');
+  }
+
+  const exportType = (req.query.type       as string) || 'leaderboard';
   const periodType = (req.query.periodType as string) || 'monthly';
   const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
 
@@ -356,13 +422,21 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: Response) 
 
   if (exportType === 'leaderboard') {
     const docs = await AnalyticsAggregate.find({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
+      organizationId: new mongoose.Types.ObjectId(orgId),
       periodType,
       periodKey,
-    }).sort({ rank: 1 }).lean();
+    })
+      .sort({ rank: 1 })
+      .lean();
 
     const userIds = docs.map(d => d.userId.toString());
-    const users   = await CrmUser.find({ _id: { $in: userIds } }).select('fullName username email role').lean();
+    const users   = await CrmUser.find({
+      _id:            { $in: userIds },
+      organizationId: new mongoose.Types.ObjectId(orgId),
+    })
+      .select('fullName username email role')
+      .lean();
+
     const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
 
     rows = docs.map(d => ({
@@ -388,12 +462,20 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: Response) 
     // Activity log export
     const { start, end } = getPeriodRange(periodKey, periodType as any);
     const logs = await ActivityLog.find({
-      organizationId: new mongoose.Types.ObjectId(orgId!),
-      timestamp: { $gte: start, $lt: end },
-    }).sort({ timestamp: -1 }).lean();
+      organizationId: new mongoose.Types.ObjectId(orgId),
+      timestamp:      { $gte: start, $lt: end },
+    })
+      .sort({ timestamp: -1 })
+      .lean();
 
     const userIds = [...new Set(logs.map(l => l.userId.toString()))];
-    const users   = await CrmUser.find({ _id: { $in: userIds } }).select('fullName username').lean();
+    const users   = await CrmUser.find({
+      _id:            { $in: userIds },
+      organizationId: new mongoose.Types.ObjectId(orgId),
+    })
+      .select('fullName username')
+      .lean();
+
     const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
 
     rows = logs.map(l => ({
@@ -408,30 +490,52 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: Response) 
   }
 
   if (rows.length === 0) {
-    throw new ApiError(404, 'No data found for export');
+    throw new ApiError(404, 'No data found for the selected period');
   }
 
   const parser = new Parser({ fields: Object.keys(rows[0]) });
   const csv    = parser.parse(rows);
 
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="analytics_${exportType}_${periodKey}.csv"`);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="analytics_${exportType}_${periodKey}.csv"`
+  );
   res.send(csv);
 });
 
 // ─── Admin: Trigger Badge Evaluation ─────────────────────────────────────────
 
+/**
+ * POST /api/analytics/evaluate-badges
+ * Access: admin only
+ */
 export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: Response) => {
-  const actor = req.crmUser;
-  if (!actor || actor.role !== 'admin') throw new ApiError(403, 'Admin only');
+  const actor = requireCrmUser(req);
+  const orgId = requireOrgId(actor);
 
-  const orgId  = actor.organizationId?.toString();
+  if (actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can trigger badge evaluation');
+  }
+
   const userId = req.body.userId || actor._id.toString();
-  const period = req.body.periodType || 'weekly';
-  const key    = req.body.periodKey  || getPeriodKey(new Date(), period);
+  const period = (req.body.periodType as 'daily' | 'weekly' | 'monthly') || 'weekly';
+  const key    = req.body.periodKey || getPeriodKey(new Date(), period);
 
-  const awarded = await evaluateBadges(orgId!, userId, period, key);
-  res.json(new ApiResponse(200, { awarded }, `${awarded.length} badge(s) evaluated`));
+  // Confirm target user belongs to same org
+  if (req.body.userId) {
+    const targetUser = await CrmUser.findOne({
+      _id:            req.body.userId,
+      organizationId: new mongoose.Types.ObjectId(orgId),
+    });
+    if (!targetUser) throw new ApiError(404, 'User not found in your organization');
+  }
+
+  const awarded = await evaluateBadges(orgId, userId, period, key);
+
+  res.json(
+    new ApiResponse(200, { awarded, count: awarded.length }, `${awarded.length} badge(s) awarded`)
+  );
 });
 
 export default {
