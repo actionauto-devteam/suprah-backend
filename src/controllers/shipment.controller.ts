@@ -11,6 +11,7 @@ import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
+import { getSocketIO } from '../utils/socketEmitter';
 import { storageService } from '../services/storage.service';
 import fs from 'fs';
 import path from 'path';
@@ -199,6 +200,10 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         )
     );
 
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'created' });
+
     // Invalidate shipment and quote caches on creation
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
@@ -218,17 +223,18 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const skip  = (page - 1) * limit;
     const orgId = req.orgId as string;
 
     const filter: any = {};
-
     if (status && status !== 'all') {
         filter.status = status;
     }
 
-    // Only cache the unfiltered/status-only queries — skip caching search queries
     const isCacheable = !search;
-    const cacheKey = `shipments:${orgId}:list:${status || 'all'}`;
+    const cacheKey = `shipments:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {
         const cached = await cacheService.get(cacheKey);
@@ -237,24 +243,29 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const shipments = await Shipment.find(filter)
-        .populate({
-            path: 'quoteId',
-            populate: {
-                path: 'vehicleId',
-                select: 'year make modelName vin stockNumber image location'
-            }
-        })
-        .populate('createdBy', 'name email avatar')
-        .sort({ createdAt: -1 });
+    const attachOrg = async (list: any[]) => {
+        const uniqueOrgIds = [...new Set(list.map((s: any) => s.organizationId?.toString()).filter(Boolean))];
+        const validOrgIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+        const orgs = await Organization.find({ _id: { $in: validOrgIds } }).select('name logoUrl');
+        const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+        orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+        return list.map((s: any) => ({ ...(s.toJSON ? s.toJSON() : s), organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' } }));
+    };
 
-    let filteredShipments = shipments;
+    let shipmentsWithOrg: any[];
+    let total: number;
+
     if (search) {
-        const searchLower = (search as string).toLowerCase();
-        filteredShipments = shipments.filter(shipment => {
-            const quote = shipment.quoteId as any;
-            const preserved = shipment.preservedQuoteData as any;
+        // Fetch all matching docs, filter in memory (quoteId is populated, not queryable in DB easily)
+        const all = await Shipment.find(filter)
+            .populate({ path: 'quoteId', populate: { path: 'vehicleId', select: 'year make modelName vin stockNumber image location' } })
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 });
 
+        const searchLower = (search as string).toLowerCase();
+        const filtered = all.filter(s => {
+            const quote = s.quoteId as any;
+            const preserved = s.preservedQuoteData as any;
             return (
                 quote?.firstName?.toLowerCase().includes(searchLower) ||
                 quote?.lastName?.toLowerCase().includes(searchLower) ||
@@ -264,27 +275,34 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
                 preserved?.lastName?.toLowerCase().includes(searchLower) ||
                 preserved?.vin?.toLowerCase().includes(searchLower) ||
                 preserved?.stockNumber?.toLowerCase().includes(searchLower) ||
-                shipment.trackingNumber?.toLowerCase().includes(searchLower)
+                s.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
+
+        total = filtered.length;
+        shipmentsWithOrg = await attachOrg(filtered.slice(skip, skip + limit));
+    } else {
+        total = await Shipment.countDocuments(filter);
+        const shipments = await Shipment.find(filter)
+            .populate({ path: 'quoteId', populate: { path: 'vehicleId', select: 'year make modelName vin stockNumber image location' } })
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+        shipmentsWithOrg = await attachOrg(shipments);
     }
 
-    // Attach organization name to each shipment
-    const uniqueOrgIds = [...new Set(filteredShipments.map(s => s.organizationId?.toString()).filter(Boolean))];
-    const validOrgIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
-    const orgs = await Organization.find({ _id: { $in: validOrgIds } }).select('name logoUrl');
+    const totalPages = Math.ceil(total / limit);
+    const responseData = {
+        shipments: shipmentsWithOrg,
+        pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    };
 
-    const orgMap = new Map<string, { name: string; logoUrl?: string }>();
-    orgs.forEach(o => {
-        orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
-    });
+    if (isCacheable) {
+        await cacheService.set(cacheKey, responseData, SHIPMENT_CACHE_TTL);
+    }
 
-    const shipmentsWithOrg = filteredShipments.map(s => ({
-        ...(s.toJSON()),
-        organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
-    }));
-
-    res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
+    res.json(new ApiResponse(200, responseData, 'Shipments fetched successfully'));
 });
 
 /**
@@ -456,6 +474,10 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
 
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'updated' });
+
     // Invalidate shipment cache on update
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
 
@@ -598,6 +620,10 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
                 : 'Shipment deleted successfully. Quote has been restored.'
         )
     );
+
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'deleted' });
 
     await AuditLog.create({
         entityType: 'Shipment',
