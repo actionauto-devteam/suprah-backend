@@ -15,6 +15,7 @@ import {
 import { maskLoadForDriver } from "../utils/loadMask";
 import { storageService } from "../services/storage.service";
 import { safeCreateNotification } from "../utils/safeNotification";
+import { getSocketIO } from "../utils/socketEmitter";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,6 +146,9 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     contract: contractWithTimestamp,
     status: "Posted",
   });
+
+  const _io = getSocketIO();
+  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "created" });
 
   return res.status(201).json(new ApiResponse(201, load, "Load created successfully"));
 });
@@ -311,6 +315,9 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await Load.deleteOne({ _id: load._id });
+
+  const _io = getSocketIO();
+  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted" });
 
   return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
 });
