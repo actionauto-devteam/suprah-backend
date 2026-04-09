@@ -4,15 +4,16 @@ import Shipment from '../models/Shipment.model';
 import Quote from '../models/Quote.model';
 import Payment from '../models/Payment.model';
 import Organization from '../models/Organization.model';
-import AuditLog from '../models/AuditLog.model';
 import User, { IUser } from '../models/User.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import logger from '../utils/logger';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
 import { getSocketIO } from '../utils/socketEmitter';
-import { storageService } from '../services/storage.service';
+import { storageService, BucketType } from '../services/storage.service';
+import activityService from '../services/activity.service';
 import fs from 'fs';
 import path from 'path';
 
@@ -204,18 +205,23 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
     const _io = getSocketIO();
     if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'created' });
 
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'shipment_created',
+            title: 'Shipment Created',
+            description: `Converted quote to shipment ${trackingNumber}`,
+            metadata: { shipmentId: shipment._id.toString(), trackingNumber }
+        });
+    }
+
     // Invalidate shipment and quote caches on creation
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: shipment._id,
-        action: 'CREATE',
-        reason: 'Shipment created from quote',
-        performedBy: userId,
-        changes: { quoteId, trackingNumber }
-    });
+    logger.info({ shipmentId: shipment._id, trackingNumber }, 'Converted quote to shipment');
 });
 
 /**
@@ -223,9 +229,9 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
-    const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
-    const skip  = (page - 1) * limit;
+    const skip = (page - 1) * limit;
     const orgId = req.orgId as string;
 
     const filter: any = {};
@@ -252,8 +258,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         return list.map((s: any) => ({ ...(s.toJSON ? s.toJSON() : s), organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' } }));
     };
 
-    let shipmentsWithOrg: any[];
-    let total: number;
+    let filteredShipments: any[] = [];
 
     if (search) {
         // Fetch all matching docs, filter in memory (quoteId is populated, not queryable in DB easily)
@@ -263,7 +268,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             .sort({ createdAt: -1 });
 
         const searchLower = (search as string).toLowerCase();
-        const filtered = all.filter(s => {
+        filteredShipments = all.filter(s => {
             const quote = s.quoteId as any;
             const preserved = s.preservedQuoteData as any;
             return (
@@ -278,28 +283,60 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
                 s.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
-
-        total = filtered.length;
-        shipmentsWithOrg = await attachOrg(filtered.slice(skip, skip + limit));
     } else {
-        total = await Shipment.countDocuments(filter);
-        const shipments = await Shipment.find(filter)
-            .populate({ path: 'quoteId', populate: { path: 'vehicleId', select: 'year make modelName vin stockNumber image location' } })
+        filteredShipments = await Shipment.find(filter)
+            .populate({
+                path: 'quoteId',
+                populate: {
+                    path: 'vehicleId',
+                    select: 'year make modelName vin stockNumber image location'
+                }
+            })
             .populate('createdBy', 'name email avatar')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
-        shipmentsWithOrg = await attachOrg(shipments);
     }
 
-    const totalPages = Math.ceil(total / limit);
+    const total = search ? filteredShipments.length : await Shipment.countDocuments(filter);
+
+    // Attach organization name to each shipment
+    const uniqueOrgIds = [...new Set(filteredShipments.map(s => s.organizationId?.toString()).filter(Boolean))];
+    const validOrgIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+    const orgs = await Organization.find({ _id: { $in: validOrgIds } }).select('name logoUrl');
+
+    const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+    orgs.forEach(o => {
+        orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
+    });
+
+    const shipmentsWithOrg = await Promise.all(filteredShipments.map(async s => {
+        const shipmentObj = s.toJSON ? s.toJSON() : s;
+
+        // Sign proof of delivery URL if exists
+        if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
+            const signedUrl = await storageService.getSignedUrl(shipmentObj.proofOfDelivery.imageUrl);
+            if (signedUrl) shipmentObj.proofOfDelivery.imageUrl = signedUrl;
+        }
+
+        return {
+            ...shipmentObj,
+            organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
+        };
+    }));
+
     const responseData = {
         shipments: shipmentsWithOrg,
-        pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+        pagination: {
+            total,
+            page,
+            limit,
+            pages: Math.ceil(total / limit)
+        }
     };
 
     if (isCacheable) {
-        await cacheService.set(cacheKey, responseData, SHIPMENT_CACHE_TTL);
+        await cacheService.set(cacheKey, responseData, 300); // 5 mins
     }
 
     res.json(new ApiResponse(200, responseData, 'Shipments fetched successfully'));
@@ -323,7 +360,14 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Shipment not found');
     }
 
-    res.json(new ApiResponse(200, shipment, 'Shipment fetched successfully'));
+    const shipmentObj = shipment.toJSON();
+    // Sign proof of delivery URL if exists
+    if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
+        const signedUrl = await storageService.getSignedUrl(shipmentObj.proofOfDelivery.imageUrl);
+        if (signedUrl) shipmentObj.proofOfDelivery.imageUrl = signedUrl;
+    }
+
+    res.json(new ApiResponse(200, shipmentObj, 'Shipment fetched successfully'));
 });
 
 /**
@@ -478,17 +522,22 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
     const _io = getSocketIO();
     if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'updated' });
 
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: status === 'Delivered' ? 'load_delivered' : 'shipment_updated',
+            title: status === 'Delivered' ? 'Shipment Delivered' : 'Shipment Updated',
+            description: `Updated shipment ${shipment.trackingNumber} to status: ${status || 'Updated'}`,
+            metadata: { shipmentId: shipment._id.toString(), status, originalStatus: shipment.status }
+        });
+    }
+
     // Invalidate shipment cache on update
     await cacheService.invalidateByPrefix(`shipments:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: shipment._id,
-        action: 'UPDATE',
-        reason: 'Shipment updated',
-        performedBy: userId,
-        changes: updateData
-    });
+    logger.info({ shipmentId: shipment._id, status }, 'Shipment details updated');
 });
 
 /**
@@ -625,13 +674,19 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
     const _io = getSocketIO();
     if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'deleted' });
 
-    await AuditLog.create({
-        entityType: 'Shipment',
-        entityId: req.params.id,
-        action: 'DELETE',
-        reason: 'Shipment deleted',
-        performedBy: userId
-    });
+    // Log activity
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'shipment_deleted',
+            title: 'Shipment Deleted',
+            description: `Deleted shipment ${trackingNumber}`,
+            metadata: { shipmentId: req.params.id, trackingNumber }
+        });
+    }
+
+    logger.warn({ shipmentId: req.params.id, trackingNumber }, 'Shipment deleted');
 });
 
 /**
@@ -659,24 +714,13 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
         throw new ApiError(403, 'Only the assigned driver can submit proof of delivery');
     }
 
-    // Delete old proof if it exists
+    // Delete old proof if it exists (handles both R2 keys and legacy local paths)
     if (shipment.proofOfDelivery?.imageUrl) {
-        if (shipment.proofOfDelivery.imageUrl.startsWith('http')) {
-            await storageService.delete(shipment.proofOfDelivery.imageUrl);
-        } else if (shipment.proofOfDelivery.imageUrl.startsWith('/uploads/proof-of-delivery/')) {
-            const oldPath = path.join(__dirname, '../../', shipment.proofOfDelivery.imageUrl);
-            try {
-                if (fs.existsSync(oldPath)) {
-                    fs.unlinkSync(oldPath);
-                }
-            } catch (err) {
-                console.error('Failed to delete legacy local proof file:', err);
-            }
-        }
+        await storageService.delete(shipment.proofOfDelivery.imageUrl, BucketType.PRIVATE);
     }
 
-    // Upload new image to R2
-    const imageUrl = await storageService.upload(file, 'proofs');
+    // Upload new image to R2 PRIVATE bucket
+    const imageUrl = await storageService.upload(file, 'proofs', BucketType.PRIVATE);
 
     shipment.proofOfDelivery = {
         imageUrl,
@@ -685,6 +729,19 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     };
 
     await shipment.save();
+
+    logger.info({ shipmentId: shipment._id, userId }, 'Proof of delivery submitted');
+
+    // Log activity (Persona: Driver delivering)
+    if (userId) {
+        await activityService.logLoadActivity(
+            userId,
+            shipment.organizationId?.toString(),
+            'load_delivered',
+            shipment._id.toString(),
+            `Submitted proof of delivery for shipment ${shipment.trackingNumber}`
+        );
+    }
 
     // Use the shipment's own organizationId for notifications
     const shipmentOrgId = shipment.organizationId.toString();
@@ -756,6 +813,20 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
             },
         });
     }
+
+    // Log activity (Persona: Admin confirming delivery)
+    if (userId) {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'load_delivered',
+            title: 'Delivery Confirmed',
+            description: `Admin confirmed proof of delivery for shipment ${shipment.trackingNumber}`,
+            metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber }
+        });
+    }
+
+    logger.info({ shipmentId: shipment._id, userId }, 'Delivery confirmed by admin');
 
     res.json(new ApiResponse(200, updated, 'Delivery confirmed successfully'));
 });

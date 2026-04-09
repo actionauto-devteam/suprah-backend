@@ -1,8 +1,15 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import config from '../config';
-import { ApiError } from '../utils/ApiError';
 import path from 'path';
-import fs from 'fs';
+import fs from 'fs/promises';
+import { existsSync, mkdirSync } from 'fs';
+
+export enum BucketType {
+    PUBLIC = 'public',
+    PRIVATE = 'private',
+    FTP = 'ftp'
+}
 
 class StorageService {
     private s3Client: S3Client | null = null;
@@ -13,9 +20,9 @@ class StorageService {
     }
 
     private initialize() {
-        const { accessKeyId, secretAccessKey, endpoint, bucketName } = config.r2;
+        const { accessKeyId, secretAccessKey, endpoint, buckets } = config.r2;
 
-        if (!accessKeyId || !secretAccessKey || !endpoint || !bucketName) {
+        if (!accessKeyId || !secretAccessKey || !endpoint || !buckets.public) {
             console.warn('[StorageService] R2 Credentials not fully configured. Cloud storage will be disabled.');
             return;
         }
@@ -27,85 +34,155 @@ class StorageService {
                 accessKeyId: accessKeyId,
                 secretAccessKey: secretAccessKey,
             },
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
         });
         this.isConfigured = true;
     }
 
+    private getBucketName(type: BucketType): string {
+        switch (type) {
+            case BucketType.PRIVATE:
+                return config.r2.buckets.private;
+            case BucketType.FTP:
+                return config.r2.buckets.ftp;
+            case BucketType.PUBLIC:
+            default:
+                return config.r2.buckets.public;
+        }
+    }
+
     /**
      * Uploads a file to Cloudflare R2
-     * @param file The Multer file object
+     * @param file The Multer file object or Buffer
      * @param folder The target folder (e.g., 'avatars', 'proofs')
-     * @returns The public URL of the uploaded file
+     * @param type The bucket type (public, private, or ftp)
+     * @returns The public URL (for public) or the key (for private/ftp)
      */
-    async upload(file: Express.Multer.File, folder: string): Promise<string> {
+    async upload(
+        file: Express.Multer.File | { buffer: Buffer; originalname: string; mimetype: string },
+        folder: string,
+        type: BucketType = BucketType.PUBLIC
+    ): Promise<string> {
         const extension = path.extname(file.originalname).toLowerCase();
         const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+        const key = `${folder}/${fileName}`;
+        const bucketName = this.getBucketName(type);
 
         if (this.isConfigured && this.s3Client) {
             try {
-                const key = `${folder}/${fileName}`;
                 const command = new PutObjectCommand({
-                    Bucket: config.r2.bucketName,
+                    Bucket: bucketName,
                     Key: key,
                     Body: file.buffer,
                     ContentType: file.mimetype,
                 });
                 await this.s3Client.send(command);
-                return `${config.r2.publicUrl}/${key}`;
+
+                if (type === BucketType.PUBLIC) {
+                    const finalUrl = `${config.r2.publicUrl}/${key}`;
+                    console.log(`[StorageService] Generated Public URL: ${finalUrl}`);
+                    return finalUrl;
+                }
+                return key; // For private/ftp, return the key
             } catch (error: any) {
-                console.warn('[StorageService] R2 upload failed, falling back to local storage:', error.message);
+                console.warn(`[StorageService] R2 upload to ${bucketName} failed, falling back to local:`, error.message);
             }
         }
 
         return this.saveLocally(file.buffer, folder, fileName);
     }
 
-    private saveLocally(buffer: Buffer, folder: string, fileName: string): string {
+    private async saveLocally(buffer: Buffer, folder: string, fileName: string): Promise<string> {
         const uploadDir = path.join(__dirname, '../../uploads', folder);
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
+        if (!existsSync(uploadDir)) {
+            mkdirSync(uploadDir, { recursive: true });
         }
         const filePath = path.join(uploadDir, fileName);
-        fs.writeFileSync(filePath, buffer);
+        await fs.writeFile(filePath, buffer);
         return `/uploads/${folder}/${fileName}`;
     }
 
     /**
-     * Deletes a file from Cloudflare R2
-     * @param urlOrKey The full URL or just the key of the file to delete
+     * Generates a signed URL for a private file
+     * @param key The file key in the private bucket
+     * @param expiresIn Expiration time in seconds (default 15 mins)
      */
-    async delete(urlOrKey: string): Promise<void> {
-        if (!this.isConfigured || !this.s3Client || !urlOrKey) return;
+    async getSignedUrl(key: string, expiresIn: number = 900): Promise<string | null> {
+        if (!this.isConfigured || !this.s3Client || !key) return null;
 
-        // Extract key if a full URL was provided
-        let key = urlOrKey;
-        if (urlOrKey.startsWith('http')) {
+        // If it's a local path, return it as is (internal dev)
+        if (key.startsWith('/uploads/')) return key;
+
+        try {
+            const command = new GetObjectCommand({
+                Bucket: config.r2.buckets.private,
+                Key: key,
+            });
+            return await getSignedUrl(this.s3Client, command, { expiresIn });
+        } catch (error) {
+            console.error('[StorageService] Signed URL Error:', error);
+            return null;
+        }
+    }
+
+    /**
+     * Deletes a file from Cloudflare R2 or local disk
+     * @param pathOrUrl The full URL, local path, or key
+     * @param type The bucket type where the file resides
+     */
+    async delete(pathOrUrl: string, type: BucketType = BucketType.PUBLIC): Promise<void> {
+        if (!pathOrUrl) return;
+
+        // 1. Handle Local Deletion
+        if (pathOrUrl.startsWith('/uploads/')) {
+            try {
+                const fullPath = path.join(__dirname, '../../', pathOrUrl);
+                if (existsSync(fullPath)) {
+                    await fs.unlink(fullPath);
+                }
+            } catch (err) {
+                console.error('[StorageService] Local Delete Error:', err);
+            }
+            return;
+        }
+
+        // 2. Handle R2 Deletion
+        if (!this.isConfigured || !this.s3Client) return;
+
+        let key = pathOrUrl;
+        if (pathOrUrl.startsWith('http')) {
             const baseUrl = config.r2.publicUrl;
-            if (urlOrKey.startsWith(baseUrl)) {
-                key = urlOrKey.replace(`${baseUrl}/`, '');
+            if (pathOrUrl.startsWith(baseUrl)) {
+                key = pathOrUrl.replace(`${baseUrl}/`, '');
+            } else if (!pathOrUrl.includes('r2.cloudflarestorage.com')) {
+                // If it's another domain and not a signed URL, skip
+                return;
             } else {
-                // If it's another domain, it's not our file or it's incorrectly formatted
+                // Handle signed URL key extraction if needed, 
+                // but usually we store keys for private files
                 return;
             }
         }
 
         try {
             const command = new DeleteObjectCommand({
-                Bucket: config.r2.bucketName,
+                Bucket: this.getBucketName(type),
                 Key: key,
             });
-
             await this.s3Client.send(command);
         } catch (error: any) {
-            console.error('[StorageService] Delete Error:', error);
-            // We don't throw here to prevent blocking the main operation if delete fails
+            console.error('[StorageService] R2 Delete Error:', error);
         }
     }
 
     /**
-     * Extracts the key from an R2 URL
+     * Extracts the R2 key from a full public URL
+     * @param url The full R2 public URL
+     * @returns The key (path) within the bucket
      */
     getKeyFromUrl(url: string): string | null {
+        if (!url || !url.startsWith('http')) return null;
         const baseUrl = config.r2.publicUrl;
         if (url.startsWith(baseUrl)) {
             return url.replace(`${baseUrl}/`, '');

@@ -8,7 +8,9 @@ import Shipment from '../models/Shipment.model';
 import User, { IUser } from '../models/User.model';
 import { safeCreateNotification } from '../utils/safeNotification';
 import { notifyOrgAdmins } from '../utils/safeNotification';
+import activityService from '../services/activity.service';
 import config from '../config';
+import logger from '../utils/logger';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-01-28.clover',
@@ -160,13 +162,25 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
       metadata: { shipmentId, amount },
     });
 
+    // Log activity (Persona: Driver receiving money)
+    await activityService.logFinancialActivity(
+      driverId,
+      orgId,
+      'payout_received',
+      amount,
+      `Received payout for shipment ${shipment.trackingNumber || shipmentId}`,
+      { shipmentId: shipment._id.toString(), payoutId: payout._id.toString() }
+    );
+
+    logger.info({ payoutId: payout._id, driverId, amount }, 'Driver payout sent successfully');
+
     res.status(201).json(new ApiResponse(201, payout, 'Driver payout sent successfully'));
   } catch (stripeError: any) {
     payout.status = 'failed';
     payout.failureReason = stripeError?.message || 'Stripe transfer failed';
     await payout.save();
 
-    notifyOrgAdmins(orgId, 'general', 'Driver Payout Failed', `Payout of $${amount.toFixed(2)} to ${driver.name} failed: ${payout.failureReason}`, { shipmentId, driverId });
+    logger.error({ err: stripeError, payoutId: payout._id, driverId }, 'Driver payout failed');
 
     throw new ApiError(402, `Payout failed: ${payout.failureReason}`);
   }
@@ -289,6 +303,8 @@ const initiateDriverOnboarding = asyncHandler(async (req: Request, res: Response
     return_url: `${frontendUrl}/driver/settings?stripe=success`,
     type: 'account_onboarding',
   });
+
+  logger.info({ userId, accountId }, 'Driver onboarding URL generated');
 
   res.json(new ApiResponse(200, { url: accountLink.url }, 'Stripe onboarding URL generated'));
 });

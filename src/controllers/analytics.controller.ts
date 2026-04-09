@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import { Request, Response as ExpressResponse } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -11,6 +11,7 @@ import { rebuildRanks } from '../services/activityLogger.service';
 import { evaluateBadges } from '../services/badge.service';
 import { getPeriodKey, getPeriodRange } from '../services/kpiEngine.service';
 import mongoose from 'mongoose';
+// @ts-ignore
 import { Parser } from 'json2csv';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ function requireCrmUser(req: Request): ICrmUser {
  * Query: periodType, periodKey, limit
  * Access: admin = all users | manager = all users | employee = self only
  */
-export const getLeaderboard = asyncHandler(async (req: Request, res: Response) => {
+export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor      = requireCrmUser(req);
   const orgId      = requireOrgId(actor);
   const periodType = (req.query.periodType as string) || 'weekly';
@@ -122,7 +123,7 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: Response) =
  * GET /api/analytics/my-stats
  * Access: all authenticated CRM users (own data only)
  */
-export const getMyStats = asyncHandler(async (req: Request, res: Response) => {
+export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor  = requireCrmUser(req);
   const orgId  = requireOrgId(actor);
   const userId = actor._id.toString();
@@ -175,7 +176,7 @@ export const getMyStats = asyncHandler(async (req: Request, res: Response) => {
  * GET /api/analytics/overview
  * Access: admin, manager only
  */
-export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Response) => {
+export const getAnalyticsOverview = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
 
@@ -247,6 +248,7 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Respo
       $group: {
         _id:   '$actionType',
         count: { $sum: 1 },
+        score: { $sum: '$score' },
       },
     },
     { $sort: { count: -1 } },
@@ -268,7 +270,7 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Respo
  * GET /api/analytics/activity-feed
  * Access: admin/manager = all users in org | employee = own logs only
  */
-export const getActivityFeed = asyncHandler(async (req: Request, res: Response) => {
+export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
 
@@ -337,7 +339,7 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: Response) 
  * GET /api/analytics/users/:userId/stats
  * Access: admin, manager only
  */
-export const getUserStats = asyncHandler(async (req: Request, res: Response) => {
+export const getUserStats = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
 
@@ -406,7 +408,7 @@ export const getUserStats = asyncHandler(async (req: Request, res: Response) => 
  * GET /api/analytics/export
  * Access: admin only
  */
-export const exportAnalytics = asyncHandler(async (req: Request, res: Response) => {
+export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
 
@@ -510,7 +512,7 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: Response) 
  * POST /api/analytics/evaluate-badges
  * Access: admin only
  */
-export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: Response) => {
+export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
 

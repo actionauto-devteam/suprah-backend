@@ -11,7 +11,7 @@ export interface IAuditLog extends Document {
     organizationId?: string;
 }
 
-const AuditLogSchema: Schema = new Schema(
+const InternalAuditLogSchema: Schema = new Schema(
     {
         entityType: {
             type: String,
@@ -38,7 +38,11 @@ const AuditLogSchema: Schema = new Schema(
         changes: { type: Schema.Types.Mixed },
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },
-        timestamp: { type: Date, default: Date.now },
+        timestamp: { 
+            type: Date, 
+            default: Date.now,
+            index: { name: 'ttl_30_days', expireAfterSeconds: 30 * 24 * 60 * 60 } 
+        },
         organizationId: { type: String, index: true },
     },
     {
@@ -46,4 +50,4 @@ const AuditLogSchema: Schema = new Schema(
     }
 );
 
-export default mongoose.model<IAuditLog>('AuditLog', AuditLogSchema);
+export default mongoose.models.AuditLog || mongoose.model<IAuditLog>('AuditLog', InternalAuditLogSchema);

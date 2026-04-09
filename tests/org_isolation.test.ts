@@ -2,45 +2,62 @@ import request from 'supertest';
 import app from '../src/server';
 import Quote from '../src/models/Quote.model';
 import User from '../src/models/User.model';
-import { clerkClient } from '@clerk/clerk-sdk-node';
+import Organization from '../src/models/Organization.model';
 import mongoose from 'mongoose';
-
-const mockedClerk = clerkClient as jest.Mocked<any>;
+import tokenService from '../src/services/token.service';
 
 describe('Organization Data Isolation', () => {
-    const orgA = 'org_A_id';
-    const orgB = 'org_B_id';
-    const userA_id = 'user_A_id';
-    const userB_id = 'user_B_id';
+    let orgA: any;
+    let orgB: any;
+    let userA: any;
+    let userB: any;
+    let tokenA: string;
+    let tokenB: string;
 
     beforeAll(async () => {
-        // Ensure users exist in DB for JIT bypass or to match mocked IDs
-        await User.create({
-            clerkId: userA_id,
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test data
+        const testEmails = ['userA@example.com', 'userB@example.com'];
+        await User.deleteMany({ email: { $in: testEmails } });
+        await Organization.deleteMany({ slug: { $in: ['isol-org-a', 'isol-org-b'] } });
+
+        // Create Orgs
+        orgA = await Organization.create({ name: 'Isol Org A', slug: 'isol-org-a', status: 'active' });
+        orgB = await Organization.create({ name: 'Isol Org B', slug: 'isol-org-b', status: 'active' });
+
+        // Create Users
+        userA = await User.create({
             email: 'userA@example.com',
             name: 'User A',
-            role: 'user'
+            role: 'admin',
+            organizationId: orgA._id,
+            emailVerified: true,
+            onboardingCompleted: true
         });
-        await User.create({
-            clerkId: userB_id,
+
+        userB = await User.create({
             email: 'userB@example.com',
             name: 'User B',
-            role: 'user'
+            role: 'admin',
+            organizationId: orgB._id,
+            emailVerified: true,
+            onboardingCompleted: true
         });
-    });
 
-    beforeEach(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await Quote.deleteMany({});
-        }
-    });
+        tokenA = tokenService.generateAccessToken(userA);
+        tokenB = tokenService.generateAccessToken(userB);
+    }, 30000);
 
     afterAll(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-            await Quote.deleteMany({});
+        await User.deleteMany({ email: { $in: ['userA@example.com', 'userB@example.com'] } });
+        await Organization.deleteMany({ _id: { $in: [orgA?._id, orgB?._id] } });
+        await Quote.deleteMany({ organizationId: { $in: [orgA?._id.toString(), orgB?._id.toString()] } });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
         }
     });
 
@@ -51,7 +68,7 @@ describe('Organization Data Isolation', () => {
             lastName: 'Doe',
             email: 'john@example.com',
             phone: '1234567890',
-            organizationId: orgA,
+            organizationId: orgA._id.toString(),
             fromZip: '12345',
             toZip: '54321',
             fromAddress: 'Start A',
@@ -68,7 +85,7 @@ describe('Organization Data Isolation', () => {
             lastName: 'Smith',
             email: 'jane@example.com',
             phone: '0987654321',
-            organizationId: orgB,
+            organizationId: orgB._id.toString(),
             fromZip: '11111',
             toZip: '22222',
             fromAddress: 'Start B',
@@ -80,37 +97,23 @@ describe('Organization Data Isolation', () => {
         });
 
         // 3. Request as Org A user
-        mockedClerk.verifyToken.mockResolvedValueOnce({
-            sub: userA_id,
-            sid: 'sess_A',
-            org_id: orgA,
-            org_role: 'org:member'
-        });
-
         const resA = await request(app)
             .get('/api/quotes')
-            .set('Authorization', 'Bearer token_A')
+            .set('Authorization', `Bearer ${tokenA}`)
             .expect(200);
 
         expect(resA.body.data.length).toBe(1);
-        expect(resA.body.data[0].organizationId).toBe(orgA);
+        expect(resA.body.data[0].organizationId).toBe(orgA._id.toString());
         expect(resA.body.data[0].firstName).toBe('John');
 
         // 4. Request as Org B user
-        mockedClerk.verifyToken.mockResolvedValueOnce({
-            sub: userB_id,
-            sid: 'sess_B',
-            org_id: orgB,
-            org_role: 'org:member'
-        });
-
         const resB = await request(app)
             .get('/api/quotes')
-            .set('Authorization', 'Bearer token_B')
+            .set('Authorization', `Bearer ${tokenB}`)
             .expect(200);
 
         expect(resB.body.data.length).toBe(1);
-        expect(resB.body.data[0].organizationId).toBe(orgB);
+        expect(resB.body.data[0].organizationId).toBe(orgB._id.toString());
         expect(resB.body.data[0].firstName).toBe('Jane');
     });
 
@@ -121,7 +124,7 @@ describe('Organization Data Isolation', () => {
             lastName: 'Quote',
             email: 'private@example.com',
             phone: '0000000000',
-            organizationId: orgA,
+            organizationId: orgA._id.toString(),
             fromZip: '12345',
             toZip: '54321',
             fromAddress: 'Secret',
@@ -133,29 +136,15 @@ describe('Organization Data Isolation', () => {
         });
 
         // 2. Attempt to fetch it as Org B user
-        mockedClerk.verifyToken.mockResolvedValueOnce({
-            sub: userB_id,
-            sid: 'sess_B',
-            org_id: orgB,
-            org_role: 'org:member'
-        });
-
         const res = await request(app)
             .get(`/api/quotes/${quoteA._id}`)
-            .set('Authorization', 'Bearer token_B')
-            .expect(404); // Should return 404 because controller uses findOne({ _id, organizationId })
+            .set('Authorization', `Bearer ${tokenB}`)
+            .expect(404);
 
         expect(res.body.message).toContain('not found');
     });
 
     it('should assign correct organizationId when creating a new quote', async () => {
-        mockedClerk.verifyToken.mockResolvedValueOnce({
-            sub: userA_id,
-            sid: 'sess_A',
-            org_id: orgA,
-            org_role: 'org:member'
-        });
-
         const newQuote = {
             firstName: 'New',
             lastName: 'Customer',
@@ -167,18 +156,19 @@ describe('Organization Data Isolation', () => {
             toAddress: 'NYC',
             miles: 3000,
             rate: 1500,
-            eta: { min: 5, max: 10 }
+            eta: { min: 5, max: 10 },
+            units: 1
         };
 
         const res = await request(app)
             .post('/api/quotes')
-            .set('Authorization', 'Bearer token_A')
+            .set('Authorization', `Bearer ${tokenA}`)
             .send(newQuote)
             .expect(201);
 
-        expect(res.body.data.organizationId).toBe(orgA);
+        expect(res.body.data.organizationId).toBe(orgA._id.toString());
 
         const savedQuote = await Quote.findById(res.body.data._id);
-        expect(savedQuote?.organizationId).toBe(orgA);
+        expect(savedQuote?.organizationId).toBe(orgA._id.toString());
     });
 });

@@ -6,8 +6,9 @@ import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import emailService from '../services/email.service';
-import AuditLog from '../models/AuditLog.model';
 import config from '../config';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 
@@ -62,14 +63,16 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
             status: 'pending',
         });
 
-        await AuditLog.create({
-            entityType: 'Invitation',
-            entityId: token, // We don't have ID easily unless we grab form create, but token is unique enough or we use email
-            action: 'CREATE',
-            reason: `Invitation sent to ${email}`,
-            performedBy: req.user._id,
-            changes: { email, organizationId, role }
+        await activityService.createActivity({
+            userId: req.user._id.toString(),
+            organizationId: organizationId.toString(),
+            type: 'other',
+            title: 'Team Invitation Sent',
+            description: `Sent invitation to ${email} as ${role || 'member'}`,
+            metadata: { email, role }
         });
+
+        logger.info({ inviterId: req.user._id, invitedEmail: email }, 'Team invitation sent');
 
         // Notify the inviter that invitation was sent
         const org = await Organization.findById(organizationId);
@@ -292,23 +295,16 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
         });
     }
 
-    await AuditLog.create({
-        entityType: 'Invitation',
-        entityId: invite._id,
-        action: 'UPDATE',
-        reason: `Invitation accepted by ${user.email}`,
-        performedBy: user._id,
-        changes: { status: 'accepted' }
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: invite.organizationId?.toString(),
+        type: 'other',
+        title: 'Invitation Accepted',
+        description: `Joined organization via invitation`,
+        metadata: { organizationId: invite.organizationId, role: invite.role }
     });
 
-    await AuditLog.create({
-        entityType: 'User',
-        entityId: user._id,
-        action: 'UPDATE',
-        reason: `User joined organization ${invite.organizationId}`,
-        performedBy: user._id,
-        changes: { organizationId: invite.organizationId, role: invite.role }
-    });
+    logger.info({ userId: user._id, orgId: invite.organizationId }, 'Invitation accepted');
 
     res.status(200).json({
         success: true,
@@ -408,14 +404,16 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
         }
     }
 
-    await AuditLog.create({
-        entityType: 'Invitation',
-        entityId: 'bulk',
-        action: 'CREATE',
-        reason: `Bulk invitations attempted for ${emails.length} emails`,
-        performedBy: req.user?._id,
-        changes: { results }
+    await activityService.createActivity({
+        userId: (req.user?._id as any).toString(),
+        organizationId: organizationId.toString(),
+        type: 'other',
+        title: 'Bulk Invitations Sent',
+        description: `Attempted to invite ${emails.length} users`,
+        metadata: { sentCount: results.sent.length, failedCount: results.failed.length }
     });
+
+    logger.info({ inviterId: req.user?._id, count: results.sent.length }, 'Bulk invitations processed');
 
     res.status(200).json({
         success: true,

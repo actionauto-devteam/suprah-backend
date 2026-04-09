@@ -8,6 +8,8 @@ import Payment from '../models/Payment.model';
 import User, { IUser } from '../models/User.model';
 import config from '../config';
 import ReferralService from '../services/referral.service';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-01-28.clover',
@@ -56,6 +58,8 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
     `A payment of $${amount.toFixed(2)} for ${customerName} is pending.`,
     { paymentId: payment._id.toString(), amount, customerName }
   );
+
+  logger.info({ paymentId: payment._id, amount, customerEmail }, 'Payment record created');
 
   res.status(201).json(new ApiResponse(201, payment, 'Payment record created successfully'));
 });
@@ -230,9 +234,16 @@ const confirmPayment = asyncHandler(async (req: Request, res: Response) => {
       metadata: { paymentId: payment._id.toString(), amount: payment.amount, customerName: payment.customerName },
     });
 
-    try { await ReferralService.processPaymentReward(payment, userId); } catch (e) {
-      console.error('[Referral] confirmPayment:', e);
-    }
+    await activityService.logFinancialActivity(
+      userId,
+      orgId,
+      'payment_completed',
+      payment.amount,
+      `Payment of $${payment.amount.toFixed(2)} confirmed from ${payment.customerName}`,
+      { paymentId: payment._id.toString(), stripeChargeId: payment.stripeChargeId }
+    );
+
+    logger.info({ paymentId: payment._id, amount: payment.amount }, 'Payment confirmed successfully');
 
     return res.json(new ApiResponse(200, payment, 'Payment confirmed successfully'));
   }
@@ -270,6 +281,8 @@ const cancelPayment = asyncHandler(async (req: Request, res: Response) => {
     { paymentId: payment._id.toString() }
   );
 
+  logger.info({ paymentId: payment._id }, 'Payment cancelled');
+
   res.json(new ApiResponse(200, payment, 'Payment cancelled successfully'));
 });
 
@@ -296,6 +309,17 @@ const refundPayment = asyncHandler(async (req: Request, res: Response) => {
     `Payment of $${payment.amount.toFixed(2)} for ${payment.customerName} has been refunded.`,
     { paymentId: payment._id.toString() }
   );
+
+  await activityService.createActivity({
+    userId: (req.user?._id as any).toString(),
+    organizationId: orgId,
+    type: 'wallet_adjustment',
+    title: 'Payment Refunded',
+    description: `Refund of $${(amount || payment.amount).toFixed(2)} processed for ${payment.customerName}`,
+    metadata: { paymentId: payment._id.toString(), refundAmount: amount || payment.amount }
+  });
+
+  logger.info({ paymentId: payment._id, amount: amount || payment.amount }, 'Payment refunded');
 
   res.json(new ApiResponse(200, payment, 'Payment refunded successfully'));
 });
@@ -405,8 +429,18 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
         payment.paidAt = new Date();
         payment.stripeChargeId = pi.latest_charge as string;
         await payment.save();
+        await activityService.createActivity({
+          userId: 'SYSTEM',
+          organizationId: payment.organizationId.toString(),
+          type: 'payment_completed',
+          title: 'Payment Succeeded (Webhook)',
+          description: `Webhook confirmation: $${payment.amount.toFixed(2)} received`,
+          metadata: { paymentId: payment._id.toString(), piId: pi.id }
+        });
+        logger.info({ paymentId: payment._id, piId: pi.id }, 'Stripe Webhook: Payment success');
+        
         try { await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK'); } catch (e) {
-          console.error('[Referral] webhook:', e);
+          logger.error({ err: e, paymentId: payment._id }, 'Referral processing failed during webhook');
         }
       }
       break;
@@ -585,8 +619,19 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
     await payment.save();
 
     try { await ReferralService.processPaymentReward(payment, user._id.toString()); } catch (e) {
-      console.error('[Referral] confirmCustomerPayment:', e);
+      logger.error({ err: e, paymentId: payment._id }, 'Referral processing failed during customer confirmation');
     }
+
+    await activityService.logFinancialActivity(
+      user._id.toString(),
+      payment.organizationId?.toString(),
+      'payment_completed',
+      payment.amount,
+      `Customer payment of $${payment.amount.toFixed(2)} confirmed`,
+      { paymentId: payment._id.toString(), stripeChargeId: payment.stripeChargeId }
+    );
+
+    logger.info({ paymentId: payment._id, userId: user._id }, 'Customer payment confirmed');
 
     await safeCreateNotification({
       userId: payment.createdBy as any,

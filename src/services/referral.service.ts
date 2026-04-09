@@ -6,6 +6,7 @@ import Shipment from '../models/Shipment.model';
 import { IPayment } from '../models/Payment.model';
 import notificationService from './notification.service';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import activityService from './activity.service';
 
 export class ReferralService {
     /**
@@ -100,6 +101,16 @@ export class ReferralService {
         // G. Update Notification Preferences (Logic assumed to be elsewhere or here)
         // Ensure we find the right referral for final updates
         const finalReferral = await Referral.findById(referral._id);
+
+        // Log activity (Persona: Referrer receiving reward)
+        await activityService.logFinancialActivity(
+            referrer._id.toString(),
+            referrer.organizationId?.toString(),
+            'referral_applied',
+            rewardAmount,
+            `Earned referral reward: ${customer.name || customer.email} purchased a vehicle.`,
+            { referralId: referral._id.toString(), transactionId: transaction._id.toString() }
+        );
 
         // C. Audit Log
         await AuditLog.create({

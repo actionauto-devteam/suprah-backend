@@ -2,10 +2,11 @@ import express from 'express';
 import multer from 'multer';
 import supraSpaceController from '../controllers/supraspace.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
+import { uploadLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
-// Multer — memory storage; files are uploaded directly to Cloudinary
+// Multer — memory storage; files are uploaded directly to Cloudflare R2
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -52,7 +53,9 @@ router.patch('/conversations/:id', supraSpaceController.updateConversation);
 router.get('/conversations/:id/messages', supraSpaceController.getMessages);
 router.post('/conversations/:id/messages', supraSpaceController.sendMessage);
 router.post(
-  '/conversations/:id/upload',
+  '/:id/upload', // Match the frontend's expected /supraspace/:id/upload
+  uploadLimiter,
+  crmAuth(),
   upload.array('files', 5),
   supraSpaceController.uploadAttachment
 );

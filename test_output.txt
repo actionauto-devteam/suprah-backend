@@ -1,0 +1,63 @@
+
+> ts-node-express@1.0.0 test
+> jest --detectOpenHandles --forceExit tests/mywork.test.ts tests/notification.test.ts
+
+(node:16296) [MONGOOSE] Warning: Duplicate schema index on {"organizationId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+(Use `node --trace-warnings ...` to show where the warning was created)
+FAIL tests/notification.test.ts (32.714 s)
+  ΓùÅ Notification API - Organization Isolation ΓÇ║ should only return notifications belonging to the user's organization
+
+    MongooseError: Operation `users.deleteMany()` buffering timed out after 10000ms
+
+      at Timeout.<anonymous> (node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+
+  ΓùÅ Notification API - Organization Isolation ΓÇ║ should mark only own organization notifications as read
+
+    MongooseError: Operation `users.deleteMany()` buffering timed out after 10000ms
+
+      at Timeout.<anonymous> (node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+
+
+  ΓùÅ Test suite failed to run
+
+    thrown: "Exceeded timeout of 5000 ms for a hook.
+    Add a timeout value to this test to increase the timeout, if this is a long-running test. See https://jestjs.io/docs/api#testname-fn-timeout."
+
+      52 |     }, 30000);
+      53 |
+    > 54 |     afterAll(async () => {
+         |     ^
+      55 |         await User.deleteMany({ email: { $in: ['notif_userA@example.com', 'notif_userB@example.com'] } });
+      56 |         await Organization.deleteMany({ _id: { $in: [orgA?._id, orgB?._id] } });
+      57 |         await Notification.deleteMany({ organizationId: { $in: [orgA?._id.toString(), orgB?._id.toString()] } });
+
+      at tests/notification.test.ts:54:5
+      at Object.<anonymous> (tests/notification.test.ts:9:1)
+
+  ΓùÅ Test suite failed to run
+
+    thrown: "Exceeded timeout of 5000 ms for a hook.
+    Add a timeout value to this test to increase the timeout, if this is a long-running test. See https://jestjs.io/docs/api#testname-fn-timeout."
+
+      63 | });
+      64 |
+    > 65 | afterAll(async () => {
+         | ^
+      66 |     if (mongoose.connection.readyState !== 0) {
+      67 |         await mongoose.connection.close();
+      68 |     }
+
+      at Object.<anonymous> (tests/setup.ts:65:1)
+
+(node:16296) [MONGOOSE] Warning: Duplicate schema index on {"organizationId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+  ΓùÅ  process.exit called with "1"
+
+      16 |     logger.error({ err }, `MongoDB Connection Error: ${err.message}`);
+      17 |     // Exit process with failure
+    > 18 |     process.exit(1);
+         |             ^
+      19 |   }
+      20 | };
+      21 |
+
+      at connectDB (src/config/db.ts:18:13)

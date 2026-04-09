@@ -2,61 +2,52 @@ import request from 'supertest';
 import app from '../src/server';
 import mongoose from 'mongoose';
 import { OwnedVehicle } from '../src/models/OwnedVehicle.model';
-import { ServiceRecord } from '../src/models/ServiceRecord.model';
-
-// Mock the Auth Middleware to inject a fake user Identity
-jest.mock('../src/middleware/auth.middleware', () => {
-    return () => (req: any, res: any, next: any) => {
-        req.user = { _id: new mongoose.Types.ObjectId('507f1f77bcf86cd799439011') };
-        next();
-    };
-});
-
-// Mock the Models purely for testing controllers without hitting DB
-jest.mock('../src/models/OwnedVehicle.model', () => ({
-    OwnedVehicle: {
-        findOne: jest.fn(),
-        create: jest.fn(),
-        find: jest.fn(),
-    }
-}));
-jest.mock('../src/models/ServiceRecord.model', () => ({
-    ServiceRecord: {
-        findOne: jest.fn(),
-        create: jest.fn(),
-        find: jest.fn(),
-    }
-}));
-jest.mock('../src/models/ServiceLocation.model', () => ({
-    __esModule: true,
-    default: {
-        find: jest.fn().mockResolvedValue([]),
-    }
-}));
+import User from '../src/models/User.model';
+import tokenService from '../src/services/token.service';
 
 describe('OwnedVehicle API Logic', () => {
-    const mockUserId = new mongoose.Types.ObjectId('507f1f77bcf86cd799439011');
-    const mockVehicleId = new mongoose.Types.ObjectId('707f1f77bcf86cd799439033');
+    let testUser: any;
+    let authToken: string;
+    const testEmail = 'vehicle.owner@test.com';
 
-    beforeEach(() => {
-        jest.clearAllMocks();
+    beforeAll(async () => {
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test data
+        await User.deleteMany({ email: testEmail });
+        await OwnedVehicle.deleteMany({ vin: 'TESTVIN123' });
+
+        // Create User
+        testUser = await User.create({
+            email: testEmail,
+            name: 'Vehicle Owner',
+            role: 'customer',
+            emailVerified: true,
+            onboardingCompleted: true
+        });
+
+        authToken = tokenService.generateAccessToken(testUser);
+    }, 30000);
+
+    afterAll(async () => {
+        await User.deleteMany({ email: testEmail });
+        await OwnedVehicle.deleteMany({ userId: testUser?._id });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
+        }
+    });
+
+    beforeEach(async () => {
+        await OwnedVehicle.deleteMany({ userId: testUser?._id });
     });
 
     it('POST /api/customer/vehicles - Should successfully create a new car', async () => {
-        // Mock findOne returning null (No existing car with same VIN)
-        (OwnedVehicle.findOne as jest.Mock).mockResolvedValue(null);
-        // Mock actual creation
-        (OwnedVehicle.create as jest.Mock).mockResolvedValue({
-            _id: mockVehicleId,
-            userId: mockUserId,
-            vin: 'TESTVIN123',
-            make: 'Honda',
-            model: 'Civic',
-            year: '2024'
-        });
-
         const res = await request(app)
             .post('/api/customer/vehicles')
+            .set('Authorization', `Bearer ${authToken}`)
             .send({
                 vin: 'TESTVIN123',
                 make: 'Honda',
@@ -67,17 +58,23 @@ describe('OwnedVehicle API Logic', () => {
         expect(res.status).toBe(201);
         expect(res.body.success).toBe(true);
         expect(res.body.data.vin).toBe('TESTVIN123');
+
+        const saved = await OwnedVehicle.findOne({ vin: 'TESTVIN123', userId: testUser._id });
+        expect(saved).not.toBeNull();
     });
 
     it('POST /api/customer/vehicles - Should reject duplicate VINs for the same user', async () => {
-        // Mock findOne returning a truthy value (existing duplicate car)
-        (OwnedVehicle.findOne as jest.Mock).mockResolvedValue({
+        await OwnedVehicle.create({
+            userId: testUser._id,
             vin: 'TESTVIN123',
-            userId: mockUserId
+            make: 'Honda',
+            model: 'Civic',
+            year: '2024'
         });
 
         const res = await request(app)
             .post('/api/customer/vehicles')
+            .set('Authorization', `Bearer ${authToken}`)
             .send({
                 vin: 'TESTVIN123',
                 make: 'Honda',
@@ -90,55 +87,60 @@ describe('OwnedVehicle API Logic', () => {
     });
 
     it('GET /api/customer/vehicles - Should return user cars only', async () => {
-        // Mock finding user vehicles
-        const findMock = {
-            sort: jest.fn().mockResolvedValue([
-                { _id: mockVehicleId, make: 'Honda' }
-            ])
-        };
-        (OwnedVehicle.find as jest.Mock).mockReturnValue(findMock);
+        await OwnedVehicle.create({
+            userId: testUser._id,
+            vin: 'TESTVIN123',
+            make: 'Honda',
+            model: 'Civic',
+            year: '2024'
+        });
 
-        const res = await request(app).get('/api/customer/vehicles');
+        const res = await request(app)
+            .get('/api/customer/vehicles')
+            .set('Authorization', `Bearer ${authToken}`);
 
         expect(res.status).toBe(200);
         expect(res.body.success).toBe(true);
         expect(res.body.data.length).toBe(1);
-        expect(OwnedVehicle.find).toHaveBeenCalledWith({ userId: mockUserId, status: 'ACTIVE' });
     });
 
     it('PATCH /api/customer/vehicles/:id/mileage - Should correctly update the vehicle mileage', async () => {
-        const mockSave = jest.fn();
-        const fakeVehicleDoc = {
-            _id: mockVehicleId,
-            currentMileage: 1000,
-            save: mockSave
-        };
-        (OwnedVehicle.findOne as jest.Mock).mockResolvedValue(fakeVehicleDoc);
+        const vehicle = await OwnedVehicle.create({
+            userId: testUser._id,
+            vin: 'TESTVIN123',
+            make: 'Honda',
+            model: 'Civic',
+            year: '2024',
+            currentMileage: 1000
+        });
 
         const res = await request(app)
-            .patch(`/api/customer/vehicles/${mockVehicleId}/mileage`)
+            .patch(`/api/customer/vehicles/${vehicle._id}/mileage`)
+            .set('Authorization', `Bearer ${authToken}`)
             .send({ currentMileage: 1500 });
 
         expect(res.status).toBe(200);
-        expect(fakeVehicleDoc.currentMileage).toBe(1500);
-        expect(mockSave).toHaveBeenCalledTimes(1);
+        
+        const updated = await OwnedVehicle.findById(vehicle._id);
+        expect(updated?.currentMileage).toBe(1500);
     });
 
     it('PATCH /api/customer/vehicles/:id/mileage - Should prevent mileage from decreasing', async () => {
-        const mockSave = jest.fn();
-        const fakeVehicleDoc = {
-            _id: mockVehicleId,
-            currentMileage: 5000,
-            save: mockSave
-        };
-        (OwnedVehicle.findOne as jest.Mock).mockResolvedValue(fakeVehicleDoc);
+        const vehicle = await OwnedVehicle.create({
+            userId: testUser._id,
+            vin: 'TESTVIN123',
+            make: 'Honda',
+            model: 'Civic',
+            year: '2024',
+            currentMileage: 5000
+        });
 
         const res = await request(app)
-            .patch(`/api/customer/vehicles/${mockVehicleId}/mileage`)
+            .patch(`/api/customer/vehicles/${vehicle._id}/mileage`)
+            .set('Authorization', `Bearer ${authToken}`)
             .send({ currentMileage: 4000 });
 
         expect(res.status).toBe(400);
         expect(res.body.message).toBe('Mileage cannot be decreased');
-        expect(mockSave).not.toHaveBeenCalled();
     });
 });

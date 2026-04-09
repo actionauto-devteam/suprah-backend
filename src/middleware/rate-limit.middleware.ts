@@ -22,6 +22,7 @@ export const authLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { default: false }
 });
 
 /**
@@ -44,6 +45,7 @@ export const otpLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { default: false }
 });
 
 /**
@@ -67,6 +69,7 @@ export const adfLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { default: false }
 });
 
 /**
@@ -89,6 +92,7 @@ export const syncLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { default: false }
 });
 
 /**
@@ -111,4 +115,29 @@ export const replyLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { default: false }
+});
+/**
+ * File Upload Limiter
+ * 5 requests per 10 minutes per User/IP
+ * Protects against storage flooding and resource exhaustion
+ */
+export const uploadLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 5,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        // Track by User ID (Standard Auth or CRM Auth) or IP
+        return (req.user?._id || req.crmUser?._id || req.ip).toString();
+    },
+    message: {
+        success: false,
+        message: "You've reached the limit for file uploads. To ensure system stability for all users, please wait 10 minutes before trying again. If you need to upload multiple files, try sending them in a single batch (max 5).",
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
 });

@@ -31,6 +31,7 @@ import crmTimeprofRoute from "./crmTimeproof.route";
 import devToolsRoute from "./devTools.routes";
 import loadRoute from "./load.routes";
 import analyticsRoute from "./analytics.routes";
+import activityRoute from "./activity.routes";
 
 const router = express.Router();
 
@@ -162,6 +163,10 @@ const defaultRoutes = [
   {
     path: "/analytics",
     route: analyticsRoute,
+  },
+  {
+    path: "/activity",
+    route: activityRoute,
   },
 ];
 

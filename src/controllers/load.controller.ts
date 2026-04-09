@@ -5,6 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
 import Vehicle from "../models/Vehicle.model";
 import User, { IUser } from "../models/User.model";
+import logger from "../utils/logger";
 import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
 import {
   getCoordinatesForPair,
@@ -13,9 +14,10 @@ import {
   calculateETA,
 } from "../utils/calculations";
 import { maskLoadForDriver } from "../utils/loadMask";
-import { storageService } from "../services/storage.service";
+import { storageService, BucketType } from "../services/storage.service";
 import { safeCreateNotification } from "../utils/safeNotification";
 import { getSocketIO } from "../utils/socketEmitter";
+import activityService from "../services/activity.service";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -41,10 +43,10 @@ const lookupVin = asyncHandler(async (req: Request, res: Response) => {
 
   return res.status(200).json(
     new ApiResponse(200, {
-      year:      vehicle.year,
-      make:      vehicle.make,
-      model:     vehicle.modelName,
-      color:     vehicle.exteriorColor || "",
+      year: vehicle.year,
+      make: vehicle.make,
+      model: vehicle.modelName,
+      color: vehicle.exteriorColor || "",
       condition: vehicle.status === "In Recon" ? "Inoperable" : "Operable",
     }, "Vehicle found in inventory")
   );
@@ -73,12 +75,12 @@ const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
     deliveryCoords.lat, deliveryCoords.lon
   );
 
-  const units       = vehicles.length || 1;
+  const units = vehicles.length || 1;
   const hasEnclosed = vehicles.some((v) => v.trailerType === "Enclosed");
   const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
 
   const rate = calculateRate(miles, units, hasEnclosed, hasInoperable);
-  const eta  = calculateETA(miles);
+  const eta = calculateETA(miles);
 
   return res.status(200).json(
     new ApiResponse(200, { miles, estimatedRate: rate, eta }, "Rate calculated")
@@ -106,8 +108,8 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     const [pc, dc] = await getCoordinatesForPair(pickupLocation.zip, deliveryLocation.zip);
     if (pc && dc) {
       computedMiles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
-      const units        = vehicles.length || 1;
-      const hasEnclosed   = vehicles.some((v) => v.trailerType === "enclosed_2car" || v.trailerType === "enclosed_3car");
+      const units = vehicles.length || 1;
+      const hasEnclosed = vehicles.some((v) => v.trailerType === "enclosed_2car" || v.trailerType === "enclosed_3car");
       const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
       estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
     }
@@ -116,10 +118,10 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const pricing = {
-    miles:            computedMiles,
+    miles: computedMiles,
     estimatedRate,
     carrierPayAmount: clientPricing?.carrierPayAmount,
-    copCodAmount:     clientPricing?.copCodAmount ?? 0,
+    copCodAmount: clientPricing?.copCodAmount ?? 0,
     // balanceAmount computed automatically by pre-save hook in the model
   };
 
@@ -150,6 +152,17 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
   const _io = getSocketIO();
   if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "created" });
 
+  // Log activity
+  await activityService.logLoadActivity(
+    user._id.toString(),
+    organizationId,
+    'load_posted',
+    load._id.toString(),
+    `Created load ${loadNumber}`
+  );
+
+  logger.info({ loadId: load._id, loadNumber, orgId: organizationId }, 'Load created successfully');
+
   return res.status(201).json(new ApiResponse(201, load, "Load created successfully"));
 });
 
@@ -164,8 +177,8 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
   const filter: Record<string, unknown> = { organizationId, isDeleted: false };
   if (q) {
     filter.$or = [
-      { vin:       { $regex: q, $options: "i" } },
-      { make:      { $regex: q, $options: "i" } },
+      { vin: { $regex: q, $options: "i" } },
+      { make: { $regex: q, $options: "i" } },
       { modelName: { $regex: q, $options: "i" } },
     ];
   }
@@ -176,11 +189,11 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
     .lean();
 
   const data = vehicles.map((v) => ({
-    vin:       v.vin,
-    year:      v.year,
-    make:      v.make,
-    model:     v.modelName,
-    color:     v.exteriorColor || "",
+    vin: v.vin,
+    year: v.year,
+    make: v.make,
+    model: v.modelName,
+    color: v.exteriorColor || "",
     condition: v.status === "In Recon" ? "Inoperable" : "Operable",
   }));
 
@@ -198,9 +211,9 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
 
   // ── Pagination ──────────────────────────────────────────────────────────────
-  const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
-  const skip  = (page - 1) * limit;
+  const skip = (page - 1) * limit;
 
   // ── Filters ─────────────────────────────────────────────────────────────────
   const filter: Record<string, unknown> = { organizationId };
@@ -219,14 +232,14 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const q = (req.query.q as string | undefined)?.trim();
   if (q) {
     filter.$or = [
-      { loadNumber:                    { $regex: q, $options: "i" } },
-      { "pickupLocation.city":         { $regex: q, $options: "i" } },
-      { "pickupLocation.state":        { $regex: q, $options: "i" } },
-      { "deliveryLocation.city":       { $regex: q, $options: "i" } },
-      { "deliveryLocation.state":      { $regex: q, $options: "i" } },
-      { "vehicles.make":               { $regex: q, $options: "i" } },
-      { "vehicles.model":              { $regex: q, $options: "i" } },
-      { "vehicles.vin":                { $regex: q, $options: "i" } },
+      { loadNumber: { $regex: q, $options: "i" } },
+      { "pickupLocation.city": { $regex: q, $options: "i" } },
+      { "pickupLocation.state": { $regex: q, $options: "i" } },
+      { "deliveryLocation.city": { $regex: q, $options: "i" } },
+      { "deliveryLocation.state": { $regex: q, $options: "i" } },
+      { "vehicles.make": { $regex: q, $options: "i" } },
+      { "vehicles.model": { $regex: q, $options: "i" } },
+      { "vehicles.vin": { $regex: q, $options: "i" } },
     ];
   }
 
@@ -243,9 +256,17 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     ? rawLoads.map((l) => maskLoadForDriver(l as unknown as Record<string, unknown>))
     : rawLoads;
 
+  const loadsWithSignedProofs = await Promise.all(loads.map(async (l: any) => {
+    if (l.proofOfDelivery?.imageUrl && !l.proofOfDelivery.imageUrl.startsWith('http')) {
+      const signed = await storageService.getSignedUrl(l.proofOfDelivery.imageUrl);
+      if (signed) l.proofOfDelivery.imageUrl = signed;
+    }
+    return l;
+  }));
+
   return res.status(200).json(
     new ApiResponse(200, {
-      loads,
+      loads: loadsWithSignedProofs,
       pagination: {
         page,
         limit,
@@ -271,12 +292,12 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
   ]);
 
   const stats: Record<string, number> = {
-    all:          0,
-    Posted:       0,
-    Assigned:     0,
+    all: 0,
+    Posted: 0,
+    Assigned: 0,
     "In-Transit": 0,
-    Delivered:    0,
-    Cancelled:    0,
+    Delivered: 0,
+    Cancelled: 0,
   };
 
   for (const { _id, count } of agg) {
@@ -291,7 +312,7 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
 
 const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
-  const user           = getUser(req);
+  const user = getUser(req);
 
   const raw = await Load.findOne({ _id: req.params.id, organizationId }).lean();
   if (!raw) throw new ApiError(404, "Load not found");
@@ -300,7 +321,14 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
     ? maskLoadForDriver(raw as unknown as Record<string, unknown>)
     : raw;
 
-  return res.status(200).json(new ApiResponse(200, load, "Load fetched successfully"));
+  // Sign proof of delivery URL if exists
+  const loadObj = load as any;
+  if (loadObj.proofOfDelivery?.imageUrl && !loadObj.proofOfDelivery.imageUrl.startsWith('http')) {
+    const signed = await storageService.getSignedUrl(loadObj.proofOfDelivery.imageUrl);
+    if (signed) loadObj.proofOfDelivery.imageUrl = signed;
+  }
+
+  return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
 });
 
 const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -318,6 +346,18 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
 
   const _io = getSocketIO();
   if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted" });
+
+  // Log activity
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId,
+    type: 'shipment_deleted', // Assuming similar mapping or add quote_deleted/load_deleted
+    title: 'Load Deleted',
+    description: `Deleted load ${load.loadNumber}`,
+    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
+  });
+
+  logger.warn({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load deleted');
 
   return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
 });
@@ -346,7 +386,8 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     try { await storageService.delete(load.proofOfDelivery.imageUrl); } catch { /* non-fatal */ }
   }
 
-  const imageUrl = await storageService.upload(file, "proofs");
+  // Upload to PRIVATE bucket for security
+  const imageUrl = await storageService.upload(file, "proofs", BucketType.PRIVATE);
 
   (load as any).proofOfDelivery = {
     imageUrl,
@@ -355,6 +396,15 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
   };
 
   await load.save();
+
+  // Log activity
+  await activityService.logLoadActivity(
+    userId,
+    load.organizationId?.toString(),
+    'load_delivered', // Triggering 'delivered' status log
+    load._id.toString(),
+    `Submitted proof of delivery for load ${load.loadNumber}`
+  );
 
   const orgId = load.organizationId?.toString();
   if (orgId) {
@@ -368,6 +418,8 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
       });
     }
   }
+
+  logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
 
   return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
 });

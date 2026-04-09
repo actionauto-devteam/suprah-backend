@@ -5,6 +5,8 @@ import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 
@@ -42,6 +44,17 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
             appointmentId: appointment._id?.toString(),
         }, userId);
     }
+
+    await activityService.createActivity({
+        userId,
+        organizationId: orgId || 'global',
+        type: 'appointment_created',
+        title: 'Appointment Scheduled',
+        description: `New appointment "${appointment.title}" scheduled`,
+        metadata: { appointmentId: appointment._id?.toString(), startTime: appointment.startTime }
+    });
+
+    logger.info({ appointmentId: appointment._id, userId, orgId }, 'Appointment created successfully');
 
     res.status(201).json(
         new ApiResponse(201, appointment, 'Appointment created successfully')
@@ -150,6 +163,8 @@ const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) 
     res.json(
         new ApiResponse(200, result, 'Synced with Google Calendar successfully')
     );
+
+    logger.info({ userId, orgId }, 'Google Calendar sync completed');
 });
 
 /**
@@ -204,6 +219,17 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
         }, userId);
     }
 
+    await activityService.createActivity({
+        userId,
+        organizationId: orgId || 'global',
+        type: 'appointment_updated',
+        title: 'Appointment Updated',
+        description: `Appointment "${appointment.title}" was modified`,
+        metadata: { appointmentId: appointment._id?.toString() }
+    });
+
+    logger.info({ appointmentId: appointment._id, userId }, 'Appointment updated');
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment updated successfully')
     );
@@ -228,6 +254,17 @@ const cancelAppointment = asyncHandler(async (req: Request, res: Response) => {
         }, userId);
     }
 
+    await activityService.createActivity({
+        userId,
+        organizationId: orgId || 'global',
+        type: 'appointment_cancelled',
+        title: 'Appointment Cancelled',
+        description: `Appointment "${appointment.title}" was cancelled`,
+        metadata: { appointmentId: appointment._id?.toString() }
+    });
+
+    logger.warn({ appointmentId: appointment._id, userId }, 'Appointment cancelled');
+
     res.json(
         new ApiResponse(200, appointment, 'Appointment cancelled successfully')
     );
@@ -251,6 +288,17 @@ const deleteAppointment = asyncHandler(async (req: Request, res: Response) => {
             appointmentId: id,
         }, userId);
     }
+
+    await activityService.createActivity({
+        userId,
+        organizationId: orgId || 'global',
+        type: 'appointment_cancelled',
+        title: 'Appointment Permanently Deleted',
+        description: `Appointment record ${id} was removed from the system`,
+        metadata: { appointmentId: id }
+    });
+
+    logger.warn({ appointmentId: id, userId }, 'Appointment deleted');
 
     res.json(
         new ApiResponse(200, null, 'Appointment deleted successfully')
@@ -298,6 +346,8 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
             metadata: { appointmentId: id, guestResponse: status },
         });
     }
+
+    logger.info({ appointmentId: id, status, guestName: req.body.guestName }, 'Guest responded to appointment');
 
     res.json(
         new ApiResponse(200, appointment, `Invitation ${status} successfully`)

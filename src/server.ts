@@ -14,8 +14,25 @@ import passport from './config/passport';
 import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
+import healthRoute from './routes/health.route';
+import supraSpaceRoute from './routes/supraspace.route';
+import { initSupraSpaceSocket } from './socket/supraspace.socket';
+
+import { httpLogger } from './utils/logger';
+import logger from './utils/logger';
+import { correlationIdMiddleware } from './middleware/correlationId.middleware';
+import { metricsMiddleware } from './middleware/metrics.middleware';
 
 const app: Application = express();
+
+// 1. Assign unique Request ID (Correlation ID) first
+app.use(correlationIdMiddleware);
+
+// 2. Track Golden Signals (Latency, Traffic, Errors)
+app.use(metricsMiddleware);
+
+// 3. Use structured logging middleware (picks up the Request ID)
+app.use(httpLogger);
 
 // Use Helmet for secure HTTP headers
 app.use(helmet({
@@ -23,14 +40,6 @@ app.use(helmet({
   contentSecurityPolicy: config.env === 'production' ? undefined : false, // Disable CSP in dev to avoid blocking Vite/Hot Reload
 }));
 const httpServer = createServer(app);
-
-// ========================================
-// Request logging middleware
-// ========================================
-app.use((req, res, next) => {
-  console.log(`[Request] ${req.method} ${req.path} | Origin: ${req.headers.origin || 'None'}`);
-  next();
-});
 
 // ========================================
 // Connect to MongoDB
@@ -53,11 +62,11 @@ app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '512kb' }));
 
 // ========================================
-// Static file serving (Limited to non-sensitive assets)
+// Static file serving (LEGACY - REPLACED BY R2)
 // ========================================
-app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
-app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
-app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
+// app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
+// app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
+// app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
 
 // ========================================
 // CORS CONFIGURATION
@@ -68,7 +77,7 @@ const corsOptions = {
 
     // Allow requests without origin (Postman, mobile apps)
     if (!origin) {
-      console.log('⚠️ CORS ALLOWED (No Origin)');
+      logger.debug('CORS allowed: No Origin');
       return callback(null, true);
     }
 
@@ -77,11 +86,11 @@ const corsOptions = {
     }
 
     if (config.env === 'development') {
-      console.log('⚠️ CORS ALLOWED (Dev Mode):', origin);
+      logger.debug('CORS allowed (Dev Mode): %s', origin);
       return callback(null, true);
     }
 
-    console.log('❌ CORS BLOCKED:', origin);
+    logger.warn('CORS blocked: %s', origin);
     return callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
 
@@ -103,24 +112,24 @@ const io = new Server(httpServer, {
 
 setupSocket(io);
 setSocketIO(io);
+initSupraSpaceSocket(httpServer); // Initialize the specialized SupraSpace socket server
 
-console.log('✓ CORS configured with origins:', config.corsOrigin);
-console.log('✓ Environment:', config.env);
+logger.info('✓ CORS configured with origins: %s', config.corsOrigin);
+logger.info('✓ Environment: %s', config.env);
 
 app.use(cookieParser());
 app.use(passport.initialize());
 
 // ========================================
-// Health Check
+// Health Checks (Liveness & Readiness)
 // ========================================
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
+app.use(healthRoute);
 
 // ========================================
 // API Routes
 // ========================================
 app.use('/api', routes);
+app.use('/supraspace', supraSpaceRoute); // Aliased for client-side legacy compatibility
 
 // ========================================
 // Global Error Handler
@@ -135,7 +144,7 @@ if (require.main === module) {
   initCleanupScheduler();
 
   httpServer.listen(config.port, () => {
-    console.log(`Server running on port ${config.port}`);
+    logger.info(`Server running on port ${config.port}`);
   });
 }
 

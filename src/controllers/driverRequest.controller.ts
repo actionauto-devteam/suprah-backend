@@ -7,6 +7,8 @@ import User, { IUser } from "../models/User.model";
 import Organization from "../models/Organization.model";
 import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
+import logger from "../utils/logger";
+import activityService from "../services/activity.service";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -74,6 +76,8 @@ const createDriverRequest = asyncHandler(
         // Non-critical — continue even if notification fails
       }
     }
+
+    logger.info({ driverRequestId: driverRequest._id, userId }, 'Driver registration request submitted');
 
     res.status(201).json(
       new ApiResponse(201, driverRequest, "Driver request submitted"),
@@ -259,8 +263,19 @@ const approveDriverRequest = asyncHandler(
         `,
       });
     } catch (emailErr) {
-      console.error("Failed to send approval email:", emailErr);
+      logger.error({ err: emailErr, driverId: driverUser._id }, 'Failed to send driver approval email');
     }
+
+    await activityService.createActivity({
+      userId: driverUser._id.toString(),
+      organizationId: (orgToAssign as any)?.toString() || 'global',
+      type: 'profile_update',
+      title: 'Driver Approved',
+      description: `Account upgraded to Driver role by admin ${adminUser.name}`,
+      metadata: { driverRequestId: request._id.toString(), adminId: adminUser._id.toString() }
+    });
+
+    logger.info({ driverRequestId: request._id, driverId: driverUser._id, adminId: adminUser._id }, 'Driver request approved');
 
     res.json(new ApiResponse(200, request, "Driver request approved"));
   },
@@ -312,6 +327,8 @@ const rejectDriverRequest = asyncHandler(
     } catch {
       // Non-critical
     }
+
+    logger.warn({ driverRequestId: request._id, adminId: adminUser._id }, 'Driver request rejected');
 
     res.json(new ApiResponse(200, request, "Driver request rejected"));
   },

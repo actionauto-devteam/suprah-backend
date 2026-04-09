@@ -7,6 +7,21 @@ import User from '../src/models/User.model';
 
 dotenv.config();
 
+// --- DATABASE SECURITY GATEKEEPER ---
+// Prevent accidental wipes of production/live data
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/vehicle-management';
+const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
+
+if (isAtlas && process.env.ALLOW_WIPE !== 'true') {
+  console.error('\n\n🚨 FATAL ERROR: DATABASE WIPE PREVENTED');
+  console.error('------------------------------------------');
+  console.error('The seed script is attempting to wipe a Cloud Atlas cluster.');
+  console.error('To protect your data, the operation has been aborted.');
+  console.error('If you actually want to re-seed, set ALLOW_WIPE=true in your environment.\n\n');
+  process.exit(1);
+}
+// ------------------------------------
+
 const mockVehicles = [
   {
     vin: "5J8YD4H86NL123456",

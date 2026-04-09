@@ -3,6 +3,7 @@ import shipmentController from '../controllers/shipment.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 import { uploadProofImage } from '../middleware/upload.middleware';
+import { uploadLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
@@ -12,7 +13,7 @@ router.use(auth());
 // The controller finds the shipment by ID and verifies driver assignment.
 router
     .route('/:id/submit-proof')
-    .post(uploadProofImage, shipmentController.submitProofOfDelivery);
+    .post(uploadLimiter, auth(), uploadProofImage, shipmentController.submitProofOfDelivery);
 
 router.use(requireOrg);
 

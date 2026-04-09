@@ -7,6 +7,7 @@
  */
 
 import { parseStringPromise } from 'xml2js';
+import logger from './logger';
 
 export interface ParsedADFLead {
   firstName: string;
@@ -366,7 +367,7 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
       rawFields,
     };
   } catch (err) {
-    console.error('[ADF Parser] Failed to parse ADF XML:', err);
+    logger.error({ err, xmlData }, '[ADF Parser] Failed to parse ADF XML');
     return null;
   }
 }

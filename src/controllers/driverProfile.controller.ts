@@ -2,10 +2,11 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
-import DriverProfile from "../models/DriverProfile.model";
+import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
 import { IUser } from "../models/User.model";
-import storageService from "../services/storage.service";
-import AuditLog from "../models/AuditLog.model";
+import storageService, { BucketType } from "../services/storage.service";
+import activityService from "../services/activity.service";
+import logger from "../utils/logger";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -29,7 +30,27 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const orgId = user.organizationId?.toString() || "";
   const profile = await getOrCreateProfile(user._id.toString(), orgId);
 
-  res.json(new ApiResponse(200, profile, "Driver profile fetched"));
+  // Sign document URLs
+  const profileObj = profile.toJSON();
+  if (profileObj.documents) {
+    for (const doc of profileObj.documents) {
+      if (doc.fileUrl && !doc.fileUrl.startsWith('http')) {
+        const signed = await storageService.getSignedUrl(doc.fileUrl);
+        if (signed) doc.fileUrl = signed;
+      }
+    }
+  }
+
+  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
+  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
+  const complianceSummary = {
+    uploadedCount,
+    totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
+    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
+    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter(t => !uploadedTypes.has(t))
+  };
+
+  res.json(new ApiResponse(200, { ...profileObj, complianceSummary }, "Driver profile fetched"));
 });
 
 const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
@@ -88,13 +109,15 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Equipment updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Equipment information updated",
-    performedBy: user._id,
-    changes: req.body,
+  logger.info({ profileId: profile._id, userId: user._id }, 'Equipment information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Equipment Updated',
+    description: `Driver ${user.name} updated equipment details`,
+    metadata: { profileId: profile._id.toString(), trailerType }
   });
 });
 
@@ -128,19 +151,15 @@ const updateCompliance = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Compliance updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance information updated",
-    performedBy: user._id,
-    changes: {
-      licenseState,
-      licenseExpirationDate,
-      medicalCardExpirationDate,
-      insuranceExpirationDate,
-      insuranceProvider,
-    },
+  logger.info({ profileId: profile._id, userId: user._id }, 'Compliance information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Compliance Updated',
+    description: `Driver ${user.name} updated license/insurance details`,
+    metadata: { profileId: profile._id.toString(), licenseState }
   });
 });
 
@@ -161,6 +180,12 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     "operating_authority", "cargo_insurance", "liability_insurance", "other",
   ];
   if (!allowedTypes.includes(type)) throw new ApiError(400, "Invalid document type");
+  
+  // Enforce expiration dates for high-risk documents
+  const needsExpiry = ["drivers_license_front", "drivers_license_back", "medical_card", "insurance_certificate", "liability_insurance", "cargo_insurance"];
+  if (needsExpiry.includes(type) && !expiresAt) {
+    throw new ApiError(400, `Expiration date is required for ${type.replace(/_/g, " ")}`);
+  }
 
   const orgId = user.organizationId?.toString() || "";
   const profile = await getOrCreateProfile(user._id.toString(), orgId);
@@ -169,7 +194,8 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Maximum of 20 documents allowed");
   }
 
-  const fileUrl = await storageService.upload(file, "driver-documents");
+  // Upload to PRIVATE bucket for security
+  const fileUrl = await storageService.upload(file, "driver-documents", BucketType.PRIVATE);
   const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
 
   profile.documents.push({
@@ -188,16 +214,18 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  // Log activity
+  await activityService.logComplianceActivity(
+    user._id.toString(),
+    orgId,
+    'compliance_uploaded',
+    label,
+    'Pending Review'
+  );
+
   res.json(new ApiResponse(200, profile, "Document uploaded"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document uploaded",
-    performedBy: user._id,
-    changes: { documentType: type, fileName: file.originalname },
-  });
+  logger.info({ profileId: profile._id, type, label }, 'Compliance document uploaded');
 });
 
 const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -228,13 +256,15 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Document deleted"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document deleted",
-    performedBy: user._id,
-    changes: { deletedDocumentId: documentId },
+  logger.warn({ profileId: profile._id, documentId }, 'Compliance document deleted');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: profile.organizationId.toString(),
+    type: 'other',
+    title: 'Document Deleted',
+    description: `Driver ${user.name} removed a compliance document`,
+    metadata: { profileId: profile._id.toString(), documentId }
   });
 });
 
@@ -273,13 +303,15 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, profile, "Logistics updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Logistics information updated",
-    performedBy: user._id,
-    changes: req.body,
+  logger.info({ profileId: profile._id, userId: user._id }, 'Logistics information updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Logistics Updated',
+    description: `Driver ${user.name} updated service area/routes`,
+    metadata: { profileId: profile._id.toString(), serviceRadius }
   });
 });
 
@@ -292,7 +324,19 @@ const getOrgDriverProfiles = asyncHandler(async (req: Request, res: Response) =>
     .populate("userId", "name email avatar")
     .lean();
 
-  res.json(new ApiResponse(200, profiles, "Organization driver profiles fetched"));
+  const profilesWithSignedDocs = await Promise.all(profiles.map(async (p: any) => {
+    if (p.documents) {
+      for (const doc of p.documents) {
+        if (doc.fileUrl && !doc.fileUrl.startsWith('http')) {
+          const signed = await storageService.getSignedUrl(doc.fileUrl);
+          if (signed) doc.fileUrl = signed;
+        }
+      }
+    }
+    return p;
+  }));
+
+  res.json(new ApiResponse(200, profilesWithSignedDocs, "Organization driver profiles fetched"));
 });
 
 const getDriverProfileById = asyncHandler(async (req: Request, res: Response) => {
@@ -305,7 +349,27 @@ const getDriverProfileById = asyncHandler(async (req: Request, res: Response) =>
   }).populate("userId", "name email avatar");
 
   if (!profile) throw new ApiError(404, "Driver profile not found");
-  res.json(new ApiResponse(200, profile, "Driver profile fetched"));
+
+  const profileObj = profile.toJSON();
+  if (profileObj.documents) {
+    for (const doc of profileObj.documents) {
+      if (doc.fileUrl && !doc.fileUrl.startsWith('http')) {
+        const signed = await storageService.getSignedUrl(doc.fileUrl);
+        if (signed) doc.fileUrl = signed;
+      }
+    }
+  }
+
+  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
+  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
+  const complianceSummary = {
+    uploadedCount,
+    totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
+    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
+    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter(t => !uploadedTypes.has(t))
+  };
+
+  res.json(new ApiResponse(200, { ...profileObj, complianceSummary }, "Driver profile fetched"));
 });
 
 const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -347,16 +411,18 @@ const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  // Log activity (Persona: Admin acting on Driver)
+  await activityService.logComplianceActivity(
+    driverId,
+    orgId,
+    'doc_verified',
+    doc.label,
+    verified ? 'Verified' : 'Unverified'
+  );
+
   res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: `Document ${verified ? "verified" : "verification revoked"}`,
-    performedBy: user._id,
-    changes: { documentId, verified },
-  });
+  logger.info({ profileId: profile._id, driverId, documentId, verified }, 'Document verification status changed');
 });
 
 const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -396,16 +462,19 @@ const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  // Log activity (Persona: Admin acting on Driver)
+  await activityService.createActivity({
+    userId: driverId,
+    organizationId: orgId,
+    type: 'other',
+    title: 'Document Rejected',
+    description: `Document ${doc.label} was rejected: ${reason.trim()}`,
+    metadata: { documentId, reason: reason.trim(), adminId: user._id.toString() }
+  });
+
   res.json(new ApiResponse(200, profile, "Document rejected"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Compliance document rejected",
-    performedBy: user._id,
-    changes: { documentId, rejectionReason: reason.trim() },
-  });
+  logger.warn({ profileId: profile._id, driverId, documentId, reason }, 'Compliance document rejected');
 });
 
 const updateIdentityVerification = asyncHandler(async (req: Request, res: Response) => {
@@ -434,35 +503,41 @@ const updateIdentityVerification = asyncHandler(async (req: Request, res: Respon
     profile.verificationAgreementDate = new Date();
   }
 
-  const requiredDocs = [
-    "drivers_license", "medical_card", "insurance_certificate",
-    "vehicle_registration", "operating_authority", "w9_form",
-  ];
   const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
-  const allUploaded = requiredDocs.every(t => uploadedTypes.has(t));
-  const allVerified = requiredDocs.every(t =>
+  const allUploaded = REQUIRED_COMPLIANCE_DOCS.every(t => uploadedTypes.has(t));
+  
+  const allVerified = REQUIRED_COMPLIANCE_DOCS.every(t =>
     profile.documents.some((d: any) => d.type === t && d.verified)
   );
+
+  // Progress score calculation for 0/7 (or 0/6 in UI)
+  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
+  const complianceScore = Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100);
 
   if (allVerified && profile.ssnLast4 && profile.backgroundCheckConsent && profile.verificationAgreement) {
     profile.verificationStatus = "verified";
   } else if (allUploaded && profile.ssnLast4 && profile.backgroundCheckConsent && profile.verificationAgreement) {
     profile.verificationStatus = "under_review";
-  } else if (profile.documents.length > 0 || profile.ssnLast4) {
+  } else if (uploadedCount > 0 || profile.ssnLast4) {
     profile.verificationStatus = "in_progress";
   }
+
+  profile.profileCompletionScore = complianceScore; // Reuse this field for doc progress if preferred or keep separate
+
 
   await profile.save();
 
   res.json(new ApiResponse(200, profile, "Identity verification updated"));
 
-  await AuditLog.create({
-    entityType: "DriverProfile",
-    entityId: profile._id,
-    action: "UPDATE",
-    reason: "Identity verification information updated",
-    performedBy: user._id,
-    changes: { ssnLast4: ssnLast4 ? "****" : undefined, backgroundCheckConsent, verificationAgreement },
+  logger.info({ profileId: profile._id, userId: user._id }, 'Identity verification updated');
+
+  await activityService.createActivity({
+    userId: user._id.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Identity Verification Update',
+    description: `Driver ${user.name} updated tax/identity info`,
+    metadata: { profileId: profile._id.toString(), status: profile.verificationStatus }
   });
 });
 
