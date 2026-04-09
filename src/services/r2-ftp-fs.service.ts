@@ -7,9 +7,11 @@ import {
     DeleteObjectCommand, 
     HeadObjectCommand 
 } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import config from '../config';
-import { PassThrough, Readable } from 'stream';
+import { PassThrough, Readable, Transform } from 'stream';
 import path from 'path';
+import syncService from './sync.service';
 
 export class R2FileSystem extends FileSystem {
     private s3Client: S3Client;
@@ -26,6 +28,8 @@ export class R2FileSystem extends FileSystem {
                 accessKeyId: config.r2.accessKeyId,
                 secretAccessKey: config.r2.secretAccessKey,
             },
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
         });
     }
 
@@ -125,26 +129,85 @@ export class R2FileSystem extends FileSystem {
         }
 
         const key = this.getR2Key(fileName);
-        const passThrough = new PassThrough();
+        
+        /**
+         * The Bridge Architecture (Fixed):
+         * 1. uploadSink: A PassThrough stream that the AWS SDK reads from.
+         * 2. parallelUploads3: The AWS SDK Upload manager.
+         * 3. bridge: A Transform stream we return to the FTP server.
+         * 
+         * We start the upload process IMMEDIATELY (via parallelUploads3.done()) 
+         * so the SDK starts pulling data from the buffer as it arrives from FTP.
+         */
+        const uploadSink = new PassThrough();
+        
+        const parallelUploads3 = new Upload({
+            client: this.s3Client,
+            params: {
+                Bucket: this.bucket,
+                Key: key,
+                Body: uploadSink,
+            },
+            queueSize: 1, 
+            partSize: 5 * 1024 * 1024,
+        });
 
-        // Start upload to R2 in background
-        const upload = async () => {
-            try {
-                const command = new PutObjectCommand({
-                    Bucket: this.bucket,
-                    Key: key,
-                    Body: passThrough,
-                });
-                await this.s3Client.send(command);
-            } catch (err) {
-                console.error(`[R2FileSystem] Upload Error for ${key}:`, err);
-                passThrough.destroy(err as Error);
+        // Start the upload loop immediately so it can consume data from the sink
+        const uploadPromise = parallelUploads3.done();
+
+        // Monitor progress
+        parallelUploads3.on('httpUploadProgress', (progress) => {
+            if (progress.loaded) {
+                console.log(`[R2FileSystem] ⏳ Uploading ${key}: ${progress.loaded} bytes sent`);
             }
-        };
+        });
 
-        upload();
+        const bridge = new Transform({
+            transform(chunk, encoding, callback) {
+                // Pipe data into the R2 upload sink. 
+                // This will now drain properly because the uploadPromise is active.
+                const canAcceptMore = uploadSink.write(chunk, encoding);
+                if (canAcceptMore) {
+                    callback();
+                } else {
+                    uploadSink.once('drain', callback);
+                }
+            },
+            async flush(callback) {
+                try {
+                    console.log(`[R2FileSystem] 🏁 FTP data received for ${key}. Finalizing R2 upload...`);
+                    
+                    // 1. Mark the sink as finished so the SDK knows no more data is coming
+                    uploadSink.end();
+                    
+                    // 2. Wait for the SDK to confirm the final handshake with R2
+                    await uploadPromise;
+                    
+                    console.log(`[R2FileSystem] ✅ Successfully uploaded: ${key}`);
 
-        return passThrough;
+                    // 3. Trigger inventory sync
+                    if (key.toLowerCase().includes('dealerscloud')) {
+                        console.log(`[R2FileSystem] 🔄 Triggering Inventory Sync for: ${key}`);
+                        syncService.processR2File(key).catch(err => {
+                            console.error(`[R2FileSystem] ❌ Sync Error for ${key}:`, err);
+                        });
+                    }
+
+                    // 4. Resolve the FTP command
+                    callback();
+                } catch (err: any) {
+                    console.error(`[R2FileSystem] ❌ Synchronized Upload Error:`, err);
+                    callback(err);
+                }
+            }
+        });
+
+        // Safety: ensure errors on the sink propagate to the bridge
+        uploadSink.on('error', (err) => {
+            bridge.destroy(err);
+        });
+
+        return bridge;
     }
 
     /**

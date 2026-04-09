@@ -34,6 +34,8 @@ class StorageService {
                 accessKeyId: accessKeyId,
                 secretAccessKey: secretAccessKey,
             },
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
         });
         this.isConfigured = true;
     }

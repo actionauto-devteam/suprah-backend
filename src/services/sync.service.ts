@@ -14,7 +14,7 @@ import config from '../config';
  * The internal organization ID for Action Auto Utah.
  * All vehicles synced via FTP are owned by this org.
  */
-const ACTION_AUTO_ORG_ID = '698f474596361c239f73c608';
+const ACTION_AUTO_ORG_ID = '69d6a26499bee4596c1ea94c';
 
 export class SyncService {
     async syncInventory(): Promise<any> {
@@ -190,6 +190,8 @@ export class SyncService {
                 accessKeyId: config.r2.accessKeyId,
                 secretAccessKey: config.r2.secretAccessKey,
             },
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
         });
 
         try {
@@ -257,12 +259,12 @@ export class SyncService {
             parser.on('end', async () => {
                 try {
                     const deletionResult = await this.handleDeletions(csvVins);
-                    
+
                     syncLog.vehiclesProcessed = processed;
                     syncLog.vehiclesAdded = added;
                     syncLog.vehiclesUpdated = updated;
                     syncLog.vehiclesDeleted = deletionResult.deletedCount;
-                    
+
                     resolve({ added, updated, deleted: deletionResult.deletedCount, processed });
                 } catch (err) {
                     reject(err);
@@ -282,7 +284,7 @@ export class SyncService {
         // ... kept as legacy fallback but refactored to use stream
         const fs = require('fs');
         const stream = fs.createReadStream(filePath);
-        return this.processStream(stream, { save: () => {} });
+        return this.processStream(stream, { save: () => { } });
     }
 
     /**
