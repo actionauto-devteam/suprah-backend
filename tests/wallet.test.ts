@@ -23,9 +23,24 @@ describe('Digital Wallet and Referral Engine Integration Tests', () => {
         }
 
         // Clean up any dirty data from failed previous runs
-        await User.deleteMany({ email: { $regex: '@example.com' } });
-        await Referral.deleteMany({});
-        await Transaction.deleteMany({});
+        // Clean up only our specific test users and their related data
+        const testClerkIds = [referrerId, newCustomerId];
+        const testUserIds = (await User.find({ clerkId: { $in: testClerkIds } })).map(u => u._id);
+
+        await User.deleteMany({ clerkId: { $in: testClerkIds } });
+        await Referral.deleteMany({ 
+            $or: [
+                { referrerClerkId: { $in: testClerkIds } },
+                { referredUserClerkId: { $in: testClerkIds } },
+                { userId: { $in: testUserIds } }
+            ]
+        });
+        await Transaction.deleteMany({ 
+            $or: [
+                { userClerkId: { $in: testClerkIds } },
+                { userId: { $in: testUserIds } }
+            ]
+        });
 
         // We act like a real customer by initializing the referrer
         const referrer = new User({

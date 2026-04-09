@@ -11,7 +11,7 @@ import logger from '../utils/logger';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
-import { storageService } from '../services/storage.service';
+import { storageService, BucketType } from '../services/storage.service';
 import activityService from '../services/activity.service';
 import fs from 'fs';
 import path from 'path';
@@ -285,9 +285,19 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl });
     });
 
-    const shipmentsWithOrg = filteredShipments.map(s => ({
-        ...(s.toJSON()),
-        organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
+    const shipmentsWithOrg = await Promise.all(filteredShipments.map(async s => {
+        const shipmentObj = s.toJSON();
+        
+        // Sign proof of delivery URL if exists
+        if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
+            const signedUrl = await storageService.getSignedUrl(shipmentObj.proofOfDelivery.imageUrl);
+            if (signedUrl) shipmentObj.proofOfDelivery.imageUrl = signedUrl;
+        }
+
+        return {
+            ...shipmentObj,
+            organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
+        };
     }));
 
     res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
@@ -311,7 +321,14 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(404, 'Shipment not found');
     }
 
-    res.json(new ApiResponse(200, shipment, 'Shipment fetched successfully'));
+    const shipmentObj = shipment.toJSON();
+    // Sign proof of delivery URL if exists
+    if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
+        const signedUrl = await storageService.getSignedUrl(shipmentObj.proofOfDelivery.imageUrl);
+        if (signedUrl) shipmentObj.proofOfDelivery.imageUrl = signedUrl;
+    }
+
+    res.json(new ApiResponse(200, shipmentObj, 'Shipment fetched successfully'));
 });
 
 /**
@@ -650,24 +667,13 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
         throw new ApiError(403, 'Only the assigned driver can submit proof of delivery');
     }
 
-    // Delete old proof if it exists
+    // Delete old proof if it exists (handles both R2 keys and legacy local paths)
     if (shipment.proofOfDelivery?.imageUrl) {
-        if (shipment.proofOfDelivery.imageUrl.startsWith('http')) {
-            await storageService.delete(shipment.proofOfDelivery.imageUrl);
-        } else if (shipment.proofOfDelivery.imageUrl.startsWith('/uploads/proof-of-delivery/')) {
-            const oldPath = path.join(__dirname, '../../', shipment.proofOfDelivery.imageUrl);
-            try {
-                if (fs.existsSync(oldPath)) {
-                    fs.unlinkSync(oldPath);
-                }
-            } catch (err) {
-                console.error('Failed to delete legacy local proof file:', err);
-            }
-        }
+        await storageService.delete(shipment.proofOfDelivery.imageUrl, BucketType.PRIVATE);
     }
 
-    // Upload new image to R2
-    const imageUrl = await storageService.upload(file, 'proofs');
+    // Upload new image to R2 PRIVATE bucket
+    const imageUrl = await storageService.upload(file, 'proofs', BucketType.PRIVATE);
 
     shipment.proofOfDelivery = {
         imageUrl,

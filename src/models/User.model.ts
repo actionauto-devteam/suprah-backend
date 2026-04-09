@@ -324,7 +324,8 @@ UserSchema.pre<IUser>('save', async function (next) {
       const random3Digits = Math.floor(100 + Math.random() * 900); // 100-999
       const candidateCode = `AAU-${baseName}-${random3Digits}`;
 
-      const existingUser = await mongoose.models.User.findOne({ referralCode: candidateCode });
+      const User = this.constructor as mongoose.Model<IUser>;
+      const existingUser = await User.findOne({ referralCode: candidateCode });
       if (!existingUser) {
         user.referralCode = candidateCode;
         codeUnique = true;

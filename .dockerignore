@@ -13,3 +13,4 @@ dist
 coverage
 deploy
 ftp-uploads
+app.log

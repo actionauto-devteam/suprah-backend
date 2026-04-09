@@ -47,6 +47,17 @@ async function importLocations() {
     }
 
     try {
+        const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
+        
+        if (isAtlas && process.env.ALLOW_WIPE !== 'true') {
+            console.error('\n\n🚨 FATAL ERROR: PARTNER DATA WIPE PREVENTED');
+            console.error('--------------------------------------------');
+            console.error('This script is attempting to clear and re-import Jiffy Lube locations on a Cloud Atlas cluster.');
+            console.error('To protect your data, the operation has been aborted.');
+            console.error('If you actually want to re-import, set ALLOW_WIPE=true.\n\n');
+            process.exit(1);
+        }
+
         await mongoose.connect(MONGODB_URI);
         console.log('Connected to MongoDB');
 

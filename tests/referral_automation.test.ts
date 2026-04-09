@@ -87,11 +87,17 @@ describe('Referral Automation Integration Tests', () => {
     });
 
     afterAll(async () => {
-        // Final cleanup
+        // Final targeted cleanup
         await User.deleteMany({ email: { $regex: 'automation.test@example.com' } });
-        await Referral.deleteMany({});
-        await Transaction.deleteMany({});
+        await Referral.deleteMany({ 
+            $or: [
+                { referrerClerkId: { $in: [referrerClerkId, customerClerkId] } },
+                { referredUserClerkId: { $in: [referrerClerkId, customerClerkId] } }
+            ]
+        });
+        await Transaction.deleteMany({ userClerkId: { $in: [referrerClerkId, customerClerkId] } });
         await Payment.deleteMany({ customerEmail: customerEmail });
+        await Organization.deleteOne({ _id: testOrgId });
 
         // Only disconnect if we are in the standalone test DB
         if (mongoose.connection.db?.databaseName === 'actionauto_test') {

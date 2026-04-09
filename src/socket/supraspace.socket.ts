@@ -31,19 +31,19 @@ import { Server as IOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
+import config from '../config';
 import logger from '../utils/logger';
 
 let io: IOServer;
 
 // ── Mirrors crmAuth.middleware.ts secret resolution exactly ──────────────────
-const CRM_JWT_SECRET =
-  process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+const CRM_JWT_SECRET = config.jwt.accessSecret || 'crm-secret-key';
 
-// ── Parse allowed origins from your existing CORS_ORIGIN env var ─────────────
+// ── Parse allowed origins from centralized config ────────────────────────────
 function getCorsOrigins(): string | string[] {
-  const raw = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || '*';
+  const raw = config.corsOrigin || '*';
   if (raw === '*') return '*';
-  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return raw.split(',').map((s: string) => s.trim()).filter(Boolean);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -51,7 +51,27 @@ function getCorsOrigins(): string | string[] {
 export function initSupraSpaceSocket(server: HttpServer): IOServer {
   io = new IOServer(server, {
     cors: {
-      origin: getCorsOrigins(),
+      origin: (origin, callback) => {
+        const allowed = getCorsOrigins();
+        
+        // Allow requests with no origin (e.g. mobile apps, curl)
+        if (!origin) return callback(null, true);
+
+        // Allow any origin in development mode to match server.ts behavior
+        if (config.env === 'development') return callback(null, true);
+
+        // Check against allowed list
+        if (Array.isArray(allowed)) {
+          if (allowed.includes(origin) || allowed.includes('*')) {
+            return callback(null, true);
+          }
+        } else if (allowed === '*' || allowed === origin) {
+          return callback(null, true);
+        }
+
+        logger.warn({ origin }, '[SupraSpace Socket] CORS blocked');
+        callback(new Error('Not allowed by CORS'));
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },

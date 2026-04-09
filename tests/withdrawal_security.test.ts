@@ -21,8 +21,9 @@ describe('Withdrawal Security & Audit Integration Tests', () => {
         }
 
         await User.deleteMany({ email: { $regex: '@security.com' } });
-        // await Referral.deleteMany({});
-        // await Transaction.deleteMany({});
+        // Targeted cleanup of records linked to our test customer
+        await Referral.deleteMany({ referrerClerkId: customerId });
+        await Transaction.deleteMany({ userClerkId: customerId });
 
         // Create a customer with a balance
         await new User({

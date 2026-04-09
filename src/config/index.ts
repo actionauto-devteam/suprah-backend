@@ -8,8 +8,16 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const envVarsSchema = Joi.object()
   .keys({
-    NODE_ENV: Joi.string().valid('production', 'development', 'test', 'staging').required(),
-    PORT: Joi.number().default(5000),
+    NODE_ENV: Joi.string().valid('production', 'development', 'test').required(),
+    PORT: Joi.number().default(3000),
+    FRONTEND_URL: Joi.string().required().description('Frontend URL'),
+
+    FTP_PASV_MAX: Joi.number().default(21010),
+    FTP_SERVER_USER: Joi.string().allow('').default('dealerscloud'),
+    FTP_SERVER_PASSWORD: Joi.string().allow('').default('changeme123'),
+    FTP_FORCE_TLS: Joi.boolean().default(false),
+    FTP_TLS_CERT_PATH: Joi.string().allow('').description('Path to FTPS certificate'),
+    FTP_TLS_KEY_PATH: Joi.string().allow('').description('Path to FTPS key'),
     BACKEND_URL: Joi.string().required().description('Backend URL'),
     MONGODB_URI: Joi.string().required().description('Mongo DB url'),
     MONGODB_URI_TEST: Joi.string().allow('').description('Mongo DB test url'),
@@ -50,8 +58,12 @@ const envVarsSchema = Joi.object()
     R2_ACCESS_KEY_ID: Joi.string().allow('').description('R2 Access Key'),
     R2_SECRET_ACCESS_KEY: Joi.string().allow('').description('R2 Secret Access Key'),
     R2_ENDPOINT: Joi.string().allow('').description('R2 Endpoint'),
-    R2_BUCKET_NAME: Joi.string().allow('').description('R2 Bucket Name'),
+    R2_BUCKET_PUBLIC: Joi.string().allow('').default('actionauto-public'),
+    R2_BUCKET_PRIVATE: Joi.string().allow('').default('actionauto-private'),
+    R2_BUCKET_FTP: Joi.string().allow('').default('actionauto-ftp'),
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
+
+    CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
   })
   .unknown();
 
@@ -80,6 +92,7 @@ const config = {
     accessExpiration: envVars.JWT_ACCESS_EXPIRATION,
     refreshSecret: envVars.JWT_REFRESH_SECRET,
     refreshExpiration: envVars.JWT_REFRESH_EXPIRATION,
+    crmJwtSecret: envVars.CRM_JWT_SECRET,
   },
   ftp: {
     host: envVars.DEALERSCLOUD_FTP_HOST,
@@ -118,9 +131,18 @@ const config = {
     accessKeyId: envVars.R2_ACCESS_KEY_ID,
     secretAccessKey: envVars.R2_SECRET_ACCESS_KEY,
     endpoint: envVars.R2_ENDPOINT,
-    bucketName: envVars.R2_BUCKET_NAME,
-    publicUrl: envVars.R2_PUBLIC_URL,
+    buckets: {
+      public: envVars.R2_BUCKET_PUBLIC,
+      private: envVars.R2_BUCKET_PRIVATE,
+      ftp: envVars.R2_BUCKET_FTP,
+    },
+    publicUrl: (envVars.R2_PUBLIC_URL || '').replace(/\/$/, '').trim(),
   },
+  ftpServer: {
+    forceTls: envVars.FTP_FORCE_TLS,
+    tlsCertPath: envVars.FTP_TLS_CERT_PATH,
+    tlsKeyPath: envVars.FTP_TLS_KEY_PATH,
+  }
 };
 
 export default config;

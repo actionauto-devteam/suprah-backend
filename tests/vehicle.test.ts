@@ -57,7 +57,8 @@ describe('Vehicle API Endpoints', () => {
     });
 
     afterAll(async () => {
-        await Vehicle.deleteMany({});
+        // Targeted clean up of test vehicles
+        await Vehicle.deleteMany({ vin: { $regex: /^TEST/ } });
     });
 
     describe('GET /api/vehicles', () => {

@@ -1,9 +1,12 @@
-import { FtpSrv, FileSystem } from 'ftp-srv';
+import { FtpSrv } from 'ftp-srv';
 import bunyan from 'bunyan';
 import path from 'path';
 import fs from 'fs/promises';
 import { ftpServerConfig } from '../config/ftp-server.config';
+import config from '../config';
 import syncService from './sync.service';
+import { R2FileSystem } from './r2-ftp-fs.service';
+import { existsSync } from 'fs';
 
 const log = bunyan.createLogger({ name: 'ftp-server' });
 
@@ -15,8 +18,26 @@ export class ActionFtpServer {
      */
     async start(): Promise<void> {
         try {
-            // Ensure upload directory exists
-            await fs.mkdir(ftpServerConfig.uploadDir, { recursive: true });
+            // Prepare TLS options if provided
+            let tls: any = false;
+            if (config.ftpServer.tlsCertPath && config.ftpServer.tlsKeyPath) {
+                try {
+                    const certExists = existsSync(config.ftpServer.tlsCertPath);
+                    const keyExists = existsSync(config.ftpServer.tlsKeyPath);
+                    
+                    if (certExists && keyExists) {
+                        tls = {
+                            cert: await fs.readFile(config.ftpServer.tlsCertPath),
+                            key: await fs.readFile(config.ftpServer.tlsKeyPath),
+                        };
+                        log.info('FTP TLS encryption enabled');
+                    } else {
+                        log.warn('FTP TLS certificates not found, falling back to plaintext');
+                    }
+                } catch (err) {
+                    log.error({ err }, 'Failed to load FTP TLS certificates');
+                }
+            }
 
             this.ftpServer = new FtpSrv({
                 url: `ftp://0.0.0.0:${ftpServerConfig.port}`,
@@ -25,6 +46,7 @@ export class ActionFtpServer {
                 pasv_max: ftpServerConfig.pasv_max,
                 greeting: ['Welcome to ActionAuto FTP Server'],
                 anonymous: false,
+                tls: tls,
             });
 
             // Authentication handler
@@ -34,12 +56,12 @@ export class ActionFtpServer {
                 if (username === ftpServerConfig.username && password === ftpServerConfig.password) {
                     log.info({ username }, 'Login successful');
 
-                    // Set up file system for this connection
+                    // Set up cloud file system for this connection
                     resolve({
-                        fs: new FileSystem(connection, {
-                            root: path.resolve(ftpServerConfig.uploadDir),
+                        fs: new R2FileSystem(connection, {
+                            root: '/',
                             cwd: '/'
-                        })
+                        }) as any
                     });
                 } else {
                     log.warn({ username }, 'Login failed - invalid credentials');
@@ -55,23 +77,22 @@ export class ActionFtpServer {
                     return;
                 }
 
-                log.info({ filePath }, 'File uploaded successfully');
+                log.info({ filePath }, 'File uploaded successfully to R2');
 
-                // Check if it's a CSV file
-                if (filePath && filePath.endsWith('.csv')) {
-                    const fullPath = path.join(ftpServerConfig.uploadDir, path.basename(filePath));
-                    log.info({ fullPath }, 'Processing uploaded CSV file');
+                // Check if it's a CSV or TXT file from DealersCloud
+                const isInventory = filePath && (filePath.endsWith('.csv') || filePath.endsWith('.txt'));
+                
+                if (isInventory) {
+                    // filePath in R2FS is the relative path (key)
+                    const key = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+                    log.info({ key }, 'Processing uploaded inventory from R2');
 
                     try {
-                        // Trigger sync service to process the file
-                        await syncService.processLocalFile(fullPath);
-                        log.info({ fullPath }, 'File processed successfully');
-
-                        // Optional: Delete file after processing
-                        await fs.unlink(fullPath);
-                        log.info({ fullPath }, 'File deleted after processing');
+                        // Trigger sync service to process from R2 stream
+                        await syncService.processR2File(key);
+                        log.info({ key }, 'Inventory processed successfully from cloud storage');
                     } catch (err) {
-                        log.error({ err, fullPath }, 'Error processing uploaded file');
+                        log.error({ err, key }, 'Error processing inventory from R2');
                     }
                 }
             });

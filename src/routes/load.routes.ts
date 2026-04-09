@@ -4,6 +4,7 @@ import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
 import { uploadProofImage } from "../middleware/upload.middleware";
+import { uploadLimiter } from "../middleware/rate-limit.middleware";
 
 const router = express.Router();
 
@@ -32,6 +33,6 @@ router
   .delete(staffOnly, loadController.deleteLoad); // staff only
 
 // Driver submits proof — no org required (same pattern as shipment submit-proof)
-router.post("/:id/submit-proof", uploadProofImage, loadController.submitProofOfDelivery);
+router.post("/:id/submit-proof", uploadLimiter, auth(), uploadProofImage, loadController.submitProofOfDelivery);
 
 export default router;

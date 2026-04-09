@@ -23,19 +23,9 @@ describe('Conversation API - Organization Isolation', () => {
         mongoUserB_id = userB._id as mongoose.Types.ObjectId;
     });
 
-    beforeEach(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await Conversation.deleteMany({});
-        }
-    });
-
     afterAll(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-            await Conversation.deleteMany({});
-        }
+        await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
+        await Conversation.deleteMany({ organizationId: { $in: [orgA, orgB] } });
     });
 
     it('should only return conversations belonging to the user\'s organization', async () => {

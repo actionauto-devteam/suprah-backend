@@ -22,11 +22,6 @@ describe('Custom Organization System', () => {
     let inviteToken: string;
 
     beforeAll(async () => {
-        // Cleanup
-        await User.deleteMany({});
-        await Organization.deleteMany({});
-        await Invitation.deleteMany({});
-
         // Create User A (Owner)
         const userA = await User.create({
             clerkId: userA_clerkId,
@@ -47,9 +42,12 @@ describe('Custom Organization System', () => {
     });
 
     afterAll(async () => {
-        await User.deleteMany({});
-        await Organization.deleteMany({});
-        await Invitation.deleteMany({});
+        // Targeted clean up
+        await User.deleteMany({ clerkId: { $in: [userA_clerkId, userB_clerkId] } });
+        if (createdOrgId) {
+            await Organization.deleteMany({ _id: createdOrgId });
+            await Invitation.deleteMany({ organizationId: createdOrgId });
+        }
     });
 
     it('should create an organization', async () => {

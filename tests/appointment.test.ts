@@ -34,19 +34,9 @@ describe('Appointment API - Organization Isolation', () => {
         mongoUserB_id = userB._id as mongoose.Types.ObjectId;
     }, 15000);
 
-    beforeEach(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await Appointment.deleteMany({});
-        }
-    });
-
     afterAll(async () => {
-        const dbName = mongoose.connection.name;
-        if (dbName && dbName.includes('test')) {
-            await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
-            await Appointment.deleteMany({});
-        }
+        await User.deleteMany({ clerkId: { $in: [userA_id, userB_id] } });
+        await Appointment.deleteMany({ organizationId: { $in: [orgA, orgB] } });
     });
 
     it('should only return appointments belonging to the user\'s organization', async () => {

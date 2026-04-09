@@ -27,6 +27,8 @@ export type OperationalStatus =
 
 export type ComplianceDocumentType =
   | "drivers_license"
+  | "drivers_license_front"
+  | "drivers_license_back"
   | "medical_card"
   | "insurance_certificate"
   | "vehicle_registration"
@@ -36,6 +38,16 @@ export type ComplianceDocumentType =
   | "cargo_insurance"
   | "liability_insurance"
   | "other";
+
+export const REQUIRED_COMPLIANCE_DOCS: ComplianceDocumentType[] = [
+  "drivers_license_front",
+  "drivers_license_back",
+  "medical_card",
+  "liability_insurance",
+  "vehicle_registration",
+  "operating_authority",
+  "w9_form",
+];
 
 export interface IComplianceDocument {
   _id?: mongoose.Types.ObjectId;
@@ -124,6 +136,8 @@ const ComplianceDocumentSchema = new Schema<IComplianceDocument>(
       type: String,
       enum: [
         "drivers_license",
+        "drivers_license_front",
+        "drivers_license_back",
         "medical_card",
         "insurance_certificate",
         "vehicle_registration",

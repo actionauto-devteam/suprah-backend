@@ -297,6 +297,22 @@ export const getLogStats = asyncHandler(async (req: Request, res: Response) => {
  * Clear application logs
  */
 export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) => {
+  const { confirm } = req.body;
+
+  if (confirm !== true) {
+    throw new ApiError(400, "Deletion aborted. You must provide {'confirm': true} in the request body to clear logs.");
+  }
+
+  // --- DATABASE SECURITY GATEKEEPER ---
+  const MONGODB_URI = process.env.MONGODB_URI || '';
+  const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
+  
+  if (isAtlas && process.env.ALLOW_WIPE !== 'true') {
+    logger.error('Attempted to clear system logs on a Cloud Atlas instance without ALLOW_WIPE=true');
+    throw new ApiError(403, "Database Protection: Bulk log deletion is blocked on live clusters. Set ALLOW_WIPE=true to override.");
+  }
+  // ------------------------------------
+
   const logPath = path.join(process.cwd(), 'logs', 'app.log');
   
   if (fs.existsSync(logPath)) {

@@ -15,6 +15,8 @@ import config from './config';
 import { initSyncScheduler } from './schedulers/sync.scheduler';
 import { initCleanupScheduler } from './schedulers/cleanup.scheduler';
 import healthRoute from './routes/health.route';
+import supraSpaceRoute from './routes/supraspace.route';
+import { initSupraSpaceSocket } from './socket/supraspace.socket';
 
 import { httpLogger } from './utils/logger';
 import logger from './utils/logger';
@@ -60,11 +62,11 @@ app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 app.use(express.text({ type: ['application/xml', 'text/xml'], limit: '512kb' }));
 
 // ========================================
-// Static file serving (Limited to non-sensitive assets)
+// Static file serving (LEGACY - REPLACED BY R2)
 // ========================================
-app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
-app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
-app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
+// app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
+// app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
+// app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
 
 // ========================================
 // CORS CONFIGURATION
@@ -110,6 +112,7 @@ const io = new Server(httpServer, {
 
 setupSocket(io);
 setSocketIO(io);
+initSupraSpaceSocket(httpServer); // Initialize the specialized SupraSpace socket server
 
 logger.info('✓ CORS configured with origins: %s', config.corsOrigin);
 logger.info('✓ Environment: %s', config.env);
@@ -126,6 +129,7 @@ app.use(healthRoute);
 // API Routes
 // ========================================
 app.use('/api', routes);
+app.use('/supraspace', supraSpaceRoute); // Aliased for client-side legacy compatibility
 
 // ========================================
 // Global Error Handler

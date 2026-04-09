@@ -41,15 +41,12 @@ describe('Driver Request API', () => {
     // Tatakbo bago ang BAWAT isang test
     // Purpose: linisin ang DriverRequest table para hindi mag-interfere ang data
     beforeEach(async () => {
-        await DriverRequest.deleteMany({});
-        // NOTE: hindi natin dini-delete ang Users — once create lang sa beforeAll
+        // Targeted clean up for our specific test applicant only
+        await DriverRequest.deleteMany({ driverUserId: applicantUser._id });
     });
 
-    // ─── AFTER ALL ────────────────────────────────────────────────────────────
-    // Tatakbo isang beses pagkatapos ng LAHAT ng tests
-    // Purpose: linisin ang DB para walang natirang test data
     afterAll(async () => {
-        await DriverRequest.deleteMany({});
+        await DriverRequest.deleteMany({ driverUserId: applicantUser._id });
         await User.deleteMany({ clerkId: APPLICANT_CLERK_ID });
     });
 

@@ -14,7 +14,7 @@ import {
   calculateETA,
 } from "../utils/calculations";
 import { maskLoadForDriver } from "../utils/loadMask";
-import { storageService } from "../services/storage.service";
+import { storageService, BucketType } from "../services/storage.service";
 import { safeCreateNotification } from "../utils/safeNotification";
 import activityService from "../services/activity.service";
 
@@ -252,9 +252,17 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     ? rawLoads.map((l) => maskLoadForDriver(l as unknown as Record<string, unknown>))
     : rawLoads;
 
+  const loadsWithSignedProofs = await Promise.all(loads.map(async (l: any) => {
+    if (l.proofOfDelivery?.imageUrl && !l.proofOfDelivery.imageUrl.startsWith('http')) {
+      const signed = await storageService.getSignedUrl(l.proofOfDelivery.imageUrl);
+      if (signed) l.proofOfDelivery.imageUrl = signed;
+    }
+    return l;
+  }));
+
   return res.status(200).json(
     new ApiResponse(200, {
-      loads,
+      loads: loadsWithSignedProofs,
       pagination: {
         page,
         limit,
@@ -309,7 +317,14 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
     ? maskLoadForDriver(raw as unknown as Record<string, unknown>)
     : raw;
 
-  return res.status(200).json(new ApiResponse(200, load, "Load fetched successfully"));
+  // Sign proof of delivery URL if exists
+  const loadObj = load as any;
+  if (loadObj.proofOfDelivery?.imageUrl && !loadObj.proofOfDelivery.imageUrl.startsWith('http')) {
+    const signed = await storageService.getSignedUrl(loadObj.proofOfDelivery.imageUrl);
+    if (signed) loadObj.proofOfDelivery.imageUrl = signed;
+  }
+
+  return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
 });
 
 const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -364,7 +379,8 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     try { await storageService.delete(load.proofOfDelivery.imageUrl); } catch { /* non-fatal */ }
   }
 
-  const imageUrl = await storageService.upload(file, "proofs");
+  // Upload to PRIVATE bucket for security
+  const imageUrl = await storageService.upload(file, "proofs", BucketType.PRIVATE);
 
   (load as any).proofOfDelivery = {
     imageUrl,

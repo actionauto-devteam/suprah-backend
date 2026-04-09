@@ -23,8 +23,8 @@ describe('Dashboard Routes - Organization Isolation', () => {
 
     afterAll(async () => {
         await User.deleteMany({ clerkId: userId });
-        await Vehicle.deleteMany({});
-        await Quote.deleteMany({});
+        await Vehicle.deleteMany({ vin: 'VIN123' });
+        await Quote.deleteMany({ organizationId: orgId });
     });
 
     test('GET /api/dashboard/metrics should return isolated metrics', async () => {

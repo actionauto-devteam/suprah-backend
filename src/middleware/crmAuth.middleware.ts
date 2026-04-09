@@ -72,19 +72,27 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
     if (authHeader?.startsWith('Bearer ')) {
       const mainToken = authHeader.split(' ')[1];
 
-      let payload;
+      let payload: any;
       try {
         payload = tokenService.verifyAccessToken(mainToken);
-      } catch {
+        console.log('[DEBUG-AUTH] Payload verified:', payload.sub);
+      } catch (err) {
+        console.log('[DEBUG-AUTH] Payload verification failed:', err);
         throw new ApiError(401, 'CRM authentication required. Please log in.');
       }
 
       if (!payload.orgId) {
+        console.log('[DEBUG-AUTH] No orgId in payload');
         throw new ApiError(403, 'Your account is not linked to any organization.');
       }
 
       const mainUser = await User.findById(payload.sub).select('name email role isActive organizationId');
-      if (!mainUser || !mainUser.isActive) {
+      if (!mainUser) {
+        console.log('[DEBUG-AUTH] User not found in DB:', payload.sub);
+        throw new ApiError(401, 'Account not found or inactive');
+      }
+      if (!mainUser.isActive) {
+        console.log('[DEBUG-AUTH] User is inactive:', payload.sub);
         throw new ApiError(401, 'Account not found or inactive');
       }
 
@@ -128,6 +136,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       return next(error);
     }
 
+    console.error('[DEBUG-AUTH] CRM Auth Global Failure:', error);
     next(new ApiError(401, 'CRM authentication failed'));
   }
 };
