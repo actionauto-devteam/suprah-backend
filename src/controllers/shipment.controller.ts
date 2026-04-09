@@ -11,6 +11,7 @@ import logger from '../utils/logger';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import cacheService from '../services/cache.service';
+import { getSocketIO } from '../utils/socketEmitter';
 import { storageService, BucketType } from '../services/storage.service';
 import activityService from '../services/activity.service';
 import fs from 'fs';
@@ -200,6 +201,10 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
         )
     );
 
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'created' });
+
     // Log activity
     if (userId) {
         await activityService.createActivity({
@@ -224,17 +229,18 @@ const createShipment = asyncHandler(async (req: Request, res: Response) => {
  */
 const getShipments = asyncHandler(async (req: Request, res: Response) => {
     const { status, search } = req.query;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const skip = (page - 1) * limit;
     const orgId = req.orgId as string;
 
     const filter: any = {};
-
     if (status && status !== 'all') {
         filter.status = status;
     }
 
-    // Only cache the unfiltered/status-only queries — skip caching search queries
     const isCacheable = !search;
-    const cacheKey = `shipments:${orgId}:list:${status || 'all'}`;
+    const cacheKey = `shipments:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {
         const cached = await cacheService.get(cacheKey);
@@ -243,24 +249,29 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const shipments = await Shipment.find(filter)
-        .populate({
-            path: 'quoteId',
-            populate: {
-                path: 'vehicleId',
-                select: 'year make modelName vin stockNumber image location'
-            }
-        })
-        .populate('createdBy', 'name email avatar')
-        .sort({ createdAt: -1 });
+    const attachOrg = async (list: any[]) => {
+        const uniqueOrgIds = [...new Set(list.map((s: any) => s.organizationId?.toString()).filter(Boolean))];
+        const validOrgIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+        const orgs = await Organization.find({ _id: { $in: validOrgIds } }).select('name logoUrl');
+        const orgMap = new Map<string, { name: string; logoUrl?: string }>();
+        orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
+        return list.map((s: any) => ({ ...(s.toJSON ? s.toJSON() : s), organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' } }));
+    };
 
-    let filteredShipments = shipments;
+    let shipmentsWithOrg: any[];
+    let total: number;
+
     if (search) {
-        const searchLower = (search as string).toLowerCase();
-        filteredShipments = shipments.filter(shipment => {
-            const quote = shipment.quoteId as any;
-            const preserved = shipment.preservedQuoteData as any;
+        // Fetch all matching docs, filter in memory (quoteId is populated, not queryable in DB easily)
+        const all = await Shipment.find(filter)
+            .populate({ path: 'quoteId', populate: { path: 'vehicleId', select: 'year make modelName vin stockNumber image location' } })
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 });
 
+        const searchLower = (search as string).toLowerCase();
+        const filtered = all.filter(s => {
+            const quote = s.quoteId as any;
+            const preserved = s.preservedQuoteData as any;
             return (
                 quote?.firstName?.toLowerCase().includes(searchLower) ||
                 quote?.lastName?.toLowerCase().includes(searchLower) ||
@@ -270,7 +281,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
                 preserved?.lastName?.toLowerCase().includes(searchLower) ||
                 preserved?.vin?.toLowerCase().includes(searchLower) ||
                 preserved?.stockNumber?.toLowerCase().includes(searchLower) ||
-                shipment.trackingNumber?.toLowerCase().includes(searchLower)
+                s.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
     }
@@ -287,7 +298,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
 
     const shipmentsWithOrg = await Promise.all(filteredShipments.map(async s => {
         const shipmentObj = s.toJSON();
-        
+
         // Sign proof of delivery URL if exists
         if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
             const signedUrl = await storageService.getSignedUrl(shipmentObj.proofOfDelivery.imageUrl);
@@ -300,7 +311,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         };
     }));
 
-    res.json(new ApiResponse(200, shipmentsWithOrg, 'Shipments fetched successfully'));
+    res.json(new ApiResponse(200, responseData, 'Shipments fetched successfully'));
 });
 
 /**
@@ -479,6 +490,10 @@ const updateShipment = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, shipment, 'Shipment updated successfully'));
 
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'updated' });
+
     // Log activity
     if (userId) {
         await activityService.createActivity({
@@ -626,6 +641,10 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
                 : 'Shipment deleted successfully. Quote has been restored.'
         )
     );
+
+    // Real-time: notify org members
+    const _io = getSocketIO();
+    if (_io) _io.to(`org:${orgId}`).emit('shipment:change', { action: 'deleted' });
 
     // Log activity
     if (userId) {

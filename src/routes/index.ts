@@ -30,6 +30,7 @@ import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
 import devToolsRoute from "./devTools.routes";
 import loadRoute from "./load.routes";
+import analyticsRoute from "./analytics.routes";
 import activityRoute from "./activity.routes";
 
 const router = express.Router();
@@ -135,7 +136,6 @@ const defaultRoutes = [
     path: "/crm/timeproof",
     route: crmTimeprofRoute,
   },
-
   {
     path: "/crm/biometric",
     route: crmBiometricRoute,
@@ -159,6 +159,10 @@ const defaultRoutes = [
   {
     path: "/org-lead",
     route: orgLeadRoute,
+  },
+  {
+    path: "/analytics",
+    route: analyticsRoute,
   },
   {
     path: "/activity",
