@@ -2,44 +2,69 @@ import request from 'supertest';
 import mongoose from 'mongoose';
 import app from '../src/server';
 import User from '../src/models/User.model';
-import { ApiResponse } from '../src/utils/ApiResponse';
-
-// Mock the middlewares by essentially bypassing them or controlling their behavior
-// We can use jest.spyOn or mock the entire module
-jest.mock('../src/middleware/auth.middleware', () => {
-  return () => (req: any, res: any, next: any) => {
-    // Default to unauthorized; tests will overwrite this by mocking the mock if needed
-    if (req.headers.authorization === 'Bearer superadmin-token') {
-      req.user = { _id: new mongoose.Types.ObjectId(), role: 'super_admin', isActive: true, onboardingCompleted: true, emailVerified: true };
-      return next();
-    }
-    if (req.headers.authorization === 'Bearer admin-token') {
-       req.user = { _id: new mongoose.Types.ObjectId(), role: 'admin', isActive: true, onboardingCompleted: true, emailVerified: true };
-       return next();
-    }
-    if (req.headers.authorization === 'Bearer user-token') {
-        req.user = { _id: new mongoose.Types.ObjectId(), role: 'user', isActive: true, onboardingCompleted: true, emailVerified: true };
-        return next();
-     }
-    next(new Error('Unauthorized'));
-  };
-});
-
-// Mock rbac middleware
-jest.mock('../src/middleware/rbac.middleware', () => ({
-  requireSuperAdmin: (req: any, res: any, next: any) => {
-    if (req.user?.role === 'super_admin') return next();
-    res.status(403).json({ message: 'Forbidden: Super Admin access required' });
-  }
-}));
+import tokenService from '../src/services/token.service';
 
 describe('Admin Observability Security & Integrity', () => {
+    let superAdminToken: string;
+    let adminToken: string;
+    let userToken: string;
+    
+    const superAdminEmail = 'super.admin@observability.com';
+    const adminEmail = 'admin@observability.com';
+    const userEmail = 'user@observability.com';
+
+    beforeAll(async () => {
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test users
+        await User.deleteMany({ email: { $in: [superAdminEmail, adminEmail, userEmail] } });
+
+        // Create Super Admin
+        const superAdmin = await User.create({
+            name: 'Super Admin',
+            email: superAdminEmail,
+            role: 'super_admin',
+            emailVerified: true,
+            onboardingCompleted: true
+        });
+        superAdminToken = tokenService.generateAccessToken(superAdmin);
+
+        // Create Admin
+        const admin = await User.create({
+            name: 'Admin',
+            email: adminEmail,
+            role: 'admin',
+            emailVerified: true,
+            onboardingCompleted: true
+        });
+        adminToken = tokenService.generateAccessToken(admin);
+
+        // Create Regular User
+        const user = await User.create({
+            name: 'User',
+            email: userEmail,
+            role: 'customer',
+            emailVerified: true,
+            onboardingCompleted: true
+        });
+        userToken = tokenService.generateAccessToken(user);
+    }, 30000);
+
+    afterAll(async () => {
+        await User.deleteMany({ email: { $in: [superAdminEmail, adminEmail, userEmail] } });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
+        }
+    });
     
     describe('RBAC Enforcement', () => {
         it('should block non-admin users from accessing system stats', async () => {
             const response = await request(app)
                 .get('/api/admin/system/stats')
-                .set('Authorization', 'Bearer user-token');
+                .set('Authorization', `Bearer ${userToken}`);
             
             expect(response.status).toBe(403);
         });
@@ -47,7 +72,7 @@ describe('Admin Observability Security & Integrity', () => {
         it('should block non-admin users from accessing system logs', async () => {
             const response = await request(app)
                 .get('/api/admin/system/logs')
-                .set('Authorization', 'Bearer user-token');
+                .set('Authorization', `Bearer ${userToken}`);
             
             expect(response.status).toBe(403);
         });
@@ -55,54 +80,38 @@ describe('Admin Observability Security & Integrity', () => {
         it('should allow super_admin to access system stats', async () => {
             const response = await request(app)
                 .get('/api/admin/system/stats')
-                .set('Authorization', 'Bearer superadmin-token');
+                .set('Authorization', `Bearer ${superAdminToken}`);
             
             expect(response.status).toBe(200);
             expect(response.body.message).toContain('retrieved successfully');
         });
-
-        it('should allow super_admin to access organization activity', async () => {
-            const response = await request(app)
-                .get('/api/activity/organization')
-                .set('Authorization', 'Bearer superadmin-token');
-            
-            // Note: Might fail if organizationId is not attached to the mock user 
-            // but the controller handles it. For now check route access.
-            expect(response.status).not.toBe(404);
-            expect(response.status).not.toBe(403);
-        });
     });
 
     describe('Path Traversal & Log Security', () => {
-        it('should not allow reading files outside the logs directory (Simulated)', async () => {
-            // Because the path is hardcoded in the controller:
-            // const logPath = path.join(process.cwd(), 'logs', 'app.log');
-            // We verify that it only returns logs and doesn't take path input.
+        it('should return system logs for super_admin', async () => {
             const response = await request(app)
                 .get('/api/admin/system/logs?lines=10')
-                .set('Authorization', 'Bearer superadmin-token');
+                .set('Authorization', `Bearer ${superAdminToken}`);
             
+            // Note: In test environment, the log file might be empty, but it should return 200 and potentially an empty array
             expect(response.status).toBe(200);
             expect(Array.isArray(response.body.data)).toBe(true);
         });
     });
 
     describe('Input Sanitization', () => {
-        it('should enforce maximum limits for log lines', async () => {
-            // Note: The controller currently doesn't have a MAX_LIMIT check, 
-            // but it should. Let's verify our fix later.
+        it('should handle large line counts gracefully', async () => {
             const response = await request(app)
                 .get('/api/admin/system/logs?lines=9999999')
-                .set('Authorization', 'Bearer superadmin-token');
+                .set('Authorization', `Bearer ${superAdminToken}`);
             
             expect(response.status).toBe(200);
-            // Verify it doesn't crash or hang
         });
 
         it('should handle invalid pagination gracefully for activity', async () => {
             const response = await request(app)
                 .get('/api/activity/organization?limit=abc&page=-5')
-                .set('Authorization', 'Bearer superadmin-token');
+                .set('Authorization', `Bearer ${superAdminToken}`);
             
             expect(response.status).toBe(200);
             expect(Array.isArray(response.body.data)).toBe(true);

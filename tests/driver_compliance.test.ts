@@ -1,41 +1,56 @@
 import mongoose from 'mongoose';
 import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from '../src/models/DriverProfile.model';
 import User from '../src/models/User.model';
-import driverProfileController from '../src/controllers/driverProfile.controller';
-import { Request, Response } from 'express';
-// We just need to test the logic, but since it's an asyncHandler we might need a mock req/res or just test the model method if we had one.
-// Since the logic is in the controller directly, I'll test it by mocking the req/res and the DB interaction.
+import Organization from '../src/models/Organization.model';
 
 describe('Driver Compliance Logic', () => {
-    let testUser: any;
+    let testOrg: any;
+    const testEmail = 'compliance.driver@test.com';
 
     beforeAll(async () => {
-        // Mongoose connection is handled by setup.ts
-    });
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test data
+        await User.deleteMany({ email: testEmail });
+        await Organization.deleteMany({ slug: 'compliance-org' });
+
+        testOrg = await Organization.create({
+            name: 'Compliance Org',
+            slug: 'compliance-org',
+            status: 'active'
+        });
+    }, 30000);
 
     afterAll(async () => {
-        // Cleanup ONLY test data
-        if (testUser) {
-            await User.deleteOne({ _id: testUser._id }).catch(() => {});
-            await DriverProfile.deleteOne({ userId: testUser._id }).catch(() => {});
+        const users = await User.find({ email: testEmail });
+        const userIds = users.map(u => u._id);
+        
+        await User.deleteMany({ email: testEmail });
+        await DriverProfile.deleteMany({ userId: { $in: userIds } });
+        await Organization.deleteOne({ _id: testOrg?._id });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
         }
     });
 
     it('should calculate 0/7 compliance score when no documents are uploaded', async () => {
-        const uniqueEmail = `test-${Date.now()}@driver.com`;
-        testUser = await User.create({
+        const user = await User.create({
             name: 'Test Driver',
-            email: uniqueEmail,
+            email: testEmail,
             role: 'driver',
-            organizationId: new mongoose.Types.ObjectId()
+            organizationId: testOrg._id,
+            emailVerified: true,
+            onboardingCompleted: true
         });
 
         const profile = await DriverProfile.create({
-            userId: testUser._id,
-            organizationId: testUser.organizationId.toString()
+            userId: user._id,
+            organizationId: testOrg._id.toString()
         });
 
-        // Manually trigger the logic that would happen in updateIdentityVerification
         const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
         const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
         const complianceScore = Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100);
@@ -46,17 +61,21 @@ describe('Driver Compliance Logic', () => {
     });
 
     it('should calculate 100% compliance when all 7 documents are uploaded', async () => {
-        const orgId = new mongoose.Types.ObjectId();
+        const fullEmail = 'full.compliance@test.com';
+        await User.deleteMany({ email: fullEmail });
+
         const user = await User.create({
             name: 'Full Driver',
-            email: 'full@driver.com',
+            email: fullEmail,
             role: 'driver',
-            organizationId: orgId
+            organizationId: testOrg._id,
+            emailVerified: true,
+            onboardingCompleted: true
         });
 
         const profile = await DriverProfile.create({
             userId: user._id,
-            organizationId: orgId.toString()
+            organizationId: testOrg._id.toString()
         });
 
         // Simulate uploading all 7 required docs

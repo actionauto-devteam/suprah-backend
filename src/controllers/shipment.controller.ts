@@ -258,8 +258,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
         return list.map((s: any) => ({ ...(s.toJSON ? s.toJSON() : s), organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' } }));
     };
 
-    let shipmentsWithOrg: any[];
-    let total: number;
+    let filteredShipments: any[] = [];
 
     if (search) {
         // Fetch all matching docs, filter in memory (quoteId is populated, not queryable in DB easily)
@@ -269,7 +268,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             .sort({ createdAt: -1 });
 
         const searchLower = (search as string).toLowerCase();
-        const filtered = all.filter(s => {
+        filteredShipments = all.filter(s => {
             const quote = s.quoteId as any;
             const preserved = s.preservedQuoteData as any;
             return (
@@ -284,7 +283,22 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
                 s.trackingNumber?.toLowerCase().includes(searchLower)
             );
         });
+    } else {
+        filteredShipments = await Shipment.find(filter)
+            .populate({
+                path: 'quoteId',
+                populate: {
+                    path: 'vehicleId',
+                    select: 'year make modelName vin stockNumber image location'
+                }
+            })
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
     }
+
+    const total = search ? filteredShipments.length : await Shipment.countDocuments(filter);
 
     // Attach organization name to each shipment
     const uniqueOrgIds = [...new Set(filteredShipments.map(s => s.organizationId?.toString()).filter(Boolean))];
@@ -297,7 +311,7 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
     });
 
     const shipmentsWithOrg = await Promise.all(filteredShipments.map(async s => {
-        const shipmentObj = s.toJSON();
+        const shipmentObj = s.toJSON ? s.toJSON() : s;
 
         // Sign proof of delivery URL if exists
         if (shipmentObj.proofOfDelivery?.imageUrl && !shipmentObj.proofOfDelivery.imageUrl.startsWith('http')) {
@@ -310,6 +324,20 @@ const getShipments = asyncHandler(async (req: Request, res: Response) => {
             organization: orgMap.get(s.organizationId?.toString()) || { name: 'Unknown Org' }
         };
     }));
+
+    const responseData = {
+        shipments: shipmentsWithOrg,
+        pagination: {
+            total,
+            page,
+            limit,
+            pages: Math.ceil(total / limit)
+        }
+    };
+
+    if (isCacheable) {
+        await cacheService.set(cacheKey, responseData, 300); // 5 mins
+    }
 
     res.json(new ApiResponse(200, responseData, 'Shipments fetched successfully'));
 });

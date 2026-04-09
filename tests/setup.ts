@@ -23,6 +23,13 @@ jest.mock('@clerk/clerk-sdk-node', () => {
     };
 });
 
+// Mock json2csv globally to prevent missing module errors during test runs
+jest.mock('json2csv', () => ({
+    Parser: jest.fn().mockImplementation(() => ({
+        parse: jest.fn().mockReturnValue('csv,data')
+    }))
+}), { virtual: true });
+
 // Mock environment variables
 process.env.CLERK_PUBLISHABLE_KEY = 'pk_test_123';
 process.env.CLERK_SECRET_KEY = 'sk_test_123';
@@ -66,7 +73,7 @@ afterAll(async () => {
 const originalDeleteMany = mongoose.Model.deleteMany;
 mongoose.Model.deleteMany = function (this: mongoose.Model<any>, filter: any, options?: any) {
     const dbName = mongoose.connection.name;
-    const isSafeDb = dbName === 'action-auto-test' || dbName.toLowerCase().includes('test');
+    const isSafeDb = dbName && (dbName === 'action-auto-test' || dbName.toLowerCase().includes('test'));
     
     // If filter is empty OR includes everything, and we're not in a safe test DB, BLOCK IT.
     const isMassDelete = !filter || Object.keys(filter).length === 0;

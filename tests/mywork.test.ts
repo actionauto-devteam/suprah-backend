@@ -12,26 +12,41 @@ describe('My Work Routes - Targeted Isolation', () => {
     let vehicleId: string;
 
     beforeAll(async () => {
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test data
+        await User.deleteMany({ email: { $in: ['tech.work@example.com', 'other.work@example.com'] } });
+
         user = await User.create({
             email: 'tech.work@example.com',
             password: 'password123',
             name: 'Technician',
-            role: 'user'
+            role: 'user',
+            emailVerified: true,
+            onboardingCompleted: true
         });
         otherUser = await User.create({
             email: 'other.work@example.com',
             password: 'password123',
             name: 'Other Tech',
-            role: 'user'
+            role: 'user',
+            emailVerified: true,
+            onboardingCompleted: true
         });
-        const tokens = await tokenService.generateAuthTokens(user);
-        accessToken = tokens.access.token;
-    });
+        
+        accessToken = tokenService.generateAccessToken(user);
+    }, 30000);
 
     afterAll(async () => {
         // Targeted Cleanup
         await User.deleteMany({ email: { $in: ['tech.work@example.com', 'other.work@example.com'] } });
-        await Vehicle.deleteMany({ assignedTo: { $in: [user._id, otherUser._id] } });
+        await Vehicle.deleteMany({ assignedTo: { $in: [user?._id, otherUser?._id] } });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
+        }
     });
 
     beforeEach(async () => {
@@ -69,7 +84,7 @@ describe('My Work Routes - Targeted Isolation', () => {
             .set('Authorization', `Bearer ${accessToken}`);
         
         expect(res.status).toBe(200);
-        // We use find to keep it data-safe in case of other tests
+        
         const myVehicle = res.body.data.find((v: any) => v.vin === 'VIN_MYWORK_123');
         expect(myVehicle).toBeDefined();
         
