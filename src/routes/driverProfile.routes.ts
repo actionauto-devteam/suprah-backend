@@ -19,6 +19,7 @@ router.patch("/identity-verification", driverProfileController.updateIdentityVer
 
 router.get("/org", requireOrg, driverProfileController.getOrgDriverProfiles);
 router.get("/org/:driverId", requireOrg, driverProfileController.getDriverProfileById);
+router.patch("/org/:driverId/approve", requireOrg, driverProfileController.approveDriverProfile);
 router.patch("/org/:driverId/documents/:documentId/verify", requireOrg, driverProfileController.verifyDocument);
 router.patch("/org/:driverId/documents/:documentId/reject", requireOrg, driverProfileController.rejectDocument);
 

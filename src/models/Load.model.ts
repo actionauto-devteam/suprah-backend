@@ -24,21 +24,21 @@ export interface ILocationBlock {
 
 const LocationBlockSchema = new Schema<ILocationBlock>(
   {
-    locationType:        { type: String, trim: true },
-    companyName:         { type: String, trim: true },
-    contactName:         { type: String, trim: true },
-    email:               { type: String, trim: true, lowercase: true },
-    phone:               { type: String, trim: true },
-    cellPhone:           { type: String, trim: true },
-    phoneExt:            { type: String, trim: true },
-    street:              { type: String, trim: true },
-    city:                { type: String, required: true, trim: true },
-    state:               { type: String, required: true, trim: true, uppercase: true },
-    zip:                 { type: String, required: true, trim: true },
-    country:             { type: String, default: "US", trim: true, uppercase: true },
-    buyerReferenceNumber:{ type: String, trim: true, maxlength: 50 },
-    isTwicRequired:      { type: Boolean, default: false },
-    notes:               { type: String, trim: true, maxlength: 500 },
+    locationType: { type: String, trim: true },
+    companyName: { type: String, trim: true },
+    contactName: { type: String, trim: true },
+    email: { type: String, trim: true, lowercase: true },
+    phone: { type: String, trim: true },
+    cellPhone: { type: String, trim: true },
+    phoneExt: { type: String, trim: true },
+    street: { type: String, trim: true },
+    city: { type: String, required: true, trim: true },
+    state: { type: String, required: true, trim: true, uppercase: true },
+    zip: { type: String, required: true, trim: true },
+    country: { type: String, default: "US", trim: true, uppercase: true },
+    buyerReferenceNumber: { type: String, trim: true, maxlength: 50 },
+    isTwicRequired: { type: Boolean, default: false },
+    notes: { type: String, trim: true, maxlength: 500 },
   },
   { _id: false }
 );
@@ -65,18 +65,18 @@ export interface ILoadVehicle {
 
 const LoadVehicleSchema = new Schema<ILoadVehicle>(
   {
-    vehicleId:    { type: Schema.Types.ObjectId, ref: "Vehicle" },
-    hasVin:       { type: Boolean, default: false },
-    vin:          { type: String, trim: true, uppercase: true, maxlength: 17 },
-    vehicleType:  { type: String, trim: true },
-    year:         { type: Number },
-    make:         { type: String, trim: true },
-    model:        { type: String, trim: true },
-    color:        { type: String, trim: true },
-    trailerType:  { type: String, required: true, trim: true },
-    condition:    { type: String, enum: ["Operable", "Inoperable"], default: "Operable" },
-    oversized:    { type: Boolean, default: false },
-    lotNumber:    { type: String, trim: true },
+    vehicleId: { type: Schema.Types.ObjectId, ref: "Vehicle" },
+    hasVin: { type: Boolean, default: false },
+    vin: { type: String, trim: true, uppercase: true, maxlength: 17 },
+    vehicleType: { type: String, trim: true },
+    year: { type: Number },
+    make: { type: String, trim: true },
+    model: { type: String, trim: true },
+    color: { type: String, trim: true },
+    trailerType: { type: String, required: true, trim: true },
+    condition: { type: String, enum: ["Operable", "Inoperable"], default: "Operable" },
+    oversized: { type: Boolean, default: false },
+    lotNumber: { type: String, trim: true },
     licensePlate: { type: String, trim: true, uppercase: true },
     licenseState: { type: String, trim: true, uppercase: true },
     carrierNotes: { type: String, trim: true, maxlength: 500 },
@@ -96,11 +96,11 @@ export interface ILoadDates {
 
 const LoadDatesSchema = new Schema<ILoadDates>(
   {
-    firstAvailable:  { type: Date },
-    expirationDate:  { type: Date },
-    pickupDeadline:  { type: Date },
-    deliveryDeadline:{ type: Date },
-    notes:           { type: String, trim: true, maxlength: 500 },
+    firstAvailable: { type: Date },
+    expirationDate: { type: Date },
+    pickupDeadline: { type: Date },
+    deliveryDeadline: { type: Date },
+    notes: { type: String, trim: true, maxlength: 500 },
   },
   { _id: false }
 );
@@ -120,11 +120,11 @@ export interface ILoadPricing {
 
 const LoadPricingSchema = new Schema<ILoadPricing>(
   {
-    miles:            { type: Number },
-    estimatedRate:    { type: Number },
+    miles: { type: Number },
+    estimatedRate: { type: Number },
     carrierPayAmount: { type: Number },
-    copCodAmount:     { type: Number, default: 0 },
-    balanceAmount:    { type: Number },
+    copCodAmount: { type: Number, default: 0 },
+    balanceAmount: { type: Number },
   },
   { _id: false }
 );
@@ -143,13 +143,13 @@ export interface ILoadAdditionalInfo {
 
 const LoadAdditionalInfoSchema = new Schema<ILoadAdditionalInfo>(
   {
-    notes:               { type: String, trim: true, maxlength: 4000 },
-    instructions:        { type: String, trim: true, maxlength: 4000 },
-    visibility:          { type: String, enum: ["public", "private"], default: "public" },
-    internalLoadId:      { type: String, trim: true, maxlength: 50 },
-    preDispatchNotes:    { type: String, trim: true, maxlength: 4000 },
+    notes: { type: String, trim: true, maxlength: 4000 },
+    instructions: { type: String, trim: true, maxlength: 4000 },
+    visibility: { type: String, enum: ["public", "private"], default: "public" },
+    internalLoadId: { type: String, trim: true, maxlength: 50 },
+    preDispatchNotes: { type: String, trim: true, maxlength: 4000 },
     specialInstructions: { type: String, trim: true, maxlength: 4000 },
-    loadSpecificTerms:   { type: String, trim: true, maxlength: 500 },
+    loadSpecificTerms: { type: String, trim: true, maxlength: 500 },
   },
   { _id: false }
 );
@@ -166,7 +166,7 @@ const LoadContractSchema = new Schema<ILoadContract>(
   {
     agreedToTerms: { type: Boolean, required: true, default: false },
     signatureName: { type: String, trim: true, maxlength: 200 },
-    signedAt:      { type: Date },
+    signedAt: { type: Date },
   },
   { _id: false }
 );
@@ -177,41 +177,42 @@ export type LoadStatus = "Draft" | "Posted" | "Assigned" | "In-Transit" | "Deliv
 export type LoadPostType = "load-board" | "assign-carrier";
 
 export interface ILoad extends Document {
-  organizationId:   string;
-  orgId?:           mongoose.Types.ObjectId;
-  createdBy:        mongoose.Types.ObjectId;
+  organizationId: string;
+  orgId?: mongoose.Types.ObjectId;
+  createdBy: mongoose.Types.ObjectId;
 
-  loadNumber:       string;
-  postType:         LoadPostType;
-  status:           LoadStatus;
+  loadNumber: string;
+  postType: LoadPostType;
+  status: LoadStatus;
 
-  pickupLocation:   ILocationBlock;
+  pickupLocation: ILocationBlock;
   deliveryLocation: ILocationBlock;
 
-  vehicles:         ILoadVehicle[];
-  dates?:           ILoadDates;
-  pricing?:         ILoadPricing;
-  additionalInfo?:  ILoadAdditionalInfo;
-  contract?:        ILoadContract;
+  vehicles: ILoadVehicle[];
+  dates?: ILoadDates;
+  pricing?: ILoadPricing;
+  additionalInfo?: ILoadAdditionalInfo;
+  contract?: ILoadContract;
 
   assignedDriverId?: mongoose.Types.ObjectId;
-  assignedAt?:       Date;
+  assignedAt?: Date;
+  driverAcceptedAt?: Date;
 
   proofOfDelivery?: {
-    imageUrl:    string;
+    imageUrl: string;
     submittedAt: Date;
-    note?:       string;
+    note?: string;
     confirmedAt?: Date;
     confirmedBy?: mongoose.Types.ObjectId;
   };
 
   pendingDriverRequests?: Array<{
-    driverId:        mongoose.Types.ObjectId;
-    driverName:      string;
-    requestedAt:     Date;
-    status:          "pending" | "approved" | "rejected";
-    reviewedAt?:     Date;
-    reviewedBy?:     mongoose.Types.ObjectId;
+    driverId: mongoose.Types.ObjectId;
+    driverName: string;
+    requestedAt: Date;
+    status: "pending" | "approved" | "rejected";
+    reviewedAt?: Date;
+    reviewedBy?: mongoose.Types.ObjectId;
     rejectionReason?: string;
   }>;
 
@@ -222,8 +223,8 @@ export interface ILoad extends Document {
 const LoadSchema = new Schema<ILoad>(
   {
     organizationId: { type: String, required: true, index: true },
-    orgId:          { type: Schema.Types.ObjectId, ref: "Organization", index: true },
-    createdBy:      { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    orgId: { type: Schema.Types.ObjectId, ref: "Organization", index: true },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
     loadNumber: { type: String, unique: true, sparse: true },
 
@@ -239,34 +240,35 @@ const LoadSchema = new Schema<ILoad>(
       default: "Draft",
     },
 
-    pickupLocation:   { type: LocationBlockSchema, required: true },
+    pickupLocation: { type: LocationBlockSchema, required: true },
     deliveryLocation: { type: LocationBlockSchema, required: true },
 
-    vehicles:       { type: [LoadVehicleSchema], default: [] },
-    dates:          { type: LoadDatesSchema },
-    pricing:        { type: LoadPricingSchema },
+    vehicles: { type: [LoadVehicleSchema], default: [] },
+    dates: { type: LoadDatesSchema },
+    pricing: { type: LoadPricingSchema },
     additionalInfo: { type: LoadAdditionalInfoSchema },
-    contract:       { type: LoadContractSchema },
+    contract: { type: LoadContractSchema },
 
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
-    assignedAt:       { type: Date },
+    assignedAt: { type: Date },
+    driverAcceptedAt: { type: Date },
 
     proofOfDelivery: {
-      imageUrl:    { type: String, trim: true },
+      imageUrl: { type: String, trim: true },
       submittedAt: { type: Date },
-      note:        { type: String, trim: true },
+      note: { type: String, trim: true },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },
 
     pendingDriverRequests: [
       {
-        driverId:        { type: Schema.Types.ObjectId, ref: "User", required: true },
-        driverName:      { type: String, required: true },
-        requestedAt:     { type: Date, default: Date.now },
-        status:          { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
-        reviewedAt:      { type: Date },
-        reviewedBy:      { type: Schema.Types.ObjectId, ref: "User" },
+        driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+        driverName: { type: String, required: true },
+        requestedAt: { type: Date, default: Date.now },
+        status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+        reviewedAt: { type: Date },
+        reviewedBy: { type: Schema.Types.ObjectId, ref: "User" },
         rejectionReason: { type: String, trim: true },
       },
     ],

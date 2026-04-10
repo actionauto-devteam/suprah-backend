@@ -180,7 +180,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     "operating_authority", "cargo_insurance", "liability_insurance", "other",
   ];
   if (!allowedTypes.includes(type)) throw new ApiError(400, "Invalid document type");
-  
+
   // Enforce expiration dates for high-risk documents
   const needsExpiry = ["drivers_license_front", "drivers_license_back", "medical_card", "insurance_certificate", "liability_insurance", "cargo_insurance"];
   if (needsExpiry.includes(type) && !expiresAt) {
@@ -505,7 +505,7 @@ const updateIdentityVerification = asyncHandler(async (req: Request, res: Respon
 
   const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
   const allUploaded = REQUIRED_COMPLIANCE_DOCS.every(t => uploadedTypes.has(t));
-  
+
   const allVerified = REQUIRED_COMPLIANCE_DOCS.every(t =>
     profile.documents.some((d: any) => d.type === t && d.verified)
   );
@@ -541,6 +541,41 @@ const updateIdentityVerification = asyncHandler(async (req: Request, res: Respon
   });
 });
 
+const approveDriverProfile = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!["admin", "super_admin"].includes(user.role)) {
+    throw new ApiError(403, "Only admins can approve driver profiles");
+  }
+
+  const orgId = req.orgId as string;
+  if (!orgId) throw new ApiError(403, "Organization context required");
+
+  const { driverId } = req.params;
+
+  const profile = await DriverProfile.findOne({
+    userId: driverId,
+    organizationId: orgId,
+  });
+  if (!profile) throw new ApiError(404, "Driver profile not found");
+
+  profile.verificationStatus = "verified";
+  await profile.save();
+
+  await activityService.createActivity({
+    userId: driverId,
+    organizationId: orgId,
+    type: 'other',
+    title: 'Driver Profile Approved',
+    description: `Driver profile was approved by admin ${user.name}`,
+    metadata: { profileId: profile._id.toString(), approvedBy: user._id.toString() }
+  });
+
+  logger.info({ profileId: profile._id, driverId, approvedBy: user._id }, 'Driver profile approved by admin');
+
+  res.json(new ApiResponse(200, profile, "Driver profile approved"));
+});
+
 export default {
   getProfile,
   updateEquipment,
@@ -553,4 +588,5 @@ export default {
   verifyDocument,
   rejectDocument,
   updateIdentityVerification,
+  approveDriverProfile,
 };
