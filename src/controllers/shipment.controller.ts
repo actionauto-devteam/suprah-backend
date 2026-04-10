@@ -14,6 +14,7 @@ import cacheService from '../services/cache.service';
 import { getSocketIO } from '../utils/socketEmitter';
 import { storageService, BucketType } from '../services/storage.service';
 import activityService from '../services/activity.service';
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 
@@ -720,12 +721,18 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     }
 
     // Upload new image to R2 PRIVATE bucket
-    const imageUrl = await storageService.upload(file, 'proofs', BucketType.PRIVATE);
+    const imageUrl = await storageService.upload(file, 'proof-of-delivery', BucketType.PRIVATE);
+
+    // Auto-route proof to whoever created the shipment/quote
+    const submittedTo = shipment.createdBy
+        ? new mongoose.Types.ObjectId(shipment.createdBy.toString())
+        : undefined;
 
     shipment.proofOfDelivery = {
         imageUrl,
         submittedAt: new Date(),
         note: note || undefined,
+        submittedTo,
     };
 
     await shipment.save();
@@ -743,17 +750,16 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
         );
     }
 
-    // Use the shipment's own organizationId for notifications
     const shipmentOrgId = shipment.organizationId.toString();
 
-    const admins = await User.find({
-        organizationId: shipment.organizationId,
-        role: { $in: ['admin', 'user', 'super_admin'] },
-    }).select('_id');
+    // Notify the admin who created the shipment; fallback to all admins
+    const notifyIds: string[] = submittedTo
+        ? [submittedTo.toString()]
+        : (await User.find({ organizationId: shipment.organizationId, role: { $in: ['admin', 'user', 'super_admin'] } }).select('_id')).map((a: any) => a._id.toString());
 
-    for (const admin of admins) {
+    for (const adminId of notifyIds) {
         await safeCreateNotification({
-            userId: admin._id.toString(),
+            userId: adminId,
             organizationId: shipmentOrgId,
             type: 'proof_submitted',
             title: 'Proof of Delivery Submitted',
@@ -767,6 +773,26 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     }
 
     res.json(new ApiResponse(200, shipment, 'Proof of delivery submitted successfully'));
+});
+
+/**
+ * GET /shipments/:id/proof-image
+ * Streams the private proof image to authenticated admin/dealer clients.
+ */
+const streamProofImage = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const shipment = await Shipment.findOne({ _id: req.params.id, organizationId: orgId }).lean();
+    if (!shipment) throw new ApiError(404, 'Shipment not found');
+
+    const key = (shipment as any).proofOfDelivery?.imageUrl;
+    if (!key) throw new ApiError(404, 'No proof image submitted');
+
+    const result = await storageService.streamPrivateFile(key);
+    if (!result) throw new ApiError(404, 'Proof image not found in storage');
+
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    result.stream.pipe(res);
 });
 
 /**
@@ -876,5 +902,6 @@ export default {
     deleteShipment,
     getShipmentStats,
     submitProofOfDelivery,
+    streamProofImage,
     confirmDelivery,
 };

@@ -41,4 +41,6 @@ router
     .route('/:id/confirm-delivery')
     .post(shipmentController.confirmDelivery);
 
+router.get('/:id/proof-image', shipmentController.streamProofImage);
+
 export default router;

@@ -195,13 +195,14 @@ export interface ILoad extends Document {
   contract?: ILoadContract;
 
   assignedDriverId?: mongoose.Types.ObjectId;
-  assignedAt?: Date;
+  assignedAt?:       Date;
   driverAcceptedAt?: Date;
 
   proofOfDelivery?: {
-    imageUrl: string;
-    submittedAt: Date;
-    note?: string;
+    imageUrl:     string;
+    submittedAt:  Date;
+    note?:        string;
+    submittedTo?: mongoose.Types.ObjectId;
     confirmedAt?: Date;
     confirmedBy?: mongoose.Types.ObjectId;
   };
@@ -249,14 +250,15 @@ const LoadSchema = new Schema<ILoad>(
     additionalInfo: { type: LoadAdditionalInfoSchema },
     contract: { type: LoadContractSchema },
 
-    assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
-    assignedAt: { type: Date },
-    driverAcceptedAt: { type: Date },
+    assignedDriverId:  { type: Schema.Types.ObjectId, ref: "User", index: true },
+    assignedAt:        { type: Date },
+    driverAcceptedAt:  { type: Date },
 
     proofOfDelivery: {
       imageUrl: { type: String, trim: true },
       submittedAt: { type: Date },
-      note: { type: String, trim: true },
+      note:        { type: String, trim: true },
+      submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },

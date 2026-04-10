@@ -117,6 +117,7 @@ export interface IShipment extends Document {
     imageUrl: string;
     submittedAt: Date;
     note?: string;
+    submittedTo?: mongoose.Types.ObjectId;
     confirmedAt?: Date;
     confirmedBy?: mongoose.Types.ObjectId;
   };
@@ -255,9 +256,10 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     },
 
     proofOfDelivery: {
-      imageUrl: { type: String, trim: true },
+      imageUrl:    { type: String, trim: true },
       submittedAt: { type: Date },
-      note: { type: String, trim: true },
+      note:        { type: String, trim: true },
+      submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },

@@ -381,18 +381,22 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, "Only the assigned driver can submit proof of delivery");
   }
 
-  // Replace old image if one exists
-  if (load.proofOfDelivery?.imageUrl?.startsWith("http")) {
-    try { await storageService.delete(load.proofOfDelivery.imageUrl); } catch { /* non-fatal */ }
+  // Replace old image if one exists (R2 stores raw keys, not http URLs)
+  if (load.proofOfDelivery?.imageUrl) {
+    try { await storageService.delete(load.proofOfDelivery.imageUrl, BucketType.PRIVATE); } catch { /* non-fatal */ }
   }
 
   // Upload to PRIVATE bucket for security
-  const imageUrl = await storageService.upload(file, "proofs", BucketType.PRIVATE);
+  const imageUrl = await storageService.upload(file, "proof-of-delivery", BucketType.PRIVATE);
+
+  // Auto-route proof to whoever created/posted the load
+  const submittedTo = load.createdBy ? load.createdBy.toString() : undefined;
 
   (load as any).proofOfDelivery = {
     imageUrl,
     submittedAt: new Date(),
     note: note || undefined,
+    submittedTo: submittedTo || undefined,
   };
 
   await load.save();
@@ -401,17 +405,21 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
   await activityService.logLoadActivity(
     userId,
     load.organizationId?.toString(),
-    'load_delivered', // Triggering 'delivered' status log
+    'load_delivered',
     load._id.toString(),
     `Submitted proof of delivery for load ${load.loadNumber}`
   );
 
   const orgId = load.organizationId?.toString();
   if (orgId) {
-    const admins = await User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin", "employee"] } }).select("_id");
-    for (const admin of admins) {
+    // Notify the admin who created/posted the load; fallback to all admins
+    const notifyIds: string[] = submittedTo
+      ? [submittedTo]
+      : (await User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin", "employee"] } }).select("_id")).map((a: any) => a._id.toString());
+
+    for (const adminId of notifyIds) {
       await safeCreateNotification({
-        userId: admin._id.toString(), organizationId: orgId,
+        userId: adminId, organizationId: orgId,
         type: "proof_submitted", title: "Proof of Delivery Submitted",
         message: `Driver submitted proof of delivery for load ${load.loadNumber || req.params.id}`,
         metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber, imageUrl },
@@ -424,4 +432,75 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
   return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
 });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad, submitProofOfDelivery };
+// ─── Proof Image Proxy ────────────────────────────────────────────────────────
+// GET /api/loads/:id/proof-image
+// Streams the private proof image to authenticated admin/dealer clients.
+
+const streamProofImage = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const load = await Load.findOne({ _id: req.params.id, organizationId }).lean();
+  if (!load) throw new ApiError(404, "Load not found");
+
+  const key = (load as any).proofOfDelivery?.imageUrl;
+  if (!key) throw new ApiError(404, "No proof image submitted");
+
+  const result = await storageService.streamPrivateFile(key);
+  if (!result) throw new ApiError(404, "Proof image not found in storage");
+
+  res.setHeader("Content-Type", result.contentType);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  result.stream.pipe(res);
+});
+
+// ─── Confirm Delivery ─────────────────────────────────────────────────────────
+// POST /api/loads/:id/confirm-delivery
+// Admin/dealer confirms the driver's submitted proof, marking the load as Delivered.
+
+const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+
+  if (!load.proofOfDelivery?.imageUrl) {
+    throw new ApiError(400, "No proof of delivery has been submitted yet");
+  }
+
+  const updated = await Load.findOneAndUpdate(
+    { _id: req.params.id, organizationId },
+    {
+      status: "Delivered",
+      "proofOfDelivery.confirmedAt": new Date(),
+      "proofOfDelivery.confirmedBy": user._id,
+    },
+    { new: true }
+  );
+
+  if (load.assignedDriverId) {
+    await safeCreateNotification({
+      userId: load.assignedDriverId.toString(),
+      organizationId,
+      type: "delivery_confirmed",
+      title: "Delivery Confirmed",
+      message: `Your delivery for load ${load.loadNumber} has been confirmed`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+    });
+  }
+
+  await activityService.logLoadActivity(
+    user._id.toString(),
+    organizationId,
+    "load_delivered",
+    load._id.toString(),
+    `Admin confirmed proof of delivery for load ${load.loadNumber}`
+  );
+
+  logger.info({ loadId: load._id, userId: user._id }, "Delivery confirmed by admin for load");
+
+  return res.status(200).json(new ApiResponse(200, updated, "Delivery confirmed successfully"));
+});
+
+export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery };

@@ -7,12 +7,12 @@ import { ApiError } from '../utils/ApiError';
 const storage = multer.memoryStorage();
 
 const imageFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowed = ['.jpg', '.jpeg', '.png', '.webp'];
+  const allowed = ['.jpg', '.jpeg', '.png', '.img'];
   const ext = path.extname(file.originalname).toLowerCase();
   if (allowed.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new ApiError(400, 'Only image files (jpg, jpeg, png, webp) are allowed') as any, false);
+    cb(new ApiError(400, 'Only image files (jpg, jpeg, png, img) are allowed') as any, false);
   }
 };
 
@@ -35,7 +35,7 @@ const avatarFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.F
 export const uploadProofImage = multer({
   storage: storage,
   fileFilter: imageFileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
 }).single('proof');
 
 export const uploadAvatarImage = multer({

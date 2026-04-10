@@ -35,4 +35,10 @@ router
 // Driver submits proof — no org required (same pattern as shipment submit-proof)
 router.post("/:id/submit-proof", uploadLimiter, auth(), uploadProofImage, loadController.submitProofOfDelivery);
 
+// Admin/dealer streams proof image (proxy — avoids exposing private R2 keys)
+router.get("/:id/proof-image", staffOnly, loadController.streamProofImage);
+
+// Admin/dealer confirms proof of delivery
+router.post("/:id/confirm-delivery", staffOnly, loadController.confirmDelivery);
+
 export default router;

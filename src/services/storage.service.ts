@@ -1,9 +1,10 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Readable } from 'stream';
 import config from '../config';
 import path from 'path';
 import fs from 'fs/promises';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, createReadStream } from 'fs';
 
 export enum BucketType {
     PUBLIC = 'public',
@@ -173,6 +174,41 @@ class StorageService {
             await this.s3Client.send(command);
         } catch (error: any) {
             console.error('[StorageService] R2 Delete Error:', error);
+        }
+    }
+
+    /**
+     * Streams a private file — works for both local /uploads/ paths and R2 private keys.
+     * Used by proxy endpoints to serve private images to authenticated clients.
+     */
+    async streamPrivateFile(key: string): Promise<{ stream: Readable; contentType: string } | null> {
+        if (!key) return null;
+
+        // Local fallback path
+        if (key.startsWith('/uploads/')) {
+            const fullPath = path.join(__dirname, '../../', key);
+            if (!existsSync(fullPath)) return null;
+            const ext = path.extname(key).toLowerCase();
+            const contentType = ext === '.png' ? 'image/png' : 'image/jpeg';
+            return { stream: createReadStream(fullPath) as unknown as Readable, contentType };
+        }
+
+        if (!this.isConfigured || !this.s3Client) return null;
+
+        try {
+            const command = new GetObjectCommand({
+                Bucket: config.r2.buckets.private,
+                Key: key,
+            });
+            const response = await this.s3Client.send(command);
+            if (!response.Body) return null;
+            return {
+                stream: response.Body as Readable,
+                contentType: response.ContentType || 'image/jpeg',
+            };
+        } catch (error) {
+            console.error('[StorageService] streamPrivateFile error:', error);
+            return null;
         }
     }
 
