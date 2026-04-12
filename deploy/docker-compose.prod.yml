@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  # 1. Redis: Internal Cache & Session Store
+  redis:
+    image: redis:7-alpine
+    container_name: actionauto-redis
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    command: >
+      sh -c "redis-server --appendonly yes --requirepass $${REDIS_PASSWORD}"
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} PING"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # 2. Main API Service
+  api:
+    image: jolo0/actionauto-api:latest
+    container_name: actionauto-api
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - PORT=5000
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ftp-uploads:/app/ftp-uploads
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # 3. FTP Sync Worker (FTPS)
+  ftp-worker:
+    image: jolo0/actionauto-ftp:latest
+    container_name: actionauto-ftp
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "2121:2121"
+      - "21000-21010:21000-21010"
+    environment:
+      NODE_ENV: production
+      FTP_SERVER_PORT: 2121
+      FTP_PASSIVE_URL: 54.191.44.38
+      FTP_PASV_MIN: 21000
+      FTP_PASV_MAX: 21010
+      FTP_FORCE_TLS: "true"
+      FTP_TLS_CERT_PATH: /app/certs/server.crt
+      FTP_TLS_KEY_PATH: /app/certs/server.key
+      # Networked Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ftp-uploads:/app/ftp-uploads
+      - ./certs:/app/certs:ro # Add this line
+      - ./certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "21"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # 4. Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: actionauto-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - api
+    networks:
+      - app-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # 5. Certbot (SSL Sidecar)
+  certbot:
+    image: certbot/certbot
+    container_name: actionauto-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    networks:
+      - app-network
+    depends_on:
+      - nginx
+
+volumes:
+  ftp-uploads:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge

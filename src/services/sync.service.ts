@@ -14,10 +14,17 @@ import config from '../config';
  * The internal organization ID for Action Auto Utah.
  * All vehicles synced via FTP are owned by this org.
  */
-const ACTION_AUTO_ORG_ID = '69d6a26499bee4596c1ea94c';
+const ACTION_AUTO_ORG_ID = process.env.ACTION_AUTO_ORG_ID || '69d6a26499bee4596c1ea94c';
 
 export class SyncService {
+    private isLocked = false;
+
     async syncInventory(): Promise<any> {
+        if (this.isLocked) {
+            console.log('[SyncService] ⚠️ Sync already in progress. Skipping...');
+            return { message: 'Sync already in progress' };
+        }
+
         const startTime = new Date();
         const syncLog = await SyncLog.create({
             startTime,
@@ -25,12 +32,16 @@ export class SyncService {
             organizationId: ACTION_AUTO_ORG_ID,
         });
 
+        this.isLocked = true;
         try {
             // 1. Fetch from FTP and Pipe to Parser
             const stream = await ftpService.getInventoryStream();
             const result = await this.processStream(stream, syncLog);
 
-            // 2. Finalize sync log
+            // 2. Performance: Pre-calculate daysOnLot instead of doing it in model hooks
+            await this.updateDaysOnLot();
+
+            // 3. Finalize sync log
             syncLog.status = 'COMPLETED';
             syncLog.endTime = new Date();
             await syncLog.save();
@@ -48,6 +59,8 @@ export class SyncService {
             syncLog.endTime = new Date();
             await syncLog.save();
             throw error;
+        } finally {
+            this.isLocked = false;
         }
     }
 
@@ -316,6 +329,41 @@ export class SyncService {
         }
 
         return { deletedCount: vehiclesToMarkSold.length };
+    }
+
+    /**
+     * Bulk updates daysOnLot for all vehicles in the target organization.
+     * This moves expensive date math from Request-Time (read) to Sync-Time (write).
+     */
+    private async updateDaysOnLot() {
+        try {
+            const now = new Date();
+            const vehicles = await Vehicle.find({
+                organizationId: ACTION_AUTO_ORG_ID,
+                status: { $ne: 'Sold' },
+                isDeleted: false
+            });
+
+            const bulkOps = vehicles.map(vehicle => {
+                const days = Math.floor(
+                    (now.getTime() - new Date(vehicle.dateAdded || vehicle.createdAt).getTime()) /
+                    (1000 * 60 * 60 * 24)
+                );
+                return {
+                    updateOne: {
+                        filter: { _id: vehicle._id },
+                        update: { $set: { daysOnLot: Math.max(0, days) } }
+                    }
+                };
+            });
+
+            if (bulkOps.length > 0) {
+                await Vehicle.bulkWrite(bulkOps);
+                console.log(`[SyncService] ⚡ Updated daysOnLot for ${bulkOps.length} vehicles.`);
+            }
+        } catch (err) {
+            console.error('[SyncService] Failed to update daysOnLot:', err);
+        }
     }
 }
 

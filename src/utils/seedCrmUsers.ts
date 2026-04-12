@@ -17,6 +17,7 @@ const CRM_USERS = [
   { fullName: 'Krizza Pepito', username: '2026-00013', email: 'krizza@actionautoutah.com', role: 'admin' as const },
 ];
 
+const TARGET_ORGANIZATION_ID = '69da5ccbbd32e79c9296e750';
 const DEFAULT_PASSWORD = 'superadmin@123!';
 
 /**
@@ -32,11 +33,20 @@ const seedCrmUsers = async (): Promise<void> => {
     let existing = 0;
 
     for (const userData of CRM_USERS) {
+      // Look for user by email (globally unique) or username within this organization
       const exists = await CrmUser.findOne({
-        $or: [{ username: userData.username }, { email: userData.email }],
+        $or: [
+          { email: userData.email },
+          { username: userData.username, organizationId: TARGET_ORGANIZATION_ID },
+        ],
       });
 
       if (exists) {
+        // Optional: Ensure existing user is pointed to the correct org if it's missing
+        if (!exists.organizationId) {
+          exists.organizationId = TARGET_ORGANIZATION_ID as any;
+          await exists.save();
+        }
         existing++;
         continue;
       }
@@ -44,6 +54,7 @@ const seedCrmUsers = async (): Promise<void> => {
       // Password is auto-hashed by the pre-save hook in CrmUser model
       await CrmUser.create({
         ...userData,
+        organizationId: TARGET_ORGANIZATION_ID,
         password: DEFAULT_PASSWORD,
         isActive: true,
       });

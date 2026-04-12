@@ -141,3 +141,47 @@ export const uploadLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
+/**
+ * Global Rate Limiter
+ * 200 requests per 15 minutes per IP
+ * Standard protection for all routes to prevent resource exhaustion
+ */
+export const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    skip: (req: any) => {
+        // Skip rate limit for internal health checks or if explicitly disabled
+        return process.env.SKIP_RATE_LIMIT === 'true' || req.path === '/health';
+    },
+    message: {
+        success: false,
+        message: 'Too many requests from this IP, please try again after 15 minutes',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+/**
+ * Heavy Inventory Sync Limiter
+ * 2 requests per 5 minutes per user
+ * Prevents multiple manual syncs from overlapping and locking the DB
+ */
+export const inventorySyncLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 2,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'An inventory sync is already in progress or was recently completed. Please wait 5 minutes before triggering again.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});

@@ -22,11 +22,14 @@ const envVarsSchema = Joi.object()
     MONGODB_URI: Joi.string().required().description('Mongo DB url'),
     MONGODB_URI_TEST: Joi.string().allow('').description('Mongo DB test url'),
     BCRYPT_SALT_ROUNDS: Joi.number().required().description('Bcrypt salt rounds'),
-    // JWT
-    JWT_ACCESS_SECRET: Joi.string().allow('').description('JWT access secret key'),
-    JWT_ACCESS_EXPIRATION: Joi.string().allow('').description("JWT access token expiration time"),
-    JWT_REFRESH_SECRET: Joi.string().allow('').description('JWT refresh secret key'),
-    JWT_REFRESH_EXPIRATION: Joi.string().allow('').description('expiration time for refresh token'),
+    JWT_ACCESS_SECRET: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('JWT access secret key'),
+    JWT_ACCESS_EXPIRATION: Joi.string().default('15m').description("JWT access token expiration time"),
+    JWT_REFRESH_SECRET: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('JWT refresh secret key'),
+    JWT_REFRESH_EXPIRATION: Joi.string().default('7d').description('expiration time for refresh token'),
 
     CORS_ORIGIN: Joi.string().default('http://localhost:3000').description('CORS allowed origin'),
     DEALERSCLOUD_FTP_HOST: Joi.string().allow('').default(''),
@@ -55,12 +58,18 @@ const envVarsSchema = Joi.object()
     REDIS_PASSWORD: Joi.string().allow('').default('').description('Redis password'),
 
     // Cloudflare R2
-    R2_ACCESS_KEY_ID: Joi.string().allow('').description('R2 Access Key'),
-    R2_SECRET_ACCESS_KEY: Joi.string().allow('').description('R2 Secret Access Key'),
-    R2_ENDPOINT: Joi.string().allow('').description('R2 Endpoint'),
-    R2_BUCKET_PUBLIC: Joi.string().allow('').default('actionauto-public'),
-    R2_BUCKET_PRIVATE: Joi.string().allow('').default('actionauto-private'),
-    R2_BUCKET_FTP: Joi.string().allow('').default('actionauto-ftp'),
+    R2_ACCESS_KEY_ID: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('R2 Access Key'),
+    R2_SECRET_ACCESS_KEY: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('R2 Secret Access Key'),
+    R2_ENDPOINT: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('R2 Endpoint'),
+    R2_BUCKET_PUBLIC: Joi.string().default('actionauto-public'),
+    R2_BUCKET_PRIVATE: Joi.string().default('actionauto-private'),
+    R2_BUCKET_FTP: Joi.string().default('actionauto-ftp'),
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
 
     CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),

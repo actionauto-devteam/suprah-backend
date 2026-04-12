@@ -18,12 +18,16 @@ import healthRoute from './routes/health.route';
 import supraSpaceRoute from './routes/supraspace.route';
 import { initSupraSpaceSocket } from './socket/supraspace.socket';
 
+import { globalLimiter } from './middleware/rate-limit.middleware';
 import { httpLogger } from './utils/logger';
 import logger from './utils/logger';
 import { correlationIdMiddleware } from './middleware/correlationId.middleware';
 import { metricsMiddleware } from './middleware/metrics.middleware';
 
 const app: Application = express();
+
+// 0. Applied Global Rate Limiting first to protect the server
+app.use(globalLimiter);
 
 // 1. Assign unique Request ID (Correlation ID) first
 app.use(correlationIdMiddleware);
@@ -143,8 +147,52 @@ if (require.main === module) {
   initSyncScheduler();
   initCleanupScheduler();
 
-  httpServer.listen(config.port, () => {
+  const server = httpServer.listen(config.port, () => {
     logger.info(`Server running on port ${config.port}`);
+  });
+
+  // ─── Graceful Shutdown ──────────────────────────────────────────────────────
+  const shutdown = async (signal: string) => {
+    logger.info(`[${signal}] Received. Starting graceful shutdown...`);
+
+    // 1. Stop accepting new requests
+    server.close(() => {
+      logger.info('HTTP server closed.');
+    });
+
+    // 2. Disconnect from DB and Cache
+    try {
+      const { disconnectDB } = require('./config/db');
+      const { cacheService } = require('./services/cache.service');
+
+      await Promise.all([
+        disconnectDB(),
+        cacheService.disconnect()
+      ]);
+
+      logger.info('Graceful shutdown completed. Exiting process.');
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err }, 'Error during graceful shutdown');
+      process.exit(1);
+    }
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // ─── Global Error Handlers ──────────────────────────────────────────────────
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error({ reason, promise }, 'Unhandled Rejection at Promise');
+    // In production, we might want to exit and let Docker restart the container
+    if (config.env === 'production') {
+      shutdown('UNHANDLED_REJECTION');
+    }
+  });
+
+  process.on('uncaughtException', (err) => {
+    logger.fatal({ err }, 'Uncaught Exception thrown');
+    shutdown('UNCAUGHT_EXCEPTION');
   });
 }
 

@@ -10,3 +10,6 @@ FTP-SERVER-CREDENTIALS.md
 AWS_DEPLOYMENT_GUIDE.md
 .agents
 logs
+
+actionauto-key.pem
+deployment_architecture.md

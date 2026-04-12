@@ -16,17 +16,11 @@ import {
   extractADFFromBody,
   detectChannel,
 } from '../utils/adfParser';
-import SystemConfig from '../models/SystemConfig.model';
 import { getSocketIO } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import googleCalendarService from '../services/googleCalendar.service';
-
-// ─────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────
-const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev@gmail.com';
 
 /**
  * STRICT SOURCE FILTER — only leads from this address are ingested.
@@ -34,87 +28,46 @@ const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev
  */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 
-async function getCentralOAuth2Client(orgId?: string) {
+async function getCentralOAuth2Client(orgId: string) {
   const oauth2Client = new google.auth.OAuth2(
-    process.env.CENTRAL_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID,
-    process.env.CENTRAL_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET,
-    process.env.CENTRAL_GOOGLE_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI,
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI,
   );
 
-  let credentials: any = null;
+  const cacheKey = `config:org:${orgId}`;
+  let orgConfig = await cacheService.get(cacheKey);
 
-  // 1. Prioritize OrgLeadConfig if orgId is provided (New multi-tenant path)
-  if (orgId) {
-    const cacheKey = `config:org:${orgId}`;
-    let orgConfig = await cacheService.get(cacheKey);
-
-    if (!orgConfig) {
-      orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
-      if (orgConfig) {
-        await cacheService.set(cacheKey, orgConfig, 3600); // 1hr
-      }
-    }
-
-    if (orgConfig && orgConfig.gmailConnected && orgConfig.refreshToken) {
-      const isCached = !!(await cacheService.get(cacheKey));
-      console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}${isCached ? ' (Cached)' : ''}`);
-      credentials = {
-        access_token:  orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
-        refresh_token: decrypt(orgConfig.refreshToken),
-        expiry_date:   orgConfig.expiryDate,
-      };
+  if (!orgConfig) {
+    orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
+    if (orgConfig) {
+      await cacheService.set(cacheKey, orgConfig, 3600); // 1hr
     }
   }
 
-  // 2. Fallback to SystemConfig
-  if (!credentials) {
-    const systemConfig = await SystemConfig.findOne({ key: 'central_gmail_tokens' });
-    if (systemConfig) {
-      console.log('[CENTRAL-AUTH] Using persistent tokens from SystemConfig');
-      credentials = systemConfig.value;
-    }
+  if (orgConfig && orgConfig.gmailConnected && orgConfig.refreshToken) {
+    const isCached = !!(await cacheService.get(cacheKey));
+    console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}${isCached ? ' (Cached)' : ''}`);
+    
+    oauth2Client.setCredentials({
+      access_token:  orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
+      refresh_token: decrypt(orgConfig.refreshToken),
+      expiry_date:   orgConfig.expiryDate,
+    });
+  } else {
+    console.error(`[CENTRAL-AUTH] ERROR: No Gmail credentials found for organization: ${orgId}`);
+    throw new Error('Please connect your email leads into the CRM settings.');
   }
-
-  // 3. Environment Variables (Super Admin / Development only)
-  // [ENFORCEMENT] In production, all organizations must use OrgLeadConfig.
-  if (!credentials) {
-    if (process.env.CENTRAL_GMAIL_REFRESH_TOKEN) {
-      console.warn('[CENTRAL-AUTH] WARNING: Falling back to environmental refresh token. This is deprecated for production.');
-      credentials = {
-        access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
-        refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
-        expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
-      };
-    } else {
-      console.error('[CENTRAL-AUTH] ERROR: No Gmail credentials found (OrgLeadConfig, SystemConfig, or Env). Ingestion will fail.');
-      throw new Error('Gmail authentication context missing. Please configure organization Gmail settings.');
-    }
-  }
-
-  oauth2Client.setCredentials(credentials);
 
   // Persistence listener: update database when tokens are refreshed
   oauth2Client.on('tokens', async (tokens) => {
     try {
-      if (orgId) {
-        console.log(`[CENTRAL-AUTH] Tokens refreshed for org ${orgId}, updating OrgLeadConfig...`);
-        const update: any = { expiryDate: tokens.expiry_date };
-        if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
-        if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
-        await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
-        await cacheService.del(`config:org:${orgId}`); // Invalidate cache
-      } else {
-        console.log('[CENTRAL-AUTH] Tokens refreshed, updating SystemConfig...');
-        await SystemConfig.findOneAndUpdate(
-          { key: 'central_gmail_tokens' },
-          {
-            key: 'central_gmail_tokens',
-            value: tokens,
-            description: 'OAuth2 tokens for centralized Gmail lead ingestion'
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-      }
+      console.log(`[CENTRAL-AUTH] Tokens refreshed for org ${orgId}, updating OrgLeadConfig...`);
+      const update: any = { expiryDate: tokens.expiry_date };
+      if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
+      if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
+      await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
+      await cacheService.del(`config:org:${orgId}`); // Invalidate cache
     } catch (err) {
       console.error('[CENTRAL-AUTH] Failed to persist refreshed tokens:', err);
     }
@@ -536,10 +489,11 @@ export const replyToInquiry = async (req: Request, res: Response) => {
     logger.info({ leadId: lead._id, userId }, 'Staff replied to lead');
 
     try {
+      const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
       const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
       const user = await User.findById(userId);
-      const senderDisplay = user?.email || CENTRAL_EMAIL;
+      const senderDisplay = user?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
 
       const recipientEmail = lead.senderEmail || lead.email;
       const headers = [
@@ -831,21 +785,18 @@ export const getCentralSyncStatus = asyncHandler(async (req: Request, res: Respo
   const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
   const connected = !!(config && config.gmailConnected && config.refreshToken);
   
-  const envConfigured = !!(process.env.CENTRAL_GMAIL_REFRESH_TOKEN || process.env.CENTRAL_GMAIL_ACCESS_TOKEN);
-  const isActuallyConnected = connected || envConfigured;
-
-  const email = connected ? config.gmailAddress : (envConfigured ? CENTRAL_EMAIL : null);
+  const email = connected ? config.gmailAddress : null;
 
   res.json(
     new ApiResponse(
       200,
       { 
-        connected: isActuallyConnected, 
+        connected, 
         email, 
         leadsSourceEmail: LEADS_SOURCE_EMAIL,
-        mode: connected ? 'organization' : (envConfigured ? 'system_fallback' : 'unconfigured')
+        mode: connected ? 'organization' : 'unconfigured'
       },
-      isActuallyConnected ? 'Lead ingestion active' : 'Not configured'
+      connected ? 'Lead ingestion active' : 'Not configured'
     )
   );
 });
@@ -938,6 +889,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
       return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
     }
 
+    const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
     const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
@@ -977,7 +929,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
           senderEmail: email,
           message: body,
           timestamp: new Date(parseInt(msg.internalDate || Date.now())),
-          isOwn: email === CENTRAL_EMAIL || email === user?.email,
+          isOwn: email === user?.email || (config?.gmailAddress === email),
         };
       });
 

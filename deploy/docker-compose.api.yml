@@ -16,6 +16,16 @@ services:
       - CORS_ORIGIN=https://www.suprah-app.com,https://suprah-app.com,http://localhost:3000
     volumes:
       - ftp-uploads:/app/ftp-uploads
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - app-network
 

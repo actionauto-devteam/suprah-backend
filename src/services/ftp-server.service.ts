@@ -1,5 +1,4 @@
 import { FtpSrv } from 'ftp-srv';
-import bunyan from 'bunyan';
 import path from 'path';
 import fs from 'fs/promises';
 import { ftpServerConfig } from '../config/ftp-server.config';
@@ -7,8 +6,9 @@ import config from '../config';
 import syncService from './sync.service';
 import { R2FileSystem } from './r2-ftp-fs.service';
 import { existsSync } from 'fs';
+import logger from '../utils/logger';
 
-const log = bunyan.createLogger({ name: 'ftp-server' });
+const log = logger.child({ module: 'ftp-server' });
 
 export class ActionFtpServer {
     private ftpServer: FtpSrv | null = null;
@@ -19,24 +19,41 @@ export class ActionFtpServer {
     async start(): Promise<void> {
         try {
             // Prepare TLS options if provided
+            console.log('🔍 DEBUG: FTP Initialization started');
+            console.log('🔍 DEBUG: certPath:', config.ftpServer.tlsCertPath);
+            console.log('🔍 DEBUG: keyPath:', config.ftpServer.tlsKeyPath);
+            console.log('🔍 DEBUG: forceTls:', config.ftpServer.forceTls);
+            console.log('🔍 DEBUG: env:', config.env);
+
             let tls: any = false;
             if (config.ftpServer.tlsCertPath && config.ftpServer.tlsKeyPath) {
                 try {
                     const certExists = existsSync(config.ftpServer.tlsCertPath);
                     const keyExists = existsSync(config.ftpServer.tlsKeyPath);
+                    console.log('🔍 DEBUG: Cert Exists:', certExists);
+                    console.log('🔍 DEBUG: Key Exists:', keyExists);
                     
                     if (certExists && keyExists) {
                         tls = {
                             cert: await fs.readFile(config.ftpServer.tlsCertPath),
                             key: await fs.readFile(config.ftpServer.tlsKeyPath),
+                            minVersion: 'TLSv1.2',
+                            maxVersion: 'TLSv1.2',
                         };
                         log.info('FTP TLS encryption enabled');
+                    } else if (config.env === 'production' && config.ftpServer.forceTls) {
+                        log.fatal('CRITICAL: FTP TLS requested for production but certificates are missing!');
+                        throw new Error('FTP TLS certificates required but not found');
                     } else {
                         log.warn('FTP TLS certificates not found, falling back to plaintext');
                     }
                 } catch (err) {
                     log.error({ err }, 'Failed to load FTP TLS certificates');
+                    if (config.env === 'production' && config.ftpServer.forceTls) throw err;
                 }
+            } else if (config.env === 'production' && config.ftpServer.forceTls) {
+                log.fatal('CRITICAL: FTP TLS forced but no certificate paths configured!');
+                throw new Error('FTP TLS configuration missing for production');
             }
 
             this.ftpServer = new FtpSrv({
@@ -70,7 +87,6 @@ export class ActionFtpServer {
             });
 
             // File upload handler
-            // Note: STOR event exists in ftp-srv but not in TypeScript definitions
             (this.ftpServer as any).on('STOR', async (error: Error | null, filePath: string) => {
                 if (error) {
                     log.error({ error }, 'File upload error');
@@ -79,16 +95,13 @@ export class ActionFtpServer {
 
                 log.info({ filePath }, 'File uploaded successfully to R2');
 
-                // Check if it's a CSV or TXT file from DealersCloud
                 const isInventory = filePath && (filePath.endsWith('.csv') || filePath.endsWith('.txt'));
                 
                 if (isInventory) {
-                    // filePath in R2FS is the relative path (key)
                     const key = filePath.startsWith('/') ? filePath.slice(1) : filePath;
                     log.info({ key }, 'Processing uploaded inventory from R2');
 
                     try {
-                        // Trigger sync service to process from R2 stream
                         await syncService.processR2File(key);
                         log.info({ key }, 'Inventory processed successfully from cloud storage');
                     } catch (err) {
