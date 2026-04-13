@@ -106,14 +106,25 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status } = req.query;
 
-  // 1. Fetch ALL active shipments globally to determine driver availability
-  const activeShipments = await Shipment.find(
-    {
-      assignedDriverId: { $exists: true, $ne: null },
-      status: { $nin: ["Delivered", "Cancelled"] },
-    },
-    "_id assignedDriverId trackingNumber status organizationId origin destination",
-  ).sort({ assignedAt: -1 });
+  // 1. Fetch assigned Shipments + Loads that are pre-acceptance only
+  // (Dispatched/Available for Pickup = waiting for driver acceptance)
+  // (In-Route/In-Transit = driver already accepted — hide from Assigned tab until dropped)
+  const [activeShipments, activeLoads] = await Promise.all([
+    Shipment.find(
+      {
+        assignedDriverId: { $exists: true, $ne: null },
+        status: { $in: ["Dispatched", "Available for Pickup"] },
+      },
+      "_id assignedDriverId trackingNumber status organizationId origin destination",
+    ).sort({ assignedAt: -1 }),
+    Load.find(
+      {
+        assignedDriverId: { $exists: true, $ne: null },
+        status: "Assigned",
+      },
+      "_id assignedDriverId loadNumber status organizationId pickupLocation deliveryLocation",
+    ).sort({ assignedAt: -1 }),
+  ]);
 
   const filter: any = { organizationId: orgId };
   if (status && status !== "all") {
@@ -145,15 +156,48 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
         status: shipment.status,
         origin: shipment.origin,
         destination: shipment.destination,
+        __docType: "shipment",
         owned: true,
       });
     } else {
-      // Redacted entry for competitor shipments
       shipmentsByDriver.get(assignedDriverId)!.push({
-        id: "redacted", // Hide the actual shipment ID
+        id: "redacted",
         status: "Occupied (External Load)",
         owned: false,
-        // Sensitive fields (trackingNumber, origin, destination) are OMITTED
+      });
+    }
+  }
+
+  // 4. Also include assigned TMS Loads in the driver's load list
+  for (const load of activeLoads) {
+    const assignedDriverId = (load as any).assignedDriverId?.toString();
+    if (!assignedDriverId) continue;
+
+    if (!shipmentsByDriver.has(assignedDriverId)) {
+      shipmentsByDriver.set(assignedDriverId, []);
+    }
+
+    const isOurLoad = (load as any).organizationId?.toString() === orgId;
+
+    if (isOurLoad) {
+      const pickup = (load as any).pickupLocation;
+      const delivery = (load as any).deliveryLocation;
+      const origin = `${pickup?.city || ""}${pickup?.state ? `, ${pickup.state}` : ""}`.trim();
+      const destination = `${delivery?.city || ""}${delivery?.state ? `, ${delivery.state}` : ""}`.trim();
+      shipmentsByDriver.get(assignedDriverId)!.push({
+        id: (load as any)._id.toString(),
+        trackingNumber: (load as any).loadNumber,
+        status: (load as any).status,
+        origin,
+        destination,
+        __docType: "load",
+        owned: true,
+      });
+    } else {
+      shipmentsByDriver.get(assignedDriverId)!.push({
+        id: "redacted",
+        status: "Occupied (External Load)",
+        owned: false,
       });
     }
   }
@@ -279,6 +323,11 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
       (req.user as any)?._id?.toString()
     );
 
+    const _ioAssign = getSocketIO();
+    if (_ioAssign) {
+      _ioAssign.to(`org:${orgId}`).emit("driver:loads_updated", { action: "assigned", shipmentId: shipment._id.toString(), driverId: driver._id.toString() });
+    }
+
     res.json(new ApiResponse(200, shipment, "Load assigned"));
 
     await AuditLog.create({
@@ -340,6 +389,11 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     (req.user as any)?._id?.toString()
   );
 
+  const _ioLoadAssign = getSocketIO();
+  if (_ioLoadAssign) {
+    _ioLoadAssign.to(`org:${orgId}`).emit("driver:loads_updated", { action: "assigned", loadId: load._id.toString(), driverId: driver._id.toString() });
+  }
+
   res.json(new ApiResponse(200, load, "Load assigned"));
 
   await AuditLog.create({
@@ -348,7 +402,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     action: "UPDATE",
     reason: "Load assigned to driver",
     performedBy: (req.user as any)?._id,
-    changes: { assignedDriverId: driver._id, status: "Dispatched" },
+    changes: { assignedDriverId: driver._id, status: "Assigned" },
   });
 });
 
@@ -368,7 +422,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(403, "You are not assigned to this load");
     }
     load.driverAcceptedAt = new Date();
-    if (load.status === "Assigned") load.status = "Assigned";
+    if (load.status === "Assigned") load.status = "In-Transit";
     await load.save();
 
     const driver = await User.findById(userId).select('name email');
@@ -380,7 +434,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
       if (io) io.to(`org:${load.organizationId.toString()}`).emit("driver:loads_updated", { action: "accepted", loadId, driverId: userId });
     }
     res.json(new ApiResponse(200, load, "Load accepted"));
-    await AuditLog.create({ entityType: "Load", entityId: load._id, action: "UPDATE", reason: "Driver accepted load", performedBy: userId, changes: { driverAcceptedAt: load.driverAcceptedAt } });
+    await AuditLog.create({ entityType: "Load", entityId: load._id, action: "UPDATE", reason: "Driver accepted load", performedBy: userId, changes: { status: "In-Transit", driverAcceptedAt: load.driverAcceptedAt } });
     return;
   }
 
@@ -391,7 +445,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(403, "You are not assigned to this load");
     }
     shipment.driverAcceptedAt = new Date();
-    if (shipment.status === "Available for Pickup") shipment.status = "Dispatched";
+    if (shipment.status === "Available for Pickup" || shipment.status === "Dispatched") shipment.status = "In-Route";
     await shipment.save();
 
     const driver = await User.findById(userId).select("name email");
@@ -401,6 +455,8 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
         `${driver?.name || driver?.email || "Driver"} accepted shipment ${shipment.trackingNumber}`,
         { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber, driverId: userId, driverName: driver?.name || driver?.email, status: shipment.status }
       );
+      const ioAccept = getSocketIO();
+      if (ioAccept) ioAccept.to(`org:${shipment.organizationId.toString()}`).emit("driver:loads_updated", { action: "accepted", shipmentId: shipment._id.toString(), driverId: userId });
     }
     res.json(new ApiResponse(200, shipment, "Load accepted"));
     await AuditLog.create({
@@ -420,6 +476,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   load.driverAcceptedAt = new Date();
+  if (load.status === "Assigned") load.status = "In-Transit";
   await load.save();
 
   const driver = await User.findById(userId).select("name email");
@@ -429,6 +486,8 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
       `${driver?.name || driver?.email || "Driver"} accepted load ${load.loadNumber}`,
       { loadId: load._id.toString(), loadNumber: load.loadNumber, driverId: userId, driverName: driver?.name || driver?.email, status: load.status }
     );
+    const ioFallback = getSocketIO();
+    if (ioFallback) ioFallback.to(`org:${load.organizationId.toString()}`).emit("driver:loads_updated", { action: "accepted", loadId: load._id.toString(), driverId: userId });
   }
 
   res.json(new ApiResponse(200, load, "Load accepted"));
@@ -436,7 +495,7 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   await AuditLog.create({
     entityType: "Load", entityId: load._id, action: "UPDATE",
     reason: "Driver accepted load", performedBy: userId,
-    changes: { driverAcceptedAt: (load as any).driverAcceptedAt },
+    changes: { status: "In-Transit", driverAcceptedAt: load.driverAcceptedAt },
   });
 });
 
@@ -839,7 +898,6 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const shipmentFilter: any = {
     organizationId: orgId,
     status: "Available for Pickup",
-    isPostedToBoard: true,
     $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
   };
 
@@ -973,7 +1031,6 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     _id: shipmentId,
     organizationId: orgId,
     status: "Available for Pickup",
-    isPostedToBoard: true,
     $or: [{ assignedDriverId: { $exists: false } }, { assignedDriverId: null }],
   });
   if (!shipment) throw new ApiError(404, "Load not available");
