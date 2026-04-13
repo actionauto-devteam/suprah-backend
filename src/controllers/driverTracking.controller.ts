@@ -415,6 +415,16 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "A shipment ID or load ID is required");
   }
 
+  const driverProfile = await DriverProfile.findOne({ userId });
+  const maxCap = driverProfile?.maxVehicleCapacity || 12;
+  const [activeShipmentCount, activeLoadCount] = await Promise.all([
+    Shipment.countDocuments({ assignedDriverId: userId, status: { $nin: ["Delivered", "Cancelled"] } }),
+    Load.countDocuments({ assignedDriverId: userId, status: { $nin: ["Delivered", "Cancelled"] } }),
+  ]);
+  if (activeShipmentCount + activeLoadCount >= maxCap) {
+    throw new ApiError(400, `You've reached your active load limit (${activeShipmentCount + activeLoadCount}/${maxCap}). Complete or drop a load first.`);
+  }
+
   if (loadId) {
     const load = await Load.findById(loadId);
     if (!load) throw new ApiError(404, "Load not found");
@@ -503,9 +513,10 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
 const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
 
-  const [shipments, loads] = await Promise.all([
+  const [shipments, loads, driverProfile] = await Promise.all([
     Shipment.find({ assignedDriverId: userId }).sort({ assignedAt: -1 }).lean(),
     Load.find({ assignedDriverId: userId }).sort({ assignedAt: -1 }).lean(),
+    DriverProfile.findOne({ userId }, "maxVehicleCapacity trailerType").lean(),
   ]);
 
   // Normalize Load documents to match the Shipment shape the frontend expects
@@ -536,7 +547,14 @@ const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
     (a: any, b: any) => new Date(b.assignedAt || b.createdAt).getTime() - new Date(a.assignedAt || a.createdAt).getTime()
   );
 
-  res.json(new ApiResponse(200, combined, "Assigned loads fetched"));
+  const activeCount = combined.filter((l: any) => l.status !== "Delivered" && l.status !== "Cancelled").length;
+
+  res.json(new ApiResponse(200, {
+    loads: combined,
+    activeLoadCount: activeCount,
+    maxLoadCapacity: driverProfile?.maxVehicleCapacity || 12,
+    trailerType: driverProfile?.trailerType || null,
+  }, "Assigned loads fetched"));
 });
 
 const removeLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -981,6 +999,15 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   }
   if (driverProfile?.operationalStatus && driverProfile.operationalStatus !== "active") {
     throw new ApiError(403, "Your operational status must be Active to request loads");
+  }
+
+  const maxCap = driverProfile?.maxVehicleCapacity || 12;
+  const [activeShipments, activeLoads] = await Promise.all([
+    Shipment.countDocuments({ assignedDriverId: user._id, status: { $nin: ["Delivered", "Cancelled"] } }),
+    Load.countDocuments({ assignedDriverId: user._id, status: { $nin: ["Delivered", "Cancelled"] } }),
+  ]);
+  if (activeShipments + activeLoads >= maxCap) {
+    throw new ApiError(400, `You've reached your active load limit (${activeShipments + activeLoads}/${maxCap}). Complete or drop a load first.`);
   }
 
   const requestEntry = {

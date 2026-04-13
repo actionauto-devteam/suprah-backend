@@ -74,6 +74,7 @@ export interface IDriverProfile extends Document {
 
   trailerType: TrailerType;
   maxVehicleCapacity: number;
+  customTrailerName: string;
   truckMake: string;
   truckModel: string;
   truckYear: number;
@@ -207,6 +208,7 @@ const DriverProfileSchema = new Schema<IDriverProfile>(
       default: "open_3car_wedge",
     },
     maxVehicleCapacity: { type: Number, default: 1, min: 1, max: 12 },
+    customTrailerName: { type: String, trim: true, default: "", maxlength: 80 },
     truckMake: { type: String, trim: true, default: "" },
     truckModel: { type: String, trim: true, default: "" },
     truckYear: { type: Number, min: 1990, max: 2030 },

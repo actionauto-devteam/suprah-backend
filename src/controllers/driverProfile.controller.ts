@@ -64,6 +64,7 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   const {
     trailerType,
     maxVehicleCapacity,
+    customTrailerName,
     truckMake,
     truckModel,
     truckYear,
@@ -86,6 +87,7 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
 
   if (trailerType !== undefined) profile.trailerType = trailerType;
   if (maxVehicleCapacity !== undefined) profile.maxVehicleCapacity = maxVehicleCapacity;
+  if (customTrailerName !== undefined) profile.customTrailerName = customTrailerName;
   if (truckMake !== undefined) profile.truckMake = truckMake;
   if (truckModel !== undefined) profile.truckModel = truckModel;
   if (truckYear !== undefined) profile.truckYear = truckYear;
