@@ -192,7 +192,30 @@ class GoogleCalendarService {
     }
 
     const { timeMin, timeMax } = getSyncWindow();
-    const events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+    let events: calendar_v3.Schema$Event[];
+    try {
+      events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+    } catch (err: any) {
+      const msg: string = err?.message ?? err?.errors?.[0]?.message ?? '';
+      const isInsufficientScopes =
+        msg.toLowerCase().includes('insufficient') ||
+        msg.toLowerCase().includes('insufficientauthenticateduser') ||
+        err?.status === 403 ||
+        err?.code === 403;
+
+      if (isInsufficientScopes) {
+        // Clear the stored connection so the user is prompted to reconnect
+        await OrgLeadConfig.updateOne(
+          { organizationId },
+          { $set: { calendarConnected: false } }
+        );
+        throw new ApiError(
+          403,
+          'Google Calendar authorization is missing calendar permissions. Please disconnect and reconnect your calendar.'
+        );
+      }
+      throw err;
+    }
 
     let processed = 0;
     for (const event of events) {

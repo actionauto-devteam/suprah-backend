@@ -189,14 +189,44 @@ const sync = asyncHandler(async (req: Request, res: Response) => {
 
     console.log(`[ManualSync] Triggered by user ${userId} for org ${orgId}`);
 
+    // Helper: detect Google "insufficient authentication scopes" errors
+    const isInsufficientScopes = (err: any): boolean => {
+        const msg: string = err?.message ?? err?.errors?.[0]?.message ?? '';
+        return (
+            msg.toLowerCase().includes('insufficient') ||
+            msg.toLowerCase().includes('insufficientauthenticateduser') ||
+            err?.status === 403 ||
+            err?.code === 403
+        );
+    };
+
     // 1. Sync Gmail Leads
-    const gmailResult = await orgGmailService.syncLeadsForOrg(orgId);
+    let gmailResult;
+    try {
+        gmailResult = await orgGmailService.syncLeadsForOrg(orgId);
+    } catch (err: any) {
+        if (isInsufficientScopes(err)) {
+            // Stale token — clear both Gmail & Calendar so the UI prompts reconnect
+            await OrgLeadConfig.updateOne(
+                { organizationId: orgId },
+                { $set: { gmailConnected: false, calendarConnected: false } }
+            );
+            throw new ApiError(
+                403,
+                'Google account authorization is missing required permissions. Please disconnect and reconnect your Google account.'
+            );
+        }
+        console.warn(`[ManualSync] Gmail sync failed: ${err.message}`);
+        gmailResult = { processed: 0, errors: [] };
+    }
 
     // 2. Sync Calendar Events (Uses OrgLeadConfig tokens via orgId)
     let calendarProcessed = 0;
     try {
         calendarProcessed = await googleCalendarService.syncAllEvents(orgId, userId);
     } catch (err: any) {
+        // Only re-throw scope errors (403) — "not connected" (401/404) are expected and ignorable
+        if (err instanceof ApiError && err.statusCode === 403) throw err;
         console.warn(`[ManualSync] Calendar sync failed (ignorable if not connected): ${err.message}`);
     }
 
