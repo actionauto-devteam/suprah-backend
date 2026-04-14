@@ -14,6 +14,8 @@ import {
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
+import { userAuthCache } from '../utils/cache.util';
+
 
 class AuthController {
     /**
@@ -239,10 +241,14 @@ class AuthController {
         const { role } = completeOnboardingSchema.parse(req.body);
         const result = await authService.completeOnboarding(req.user._id, role);
 
+        // Invalidate auth cache so the new onboarding status is picked up immediately
+        userAuthCache.delete(req.user._id.toString());
+
         res.status(200).json(
             new ApiResponse(200, result, 'Onboarding completed successfully')
         );
     });
+
 
     handleOAuthCallback = async (user: any) => {
         return await authService.handleOAuthCallback(user);

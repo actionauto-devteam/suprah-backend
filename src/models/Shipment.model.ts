@@ -137,12 +137,10 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     organizationId: {
       type: String,
       required: true,
-      index: true,
     },
     orgId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
-      index: true,
     },
 
     status: {

@@ -99,9 +99,12 @@ if (isDev) {
       },
       {
         target: path.join(__dirname, `pino-mongodb-transport${__filename.endsWith('.ts') ? '.ts' : '.js'}`),
-        options: {},
+        options: { 
+          uri: process.env.MONGODB_URI 
+        },
         level: 'info',
       },
+
     ],
   });
 

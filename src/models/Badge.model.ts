@@ -110,7 +110,7 @@ export interface IUserBadge extends Document {
 
 const UserBadgeSchema = new Schema<IUserBadge>(
   {
-    organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', required: true, index: true },
+    organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', required: true },
     userId:         { type: Schema.Types.ObjectId, ref: 'CrmUser',      required: true, index: true },
     badgeId:        { type: String, required: true },
     awardedAt:      { type: Date, default: Date.now },

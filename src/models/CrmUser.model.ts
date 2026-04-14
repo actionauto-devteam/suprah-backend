@@ -28,7 +28,6 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: Schema.Types.ObjectId,
       ref: 'Organization',
       required: false, // optional for existing records; required for all new records going forward
-      index: true,
     },
     fullName: {
       type: String,

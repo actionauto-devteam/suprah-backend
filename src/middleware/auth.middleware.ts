@@ -3,6 +3,7 @@ import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import Organization from '../models/Organization.model';
 import tokenService from '../services/token.service';
+import { userAuthCache, orgStatusCache } from '../utils/cache.util';
 
 // Extend Express Request type to include auth property for backward compatibility
 declare global {
@@ -21,12 +22,6 @@ declare global {
         }
     }
 }
-
-// Simple in-memory cache for auth lookups (TTL: 60s)
-const AUTH_CACHE_TTL = 60000;
-interface CacheEntry<T> { data: T; timestamp: number; }
-const userCache = new Map<string, CacheEntry<IUser>>();
-const orgCache = new Map<string, CacheEntry<{ status: string }>>();
 
 /**
  * Custom Authentication Middleware
@@ -56,17 +51,18 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         const now = Date.now();
         let user: IUser | undefined | null;
 
-        const cachedUser = userCache.get(userId);
-        if (cachedUser && (now - cachedUser.timestamp < AUTH_CACHE_TTL)) {
-            user = cachedUser.data;
+        const cachedUser = userAuthCache.get(userId);
+        if (cachedUser) {
+            user = cachedUser;
         } else {
             user = await User.findById(userId);
-            if (user) userCache.set(userId, { data: user, timestamp: now });
+            if (user) userAuthCache.set(userId, user);
         }
 
         if (!user) {
             throw new ApiError(401, 'User not found');
         }
+
 
         // 4. Attach user and org info to request
         let orgId = user.organizationId?.toString();
@@ -78,13 +74,13 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             if (impersonateId) {
                 // Validate impersonated orgId exists (cached)
                 let orgExists = false;
-                const cachedOrg = orgCache.get(impersonateId);
-                if (cachedOrg && (now - cachedOrg.timestamp < AUTH_CACHE_TTL)) {
+                const cachedOrg = orgStatusCache.get(impersonateId);
+                if (cachedOrg) {
                     orgExists = true;
                 } else {
                     const org = await Organization.findById(impersonateId).select('status');
                     if (org) {
-                        orgCache.set(impersonateId, { data: { status: org.status }, timestamp: now });
+                        orgStatusCache.set(impersonateId, { status: org.status });
                         orgExists = true;
                     }
                 }
@@ -146,15 +142,15 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         // 9. Organization Suspension Check (with TTL cache)
         if (req.orgId) {
             let status: string | undefined;
-            const cachedOrg = orgCache.get(req.orgId);
+            const cachedOrg = orgStatusCache.get(req.orgId);
 
-            if (cachedOrg && (now - cachedOrg.timestamp < AUTH_CACHE_TTL)) {
-                status = cachedOrg.data.status;
+            if (cachedOrg) {
+                status = cachedOrg.status;
             } else {
                 const org = await Organization.findById(req.orgId).select('status');
                 if (org) {
                     status = org.status;
-                    orgCache.set(req.orgId, { data: { status: org.status }, timestamp: now });
+                    orgStatusCache.set(req.orgId, { status: org.status });
                 }
             }
 

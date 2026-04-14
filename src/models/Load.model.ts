@@ -223,8 +223,8 @@ export interface ILoad extends Document {
 
 const LoadSchema = new Schema<ILoad>(
   {
-    organizationId: { type: String, required: true, index: true },
-    orgId: { type: Schema.Types.ObjectId, ref: "Organization", index: true },
+    organizationId: { type: String, required: true },
+    orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
     loadNumber: { type: String, unique: true, sparse: true },

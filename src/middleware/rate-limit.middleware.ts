@@ -148,7 +148,8 @@ export const uploadLimiter = rateLimit({
  */
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 200,
+    max: 1000,
+
     skip: (req: any) => {
         // Skip rate limit for internal health checks or if explicitly disabled
         return process.env.SKIP_RATE_LIMIT === 'true' || req.path === '/health';

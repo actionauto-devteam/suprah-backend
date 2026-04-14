@@ -43,7 +43,7 @@ const InvoiceCounter = mongoose.models.InvoiceCounter || mongoose.model('Invoice
 
 const PaymentSchema: Schema<IPayment> = new Schema(
   {
-    organizationId: { type: String, required: true, index: true },
+    organizationId: { type: String, required: true },
     orgId: { type: Schema.Types.ObjectId, ref: 'Organization', index: true },
     customerId: { type: String, required: true, index: true },
     customerName: { type: String, required: true, trim: true },

@@ -4,8 +4,21 @@ const build = async (options: any) => {
   const mongoose = require('mongoose');
   const { SystemLog } = require('../models/SystemLog.model');
 
-  // Handle cross-thread Mongoose connection if needed
-  // In most standard setups, we just need to ensure we don't crash if connection isn't ready
+  // Handle cross-thread Mongoose connection 
+  // Pino transports run in a separate worker thread and don't share the main process connection.
+  if (mongoose.connection.readyState !== 1) {
+    const mongoUri = options.uri || process.env.MONGODB_URI;
+    if (mongoUri) {
+      try {
+        await mongoose.connect(mongoUri);
+        console.log('[Pino-MongoDB-Transport] Worker established DB connection');
+      } catch (err) {
+        console.error('[Pino-MongoDB-Transport] Failed to connect to DB in worker:', err);
+      }
+    } else {
+      console.warn('[Pino-MongoDB-Transport] No MONGODB_URI provided to worker transport');
+    }
+  }
   
   return new Writable({
     objectMode: true,
@@ -16,8 +29,8 @@ const build = async (options: any) => {
       const saveLog = async () => {
         try {
           if (mongoose.connection.readyState !== 1) {
-            // If DB is not connected, we skip this log to avoid blocking the buffer
-            // In a production setup, you might want a small in-memory queue
+            // Log to stdout so the user can see in Docker/PM2 that logging is disconnected
+            console.warn('[Pino-MongoDB-Transport] DB not ready (readyState: %d). Skipping log.', mongoose.connection.readyState);
             return callback();
           }
 
@@ -36,14 +49,16 @@ const build = async (options: any) => {
           callback();
         } catch (error) {
           // Log the error to stdout to avoid silent failures in the worker
-          console.error('[Pino-MongoDB-Transport] Error saving log:', error);
-          callback(); // Proceed to next log to prevent stream backup
+          console.error('[Pino-MongoDB-Transport] Error saving log to MongoDB:', error);
+          callback(); 
         }
       };
+
 
       saveLog();
     }
   });
 };
+
 
 export default build;

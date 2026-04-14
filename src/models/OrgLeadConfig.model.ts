@@ -31,8 +31,7 @@ const OrgLeadConfigSchema: Schema = new Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Organization',
         required: true,
-        unique: true,
-        index: true
+        unique: true
     },
     connectedBy: {
         type: mongoose.Schema.Types.ObjectId,
@@ -52,7 +51,6 @@ const OrgLeadConfigSchema: Schema = new Schema({
     connectedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
-// Ensure we have a unique index on organizationId
-OrgLeadConfigSchema.index({ organizationId: 1 }, { unique: true });
+// OrganizationId unique index is already defined in the field definition above
 
 export default mongoose.model<IOrgLeadConfig>('OrgLeadConfig', OrgLeadConfigSchema);

@@ -26,6 +26,9 @@ import { metricsMiddleware } from './middleware/metrics.middleware';
 
 const app: Application = express();
 
+// Enable trust proxy to correctly identify client IP behind Nginx
+app.set('trust proxy', 1);
+
 // 0. Applied Global Rate Limiting first to protect the server
 app.use(globalLimiter);
 
