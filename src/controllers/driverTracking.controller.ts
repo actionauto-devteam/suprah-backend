@@ -562,47 +562,89 @@ const removeLoad = asyncHandler(async (req: Request, res: Response) => {
   const { shipmentId } = req.body as { shipmentId?: string };
   if (!shipmentId) throw new ApiError(400, "Shipment ID is required");
 
+  // --- Shipment path ---
   const shipment = await Shipment.findOne({ _id: shipmentId, organizationId: orgId });
-  if (!shipment) throw new ApiError(404, "Shipment not found");
+  if (shipment) {
+    const previousDriverId = shipment.assignedDriverId?.toString();
 
-  const previousDriverId = shipment.assignedDriverId?.toString();
+    await Shipment.findByIdAndUpdate(shipmentId, {
+      $set: { status: "Available for Pickup" },
+      $unset: { assignedDriverId: 1, assignedAt: 1, driverAcceptedAt: 1 },
+    });
 
-  await Shipment.findByIdAndUpdate(shipmentId, {
-    $set: { status: "Available for Pickup" },
+    if (previousDriverId) {
+      await DriverLocation.findOneAndUpdate(
+        { userId: previousDriverId },
+        { $pull: { shipmentIds: shipment._id } },
+      );
+      const driver = await User.findById(previousDriverId).select("name email");
+      await safeCreateNotification({
+        userId: previousDriverId,
+        organizationId: orgId,
+        type: "shipment_removed",
+        title: "Load Removed",
+        message: `Load ${shipment.trackingNumber || "N/A"} has been removed from your assignments`,
+        metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber },
+      });
+      await notifyOrgAdmins(
+        orgId, "shipment_status_changed", "Load Removed from Driver",
+        `${shipment.trackingNumber} removed from ${driver?.name || driver?.email || "driver"}`,
+        { shipmentId: shipment._id.toString(), driverId: previousDriverId },
+        (req.user as any)?._id?.toString(),
+      );
+    }
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit("driver:loads_updated", { action: "removed", shipmentId });
+
+    res.json(new ApiResponse(200, null, "Load removed from driver"));
+
+    await AuditLog.create({
+      entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+      reason: "Load removed from driver by admin", performedBy: (req.user as any)?._id,
+      changes: { assignedDriverId: null, status: "Available for Pickup" },
+    });
+    return;
+  }
+
+  // --- Load fallback path ---
+  const load = await Load.findOne({ _id: shipmentId, organizationId: orgId });
+  if (!load) throw new ApiError(404, "Load not found");
+
+  const previousDriverId = load.assignedDriverId?.toString();
+
+  await Load.findByIdAndUpdate(shipmentId, {
+    $set: { status: "Posted" },
     $unset: { assignedDriverId: 1, assignedAt: 1, driverAcceptedAt: 1 },
   });
 
   if (previousDriverId) {
-    await DriverLocation.findOneAndUpdate(
-      { userId: previousDriverId },
-      { $pull: { shipmentIds: shipment._id } },
-    );
     const driver = await User.findById(previousDriverId).select("name email");
     await safeCreateNotification({
       userId: previousDriverId,
       organizationId: orgId,
       type: "shipment_removed",
       title: "Load Removed",
-      message: `Load ${shipment.trackingNumber || "N/A"} has been removed from your assignments`,
-      metadata: { shipmentId: shipment._id.toString(), trackingNumber: shipment.trackingNumber },
+      message: `Load ${load.loadNumber || "N/A"} has been removed from your assignments`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
     });
     await notifyOrgAdmins(
       orgId, "shipment_status_changed", "Load Removed from Driver",
-      `${shipment.trackingNumber} removed from ${driver?.name || driver?.email || "driver"}`,
-      { shipmentId: shipment._id.toString(), driverId: previousDriverId },
+      `Load ${load.loadNumber} removed from ${driver?.name || driver?.email || "driver"}`,
+      { loadId: load._id.toString(), driverId: previousDriverId },
       (req.user as any)?._id?.toString(),
     );
   }
 
-  const io = getSocketIO();
-  if (io) io.to(`org:${orgId}`).emit("driver:loads_updated", { action: "removed", shipmentId });
+  const ioLoad = getSocketIO();
+  if (ioLoad) ioLoad.to(`org:${orgId}`).emit("driver:loads_updated", { action: "removed", loadId: load._id.toString() });
 
   res.json(new ApiResponse(200, null, "Load removed from driver"));
 
   await AuditLog.create({
-    entityType: "Shipment", entityId: shipment._id, action: "UPDATE",
+    entityType: "Load", entityId: load._id, action: "UPDATE",
     reason: "Load removed from driver by admin", performedBy: (req.user as any)?._id,
-    changes: { assignedDriverId: null, status: "Available for Pickup" },
+    changes: { assignedDriverId: null, status: "Posted" },
   });
 });
 

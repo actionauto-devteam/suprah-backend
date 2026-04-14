@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Shipment from '../models/Shipment.model';
+import Load from '../models/Load.model';
 import Quote from '../models/Quote.model';
 import Payment from '../models/Payment.model';
 import Organization from '../models/Organization.model';
@@ -592,8 +593,31 @@ const deleteShipment = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const shipment = await Shipment.findOne({ _id: req.params.id, organizationId: orgId });
 
+    // --- Load fallback: ID belongs to a Load document, not a Shipment ---
     if (!shipment) {
-        throw new ApiError(404, 'Shipment not found');
+        const load = await Load.findOne({ _id: req.params.id, organizationId: orgId });
+        if (!load) throw new ApiError(404, 'Shipment not found');
+
+        await Load.findByIdAndDelete(req.params.id);
+
+        const _io = getSocketIO();
+        if (_io) {
+            _io.to(`org:${orgId}`).emit('load:change', { action: 'deleted' });
+            _io.to(`org:${orgId}`).emit('shipment:change', { action: 'deleted' });
+        }
+
+        if (userId) {
+            await activityService.createActivity({
+                userId,
+                organizationId: orgId,
+                type: 'shipment_deleted',
+                title: 'Load Deleted',
+                description: `Deleted load ${load.loadNumber || req.params.id}`,
+                metadata: { loadId: req.params.id, loadNumber: load.loadNumber },
+            });
+        }
+
+        return res.json(new ApiResponse(200, null, 'Load deleted successfully.'));
     }
 
     const trackingNumber = shipment.trackingNumber || 'N/A';
