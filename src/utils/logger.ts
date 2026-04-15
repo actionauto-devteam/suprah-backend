@@ -79,15 +79,16 @@ if (isDev) {
   // In test environment, use a silent logger to keep output clean and avoid worker conflicts
   logger = pino({ level: 'silent' });
 } else {
-  // In production, use high-performance transports (JSON stdout + Rolling File + MongoDB Worker)
-  const transport = pino.transport({
-    targets: [
-      {
-        target: 'pino/file',
-        options: { destination: 1 },
-        level: 'info',
-      },
-      {
+  // In production, we decouple streams to prevent one (e.g., MongoDB) from blocking the others (e.g., Docker logs)
+  const streams = [
+    // 1. Immediate Stdout: Zero worker overhead for instant Docker pulse
+    {
+      stream: pino.destination({ dest: 1, sync: false }),
+      level: 'info',
+    },
+    // 2. Rolling File: Asynchronous worker for long-term audit trail
+    {
+      stream: pino.transport({
         target: 'pino-roll',
         options: {
           file: logFile,
@@ -95,18 +96,20 @@ if (isDev) {
           size: '20m',
           mkdir: true,
         },
-        level: 'info',
-      },
-      {
+      }),
+      level: 'info',
+    },
+    // 3. MongoDB Cloud Log: Dedicated worker for the Admin Dashboard
+    {
+      stream: pino.transport({
         target: path.join(__dirname, `pino-mongodb-transport${__filename.endsWith('.ts') ? '.ts' : '.js'}`),
         options: { 
           uri: process.env.MONGODB_URI 
         },
-        level: 'info',
-      },
-
-    ],
-  });
+      }),
+      level: 'info',
+    }
+  ];
 
   logger = pino(
     {
@@ -126,8 +129,9 @@ if (isDev) {
       },
       timestamp: pino.stdTimeFunctions.isoTime,
     },
-    transport
+    pino.multistream(streams)
   );
+
 }
 
 // Initial startup log to verify log visibility

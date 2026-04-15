@@ -1,12 +1,14 @@
 import { Writable } from 'stream';
+import mongoose from 'mongoose';
+import { SystemLog } from '../models/SystemLog.model';
+
 const build = async (options: any) => {
-  // We use a dynamic import for the model to ensure Mongoose is available in the worker
-  const mongoose = require('mongoose');
-  const { SystemLog } = require('../models/SystemLog.model');
 
   // Handle cross-thread Mongoose connection 
   // Pino transports run in a separate worker thread and don't share the main process connection.
-  if (mongoose.connection.readyState !== 1) {
+  const connect = async () => {
+    if (mongoose.connection.readyState === 1) return;
+    
     const mongoUri = options.uri || process.env.MONGODB_URI;
     if (mongoUri) {
       try {
@@ -18,19 +20,27 @@ const build = async (options: any) => {
     } else {
       console.warn('[Pino-MongoDB-Transport] No MONGODB_URI provided to worker transport');
     }
-  }
+  };
+
+  await connect();
   
   return new Writable({
     objectMode: true,
     write(chunk, encoding, callback) {
-      // Pino logs are often objects when using 'objectMode: true' in transports
       const logData = chunk;
 
       const saveLog = async () => {
         try {
+          // Attempt to reconnect if connection dropped
           if (mongoose.connection.readyState !== 1) {
-            // Log to stdout so the user can see in Docker/PM2 that logging is disconnected
-            console.warn('[Pino-MongoDB-Transport] DB not ready (readyState: %d). Skipping log.', mongoose.connection.readyState);
+            await connect();
+          }
+
+          if (mongoose.connection.readyState !== 1) {
+            // Only warn periodically to avoid flooding stdout if DB is down
+            if (Math.random() < 0.01) {
+              console.warn('[Pino-MongoDB-Transport] DB not ready (readyState: %d). Skipping log.', mongoose.connection.readyState);
+            }
             return callback();
           }
 
@@ -48,17 +58,16 @@ const build = async (options: any) => {
 
           callback();
         } catch (error) {
-          // Log the error to stdout to avoid silent failures in the worker
           console.error('[Pino-MongoDB-Transport] Error saving log to MongoDB:', error);
           callback(); 
         }
       };
 
-
       saveLog();
     }
   });
 };
+
 
 
 export default build;
