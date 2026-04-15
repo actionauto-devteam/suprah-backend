@@ -21,6 +21,7 @@ import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import googleCalendarService from '../services/googleCalendar.service';
+import customerService from '../services/customer.service';
 
 /**
  * STRICT SOURCE FILTER — only leads from this address are ingested.
@@ -148,6 +149,28 @@ export const receiveADF = async (req: Request, res: Response) => {
 
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
+
+     try {
+      await customerService.upsertFromLead({
+        organizationId: orgId as string,
+        createdBy: systemUser._id.toString(),
+        leadId: newLead._id.toString(),
+        firstName: adfData.firstName,
+        lastName: adfData.lastName,
+        email: adfData.email,
+        phone: adfData.phone,
+        vehicleInterest: adfData.vehicle ? {
+          year: adfData.vehicle.year,
+          make: adfData.vehicle.make,
+          model: adfData.vehicle.model,
+        } : undefined,
+        channel: 'adf',
+        comments: adfData.comments,
+        source: adfData.source || 'ADF Email',
+      });
+    } catch (custErr) {
+      console.warn('[ADF] Customer upsert failed (non-fatal):', custErr);
+    }
 
     // Emit real-time notification to the organization
     const io = getSocketIO();
@@ -354,6 +377,27 @@ export const createInquiry = async (req: Request, res: Response) => {
     });
 
     const savedLead = await newLead.save();
+    try {
+    await customerService.upsertFromLead({
+      organizationId: req.orgId as string,
+      createdBy: userId.toString(),
+      leadId: savedLead._id.toString(),
+      firstName,
+      lastName: lastName || '',
+      email,
+      phone,
+      vehicleInterest: vehicle ? {
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+      } : undefined,
+      channel: detectedChannel,
+      comments: comments || '',
+      source: source || 'Manual Entry',
+    });
+  } catch (custErr) {
+    console.warn('[createInquiry] Customer upsert failed (non-fatal):', custErr);
+  }
     console.log(`[SUCCESS] New Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
 
     // Emit real-time notification to the organization
@@ -729,6 +773,31 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
         try {
           await newLead.save();
+
+          try {
+            if (leadEmail) {
+              await customerService.upsertFromLead({
+                organizationId: req.orgId as string,
+                createdBy: userId,
+                leadId: newLead._id.toString(),
+                firstName,
+                lastName,
+                email: leadEmail,
+                phone: leadPhone,
+                vehicleInterest: vehicleInfo ? {
+                  year: vehicleInfo.year,
+                  make: vehicleInfo.make,
+                  model: vehicleInfo.model,
+                } : undefined,
+                channel: parsed.channel,
+                comments,
+                source: leadSource,
+              });
+            }
+          } catch (custErr) {
+            console.warn('[CENTRAL-SYNC] Customer upsert failed (non-fatal):', custErr);
+          }
+
           existingThreadIds.add(details.data.threadId);
           syncedCount++;
           console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);

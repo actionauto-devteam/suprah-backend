@@ -32,6 +32,7 @@ import devToolsRoute from "./devTools.routes";
 import loadRoute from "./load.routes";
 import analyticsRoute from "./analytics.routes";
 import activityRoute from "./activity.routes";
+import customerRoute from "./customer.route";
 
 const router = express.Router();
 
@@ -163,6 +164,10 @@ const defaultRoutes = [
   {
     path: "/analytics",
     route: analyticsRoute,
+  },
+  {
+  path: "/customers",
+  route: customerRoute,
   },
   {
     path: "/activity",
