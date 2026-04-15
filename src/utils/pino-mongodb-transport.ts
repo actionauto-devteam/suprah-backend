@@ -27,28 +27,35 @@ const build = async (options: any) => {
   return new Writable({
     objectMode: true,
     write(chunk, encoding, callback) {
-      const logData = chunk;
-
       const saveLog = async () => {
         try {
+          // Parse the incoming chunk (it arrives as a string/buffer in transports)
+          let logData;
+          try {
+            logData = typeof chunk === 'string' ? JSON.parse(chunk) : JSON.parse(chunk.toString());
+          } catch (e) {
+            // If it's not valid JSON, skip it rather than crashing the worker
+            return callback();
+          }
+
           // Attempt to reconnect if connection dropped
           if (mongoose.connection.readyState !== 1) {
             await connect();
           }
 
           if (mongoose.connection.readyState !== 1) {
-            // Only warn periodically to avoid flooding stdout if DB is down
             if (Math.random() < 0.01) {
-              console.warn('[Pino-MongoDB-Transport] DB not ready (readyState: %d). Skipping log.', mongoose.connection.readyState);
+              console.warn('[Pino-MongoDB-Transport] DB not ready. Skipping log.');
             }
             return callback();
           }
 
           // Map Pino log fields to our SystemLog schema
+          // Ensure 'message' is never empty to pass Mongoose validation
           await SystemLog.create({
             timestamp: new Date(logData.time || Date.now()),
             level: logData.level || 'INFO',
-            message: logData.msg || '',
+            message: logData.msg || logData.message || '[No Message]',
             req: logData.req,
             res: logData.res,
             err: logData.err,
@@ -67,6 +74,7 @@ const build = async (options: any) => {
     }
   });
 };
+
 
 
 
