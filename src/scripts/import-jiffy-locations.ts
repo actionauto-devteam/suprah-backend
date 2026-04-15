@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import fs from 'fs';
+import * as XLSX from 'xlsx';
 import path from 'path';
 import dotenv from 'dotenv';
 import ServiceLocation from '../models/ServiceLocation.model';
@@ -61,28 +61,28 @@ async function importLocations() {
         await mongoose.connect(MONGODB_URI);
         console.log('Connected to MongoDB');
 
-        const csvPath = path.join(__dirname, '../../jiffy-locations.csv');
-        const csvData = fs.readFileSync(csvPath, 'utf8');
-        const lines = csvData.split('\n');
-
+        const xlsPath = path.join(process.cwd(), 'jiffy-locations.xls');
+        console.log('Reading:', xlsPath);
+        
+        const workbook = XLSX.readFile(xlsPath);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        
+        const data: any[] = XLSX.utils.sheet_to_json(sheet, { header: 1 });
         const locationsToImport = [];
 
-        // Skip title and header (Lines 1 and 2)
-        for (let i = 2; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
+        // Start from index 2 (Skip title at 0 and header at 1)
+        for (let i = 2; i < data.length; i++) {
+            const row = data[i];
+            if (!row || row.length < 4) continue;
 
-            // Use a simple split but handle potential extra commas at the end
-            const parts = line.split(',');
-            if (parts.length < 4) continue;
-
-            const address = parts[0].trim();
-            const city = parts[1].replace(/"/g, '').trim(); // Handle "BALLARD, UT" quotes
-            const zipCode = parts[2].trim();
-            const phone = parts[3].trim();
+            const address = String(row[0]).trim();
+            const city = String(row[1]).trim();
+            const zipCode = String(row[2]).trim();
+            const phone = String(row[3]).trim();
 
             const fullAddress = `${address}, ${city}, UT ${zipCode}`;
-            console.log(`Geocoding (${i - 1}/${lines.length - 2}): ${fullAddress}`);
+            console.log(`Geocoding (${i - 1}/${data.length - 2}): ${fullAddress}`);
 
             const coordinates = await geocodeAddress(fullAddress);
 

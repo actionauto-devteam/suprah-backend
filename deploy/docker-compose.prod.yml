@@ -92,8 +92,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     volumes:
       - ftp-uploads:/app/ftp-uploads
-      - ./certs:/app/certs:ro # Add this line
-      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certs:/app/certs:ro
     depends_on:
       - redis
     networks:
