@@ -54,7 +54,11 @@ jobs:
             # This handles Redis, API, FTP, and Nginx together
             docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
             
+            # Force Nginx to re-resolve the API's internal IP (Stale IP Prevention)
+            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
+            
             # Cleanup old images to prevent EBS volume saturation
+
             docker image prune -a -f
             
             # Verification
