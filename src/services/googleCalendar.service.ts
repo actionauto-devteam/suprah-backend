@@ -17,15 +17,21 @@ interface GoogleTokens {
 }
 
 // ─── Sync window ──────────────────────────────────────────────────────────────
+// 3 months back → 6 months forward keeps the dataset small and the sync fast.
 function getSyncWindow(): { timeMin: Date; timeMax: Date } {
-  const currentYear = new Date().getFullYear();
-  return {
-    timeMin: new Date(Date.UTC(currentYear - 1, 0,  1,  0,  0,  0)),
-    timeMax: new Date(Date.UTC(currentYear + 2, 11, 31, 23, 59, 59)),
-  };
+  const now = new Date();
+  const timeMin = new Date(now);
+  timeMin.setMonth(timeMin.getMonth() - 3);
+  timeMin.setHours(0, 0, 0, 0);
+
+  const timeMax = new Date(now);
+  timeMax.setMonth(timeMax.getMonth() + 6);
+  timeMax.setHours(23, 59, 59, 999);
+
+  return { timeMin, timeMax };
 }
 
-const MAX_PAGES = 20;
+const MAX_PAGES = 5; // 5 × 2500 = 12,500 events — more than enough for a rolling 9-month window
 
 class GoogleCalendarService {
   // ─── OAuth ─────────────────────────────────────────────────────────────────
@@ -217,86 +223,99 @@ class GoogleCalendarService {
       throw err;
     }
 
-    let processed = 0;
-    for (const event of events) {
-      try {
-        const result = await this.upsertEventToLocalDB(event, user, organizationId);
-        if (result !== 'skipped') processed++;
-      } catch (err) {
-        console.error(`❌ Upsert failed for event ${event.id}:`, err);
+    // ── Bulk upsert — one DB round-trip instead of N+1 ──────────────────────
+    const validEvents = events.filter(e => e.id && e.status !== 'cancelled');
+    const cancelledIds = events
+      .filter(e => e.id && e.status === 'cancelled')
+      .map(e => e.id as string);
+
+    // Fetch all existing docs in one query
+    const allIds = events.map(e => e.id).filter(Boolean) as string[];
+    const existingDocs = await Appointment.find({ googleCalendarEventId: { $in: allIds } })
+      .select('_id googleCalendarEventId status')
+      .lean();
+    const existingMap = new Map(existingDocs.map(d => [d.googleCalendarEventId, d]));
+
+    // Cancel in bulk
+    if (cancelledIds.length > 0) {
+      await Appointment.updateMany(
+        { googleCalendarEventId: { $in: cancelledIds }, status: { $ne: 'cancelled' } },
+        { $set: { status: 'cancelled' } }
+      );
+    }
+
+    // Build bulkWrite ops for valid events
+    const ops: any[] = [];
+    for (const event of validEvents) {
+      const times = this.parseEventTimes(event);
+      if (!times) continue;
+      const { startTime, endTime } = times;
+
+      const titleLower = (event.summary ?? '').toLowerCase();
+      let entryType: 'event' | 'task' | 'reminder' | 'appointment' = 'event';
+      if      (titleLower.includes('task'))        entryType = 'task';
+      else if (titleLower.includes('reminder'))    entryType = 'reminder';
+      else if (titleLower.includes('appointment')) entryType = 'appointment';
+
+      let type: 'in-person' | 'phone' | 'video' | 'other' = 'other';
+      if      (event.hangoutLink || event.conferenceData) type = 'video';
+      else if (event.location)                            type = 'in-person';
+
+      const meetingLink = event.hangoutLink ?? event.conferenceData?.entryPoints?.[0]?.uri ?? '';
+
+      if (existingMap.has(event.id!)) {
+        ops.push({
+          updateOne: {
+            filter: { googleCalendarEventId: event.id },
+            update: {
+              $set: {
+                title:        event.summary || undefined,
+                description:  event.description || undefined,
+                startTime,
+                endTime,
+                location:     event.location || undefined,
+                meetingLink:  meetingLink || undefined,
+                organizationId,
+              },
+            },
+          },
+        });
+      } else {
+        ops.push({
+          insertOne: {
+            document: {
+              title:                    event.summary ?? 'Untitled Event',
+              description:              event.description ?? '',
+              startTime,
+              endTime,
+              location:                 event.location ?? '',
+              type,
+              entryType,
+              status:                   'scheduled',
+              createdBy:                user._id,
+              organizationId,
+              participants:             [user._id],
+              googleCalendarEventId:    event.id,
+              syncedWithGoogleCalendar: true,
+              lastSyncedAt:             new Date(),
+              meetingLink,
+            },
+          },
+        });
       }
     }
+
+    let processed = 0;
+    if (ops.length > 0) {
+      const result = await Appointment.bulkWrite(ops, { ordered: false });
+      processed = (result.insertedCount ?? 0) + (result.modifiedCount ?? 0);
+    }
+    console.log(`✅ Bulk sync complete: ${processed} events processed, ${cancelledIds.length} cancelled`);
     return processed;
   }
 
   async syncAllEvents(orgId: string, triggeringUserId?: string): Promise<number> {
     return this.fetchAllGoogleCalendarEvents(orgId, orgId, triggeringUserId);
-  }
-
-  private async upsertEventToLocalDB(
-    event: calendar_v3.Schema$Event,
-    user: any,
-    organizationId: string
-  ): Promise<'created' | 'updated' | 'cancelled' | 'skipped'> {
-    if (!event.id) return 'skipped';
-
-    const existing = await Appointment.findOne({ googleCalendarEventId: event.id });
-
-    if (event.status === 'cancelled') {
-        if (existing && existing.status !== 'cancelled') {
-            existing.status = 'cancelled';
-            await existing.save();
-            return 'cancelled';
-        }
-        return 'skipped';
-    }
-
-    const times = this.parseEventTimes(event);
-    if (!times) return 'skipped';
-    const { startTime, endTime } = times;
-
-    const titleLower = (event.summary ?? '').toLowerCase();
-    let entryType: 'event' | 'task' | 'reminder' | 'appointment' = 'event';
-    if      (titleLower.includes('task')) entryType = 'task';
-    else if (titleLower.includes('reminder')) entryType = 'reminder';
-    else if (titleLower.includes('appointment')) entryType = 'appointment';
-
-    let type: 'in-person' | 'phone' | 'video' | 'other' = 'other';
-    if      (event.hangoutLink || event.conferenceData) type = 'video';
-    else if (event.location) type = 'in-person';
-
-    const meetingLink = event.hangoutLink ?? event.conferenceData?.entryPoints?.[0]?.uri ?? '';
-
-    if (existing) {
-        existing.title = event.summary || existing.title;
-        existing.description = event.description || existing.description;
-        existing.startTime = startTime;
-        existing.endTime = endTime;
-        existing.location = event.location || existing.location;
-        existing.meetingLink = meetingLink || existing.meetingLink;
-        existing.organizationId = organizationId;
-        await existing.save();
-        return 'updated';
-    }
-
-    await Appointment.create({
-        title: event.summary ?? 'Untitled Event',
-        description: event.description ?? '',
-        startTime,
-        endTime,
-        location: event.location ?? '',
-        type,
-        entryType,
-        status: 'scheduled',
-        createdBy: user._id,
-        organizationId,
-        participants: [user._id],
-        googleCalendarEventId: event.id,
-        syncedWithGoogleCalendar: true,
-        lastSyncedAt: new Date(),
-        meetingLink,
-    });
-    return 'created';
   }
 
   // ─── Outbound Sync ──────────────────────────────────────────────────────────
