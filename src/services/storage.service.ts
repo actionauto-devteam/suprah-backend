@@ -12,6 +12,10 @@ export enum BucketType {
     FTP = 'ftp'
 }
 
+interface UploadOptions {
+    allowLocalFallback?: boolean;
+}
+
 class StorageService {
     private s3Client: S3Client | null = null;
     private isConfigured: boolean = false;
@@ -63,8 +67,10 @@ class StorageService {
     async upload(
         file: Express.Multer.File | { buffer: Buffer; originalname: string; mimetype: string },
         folder: string,
-        type: BucketType = BucketType.PUBLIC
+        type: BucketType = BucketType.PUBLIC,
+        options: UploadOptions = {}
     ): Promise<string> {
+        const allowLocalFallback = options.allowLocalFallback ?? true;
         const extension = path.extname(file.originalname).toLowerCase();
         const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
         const key = `${folder}/${fileName}`;
@@ -87,8 +93,15 @@ class StorageService {
                 }
                 return key; // For private/ftp, return the key
             } catch (error: any) {
+                if (!allowLocalFallback) {
+                    throw new Error(`R2 upload failed: ${error.message}`);
+                }
                 console.warn(`[StorageService] R2 upload to ${bucketName} failed, falling back to local:`, error.message);
             }
+        }
+
+        if (!allowLocalFallback) {
+            throw new Error('[StorageService] Cloud storage is not configured; local fallback is disabled.');
         }
 
         return this.saveLocally(file.buffer, folder, fileName);

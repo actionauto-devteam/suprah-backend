@@ -260,7 +260,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * POST /api/supraspace/conversations/:id/upload
- * Save files to src/uploads/supraspace/ and send as a message
+ * Upload files to cloud storage and send as a message
  */
 const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -283,8 +283,16 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     const isImage = file.mimetype.startsWith('image/');
     if (isImage) hasImage = true;
 
-    // Upload to R2 (Private bucket for security)
-    const fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE);
+    // Upload to R2 (Private bucket). Local fallback is disabled for chat attachments.
+    let fileUrl: string;
+    try {
+      fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, {
+        allowLocalFallback: false,
+      });
+    } catch (err: any) {
+      logger.error({ err, conversationId: id, fileName: file.originalname }, '[SupraSpace] Attachment upload failed');
+      throw new ApiError(503, 'Attachment upload is temporarily unavailable. Please try again.');
+    }
     const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
 
     attachments.push({
@@ -308,22 +316,42 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   });
 
   await message.populate('sender', 'fullName username avatar');
+  if (replyTo) {
+    await message.populate({
+      path: 'replyTo',
+      populate: { path: 'sender', select: 'fullName username avatar' },
+    });
+  }
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
   await conversation.save();
 
+  // Emit/return signed URLs so attachments are immediately usable in the chat UI.
+  const messageForClient = message.toObject() as any;
+  if (Array.isArray(messageForClient.attachments)) {
+    for (const attachment of messageForClient.attachments) {
+      const signedUrl = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+      if (signedUrl) {
+        attachment.url = signedUrl;
+        if (attachment.thumbnailUrl) {
+          attachment.thumbnailUrl = signedUrl;
+        }
+      }
+    }
+  }
+
   try {
     const io = getIO();
     conversation.members.forEach((memberId) => {
-      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message });
+      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message: messageForClient });
     });
-    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message });
+    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message: messageForClient });
   } catch (socketErr) {
     console.warn('[SupraSpace] Socket emit failed on upload:', socketErr);
   }
 
-  res.status(201).json(new ApiResponse(201, message, 'File sent'));
+  res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
 
 /**

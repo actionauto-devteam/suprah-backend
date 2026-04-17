@@ -52,12 +52,22 @@ router.patch('/conversations/:id', supraSpaceController.updateConversation);
 // Messages
 router.get('/conversations/:id/messages', supraSpaceController.getMessages);
 router.post('/conversations/:id/messages', supraSpaceController.sendMessage);
-router.post(
-  '/:id/upload', // Match the frontend's expected /supraspace/:id/upload
+
+const uploadMiddlewareChain = [
   uploadLimiter,
-  crmAuth(),
   upload.array('files', 5),
-  supraSpaceController.uploadAttachment
+  supraSpaceController.uploadAttachment,
+] as const;
+
+router.post(
+  '/conversations/:id/upload',
+  ...uploadMiddlewareChain
+);
+
+// Legacy path support
+router.post(
+  '/:id/upload',
+  ...uploadMiddlewareChain
 );
 router.delete('/messages/:messageId', supraSpaceController.deleteMessage);
 
