@@ -5,7 +5,10 @@ import { requireOrg } from '../middleware/org.middleware';
 
 const router = express.Router();
 
-// Apply authentication middleware to all routes
+// Public showcase route (no auth required)
+router.get('/public/:id', vehicleController.getPublicVehicleById);
+
+// Apply authentication middleware to all other routes
 router.use(auth());
 
 // Middleware to protect non-GET routes with organization context

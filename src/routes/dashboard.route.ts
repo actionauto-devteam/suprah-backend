@@ -6,5 +6,6 @@ import { requireOrg } from '../middleware/org.middleware';
 const router = express.Router();
 
 router.get('/metrics', auth(), requireOrg, dashboardController.getDashboardMetrics);
+router.get('/leaderboard', auth(), requireOrg, dashboardController.getLeaderboard);
 
 export default router;

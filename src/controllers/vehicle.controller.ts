@@ -48,6 +48,60 @@ const normalizeVehicle = (vehicle: any) => ({
   dateSold: vehicle.dateSold,
   assignedTo: vehicle.assignedTo,
   notes: vehicle.notes || [],
+  comments: vehicle.comments || vehicle.description || '',
+});
+
+const normalizePublicVehicle = (vehicle: any) => ({
+  id: vehicle._id.toString(),
+  vin: vehicle.vin,
+  year: vehicle.year,
+  make: vehicle.make,
+  model: vehicle.modelName,
+  modelName: vehicle.modelName,
+  trim: vehicle.trim || '',
+  color: vehicle.exteriorColor || 'N/A',
+  exteriorColor: vehicle.exteriorColor || 'N/A',
+  interiorColor: vehicle.interiorColor || 'N/A',
+  stockNumber: vehicle.stockNumber || 'N/A',
+  price: vehicle.price || 0,
+  marketPrice: vehicle.msrp || 0,
+  mileage: vehicle.mileage || 0,
+  transmission: vehicle.transmission || 'Automatic',
+  fuelType: vehicle.fuelType || 'Gasoline',
+  location: vehicle.dealerCity ? `${vehicle.dealerCity}${vehicle.dealerState ? ', ' + vehicle.dealerState : ''}${vehicle.dealerZip ? ', ' + vehicle.dealerZip : ''}` : 'Unknown',
+  image: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+  images: vehicle.images || [],
+  status: vehicle.status,
+  daysOnLot: vehicle.daysOnLot || 0,
+  comments: vehicle.comments || '',
+});
+
+const normalizeCustomerVehicle = (vehicle: any) => ({
+  id: vehicle._id.toString(),
+  vin: vehicle.vin,
+  year: vehicle.year,
+  make: vehicle.make,
+  model: vehicle.modelName,
+  modelName: vehicle.modelName,
+  trim: vehicle.trim || '',
+  color: vehicle.exteriorColor || 'N/A',
+  exteriorColor: vehicle.exteriorColor || 'N/A',
+  interiorColor: vehicle.interiorColor || 'N/A',
+  stockNumber: vehicle.stockNumber || 'N/A',
+  price: vehicle.price || 0,
+  marketPrice: vehicle.msrp || 0,
+  mileage: vehicle.mileage || 0,
+  transmission: vehicle.transmission || 'Automatic',
+  fuelType: vehicle.fuelType || 'Gasoline',
+  location: vehicle.dealerCity ? `${vehicle.dealerCity}${vehicle.dealerState ? ', ' + vehicle.dealerState : ''}${vehicle.dealerZip ? ', ' + vehicle.dealerZip : ''}` : 'Unknown',
+  image: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+  images: vehicle.images || [],
+  status: vehicle.status,
+  daysOnLot: vehicle.daysOnLot || 0,
+  engine: vehicle.engine || '',
+  driveTrain: vehicle.driveTrain || '',
+  comments: vehicle.comments || '',
+  options: vehicle.options || '',
 });
 
 const createVehicle = asyncHandler(async (req: Request, res: Response) => {
@@ -106,7 +160,8 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
 const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   const {
     status,
-    search,
+    search: searchParam,
+    q, // Fallback for some frontend search bars
     make,
     model,
     year,
@@ -121,7 +176,9 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     limit = '20'
   } = req.query;
 
-  const filter: any = { organizationId: req.orgId, isDeleted: false };
+  const search = searchParam || q;
+
+  const filter: any = { isDeleted: false }; // organizationId is handled in pipeline or match below
 
   if (status && status !== 'all') {
     filter.status = status;
@@ -178,15 +235,6 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     if (req.query.maxCost) filter.cost.$lte = Number(req.query.maxCost);
   }
 
-  if (search) {
-    filter.$or = [
-      { vin: { $regex: search, $options: 'i' } },
-      { make: { $regex: search, $options: 'i' } },
-      { modelName: { $regex: search, $options: 'i' } },
-      { stockNumber: { $regex: search, $options: 'i' } }
-    ];
-  }
-
   const sortObj: any = {};
   const order = sortOrder === 'desc' ? -1 : 1;
 
@@ -224,33 +272,115 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
       sortObj.updatedAt = order;
       break;
     case 'created':
-    case 'recent': // Handle 'Recently Added'
+    case 'recent':
       sortObj.dateAdded = order;
       break;
     default:
-      // Default: Make and Model (Alphabetical)
       sortObj.make = 1;
       sortObj.modelName = 1;
   }
 
   const pageNum = Math.max(1, Number(page));
   const limitNum = Number(limit);
+  const skip = (pageNum - 1) * limitNum;
 
-  let query = Vehicle.find(filter)
-    .populate('assignedTo', 'email name')
-    .sort(sortObj);
+  // Build Aggregation Pipeline
+  const pipeline: any[] = [];
 
-  if (limitNum > 0) {
-    const skip = (pageNum - 1) * limitNum;
-    query = query.skip(skip).limit(limitNum);
+  // Stage 1: Search (Must be first)
+  if (search) {
+    const searchString = search.toString();
+    const isNumericSearch = !isNaN(Number(searchString));
+    
+    const shouldClauses: any[] = [
+      {
+        text: {
+          query: searchString,
+          path: ['make', 'modelName', 'vin', 'stockNumber'],
+          fuzzy: { maxEdits: 1 }
+        }
+      }
+    ];
+
+    // If the search is a number (like 2024), add a numeric match for the 'year' field
+    if (isNumericSearch) {
+      shouldClauses.push({
+        equals: {
+          value: Number(searchString),
+          path: 'year'
+        }
+      });
+    }
+
+    pipeline.push({
+      $search: {
+        index: 'Vehicle',
+        compound: {
+          must: [
+            {
+              equals: {
+                value: req.orgId,
+                path: 'organizationId'
+              }
+            },
+            {
+              compound: {
+                should: shouldClauses,
+                minimumShouldMatch: 1
+              }
+            }
+          ]
+        }
+      }
+    });
+  } else {
+    pipeline.push({ $match: { organizationId: req.orgId, isDeleted: false } });
   }
 
-  const [vehicles, total] = await Promise.all([
-    query.exec(),
-    Vehicle.countDocuments(filter)
-  ]);
+  // Stage 2: Filter matching
+  pipeline.push({ $match: filter });
 
-  const normalized = vehicles.map(normalizeVehicle);
+  // Stage 3: Sorting
+  pipeline.push({ $sort: sortObj });
+
+  // Stage 4: Pagination & Metadata Facets
+  pipeline.push({
+    $facet: {
+      metadata: [{ $count: 'total' }],
+      data: [
+        { $skip: skip },
+        { $limit: limitNum > 0 ? limitNum : 100 },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'assignedTo',
+            foreignField: '_id',
+            as: 'assignedTo'
+          }
+        },
+        {
+          $unwind: {
+             path: '$assignedTo',
+             preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $project: {
+            'assignedTo.password': 0,
+            'assignedTo.otp': 0,
+            'assignedTo.otpExpires': 0
+          }
+        }
+      ]
+    }
+  });
+
+  console.log('[DEBUG] Vehicle Pipeline:', JSON.stringify(pipeline, null, 2));
+  const [result] = await Vehicle.aggregate(pipeline);
+  
+  const total = result.metadata[0]?.total || 0;
+  const vehicles = result.data || [];
+  const normalized = vehicles.map((v: any) => normalizeVehicle(v));
 
   const responseData: any = {
     vehicles: normalized,
@@ -268,15 +398,48 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  const isStaff = user && (user.role === 'admin' || user.role === 'super_admin' || (user as any).organizationRole === 'employee');
   const orgId = req.orgId as string;
-  const vehicle = await Vehicle.findOne({ _id: req.params.id, organizationId: orgId })
+
+  let query: any = { _id: req.params.id, isDeleted: false };
+  
+  // If staff, we usually restrict to their organization unless super_admin
+  if (isStaff && user.role !== 'super_admin') {
+    query.organizationId = orgId;
+  }
+
+  const vehicle = await Vehicle.findOne(query)
     .populate('assignedTo', 'email name');
 
   if (!vehicle) {
     throw new ApiError(404, 'Vehicle not found');
   }
 
-  res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle fetched successfully'));
+  // Role-based normalization
+  if (isStaff) {
+    res.json(new ApiResponse(200, normalizeVehicle(vehicle), 'Vehicle fetched successfully'));
+  } else {
+    // For customers or cross-org checks, return filtered data
+    res.json(new ApiResponse(200, normalizeCustomerVehicle(vehicle), 'Vehicle fetched successfully'));
+  }
+});
+
+/**
+ * Publicly accessible vehicle data (sanitized)
+ */
+const getPublicVehicleById = asyncHandler(async (req: Request, res: Response) => {
+  const vehicle = await Vehicle.findOne({ _id: req.params.id, isDeleted: false })
+    .select('-cost -notes -assignedTo -organizationId -dealerEmail -isDeleted -manualStatusLock');
+
+  if (!vehicle) {
+    throw new ApiError(404, 'Vehicle not found');
+  }
+
+  // Double check status - normally we only show 'Ready for Sale' publicly
+  // But we allow others if explicitly shared, as long as sensitive data is scrubbed.
+  
+  res.json(new ApiResponse(200, normalizePublicVehicle(vehicle), 'Public vehicle data fetched successfully'));
 });
 
 const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
@@ -658,7 +821,7 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status, search, make, model, year, location, minPrice, maxPrice, minMileage, maxMileage } = req.query;
 
-  const filter: any = { organizationId: orgId };
+  const filter: any = {}; // Used for match stage after search
 
   if (status) {
     if (status !== 'all') {
@@ -690,19 +853,63 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
     if (maxMileage) filter.mileage.$lte = Number(maxMileage);
   }
 
+  const pipeline: any[] = [];
+
   if (search) {
-    filter.$or = [
-      { vin: { $regex: search, $options: 'i' } },
-      { make: { $regex: search, $options: 'i' } },
-      { modelName: { $regex: search, $options: 'i' } },
-      { stockNumber: { $regex: search, $options: 'i' } }
+    const searchString = search.toString();
+    const isNumericSearch = !isNaN(Number(searchString));
+    
+    const shouldClauses: any[] = [
+      {
+        text: {
+          query: searchString,
+          path: ['make', 'modelName', 'vin', 'stockNumber'],
+          fuzzy: { maxEdits: 1 }
+        }
+      }
     ];
+
+    if (isNumericSearch) {
+      shouldClauses.push({
+        equals: {
+          value: Number(searchString),
+          path: 'year'
+        }
+      });
+    }
+
+    pipeline.push({
+      $search: {
+        index: 'Vehicle',
+        compound: {
+          must: [
+            {
+              equals: {
+                value: orgId,
+                path: 'organizationId'
+              }
+            },
+            {
+              compound: {
+                should: shouldClauses,
+                minimumShouldMatch: 1
+              }
+            }
+          ]
+        }
+      }
+    });
+  } else {
+    pipeline.push({ $match: { organizationId: orgId, isDeleted: false } });
   }
 
-  const vehicles = await Vehicle.find(filter).sort({ createdAt: -1 });
+  pipeline.push({ $match: filter });
+  pipeline.push({ $sort: { createdAt: -1 } });
+
+  const vehicles = await Vehicle.aggregate(pipeline);
 
   const csvHeader = 'VIN,Year,Make,Model,Trim,Color,Stock Number,Price,Mileage,Status,Location,Date Added\n';
-  const csvRows = vehicles.map(v =>
+  const csvRows = vehicles.map((v: any) =>
     `"${v.vin}",${v.year},"${v.make}","${v.modelName}","${v.trim || ''}","${v.exteriorColor || ''}","${v.stockNumber || ''}",${v.price || 0},${v.mileage || 0},"${v.status}","${v.dealerCity}, ${v.dealerState}",${v.dateAdded ? new Date(v.dateAdded).toISOString().split('T')[0] : ''}`
   ).join('\n');
 
@@ -864,4 +1071,5 @@ export default {
   autocomplete,
   checkAvailability,
   reserveVehicle,
+  getPublicVehicleById,
 };

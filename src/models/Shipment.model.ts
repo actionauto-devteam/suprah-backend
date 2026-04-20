@@ -275,6 +275,7 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
 // Indexes
 ShipmentSchema.index({ createdBy: 1, createdAt: -1 });
 ShipmentSchema.index({ organizationId: 1, createdAt: -1 });
+ShipmentSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
 ShipmentSchema.index({ organizationId: 1, isPostedToBoard: 1, status: 1 });
 ShipmentSchema.index({ "pendingDriverRequests.driverId": 1, "pendingDriverRequests.status": 1 });
 
