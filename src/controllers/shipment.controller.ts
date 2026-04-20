@@ -18,6 +18,7 @@ import cacheService from "../services/cache.service";
 import { getSocketIO } from "../utils/socketEmitter";
 import { storageService, BucketType } from "../services/storage.service";
 import activityService from "../services/activity.service";
+import emailService from "../services/email.service";
 import mongoose from "mongoose";
 import fs from "fs";
 import path from "path";
@@ -458,6 +459,100 @@ const getShipmentById = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, shipmentObj, "Shipment fetched successfully"));
 });
+
+/**
+ * Send shipment details to email
+ */
+const sendShipmentDetailsEmail = asyncHandler(
+  async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const { id } = req.params;
+    const { recipientEmail } = req.body as { recipientEmail?: string };
+
+    const email = (recipientEmail || "").trim().toLowerCase();
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+    if (!email || !isValidEmail) {
+      throw new ApiError(400, "A valid recipient email is required");
+    }
+
+    const shipment = await Shipment.findOne({ _id: id, organizationId: orgId })
+      .populate({
+        path: "quoteId",
+        populate: {
+          path: "vehicleId",
+          select: "year make modelName vin stockNumber image location",
+        },
+      })
+      .populate("createdBy", "name email");
+
+    if (!shipment) {
+      throw new ApiError(404, "Shipment not found");
+    }
+
+    const quote = shipment.quoteId as any;
+    const preserved = shipment.preservedQuoteData as any;
+    const customerName = quote
+      ? `${quote.firstName || ""} ${quote.lastName || ""}`.trim()
+      : `${preserved?.firstName || ""} ${preserved?.lastName || ""}`.trim();
+    const vehicleName = quote?.vehicleName || preserved?.vehicleName || "N/A";
+    const trackingNumber = shipment.trackingNumber || "N/A";
+    const requestedPickupDate = shipment.requestedPickupDate
+      ? new Date(shipment.requestedPickupDate).toLocaleDateString("en-US")
+      : "N/A";
+    const scheduledDeliveryDate = shipment.scheduledDelivery
+      ? new Date(shipment.scheduledDelivery).toLocaleDateString("en-US")
+      : "N/A";
+
+    const text = [
+      "Shipment Details",
+      "",
+      `Customer: ${customerName || "N/A"}`,
+      `Tracking Number: ${trackingNumber}`,
+      `Status: ${shipment.status}`,
+      `Vehicle: ${vehicleName}`,
+      `Origin: ${shipment.origin || "N/A"}`,
+      `Destination: ${shipment.destination || "N/A"}`,
+      `Requested Pickup: ${requestedPickupDate}`,
+      `Scheduled Delivery: ${scheduledDeliveryDate}`,
+    ].join("\n");
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
+        <h2 style="margin-bottom: 12px;">Shipment Details</h2>
+        <p><strong>Customer:</strong> ${customerName || "N/A"}</p>
+        <p><strong>Tracking Number:</strong> ${trackingNumber}</p>
+        <p><strong>Status:</strong> ${shipment.status}</p>
+        <p><strong>Vehicle:</strong> ${vehicleName}</p>
+        <p><strong>Origin:</strong> ${shipment.origin || "N/A"}</p>
+        <p><strong>Destination:</strong> ${shipment.destination || "N/A"}</p>
+        <p><strong>Requested Pickup:</strong> ${requestedPickupDate}</p>
+        <p><strong>Scheduled Delivery:</strong> ${scheduledDeliveryDate}</p>
+      </div>
+    `;
+
+    await emailService.sendEmail({
+      to: email,
+      subject: `Shipment Update: ${trackingNumber}`,
+      text,
+      html,
+      organizationId: orgId,
+    });
+
+    logger.info(
+      { shipmentId: shipment._id, trackingNumber, recipientEmail: email },
+      "Shipment details email sent",
+    );
+
+    res.json(
+      new ApiResponse(
+        200,
+        { sentTo: email, shipmentId: shipment._id },
+        "Shipment details email sent successfully",
+      ),
+    );
+  },
+);
 
 /**
  * Update shipment
@@ -1122,6 +1217,7 @@ export default {
   createShipment,
   getShipments,
   getShipmentById,
+  sendShipmentDetailsEmail,
   updateShipment,
   addShipmentNote,
   deleteShipment,
