@@ -25,7 +25,8 @@
   },
   "include": [
     "src/**/*",
-    "src/types/**/*"
+    "src/types/**/*",
+    "tests/lead-pipeline.test.ts"
   ],
   "exclude": [
     "node_modules",

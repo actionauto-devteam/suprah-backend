@@ -26,6 +26,7 @@ class OrgGmailService {
         const scopes = [
             'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/gmail.modify',
+            'https://www.googleapis.com/auth/gmail.send',
             'https://www.googleapis.com/auth/userinfo.email',
             'https://www.googleapis.com/auth/calendar',
             'https://www.googleapis.com/auth/calendar.events',
@@ -235,6 +236,8 @@ class OrgGmailService {
                 raw: encodedMessage
             }
         });
+
+        console.log(`[GmailSend] Email sent successfully to ${to}. MessageId: ${response.data.id}`);
 
         return response.data;
     }

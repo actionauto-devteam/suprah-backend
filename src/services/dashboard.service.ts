@@ -8,6 +8,8 @@ import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import User from '../models/User.model';
 import Vehicle from '../models/Vehicle.model';
 import DriverLocation from '../models/DriverLocation.model';
+import DriverProfile from '../models/DriverProfile.model';
+import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 
 export class DashboardService {
     /**
@@ -17,11 +19,12 @@ export class DashboardService {
         const orgObjectId = orgId; // organizationId is stored as string in these models
 
         // Execute multiple aggregations in parallel
-        const [stats, trajectory, leaderboard, logistics] = await Promise.all([
+        const [stats, trajectory, activeReps, logistics, intelligence] = await Promise.all([
             this.getQuickStats(orgId),
             this.getRevenueTrajectory(orgId, period),
-            this.getLeaderboardData(orgId),
-            this.getLogisticsData(orgId)
+            this.getActiveReps(orgId), // Lightweight rep list for header
+            this.getLogisticsData(orgId),
+            this.getDashboardIntelligence(orgId)
         ]);
 
         // Get live payments
@@ -33,8 +36,9 @@ export class DashboardService {
         return {
             stats,
             revenueTrajectory: trajectory,
-            leaderboard,
+            activeReps, // Names & Avatars only
             logistics,
+            intelligence,
             livePayments
         };
     }
@@ -195,14 +199,21 @@ export class DashboardService {
     }
 
     /**
-     * Leaderboard with multi-model funnel
+     * Paginated Leaderboard with multi-model funnel
+     * Designed for high scalability by limiting the number of users processed per request.
      */
-    private static async getLeaderboardData(orgId: string) {
-        // 1. Get all employees
+    static async getPaginatedLeaderboard(orgId: string, page: number = 0, limit: number = 10) {
+        const skip = page * limit;
+
+        // 1. Get subset of employees
         const employees = await User.find({
             organizationId: orgId,
             role: { $in: ['employee', 'admin', 'super_admin'] }
-        }).select('name avatar');
+        })
+        .select('name avatar role')
+        .sort({ shipments: -1, createdAt: -1 }) // Sort by shipments if it's already a field, else name
+        .skip(skip)
+        .limit(limit);
 
         const leaderboard = await Promise.all(employees.map(async (emp) => {
             const userId = emp._id;
@@ -221,8 +232,9 @@ export class DashboardService {
             ]);
 
             return {
+                id: userId,
                 name: emp.name,
-                role: 'Sales Executive', // Generic fallback
+                role: emp.role === 'admin' ? 'Administrator' : 'Sales Executive',
                 calls,
                 convs: conversations,
                 appts: appointments,
@@ -231,7 +243,27 @@ export class DashboardService {
             };
         }));
 
-        return leaderboard.sort((a, b) => b.shipments - a.shipments);
+        return leaderboard;
+    }
+
+    /**
+     * @deprecated Use getPaginatedLeaderboard for better performance
+     */
+    private static async getLeaderboardData(orgId: string) {
+        return this.getPaginatedLeaderboard(orgId, 0, 10);
+    }
+
+    /**
+     * Lightweight rep metadata for dashboard headers
+     */
+    private static async getActiveReps(orgId: string) {
+        return await User.find({
+            organizationId: orgId,
+            role: { $in: ['employee', 'admin', 'super_admin'] }
+        })
+        .select('name avatar')
+        .sort({ createdAt: -1 })
+        .limit(6);
     }
 
     /**
@@ -290,5 +322,84 @@ export class DashboardService {
         });
 
         return { drivers, shipments };
+    }
+
+    /**
+     * Get advanced business intelligence metrics
+     */
+    private static async getDashboardIntelligence(orgId: string) {
+        const [netMargin, complianceAlerts, speedToLead] = await Promise.all([
+            this.getLogisticsMargin(orgId),
+            this.getComplianceAlerts(orgId),
+            this.getSpeedToLead(orgId)
+        ]);
+
+        return {
+            netMargin,
+            complianceAlerts,
+            speedToLead
+        };
+    }
+
+    /**
+     * Calculate net margin (Sell - Cost) for delivered shipments
+     * Optimized using MongoDB Aggregation to handle scale.
+     */
+    private static async getLogisticsMargin(orgId: string) {
+        const results = await Shipment.aggregate([
+            {
+                $match: {
+                    organizationId: orgId,
+                    status: 'Delivered',
+                    'preservedQuoteData.rate': { $exists: true },
+                    carrierPayAmount: { $exists: true }
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalMargin: { 
+                        $sum: { 
+                            $subtract: [
+                                { $ifNull: ["$preservedQuoteData.rate", 0] }, 
+                                { $ifNull: ["$carrierPayAmount", 0] }
+                            ] 
+                        } 
+                    }
+                }
+            }
+        ]);
+
+        return results[0]?.totalMargin || 0;
+    }
+
+    /**
+     * Count active drivers with expired compliance documents
+     */
+    private static async getComplianceAlerts(orgId: string) {
+        return await DriverProfile.countDocuments({
+            organizationId: orgId,
+            isComplianceExpired: true
+        });
+    }
+
+    /**
+     * Calculate Speed-to-Lead from Analytics records
+     */
+    private static async getSpeedToLead(orgId: string) {
+        // Look for recent monthly/weekly aggregates for the organization
+        const aggregates = await AnalyticsAggregate.find({
+            organizationId: orgId,
+            periodType: { $in: ['monthly', 'weekly'] },
+            'kpis.avgResponseTimeMin': { $gt: 0 }
+        }).sort({ periodStart: -1 }).limit(20).select('kpis.avgResponseTimeMin');
+
+        if (!aggregates.length) return 0;
+
+        const totalResponseTime = aggregates.reduce((acc, curr) => 
+            acc + (curr.kpis.avgResponseTimeMin || 0), 0
+        );
+
+        return Math.round(totalResponseTime / aggregates.length);
     }
 }
