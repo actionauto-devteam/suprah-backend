@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+dotenv.config();
 
 // Mock Clerk SDK
 jest.mock('@clerk/clerk-sdk-node', () => {
@@ -35,8 +37,9 @@ process.env.CLERK_PUBLISHABLE_KEY = 'pk_test_123';
 process.env.CLERK_SECRET_KEY = 'sk_test_123';
 
 // --- DATABASE SECURITY GATEKEEPER ---
+console.log("MONGODB_URI", process.env.MONGODB_URI);
 // We strictly forbid running tests against Cloud Atlas to prevent accidental data loss.
-const MONGODB_URI = process.env.TEST_MONGODB_URI || process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
 const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
 
 if (isAtlas && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
@@ -46,7 +49,7 @@ if (isAtlas && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
     console.error('To protect your data, the test suite has been terminated.');
     console.error('To run tests safely, use a local MongoDB instance or set');
     console.error('ALLOW_REMOTE_TEST_DB=true if you are 100% sure.\n\n');
-    process.exit(1); 
+    process.exit(1);
 }
 // ------------------------------------
 
@@ -55,7 +58,7 @@ process.env.SKIP_RATE_LIMIT = 'true';
 
 // Connection logic
 beforeAll(async () => {
-    jest.setTimeout(600 * 1000); 
+    jest.setTimeout(600 * 1000);
     if (mongoose.connection.readyState === 0) {
         console.log(`[TEST-SETUP] Connecting to SAFE test database: ${MONGODB_URI.replace(/\/\/.*@/, '//****:****@')}`);
         await mongoose.connect(MONGODB_URI);
@@ -74,10 +77,10 @@ const originalDeleteMany = mongoose.Model.deleteMany;
 mongoose.Model.deleteMany = function (this: mongoose.Model<any>, filter: any, options?: any) {
     const dbName = mongoose.connection.name;
     const isSafeDb = dbName && (dbName === 'action-auto-test' || dbName.toLowerCase().includes('test'));
-    
+
     // If filter is empty OR includes everything, and we're not in a safe test DB, BLOCK IT.
     const isMassDelete = !filter || Object.keys(filter).length === 0;
-    
+
     if (isMassDelete && !isSafeDb) {
         const errorMsg = `🚨 SECURITY BLOCK: Mass-deletion (deleteMany({})) attempted on database "${dbName}". This is forbidden to protect data. Please use targeted deletions (e.g., by ID).`;
         console.error(`\n${errorMsg}\n`);
@@ -101,7 +104,7 @@ const clearMongooseRegistry = (): void => {
             delete (mongoose.connection as any).models[modelName];
         });
     }
-    
+
     // 3. Clear Mongoose Schema Registry
     const anyMongoose = mongoose as any;
     if (anyMongoose.modelSchemas) {

@@ -2,6 +2,8 @@ import express from 'express';
 import vehicleController from '../controllers/vehicle.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
+import authorize from '../middleware/role.middleware';
+import { marketplaceLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
@@ -20,6 +22,13 @@ const requireOrgForMutation = (req: express.Request, res: express.Response, next
 };
 
 router.use(requireOrgForMutation);
+
+/**
+ * SECURE MARKETPLACE ROUTES
+ * Global access restricted to customers and authorized staff
+ */
+router.get('/marketplace', marketplaceLimiter, authorize(['customer', 'admin', 'super_admin']), vehicleController.getMarketplaceVehicles);
+router.get('/marketplace/filters', authorize(['customer', 'admin', 'super_admin']), vehicleController.getMarketplaceFilters);
 
 // Filter and statistics routes (must be before /:id routes)
 router.get('/filters', vehicleController.getFilters);

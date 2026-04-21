@@ -186,3 +186,28 @@ export const inventorySyncLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
+
+/**
+ * Marketplace Search Limiter
+ * 100 requests per 15 minutes per IP/User
+ * Prevents aggressive inventory scraping
+ */
+export const marketplaceLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, 
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'You are browsing vehicles quite quickly. Please take a short break to ensure best performance for everyone.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+

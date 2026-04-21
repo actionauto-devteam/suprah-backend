@@ -19,6 +19,10 @@ declare global {
                 orgRole?: string;
                 getToken: () => Promise<string | null>;
             };
+            leadContext?: {
+                organizationId: string;
+                vehicle: any; // Using any for IVehicle to avoid circular dependency in declaration file
+            };
         }
     }
 }

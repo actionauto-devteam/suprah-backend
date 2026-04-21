@@ -1055,6 +1055,202 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   }, 'Vehicle reserved successfully'));
 });
 
+/**
+ * SECURE GLOBAL MARKETPLACE: Fetch vehicles across all dealerships
+ * Authenticated Customers Only
+ */
+const getMarketplaceVehicles = asyncHandler(async (req: Request, res: Response) => {
+  const {
+    search: searchParam,
+    q,
+    make,
+    model,
+    year,
+    location,
+    minPrice,
+    maxPrice,
+    minMileage,
+    maxMileage,
+    sortBy = 'recent',
+    sortOrder = 'desc',
+    page = '1',
+    limit = '20'
+  } = req.query;
+
+  const search = searchParam || q;
+
+  // STRICT MARKETPLACE FILTERS
+  const filter: any = { 
+    isDeleted: false,
+    status: 'Ready for Sale' // Customers only see retail-ready inventory
+  };
+
+  if (make) filter.make = { $regex: make, $options: 'i' };
+  if (model) filter.modelName = { $regex: model, $options: 'i' };
+  if (year) filter.year = Number(year);
+  
+  if (location) {
+    filter.$or = [
+      { dealerCity: { $regex: location, $options: 'i' } },
+      { dealerState: { $regex: location, $options: 'i' } }
+    ];
+  }
+
+  if (minPrice || maxPrice) {
+    filter.price = {};
+    if (minPrice) filter.price.$gte = Number(minPrice);
+    if (maxPrice) filter.price.$lte = Number(maxPrice);
+  }
+
+  if (minMileage || maxMileage) {
+    filter.mileage = {};
+    if (minMileage) filter.mileage.$gte = Number(minMileage);
+    if (maxMileage) filter.mileage.$lte = Number(maxMileage);
+  }
+
+  const sortObj: any = {};
+  const order = sortOrder === 'desc' ? -1 : 1;
+
+  switch (sortBy) {
+    case 'year':
+      sortObj.year = order;
+      break;
+    case 'price':
+      sortObj.price = order;
+      break;
+    case 'mileage':
+      sortObj.mileage = order;
+      break;
+    case 'make':
+      sortObj.make = order;
+      sortObj.modelName = order;
+      break;
+    case 'stockNumber':
+      sortObj.stockNumber = order;
+      break;
+    case 'recent':
+    default:
+      sortObj.dateAdded = order;
+  }
+
+  const pageNum = Math.max(1, Number(page));
+  const limitNum = Number(limit);
+  const skip = (pageNum - 1) * limitNum;
+
+  const pipeline: any[] = [];
+
+  // Global Search logic (no orgId constraint)
+  if (search) {
+    const searchString = search.toString();
+    const isNumericSearch = !isNaN(Number(searchString));
+    
+    const shouldClauses: any[] = [
+      {
+        text: {
+          query: searchString,
+          path: ['make', 'modelName', 'vin', 'stockNumber'],
+          fuzzy: { maxEdits: 1 }
+        }
+      }
+    ];
+
+    if (isNumericSearch) {
+      shouldClauses.push({
+        equals: { value: Number(searchString), path: 'year' }
+      });
+    }
+
+    pipeline.push({
+      $search: {
+        index: 'Vehicle',
+        compound: {
+          must: [
+            {
+              compound: {
+                should: shouldClauses,
+                minimumShouldMatch: 1
+              }
+            }
+          ]
+        }
+      }
+    });
+
+    // After search, we STILL must match the marketplace status
+    pipeline.push({ $match: { status: 'Ready for Sale', isDeleted: false } });
+  } else {
+    pipeline.push({ $match: { status: 'Ready for Sale', isDeleted: false } });
+  }
+
+  pipeline.push({ $match: filter });
+  pipeline.push({ $sort: sortObj });
+
+  pipeline.push({
+    $facet: {
+      metadata: [{ $count: 'total' }],
+      data: [
+        { $skip: skip },
+        { $limit: limitNum > 0 ? limitNum : 100 }
+      ]
+    }
+  });
+
+  const [result] = await Vehicle.aggregate(pipeline);
+  
+  const total = result.metadata[0]?.total || 0;
+  const vehicles = result.data || [];
+  
+  // SECURE NORMALIZATION: Scrubs internal data
+  const normalized = vehicles.map((v: any) => normalizeCustomerVehicle(v));
+
+  res.json(new ApiResponse(200, {
+    vehicles: normalized,
+    total,
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      total,
+      totalPages: limitNum > 0 ? Math.ceil(total / limitNum) : 1
+    }
+  }, 'Marketplace vehicles fetched successfully'));
+});
+
+/**
+ * GLOBAL MARKETPLACE FILTERS: Get unique makes/models/locations across all dealerships
+ */
+const getMarketplaceFilters = asyncHandler(async (req: Request, res: Response) => {
+  const cacheKey = `veh:filters:marketplace`;
+  const cached = await cacheService.get(cacheKey);
+  if (cached) {
+    return res.json(new ApiResponse(200, cached, 'Marketplace filters fetched successfully'));
+  }
+
+  // Customers only see filters for Ready for Sale vehicles
+  const query = { status: 'Ready for Sale', isDeleted: false };
+
+  const [makes, models, years, locations, bodyStyles, driveTrains] = await Promise.all([
+    Vehicle.distinct('make', query),
+    Vehicle.distinct('modelName', query),
+    Vehicle.distinct('year', query),
+    Vehicle.distinct('dealerCity', query),
+    Vehicle.distinct('bodyStyle', query),
+    Vehicle.distinct('driveTrain', query)
+  ]);
+
+  const data = {
+    makes: makes.filter(Boolean).sort(),
+    models: models.filter(Boolean).sort(),
+    years: years.filter(Boolean).sort((a, b) => b - a),
+    locations: locations.filter(Boolean).sort(),
+    bodyStyles: bodyStyles.filter(Boolean).sort(),
+    driveTrains: driveTrains.filter(Boolean).sort()
+  };
+
+  await cacheService.set(cacheKey, data, 3600); // 1 hour cache
+
+  res.json(new ApiResponse(200, data, 'Marketplace filters fetched successfully'));
+});
+
 export default {
   createVehicle,
   getVehicles,
@@ -1072,4 +1268,6 @@ export default {
   checkAvailability,
   reserveVehicle,
   getPublicVehicleById,
-};
+  getMarketplaceVehicles,
+  getMarketplaceFilters
+};

@@ -38,7 +38,10 @@ export const addOwnedVehicle = asyncHandler(async (req: Request, res: Response) 
 
     res.status(201).json({
         success: true,
-        data: vehicle
+        data: {
+          ...vehicle.toObject(),
+          id: vehicle._id.toString()
+        }
     });
 });
 
@@ -54,7 +57,10 @@ export const getOwnedVehicles = asyncHandler(async (req: Request, res: Response)
     res.status(200).json({
         success: true,
         count: vehicles.length,
-        data: vehicles
+        data: vehicles.map(v => ({
+          ...v.toObject(),
+          id: v._id.toString()
+        }))
     });
 });
 
@@ -87,7 +93,10 @@ export const updateOwnedVehicleMileage = asyncHandler(async (req: Request, res: 
 
     res.status(200).json({
         success: true,
-        data: vehicle
+        data: {
+          ...vehicle.toObject(),
+          id: vehicle._id.toString()
+        }
     });
 });
 
@@ -156,7 +165,10 @@ export const updateOwnedVehicle = asyncHandler(async (req: Request, res: Respons
 
     res.status(200).json({
         success: true,
-        data: vehicle
+        data: {
+          ...vehicle.toObject(),
+          id: vehicle._id.toString()
+        }
     });
 });
 
