@@ -134,9 +134,12 @@ const getMyDriverRequestStatus = asyncHandler(
 const getDriverRequests = asyncHandler(
   async (req: Request, res: Response) => {
     const user = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (user.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can view driver requests");
+    // Viewing is allowed for all authenticated users who have an organization context 
+    // or who are global admins/super_admins.
+    if (!orgRole && user.role !== 'super_admin' && user.role !== 'admin') {
+      throw new ApiError(403, "You do not have permission to view driver requests");
     }
 
     const { status } = req.query;
@@ -163,9 +166,12 @@ const getDriverRequests = asyncHandler(
 const approveDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     const adminUser = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (adminUser.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can approve driver requests");
+    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
+
+    if (!isAdmin) {
+      throw new ApiError(403, "Only administrators can approve driver requests");
     }
 
     const request = await DriverRequest.findOne({
@@ -289,9 +295,12 @@ const approveDriverRequest = asyncHandler(
 const rejectDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     const adminUser = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (adminUser.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can reject driver requests");
+    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
+
+    if (!isAdmin) {
+      throw new ApiError(403, "Only administrators can reject driver requests");
     }
 
     const request = await DriverRequest.findOne({

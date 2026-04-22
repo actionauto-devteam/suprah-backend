@@ -14,7 +14,7 @@ router.get(
 );
 
 // Admin-only endpoints (Strictly super_admin or admin)
-router.get("/", auth(), authorize(['super_admin', 'admin']), driverRequestController.getDriverRequests);
+router.get("/", auth(), driverRequestController.getDriverRequests);
 router.patch(
   "/:id/approve",
   auth(),
