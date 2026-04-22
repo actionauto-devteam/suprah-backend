@@ -172,6 +172,10 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
 
 export const getMembers = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const sortBy = (req.query.sortBy as string) || 'createdAt';
+    const sortOrder = (req.query.sortOrder as string) === 'asc' ? 1 : -1;
 
     // Check if the current context matches the requested ID (or super_admin)
     if (req.orgId !== id && req.user?.role !== 'super_admin') {
@@ -182,14 +186,21 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
         return;
     }
 
-    const members = await User.find({ organizationId: id })
-        .select('name email avatar role organizationRole createdAt')
-        .sort({ createdAt: -1 });
+    const skip = (page - 1) * limit;
+
+    const [members, total] = await Promise.all([
+        User.find({ organizationId: id })
+            .select('name email avatar role organizationRole createdAt')
+            .sort({ [sortBy]: sortOrder })
+            .skip(skip)
+            .limit(limit),
+        User.countDocuments({ organizationId: id })
+    ]);
 
     // Ensure global admins are displayed as organization admins
     const results = members.map(m => {
         const member = m.toObject();
-        if (member.role === 'admin') {
+        if (member.role === 'admin' || member.role === 'super_admin') {
             member.organizationRole = 'admin';
         }
         return member;
@@ -198,6 +209,12 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
     res.status(200).json({
         success: true,
         data: results,
+        pagination: {
+            total,
+            page,
+            limit,
+            pages: Math.ceil(total / limit)
+        }
     });
 });
 
