@@ -1,6 +1,6 @@
 #!/bin/bash
 
-domains=(api.suprah-app.com)
+domains=(api.suprah-app.com www.suprah-app.com beszel.suprah-app.com)
 rsa_key_size=4096
 data_path="./certbot"
 email="support@suprah-app.com" # Change to a valid email
