@@ -34,150 +34,53 @@ import analyticsRoute from "./analytics.routes";
 import activityRoute from "./activity.routes";
 import customerRoute from "./customer.route";
 import customerLeadRoute from "./customerLead.route";
+import dayPulseRoute from "./dayPulse.routes";
+import feedRoute from "./feed.route";
+import feedReactionRoute from "./feedReaction.routes";
+import feedCommentRoute from "./feedComment.routes";
 
 const router = express.Router();
 
 const defaultRoutes = [
-  {
-    path: "/vehicles",
-    route: vehicleRoute,
-  },
-  {
-    path: "/dashboard",
-    route: dashboardRoute,
-  },
-  {
-    path: "/sync",
-    route: syncRoute,
-  },
-  {
-    path: "/shipments",
-    route: shipmentRoute,
-  },
-  {
-    path: "/quotes",
-    route: quoteRoute,
-  },
-  {
-    path: "/notifications",
-    route: notificationRoute,
-  },
-  {
-    path: "/profile",
-    route: profileRoute,
-  },
-  {
-    path: "/appointments",
-    route: appointmentRoute,
-  },
-  {
-    path: "/users",
-    route: userRoute,
-  },
-  {
-    path: "/google-calendar",
-    route: googleCalendarRoute,
-  },
-  {
-    path: "/organizations",
-    route: organizationRoute,
-  },
-  {
-    path: "/leads",
-    route: leadRoute,
-  },
-  {
-    path: "/crm",
-    route: crmRoute,
-  },
-  {
-    path: "/invitations",
-    route: invitationRoute,
-  },
-  {
-    path: "/driver-tracking",
-    route: driverTrackingRoute,
-  },
-  {
-    path: "/admin",
-    route: adminRoute,
-  },
-  {
-    path: "/payments",
-    route: paymentRoute,
-  },
-  {
-    path: "/driver-requests",
-    route: driverRequestRoute,
-  },
-  {
-    path: "/driver-profile",
-    route: driverProfileRoute,
-  },
-  {
-    path: "/service",
-    route: serviceRoute,
-  },
-  {
-    path: "/customer/vehicles",
-    route: ownedVehicleRoute,
-  },
-  {
-    path: "/customer/wallet",
-    route: walletRoute,
-  },
-  {
-    path: "/driver-payouts",
-    route: driverPayoutRoute,
-  },
-  {
-    path: "/supraleo",
-    route: supraleoRoute,
-  },
-  {
-    path: "/crm/timeproof",
-    route: crmTimeprofRoute,
-  },
-  {
-    path: "/crm/biometric",
-    route: crmBiometricRoute,
-  },
-  {
-    path: "/supraspace",
-    route: supraSpaceRoute,
-  },
-  {
-    path: "/auth",
-    route: authRoute,
-  },
-  {
-    path: "/dev",
-    route: devToolsRoute,
-  },
-  {
-    path: "/loads",
-    route: loadRoute,
-  },
-  {
-    path: "/org-lead",
-    route: orgLeadRoute,
-  },
-  {
-    path: "/analytics",
-    route: analyticsRoute,
-  },
-  {
-  path: "/customers",
-  route: customerRoute,
-  },
-  {
-    path: "/activity",
-    route: activityRoute,
-  },
-  {
-    path: "/customer/leads",
-    route: customerLeadRoute,
-  },
+  { path: "/vehicles",          route: vehicleRoute        },
+  { path: "/dashboard",         route: dashboardRoute      },
+  { path: "/sync",              route: syncRoute            },
+  { path: "/shipments",         route: shipmentRoute        },
+  { path: "/quotes",            route: quoteRoute           },
+  { path: "/notifications",     route: notificationRoute   },
+  { path: "/profile",           route: profileRoute         },
+  { path: "/appointments",      route: appointmentRoute     },
+  { path: "/users",             route: userRoute            },
+  { path: "/google-calendar",   route: googleCalendarRoute  },
+  { path: "/organizations",     route: organizationRoute    },
+  { path: "/leads",             route: leadRoute            },
+  { path: "/invitations",       route: invitationRoute      },
+  { path: "/driver-tracking",   route: driverTrackingRoute  },
+  { path: "/admin",             route: adminRoute           },
+  { path: "/payments",          route: paymentRoute         },
+  { path: "/driver-requests",   route: driverRequestRoute   },
+  { path: "/driver-profile",    route: driverProfileRoute   },
+  { path: "/service",           route: serviceRoute         },
+  { path: "/customer/vehicles", route: ownedVehicleRoute    },
+  { path: "/customer/wallet",   route: walletRoute          },
+  { path: "/customer/leads",    route: customerLeadRoute    },
+  { path: "/driver-payouts",    route: driverPayoutRoute    },
+  { path: "/supraleo",          route: supraleoRoute        },
+  { path: "/supraspace",        route: supraSpaceRoute      },
+  { path: "/auth",              route: authRoute            },
+  { path: "/dev",               route: devToolsRoute        },
+  { path: "/loads",             route: loadRoute            },
+  { path: "/org-lead",          route: orgLeadRoute         },
+  { path: "/analytics",         route: analyticsRoute       },
+  { path: "/customers",         route: customerRoute        },
+  { path: "/activity",          route: activityRoute        },
+  { path: "/crm/feeds/reactions", route: feedReactionRoute  }, 
+  { path: "/crm/feeds",           route: feedRoute          },
+  { path: "/crm/feeds",           route: feedCommentRoute   }, 
+  { path: "/crm/timeproof",       route: crmTimeprofRoute   },
+  { path: "/crm/biometric",       route: crmBiometricRoute  },
+  { path: "/crm/daypulse",        route: dayPulseRoute      },
+  { path: "/crm",                 route: crmRoute           },
 ];
 
 defaultRoutes.forEach((route) => {

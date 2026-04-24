@@ -4,6 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import Feed from '../models/Feed.model';
+import DayPulse from '../models/Daypulse.model';
 import FeedComment from '../models/FeedComment.model';
 import FeedReaction, { REACTION_TYPES, ReactionType } from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
@@ -24,12 +25,58 @@ function buildSummary(reactions: Array<{ reaction: string; authorName: string }>
   return summary;
 }
 
+/**
+ * Resolves the organisation ID for a reaction target.
+ *
+ * targetType "post"    → checks Feed first, falls back to DayPulse
+ * targetType "comment" → checks FeedComment
+ *
+ * Throws 404 if the document doesn't exist, 403 if it belongs to a
+ * different organisation than the requesting user.
+ */
+async function resolveTargetOrgId(
+  targetType: 'post' | 'comment',
+  targetId: string,
+  actorOrgId: mongoose.Types.ObjectId,
+): Promise<mongoose.Types.ObjectId> {
+  if (targetType === 'post') {
+    // ── Try Feed first ──
+    const post = await Feed.findOne({ _id: targetId, deletedAt: null }).lean();
+    if (post) {
+      if (post.organizationId.toString() !== actorOrgId.toString()) {
+        throw new ApiError(403, 'Access denied');
+      }
+      return post.organizationId;
+    }
+
+    // ── Fall back to DayPulse ──
+    const report = await DayPulse.findOne({ _id: targetId, deletedAt: null }).lean();
+    if (report) {
+      if (report.organizationId.toString() !== actorOrgId.toString()) {
+        throw new ApiError(403, 'Access denied');
+      }
+      return report.organizationId;
+    }
+
+    throw new ApiError(404, 'Post not found');
+  }
+
+  // ── Comment ──
+  const comment = await FeedComment.findOne({ _id: targetId, deletedAt: null }).lean();
+  if (!comment) throw new ApiError(404, 'Comment not found');
+  if (comment.organizationId.toString() !== actorOrgId.toString()) {
+    throw new ApiError(403, 'Access denied');
+  }
+  return comment.organizationId;
+}
+
 // ─── Toggle Reaction ──────────────────────────────────────────────────────────
 
 /**
  * POST /api/crm/feeds/reactions
  *
- * Upserts a reaction for the authenticated user on a post or comment.
+ * Upserts a reaction for the authenticated user on a post, DayPulse report,
+ * or comment.
  * Rules:
  *  - If the user has NO reaction → insert it (add).
  *  - If the user reacts with the SAME type → remove it (toggle off).
@@ -57,23 +104,12 @@ export const toggleReaction = asyncHandler(async (req: Request, res: Response) =
   }
 
   // ── Verify the target exists and belongs to the same org ──
-  let orgId: mongoose.Types.ObjectId;
-
-  if (targetType === 'post') {
-    const post = await Feed.findOne({ _id: targetId, deletedAt: null }).lean();
-    if (!post) throw new ApiError(404, 'Post not found');
-    if (post.organizationId.toString() !== actor.organizationId.toString()) {
-      throw new ApiError(403, 'Access denied');
-    }
-    orgId = post.organizationId;
-  } else {
-    const comment = await FeedComment.findOne({ _id: targetId, deletedAt: null }).lean();
-    if (!comment) throw new ApiError(404, 'Comment not found');
-    if (comment.organizationId.toString() !== actor.organizationId.toString()) {
-      throw new ApiError(403, 'Access denied');
-    }
-    orgId = comment.organizationId;
-  }
+  // resolveTargetOrgId handles Feed, DayPulse, and FeedComment
+  const orgId = await resolveTargetOrgId(
+    targetType as 'post' | 'comment',
+    targetId,
+    actor.organizationId,
+  );
 
   // ── Toggle logic ──
   const existing = await FeedReaction.findOne({ targetId, userId: actor._id });
@@ -160,6 +196,9 @@ export const getReactions = asyncHandler(async (req: Request, res: Response) => 
  * Returns summaries for multiple targets in one request — used when the
  * feed page loads a page of posts and needs reaction counts for all of them
  * without N individual round-trips.
+ *
+ * Works for Feed posts, DayPulse reports, and comments alike — the lookup
+ * is purely against FeedReaction so no parent-document check is needed here.
  */
 export const getBulkReactions = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
