@@ -36,11 +36,13 @@ const getNotifications = asyncHandler(async (req: Request, res: Response) => {
  */
 const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
+  const userRole = (req as any).user.role;
   const orgId = resolveNotificationOrgId(req);
 
   const count = await notificationService.getUnreadCount(
     userId.toString(),
     orgId,
+    userRole,
   );
 
   res.json(
@@ -123,7 +125,7 @@ const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
 const broadcastNotification = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const orgId = resolveNotificationOrgId(req);
-  
+
   // Only admins and super_admins can broadcast
   if (!['admin', 'super_admin'].includes(user.role)) {
     return res.status(403).json(new ApiResponse(403, null, 'Only administrators can broadcast notifications'));
