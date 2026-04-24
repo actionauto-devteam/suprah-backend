@@ -101,6 +101,47 @@ export class DashboardService {
      * Revenue trajectory based on Payment model
      */
     private static async getRevenueTrajectory(orgId: string, period: string) {
+        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+        const orgFilters: Array<Record<string, unknown>> = [{ organizationId: orgId }];
+        if (mongoose.isValidObjectId(orgId)) {
+            orgFilters.push({ organizationId: new mongoose.Types.ObjectId(orgId) as any });
+        }
+
+        if (period === '1Y') {
+            const now = new Date();
+            const yearStart = new Date(now.getFullYear(), 0, 1);
+            const nextYearStart = new Date(now.getFullYear() + 1, 0, 1);
+
+            const data = await Payment.aggregate([
+                {
+                    $match: {
+                        $or: orgFilters,
+                        status: 'succeeded',
+                        createdAt: { $gte: yearStart, $lt: nextYearStart }
+                    }
+                },
+                {
+                    $group: {
+                        _id: { $month: '$createdAt' },
+                        revenue: { $sum: { $convert: { input: '$amount', to: 'double', onError: 0, onNull: 0 } } }
+                    }
+                },
+                { $sort: { _id: 1 } }
+            ]);
+
+            const revenueByMonth = new Map<number, number>();
+            data.forEach((item) => {
+                revenueByMonth.set(item._id as number, item.revenue as number);
+            });
+
+            return monthNames.map((month, index) => ({
+                name: month,
+                revenue: revenueByMonth.get(index + 1) || 0
+            }));
+        }
+
         let dateRange = new Date();
         let groupBy: any = { $month: '$createdAt' };
 
@@ -122,10 +163,7 @@ export class DashboardService {
         const data = await Payment.aggregate([
             {
                 $match: {
-                    $or: [
-                        { organizationId: orgId },
-                        { organizationId: new mongoose.Types.ObjectId(orgId) as any }
-                    ],
+                    $or: orgFilters,
                     status: 'succeeded',
                     createdAt: { $gte: dateRange }
                 }
@@ -139,9 +177,6 @@ export class DashboardService {
             },
             { $sort: { date: 1 } }
         ]);
-
-        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
         if (period === '7D') {
             const results = [];
@@ -210,10 +245,10 @@ export class DashboardService {
             organizationId: orgId,
             role: { $in: ['employee', 'admin', 'super_admin'] }
         })
-        .select('name avatar role')
-        .sort({ shipments: -1, createdAt: -1 }) // Sort by shipments if it's already a field, else name
-        .skip(skip)
-        .limit(limit);
+            .select('name avatar role')
+            .sort({ shipments: -1, createdAt: -1 }) // Sort by shipments if it's already a field, else name
+            .skip(skip)
+            .limit(limit);
 
         const leaderboard = await Promise.all(employees.map(async (emp) => {
             const userId = emp._id;
@@ -261,9 +296,9 @@ export class DashboardService {
             organizationId: orgId,
             role: { $in: ['employee', 'admin', 'super_admin'] }
         })
-        .select('name avatar')
-        .sort({ createdAt: -1 })
-        .limit(6);
+            .select('name avatar')
+            .sort({ createdAt: -1 })
+            .limit(6);
     }
 
     /**
@@ -358,13 +393,13 @@ export class DashboardService {
             {
                 $group: {
                     _id: null,
-                    totalMargin: { 
-                        $sum: { 
+                    totalMargin: {
+                        $sum: {
                             $subtract: [
-                                { $ifNull: ["$preservedQuoteData.rate", 0] }, 
+                                { $ifNull: ["$preservedQuoteData.rate", 0] },
                                 { $ifNull: ["$carrierPayAmount", 0] }
-                            ] 
-                        } 
+                            ]
+                        }
                     }
                 }
             }
@@ -396,7 +431,7 @@ export class DashboardService {
 
         if (!aggregates.length) return 0;
 
-        const totalResponseTime = aggregates.reduce((acc, curr) => 
+        const totalResponseTime = aggregates.reduce((acc, curr) =>
             acc + (curr.kpis.avgResponseTimeMin || 0), 0
         );
 
