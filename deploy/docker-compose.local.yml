@@ -68,9 +68,58 @@ services:
     networks:
       - app-network
 
+  # Beszel Hub — Monitoring Dashboard (HTTP only, no SSL for local)
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: beszel-hub-local
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "8090:8090"
+    environment:
+      APP_URL: http://localhost:8090
+    volumes:
+      - beszel_data_local:/beszel_data
+      - beszel_socket_local:/beszel_socket
+    networks:
+      - app-network
+    healthcheck:
+      test: ['CMD', '/beszel', 'health', '--url', 'http://localhost:8090']
+      start_period: 10s
+      interval: 120s
+      timeout: 10s
+      retries: 3
+
+  # Beszel Agent — Host + Container Metrics Collector
+  # NOTE: network_mode: host on Windows Docker Desktop = Linux VM host network.
+  # Host-level stats (CPU/RAM/disk) reflect the WSL2 VM, not Windows — acceptable for local testing.
+  # Container-level metrics and all alerting work correctly.
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: beszel-agent-local
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ../.env
+    environment:
+      LISTEN: /beszel_socket/beszel.sock
+      HUB_URL: http://localhost:8090
+      EXCLUDE_CONTAINERS: actionauto-certbot
+      LOG_LEVEL: info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - beszel_agent_data_local:/var/lib/beszel-agent
+      - beszel_socket_local:/beszel_socket
+    depends_on:
+      - beszel
+
 volumes:
   ftp-uploads:
   redis-data:
+  beszel_data_local:        # Beszel Hub PocketBase DB (historical metrics)
+  beszel_agent_data_local:  # Agent machine fingerprint state
+  beszel_socket_local:      # Unix socket shared between hub and agent
 
 networks:
   app-network:

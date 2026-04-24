@@ -147,10 +147,70 @@ services:
     depends_on:
       - nginx
 
+  # 6. Beszel Hub (Monitoring Dashboard)
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: beszel-hub
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      APP_URL: https://beszel.suprah-app.com
+    volumes:
+      - beszel-data:/beszel_data
+      - beszel-socket:/beszel_socket
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ['CMD', '/beszel', 'health', '--url', 'http://localhost:8090']
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 7. Beszel Agent (Collector)
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: beszel-agent
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ../.env
+    environment:
+      LISTEN: /beszel_socket/beszel.sock
+      HUB_URL: https://beszel.suprah-app.com
+      # Exclude certbot since it's an ephemeral sidecar
+      EXCLUDE_CONTAINERS: actionauto-certbot
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - beszel-agent-data:/var/lib/beszel-agent
+      - beszel-socket:/beszel_socket
+    depends_on:
+      - beszel
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   ftp-uploads:
     driver: local
   redis-data:
+    driver: local
+  beszel-data:
+    driver: local
+  beszel-agent-data:
+    driver: local
+  beszel-socket:
     driver: local
 
 networks:

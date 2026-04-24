@@ -27,7 +27,7 @@ const normalizeVehicle = (vehicle: any) => ({
   model: vehicle.modelName,
   modelName: vehicle.modelName,
   trim: vehicle.trim || '',
-  color: vehicle.exteriorColor || 'N/A', // Mapping to 'color' for frontend compatibility
+  color: vehicle.exteriorColor || 'N/A',
   exteriorColor: vehicle.exteriorColor || 'N/A',
   interiorColor: vehicle.interiorColor || 'N/A',
   stockNumber: vehicle.stockNumber || 'N/A',
@@ -48,7 +48,7 @@ const normalizeVehicle = (vehicle: any) => ({
   dateSold: vehicle.dateSold,
   assignedTo: vehicle.assignedTo,
   notes: vehicle.notes || [],
-  comments: vehicle.comments || vehicle.description || '',
+  comments: vehicle.comments || (vehicle as any).description || '',
 });
 
 const normalizePublicVehicle = (vehicle: any) => ({
