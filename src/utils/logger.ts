@@ -14,6 +14,12 @@ const logLevel = (isDev || isTest) ? 'debug' : 'info';
 const logDir = path.join(process.cwd(), 'logs');
 const logFile = path.join(logDir, 'app.log');
 
+// Ensure log directory exists
+const fs = require('fs');
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
+
 // Define logger variable
 let logger: pino.Logger;
 
@@ -42,13 +48,18 @@ const mongoDevStream = {
 
 if (isDev) {
   // In development, combine formatted terminal output with file logging + MongoDB
-  const prettyStream = require('pino-pretty')({
-    colorize: true,
-    ignore: 'pid,hostname',
-    translateTime: 'SYS:standard',
-  });
+  let terminalStream;
+  try {
+    terminalStream = require('pino-pretty')({
+      colorize: true,
+      ignore: 'pid,hostname',
+      translateTime: 'SYS:standard',
+    });
+  } catch (e) {
+    // If pino-pretty is not available (e.g., inside basic Docker container), fallback to stdout
+    terminalStream = process.stdout;
+  }
   
-  const fs = require('fs');
   const fileStream = fs.createWriteStream(logFile, { flags: 'a' });
 
   logger = pino(
@@ -70,7 +81,7 @@ if (isDev) {
       timestamp: pino.stdTimeFunctions.isoTime,
     },
     pino.multistream([
-      { stream: prettyStream, level: logLevel },
+      { stream: terminalStream, level: logLevel },
       { stream: fileStream, level: 'info' },
       { stream: mongoDevStream as any, level: 'info' }
     ])
