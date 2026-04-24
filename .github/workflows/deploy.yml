@@ -38,18 +38,6 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Sync deployment configuration to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: "deploy/*"
-          target: "/opt/actionauto/"
-
       - name: Execute deployment commands via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -63,13 +51,15 @@ jobs:
             docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
             
             # Restart the entire stack atomically
+            # This handles Redis, API, FTP, and Nginx together
             docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
             
             # Force Nginx to re-resolve the API's internal IP (Stale IP Prevention)
             docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
             
             # Cleanup old images to prevent EBS volume saturation
-            docker image prune -f
+
+            docker image prune -a -f
             
             # Verification
             docker ps
