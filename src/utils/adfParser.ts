@@ -7,6 +7,7 @@
  */
 
 import { parseStringPromise } from 'xml2js';
+import logger from './logger';
 
 export interface ParsedADFLead {
   firstName: string;
@@ -104,11 +105,40 @@ export function detectChannel(
  * ADF fields can be strings, objects with `_` text, or arrays.
  */
 function extractText(node: any): string {
-  if (!node) return '';
+  if (node === null || node === undefined) return '';
   if (typeof node === 'string') return node.trim();
-  if (typeof node === 'object' && node._) return String(node._).trim();
-  if (Array.isArray(node)) return extractText(node[0]);
-  return String(node).trim();
+  
+  if (Array.isArray(node)) {
+    return node.length > 0 ? extractText(node[0]) : '';
+  }
+
+  if (typeof node === 'object') {
+    // xml2js uses '_' for text nodes with attributes
+    if (node._ !== undefined && node._ !== null) return String(node._).trim();
+    
+    // Some other parsers or configurations might use '#text'
+    if (node['#text'] !== undefined) return String(node['#text']).trim();
+
+    // If it's a simple object with one property that is a string, return that
+    const keys = Object.keys(node);
+    if (keys.length === 1 && typeof node[keys[0]] === 'string') {
+      return node[keys[0]].trim();
+    }
+    
+    // If it has a 'number' or 'value' field (common for phone/odometer)
+    if (node.number !== undefined) return extractText(node.number);
+    if (node.value !== undefined) return extractText(node.value);
+
+    // Fallback: search for any string property if it's a small object
+    for (const key of keys) {
+      if (typeof node[key] === 'string' && !['type', 'time', 'part', 'status'].includes(key)) {
+        return node[key].trim();
+      }
+    }
+  }
+
+  const str = String(node).trim();
+  return str === '[object Object]' ? '' : str;
 }
 
 /**
@@ -164,9 +194,54 @@ export function extractADFFromBody(body: string): string | null {
 /**
  * Parse ADF/XML content and return structured lead data
  */
+/**
+ * Sanitize XML to handle common real-world ADF issues from dealers:
+ * - Unescaped ampersands (&)
+ * - Unclosed HTML tags (<br>, <hr>, etc.)
+ * - HTML entities not valid in XML (&nbsp;, &ldquo;, etc.)
+ * - Stray HTML tags inside XML content
+ */
+function sanitizeXML(xml: string): string {
+  let sanitized = xml;
+
+  // Remove HTML doctype if present
+  sanitized = sanitized.replace(/<![dD][oO][cC][tT][yY][pP][eE][^>]*>/g, '');
+
+  // Self-close unclosed HTML void tags that break XML parsing
+  sanitized = sanitized.replace(/<(br|hr|img|input|meta|link)(\s[^>]*)?(?<!\/)>/gi, '<$1$2/>');
+
+  // Remove stray HTML tags that aren't valid ADF elements
+  sanitized = sanitized.replace(/<\/?(html|head|body|div|span|p|table|tr|td|th|thead|tbody|font|b|i|u|em|strong|a|ul|ol|li|style|script|center|h[1-6])(\s[^>]*)?>/gi, ' ');
+
+  // Replace common HTML entities with XML-safe equivalents
+  sanitized = sanitized.replace(/&nbsp;/gi, ' ');
+  sanitized = sanitized.replace(/&ldquo;/gi, '"');
+  sanitized = sanitized.replace(/&rdquo;/gi, '"');
+  sanitized = sanitized.replace(/&lsquo;/gi, "'");
+  sanitized = sanitized.replace(/&rsquo;/gi, "'");
+  sanitized = sanitized.replace(/&mdash;/gi, '-');
+  sanitized = sanitized.replace(/&ndash;/gi, '-');
+  sanitized = sanitized.replace(/&bull;/gi, '•');
+  sanitized = sanitized.replace(/&copy;/gi, '©');
+  sanitized = sanitized.replace(/&reg;/gi, '®');
+  sanitized = sanitized.replace(/&trade;/gi, '™');
+  sanitized = sanitized.replace(/&hellip;/gi, '...');
+
+  // Fix unescaped ampersands (& not followed by amp;, lt;, gt;, quot;, apos;, or #)
+  sanitized = sanitized.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+
+  // Clean up excessive whitespace
+  sanitized = sanitized.replace(/\r\n/g, '\n');
+
+  return sanitized;
+}
+
 export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
   try {
-    const result = await parseStringPromise(xmlData, {
+    // Sanitize the XML to handle real-world malformed ADF from dealers
+    const sanitized = sanitizeXML(xmlData);
+
+    const result = await parseStringPromise(sanitized, {
       explicitArray: false,
       ignoreAttrs: false,
       mergeAttrs: true,
@@ -292,7 +367,7 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
       rawFields,
     };
   } catch (err) {
-    console.error('[ADF Parser] Failed to parse ADF XML:', err);
+    logger.error({ err, xmlData }, '[ADF Parser] Failed to parse ADF XML');
     return null;
   }
 }

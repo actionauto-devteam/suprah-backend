@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ISupraSpaceAttachment {
   url: string;
+  fileKey: string;
   originalName: string;
   mimeType: string;
   size: number;         // bytes
@@ -32,6 +33,7 @@ export interface ISupraSpaceMessage extends Document {
 const AttachmentSchema = new Schema<ISupraSpaceAttachment>(
   {
     url: { type: String, required: true },
+    fileKey: { type: String, required: true },
     originalName: { type: String, required: true },
     mimeType: { type: String, required: true },
     size: { type: Number, required: true },

@@ -1,10 +1,12 @@
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import config from './config';
+import logger from './utils/logger';
 
 interface AuthSocket extends Socket {
   userId?: string;
   organizationId?: string;
+  role?: string;
 }
 
 export const setupSocket = (io: Server) => {
@@ -17,32 +19,33 @@ export const setupSocket = (io: Server) => {
         return next(new Error('Authentication error: No token provided'));
       }
 
-      // Verify token (adjust based on your auth system - JWT or Clerk)
-      // For Clerk, you might need to verify differently
+      // Verify token
       try {
         const decoded = jwt.verify(token, config.jwt.accessSecret) as any;
-        socket.userId = decoded.userId;
-        socket.organizationId = decoded.organizationId;
-      } catch (jwtError) {
+        socket.userId = decoded.sub; // tokenService uses 'sub' for userId
+        socket.organizationId = decoded.orgId; // tokenService uses 'orgId'
+        socket.role = decoded.role;
+      } catch (jwtError: any) {
         // If JWT verification fails, still allow connection in development
         if (config.env === 'development') {
-          console.log('Socket auth: Using development mode, allowing connection');
+          logger.warn('Socket auth: Using development mode, allowing connection');
           socket.userId = 'dev-user';
+          socket.role = 'super_admin'; // Allow debugging in dev
           return next();
         }
         throw jwtError;
       }
 
-      console.log(`Socket authenticated: ${socket.userId}`);
+      logger.debug({ userId: socket.userId, role: socket.role }, 'Socket authenticated');
       next();
     } catch (error) {
-      console.error('Socket authentication failed:', error);
+      logger.error(error, 'Socket authentication failed');
       next(new Error('Authentication error'));
     }
   });
 
   io.on('connection', (socket: AuthSocket) => {
-    console.log(`User connected: ${socket.userId}`);
+    logger.info({ userId: socket.userId }, 'Socket connected');
 
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
@@ -51,6 +54,25 @@ export const setupSocket = (io: Server) => {
     if (socket.organizationId) {
       socket.join(`org:${socket.organizationId}`);
     }
+
+    // --- Admin Monitoring Room ---
+    socket.on('join_system_monitoring', () => {
+      if (socket.role === 'super_admin') {
+        socket.join('admin:monitoring');
+        logger.info({ userId: socket.userId }, 'Admin joined system monitoring');
+        socket.emit('monitoring_status', { joined: true });
+      } else {
+        logger.warn({ userId: socket.userId, role: socket.role }, 'Unauthorized attempt to join monitoring');
+        socket.emit('monitoring_error', { message: 'Unauthorized: Super Admin role required' });
+      }
+    });
+
+    socket.on('leave_system_monitoring', () => {
+      socket.leave('admin:monitoring');
+      logger.info({ userId: socket.userId }, 'Admin left system monitoring');
+      socket.emit('monitoring_status', { joined: false });
+    });
+    // ----------------------------
 
     socket.on('join_shipment_tracking', (shipmentId: string) => {
       if (shipmentId) {
@@ -66,13 +88,13 @@ export const setupSocket = (io: Server) => {
 
     socket.on('join_conversation', (conversationId: string) => {
       socket.join(`conversation:${conversationId}`);
-      console.log(`User ${socket.userId} joined conversation ${conversationId}`);
+      logger.debug({ userId: socket.userId, conversationId }, 'User joined conversation');
     });
 
     // Leave conversation room
     socket.on('leave_conversation', (conversationId: string) => {
       socket.leave(`conversation:${conversationId}`);
-      console.log(`User ${socket.userId} left conversation ${conversationId}`);
+      logger.debug({ userId: socket.userId, conversationId }, 'User left conversation');
     });
 
     // Typing indicators
@@ -103,11 +125,11 @@ export const setupSocket = (io: Server) => {
 
     // Disconnect
     socket.on('disconnect', () => {
-      console.log(`User disconnected: ${socket.userId}`);
+      logger.info({ userId: socket.userId }, 'Socket disconnected');
     });
   });
 
-  console.log('Socket.io initialized');
+  logger.info('Socket.io initialized');
 
   return io;
 };
@@ -120,4 +142,4 @@ export const emitToUser = (io: Server, userId: string, event: string, data: any)
 // Helper function to emit to conversation
 export const emitToConversation = (io: Server, conversationId: string, event: string, data: any) => {
   io.to(`conversation:${conversationId}`).emit(event, data);
-};
+};

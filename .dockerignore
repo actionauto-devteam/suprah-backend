@@ -13,3 +13,8 @@ dist
 coverage
 deploy
 ftp-uploads
+app.log
+.docs
+
+CLAUDE.md
+.claude

@@ -368,7 +368,7 @@ class AuthService {
         user.otpExpiresAt = undefined;
         await user.save();
 
-        return { message: 'Password reset successfully' };
+        return { user: this.sanitizeUser(user), message: 'Password reset successfully' };
     }
 
     /**

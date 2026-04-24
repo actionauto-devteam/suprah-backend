@@ -33,6 +33,20 @@ const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => 
     res.json(new ApiResponse(200, metrics, 'Dashboard metrics fetched successfully'));
 });
 
+/**
+ * Get paginated leaderboard data
+ */
+const getLeaderboard = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const page = parseInt(req.query.page as string) || 0;
+    const limit = parseInt(req.query.limit as string) || 10;
+
+    const leaderboard = await DashboardService.getPaginatedLeaderboard(orgId, page, limit);
+
+    res.json(new ApiResponse(200, leaderboard, 'Leaderboard data fetched successfully'));
+});
+
 export default {
-    getDashboardMetrics
+    getDashboardMetrics,
+    getLeaderboard
 };

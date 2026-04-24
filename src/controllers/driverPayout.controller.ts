@@ -5,10 +5,14 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import DriverPayout from '../models/DriverPayout.model';
 import Shipment from '../models/Shipment.model';
+import Load from '../models/Load.model';
 import User, { IUser } from '../models/User.model';
 import { safeCreateNotification } from '../utils/safeNotification';
 import { notifyOrgAdmins } from '../utils/safeNotification';
+import activityService from '../services/activity.service';
 import config from '../config';
+import logger from '../utils/logger';
+import { storageService } from '../services/storage.service';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-01-28.clover',
@@ -28,43 +32,119 @@ const getUserId = (req: Request): string => {
 const getDeliverableShipments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
-  // Include: Delivered shipments OR shipments with proof submitted but not yet confirmed
-  const shipments = await Shipment.find({
-    organizationId: orgId,
+  const deliverableFilter = {
     assignedDriverId: { $exists: true, $ne: null },
     $or: [
       { status: 'Delivered' },
       {
         'proofOfDelivery.imageUrl': { $exists: true, $ne: '' },
-        'proofOfDelivery.confirmedAt': { $exists: false },
+        'proofOfDelivery.confirmedAt': { $exists: true },
       },
     ],
-  })
-    .populate('assignedDriverId', 'name email stripeConnectAccountId')
-    .sort({ 'proofOfDelivery.submittedAt': -1, delivered: -1, createdAt: -1 })
-    .lean();
+  };
 
-  const shipmentIds = shipments.map((s) => s._id);
+  const [shipments, loads] = await Promise.all([
+    Shipment.find({ organizationId: orgId, ...deliverableFilter })
+      .populate('assignedDriverId', 'name email stripeConnectAccountId')
+      .sort({ 'proofOfDelivery.submittedAt': -1, createdAt: -1 })
+      .lean(),
+    Load.find({ organizationId: orgId, ...deliverableFilter })
+      .populate('assignedDriverId', 'name email stripeConnectAccountId')
+      .sort({ 'proofOfDelivery.submittedAt': -1, createdAt: -1 })
+      .lean(),
+  ]);
 
-  // Find existing payouts for these shipments
-  const existingPayouts = await DriverPayout.find({
-    organizationId: orgId,
-    shipmentId: { $in: shipmentIds },
-  }).lean();
+  const allItems: any[] = [
+    ...shipments,
+    ...loads.map((l: any) => ({
+      ...l,
+      _type: 'load',
+      trackingNumber: l.loadNumber,
+      origin: l.pickupLocation ? `${l.pickupLocation.city}, ${l.pickupLocation.state}` : undefined,
+      destination: l.deliveryLocation ? `${l.deliveryLocation.city}, ${l.deliveryLocation.state}` : undefined,
+    })),
+  ];
 
-  const payoutByShipment: Record<string, any> = {};
-  existingPayouts.forEach((p) => {
-    payoutByShipment[p.shipmentId.toString()] = p;
-  });
+  const allIds = allItems.map((i) => i._id);
+  const existingPayouts = await DriverPayout.find({ organizationId: orgId, shipmentId: { $in: allIds } }).lean();
+  const payoutByEntity: Record<string, any> = {};
+  existingPayouts.forEach((p) => { payoutByEntity[p.shipmentId.toString()] = p; });
 
-  const result = shipments.map((s: any) => ({
+  const result = allItems.map((s) => ({
     ...s,
-    existingPayout: payoutByShipment[s._id.toString()] || null,
-    // True if proof was submitted but dealer hasn't confirmed yet
+    existingPayout: payoutByEntity[s._id.toString()] || null,
     pendingConfirmation: !!(s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt),
   }));
 
   res.json(new ApiResponse(200, result, 'Deliverable shipments fetched successfully'));
+});
+
+/**
+ * GET /driver-payouts/pending-proofs
+ * Returns Loads+Shipments where proof was submitted to this specific admin and not yet confirmed.
+ */
+const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  const orgId = req.orgId as string;
+
+  const proofFilter = {
+    organizationId: orgId,
+    'proofOfDelivery.imageUrl': { $exists: true, $ne: '' },
+    'proofOfDelivery.confirmedAt': { $exists: false },
+    'proofOfDelivery.submittedTo': userId,
+  };
+
+  const [shipments, loads] = await Promise.all([
+    Shipment.find(proofFilter)
+      .populate('assignedDriverId', 'name email')
+      .sort({ 'proofOfDelivery.submittedAt': -1 })
+      .lean(),
+    Load.find(proofFilter)
+      .populate('assignedDriverId', 'name email')
+      .sort({ 'proofOfDelivery.submittedAt': -1 })
+      .lean(),
+  ]);
+
+  // Sign all proof image URLs so the frontend can display them directly
+  const signUrl = async (item: any): Promise<any> => {
+    if (item.proofOfDelivery?.imageUrl && !item.proofOfDelivery.imageUrl.startsWith('http')) {
+      try {
+        const signed = await storageService.getSignedUrl(item.proofOfDelivery.imageUrl);
+        if (signed) return { ...item, proofOfDelivery: { ...item.proofOfDelivery, imageUrl: signed } };
+      } catch { /* non-fatal */ }
+    }
+    return item;
+  };
+
+  const normalizedLoads = loads.map((l: any) => ({
+    ...l,
+    _type: 'load',
+    trackingNumber: l.loadNumber,
+    origin: l.pickupLocation ? `${l.pickupLocation.city}, ${l.pickupLocation.state}` : undefined,
+    destination: l.deliveryLocation ? `${l.deliveryLocation.city}, ${l.deliveryLocation.state}` : undefined,
+  }));
+
+  const combined = await Promise.all(
+    [...shipments, ...normalizedLoads]
+      .sort((a: any, b: any) => new Date(b.proofOfDelivery?.submittedAt).getTime() - new Date(a.proofOfDelivery?.submittedAt).getTime())
+      .map(signUrl)
+  );
+
+  res.json(new ApiResponse(200, combined, 'Pending proofs fetched successfully'));
+});
+
+/**
+ * GET /driver-payouts/org-admins
+ * Returns list of org admins/employees for the driver's "Submit To" dropdown.
+ */
+const getOrgAdmins = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const admins = await User.find({
+    organizationId: orgId,
+    role: { $in: ['admin', 'super_admin', 'employee'] },
+    isActive: true,
+  }).select('_id name email role').lean();
+  res.json(new ApiResponse(200, admins, 'Org admins fetched'));
 });
 
 /**
@@ -160,13 +240,25 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
       metadata: { shipmentId, amount },
     });
 
+    // Log activity (Persona: Driver receiving money)
+    await activityService.logFinancialActivity(
+      driverId,
+      orgId,
+      'payout_received',
+      amount,
+      `Received payout for shipment ${shipment.trackingNumber || shipmentId}`,
+      { shipmentId: shipment._id.toString(), payoutId: payout._id.toString() }
+    );
+
+    logger.info({ payoutId: payout._id, driverId, amount }, 'Driver payout sent successfully');
+
     res.status(201).json(new ApiResponse(201, payout, 'Driver payout sent successfully'));
   } catch (stripeError: any) {
     payout.status = 'failed';
     payout.failureReason = stripeError?.message || 'Stripe transfer failed';
     await payout.save();
 
-    notifyOrgAdmins(orgId, 'general', 'Driver Payout Failed', `Payout of $${amount.toFixed(2)} to ${driver.name} failed: ${payout.failureReason}`, { shipmentId, driverId });
+    logger.error({ err: stripeError, payoutId: payout._id, driverId }, 'Driver payout failed');
 
     throw new ApiError(402, `Payout failed: ${payout.failureReason}`);
   }
@@ -290,6 +382,8 @@ const initiateDriverOnboarding = asyncHandler(async (req: Request, res: Response
     type: 'account_onboarding',
   });
 
+  logger.info({ userId, accountId }, 'Driver onboarding URL generated');
+
   res.json(new ApiResponse(200, { url: accountLink.url }, 'Stripe onboarding URL generated'));
 });
 
@@ -367,6 +461,8 @@ const getDriverConnectStatus = asyncHandler(async (req: Request, res: Response) 
 
 export default {
   getDeliverableShipments,
+  getPendingProofs,
+  getOrgAdmins,
   createPayout,
   getPayouts,
   getPayoutStats,

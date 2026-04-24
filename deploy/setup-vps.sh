@@ -44,6 +44,22 @@ else
 fi
 
 echo ""
+echo -e "${YELLOW}📦 Step 1.5: Setup Swap Memory...${NC}"
+if [ -f /swapfile ]; then
+    echo -e "${GREEN}✅ Swap file already exists${NC}"
+else
+    # Create a 4GB swap file (essential for low-RAM instances during builds/syncs)
+    fallocate -l 4G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+    sysctl vm.swappiness=10
+    echo 'vm.swappiness=10' >> /etc/sysctl.conf
+    echo -e "${GREEN}✅ 4GB Swap file created and enabled${NC}"
+fi
+
+echo ""
 echo -e "${YELLOW}🔥 Step 2: Configuring Firewall...${NC}"
 # Install and configure UFW firewall
 apt-get install -y ufw
@@ -55,39 +71,40 @@ ufw allow 22/tcp
 ufw allow 21/tcp
 ufw allow 21000:21010/tcp
 
+# Allow HTTP/HTTPS ports (Crucial for Nginx & SSL)
+ufw allow 80/tcp
+ufw allow 443/tcp
+
 # Enable firewall
 echo "y" | ufw enable
 
 echo -e "${GREEN}✅ Firewall configured${NC}"
 
 echo ""
-echo -e "${YELLOW}📁 Step 3: Creating application directory...${NC}"
-mkdir -p /opt/actionauto-ftp
-cd /opt/actionauto-ftp
+echo -e "${YELLOW}📁 Step 3: Configuring Application Environment...${NC}"
+mkdir -p /opt/actionauto/deploy/nginx/conf.d
+mkdir -p /opt/actionauto/deploy/certbot/conf
+mkdir -p /opt/actionauto/deploy/certbot/www
+cd /opt/actionauto/deploy
 
-echo -e "${GREEN}✅ Directory created: /opt/actionauto-ftp${NC}"
+echo -e "${GREEN}✅ Infrastructure ready in: /opt/actionauto${NC}"
 
 echo ""
-echo -e "${YELLOW}📝 Step 4: Setup Instructions${NC}"
+echo -e "${YELLOW}📝 Step 4: Final Production Checklist${NC}"
 echo ""
-echo "Next steps to complete manually:"
+echo "1. Upload your Secrets:"
+echo "   - Create /opt/actionauto/.env (Use deploy/.env.vps.example as a template)"
+echo "   - Ensure MONGODB_URI and REDIS_PASSWORD are set."
 echo ""
-echo "1. Upload your code to /opt/actionauto-ftp:"
-echo "   - Use SCP, Git, or SFTP to transfer files"
-echo "   - Example: scp -r ActionAutoBackend/* root@198.251.79.28:/opt/actionauto-ftp/"
+echo "2. Bootstrapping the Services:"
+echo "   - Copy docker-compose.prod.yml to /opt/actionauto/deploy/"
+echo "   - Run: docker compose -f docker-compose.prod.yml up -d"
 echo ""
-echo "2. Create .env file in /opt/actionauto-ftp/deploy/"
-echo "   - Copy from deploy/.env.vps.example"
-echo "   - Update MONGODB_URI with your connection string"
-echo "   - Set a strong FTP_SERVER_PASSWORD"
+echo "3. SSL Initialization:"
+echo "   - Run the init-letsencrypt.sh script in the deploy folder to get your certs."
 echo ""
-echo "3. Build and start the FTP server:"
-echo "   cd /opt/actionauto-ftp/deploy"
-echo "   docker compose -f docker-compose.ftp.yml up -d --build"
+echo "4. CI/CD Linkage:"
+echo "   - Ensure your VPS_HOST, VPS_SSH_USER, and VPS_SSH_PASSWORD secrets are in GitHub."
 echo ""
-echo "4. Check logs:"
-echo "   docker logs actionauto-ftp -f"
+echo -e "${GREEN}✅ VPS Security & Runtime setup complete!${NC}"
 echo ""
-echo -e "${GREEN}✅ VPS setup complete!${NC}"
-echo ""
-echo "Your FTP server will be accessible at: ftp://198.251.79.28"

@@ -65,6 +65,8 @@ export interface IVehicle extends Document {
     manualStatusLock: boolean;
     organizationId: string;
     isDeleted: boolean;
+    createdAt: Date;
+    updatedAt: Date;
 }
 
 export interface IVehicleModel extends Model<IVehicle> {
@@ -152,19 +154,6 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         timestamps: true,
     }
 );
-
-// Update daysOnLot before each query
-VehicleSchema.post('find', function (docs: IVehicle[]) {
-    docs.forEach((vehicle) => {
-        if (vehicle.dateAdded) {
-            const days = Math.floor(
-                (Date.now() - new Date(vehicle.dateAdded).getTime()) /
-                (1000 * 60 * 60 * 24)
-            );
-            vehicle.daysOnLot = days;
-        }
-    });
-});
 
 const Vehicle = mongoose.model<IVehicle, IVehicleModel>('Vehicle', VehicleSchema);
 

@@ -13,10 +13,12 @@ import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import driverRequestRoute from "./driverRequest.routes";
+import driverProfileRoute from "./driverProfile.routes";
 import adminRoute from "./admin.routes";
 import paymentRoute from "./payment.routes";
 import driverPayoutRoute from "./driverPayout.routes";
 import leadRoute from "./lead.route";
+import orgLeadRoute from "./orgLead.route";
 import crmRoute from "./crm.route";
 import serviceRoute from "./service.route";
 import ownedVehicleRoute from "./ownedVehicle.route";
@@ -28,6 +30,15 @@ import authRoute from "./auth.routes";
 import crmTimeprofRoute from "./crmTimeproof.route";
 import devToolsRoute from "./devTools.routes";
 import pushRoute from "./push.route";
+import loadRoute from "./load.routes";
+import analyticsRoute from "./analytics.routes";
+import activityRoute from "./activity.routes";
+import customerRoute from "./customer.route";
+import customerLeadRoute from "./customerLead.route";
+import dayPulseRoute from "./dayPulse.routes";
+import feedRoute from "./feed.route";
+import feedReactionRoute from "./feedReaction.routes";
+import feedCommentRoute from "./feedComment.routes";
 
 const router = express.Router();
 

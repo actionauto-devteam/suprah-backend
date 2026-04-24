@@ -2,10 +2,16 @@ import express from 'express';
 import profileController from '../controllers/profile.controller';
 import auth from '../middleware/auth.middleware';
 import { uploadAvatarImage } from '../middleware/upload.middleware';
+import { uploadLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
-// All routes require authentication
+// Routes that DON'T need the global auth() first (we handle auth per route or before the limiter)
+// Update avatar/profile picture (file upload)
+// We put uploadLimiter FIRST to protect against unauthenticated flooding
+router.patch('/avatar', uploadLimiter, auth(), uploadAvatarImage, profileController.updateAvatar);
+
+// All other routes require authentication
 router.use(auth());
 
 // Get user profile
@@ -19,9 +25,6 @@ router.patch('/online-status', profileController.updateOnlineStatus);
 
 // Update personal information
 router.patch('/personal-info', profileController.updatePersonalInfo);
-
-// Update avatar/profile picture (file upload)
-router.patch('/avatar', uploadAvatarImage, profileController.updateAvatar);
 
 // Remove avatar/profile picture
 router.delete('/avatar', profileController.removeAvatar);

@@ -2,9 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import Lead from '../models/lead.model';
 import { parseStringPromise } from 'xml2js';
 import User, { IUser } from '../models/User.model';
-import AuditLog from '../models/AuditLog.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
@@ -15,11 +16,12 @@ import {
   extractADFFromBody,
   detectChannel,
 } from '../utils/adfParser';
-
-// ─────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────
-const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev@gmail.com';
+import { getSocketIO } from '../utils/socketEmitter';
+import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import { decrypt, encrypt } from '../utils/crypto';
+import { cacheService } from '../services/cache.service';
+import googleCalendarService from '../services/googleCalendar.service';
+import customerService from '../services/customer.service';
 
 /**
  * STRICT SOURCE FILTER — only leads from this address are ingested.
@@ -27,19 +29,81 @@ const CENTRAL_EMAIL = process.env.CENTRAL_INGESTION_EMAIL || 'actionautoutah.dev
  */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 
-function getCentralOAuth2Client() {
+async function getCentralOAuth2Client(orgId: string) {
   const oauth2Client = new google.auth.OAuth2(
-    process.env.CENTRAL_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID,
-    process.env.CENTRAL_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET,
-    process.env.CENTRAL_GOOGLE_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI,
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI,
   );
-  oauth2Client.setCredentials({
-    access_token: process.env.CENTRAL_GMAIL_ACCESS_TOKEN,
-    refresh_token: process.env.CENTRAL_GMAIL_REFRESH_TOKEN,
-    expiry_date: Number(process.env.CENTRAL_GMAIL_EXPIRY_DATE) || undefined,
+
+  const cacheKey = `config:org:${orgId}`;
+  let orgConfig = await cacheService.get(cacheKey);
+
+  if (!orgConfig) {
+    orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
+    if (orgConfig) {
+      await cacheService.set(cacheKey, orgConfig, 3600); // 1hr
+    }
+  }
+
+  if (orgConfig && orgConfig.gmailConnected && orgConfig.refreshToken) {
+    const isCached = !!(await cacheService.get(cacheKey));
+    console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}${isCached ? ' (Cached)' : ''}`);
+    
+    oauth2Client.setCredentials({
+      access_token:  orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
+      refresh_token: decrypt(orgConfig.refreshToken),
+      expiry_date:   orgConfig.expiryDate,
+    });
+  } else {
+    console.error(`[CENTRAL-AUTH] ERROR: No Gmail credentials found for organization: ${orgId}`);
+    throw new Error('Please connect your email leads into the CRM settings.');
+  }
+
+  // Persistence listener: update database when tokens are refreshed
+  oauth2Client.on('tokens', async (tokens) => {
+    try {
+      console.log(`[CENTRAL-AUTH] Tokens refreshed for org ${orgId}, updating OrgLeadConfig...`);
+      const update: any = { expiryDate: tokens.expiry_date };
+      if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
+      if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
+      await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
+      await cacheService.del(`config:org:${orgId}`); // Invalidate cache
+    } catch (err) {
+      console.error('[CENTRAL-AUTH] Failed to persist refreshed tokens:', err);
+    }
   });
+
   return oauth2Client;
 }
+
+/**
+ * Robust retry wrapper with exponential backoff for Google API calls.
+ * Handles 403 (Quota Exceeded) and 429 (Too Many Requests).
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 1000): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const isQuotaError = error.code === 403 && error.message?.includes('Quota exceeded');
+      const isRateLimitError = error.code === 429;
+
+      if ((isQuotaError || isRateLimitError) && attempt < maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt);
+        console.warn(`[GMAIL-RETRY] Quota hit. Retrying in ${delay}ms (Attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─────────────────────────────────────────────────────────────
 // Handle incoming ADF XML (public endpoint for email webhooks)
@@ -57,8 +121,19 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Invalid ADF format — could not parse' });
     }
 
+    const orgId = req.query.orgId || req.body.organizationId;
+    const config = (req as any).orgLeadConfig; // Attached by validateAdfSignature middleware
+
+    // Find a system user to associate with automated ingestion
+    const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
+    if (!systemUser) {
+      console.error('[ADF-ERROR] No administrative user found to associate with lead creation');
+      return res.status(500).json({ message: 'Internal server error: No administrative context' });
+    }
+
     const newLead = new Lead({
-      organizationId: req.query.orgId || req.body.organizationId || 'global',
+      organizationId: orgId,
+      createdBy: systemUser._id,
       firstName: adfData.firstName,
       lastName: adfData.lastName,
       email: adfData.email,
@@ -68,12 +143,41 @@ export const receiveADF = async (req: Request, res: Response) => {
       parsedContent: adfData.parsedContent,
       channel: 'adf',
       source: adfData.source || 'ADF Email',
-      senderEmail: LEADS_SOURCE_EMAIL,
+      senderEmail: config?.leadSourceEmail || LEADS_SOURCE_EMAIL,
       centralIngestion: true,
     });
 
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
+
+     try {
+      await customerService.upsertFromLead({
+        organizationId: orgId as string,
+        createdBy: systemUser._id.toString(),
+        leadId: newLead._id.toString(),
+        firstName: adfData.firstName,
+        lastName: adfData.lastName,
+        email: adfData.email,
+        phone: adfData.phone,
+        vehicleInterest: adfData.vehicle ? {
+          year: adfData.vehicle.year,
+          make: adfData.vehicle.make,
+          model: adfData.vehicle.model,
+        } : undefined,
+        channel: 'adf',
+        comments: adfData.comments,
+        source: adfData.source || 'ADF Email',
+      });
+    } catch (custErr) {
+      console.warn('[ADF] Customer upsert failed (non-fatal):', custErr);
+    }
+
+    // Emit real-time notification to the organization
+    const io = getSocketIO();
+    if (io) {
+      const orgIdString = req.query.orgId || req.body.organizationId || 'global';
+      io.to(`org:${orgIdString}`).emit('lead:new', newLead);
+    }
 
     // Notify super admins
     const superAdmins = await User.find({ role: 'super_admin' });
@@ -107,18 +211,17 @@ export const receiveADF = async (req: Request, res: Response) => {
       }
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: newLead._id,
-      action: 'CREATE',
-      reason: 'New Lead via ADF/XML webhook',
-      changes: {
-        firstName: adfData.firstName,
-        lastName: adfData.lastName,
-        source: 'ADF Email',
-        channel: 'adf',
-      },
+    await activityService.createActivity({
+      userId: systemUser._id.toString(),
+      organizationId: orgId || 'global',
+      type: 'other',
+      title: 'New Lead Ingested',
+      description: `New lead ${adfData.firstName} ${adfData.lastName} from ${newLead.source}`,
+      metadata: { leadId: newLead._id.toString(), channel: 'adf' },
+      ipAddress: req.ip
     });
+
+    logger.info({ leadId: newLead._id, orgId, source: newLead.source }, 'New lead via ADF webhook');
 
     res.status(200).send('Lead processed successfully');
   } catch (error) {
@@ -127,22 +230,6 @@ export const receiveADF = async (req: Request, res: Response) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Get all leads — FILTERED BY USER
-//
-// CHANGES FROM ORIGINAL:
-//  1. Removed the $or across senderEmail/centralIngestion — the source
-//     filter is enforced at write-time so it is not needed at read-time.
-//     This eliminates the full collection scan that caused the 30s timeout.
-//  2. Added .lean() — returns plain JS objects instead of full Mongoose
-//     documents (3–5× faster, much less memory on large collections).
-//  3. Added .select() — omits the 'body' field (up to 2 KB per lead)
-//     from the list response; it is fetched on demand in the detail view.
-//
-// REQUIRED INDEXES (add to your Lead model or a migration):
-//   LeadSchema.index({ createdBy: 1, createdAt: -1 });
-//   LeadSchema.index({ createdBy: 1, status: 1 });
-// ─────────────────────────────────────────────────────────────
 export const getAllLeads = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
@@ -150,27 +237,54 @@ export const getAllLeads = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Organization context missing' });
     }
 
-    const leads = await Lead.find({ organizationId: orgId })
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const search = req.query.search as string;
+    const status = req.query.status as string;
+    const skip = (page - 1) * limit;
+
+    const query: any = { organizationId: orgId };
+
+    if (search) {
+      query.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { 'vehicle.make': { $regex: search, $options: 'i' } },
+        { 'vehicle.model': { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    if (status && status !== 'All') {
+      query.status = status;
+    }
+
+    const totalLeads = await Lead.countDocuments(query);
+    const leads = await Lead.find(query)
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
         'centralIngestion labels'
-        // 'body' intentionally omitted — fetched on demand in the detail view
       )
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
 
-    res.json(leads);
+    res.json(new ApiResponse(200, {
+      leads,
+      total: totalLeads,
+      page,
+      pages: Math.ceil(totalLeads / limit),
+    }));
   } catch (error) {
     console.error('[ERROR] Error fetching leads:', error);
     res.status(500).json({ message: 'Error fetching leads' });
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Update lead status — USER-SPECIFIC
-// ─────────────────────────────────────────────────────────────
 export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -203,14 +317,22 @@ export const updateLead = async (req: Request, res: Response) => {
         },
       });
 
-      await AuditLog.create({
-        entityType: 'Lead',
-        entityId: lead._id,
-        action: 'UPDATE',
-        reason: 'Lead status updated',
-        performedBy: (req.user as any)?._id,
-        changes: { status },
+      await activityService.createActivity({
+        userId: userId.toString(),
+        organizationId: orgId || 'global',
+        type: 'other',
+        title: 'Lead Status Updated',
+        description: `Lead ${lead.firstName} status changed to ${status}`,
+        metadata: { leadId: lead._id.toString(), status }
       });
+
+      logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
+
+      // Socket broadcast
+      const io = getSocketIO();
+      if (io) {
+        io.to(`org:${orgId}`).emit('lead:update', lead);
+      }
     }
 
     if (!lead) {
@@ -222,9 +344,6 @@ export const updateLead = async (req: Request, res: Response) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Create a new inquiry (manual/test entry) — USER-SPECIFIC
-// ─────────────────────────────────────────────────────────────
 export const createInquiry = async (req: Request, res: Response) => {
   try {
     const { firstName, lastName, email, phone, vehicle, comments, source, channel } = req.body;
@@ -258,7 +377,34 @@ export const createInquiry = async (req: Request, res: Response) => {
     });
 
     const savedLead = await newLead.save();
+    try {
+    await customerService.upsertFromLead({
+      organizationId: req.orgId as string,
+      createdBy: userId.toString(),
+      leadId: savedLead._id.toString(),
+      firstName,
+      lastName: lastName || '',
+      email,
+      phone,
+      vehicleInterest: vehicle ? {
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+      } : undefined,
+      channel: detectedChannel,
+      comments: comments || '',
+      source: source || 'Manual Entry',
+    });
+  } catch (custErr) {
+    console.warn('[createInquiry] Customer upsert failed (non-fatal):', custErr);
+  }
     console.log(`[SUCCESS] New Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
+
+    // Emit real-time notification to the organization
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${req.orgId}`).emit('lead:new', savedLead);
+    }
 
     if (userId) {
       const vehicleInterest = vehicle
@@ -285,14 +431,16 @@ export const createInquiry = async (req: Request, res: Response) => {
       });
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: savedLead._id,
-      action: 'CREATE',
-      reason: 'New Lead Manual Entry',
-      performedBy: (req.user as any)?._id,
-      changes: { firstName, lastName, source, channel: detectedChannel },
+    await activityService.createActivity({
+      userId: userId.toString(),
+      organizationId: req.orgId || 'global',
+      type: 'other',
+      title: 'Manual Lead Created',
+      description: `Manual lead ${firstName} ${lastName} created by ${userId}`,
+      metadata: { leadId: savedLead._id.toString(), source: savedLead.source }
     });
+
+    logger.info({ leadId: savedLead._id, userId, orgId: req.orgId }, 'Manual lead created');
 
     res.status(201).json({ success: true, message: 'Inquiry created successfully', data: savedLead });
   } catch (error) {
@@ -304,9 +452,6 @@ export const createInquiry = async (req: Request, res: Response) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Mark as read / pending — USER-SPECIFIC
-// ─────────────────────────────────────────────────────────────
 export const markAsRead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -317,6 +462,13 @@ export const markAsRead = async (req: Request, res: Response) => {
       { new: true }
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+
+    // Socket broadcast
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json(lead);
   } catch (error) {
     console.error('[ERROR] Error marking as read:', error);
@@ -330,10 +482,17 @@ export const markAsPending = async (req: Request, res: Response) => {
     const orgId = req.orgId;
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
-      { isPending: true },
+      { isPending: true, status: 'Pending' },
       { new: true }
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+
+    // Socket broadcast
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json(lead);
   } catch (error) {
     console.error('[ERROR] Error marking as pending:', error);
@@ -341,9 +500,6 @@ export const markAsPending = async (req: Request, res: Response) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Reply to an inquiry — sends via centralized account
-// ─────────────────────────────────────────────────────────────
 export const replyToInquiry = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -365,21 +521,23 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Inquiry not found' });
     }
 
-    await AuditLog.create({
-      entityType: 'Lead',
-      entityId: lead._id,
-      action: 'UPDATE',
-      reason: 'Lead replied to',
-      performedBy: userId,
-      changes: { status: 'Contacted', isRead: true, message },
+    await activityService.createActivity({
+      userId: userId.toString(),
+      organizationId: orgId || 'global',
+      type: 'other',
+      title: 'Lead Replied',
+      description: `Reply sent to lead ${lead.firstName}`,
+      metadata: { leadId: lead._id.toString() }
     });
 
-    // Send reply via centralized Gmail account
+    logger.info({ leadId: lead._id, userId }, 'Staff replied to lead');
+
     try {
-      const oauth2Client = getCentralOAuth2Client();
+      const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
+      const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
       const user = await User.findById(userId);
-      const senderDisplay = user?.email || CENTRAL_EMAIL;
+      const senderDisplay = user?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
 
       const recipientEmail = lead.senderEmail || lead.email;
       const headers = [
@@ -412,6 +570,13 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
     }
 
+    // Cache Invalidation & Socket Broadcast
+    await cacheService.del(`lead:thread:${id}`);
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json({ success: true, message: 'Reply sent successfully', data: lead });
   } catch (error) {
     console.error('[ERROR] Error replying to inquiry:', error);
@@ -419,16 +584,12 @@ export const replyToInquiry = async (req: Request, res: Response) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// Helper: fetch ALL Gmail message IDs with pagination
-// Loops through all pages so no emails are missed.
-// ─────────────────────────────────────────────────────────────
 async function fetchAllMessageIds(
   gmail: any,
   query: string,
   maxPerPage = 500,
-): Promise<{ id: string }[]> {
-  const all: { id: string }[] = [];
+): Promise<{ id: string, threadId: string }[]> {
+  const all: { id: string, threadId: string }[] = [];
   let pageToken: string | undefined = undefined;
 
   do {
@@ -457,28 +618,31 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     const userId = (req.user as IUser)._id.toString();
     console.log(`[CENTRAL-SYNC] Starting sync for user: ${userId} — source filter: ${LEADS_SOURCE_EMAIL}`);
 
-    if (!process.env.CENTRAL_GMAIL_REFRESH_TOKEN && !process.env.CENTRAL_GMAIL_ACCESS_TOKEN) {
+    const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
+    const isConfigured = !!(config && config.gmailConnected && config.refreshToken);
+
+    if (!isConfigured) {
       return res.status(400).json(
-        new ApiResponse(400, null, 'Centralized Gmail account not configured. Please set CENTRAL_GMAIL_* environment variables.')
+        new ApiResponse(400, null, 'Gmail ingestion not configured for this organization. Please connect Google via Settings.')
       );
     }
 
-    const oauth2Client = getCentralOAuth2Client();
+    const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // ── STRICT FILTER + full pagination — no emails missed ──
-    console.log(`[CENTRAL-SYNC] Fetching all emails from: ${LEADS_SOURCE_EMAIL}`);
-    let messages: { id: string }[];
+    console.log(`[CENTRAL-SYNC] Fetching recent emails (7d) from: ${LEADS_SOURCE_EMAIL}`);
+    let messages: { id: string, threadId: string }[];
     try {
-      messages = await fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL}`);
+      messages = await withRetry(() =>
+        fetchAllMessageIds(gmail, `in:inbox from:${LEADS_SOURCE_EMAIL} newer_than:7d`)
+      );
     } catch (gmailError: any) {
       console.error(`[CENTRAL-SYNC] Gmail API error:`, gmailError.message);
       throw new Error(`Gmail API error: ${gmailError.message}`);
     }
 
-    console.log(`[CENTRAL-SYNC] Found ${messages.length} total emails from ${LEADS_SOURCE_EMAIL}`);
+    console.log(`[CENTRAL-SYNC] Found ${messages.length} recent emails from ${LEADS_SOURCE_EMAIL}`);
 
-    // Pre-fetch all threadIds already stored for this user to avoid per-message DB queries
     const existingThreadIds = new Set(
       (await Lead.find({ organizationId: req.orgId, threadId: { $exists: true, $ne: null } })
         .select('threadId')
@@ -487,17 +651,35 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
     let syncedCount = 0;
     const errors: string[] = [];
+    const MAX_SYNC_PER_RUN = 20;
 
     for (const message of messages) {
-      try {
-        const details = await gmail.users.messages.get({
-          userId: 'me',
-          id: message.id!,
-          format: 'full',
-        });
+      if (syncedCount >= MAX_SYNC_PER_RUN) {
+        console.log(`[CENTRAL-SYNC] Reached safe limit of ${MAX_SYNC_PER_RUN} per run. Stopping this batch.`);
+        break;
+      }
 
-        // Skip already-synced threads without hitting DB again
-        if (existingThreadIds.has(details.data.threadId)) continue;
+      try {
+        if (existingThreadIds.has(message.threadId)) continue;
+        await sleep(1000);
+
+        let details: any;
+        try {
+          details = await withRetry(() =>
+            gmail.users.messages.get({
+              userId: 'me',
+              id: message.id!,
+              format: 'full',
+            })
+          );
+        } catch (retryError: any) {
+          const isQuota = retryError.code === 403 || retryError.code === 429;
+          if (isQuota) {
+            console.warn(`[CENTRAL-SYNC] Persistent Quota hit. Ending this sync session early with partial results.`);
+            break;
+          }
+          throw retryError;
+        }
 
         const headers = details.data.payload?.headers || [];
         const getHeader = (name: string) =>
@@ -505,16 +687,16 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
         const from = getHeader('from');
         const subject = getHeader('subject');
-        const emailAddr = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
-        const senderName = from.replace(/<[^>]*>/g, '').trim() || emailAddr;
+        const emailMatch = from.match(/<([^>]+)>|([^\s"<>]+@[^\s"<>]+)/);
+        const emailAddr = (emailMatch?.[1] || emailMatch?.[2] || '').toLowerCase().trim();
+        const senderName = from.replace(/<[^>]*>/g, '').replace(/['"]/g, '').trim() || emailAddr;
 
-        // ── HARD GUARD: double-check sender even though query already filters ──
-        if (emailAddr.toLowerCase() !== LEADS_SOURCE_EMAIL.toLowerCase()) {
-          console.log(`[CENTRAL-SYNC] Skipping non-leads email from: ${emailAddr}`);
+        if (emailAddr && !emailAddr.includes(LEADS_SOURCE_EMAIL.toLowerCase())) {
+          console.log(`[CENTRAL-SYNC] Skipping unexpected secondary sender in thread: ${emailAddr}`);
+          existingThreadIds.add(message.threadId);
           continue;
         }
 
-        // Extract body
         let body = '';
         if (details.data.payload?.parts) {
           const textPart = details.data.payload.parts.find((p: any) => p.mimeType === 'text/plain');
@@ -523,7 +705,6 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           if (part?.body?.data) {
             body = Buffer.from(part.body.data, 'base64').toString('utf-8');
           }
-          // Check nested parts (multipart/alternative inside multipart/mixed)
           if (!body) {
             for (const p of details.data.payload.parts) {
               if (p.parts) {
@@ -539,9 +720,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           body = Buffer.from(details.data.payload.body.data, 'base64').toString('utf-8');
         }
 
-        // ── Parse email body: detect ADF, classify channel ──
         const parsed = await parseEmailBody(body, subject, from);
-
         let firstName = '';
         let lastName = '';
         let leadEmail = emailAddr;
@@ -592,22 +771,63 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           comments,
         });
 
-        await newLead.save();
-        existingThreadIds.add(details.data.threadId);
-        syncedCount++;
-        console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);
+        try {
+          await newLead.save();
 
-        await AuditLog.create({
-          entityType: 'Lead',
-          entityId: newLead._id,
-          action: 'CREATE',
-          reason: `New Lead via Centralized Sync (${parsed.channel}) from ${LEADS_SOURCE_EMAIL}`,
-          performedBy: userId,
-          changes: { email: leadEmail, subject, channel: parsed.channel, senderEmail: LEADS_SOURCE_EMAIL },
-        });
+          try {
+            if (leadEmail) {
+              await customerService.upsertFromLead({
+                organizationId: req.orgId as string,
+                createdBy: userId,
+                leadId: newLead._id.toString(),
+                firstName,
+                lastName,
+                email: leadEmail,
+                phone: leadPhone,
+                vehicleInterest: vehicleInfo ? {
+                  year: vehicleInfo.year,
+                  make: vehicleInfo.make,
+                  model: vehicleInfo.model,
+                } : undefined,
+                channel: parsed.channel,
+                comments,
+                source: leadSource,
+              });
+            }
+          } catch (custErr) {
+            console.warn('[CENTRAL-SYNC] Customer upsert failed (non-fatal):', custErr);
+          }
 
-      } catch (error) {
-        console.error(`[CENTRAL-SYNC] Error processing message ${message.id}:`, error);
+          existingThreadIds.add(details.data.threadId);
+          syncedCount++;
+          console.log(`[CENTRAL-SYNC] Created lead: ${firstName} ${lastName} [${parsed.channel}] — ${leadEmail}`);
+
+          const io = getSocketIO();
+          if (io) {
+            io.to(`org:${req.orgId}`).emit('lead:new', newLead);
+          }
+
+          await activityService.createActivity({
+            userId: userId,
+            organizationId: req.orgId || 'global',
+            type: 'other',
+            title: 'Lead Synced from Gmail',
+            description: `Lead ${firstName} ${lastName} synced from DealtCloud filter`,
+            metadata: { leadId: newLead._id.toString(), threadId: details.data.threadId }
+          });
+
+          logger.info({ leadId: newLead._id, threadId: details.data.threadId }, 'Lead synced via Gmail');
+        } catch (saveError: any) {
+          if (saveError.code === 11000) {
+            console.log(`[CENTRAL-SYNC] Skipping already synced lead (Duplicate Key): ${message.id}`);
+            existingThreadIds.add(message.threadId);
+            continue;
+          }
+          throw saveError;
+        }
+
+      } catch (error: any) {
+        console.error(`[CENTRAL-SYNC] Error processing message ${message.id}:`, error.message);
         errors.push(`Message ${message.id}: Processing failed`);
       }
     }
@@ -625,33 +845,31 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-// DEPRECATED: Per-user Gmail sync (kept for backward compat)
-// ─────────────────────────────────────────────────────────────
 export const syncGmailInquiries = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   console.log('[SYNC] Legacy syncGmailInquiries called — redirecting to centralized sync');
   return syncCentralGmail(req, res, next);
 });
 
-// ─────────────────────────────────────────────────────────────
-// Centralized ingestion status check
-// ─────────────────────────────────────────────────────────────
 export const getCentralSyncStatus = asyncHandler(async (req: Request, res: Response) => {
-  const configured = !!(process.env.CENTRAL_GMAIL_REFRESH_TOKEN || process.env.CENTRAL_GMAIL_ACCESS_TOKEN);
-  const email = configured ? CENTRAL_EMAIL : null;
+  const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
+  const connected = !!(config && config.gmailConnected && config.refreshToken);
+  
+  const email = connected ? config.gmailAddress : null;
 
   res.json(
     new ApiResponse(
       200,
-      { connected: configured, email, leadsSourceEmail: LEADS_SOURCE_EMAIL },
-      configured ? 'Centralized ingestion active' : 'Not configured'
+      { 
+        connected, 
+        email, 
+        leadsSourceEmail: LEADS_SOURCE_EMAIL,
+        mode: connected ? 'organization' : 'unconfigured'
+      },
+      connected ? 'Lead ingestion active' : 'Not configured'
     )
   );
 });
 
-// ─────────────────────────────────────────────────────────────
-// Appointments
-// ─────────────────────────────────────────────────────────────
 export const setAppointmentForLead = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { date, time, notes, locationOrVehicle } = req.body;
@@ -676,21 +894,54 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     return res.status(404).json(new ApiResponse(404, null, 'Lead not found'));
   }
 
-  await AuditLog.create({
-    entityType: 'Lead',
-    entityId: lead._id,
-    action: 'UPDATE',
-    reason: 'Appointment set from inquiry page',
-    performedBy: userId,
-    changes: { status: 'Appointment Set', appointment: { date, time, notes, locationOrVehicle } },
+  // 1. Sync to Google Calendar (New Stability Update)
+  try {
+      const startTime = new Date(date);
+      const [hours, minutes] = time.split(':');
+      startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+      
+      const endTime = new Date(startTime);
+      endTime.setHours(startTime.getHours() + 1); // Default 1hr
+
+      const appointmentData = {
+          title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
+          description: notes,
+          startTime,
+          endTime,
+          location: locationOrVehicle,
+          organizationId: orgId,
+          createdBy: userId,
+          participants: [userId.toString()],
+          entryType: 'appointment' as const,
+          status: 'scheduled' as const
+      };
+
+      await googleCalendarService.syncAppointmentToGoogleCalendar(appointmentData as any, userId.toString());
+  } catch (syncError) {
+      console.warn('[LeadSync] Google Calendar sync failed for lead appointment:', syncError);
+  }
+
+  // 2. Audit Log
+  await activityService.createActivity({
+    userId: userId.toString(),
+    organizationId: orgId || 'global',
+    type: 'other',
+    title: 'Appointment Set for Lead',
+    description: `Scheduled ${lead.firstName}'s appointment for ${date} at ${time}`,
+    metadata: { leadId: lead._id.toString(), date, time }
   });
 
-  res.json(new ApiResponse(200, lead, 'Appointment saved successfully'));
+  logger.info({ leadId: lead._id, userId, date, time }, 'Appointment set for lead');
+
+  // 3. Socket broadcast
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit('lead:update', lead);
+  }
+
+  res.json(new ApiResponse(200, lead, 'Appointment saved and synced successfully'));
 });
 
-// ─────────────────────────────────────────────────────────────
-// Thread messages — fetched from centralized account
-// ─────────────────────────────────────────────────────────────
 export const getThreadMessages = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const userId = (req.user as IUser)._id;
@@ -701,14 +952,21 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
   }
 
   try {
-    const oauth2Client = getCentralOAuth2Client();
+    const threadCacheKey = `lead:thread:${id}`;
+    const cachedThread = await cacheService.get(threadCacheKey);
+    if (cachedThread) {
+      return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
+    }
+
+    const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
+    const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    const threadData = await gmail.users.threads.get({
+    const threadData = await withRetry(() => gmail.users.threads.get({
       userId: 'me',
-      id: lead.threadId,
+      id: lead.threadId!,
       format: 'full',
-    });
+    }));
 
     const user = await User.findById(userId);
 
@@ -740,10 +998,11 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
           senderEmail: email,
           message: body,
           timestamp: new Date(parseInt(msg.internalDate || Date.now())),
-          isOwn: email === CENTRAL_EMAIL || email === user?.email,
+          isOwn: email === user?.email || (config?.gmailAddress === email),
         };
       });
 
+    await cacheService.set(threadCacheKey, { messages }, 1800); // 30 mins
     res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
   } catch (error: any) {
     console.error('[THREAD] Error fetching thread messages:', error);

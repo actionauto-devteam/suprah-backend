@@ -1,30 +1,40 @@
 import request from 'supertest';
 import app from '../src/server';
 import Vehicle from '../src/models/Vehicle.model';
-import { clerkClient } from '@clerk/clerk-sdk-node';
+import User from '../src/models/User.model';
 import mongoose from 'mongoose';
+import tokenService from '../src/services/token.service';
 
 describe('Vehicle API Endpoints', () => {
     let authToken: string;
     let testVehicleId: string;
-    let userId: mongoose.Types.ObjectId;
-
-    const mockedClerk = clerkClient as jest.Mocked<any>;
+    let testUser: any;
 
     beforeAll(async () => {
-        // Create a test user ID
-        userId = new mongoose.Types.ObjectId();
-        authToken = 'mock_token';
+        if (mongoose.connection.readyState === 0) {
+            await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/actionauto_test');
+        }
+
+        // Clean up previous test users
+        await User.deleteMany({ email: 'vehicle.tester@example.com' });
+
+        // Create a test user for auth
+        testUser = new User({
+            name: 'Vehicle Tester',
+            email: 'vehicle.tester@example.com',
+            role: 'admin',
+            emailVerified: true,
+            onboardingCompleted: true
+        });
+        await testUser.save();
+        
+        // Generate real JWT
+        authToken = tokenService.generateAccessToken(testUser);
     });
 
     beforeEach(async () => {
-        // SAFETY: Only clear if we are explicitly on a test DB name
-        const dbName = mongoose.connection.name;
-        // if (dbName && dbName.includes('test')) {
-        //     await Vehicle.deleteMany({});
-        // } else {
-        //     console.warn(`[SAFETY] Skipping deleteMany because database name "${dbName}" does not look like a test DB.`);
-        // }
+        // Clean up only test vehicles before each test to ensure isolation
+        await Vehicle.deleteMany({ vin: { $regex: /^TEST/ } });
 
         // Create a test vehicle
         const vehicle = await Vehicle.create({
@@ -46,18 +56,16 @@ describe('Vehicle API Endpoints', () => {
         });
 
         testVehicleId = vehicle._id.toString();
-
-        // Setup standard mock for all requests
-        mockedClerk.verifyToken.mockResolvedValue({
-            sub: 'test_clerk_user_id',
-            sid: 'sess_123',
-            org_id: 'test_org_id',
-            org_role: 'org:admin'
-        });
     });
 
     afterAll(async () => {
-        await Vehicle.deleteMany({});
+        // Targeted clean up of test vehicles and user
+        await Vehicle.deleteMany({ vin: { $regex: /^TEST/ } });
+        await User.deleteMany({ email: 'vehicle.tester@example.com' });
+        
+        if (mongoose.connection.db?.databaseName === 'actionauto_test') {
+            await mongoose.disconnect();
+        }
     });
 
     describe('GET /api/vehicles', () => {

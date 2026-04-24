@@ -1,3 +1,4 @@
+import logger from '../utils/logger';
 import CrmUser from '../models/CrmUser.model';
 
 const CRM_USERS = [
@@ -16,6 +17,7 @@ const CRM_USERS = [
   { fullName: 'Krizza Pepito', username: '2026-00013', email: 'krizza@actionautoutah.com', role: 'admin' as const },
 ];
 
+const TARGET_ORGANIZATION_ID = '69da5ccbbd32e79c9296e750';
 const DEFAULT_PASSWORD = 'superadmin@123!';
 
 /**
@@ -25,17 +27,26 @@ const DEFAULT_PASSWORD = 'superadmin@123!';
  */
 const seedCrmUsers = async (): Promise<void> => {
   try {
-    console.log('[CRM Seed] Checking CRM users...');
+    logger.info('[CRM Seed] Checking CRM users...');
 
     let created = 0;
     let existing = 0;
 
     for (const userData of CRM_USERS) {
+      // Look for user by email (globally unique) or username within this organization
       const exists = await CrmUser.findOne({
-        $or: [{ username: userData.username }, { email: userData.email }],
+        $or: [
+          { email: userData.email },
+          { username: userData.username, organizationId: TARGET_ORGANIZATION_ID },
+        ],
       });
 
       if (exists) {
+        // Optional: Ensure existing user is pointed to the correct org if it's missing
+        if (!exists.organizationId) {
+          exists.organizationId = TARGET_ORGANIZATION_ID as any;
+          await exists.save();
+        }
         existing++;
         continue;
       }
@@ -43,6 +54,7 @@ const seedCrmUsers = async (): Promise<void> => {
       // Password is auto-hashed by the pre-save hook in CrmUser model
       await CrmUser.create({
         ...userData,
+        organizationId: TARGET_ORGANIZATION_ID,
         password: DEFAULT_PASSWORD,
         isActive: true,
       });
@@ -51,17 +63,17 @@ const seedCrmUsers = async (): Promise<void> => {
     }
 
     if (created > 0) {
-      console.log(`[CRM Seed] Created ${created} new CRM users`);
+      logger.info(`[CRM Seed] Created ${created} new CRM users`);
     }
 
     if (existing > 0) {
-      console.log(`[CRM Seed] ⏭  ${existing} CRM users already exist`);
+      logger.info(`[CRM Seed] ⏭  ${existing} CRM users already exist`);
     }
 
     const total = await CrmUser.countDocuments();
-    console.log(`[CRM Seed] Total CRM users in database: ${total}`);
+    logger.info(`[CRM Seed] Total CRM users in database: ${total}`);
   } catch (error) {
-    console.error('[CRM Seed] Failed to seed CRM users:', error);
+    logger.error({ error }, '[CRM Seed] Failed to seed CRM users');
     // Don't throw — server should still start even if seed fails
   }
 };

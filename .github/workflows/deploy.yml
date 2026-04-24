@@ -43,24 +43,23 @@ jobs:
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
-          password: ${{ secrets.VPS_SSH_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /opt/actionauto-ftp/deploy
+            cd /opt/actionauto/deploy
             
-            # Stop current services
-            docker compose -f docker-compose.api.yml down
-            docker compose -f docker-compose.ftp.yml down
+            # Pull latest images for all services defined in prod manifest
+            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
             
-            # Clean up old images and volumes to save disk space
-            docker system prune -a --volumes -f
+            # Restart the entire stack atomically
+            # This handles Redis, API, FTP, and Nginx together
+            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
             
-            # Pull latest images
-            docker compose -f docker-compose.api.yml pull
-            docker compose -f docker-compose.ftp.yml pull
+            # Force Nginx to re-resolve the API's internal IP (Stale IP Prevention)
+            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
             
-            # Start services
-            docker compose -f docker-compose.api.yml up -d
-            docker compose -f docker-compose.ftp.yml up -d
+            # Cleanup old images to prevent EBS volume saturation
+
+            docker image prune -a -f
             
-            # Verify status
+            # Verification
             docker ps

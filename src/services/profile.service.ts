@@ -5,8 +5,7 @@ import config from '../config';
 import notificationService from './notification.service';
 import activityService from './activity.service';
 import { storageService } from './storage.service';
-import fs from 'fs';
-import path from 'path';
+import OrgLeadConfig from '../models/OrgLeadConfig.model';
 
 /**
  * Update avatar/profile picture
@@ -21,22 +20,9 @@ const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: s
   // Upload new avatar to R2
   const avatarUrl = await storageService.upload(file, 'avatars');
 
-  // Delete old avatar (from R2 or local)
+  // Delete old avatar (StorageService handles both R2 URLs and legacy local paths)
   if (existingUser.avatar) {
-    if (existingUser.avatar.startsWith('http')) {
-      await storageService.delete(existingUser.avatar);
-    } else if (existingUser.avatar.startsWith('/uploads/avatars/')) {
-      // Cleanup legacy local file
-      const oldFilename = existingUser.avatar.replace('/uploads/avatars/', '');
-      const oldFilePath = path.join(__dirname, '../../uploads/avatars', oldFilename);
-      try {
-        if (fs.existsSync(oldFilePath)) {
-          fs.unlinkSync(oldFilePath);
-        }
-      } catch (err) {
-        console.error('Failed to delete old local avatar file:', err);
-      }
-    }
+    await storageService.delete(existingUser.avatar);
   }
 
   const user = await User.findByIdAndUpdate(
@@ -100,10 +86,11 @@ const getProfile = async (userId: string) => {
     totalAppointments,
   };
 
-  // Build Google Calendar status
+  // Build Google Calendar status from Organization config
+  const orgConfig = orgId ? await OrgLeadConfig.findOne({ organizationId: orgId }) : null;
   const googleCalendar = {
-    connected: user.googleCalendar?.connected || false,
-    connectedAt: user.googleCalendar?.connectedAt,
+    connected: orgConfig?.calendarConnected || false,
+    connectedAt: orgConfig?.updatedAt, // Using updatedAt as proxy for connection time
   };
 
   return {
@@ -261,21 +248,9 @@ const removeAvatar = async (userId: string, orgId?: string) => {
     throw new ApiError(404, 'User not found');
   }
 
-  // Delete from R2 or local
+  // Delete from R2 or legacy local
   if (existingUser.avatar) {
-    if (existingUser.avatar.startsWith('http')) {
-      await storageService.delete(existingUser.avatar);
-    } else if (existingUser.avatar.startsWith('/uploads/avatars/')) {
-      const filename = existingUser.avatar.replace('/uploads/avatars/', '');
-      const filePath = path.join(__dirname, '../../uploads/avatars', filename);
-      try {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (err) {
-        console.error('Failed to delete legacy local avatar file:', err);
-      }
-    }
+    await storageService.delete(existingUser.avatar);
   }
 
   const user = await User.findByIdAndUpdate(

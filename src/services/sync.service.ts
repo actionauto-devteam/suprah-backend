@@ -5,18 +5,26 @@ import AuditLog from '../models/AuditLog.model';
 import cacheService from './cache.service';
 import { diff } from 'deep-diff';
 import mongoose from 'mongoose';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { parse } from 'csv-parse';
+import { Readable } from 'stream';
+import config from '../config';
 
 /**
  * The internal organization ID for Action Auto Utah.
  * All vehicles synced via FTP are owned by this org.
  */
-const ACTION_AUTO_ORG_ID = '698f516abb63af8f6eb7be4c';
+const ACTION_AUTO_ORG_ID = process.env.ACTION_AUTO_ORG_ID || '69d6a26499bee4596c1ea94c';
 
 export class SyncService {
-    /**
-     * Main entry point for inventory synchronization
-     */
+    private isLocked = false;
+
     async syncInventory(): Promise<any> {
+        if (this.isLocked) {
+            console.log('[SyncService] ⚠️ Sync already in progress. Skipping...');
+            return { message: 'Sync already in progress' };
+        }
+
         const startTime = new Date();
         const syncLog = await SyncLog.create({
             startTime,
@@ -24,46 +32,25 @@ export class SyncService {
             organizationId: ACTION_AUTO_ORG_ID,
         });
 
+        this.isLocked = true;
         try {
-            // 1. Fetch and Parse
+            // 1. Fetch from FTP and Pipe to Parser
             const stream = await ftpService.getInventoryStream();
-            const rawData = await ftpService.parseInventoryFile(stream);
+            const result = await this.processStream(stream, syncLog);
 
-            syncLog.vehiclesProcessed = rawData.length;
-            await syncLog.save();
+            // 2. Performance: Pre-calculate daysOnLot instead of doing it in model hooks
+            await this.updateDaysOnLot();
 
-            const csvVins = new Set(rawData.map(v => v.vin));
-            let added = 0;
-            let updated = 0;
-
-            // 2. Process Additions and Updates
-            for (const rawVehicle of rawData) {
-                const result = await this.syncVehicle(rawVehicle);
-                if (result.type === 'added') added++;
-                if (result.type === 'updated') updated++;
-            }
-
-            // 3. Process Deletions (Soft-delete vehicles not in CSV, scoped to this org)
-            const deletionResult = await this.handleDeletions(csvVins);
-
-            // 4. Finalize sync log
-            syncLog.vehiclesAdded = added;
-            syncLog.vehiclesUpdated = updated;
-            syncLog.vehiclesDeleted = deletionResult.deletedCount;
+            // 3. Finalize sync log
             syncLog.status = 'COMPLETED';
             syncLog.endTime = new Date();
             await syncLog.save();
 
-            // 5. Invalidate vehicle cache so the API serves fresh data
+            // 3. Invalidate vehicle cache
             await cacheService.invalidateByPrefix('veh:');
             console.log(`[SyncService] ✅ Sync complete — invalidated vehicle cache.`);
 
-            return {
-                added,
-                updated,
-                deleted: deletionResult.deletedCount,
-                processed: rawData.length
-            };
+            return result;
 
         } catch (error: any) {
             syncLog.status = 'FAILED';
@@ -72,6 +59,8 @@ export class SyncService {
             syncLog.endTime = new Date();
             await syncLog.save();
             throw error;
+        } finally {
+            this.isLocked = false;
         }
     }
 
@@ -196,66 +185,119 @@ export class SyncService {
     }
 
     /**
-     * Process a locally uploaded file (from FTP server)
+     * Process an inventory file directly from R2 (called by FTP server STOR event)
      */
-    async processLocalFile(filePath: string): Promise<any> {
+    async processR2File(key: string): Promise<any> {
         const startTime = new Date();
         const syncLog = await SyncLog.create({
             startTime,
             status: 'RUNNING',
             organizationId: ACTION_AUTO_ORG_ID,
+            errorMessage: `Source: R2://${key}`
+        });
+
+        const s3Client = new S3Client({
+            region: 'auto',
+            endpoint: config.r2.endpoint,
+            credentials: {
+                accessKeyId: config.r2.accessKeyId,
+                secretAccessKey: config.r2.secretAccessKey,
+            },
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+            responseChecksumValidation: 'WHEN_REQUIRED',
         });
 
         try {
-            // Read and parse the local file
-            const fs = require('fs');
-            const stream = fs.createReadStream(filePath);
-            const rawData = await ftpService.parseInventoryFile(stream);
+            const command = new GetObjectCommand({
+                Bucket: config.r2.buckets.ftp,
+                Key: key,
+            });
+            const response = await s3Client.send(command);
+            const stream = response.Body as Readable;
 
-            syncLog.vehiclesProcessed = rawData.length;
-            await syncLog.save();
-
-            const csvVins = new Set(rawData.map(v => v.vin));
-            let added = 0;
-            let updated = 0;
-
-            // Process Additions and Updates
-            for (const rawVehicle of rawData) {
-                const result = await this.syncVehicle(rawVehicle);
-                if (result.type === 'added') added++;
-                if (result.type === 'updated') updated++;
-            }
-
-            // Process Deletions (scoped to this org only)
-            const deletionResult = await this.handleDeletions(csvVins);
+            const result = await this.processStream(stream, syncLog);
 
             // Finalize
-            syncLog.vehiclesAdded = added;
-            syncLog.vehiclesUpdated = updated;
-            syncLog.vehiclesDeleted = deletionResult.deletedCount;
             syncLog.status = 'COMPLETED';
             syncLog.endTime = new Date();
             await syncLog.save();
 
-            // Invalidate vehicle cache after successful local file sync
             await cacheService.invalidateByPrefix('veh:');
-            console.log(`[SyncService] ✅ Local file sync complete — invalidated vehicle cache.`);
-
-            return {
-                added,
-                updated,
-                deleted: deletionResult.deletedCount,
-                processed: rawData.length
-            };
-
+            return result;
         } catch (error: any) {
             syncLog.status = 'FAILED';
             syncLog.errorMessage = error.message;
-            syncLog.stackTrace = error.stack;
             syncLog.endTime = new Date();
             await syncLog.save();
             throw error;
         }
+    }
+
+    /**
+     * Shared streaming processor to handle CSV/TSV without loading full file into memory
+     */
+    private async processStream(stream: Readable, syncLog: any): Promise<any> {
+        return new Promise((resolve, reject) => {
+            let processed = 0;
+            let added = 0;
+            let updated = 0;
+            const csvVins = new Set<string>();
+
+            const parser = stream.pipe(
+                parse({
+                    columns: (header) => header.map((h: string) => h.trim().toLowerCase()),
+                    skip_empty_lines: true,
+                    trim: true,
+                    relax_quotes: true,
+                    relax_column_count: true,
+                    skip_records_with_error: true,
+                    delimiter: '\t', // DealersCloud TSV format
+                })
+            );
+
+            parser.on('data', async (rawVehicle) => {
+                parser.pause(); // Backpressure: Pause stream while we process DB update
+                try {
+                    const result = await this.syncVehicle(rawVehicle);
+                    if (result.type === 'added') added++;
+                    if (result.type === 'updated') updated++;
+                    if (rawVehicle.vin) csvVins.add(rawVehicle.vin.trim().toUpperCase());
+                    processed++;
+                } catch (err) {
+                    console.error('[SyncService] Stream processing error for vehicle:', err);
+                }
+                parser.resume();
+            });
+
+            parser.on('end', async () => {
+                try {
+                    const deletionResult = await this.handleDeletions(csvVins);
+
+                    syncLog.vehiclesProcessed = processed;
+                    syncLog.vehiclesAdded = added;
+                    syncLog.vehiclesUpdated = updated;
+                    syncLog.vehiclesDeleted = deletionResult.deletedCount;
+
+                    resolve({ added, updated, deleted: deletionResult.deletedCount, processed });
+                } catch (err) {
+                    reject(err);
+                }
+            });
+
+            parser.on('error', (err) => {
+                reject(err);
+            });
+        });
+    }
+
+    /**
+     * @deprecated Use processR2File or processStream
+     */
+    async processLocalFile(filePath: string): Promise<any> {
+        // ... kept as legacy fallback but refactored to use stream
+        const fs = require('fs');
+        const stream = fs.createReadStream(filePath);
+        return this.processStream(stream, { save: () => { } });
     }
 
     /**
@@ -287,6 +329,41 @@ export class SyncService {
         }
 
         return { deletedCount: vehiclesToMarkSold.length };
+    }
+
+    /**
+     * Bulk updates daysOnLot for all vehicles in the target organization.
+     * This moves expensive date math from Request-Time (read) to Sync-Time (write).
+     */
+    private async updateDaysOnLot() {
+        try {
+            const now = new Date();
+            const vehicles = await Vehicle.find({
+                organizationId: ACTION_AUTO_ORG_ID,
+                status: { $ne: 'Sold' },
+                isDeleted: false
+            });
+
+            const bulkOps = vehicles.map(vehicle => {
+                const days = Math.floor(
+                    (now.getTime() - new Date(vehicle.dateAdded || vehicle.createdAt).getTime()) /
+                    (1000 * 60 * 60 * 24)
+                );
+                return {
+                    updateOne: {
+                        filter: { _id: vehicle._id },
+                        update: { $set: { daysOnLot: Math.max(0, days) } }
+                    }
+                };
+            });
+
+            if (bulkOps.length > 0) {
+                await Vehicle.bulkWrite(bulkOps);
+                console.log(`[SyncService] ⚡ Updated daysOnLot for ${bulkOps.length} vehicles.`);
+            }
+        } catch (err) {
+            console.error('[SyncService] Failed to update daysOnLot:', err);
+        }
     }
 }
 

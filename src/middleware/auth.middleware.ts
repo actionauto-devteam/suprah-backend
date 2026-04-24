@@ -3,6 +3,7 @@ import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import Organization from '../models/Organization.model';
 import tokenService from '../services/token.service';
+import { userAuthCache, orgStatusCache } from '../utils/cache.util';
 
 // Extend Express Request type to include auth property for backward compatibility
 declare global {
@@ -17,6 +18,10 @@ declare global {
                 orgId?: string;
                 orgRole?: string;
                 getToken: () => Promise<string | null>;
+            };
+            leadContext?: {
+                organizationId: string;
+                vehicle: any; // Using any for IVehicle to avoid circular dependency in declaration file
             };
         }
     }
@@ -46,12 +51,22 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'Invalid token payload');
         }
 
-        // 3. Find user in local database
-        const user = await User.findById(userId);
+        // 3. Find user in local database (with TTL cache)
+        const now = Date.now();
+        let user: IUser | undefined | null;
+
+        const cachedUser = userAuthCache.get(userId);
+        if (cachedUser) {
+            user = cachedUser;
+        } else {
+            user = await User.findById(userId);
+            if (user) userAuthCache.set(userId, user);
+        }
 
         if (!user) {
             throw new ApiError(401, 'User not found');
         }
+
 
         // 4. Attach user and org info to request
         let orgId = user.organizationId?.toString();
@@ -61,6 +76,23 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         if (user.role === 'super_admin') {
             const impersonateId = req.headers['x-impersonate-org-id'] as string;
             if (impersonateId) {
+                // Validate impersonated orgId exists (cached)
+                let orgExists = false;
+                const cachedOrg = orgStatusCache.get(impersonateId);
+                if (cachedOrg) {
+                    orgExists = true;
+                } else {
+                    const org = await Organization.findById(impersonateId).select('status');
+                    if (org) {
+                        orgStatusCache.set(impersonateId, { status: org.status });
+                        orgExists = true;
+                    }
+                }
+
+                if (!orgExists) {
+                    throw new ApiError(400, 'Invalid impersonation: Organization not found');
+                }
+
                 orgId = impersonateId;
                 orgRole = 'admin'; // Assume admin role in the target org
             }
@@ -72,17 +104,14 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             finalOrgRole = 'admin';
         }
 
-        req.user = user;
+        req.user = user as IUser;
         req.orgId = orgId;
         req.orgRole = finalOrgRole;
 
-        console.log(`[AuthMiddleware] User: ${user.email}, GlobalRole: ${user.role}, OrgId: ${orgId}, OrgRole: ${orgRole}`);
-
         // 5. Compatibility Layer: req.auth
-        // We populate this so existing controllers relying on req.auth won't break.
         req.auth = {
-            userId: userId, // Local _id as string
-            sessionId: 'local_session', // Dummy for now
+            userId: userId,
+            sessionId: 'local_session',
             orgId,
             orgRole: finalOrgRole,
             getToken: async () => token,
@@ -115,10 +144,22 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
         }
 
-        // 9. Organization Suspension Check
+        // 9. Organization Suspension Check (with TTL cache)
         if (req.orgId) {
-            const org = await Organization.findById(req.orgId).select('status');
-            if (org && org.status === 'suspended') {
+            let status: string | undefined;
+            const cachedOrg = orgStatusCache.get(req.orgId);
+
+            if (cachedOrg) {
+                status = cachedOrg.status;
+            } else {
+                const org = await Organization.findById(req.orgId).select('status');
+                if (org) {
+                    status = org.status;
+                    orgStatusCache.set(req.orgId, { status: org.status });
+                }
+            }
+
+            if (status === 'suspended') {
                 // Super Admins can still access to fix things
                 if (user.role !== 'super_admin') {
                     throw new ApiError(403, 'Organization Suspended');

@@ -1,5 +1,3 @@
-import path from 'path';
-import fs from 'fs';
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -9,34 +7,8 @@ import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import { getIO } from '../socket/supraspace.socket';
-
-// ─── Local upload helper ──────────────────────────────────────────────────────
-// Files are saved to  src/uploads/supraspace/  and served statically.
-// Make sure your server has:
-//   app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
-
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'supraspace');
-
-function ensureUploadDir() {
-  if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  }
-}
-
-function saveFileToDisk(buffer: Buffer, originalName: string): string {
-  ensureUploadDir();
-  const safeName = `${Date.now()}-${originalName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-  const filePath = path.join(UPLOAD_DIR, safeName);
-  fs.writeFileSync(filePath, buffer);
-  return safeName; // return just the filename; URL is built in the controller
-}
-
-function buildFileUrl(req: Request, filename: string): string {
-  const backendUrl =
-    process.env.BACKEND_URL ||
-    `${req.protocol}://${req.get('host')}`;
-  return `${backendUrl}/uploads/supraspace/${filename}`;
-}
+import { storageService, BucketType } from '../services/storage.service';
+import logger from '../utils/logger';
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 
@@ -212,7 +184,25 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     { $addToSet: { readBy: userId } }
   );
 
-  res.json(new ApiResponse(200, messages.reverse(), 'Messages fetched'));
+  // Sign attachment URLs for each message
+  const messagesWithSignedUrls = await Promise.all(messages.map(async (msg: any) => {
+    if (msg.attachments && msg.attachments.length > 0) {
+      for (const attachment of msg.attachments) {
+        if (attachment.url && !attachment.url.startsWith('http')) {
+          const signed = await storageService.getSignedUrl(attachment.url);
+          if (signed) {
+            attachment.url = signed;
+            if (attachment.thumbnailUrl && !attachment.thumbnailUrl.startsWith('http')) {
+              attachment.thumbnailUrl = signed;
+            }
+          }
+        }
+      }
+    }
+    return msg;
+  }));
+
+  res.json(new ApiResponse(200, messagesWithSignedUrls.reverse(), 'Messages fetched'));
 });
 
 /**
@@ -270,7 +260,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * POST /api/supraspace/conversations/:id/upload
- * Save files to src/uploads/supraspace/ and send as a message
+ * Upload files to cloud storage and send as a message
  */
 const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -293,12 +283,21 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     const isImage = file.mimetype.startsWith('image/');
     if (isImage) hasImage = true;
 
-    // Save to disk
-    const savedFilename = saveFileToDisk(file.buffer, file.originalname);
-    const fileUrl = buildFileUrl(req, savedFilename);
+    // Upload to R2 (Private bucket). Local fallback is disabled for chat attachments.
+    let fileUrl: string;
+    try {
+      fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, {
+        allowLocalFallback: false,
+      });
+    } catch (err: any) {
+      logger.error({ err, conversationId: id, fileName: file.originalname }, '[SupraSpace] Attachment upload failed');
+      throw new ApiError(503, 'Attachment upload is temporarily unavailable. Please try again.');
+    }
+    const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
 
     attachments.push({
       url: fileUrl,
+      fileKey,
       originalName: file.originalname,
       mimeType: file.mimetype,
       size: file.size,
@@ -317,22 +316,42 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   });
 
   await message.populate('sender', 'fullName username avatar');
+  if (replyTo) {
+    await message.populate({
+      path: 'replyTo',
+      populate: { path: 'sender', select: 'fullName username avatar' },
+    });
+  }
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
   await conversation.save();
 
+  // Emit/return signed URLs so attachments are immediately usable in the chat UI.
+  const messageForClient = message.toObject() as any;
+  if (Array.isArray(messageForClient.attachments)) {
+    for (const attachment of messageForClient.attachments) {
+      const signedUrl = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+      if (signedUrl) {
+        attachment.url = signedUrl;
+        if (attachment.thumbnailUrl) {
+          attachment.thumbnailUrl = signedUrl;
+        }
+      }
+    }
+  }
+
   try {
     const io = getIO();
     conversation.members.forEach((memberId) => {
-      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message });
+      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message: messageForClient });
     });
-    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message });
+    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message: messageForClient });
   } catch (socketErr) {
     console.warn('[SupraSpace] Socket emit failed on upload:', socketErr);
   }
 
-  res.status(201).json(new ApiResponse(201, message, 'File sent'));
+  res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
 
 /**
@@ -368,6 +387,17 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
     },
     { runValidators: false }
   );
+
+  // Clean up R2 attachments
+  if (message.attachments && message.attachments.length > 0) {
+    for (const attachment of message.attachments) {
+      if (attachment.fileKey) {
+        await storageService.delete(attachment.fileKey).catch((err) => {
+          console.warn('[SupraSpace] Failed to delete R2 attachment:', err.message);
+        });
+      }
+    }
+  }
 
   // Emit socket event — wrapped so a socket failure does not 500 the request
   try {

@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import config from '../config';
+import logger from '../utils/logger';
 
 const LOG_PREFIX = '[CacheService]';
 
@@ -18,7 +19,7 @@ function getRedisClient(): Redis | null {
         // Reconnect automatically with exponential backoff
         retryStrategy: (times) => {
             const delay = Math.min(times * 100, 3000);
-            console.warn(`${LOG_PREFIX} Reconnecting to Redis (attempt ${times})...`);
+            logger.warn(`${LOG_PREFIX} Reconnecting to Redis (attempt ${times})...`);
             return delay;
         },
         // Don't crash the process if Redis is down at startup
@@ -27,9 +28,9 @@ function getRedisClient(): Redis | null {
         maxRetriesPerRequest: 3,
     });
 
-    redisClient.on('connect', () => console.log(`${LOG_PREFIX} ✅ Connected to Redis`));
-    redisClient.on('error', (err) => console.error(`${LOG_PREFIX} ❌ Redis error:`, err.message));
-    redisClient.on('close', () => console.warn(`${LOG_PREFIX} Redis connection closed.`));
+    redisClient.on('connect', () => logger.info(`${LOG_PREFIX} Connected to Redis`));
+    redisClient.on('error', (err) => logger.error(err, `${LOG_PREFIX} Redis error`));
+    redisClient.on('close', () => logger.warn(`${LOG_PREFIX} Redis connection closed.`));
 
     return redisClient;
 }
@@ -46,13 +47,13 @@ class CacheService {
             if (!client) return null;
             const value = await client.get(key);
             if (!value) {
-                console.log(`${LOG_PREFIX} MISS → ${key}`);
+                logger.debug(`${LOG_PREFIX} MISS → ${key}`);
                 return null;
             }
-            console.log(`${LOG_PREFIX} HIT  → ${key}`);
+            logger.debug(`${LOG_PREFIX} HIT  → ${key}`);
             return JSON.parse(value) as T;
         } catch (err: any) {
-            console.error(`${LOG_PREFIX} get() failed for key "${key}":`, err.message);
+            logger.error(err, `${LOG_PREFIX} get() failed for key "${key}"`);
             return null; // Degrade gracefully — fall through to DB
         }
     }
@@ -66,9 +67,9 @@ class CacheService {
             const client = getRedisClient();
             if (!client) return;
             await client.set(key, JSON.stringify(value), 'EX', ttlSeconds);
-            console.log(`${LOG_PREFIX} SET  → ${key} (TTL: ${ttlSeconds}s)`);
+            logger.debug(`${LOG_PREFIX} SET  → ${key} (TTL: ${ttlSeconds}s)`);
         } catch (err: any) {
-            console.error(`${LOG_PREFIX} set() failed for key "${key}":`, err.message);
+            logger.error(err, `${LOG_PREFIX} set() failed for key "${key}"`);
         }
     }
 
@@ -82,10 +83,10 @@ class CacheService {
             if (!client) return;
             const deleted = await client.del(key);
             if (deleted > 0) {
-                console.log(`${LOG_PREFIX} DEL  → ${key}`);
+                logger.debug(`${LOG_PREFIX} DEL  → ${key}`);
             }
         } catch (err: any) {
-            console.error(`${LOG_PREFIX} del() failed for key "${key}":`, err.message);
+            logger.error(err, `${LOG_PREFIX} del() failed for key "${key}"`);
         }
     }
 
@@ -112,9 +113,9 @@ class CacheService {
                 }
             } while (cursor !== '0');
 
-            console.log(`${LOG_PREFIX} INVALIDATED ${totalDeleted} keys matching "${pattern}"`);
+            logger.info(`${LOG_PREFIX} INVALIDATED ${totalDeleted} keys matching "${pattern}"`);
         } catch (err: any) {
-            console.error(`${LOG_PREFIX} invalidateByPrefix() failed for "${prefix}":`, err.message);
+            logger.error(err, `${LOG_PREFIX} invalidateByPrefix() failed for "${prefix}"`);
         }
     }
 
@@ -127,9 +128,9 @@ class CacheService {
             const client = getRedisClient();
             if (!client) return;
             await client.del(...keys);
-            console.log(`${LOG_PREFIX} DEL  → [${keys.join(', ')}]`);
+            logger.debug(`${LOG_PREFIX} DEL  → [${keys.join(', ')}]`);
         } catch (err: any) {
-            console.error(`${LOG_PREFIX} delMany() failed:`, err.message);
+            logger.error(err, `${LOG_PREFIX} delMany() failed`);
         }
     }
 
@@ -155,7 +156,7 @@ class CacheService {
         if (redisClient) {
             await redisClient.quit();
             redisClient = null;
-            console.log(`${LOG_PREFIX} Disconnected from Redis.`);
+            logger.info(`${LOG_PREFIX} Disconnected from Redis.`);
         }
     }
 }

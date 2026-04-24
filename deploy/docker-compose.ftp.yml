@@ -56,6 +56,14 @@ services:
     volumes:
       # Persist uploaded files (optional, since they're deleted after processing)
       - ftp-uploads:/app/ftp-uploads
+      # Share SSL certificates with the API (Nginx/Certbot)
+      - ./certbot/conf:/etc/letsencrypt:ro
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     
     networks:
       - ftp-network

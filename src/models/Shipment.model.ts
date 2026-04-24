@@ -74,11 +74,50 @@ export interface IShipment extends Document {
   assignedAt?: Date;
   driverAcceptedAt?: Date;
 
-  // Proof of Delivery
+  trailerTypeRequired?: string;
+  vehicleCount?: number;
+  isPostedToBoard?: boolean;
+  preDispatchNotes?: string;
+
+  pendingDriverRequests?: Array<{
+    driverId: mongoose.Types.ObjectId;
+    driverName: string;
+    requestedAt: Date;
+    status: "pending" | "approved" | "rejected";
+    reviewedAt?: Date;
+    reviewedBy?: mongoose.Types.ObjectId;
+    rejectionReason?: string;
+  }>;
+
+  carrierPayAmount?: number;
+  copCodAmount?: number;
+  balanceAmount?: number;
+
+  specialInstructions?: string;
+  loadSpecificTerms?: string;
+  desiredDeliveryDate?: Date;
+  internalLoadId?: string;
+
+  originContact?: {
+    contactName?: string;
+    email?: string;
+    phone?: string;
+    cellPhone?: string;
+    buyerReferenceNumber?: string;
+  };
+  destinationContact?: {
+    contactName?: string;
+    email?: string;
+    phone?: string;
+    cellPhone?: string;
+    buyerReferenceNumber?: string;
+  };
+
   proofOfDelivery?: {
     imageUrl: string;
     submittedAt: Date;
     note?: string;
+    submittedTo?: mongoose.Types.ObjectId;
     confirmedAt?: Date;
     confirmedBy?: mongoose.Types.ObjectId;
   };
@@ -98,12 +137,10 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
     organizationId: {
       type: String,
       required: true,
-      index: true,
     },
     orgId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
-      index: true,
     },
 
     status: {
@@ -167,16 +204,60 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
       },
     ],
 
-
-
     assignedDriverId: { type: Schema.Types.ObjectId, ref: "User" },
     assignedAt: { type: Date },
     driverAcceptedAt: { type: Date },
 
+    trailerTypeRequired: { type: String, trim: true },
+    vehicleCount: { type: Number, min: 1, max: 12 },
+    isPostedToBoard: { type: Boolean, default: false },
+    preDispatchNotes: { type: String, trim: true, maxlength: 4000 },
+
+    pendingDriverRequests: [
+      {
+        driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+        driverName: { type: String, required: true },
+        requestedAt: { type: Date, default: Date.now },
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
+        reviewedAt: { type: Date },
+        reviewedBy: { type: Schema.Types.ObjectId, ref: "User" },
+        rejectionReason: { type: String, trim: true },
+      },
+    ],
+
+    carrierPayAmount: { type: Number, min: 0 },
+    copCodAmount: { type: Number, min: 0, default: 0 },
+    balanceAmount: { type: Number },
+
+    specialInstructions: { type: String, trim: true, maxlength: 4000 },
+    loadSpecificTerms: { type: String, trim: true, maxlength: 500 },
+    desiredDeliveryDate: { type: Date },
+    internalLoadId: { type: String, trim: true, maxlength: 50 },
+
+    originContact: {
+      contactName: { type: String, trim: true },
+      email: { type: String, trim: true, lowercase: true },
+      phone: { type: String, trim: true },
+      cellPhone: { type: String, trim: true },
+      buyerReferenceNumber: { type: String, trim: true },
+    },
+    destinationContact: {
+      contactName: { type: String, trim: true },
+      email: { type: String, trim: true, lowercase: true },
+      phone: { type: String, trim: true },
+      cellPhone: { type: String, trim: true },
+      buyerReferenceNumber: { type: String, trim: true },
+    },
+
     proofOfDelivery: {
-      imageUrl: { type: String, trim: true },
+      imageUrl:    { type: String, trim: true },
       submittedAt: { type: Date },
-      note: { type: String, trim: true },
+      note:        { type: String, trim: true },
+      submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },
@@ -194,6 +275,16 @@ const ShipmentSchema: Schema<IShipment> = new Schema(
 // Indexes
 ShipmentSchema.index({ createdBy: 1, createdAt: -1 });
 ShipmentSchema.index({ organizationId: 1, createdAt: -1 });
+ShipmentSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+ShipmentSchema.index({ organizationId: 1, isPostedToBoard: 1, status: 1 });
+ShipmentSchema.index({ "pendingDriverRequests.driverId": 1, "pendingDriverRequests.status": 1 });
+
+ShipmentSchema.pre("save", function (next) {
+  if (this.carrierPayAmount != null) {
+    this.balanceAmount = this.carrierPayAmount - (this.copCodAmount || 0);
+  }
+  next();
+});
 
 // Virtual to get quote data from either the quote reference or preserved data
 ShipmentSchema.virtual("quoteData").get(function (this: IShipment) {

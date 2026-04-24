@@ -3,13 +3,15 @@ import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
-import AuditLog from '../models/AuditLog.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import logger from '../utils/logger';
+import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import cacheService from '../services/cache.service';
+import { getSocketIO } from '../utils/socketEmitter';
 import {
     getCoordinatesFromZip,
     calculateDistance,
@@ -158,35 +160,53 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         new ApiResponse(201, populatedQuote, 'Quote created successfully')
     );
 
+    // Real-time: notify org members
+    const _ioC = getSocketIO();
+    if (_ioC) _ioC.to(`org:${orgId}`).emit('quote:change', { action: 'created' });
+
     // Invalidate quote cache after creation
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'CREATE',
-        reason: 'New shipping quote created',
-        performedBy: userId,
-        changes: { firstName, lastName, vehicleId, fromZip, toZip }
+    await activityService.createActivity({
+        userId: userId || 'GUEST',
+        organizationId: orgId,
+        type: 'quote_created',
+        title: 'Draft Created',
+        description: `New transportation draft created for ${firstName} ${lastName}`,
+        metadata: { quoteId: quote._id.toString(), vehicleName: vehicleData.vehicleName, rate },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent')
     });
+
+    logger.info({ quoteId: quote._id, orgId }, 'New shipping quote created');
 });
 
 /**
- * Get all quotes for the current organization
+ * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
-    const orgId = req.orgId as string;
     const { status, search } = req.query;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const skip = (page - 1) * limit;
+    const orgId = req.orgId as string;
 
-    const filter: any = { organizationId: orgId };
-
+    const filter: any = {};
     if (status && status !== 'all') {
         filter.status = status;
     }
+    if (search) {
+        filter.$or = [
+            { firstName: { $regex: search, $options: 'i' } },
+            { lastName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { vin: { $regex: search, $options: 'i' } },
+            { stockNumber: { $regex: search, $options: 'i' } },
+        ];
+    }
 
-    // Skip caching for search queries to avoid stale filtered results
     const isCacheable = !search;
-    const cacheKey = `quotes:${orgId}:list:${status || 'all'}`;
+    const cacheKey = `quotes:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {
         const cached = await cacheService.get(cacheKey);
@@ -195,41 +215,39 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    if (search) {
-        filter.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { vin: { $regex: search, $options: 'i' } },
-            { stockNumber: { $regex: search, $options: 'i' } }
-        ];
-    }
-
-    const quotes = await Quote.find(filter)
-        .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
-        .populate('createdBy', 'name email avatar')
-        .sort({ createdAt: -1 });
+    const [total, quotes] = await Promise.all([
+        Quote.countDocuments(filter),
+        Quote.find(filter)
+            .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+            .populate('createdBy', 'name email avatar')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit),
+    ]);
 
     // Attach organization name to each quote
-    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))];
-    const validObjectIds = uniqueOrgIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id));
-    const orgs = validObjectIds.length
-        ? await Organization.find({ _id: { $in: validObjectIds } }).select('name logoUrl')
-        : [];
-
+    const uniqueOrgIds = [...new Set(quotes.map(q => q.organizationId).filter(Boolean))]
+        .filter(id => /^[0-9a-fA-F]{24}$/.test(String(id)));
+    const orgs = await Organization.find({ _id: { $in: uniqueOrgIds } }).select('name logoUrl');
     const orgMap = new Map<string, { name: string; logoUrl?: string }>();
     orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
 
     const quotesWithOrg = quotes.map(q => ({
         ...(q.toJSON()),
-        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' }
+        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' },
     }));
 
+    const totalPages = Math.ceil(total / limit);
+    const responseData = {
+        quotes: quotesWithOrg,
+        pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    };
+
     if (isCacheable) {
-        await cacheService.set(cacheKey, quotesWithOrg, QUOTE_CACHE_TTL);
+        await cacheService.set(cacheKey, responseData, QUOTE_CACHE_TTL);
     }
 
-    res.json(new ApiResponse(200, quotesWithOrg, 'Quotes fetched successfully'));
+    res.json(new ApiResponse(200, responseData, 'Quotes fetched successfully'));
 });
 
 /**
@@ -373,17 +391,24 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 
+    // Real-time: notify org members
+    const _ioU = getSocketIO();
+    if (_ioU) _ioU.to(`org:${orgId}`).emit('quote:change', { action: 'updated' });
+
     // Invalidate quote cache on update
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'UPDATE',
-        reason: 'Quote details updated',
-        performedBy: userId,
-        changes: updateData
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Draft Updated',
+        description: `Quote details modified for ${quote.firstName} ${quote.lastName}`,
+        metadata: { quoteId: quote._id.toString(), status: quote.status },
+        ipAddress: req.ip
     });
+
+    logger.info({ quoteId: quote._id, orgId }, 'Quote details updated');
 });
 
 /**
@@ -434,14 +459,16 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     // Invalidate quote cache on status change
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: quote._id,
-        action: 'UPDATE',
-        reason: `Quote status changed to ${status}`,
-        performedBy: userId,
-        changes: { status }
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Status Changed',
+        description: `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
+        metadata: { quoteId: quote._id.toString(), status }
     });
+
+    logger.info({ quoteId: quote._id, status }, 'Quote status updated');
 });
 
 /**
@@ -491,13 +518,19 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
 
-    await AuditLog.create({
-        entityType: 'Quote',
-        entityId: req.params.id,
-        action: 'DELETE',
-        reason: 'Quote deleted',
-        performedBy: userId
+    // Real-time: notify org members
+    const _ioD = getSocketIO();
+    if (_ioD) _ioD.to(`org:${orgId}`).emit('quote:change', { action: 'deleted' });
+
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_deleted',
+        title: 'Draft Deleted',
+        description: `Quote for ${customerName} was removed from the system`
     });
+
+    logger.warn({ quoteId: req.params.id, orgId }, 'Quote deleted');
 });
 
 export default {

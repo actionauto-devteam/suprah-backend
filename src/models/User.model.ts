@@ -70,20 +70,6 @@ export interface IUser extends Document {
   walletBalance: number;
   totalEarned: number;
 
-  // Google Calendar Integration
-  googleCalendar?: {
-    connected: boolean;
-    accessToken?: string;
-    refreshToken?: string;
-    expiryDate?: number;
-    connectedAt?: Date;
-
-    // NEW: Webhook tracking
-    watchChannelId?: string; // Current webhook channel ID
-    watchResourceId?: string; // Current webhook resource ID
-    watchExpiration?: Date; // When the webhook expires
-  };
-
   notificationPreferences: {
     // CRM & Sales
     quoteCreated: boolean;
@@ -262,20 +248,6 @@ const UserSchema = new Schema(
       default: 0,
     },
 
-    // Google Calendar Integration
-    googleCalendar: {
-      connected: { type: Boolean, default: false },
-      accessToken: { type: String, select: false },
-      refreshToken: { type: String, select: false },
-      expiryDate: { type: Number },
-      connectedAt: { type: Date },
-
-      // NEW fields for webhook tracking
-      watchChannelId: { type: String },
-      watchResourceId: { type: String },
-      watchExpiration: { type: Date },
-    },
-
     notificationPreferences: {
       // CRM & Sales
       quoteCreated: { type: Boolean, default: true },
@@ -374,7 +346,8 @@ UserSchema.pre<IUser>('save', async function (next) {
       const random3Digits = Math.floor(100 + Math.random() * 900); // 100-999
       const candidateCode = `AAU-${baseName}-${random3Digits}`;
 
-      const existingUser = await mongoose.models.User.findOne({ referralCode: candidateCode });
+      const User = this.constructor as mongoose.Model<IUser>;
+      const existingUser = await User.findOne({ referralCode: candidateCode });
       if (!existingUser) {
         user.referralCode = candidateCode;
         codeUnique = true;

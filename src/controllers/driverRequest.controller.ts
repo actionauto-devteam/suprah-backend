@@ -7,6 +7,8 @@ import User, { IUser } from "../models/User.model";
 import Organization from "../models/Organization.model";
 import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
+import logger from "../utils/logger";
+import activityService from "../services/activity.service";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -75,6 +77,8 @@ const createDriverRequest = asyncHandler(
       }
     }
 
+    logger.info({ driverRequestId: driverRequest._id, userId }, 'Driver registration request submitted');
+
     res.status(201).json(
       new ApiResponse(201, driverRequest, "Driver request submitted"),
     );
@@ -130,9 +134,12 @@ const getMyDriverRequestStatus = asyncHandler(
 const getDriverRequests = asyncHandler(
   async (req: Request, res: Response) => {
     const user = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (user.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can view driver requests");
+    // Viewing is allowed for all authenticated users who have an organization context 
+    // or who are global admins/super_admins.
+    if (!orgRole && user.role !== 'super_admin' && user.role !== 'admin') {
+      throw new ApiError(403, "You do not have permission to view driver requests");
     }
 
     const { status } = req.query;
@@ -159,9 +166,12 @@ const getDriverRequests = asyncHandler(
 const approveDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     const adminUser = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (adminUser.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can approve driver requests");
+    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
+
+    if (!isAdmin) {
+      throw new ApiError(403, "Only administrators can approve driver requests");
     }
 
     const request = await DriverRequest.findOne({
@@ -182,8 +192,9 @@ const approveDriverRequest = asyncHandler(
     driverUser.role = "driver";
     driverUser.isApproved = true;
     driverUser.onboardingCompleted = true;
-    if (request.organizationId) {
-      driverUser.organizationId = request.organizationId;
+    const orgToAssign = request.organizationId || adminUser.organizationId;
+    if (orgToAssign) {
+      driverUser.organizationId = orgToAssign as any;
     }
     await driverUser.save();
 
@@ -258,8 +269,19 @@ const approveDriverRequest = asyncHandler(
         `,
       });
     } catch (emailErr) {
-      console.error("Failed to send approval email:", emailErr);
+      logger.error({ err: emailErr, driverId: driverUser._id }, 'Failed to send driver approval email');
     }
+
+    await activityService.createActivity({
+      userId: driverUser._id.toString(),
+      organizationId: (orgToAssign as any)?.toString() || 'global',
+      type: 'profile_update',
+      title: 'Driver Approved',
+      description: `Account upgraded to Driver role by admin ${adminUser.name}`,
+      metadata: { driverRequestId: request._id.toString(), adminId: adminUser._id.toString() }
+    });
+
+    logger.info({ driverRequestId: request._id, driverId: driverUser._id, adminId: adminUser._id }, 'Driver request approved');
 
     res.json(new ApiResponse(200, request, "Driver request approved"));
   },
@@ -273,9 +295,12 @@ const approveDriverRequest = asyncHandler(
 const rejectDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     const adminUser = req.user as IUser;
+    const orgRole = req.orgRole;
 
-    if (adminUser.role !== "super_admin") {
-      throw new ApiError(403, "Only super admins can reject driver requests");
+    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
+
+    if (!isAdmin) {
+      throw new ApiError(403, "Only administrators can reject driver requests");
     }
 
     const request = await DriverRequest.findOne({
@@ -311,6 +336,8 @@ const rejectDriverRequest = asyncHandler(
     } catch {
       // Non-critical
     }
+
+    logger.warn({ driverRequestId: request._id, adminId: adminUser._id }, 'Driver request rejected');
 
     res.json(new ApiResponse(200, request, "Driver request rejected"));
   },

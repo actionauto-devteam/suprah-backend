@@ -177,35 +177,51 @@ const getUserNotifications = async (
   options: { limit?: number; skip?: number; isRead?: boolean; userRole?: string } = {}
 ) => {
   const { limit = 50, skip = 0, isRead, userRole } = options;
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(limit, 0) : 50;
+  const normalizedSkip = Number.isFinite(skip) ? Math.max(skip, 0) : 0;
+  const shouldFetchAll = normalizedLimit === 0;
 
   const personalFilter: any = { userId };
   if (isRead !== undefined) personalFilter.isRead = isRead;
 
+  // Support legacy org-level broadcast docs that may not have userId.
+  // Newer broadcast notifications are created per-user and are already covered by personalFilter.
   const broadcastFilter: any = {
     organizationId: orgId,
     isBroadcast: true,
+    $or: [{ userId: { $exists: false } }, { userId: null }],
   };
   if (userRole) broadcastFilter.roleTargets = { $in: [userRole] };
   if (isRead !== undefined) broadcastFilter.isRead = isRead;
 
-  const fetchLimit = limit + skip;
+  const fetchLimit = shouldFetchAll ? undefined : normalizedLimit + normalizedSkip;
+  const personalQuery = Notification.find(personalFilter).sort({ createdAt: -1 });
+  const broadcastQuery = Notification.find(broadcastFilter).sort({ createdAt: -1 });
+
+  if (fetchLimit !== undefined) {
+    personalQuery.limit(fetchLimit);
+    broadcastQuery.limit(fetchLimit);
+  }
 
   const [personalNotifs, broadcastNotifs, totalPersonal, totalBroadcast, unreadPersonal, unreadBroadcast] =
     await Promise.all([
-      Notification.find(personalFilter).sort({ createdAt: -1 }).limit(fetchLimit).lean(),
-      Notification.find(broadcastFilter).sort({ createdAt: -1 }).limit(fetchLimit).lean(),
+      personalQuery.lean(),
+      broadcastQuery.lean(),
       Notification.countDocuments(personalFilter),
       Notification.countDocuments(broadcastFilter),
       Notification.countDocuments({ ...personalFilter, isRead: false }),
       Notification.countDocuments({ ...broadcastFilter, isRead: false }),
     ]);
 
-  const allNotifs = [...personalNotifs, ...broadcastNotifs]
+  const mergedNotifs = [...personalNotifs, ...broadcastNotifs]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(skip, skip + limit);
+    .slice(
+      normalizedSkip,
+      shouldFetchAll ? undefined : normalizedSkip + normalizedLimit,
+    );
 
   return {
-    notifications: allNotifs,
+    notifications: mergedNotifs,
     total: totalPersonal + totalBroadcast,
     unreadCount: unreadPersonal + unreadBroadcast,
   };
@@ -220,6 +236,7 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
 
   if (!notification) {
     throw new ApiError(404, 'Notification not found');
+
   }
 
   emitToUser(userId, 'notification:read', { notificationId });
@@ -251,14 +268,21 @@ const deleteAllRead = async (userId: string, orgId: string) => {
   return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
 };
 
-const getUnreadCount = async (userId: string, orgId: string) => {
+const getUnreadCount = async (userId: string, orgId: string, userRole?: string) => {
+  const broadcastFilter: any = {
+    organizationId: orgId,
+    isBroadcast: true,
+    isRead: false,
+    $or: [{ userId: { $exists: false } }, { userId: null }],
+  };
+
+  if (userRole) {
+    broadcastFilter.roleTargets = { $in: [userRole] };
+  }
+
   const [personalCount, broadcastCount] = await Promise.all([
     Notification.countDocuments({ userId, isRead: false }),
-    Notification.countDocuments({
-      organizationId: orgId,
-      isBroadcast: true,
-      isRead: false,
-    }),
+    Notification.countDocuments(broadcastFilter),
   ]);
 
   return personalCount + broadcastCount;
