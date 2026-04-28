@@ -1759,14 +1759,10 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     $push: { pendingDriverRequests: requestEntry },
   });
 
-<<<<<<< HEAD
-  await notifyOrgAdmins(orgId, "driver_request", "Load Requested by Driver",
-=======
   await notifyOrgAdmins(
     orgId,
     "shipment_status_changed",
     "Load Requested by Driver",
->>>>>>> fixing-bugs-be
     `${user.name || user.email} requested shipment ${shipment.trackingNumber || "N/A"}`,
     {
       shipmentId: shipment._id.toString(),
