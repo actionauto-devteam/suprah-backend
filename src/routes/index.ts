@@ -211,3 +211,9 @@ defaultRoutes.forEach((route) => {
 });
 
 export default router;
+
+defaultRoutes.forEach((route) => {
+  router.use(route.path, route.route);
+});
+
+export default router;

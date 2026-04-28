@@ -173,13 +173,26 @@ const LoadContractSchema = new Schema<ILoadContract>(
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
 
-export type LoadStatus = "Draft" | "Posted" | "Assigned" | "In-Transit" | "Delivered" | "Cancelled";
+export type LoadStatus =
+  | "Draft"
+  | "Posted"
+  | "Assigned"
+  | "Accepted"
+  | "Picked Up"
+  | "In-Transit"
+  | "Delivered"
+  | "Cancelled";
 export type LoadPostType = "load-board" | "assign-carrier";
 
 export interface ILoad extends Document {
   organizationId: string;
   orgId?: mongoose.Types.ObjectId;
   createdBy: mongoose.Types.ObjectId;
+
+  // Optional link to the Quote this load was created from
+  quoteId?: mongoose.Types.ObjectId;
+  // True for records migrated from the legacy Shipment collection
+  migratedFromShipment?: boolean;
 
   loadNumber: string;
   postType: LoadPostType;
@@ -195,13 +208,17 @@ export interface ILoad extends Document {
   contract?: ILoadContract;
 
   assignedDriverId?: mongoose.Types.ObjectId;
-  assignedAt?:       Date;
+  assignedAt?: Date;
   driverAcceptedAt?: Date;
+  acceptedAt?: Date;
+  pickedUpAt?: Date;
+  deliveredAt?: Date;
+  droppedAt?: Date;
 
   proofOfDelivery?: {
-    imageUrl:     string;
-    submittedAt:  Date;
-    note?:        string;
+    imageUrl: string;
+    submittedAt: Date;
+    note?: string;
     submittedTo?: mongoose.Types.ObjectId;
     confirmedAt?: Date;
     confirmedBy?: mongoose.Types.ObjectId;
@@ -237,7 +254,7 @@ const LoadSchema = new Schema<ILoad>(
     },
     status: {
       type: String,
-      enum: ["Draft", "Posted", "Assigned", "In-Transit", "Delivered", "Cancelled"],
+      enum: ["Draft", "Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"],
       default: "Draft",
     },
 
@@ -250,14 +267,21 @@ const LoadSchema = new Schema<ILoad>(
     additionalInfo: { type: LoadAdditionalInfoSchema },
     contract: { type: LoadContractSchema },
 
-    assignedDriverId:  { type: Schema.Types.ObjectId, ref: "User", index: true },
-    assignedAt:        { type: Date },
-    driverAcceptedAt:  { type: Date },
+    quoteId: { type: Schema.Types.ObjectId, ref: "Quote" },
+    migratedFromShipment: { type: Boolean, default: false },
+
+    assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    assignedAt: { type: Date },
+    driverAcceptedAt: { type: Date },
+    acceptedAt: { type: Date },
+    pickedUpAt: { type: Date },
+    deliveredAt: { type: Date },
+    droppedAt: { type: Date },
 
     proofOfDelivery: {
       imageUrl: { type: String, trim: true },
       submittedAt: { type: Date },
-      note:        { type: String, trim: true },
+      note: { type: String, trim: true },
       submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },

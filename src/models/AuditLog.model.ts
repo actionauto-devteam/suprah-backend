@@ -38,10 +38,10 @@ const InternalAuditLogSchema: Schema = new Schema(
         changes: { type: Schema.Types.Mixed },
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },
-        timestamp: { 
-            type: Date, 
+        timestamp: {
+            type: Date,
             default: Date.now,
-            index: { name: 'ttl_30_days', expireAfterSeconds: 30 * 24 * 60 * 60 } 
+            index: { name: 'ttl_30_days', expireAfterSeconds: 30 * 24 * 60 * 60 }
         },
         organizationId: { type: String, index: true },
     },

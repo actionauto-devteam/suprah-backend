@@ -19,6 +19,8 @@ import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotificati
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { getSocketIO } from "../utils/socketEmitter";
 import activityService from "../services/activity.service";
+import emailService from "../services/email.service";
+import Quote from "../models/Quote.model";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,7 +66,7 @@ const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, messages);
   }
 
-  const { pickupZip, deliveryZip, vehicles } = parsed.data;
+  const { pickupZip, deliveryZip, vehicles, trailerType } = parsed.data;
 
   const [pickupCoords, deliveryCoords] = await getCoordinatesForPair(pickupZip, deliveryZip);
 
@@ -77,7 +79,7 @@ const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
   );
 
   const units = vehicles.length || 1;
-  const hasEnclosed = vehicles.some((v) => v.trailerType === "Enclosed");
+  const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
   const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
 
   const rate = calculateRate(miles, units, hasEnclosed, hasInoperable);
@@ -100,7 +102,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, messages);
   }
 
-  const { postType, pickupLocation, deliveryLocation, vehicles, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
+  const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
 
   // Compute miles + estimatedRate server-side from ZIPs
   let computedMiles: number | undefined;
@@ -110,7 +112,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     if (pc && dc) {
       computedMiles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
       const units = vehicles.length || 1;
-      const hasEnclosed = vehicles.some((v) => v.trailerType === "enclosed_2car" || v.trailerType === "enclosed_3car");
+      const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
       const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
       estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
     }
@@ -143,6 +145,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     pickupLocation,
     deliveryLocation,
     vehicles,
+    trailerType,
     dates,
     pricing,
     additionalInfo,
@@ -206,7 +209,7 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
 // ─── Get Loads (with filters, search, pagination) ────────────────────────────
 // GET /api/loads?status=Posted&q=LD-2026&postType=load-board&page=1&limit=20
 
-const LOAD_STATUSES = ["Posted", "Assigned", "In-Transit", "Delivered", "Cancelled"] as const;
+const LOAD_STATUSES = ["Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"] as const;
 
 const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
@@ -332,6 +335,102 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
 });
 
+/**
+ * Update Load
+ * PUT /api/loads/:id
+ * Allows dispatchers to edit load details (pickup, delivery, pricing, vehicles, etc.)
+ */
+const updateLoad = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  const loadId = req.params.id;
+
+  const load = await Load.findOne({ _id: loadId, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+
+  // Prevent editing if load is Delivered or Cancelled
+  if (["Delivered", "Cancelled"].includes(load.status)) {
+    throw new ApiError(400, `Cannot edit a load in ${load.status} status`);
+  }
+
+  const {
+    postType,
+    pickupLocation,
+    deliveryLocation,
+    vehicles,
+    trailerType,
+    dates,
+    pricing,
+    additionalInfo,
+    status
+  } = req.body;
+
+  const updateData: any = {};
+
+  if (postType !== undefined) updateData.postType = postType;
+  if (pickupLocation !== undefined) updateData.pickupLocation = pickupLocation;
+  if (deliveryLocation !== undefined) updateData.deliveryLocation = deliveryLocation;
+  if (vehicles !== undefined) updateData.vehicles = vehicles;
+  if (trailerType !== undefined) updateData.trailerType = trailerType;
+  if (dates !== undefined) updateData.dates = dates;
+  if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
+  if (pricing !== undefined) {
+    // If pricing is provided, we merge it with existing pricing to preserve computed fields
+    updateData.pricing = { ...load.pricing, ...pricing };
+    // If carrierPayAmount changed, balanceAmount will be recalculated by pre-save hook
+  }
+
+  if (status !== undefined) {
+    if (!LOAD_STATUSES.includes(status)) {
+      throw new ApiError(400, "Invalid status");
+    }
+    updateData.status = status;
+  }
+
+  // If pickup or delivery locations changed, recalculate miles/rate if not manually overridden
+  if (pickupLocation?.zip || deliveryLocation?.zip) {
+    try {
+      const finalPickupZip = pickupLocation?.zip || load.pickupLocation.zip;
+      const finalDeliveryZip = deliveryLocation?.zip || load.deliveryLocation.zip;
+      const [pc, dc] = await getCoordinatesForPair(finalPickupZip, finalDeliveryZip);
+      
+      if (pc && dc) {
+        const miles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
+        const units = (vehicles || load.vehicles).length || 1;
+        const currentTrailerType = trailerType || load.trailerType;
+        const hasEnclosed = currentTrailerType.toLowerCase().includes("enclosed");
+        const hasInoperable = (vehicles || load.vehicles).some((v: any) => v.condition === "Inoperable");
+        const estimatedRate = calculateRate(miles, units, hasEnclosed, hasInoperable);
+
+        if (!updateData.pricing) updateData.pricing = { ...load.pricing };
+        updateData.pricing.miles = miles;
+        updateData.pricing.estimatedRate = estimatedRate;
+      }
+    } catch (err) {
+      logger.error({ err, loadId }, "Error recalculating pricing on update");
+    }
+  }
+
+  const updatedLoad = await Load.findOneAndUpdate(
+    { _id: loadId, organizationId },
+    { $set: updateData },
+    { new: true, runValidators: true }
+  );
+
+  const _io = getSocketIO();
+  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId });
+
+  await activityService.logLoadActivity(
+    user._id.toString(),
+    organizationId,
+    'load_updated',
+    loadId,
+    `Updated load ${load.loadNumber}`
+  );
+
+  return res.json(new ApiResponse(200, updatedLoad, "Load updated successfully"));
+});
+
 const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
@@ -352,7 +451,7 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
   await activityService.createActivity({
     userId: user._id.toString(),
     organizationId,
-    type: 'shipment_deleted', // Assuming similar mapping or add quote_deleted/load_deleted
+    type: 'load_deleted', // Using load terminology
     title: 'Load Deleted',
     description: `Deleted load ${load.loadNumber}`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
@@ -470,6 +569,7 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
     { _id: req.params.id, organizationId },
     {
       status: "Delivered",
+      deliveredAt: new Date(),
       "proofOfDelivery.confirmedAt": new Date(),
       "proofOfDelivery.confirmedBy": user._id,
     },
@@ -480,7 +580,7 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
     await safeCreateNotification({
       userId: load.assignedDriverId.toString(),
       organizationId,
-      type: "delivery_confirmed",
+      type: "load_delivered", // Using load terminology
       title: "Delivery Confirmed",
       message: `Your delivery for load ${load.loadNumber} has been confirmed`,
       metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -500,4 +600,87 @@ const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, updated, "Delivery confirmed successfully"));
 });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery };
+/**
+ * Add internal note to load
+ */
+const addNote = asyncHandler(async (req: Request, res: Response) => {
+  const { text } = req.body;
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  if (!text) throw new ApiError(400, "Note text is required");
+
+  const load = await Load.findOneAndUpdate(
+    { _id: req.params.id, organizationId },
+    {
+      $push: {
+        notes: {
+          text,
+          author: user._id,
+          date: new Date(),
+        },
+      },
+    },
+    { new: true }
+  ).populate("notes.author", "name email avatar");
+
+  if (!load) throw new ApiError(404, "Load not found");
+
+  res.json(new ApiResponse(200, load, "Note added successfully"));
+});
+
+/**
+ * Send load details via email
+ */
+const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = req.orgId as string;
+  const { id } = req.params;
+  const { recipientEmail } = req.body as { recipientEmail?: string };
+
+  const email = (recipientEmail || "").trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new ApiError(400, "A valid recipient email is required");
+  }
+
+  const load = await Load.findOne({ _id: id, organizationId }).populate("createdBy", "name email");
+  if (!load) throw new ApiError(404, "Load not found");
+
+  const pickup = load.pickupLocation;
+  const delivery = load.deliveryLocation;
+  const vehicles = load.vehicles.map(v => `${v.year} ${v.make} ${v.model} (${v.condition})`).join(", ");
+
+  const text = [
+    "Load Details",
+    "",
+    `Load Number: ${load.loadNumber}`,
+    `Status: ${load.status}`,
+    `Vehicles: ${vehicles}`,
+    `Origin: ${pickup.city}, ${pickup.state} ${pickup.zip}`,
+    `Destination: ${delivery.city}, ${delivery.state} ${delivery.zip}`,
+    `Pickup: ${load.dates?.firstAvailable ? new Date(load.dates.firstAvailable).toLocaleDateString() : 'N/A'}`,
+  ].join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
+      <h2 style="margin-bottom: 12px;">Load Details</h2>
+      <p><strong>Load Number:</strong> ${load.loadNumber}</p>
+      <p><strong>Status:</strong> ${load.status}</p>
+      <p><strong>Vehicles:</strong> ${vehicles}</p>
+      <p><strong>Origin:</strong> ${pickup.city}, ${pickup.state} ${pickup.zip}</p>
+      <p><strong>Destination:</strong> ${delivery.city}, ${delivery.state} ${delivery.zip}</p>
+      <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? new Date(load.dates.firstAvailable).toLocaleDateString() : 'N/A'}</p>
+    </div>
+  `;
+
+  await emailService.sendEmail({
+    to: email,
+    subject: `Load Update: ${load.loadNumber}`,
+    text,
+    html,
+    organizationId,
+  });
+
+  res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
+});
+
+export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail };

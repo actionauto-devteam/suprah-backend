@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
+import Load from '../models/Load.model';
 import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -562,11 +563,96 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     logger.warn({ quoteId: req.params.id, orgId }, 'Quote deleted');
 });
 
+/**
+ * Convert a quote into a Load for dispatch
+ * POST /api/quotes/:id/convert-to-load
+ */
+const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const orgId = req.orgId as string;
+    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
+
+    if (!quote) throw new ApiError(404, 'Quote not found');
+    if (quote.status === 'rejected') throw new ApiError(400, 'Cannot convert a rejected quote');
+
+    // Parse city/state from address strings (e.g. "Salt Lake City, UT 84101")
+    const parseAddress = (address: string, zip: string) => {
+        const parts = address.split(',').map((p) => p.trim());
+        const city = parts[0] || address;
+        const stateZip = parts[1] || '';
+        const state = stateZip.replace(/\d+/g, '').trim().slice(0, 2).toUpperCase() || 'XX';
+        return { city, state, zip, country: 'US' };
+    };
+
+    const pickupLocation = parseAddress(quote.fromAddress, quote.fromZip);
+    const deliveryLocation = parseAddress(quote.toAddress, quote.toZip);
+
+    const trailerType = quote.enclosedTrailer ? 'enclosed' : 'open';
+
+    const load = await Load.create({
+        organizationId: orgId,
+        orgId: (req as any).orgObjectId,
+        createdBy: userId,
+        quoteId: quote._id,
+        postType: 'load-board',
+        status: 'Draft',
+        pickupLocation,
+        deliveryLocation,
+        vehicles: [{
+            vehicleId: quote.vehicleId,
+            vin: quote.vin,
+            vehicleType: 'sedan',
+            trailerType,
+            condition: quote.vehicleInoperable ? 'Inoperable' : 'Operable',
+            ...(quote.vehicleName ? (() => {
+                const parts = quote.vehicleName.split(' ');
+                return {
+                    year: parts[0] ? parseInt(parts[0]) : undefined,
+                    make: parts[1] || undefined,
+                    model: parts.slice(2).join(' ') || undefined,
+                };
+            })() : {}),
+        }],
+        pricing: {
+            miles: quote.miles,
+            estimatedRate: quote.rate,
+            carrierPayAmount: quote.rate,
+        },
+        additionalInfo: {
+            visibility: 'public',
+            notes: `Converted from quote for ${quote.firstName} ${quote.lastName}`,
+        },
+        contract: { agreedToTerms: false },
+    });
+
+    // Mark quote as booked (converted), preserve it for customer history
+    await Quote.findByIdAndUpdate(quote._id, { $set: { status: 'booked' } });
+
+    const io = getSocketIO();
+    if (io) io.to(`org:${orgId}`).emit('load:change', { action: 'created', loadId: load._id.toString() });
+
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+
+    res.status(201).json(new ApiResponse(201, load, 'Quote converted to load successfully'));
+
+    logger.info({ quoteId: quote._id, loadId: load._id, orgId }, 'Quote converted to load');
+
+    await activityService.createActivity({
+        userId: userId || 'SYSTEM',
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Quote Converted to Load',
+        description: `Quote for ${quote.firstName} ${quote.lastName} converted to load ${load.loadNumber}`,
+        metadata: { quoteId: quote._id.toString(), loadId: load._id.toString() },
+    });
+});
+
 export default {
     createQuote,
     getQuotes,
     getQuoteById,
     updateQuote,
     updateQuoteStatus,
-    deleteQuote
+    deleteQuote,
+    convertToLoad,
 };

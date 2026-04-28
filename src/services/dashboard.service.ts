@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import Shipment from '../models/Shipment.model';
+import Load from '../models/Load.model';
 import Quote from '../models/Quote.model';
 import Payment from '../models/Payment.model';
 import Lead from '../models/lead.model';
@@ -253,7 +253,7 @@ export class DashboardService {
         const leaderboard = await Promise.all(employees.map(async (emp) => {
             const userId = emp._id;
 
-            const [calls, conversations, appointments, shipments] = await Promise.all([
+            const [calls, conversations, appointments, loads] = await Promise.all([
                 Lead.countDocuments({ organizationId: orgId, createdBy: userId, channel: 'phone' }),
                 SupraSpaceConversation.countDocuments({
                     members: userId,
@@ -263,7 +263,7 @@ export class DashboardService {
                     ]
                 }),
                 Appointment.countDocuments({ organizationId: orgId, createdBy: userId }),
-                Shipment.countDocuments({ organizationId: orgId, createdBy: userId })
+                Load.countDocuments({ organizationId: orgId, createdBy: userId })
             ]);
 
             return {
@@ -273,7 +273,7 @@ export class DashboardService {
                 calls,
                 convs: conversations,
                 appts: appointments,
-                shipments,
+                loads,
                 avatar: emp.avatar || ''
             };
         }));
@@ -302,37 +302,24 @@ export class DashboardService {
     }
 
     /**
-     * Driver and Shipment logistics
+     * Driver and Load logistics
      */
     private static async getLogisticsData(orgId: string) {
         const fiveMinutesAgo = new Date();
         fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
 
-        const [activeDriversCount, totalDriversCount, shipmentStats] = await Promise.all([
+        const [activeDriversCount, totalDriversCount, loadStats] = await Promise.all([
             DriverLocation.countDocuments({
-                $or: [
-                    { organizationId: orgId },
-                    { organizationId: new mongoose.Types.ObjectId(orgId) as any }
-                ],
+                organizationId: orgId,
                 status: { $ne: 'offline' },
                 lastSeenAt: { $gte: fiveMinutesAgo }
             }),
             User.countDocuments({
-                $or: [
-                    { organizationId: orgId },
-                    { organizationId: new mongoose.Types.ObjectId(orgId) as any }
-                ],
+                organizationId: orgId,
                 role: 'driver'
             }),
-            Shipment.aggregate([
-                {
-                    $match: {
-                        $or: [
-                            { organizationId: orgId },
-                            { organizationId: new mongoose.Types.ObjectId(orgId) as any }
-                        ]
-                    }
-                },
+            Load.aggregate([
+                { $match: { organizationId: orgId } },
                 { $group: { _id: '$status', count: { $sum: 1 } } }
             ])
         ]);
@@ -342,7 +329,7 @@ export class DashboardService {
             ready: totalDriversCount
         };
 
-        const shipments: Record<string, number> = {
+        const loads: Record<string, number> = {
             'Available': 0,
             'In Route': 0,
             'Dispatched': 0,
@@ -350,13 +337,16 @@ export class DashboardService {
             'Cancelled': 0
         };
 
-        shipmentStats.forEach(stat => {
-            if (stat._id === 'Available for Pickup') shipments['Available'] = stat.count;
-            else if (stat._id === 'In-Route') shipments['In Route'] = stat.count;
-            else if (shipments.hasOwnProperty(stat._id)) shipments[stat._id] = stat.count;
+        loadStats.forEach(stat => {
+            if (stat._id === 'Posted') loads['Available'] = stat.count;
+            else if (stat._id === 'In-Transit') loads['In Route'] = stat.count;
+            else if (loads.hasOwnProperty(stat._id)) loads[stat._id] = stat.count;
+            else if (stat._id === 'Assigned' || stat._id === 'Accepted') {
+                loads['Dispatched'] = (loads['Dispatched'] || 0) + stat.count;
+            }
         });
 
-        return { drivers, shipments };
+        return { drivers, loads };
     }
 
     /**
@@ -377,17 +367,17 @@ export class DashboardService {
     }
 
     /**
-     * Calculate net margin (Sell - Cost) for delivered shipments
+     * Calculate net margin (Sell - Cost) for delivered loads
      * Optimized using MongoDB Aggregation to handle scale.
      */
     private static async getLogisticsMargin(orgId: string) {
-        const results = await Shipment.aggregate([
+        const results = await Load.aggregate([
             {
                 $match: {
                     organizationId: orgId,
                     status: 'Delivered',
-                    'preservedQuoteData.rate': { $exists: true },
-                    carrierPayAmount: { $exists: true }
+                    'pricing.estimatedRate': { $exists: true },
+                    'pricing.carrierPayAmount': { $exists: true }
                 }
             },
             {
@@ -396,8 +386,8 @@ export class DashboardService {
                     totalMargin: {
                         $sum: {
                             $subtract: [
-                                { $ifNull: ["$preservedQuoteData.rate", 0] },
-                                { $ifNull: ["$carrierPayAmount", 0] }
+                                { $ifNull: ["$pricing.estimatedRate", 0] },
+                                { $ifNull: ["$pricing.carrierPayAmount", 0] }
                             ]
                         }
                     }

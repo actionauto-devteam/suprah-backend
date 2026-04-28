@@ -14,8 +14,8 @@ router.use(requireOrg);
 // ── Admin/employee-only routes (drivers have no reason to access these) ───────
 const staffOnly = authorize(["super_admin", "admin", "employee"]);
 
-router.get("/vin/:vin",        staffOnly, loadController.lookupVin);
-router.get("/vehicles",        staffOnly, loadController.getInventoryVehicles);
+router.get("/vin/:vin", staffOnly, loadController.lookupVin);
+router.get("/vehicles", staffOnly, loadController.getInventoryVehicles);
 router.post("/calculate-rate", staffOnly, loadController.calculateLoadRate);
 
 // ── Stats — all authenticated org members ─────────────────────────────────────

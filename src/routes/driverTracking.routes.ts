@@ -11,6 +11,7 @@ router.use(auth());
 router.post("/location", driverTrackingController.updateLocation);
 router.get("/my-loads", driverTrackingController.getMyLoads);
 router.post("/accept-load", driverTrackingController.acceptLoad);
+router.post("/mark-picked-up", driverTrackingController.markPickedUp);
 router.post("/drop-load", driverTrackingController.dropLoad);
 router.post("/start-route", driverTrackingController.startRoute);
 router.get("/available-loads", driverTrackingController.getAvailableLoads);

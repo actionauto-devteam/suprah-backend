@@ -71,7 +71,7 @@ describe('Digital Wallet and Referral Engine Integration Tests', () => {
         await Referral.deleteMany({ organizationId: testOrg?._id });
         await Transaction.deleteMany({ organizationId: testOrg?._id });
         await Organization.deleteOne({ _id: testOrg?._id });
-        
+
         if (mongoose.connection.db?.databaseName === 'actionauto_test') {
             await mongoose.disconnect();
         }

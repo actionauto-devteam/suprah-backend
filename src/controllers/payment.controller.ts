@@ -160,11 +160,11 @@ const createPaymentIntent = asyncHandler(async (req: Request, res: Response) => 
     stripeCustomerId = customers.data.length > 0
       ? customers.data[0].id
       : (await stripe.customers.create({
-          name: payment.customerName,
-          email: payment.customerEmail,
-          phone: payment.customerPhone,
-          metadata: { organizationId: orgId },
-        })).id;
+        name: payment.customerName,
+        email: payment.customerEmail,
+        phone: payment.customerPhone,
+        metadata: { organizationId: orgId },
+      })).id;
   }
 
   const paymentIntent = await stripe.paymentIntents.create({
@@ -438,7 +438,7 @@ const handleStripeWebhook = asyncHandler(async (req: Request, res: Response) => 
           metadata: { paymentId: payment._id.toString(), piId: pi.id }
         });
         logger.info({ paymentId: payment._id, piId: pi.id }, 'Stripe Webhook: Payment success');
-        
+
         try { await ReferralService.processPaymentReward(payment, 'STRIPE_WEBHOOK'); } catch (e) {
           logger.error({ err: e, paymentId: payment._id }, 'Referral processing failed during webhook');
         }
@@ -558,10 +558,10 @@ const createCustomerPaymentIntent = asyncHandler(async (req: Request, res: Respo
     stripeCustomerId = customers.data.length > 0
       ? customers.data[0].id
       : (await stripe.customers.create({
-          name: payment.customerName,
-          email: payment.customerEmail,
-          phone: payment.customerPhone,
-        })).id;
+        name: payment.customerName,
+        email: payment.customerEmail,
+        phone: payment.customerPhone,
+      })).id;
   }
 
   const paymentIntent = await stripe.paymentIntents.create({
