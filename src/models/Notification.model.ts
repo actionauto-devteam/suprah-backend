@@ -51,6 +51,7 @@ const NotificationSchema = new Schema(
         'quote_updated',
         'quote_deleted',
         'quote_converted',
+        'quote_accepted',
 
         // Shipments
         'shipment_created',
@@ -61,6 +62,8 @@ const NotificationSchema = new Schema(
         'shipment_picked_up',
         'shipment_delivered',
         'proof_of_delivery',
+        'shipment_arrived_at_pickup',
+        'shipment_arrived_at_delivery',
 
         // Vehicles/Inventory
         'vehicle_added',
@@ -117,6 +120,10 @@ const NotificationSchema = new Schema(
         'message_received',
         'reminder',
         'general',
+
+        // Referrals
+        'referral_joined',
+        'referral_rewarded',
 
         // Legacy/Compatibility
         'proof_submitted',

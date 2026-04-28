@@ -74,9 +74,15 @@ const envVarsSchema = Joi.object()
 
     CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
     // Push Notifications
-    VAPID_PUBLIC_KEY: Joi.string().required().description('VAPID Public Key'),
-    VAPID_PRIVATE_KEY: Joi.string().required().description('VAPID Private Key'),
-    VAPID_SUBJECT: Joi.string().required().description('VAPID Subject (mailto)'),
+    VAPID_PUBLIC_KEY: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Public Key'),
+    VAPID_PRIVATE_KEY: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Private Key'),
+    VAPID_SUBJECT: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Subject (mailto)'),
   })
   .unknown();
 

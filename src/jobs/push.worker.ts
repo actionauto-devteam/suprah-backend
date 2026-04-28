@@ -80,6 +80,11 @@ if (config.redis.enabled) {
         );
       }
 
+      const rejected = results.filter((r) => r.status === 'rejected');
+      if (rejected.length > 0) {
+        throw new Error(`Failed to send push notification to ${rejected.length} endpoints`);
+      }
+
       logger.debug(`${LOG_PREFIX} Processed ${results.length} subscriptions for user ${userId} (Pruned: ${endpointsToPrune.length})`);
     },
     {

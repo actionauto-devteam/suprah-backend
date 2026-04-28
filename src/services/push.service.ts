@@ -66,7 +66,7 @@ export class PushService {
 
       if (!config.redis.enabled || !pushQueue) {
         logger.debug(`${LOG_PREFIX} Skipping broadcast of ${jobs.length} notifications (Redis is disabled).`);
-        return { success: true, sentCount: jobs.length };
+        return { success: true, sentCount: 0, skippedCount: jobs.length };
       }
 
       // BullMQ addBulk is highly optimized for performance

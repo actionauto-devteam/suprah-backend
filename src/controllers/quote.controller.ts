@@ -7,7 +7,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
-import { safeCreateNotification, notifyAllOrganizations } from '../utils/safeNotification';
+import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { IUser } from '../models/User.model';
 import cacheService from '../services/cache.service';
@@ -148,12 +148,12 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
-    notifyAllOrganizations(
+    notifyOrgAdmins(
+        orgId,
         'quote_created',
         'New Draft Created',
         `A new transportation draft has been created for ${firstName} ${lastName} — ${vehicleData.vehicleName}.`,
-        { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName: vehicleData.vehicleName },
-        orgId
+        { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName: vehicleData.vehicleName }
     );
 
     res.status(201).json(
@@ -376,30 +376,30 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
             vehicleName: quote.vehicleName,
         });
 
-        const targetId = userId || 'system'; // Fallback for public updates
-
-        await safeCreateNotification({
-            userId: targetId,
-            organizationId: orgId,
-            type: nType,
-            title,
-            message,
-            metadata: {
-                quoteId: quote._id.toString(),
-                customerName: `${quote.firstName} ${quote.lastName}`,
-                vehicleName: quote.vehicleName,
-                status: quote.status,
-            },
-        });
+        if (userId) {
+            await safeCreateNotification({
+                userId,
+                organizationId: orgId,
+                type: nType,
+                title,
+                message,
+                metadata: {
+                    quoteId: quote._id.toString(),
+                    customerName: `${quote.firstName} ${quote.lastName}`,
+                    vehicleName: quote.vehicleName,
+                    status: quote.status,
+                },
+            });
+        }
 
         // If it was accepted, also broadcast to the whole org
         if (status === 'accepted') {
-            await notifyAllOrganizations(
+            await notifyOrgAdmins(
+                orgId,
                 'quote_accepted',
                 title,
                 message,
-                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` },
-                orgId
+                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` }
             );
         }
     }
@@ -457,28 +457,28 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
             vehicleName: quote.vehicleName || 'N/A',
         });
 
-        const targetId = userId || 'system';
-
-        await safeCreateNotification({
-            userId: targetId,
-            organizationId: orgId,
-            type: nType,
-            title: status === 'accepted' ? 'Quote Accepted' : 'Quote Status Updated',
-            message: status === 'accepted' ? message : `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
-            metadata: {
-                quoteId: quote._id.toString(),
-                customerName: `${quote.firstName} ${quote.lastName}`,
-                status,
-            },
-        });
+        if (userId) {
+            await safeCreateNotification({
+                userId,
+                organizationId: orgId,
+                type: nType,
+                title: status === 'accepted' ? 'Quote Accepted' : 'Quote Status Updated',
+                message: status === 'accepted' ? message : `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
+                metadata: {
+                    quoteId: quote._id.toString(),
+                    customerName: `${quote.firstName} ${quote.lastName}`,
+                    status,
+                },
+            });
+        }
 
         if (status === 'accepted') {
-            await notifyAllOrganizations(
+            await notifyOrgAdmins(
+                orgId,
                 'quote_accepted',
                 'Quote Accepted',
                 message,
-                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` },
-                orgId
+                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` }
             );
         }
     }
@@ -537,12 +537,12 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
-    notifyAllOrganizations(
+    notifyOrgAdmins(
+        orgId,
         'quote_deleted',
         'Quote Deleted',
         `Quote for ${customerName} (${vehicleName}) has been deleted.`,
-        { customerName, vehicleName },
-        orgId
+        { customerName, vehicleName }
     );
 
     res.json(new ApiResponse(200, null, 'Quote deleted successfully'));

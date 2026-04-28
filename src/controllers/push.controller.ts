@@ -27,7 +27,8 @@ export class PushController {
             }
         );
 
-        // Add the new/updated subscription to the CURRENT user
+        // The updateMany above pulled this endpoint from ALL users (including the current user).
+        // It is therefore safe to $push without risking duplicates per user.
         await User.updateOne(
             { _id: userId },
             {
@@ -87,11 +88,20 @@ export class PushController {
         let targets: string[] = [];
 
         if (roleTarget) {
-            // Find all users with this role who have at least one valid push subscription
-            const users = await User.find({
+            const userQuery: Record<string, unknown> = {
                 role: roleTarget,
                 'pushSubscriptions.0': { $exists: true }
-            }).select('_id');
+            };
+
+            if (req.user?.role === 'admin') {
+                if (!req.orgId) {
+                    throw new ApiError(400, 'Organization context is required for admin broadcasts.');
+                }
+                userQuery.organizationId = req.orgId;
+            }
+
+            // Find all users with this role who have at least one valid push subscription
+            const users = await User.find(userQuery).select('_id');
             targets = users.map(u => u._id.toString());
         } else if (userIds && Array.isArray(userIds)) {
             targets = userIds;
