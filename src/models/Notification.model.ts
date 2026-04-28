@@ -146,6 +146,10 @@ const NotificationSchema = new Schema(
   }
 );
 
+// Add TTL index to automatically delete notifications after 90 days (7,776,000 seconds)
+NotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
+
+
 // Compound indexes for efficient queries
 NotificationSchema.index({ userId: 1, createdAt: -1 });
 NotificationSchema.index({ userId: 1, isRead: 1 });

@@ -36,6 +36,7 @@
     "axios": "^1.13.2",
     "basic-ftp": "^5.1.0",
     "bcryptjs": "^2.4.3",
+    "bullmq": "^5.76.1",
     "bunyan": "^1.8.15",
     "chokidar": "^5.0.0",
     "cookie-parser": "^1.4.6",

@@ -369,24 +369,39 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     }
 
     // Create notification safely
-    if (userId) {
-        const { title, message } = notificationTemplates.quote_updated({
+    if (userId || status === 'accepted') {
+        const nType = status === 'accepted' ? 'quote_accepted' : 'quote_updated';
+        const { title, message } = notificationTemplates[nType]({
             customerName: `${quote.firstName} ${quote.lastName}`,
             vehicleName: quote.vehicleName,
         });
 
+        const targetId = userId || 'system'; // Fallback for public updates
+
         await safeCreateNotification({
-            userId,
+            userId: targetId,
             organizationId: orgId,
-            type: 'quote_updated',
+            type: nType,
             title,
             message,
             metadata: {
                 quoteId: quote._id.toString(),
                 customerName: `${quote.firstName} ${quote.lastName}`,
                 vehicleName: quote.vehicleName,
+                status: quote.status,
             },
         });
+
+        // If it was accepted, also broadcast to the whole org
+        if (status === 'accepted') {
+            await notifyAllOrganizations(
+                'quote_accepted',
+                title,
+                message,
+                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` },
+                orgId
+            );
+        }
     }
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
@@ -435,23 +450,37 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     }
 
     // Create notification safely
-    if (userId) {
-        const { title, message } = notificationTemplates.quote_updated({
+    if (userId || status === 'accepted') {
+        const nType = status === 'accepted' ? 'quote_accepted' : 'quote_updated';
+        const { title, message } = notificationTemplates[nType]({
             customerName: `${quote.firstName} ${quote.lastName}`,
+            vehicleName: quote.vehicleName || 'N/A',
         });
 
+        const targetId = userId || 'system';
+
         await safeCreateNotification({
-            userId,
+            userId: targetId,
             organizationId: orgId,
-            type: 'quote_updated',
-            title: 'Quote Status Updated',
-            message: `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
+            type: nType,
+            title: status === 'accepted' ? 'Quote Accepted' : 'Quote Status Updated',
+            message: status === 'accepted' ? message : `Quote status changed to ${status} for ${quote.firstName} ${quote.lastName}`,
             metadata: {
                 quoteId: quote._id.toString(),
                 customerName: `${quote.firstName} ${quote.lastName}`,
                 status,
             },
         });
+
+        if (status === 'accepted') {
+            await notifyAllOrganizations(
+                'quote_accepted',
+                'Quote Accepted',
+                message,
+                { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` },
+                orgId
+            );
+        }
     }
 
     res.json(new ApiResponse(200, quote, 'Quote status updated successfully'));

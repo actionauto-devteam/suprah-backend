@@ -179,37 +179,30 @@ export const receiveADF = async (req: Request, res: Response) => {
       io.to(`org:${orgIdString}`).emit('lead:new', newLead);
     }
 
-    // Notify super admins
-    const superAdmins = await User.find({ role: 'super_admin' });
+    // Broadcast to Org Admins
     const vehicleInterest = adfData.vehicle
       ? `${adfData.vehicle.year} ${adfData.vehicle.make} ${adfData.vehicle.model}`.trim()
       : undefined;
 
-    for (const admin of superAdmins) {
-      try {
-        const { title, message } = notificationTemplates.new_lead({
-          customerName: `${adfData.firstName} ${adfData.lastName}`.trim(),
-          source: 'ADF Email',
-          vehicleInterest: vehicleInterest || undefined,
-        });
-        await safeCreateNotification({
-          userId: admin._id.toString(),
-          organizationId: admin.organizationId?.toString() || 'global',
-          type: 'new_lead',
-          title,
-          message,
-          metadata: {
-            leadId: newLead._id.toString(),
-            customerName: `${adfData.firstName} ${adfData.lastName}`.trim(),
-            email: adfData.email,
-            source: 'ADF Email',
-            channel: 'adf',
-          },
-        });
-      } catch {
-        // Non-critical
+    const { title, message } = notificationTemplates.new_lead({
+      customerName: `${adfData.firstName} ${adfData.lastName}`.trim(),
+      source: 'ADF Email',
+      vehicleInterest: vehicleInterest || undefined,
+    });
+
+    await notifyOrgAdmins(
+      orgId as string,
+      "new_lead",
+      title,
+      message,
+      {
+        leadId: newLead._id.toString(),
+        customerName: `${adfData.firstName} ${adfData.lastName}`.trim(),
+        email: adfData.email,
+        source: 'ADF Email',
+        channel: 'adf',
       }
-    }
+    );
 
     await activityService.createActivity({
       userId: systemUser._id.toString(),
@@ -406,7 +399,8 @@ export const createInquiry = async (req: Request, res: Response) => {
       io.to(`org:${req.orgId}`).emit('lead:new', savedLead);
     }
 
-    if (userId) {
+    // Broadcast to Org Admins
+    if (req.orgId) {
       const vehicleInterest = vehicle
         ? `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim()
         : undefined;
@@ -415,20 +409,20 @@ export const createInquiry = async (req: Request, res: Response) => {
         source: source || 'Manual Entry',
         vehicleInterest: vehicleInterest || undefined,
       });
-      await safeCreateNotification({
-        userId: userId.toString(),
-        organizationId: (req as any).orgId || 'global',
-        type: 'new_lead',
+
+      await notifyOrgAdmins(
+        req.orgId as string,
+        'new_lead',
         title,
         message,
-        metadata: {
+        {
           leadId: savedLead._id.toString(),
           customerName: `${firstName} ${lastName || ''}`.trim(),
           email,
           source: source || 'Manual Entry',
           channel: detectedChannel,
-        },
-      });
+        }
+      );
     }
 
     await activityService.createActivity({

@@ -1,73 +1,87 @@
-import webpush from 'web-push';
-import config from '../config';
-import User from '../models/User.model';
 import mongoose from 'mongoose';
+import { pushQueue } from '../jobs/push.queue';
+import logger from '../utils/logger';
+import config from '../config';
 
-// Initialize web-push with VAPID details
-webpush.setVapidDetails(
-    config.push.vapidSubject,
-    config.push.vapidPublicKey,
-    config.push.vapidPrivateKey
-);
+const LOG_PREFIX = '[PushService]';
 
+/**
+ * Service for managing Web Push notifications.
+ * Refactored to use BullMQ for background processing.
+ */
 export class PushService {
-    /**
-     * Sends a push notification to all valid subscriptions for a specific user.
-     * Handles automatic cleanup of dead/expired subscriptions (410, 404).
-     * 
-     * @param userId The ID of the user to notify
-     * @param payload The notification payload (title, body, url, etc.)
-     */
-    static async send(userId: string | mongoose.Types.ObjectId, payload: any) {
-        const user = await User.findById(userId);
+  /**
+   * Queues a push notification for a specific user.
+   * This is a non-blocking operation that returns immediately.
+   * 
+   * @param userId The ID of the user to notify
+   * @param payload The notification payload
+   */
+  static async send(userId: string | mongoose.Types.ObjectId, payload: any) {
+    if (!config.redis.enabled || !pushQueue) {
+      logger.debug(`${LOG_PREFIX} Skipping push (Redis is disabled).`);
+      return { success: true, message: 'Push skipped (Redis disabled).' };
+    }
+    try {
+      await pushQueue.add('send-push', { 
+        userId: userId.toString(), 
+        payload 
+      });
+      return { success: true, message: 'Push notification job queued.' };
+    } catch (error: any) {
+      logger.error(`${LOG_PREFIX} Failed to queue push job for user ${userId}: ${error.message}`);
+      return { success: false, message: 'Failed to queue push notification.' };
+    }
+  }
 
-        if (!user || !user.pushSubscriptions || user.pushSubscriptions.length === 0) {
-            return { success: false, message: 'No active push subscriptions found for user.' };
+  /**
+   * Queues a synchronized "dismiss" signal to clear notifications across devices.
+   */
+  static async dismiss(userId: string | mongoose.Types.ObjectId, tag: string) {
+    const payload = {
+      isSyncAction: true,
+      action: 'dismiss',
+      tag: tag,
+    };
+    return this.send(userId, payload);
+  }
+
+  /**
+   * Efficiently queues broadcast push notifications for multiple users using bulk ingestion.
+   * 
+   * @param userIds Array of user IDs to notify
+   * @param payload The notification payload
+   */
+  static async broadcast(userIds: (string | mongoose.Types.ObjectId)[], payload: any) {
+    try {
+      if (!userIds || userIds.length === 0) return { success: true, sentCount: 0 };
+
+      const jobs = userIds.map(id => ({
+        name: 'send-push',
+        data: { 
+          userId: id.toString(), 
+          payload 
         }
+      }));
 
-        const payloadString = JSON.stringify(payload);
-        const results = await Promise.allSettled(
-            user.pushSubscriptions.map(async (sub) => {
-                try {
-                    await webpush.sendNotification(
-                        {
-                            endpoint: sub.endpoint,
-                            keys: {
-                                p256dh: sub.keys.p256dh,
-                                auth: sub.keys.auth,
-                            },
-                        },
-                        payloadString
-                    );
-                } catch (error: any) {
-                    // 410 Gone or 404 Not Found - The subscription is no longer valid
-                    if (error.statusCode === 410 || error.statusCode === 404) {
-                        await User.updateOne(
-                            { _id: userId },
-                            { $pull: { pushSubscriptions: { endpoint: sub.endpoint } } }
-                        );
-                    }
-                    throw error;
-                }
-            })
-        );
+      if (!config.redis.enabled || !pushQueue) {
+        logger.debug(`${LOG_PREFIX} Skipping broadcast of ${jobs.length} notifications (Redis is disabled).`);
+        return { success: true, sentCount: jobs.length };
+      }
 
-        const successful = results.filter((r) => r.status === 'fulfilled').length;
-        const failed = results.filter((r) => r.status === 'rejected').length;
-
-        return {
-            success: true,
-            sentCount: successful,
-            failedCount: failed,
-        };
+      // BullMQ addBulk is highly optimized for performance
+      await pushQueue.addBulk(jobs);
+      
+      logger.info(`${LOG_PREFIX} Queued broadcast for ${jobs.length} users.`);
+      return {
+        success: true,
+        sentCount: jobs.length,
+      };
+    } catch (error: any) {
+      logger.error(`${LOG_PREFIX} Broadcast queuing failed: ${error.message}`);
+      return { success: false, message: 'Broadcast queuing failed.' };
     }
-
-    /**
-     * Sends a broadcast push notification to multiple users.
-     */
-    static async broadcast(userIds: (string | mongoose.Types.ObjectId)[], payload: any) {
-        return Promise.allSettled(userIds.map((id) => this.send(id, payload)));
-    }
+  }
 }
 
 export default PushService;

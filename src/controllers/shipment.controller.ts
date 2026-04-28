@@ -11,6 +11,7 @@ import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
 import {
   safeCreateNotification,
+  notifyOrgAdmins,
   notifyAllOrganizations,
 } from "../utils/safeNotification";
 import { notificationTemplates } from "../utils/notificationTemplates";
@@ -1046,30 +1047,27 @@ const submitProofOfDelivery = asyncHandler(
 
     const shipmentOrgId = shipment.organizationId.toString();
 
-    // Notify the admin who created the shipment; fallback to all admins
-    const notifyIds: string[] = submittedTo
-      ? [submittedTo.toString()]
-      : (
-          await User.find({
-            organizationId: shipment.organizationId,
-            role: { $in: ["admin", "user", "super_admin"] },
-          }).select("_id")
-        ).map((a: any) => a._id.toString());
+    const driver = await User.findById(userId);
+    const driverName = driver?.name || "A driver";
 
-    for (const adminId of notifyIds) {
-      await safeCreateNotification({
-        userId: adminId,
-        organizationId: shipmentOrgId,
-        type: "proof_submitted",
-        title: "Proof of Delivery Submitted",
-        message: `Driver submitted proof of delivery for shipment ${shipment.trackingNumber || shipmentId}`,
-        metadata: {
-          shipmentId,
-          trackingNumber: shipment.trackingNumber,
-          imageUrl,
-        },
-      });
-    }
+    // Broadcast to Org Admins
+    const { title, message } = notificationTemplates.proof_of_delivery({
+      driverName,
+      trackingNumber: shipment.trackingNumber || "N/A",
+    });
+
+    await notifyOrgAdmins(
+      shipmentOrgId,
+      "proof_of_delivery",
+      title,
+      message,
+      {
+        shipmentId: shipment._id.toString(),
+        trackingNumber: shipment.trackingNumber,
+        imageUrl,
+        driverName,
+      }
+    );
 
     res.json(
       new ApiResponse(

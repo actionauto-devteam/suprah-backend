@@ -160,6 +160,50 @@ const defaultRoutes = [
     path: "/push",
     route: pushRoute,
   },
+  {
+    path: "/loads",
+    route: loadRoute,
+  },
+  {
+    path: "/analytics",
+    route: analyticsRoute,
+  },
+  {
+    path: "/activity",
+    route: activityRoute,
+  },
+  {
+    path: "/customers",
+    route: customerRoute,
+  },
+  {
+    path: "/customer/leads",
+    route: customerLeadRoute,
+  },
+  {
+    path: "/day-pulse",
+    route: dayPulseRoute,
+  },
+  {
+    path: "/feed",
+    route: feedRoute,
+  },
+  {
+    path: "/feed-reactions",
+    route: feedReactionRoute,
+  },
+  {
+    path: "/feed-comments",
+    route: feedCommentRoute,
+  },
+  {
+    path: "/org-lead",
+    route: orgLeadRoute,
+  },
+  {
+    path: "/driver-profile",
+    route: driverProfileRoute,
+  },
 ];
 
 defaultRoutes.forEach((route) => {

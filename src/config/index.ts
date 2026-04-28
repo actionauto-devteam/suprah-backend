@@ -155,7 +155,7 @@ const config = {
     forceTls: envVars.FTP_FORCE_TLS,
     tlsCertPath: envVars.FTP_TLS_CERT_PATH,
     tlsKeyPath: envVars.FTP_TLS_KEY_PATH,
-  }
+  },
   push: {
     vapidPublicKey: envVars.VAPID_PUBLIC_KEY,
     vapidPrivateKey: envVars.VAPID_PRIVATE_KEY,
