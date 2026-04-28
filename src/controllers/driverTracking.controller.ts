@@ -1079,7 +1079,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
 
     await Load.findByIdAndUpdate(loadId, { $push: { pendingDriverRequests: requestEntry } });
 
-    await notifyOrgAdmins(orgId, "shipment_status_changed", "Load Requested by Driver",
+    await notifyOrgAdmins(orgId, "driver_request", "Load Requested by Driver",
       `${user.name || user.email} requested load ${load.loadNumber}`,
       { loadId: load._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email });
 
@@ -1117,7 +1117,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
 
   await Shipment.findByIdAndUpdate(shipmentId, { $push: { pendingDriverRequests: requestEntry } });
 
-  await notifyOrgAdmins(orgId, "shipment_status_changed", "Load Requested by Driver",
+  await notifyOrgAdmins(orgId, "driver_request", "Load Requested by Driver",
     `${user.name || user.email} requested shipment ${shipment.trackingNumber || "N/A"}`,
     { shipmentId: shipment._id.toString(), driverId: user._id.toString(), driverName: user.name || user.email });
 

@@ -23,6 +23,7 @@ import { httpLogger } from './utils/logger';
 import logger from './utils/logger';
 import { correlationIdMiddleware } from './middleware/correlationId.middleware';
 import { metricsMiddleware } from './middleware/metrics.middleware';
+import './jobs/push.worker'; // Initialize the Push Notification worker
 
 const app: Application = express();
 
@@ -167,10 +168,12 @@ if (require.main === module) {
     try {
       const { disconnectDB } = require('./config/db');
       const { cacheService } = require('./services/cache.service');
+      const { pushWorker } = require('./jobs/push.worker');
 
       await Promise.all([
         disconnectDB(),
-        cacheService.disconnect()
+        cacheService.disconnect(),
+        pushWorker ? pushWorker.close() : Promise.resolve(),
       ]);
 
       logger.info('Graceful shutdown completed. Exiting process.');

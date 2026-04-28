@@ -57,7 +57,10 @@ export async function safeBroadcastNotification(params: BroadcastParams) {
     // Find all users in the organization with the specified roles
     const users = await User.find({
       organizationId,
-      role: { $in: roles },
+      $or: [
+        { role: { $in: roles } },
+        { organizationRole: { $in: roles } }
+      ]
     }).select('_id');
 
     if (users.length === 0) {

@@ -51,6 +51,7 @@ const NotificationSchema = new Schema(
         'quote_updated',
         'quote_deleted',
         'quote_converted',
+        'quote_accepted',
 
         // Shipments
         'shipment_created',
@@ -61,6 +62,8 @@ const NotificationSchema = new Schema(
         'shipment_picked_up',
         'shipment_delivered',
         'proof_of_delivery',
+        'shipment_arrived_at_pickup',
+        'shipment_arrived_at_delivery',
 
         // Vehicles/Inventory
         'vehicle_added',
@@ -118,6 +121,10 @@ const NotificationSchema = new Schema(
         'reminder',
         'general',
 
+        // Referrals
+        'referral_joined',
+        'referral_rewarded',
+
         // Legacy/Compatibility
         'proof_submitted',
         'delivery_confirmed',
@@ -145,6 +152,10 @@ const NotificationSchema = new Schema(
     timestamps: true,
   }
 );
+
+// Add TTL index to automatically delete notifications after 90 days (7,776,000 seconds)
+NotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
+
 
 // Compound indexes for efficient queries
 NotificationSchema.index({ userId: 1, createdAt: -1 });

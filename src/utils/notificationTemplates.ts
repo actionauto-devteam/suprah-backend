@@ -91,6 +91,11 @@ export const notificationTemplates = {
     message: `Quote for ${data.customerName} converted to shipment ${data.trackingNumber}`,
   }),
 
+  quote_accepted: (data: QuoteData) => ({
+    title: 'Quote Accepted by Customer',
+    message: `${data.customerName} has accepted the quote${data.vehicleName ? ` for ${data.vehicleName}` : ''}!`,
+  }),
+
   // ==================== SHIPMENTS ====================
   shipment_created: (data: ShipmentData) => ({
     title: 'New Shipment Created',
@@ -129,7 +134,17 @@ export const notificationTemplates = {
 
   proof_of_delivery: (data: { driverName: string; trackingNumber: string }) => ({
     title: 'Proof of Delivery Submitted',
-    message: `${data.driverName} submitted proof of delivery for shipment ${data.trackingNumber}`,
+    message: `${data.driverName} submitted proof of delivery for shipment ${data.trackingNumber}. View to verify.`,
+  }),
+
+  shipment_arrived_at_pickup: (data: { driverName: string; trackingNumber: string; origin: string }) => ({
+    title: 'Driver Arrived at Pickup',
+    message: `${data.driverName} has arrived at the pickup location: ${data.origin}`,
+  }),
+
+  shipment_arrived_at_delivery: (data: { driverName: string; trackingNumber: string; destination: string }) => ({
+    title: 'Driver Arrived at Delivery',
+    message: `${data.driverName} has arrived at the delivery location: ${data.destination}`,
   }),
 
   // ==================== VEHICLES/INVENTORY ====================

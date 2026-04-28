@@ -2,6 +2,8 @@ import Notification from '../models/Notification.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import { emitToUser } from '../utils/socketEmitter';
+import PushService from './push.service';
+import logger from '../utils/logger';
 
 interface CreateNotificationParams {
   userId: string;
@@ -13,9 +15,10 @@ interface CreateNotificationParams {
 }
 
 const VALID_NOTIFICATION_TYPES = [
-  'quote_created', 'quote_updated', 'quote_deleted', 'quote_converted',
+  'quote_created', 'quote_updated', 'quote_deleted', 'quote_converted', 'quote_accepted',
   'shipment_created', 'shipment_updated', 'shipment_deleted', 'shipment_status_changed',
   'shipment_assigned', 'shipment_picked_up', 'shipment_delivered', 'proof_of_delivery',
+  'shipment_arrived_at_pickup', 'shipment_arrived_at_delivery',
   'vehicle_added', 'vehicle_updated', 'vehicle_sold', 'vehicle_status_changed',
   'inventory_sync', 'new_inventory_alert',
   'appointment_created', 'appointment_updated', 'appointment_cancelled',
@@ -37,6 +40,7 @@ const PREFERENCE_MAP: Record<string, string> = {
   quote_updated: 'quoteUpdated',
   quote_deleted: 'quoteDeleted',
   quote_converted: 'quoteCreated',
+  quote_accepted: 'quoteUpdated',
   shipment_created: 'shipmentCreated',
   shipment_updated: 'shipmentUpdated',
   shipment_deleted: 'shipmentDeleted',
@@ -45,6 +49,8 @@ const PREFERENCE_MAP: Record<string, string> = {
   shipment_picked_up: 'shipmentUpdated',
   shipment_delivered: 'shipmentUpdated',
   proof_of_delivery: 'shipmentUpdated',
+  shipment_arrived_at_pickup: 'shipmentUpdated',
+  shipment_arrived_at_delivery: 'shipmentUpdated',
   appointment_created: 'appointmentCreated',
   appointment_updated: 'appointmentUpdated',
   appointment_cancelled: 'appointmentCancelled',
@@ -117,6 +123,50 @@ const createNotification = async (params: CreateNotificationParams) => {
   });
 
   emitToUser(userId, 'notification:new', notification);
+
+  // Trigger Web Push Notification
+  try {
+    const urlMap: Record<string, string> = {
+      shipment_assigned: '/driver/loads',
+      message_received: '/driver/notifications',
+      quote_created: '/transportation?tab=drafts',
+      quote_accepted: '/transportation?tab=quotes',
+      shipment_delivered: '/transportation?tab=shipments',
+      proof_of_delivery: '/driver-tracker',
+      shipment_arrived_at_pickup: '/driver-tracker',
+      shipment_arrived_at_delivery: '/driver-tracker',
+      new_lead: '/crm/dashboard',
+      driver_request: '/driver-tracker',
+      driver_request_approved: '/driver/loads',
+      driver_request_rejected: '/notifications',
+    };
+
+    const pushPayload: any = {
+      title,
+      body: message,
+      tag: preferenceKey || 'general', // Group by preference category
+      data: {
+        url: urlMap[type] || '/notifications',
+        notificationId: notification._id,
+      },
+    };
+
+    // Add interactive actions for driver join requests
+    if (type === 'driver_request') {
+      pushPayload.actions = [
+        { action: 'approve', title: 'Approve' },
+        { action: 'reject', title: 'Reject' }
+      ];
+      // Include the ID in data so the SW can call the API
+      pushPayload.data.driverRequestId = metadata?.driverRequestId || notification._id;
+    }
+
+    PushService.send(userId, pushPayload).catch(err =>
+      logger.error(err, `[PushService] Failed to queue push for user ${userId}`)
+    );
+  } catch (error: any) {
+    logger.error(error, '[NotificationService] Error triggering web push');
+  }
 
   return notification;
 };
@@ -191,15 +241,20 @@ const getUserNotifications = async (
 
 const markAsRead = async (notificationId: string, orgId: string, userId: string) => {
   const notification = await Notification.findOneAndUpdate(
-    { _id: notificationId, userId },
+    { _id: notificationId, userId, organizationId: orgId }, // Strict org scoping
     { isRead: true },
     { new: true }
   );
 
   if (!notification) {
-    throw new ApiError(404, 'Notification not found');
-
+    throw new ApiError(404, 'Notification not found or access denied');
   }
+
+  // SYNC: Tell other devices to dismiss the push notification
+  const preferenceKey = PREFERENCE_MAP[notification.type] || 'general';
+  PushService.dismiss(userId, preferenceKey).catch(err => 
+    logger.error(err, '[NotificationService] Sync dismiss failed')
+  );
 
   emitToUser(userId, 'notification:read', { notificationId });
 
@@ -207,7 +262,7 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
 };
 
 const markAllAsRead = async (userId: string, orgId: string) => {
-  await Notification.updateMany({ userId, isRead: false }, { isRead: true });
+  await Notification.updateMany({ userId, organizationId: orgId, isRead: false }, { isRead: true });
   emitToUser(userId, 'notification:readAll', {});
   return { message: 'All notifications marked as read' };
 };
@@ -216,17 +271,18 @@ const deleteNotification = async (notificationId: string, orgId: string, userId:
   const notification = await Notification.findOneAndDelete({
     _id: notificationId,
     userId,
+    organizationId: orgId, // Strict org scoping
   });
 
   if (!notification) {
-    throw new ApiError(404, 'Notification not found');
+    throw new ApiError(404, 'Notification not found or access denied');
   }
 
   return notification;
 };
 
 const deleteAllRead = async (userId: string, orgId: string) => {
-  const result = await Notification.deleteMany({ userId, isRead: true });
+  const result = await Notification.deleteMany({ userId, organizationId: orgId, isRead: true });
   return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
 };
 
@@ -300,6 +356,33 @@ const broadcastNotification = async (params: {
       emitToUser(user._id.toString(), 'notification:new', userNotif);
     }
   });
+
+  // Trigger Web Push Broadcast
+  try {
+    const urlMap: Record<string, string> = {
+      shipment_assigned: '/driver/loads',
+      message_received: '/driver/notifications',
+      quote_created: '/transportation?tab=drafts',
+      shipment_delivered: '/transportation?tab=shipments',
+      new_lead: '/crm/dashboard',
+      driver_request: '/notifications',
+    };
+
+    const broadcastPayload = {
+      title,
+      body: message,
+      data: {
+        url: urlMap[type] || '/notifications',
+      },
+    };
+
+    const userIds = users.map(u => u._id.toString());
+    PushService.broadcast(userIds, broadcastPayload).catch(err =>
+      logger.error(err, '[PushService] Broadcast failed')
+    );
+  } catch (error: any) {
+    logger.error(error, '[NotificationService] Error triggering web push broadcast');
+  }
 
   return created;
 };

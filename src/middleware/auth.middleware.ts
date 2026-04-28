@@ -128,6 +128,7 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             req.originalUrl.includes('/api/users/me') ||
             req.originalUrl.includes('/api/notifications') ||
             req.originalUrl.includes('/api/invitations/accept') ||
+            req.originalUrl.includes('/api/push/subscribe') ||
             req.originalUrl.includes('/api/driver-requests/my-status');
 
         if (!user.onboardingCompleted && !isWhitelisted) {

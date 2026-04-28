@@ -25,6 +25,16 @@ export interface IPersonalInfo {
   socialLinks?: ISocialLink[];
 }
 
+export interface IPushSubscription {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+  deviceHint?: string;
+  createdAt?: Date;
+}
+
 export interface IUser extends Document {
   name: string;
   email: string;
@@ -90,6 +100,7 @@ export interface IUser extends Document {
     features: string[];
   };
   stripeConnectAccountId?: string;
+  pushSubscriptions: IPushSubscription[];
   isPasswordMatch(password: string): Promise<boolean>;
 }
 
@@ -287,6 +298,17 @@ const UserSchema = new Schema(
         default: ['Basic Dashboard', 'Up to 10 Vehicles', 'Email Support'],
       },
     },
+    pushSubscriptions: [
+      {
+        endpoint: { type: String, required: true },
+        keys: {
+          p256dh: { type: String, required: true },
+          auth: { type: String, required: true },
+        },
+        deviceHint: { type: String },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,

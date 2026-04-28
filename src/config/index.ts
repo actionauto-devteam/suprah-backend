@@ -73,6 +73,16 @@ const envVarsSchema = Joi.object()
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
 
     CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
+    // Push Notifications
+    VAPID_PUBLIC_KEY: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Public Key'),
+    VAPID_PRIVATE_KEY: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Private Key'),
+    VAPID_SUBJECT: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('VAPID Subject (mailto)'),
   })
   .unknown();
 
@@ -151,7 +161,12 @@ const config = {
     forceTls: envVars.FTP_FORCE_TLS,
     tlsCertPath: envVars.FTP_TLS_CERT_PATH,
     tlsKeyPath: envVars.FTP_TLS_KEY_PATH,
-  }
+  },
+  push: {
+    vapidPublicKey: envVars.VAPID_PUBLIC_KEY,
+    vapidPrivateKey: envVars.VAPID_PRIVATE_KEY,
+    vapidSubject: envVars.VAPID_SUBJECT,
+  },
 };
 
 export default config;

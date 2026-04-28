@@ -15,7 +15,8 @@ import {
 } from "../utils/calculations";
 import { maskLoadForDriver } from "../utils/loadMask";
 import { storageService, BucketType } from "../services/storage.service";
-import { safeCreateNotification } from "../utils/safeNotification";
+import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
+import { notificationTemplates } from "../utils/notificationTemplates";
 import { getSocketIO } from "../utils/socketEmitter";
 import activityService from "../services/activity.service";
 
@@ -401,30 +402,26 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
 
   await load.save();
 
-  // Log activity
-  await activityService.logLoadActivity(
-    userId,
-    load.organizationId?.toString(),
-    'load_delivered',
-    load._id.toString(),
-    `Submitted proof of delivery for load ${load.loadNumber}`
-  );
-
+  // Broadcast to Org Admins
   const orgId = load.organizationId?.toString();
-  if (orgId) {
-    // Notify the admin who created/posted the load; fallback to all admins
-    const notifyIds: string[] = submittedTo
-      ? [submittedTo]
-      : (await User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin", "employee"] } }).select("_id")).map((a: any) => a._id.toString());
+  const { title, message } = notificationTemplates.proof_of_delivery({
+    driverName: user.name || "A driver",
+    trackingNumber: load.loadNumber || req.params.id,
+  });
 
-    for (const adminId of notifyIds) {
-      await safeCreateNotification({
-        userId: adminId, organizationId: orgId,
-        type: "proof_submitted", title: "Proof of Delivery Submitted",
-        message: `Driver submitted proof of delivery for load ${load.loadNumber || req.params.id}`,
-        metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber, imageUrl },
-      });
-    }
+  if (orgId) {
+    await notifyOrgAdmins(
+      orgId,
+      "proof_of_delivery",
+      title,
+      message,
+      {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        imageUrl,
+        driverName: user.name,
+      }
+    );
   }
 
   logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
