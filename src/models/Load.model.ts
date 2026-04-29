@@ -54,7 +54,6 @@ export interface ILoadVehicle {
   make?: string;
   model?: string;
   color?: string;
-  trailerType: string;
   condition: "Operable" | "Inoperable";
   oversized?: boolean;
   lotNumber?: string;
@@ -73,7 +72,6 @@ const LoadVehicleSchema = new Schema<ILoadVehicle>(
     make: { type: String, trim: true },
     model: { type: String, trim: true },
     color: { type: String, trim: true },
-    trailerType: { type: String, required: true, trim: true },
     condition: {
       type: String,
       enum: ["Operable", "Inoperable"],
@@ -205,6 +203,7 @@ export interface ILoad extends Document {
   loadNumber: string;
   postType: LoadPostType;
   status: LoadStatus;
+  trailerType: string;
 
   pickupLocation: ILocationBlock;
   deliveryLocation: ILocationBlock;
@@ -242,6 +241,12 @@ export interface ILoad extends Document {
     rejectionReason?: string;
   }>;
 
+  notes?: Array<{
+    text: string;
+    author: mongoose.Types.ObjectId;
+    date: Date;
+  }>;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -270,6 +275,7 @@ const LoadSchema = new Schema<ILoad>(
       enum: ["Draft", "Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"],
       default: "Draft",
     },
+    trailerType: { type: String, required: true, trim: true },
 
     pickupLocation: { type: LocationBlockSchema, required: true },
     deliveryLocation: { type: LocationBlockSchema, required: true },
@@ -315,17 +321,49 @@ const LoadSchema = new Schema<ILoad>(
         rejectionReason: { type: String, trim: true },
       },
     ],
+
+    notes: [
+      {
+        text: { type: String, required: true, trim: true, maxlength: 4000 },
+        author: { type: Schema.Types.ObjectId, ref: "User", required: true },
+        date: { type: Date, default: Date.now },
+      },
+    ],
   },
   { timestamps: true },
 );
 
-// Auto-compute balanceAmount before save
-LoadSchema.pre("save", function (next) {
+// ─── Load Number Counter ──────────────────────────────────────────────────────
+// Atomic counter keyed by YYYYMMDD — same pattern as InvoiceCounter in Payment.model.ts
+
+const LoadCounterSchema = new Schema(
+  { _id: { type: String, required: true }, seq: { type: Number, default: 0 } },
+  { collection: "loadcounters" },
+);
+const LoadCounter =
+  mongoose.models.LoadCounter ||
+  mongoose.model("LoadCounter", LoadCounterSchema);
+
+// Auto-generate loadNumber and compute balanceAmount before save
+LoadSchema.pre("save", async function (next) {
+  // 1. Generate sequential loadNumber if not already set
+  if (!this.loadNumber) {
+    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const counter = await LoadCounter.findOneAndUpdate(
+      { _id: datePart },
+      { $inc: { seq: 1 } },
+      { upsert: true, new: true },
+    );
+    this.loadNumber = `LD-${datePart}-${String(counter.seq).padStart(4, "0")}`;
+  }
+
+  // 2. Compute balanceAmount from pricing
   if (this.pricing) {
     const pay = this.pricing.carrierPayAmount ?? 0;
     const cod = this.pricing.copCodAmount ?? 0;
     this.pricing.balanceAmount = pay - cod;
   }
+
   next();
 });
 
@@ -335,6 +373,16 @@ LoadSchema.index({ organizationId: 1, "additionalInfo.visibility": 1 });
 LoadSchema.index({
   "pendingDriverRequests.driverId": 1,
   "pendingDriverRequests.status": 1,
+});
+LoadSchema.index({
+  loadNumber: "text",
+  "pickupLocation.city": "text",
+  "pickupLocation.state": "text",
+  "deliveryLocation.city": "text",
+  "deliveryLocation.state": "text",
+  "vehicles.make": "text",
+  "vehicles.model": "text",
+  "vehicles.vin": "text",
 });
 
 const Load = mongoose.model<ILoad>("Load", LoadSchema);

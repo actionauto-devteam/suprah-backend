@@ -15,6 +15,7 @@ import {
 } from "../utils/calculations";
 import { maskLoadForDriver } from "../utils/loadMask";
 import { storageService, BucketType } from "../services/storage.service";
+import { getSignedProofUrl } from "../utils/signedUrlCache";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { getSocketIO } from "../utils/socketEmitter";
@@ -107,6 +108,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
   // Compute miles + estimatedRate server-side from ZIPs
   let computedMiles: number | undefined;
   let estimatedRate: number | undefined;
+  let pricingWarning: string | undefined;
   try {
     const [pc, dc] = await getCoordinatesForPair(pickupLocation.zip, deliveryLocation.zip);
     if (pc && dc) {
@@ -115,9 +117,11 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
       const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
       const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
       estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
+    } else {
+      pricingWarning = "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
     }
   } catch {
-    // Non-fatal — saves without computed pricing if ZIP lookup fails
+    pricingWarning = "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
   }
 
   const pricing = {
@@ -128,19 +132,74 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     // balanceAmount computed automatically by pre-save hook in the model
   };
 
-  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
-  const loadNumber = `LD-${datePart}-${randPart}`;
-
   const contractWithTimestamp = contract?.agreedToTerms
     ? { ...contract, signedAt: new Date() }
     : contract;
+
+  // Validation 1: Check for duplicate VINs
+  const vins = vehicles?.map((v: any) => v.vin).filter(Boolean) || [];
+  if (new Set(vins).size !== vins.length) {
+    return res.status(400).json({
+      success: false,
+      error: 'Duplicate VINs not allowed',
+      code: 'DUPLICATE_VIN',
+      field: 'vehicles',
+    });
+  }
+
+  // Validation 2: Check trailer capacity
+  const TRAILER_CAPACITY: Record<string, number> = {
+    open_3car_wedge: 3,
+    open_2car: 2,
+    enclosed_2car: 2,
+    enclosed_3car: 3,
+    flatbed: 2,
+    hotshot: 1,
+    dually_flatbed: 1,
+    gooseneck: 2,
+    lowboy: 1,
+    step_deck: 2,
+    '9car_stinger': 9,
+    '7car_stinger': 7,
+    '5car_open': 5,
+    rgn: 2,
+    double_drop: 2,
+    power_only: 0,
+    other: 1,
+  };
+
+  const maxVehicles = TRAILER_CAPACITY[trailerType] ?? 1;
+  const vehicleCount = vehicles?.length || 0;
+
+  if (vehicleCount > maxVehicles) {
+    return res.status(400).json({
+      success: false,
+      error: `Max ${maxVehicles} vehicles allowed for ${trailerType}`,
+      code: 'CAPACITY_EXCEEDED',
+      field: 'vehicles',
+    });
+  }
+
+  // Validation 3: Check for past dates
+  if (dates?.firstAvailable) {
+    const selectedDate = new Date(dates.firstAvailable);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (selectedDate < today) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot select a date in the past',
+        code: 'INVALID_DATE',
+        field: 'dates.firstAvailable',
+      });
+    }
+  }
 
   const load = await Load.create({
     organizationId,
     orgId: (user as any).orgId,
     createdBy: user._id,
-    loadNumber,
     postType,
     pickupLocation,
     deliveryLocation,
@@ -162,12 +221,12 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     organizationId,
     'load_posted',
     load._id.toString(),
-    `Created load ${loadNumber}`
+    `Created load ${load.loadNumber}`
   );
 
-  logger.info({ loadId: load._id, loadNumber, orgId: organizationId }, 'Load created successfully');
+  logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
 
-  return res.status(201).json(new ApiResponse(201, load, "Load created successfully"));
+  return res.status(201).json(new ApiResponse(201, { load, ...(pricingWarning ? { warning: pricingWarning } : {}) }, "Load created successfully"));
 });
 
 // ─── Get Inventory Vehicles (for VIN picker) ──────────────────────────────────
@@ -235,16 +294,7 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   // ── Search ──────────────────────────────────────────────────────────────────
   const q = (req.query.q as string | undefined)?.trim();
   if (q) {
-    filter.$or = [
-      { loadNumber: { $regex: q, $options: "i" } },
-      { "pickupLocation.city": { $regex: q, $options: "i" } },
-      { "pickupLocation.state": { $regex: q, $options: "i" } },
-      { "deliveryLocation.city": { $regex: q, $options: "i" } },
-      { "deliveryLocation.state": { $regex: q, $options: "i" } },
-      { "vehicles.make": { $regex: q, $options: "i" } },
-      { "vehicles.model": { $regex: q, $options: "i" } },
-      { "vehicles.vin": { $regex: q, $options: "i" } },
-    ];
+    (filter as any).$text = { $search: q };
   }
 
   // ── Query ───────────────────────────────────────────────────────────────────
@@ -261,8 +311,8 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     : rawLoads;
 
   const loadsWithSignedProofs = await Promise.all(loads.map(async (l: any) => {
-    if (l.proofOfDelivery?.imageUrl && !l.proofOfDelivery.imageUrl.startsWith('http')) {
-      const signed = await storageService.getSignedUrl(l.proofOfDelivery.imageUrl);
+    if (l.proofOfDelivery?.imageUrl) {
+      const signed = await getSignedProofUrl(l.proofOfDelivery.imageUrl);
       if (signed) l.proofOfDelivery.imageUrl = signed;
     }
     return l;
@@ -327,8 +377,8 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
 
   // Sign proof of delivery URL if exists
   const loadObj = load as any;
-  if (loadObj.proofOfDelivery?.imageUrl && !loadObj.proofOfDelivery.imageUrl.startsWith('http')) {
-    const signed = await storageService.getSignedUrl(loadObj.proofOfDelivery.imageUrl);
+  if (loadObj.proofOfDelivery?.imageUrl) {
+    const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
     if (signed) loadObj.proofOfDelivery.imageUrl = signed;
   }
 

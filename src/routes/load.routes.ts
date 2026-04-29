@@ -30,10 +30,17 @@ router
 router
   .route("/:id")
   .get(loadController.getLoadById)              // drivers can read (masking applied in controller)
+  .put(staffOnly, loadController.updateLoad)    // staff only
   .delete(staffOnly, loadController.deleteLoad); // staff only
 
-// Driver submits proof — no org required (same pattern as shipment submit-proof)
-router.post("/:id/submit-proof", uploadLimiter, auth(), uploadProofImage, loadController.submitProofOfDelivery);
+// Internal notes — staff only
+router.post("/:id/notes", staffOnly, loadController.addNote);
+
+// Send load details by email — staff only
+router.post("/:id/send-email", staffOnly, loadController.sendDetailsEmail);
+
+// Driver submits proof — drivers pass requireOrg via their organizationId from the DB
+router.post("/:id/submit-proof", uploadLimiter, uploadProofImage, loadController.submitProofOfDelivery);
 
 // Admin/dealer streams proof image (proxy — avoids exposing private R2 keys)
 router.get("/:id/proof-image", staffOnly, loadController.streamProofImage);

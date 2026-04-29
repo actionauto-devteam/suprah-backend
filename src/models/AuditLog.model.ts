@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IAuditLog extends Document {
-    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction';
+    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Load' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction';
     entityId?: mongoose.Types.ObjectId | string;
     action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL';
     changes?: any;
@@ -27,6 +27,7 @@ const InternalAuditLogSchema: Schema = new Schema(
                 'System',
                 'Billing',
                 'Shipment',
+                'Load',
                 'Driver',
                 'Invitation',
                 'Referral',

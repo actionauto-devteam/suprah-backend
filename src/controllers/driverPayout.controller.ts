@@ -10,7 +10,7 @@ import { safeCreateNotification } from '../utils/safeNotification';
 import activityService from '../services/activity.service';
 import config from '../config';
 import logger from '../utils/logger';
-import { storageService } from '../services/storage.service';
+import { getSignedProofUrl } from '../utils/signedUrlCache';
 
 const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: "2026-01-28.clover",
@@ -30,6 +30,7 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   const orgId = req.orgId as string;
 
   const deliverableFilter = {
+    organizationId: orgId,
     assignedDriverId: { $exists: true, $ne: null },
     $or: [
       { status: "Delivered" },
@@ -58,13 +59,20 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   const payoutByEntity: Record<string, any> = {};
   existingPayouts.forEach((p) => { payoutByEntity[p.loadId.toString()] = p; });
 
-  const result = allItems.map((s) => ({
-    ...s,
-    existingPayout: payoutByEntity[s._id.toString()] || null,
-    pendingConfirmation: !!(
-      s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt
-    ),
-  }));
+  const result = await Promise.all(
+    allItems.map(async (s) => {
+      let item: any = {
+        ...s,
+        existingPayout: payoutByEntity[s._id.toString()] || null,
+        pendingConfirmation: !!(s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt),
+      };
+      if (item.proofOfDelivery?.imageUrl) {
+        const signed = await getSignedProofUrl(item.proofOfDelivery.imageUrl);
+        if (signed) item = { ...item, proofOfDelivery: { ...item.proofOfDelivery, imageUrl: signed } };
+      }
+      return item;
+    })
+  );
 
   res.json(new ApiResponse(200, result, 'Deliverable loads fetched successfully'));
 });
@@ -96,14 +104,9 @@ const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
     .lean();
 
   const signUrl = async (item: any): Promise<any> => {
-    if (
-      item.proofOfDelivery?.imageUrl &&
-      !item.proofOfDelivery.imageUrl.startsWith("http")
-    ) {
-      try {
-        const signed = await storageService.getSignedUrl(item.proofOfDelivery.imageUrl);
-        if (signed) return { ...item, proofOfDelivery: { ...item.proofOfDelivery, imageUrl: signed } };
-      } catch { /* ignored */ }
+    if (item.proofOfDelivery?.imageUrl) {
+      const signed = await getSignedProofUrl(item.proofOfDelivery.imageUrl);
+      if (signed) return { ...item, proofOfDelivery: { ...item.proofOfDelivery, imageUrl: signed } };
     }
     return item;
   };
@@ -154,8 +157,13 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { loadId, driverId, amount, description, notes } = req.body;
 
-  if (!loadId || !driverId || !amount) {
+  if (!loadId || !driverId || amount === undefined || amount === null) {
     throw new ApiError(400, 'loadId, driverId, and amount are required');
+  }
+
+  const numericAmount = Number(amount);
+  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    throw new ApiError(400, 'Amount must be a positive number');
   }
 
   const load = await Load.findOne({ _id: loadId, organizationId: orgId, status: 'Delivered' });
@@ -174,7 +182,7 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     driverId,
     driverName: driver.name,
     driverEmail: driver.email,
-    amount,
+    amount: numericAmount,
     currency: 'usd',
     description: description || `Payout for load ${load.loadNumber}`,
     status: 'processing',
@@ -184,7 +192,7 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
 
   try {
     const transfer = await stripe.transfers.create({
-      amount: Math.round(amount * 100),
+      amount: Math.round(numericAmount * 100),
       currency: "usd",
       destination: driver.stripeConnectAccountId,
       description: payout.description,
@@ -201,21 +209,18 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
       organizationId: orgId,
       type: 'driver_payout',
       title: 'Payout Received',
-      message: `You received a payout of $${amount.toFixed(2)} for load ${load.loadNumber}`,
-      metadata: { loadId, amount },
+      message: `You received a payout of $${numericAmount.toFixed(2)} for load ${load.loadNumber}`,
+      metadata: { loadId, amount: numericAmount },
     });
 
-    await activityService.logFinancialActivity(driverId, orgId, 'payout_received', amount, `Received payout for load ${load.loadNumber}`, { loadId: load._id.toString(), payoutId: payout._id.toString() });
+    await activityService.logFinancialActivity(driverId, orgId, 'payout_received', numericAmount, `Received payout for load ${load.loadNumber}`, { loadId: load._id.toString(), payoutId: payout._id.toString() });
 
-    res.status(201).json(new ApiResponse(201, payout, 'Payout sent successfully'));
     logger.info(
-      { payoutId: payout._id, driverId, amount },
+      { payoutId: payout._id, driverId, amount: numericAmount },
       "Driver payout sent successfully",
     );
 
-    res
-      .status(201)
-      .json(new ApiResponse(201, payout, "Driver payout sent successfully"));
+    res.status(201).json(new ApiResponse(201, payout, 'Payout sent successfully'));
   } catch (stripeError: any) {
     payout.status = "failed";
     payout.failureReason = stripeError?.message || "Stripe transfer failed";
@@ -224,9 +229,15 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   }
 });
 
+const VALID_PAYOUT_STATUSES = ["pending", "processing", "paid", "failed"] as const;
+
 const getPayouts = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status, driverId } = req.query;
+
+  if (status && status !== "all" && !VALID_PAYOUT_STATUSES.includes(status as any)) {
+    throw new ApiError(400, `Invalid status filter. Must be one of: all, ${VALID_PAYOUT_STATUSES.join(", ")}`);
+  }
 
   const filter: any = { organizationId: orgId };
   if (status && status !== "all") filter.status = status;

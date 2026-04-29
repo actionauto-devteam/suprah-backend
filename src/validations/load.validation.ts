@@ -49,7 +49,6 @@ export const loadVehicleSchema = z.object({
   make: z.string().trim().max(50).optional(),
   model: z.string().trim().max(50).optional(),
   color: z.string().trim().max(50).optional(),
-  trailerType: z.enum(TRAILER_TYPES),
   condition: z.enum(["Operable", "Inoperable"]).default("Operable"),
   oversized: z.boolean().default(false),
   lotNumber: z.string().trim().max(50).optional(),
@@ -114,6 +113,7 @@ export const createLoadSchema = z.object({
   pickupLocation: locationBlockSchema,
   deliveryLocation: locationBlockSchema,
   vehicles: z.array(loadVehicleSchema).max(12, "Maximum 12 vehicles per load").default([]),
+  trailerType: z.enum(TRAILER_TYPES),
   dates: loadDatesSchema.optional(),
   additionalInfo: loadAdditionalInfoSchema.optional(),
   contract: loadContractSchema.optional(),
@@ -131,17 +131,7 @@ export type CreateLoadInput = z.infer<typeof createLoadSchema>;
 export const calculateRateSchema = z.object({
   pickupZip: z.string().trim().min(5).max(10),
   deliveryZip: z.string().trim().min(5).max(10),
-  vehicles: z.array(z.object({
-    trailerType: z.string(),
-    condition: z.enum(["Operable", "Inoperable"]),
-  })).default([]),
-});
-// ─── Calculate Rate (standalone endpoint) ─────────────────────────────────────
-
-export const calculateRateSchema = z.object({
-  pickupZip: z.string().trim().min(5).max(10),
-  deliveryZip: z.string().trim().min(5).max(10),
-  trailerType: z.string(),
+  trailerType: z.enum(TRAILER_TYPES),
   vehicles: z.array(z.object({
     condition: z.enum(["Operable", "Inoperable"]),
   })).default([]),

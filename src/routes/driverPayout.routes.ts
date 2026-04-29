@@ -15,7 +15,7 @@ router.get('/my-payouts', driverPayoutController.getMyPayouts);
 // Organization-scoped routes
 router.use(requireOrg);
 
-router.get('/deliverable', driverPayoutController.getDeliverableShipments);
+router.get('/deliverable', driverPayoutController.getDeliverableLoads);
 router.get('/pending-proofs', driverPayoutController.getPendingProofs);
 router.get('/org-admins', driverPayoutController.getOrgAdmins);
 router.get('/stats', driverPayoutController.getPayoutStats);
