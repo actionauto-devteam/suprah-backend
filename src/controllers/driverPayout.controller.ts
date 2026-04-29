@@ -13,12 +13,12 @@ import logger from '../utils/logger';
 import { storageService } from '../services/storage.service';
 
 const stripe = new Stripe(config.stripe.secretKey, {
-  apiVersion: '2026-01-28.clover',
+  apiVersion: "2026-01-28.clover",
 });
 
 const getUserId = (req: Request): string => {
   const userId = (req.user as IUser)?._id?.toString();
-  if (!userId) throw new ApiError(401, 'User not authenticated');
+  if (!userId) throw new ApiError(401, "User not authenticated");
   return userId;
 };
 
@@ -30,9 +30,14 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   const orgId = req.orgId as string;
 
   const deliverableFilter = {
-    organizationId: orgId,
     assignedDriverId: { $exists: true, $ne: null },
-    status: 'Delivered',
+    $or: [
+      { status: "Delivered" },
+      {
+        "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
+        "proofOfDelivery.confirmedAt": { $exists: true },
+      },
+    ],
   };
 
   const loads = await Load.find(deliverableFilter)
@@ -56,7 +61,9 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   const result = allItems.map((s) => ({
     ...s,
     existingPayout: payoutByEntity[s._id.toString()] || null,
-    pendingConfirmation: !!(s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt),
+    pendingConfirmation: !!(
+      s.proofOfDelivery?.imageUrl && !s.proofOfDelivery?.confirmedAt
+    ),
   }));
 
   res.json(new ApiResponse(200, result, 'Deliverable loads fetched successfully'));
@@ -69,13 +76,19 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
 const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
+  const role = (req.user as IUser)?.role;
 
-  const proofFilter = {
+  const canViewAllPendingProofs = role && role !== "driver";
+
+  const proofFilter: Record<string, any> = {
     organizationId: orgId,
-    'proofOfDelivery.imageUrl': { $exists: true, $ne: '' },
-    'proofOfDelivery.confirmedAt': { $exists: false },
-    'proofOfDelivery.submittedTo': userId,
+    "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
+    "proofOfDelivery.confirmedAt": { $exists: false },
   };
+
+  if (!canViewAllPendingProofs) {
+    proofFilter["proofOfDelivery.submittedTo"] = userId;
+  }
 
   const loads = await Load.find(proofFilter)
     .populate('assignedDriverId', 'name email')
@@ -83,7 +96,10 @@ const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
     .lean();
 
   const signUrl = async (item: any): Promise<any> => {
-    if (item.proofOfDelivery?.imageUrl && !item.proofOfDelivery.imageUrl.startsWith('http')) {
+    if (
+      item.proofOfDelivery?.imageUrl &&
+      !item.proofOfDelivery.imageUrl.startsWith("http")
+    ) {
       try {
         const signed = await storageService.getSignedUrl(item.proofOfDelivery.imageUrl);
         if (signed) return { ...item, proofOfDelivery: { ...item.proofOfDelivery, imageUrl: signed } };
@@ -94,10 +110,14 @@ const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
 
   const normalizedLoads = loads.map((l: any) => ({
     ...l,
-    _type: 'load',
+    _type: "load",
     trackingNumber: l.loadNumber,
-    origin: l.pickupLocation ? `${l.pickupLocation.city}, ${l.pickupLocation.state}` : undefined,
-    destination: l.deliveryLocation ? `${l.deliveryLocation.city}, ${l.deliveryLocation.state}` : undefined,
+    origin: l.pickupLocation
+      ? `${l.pickupLocation.city}, ${l.pickupLocation.state}`
+      : undefined,
+    destination: l.deliveryLocation
+      ? `${l.deliveryLocation.city}, ${l.deliveryLocation.state}`
+      : undefined,
   }));
 
   const combined = await Promise.all(
@@ -106,7 +126,9 @@ const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
       .map(signUrl)
   );
 
-  res.json(new ApiResponse(200, combined, 'Pending proofs fetched successfully'));
+  res.json(
+    new ApiResponse(200, combined, "Pending proofs fetched successfully"),
+  );
 });
 
 /**
@@ -116,10 +138,12 @@ const getOrgAdmins = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const admins = await User.find({
     organizationId: orgId,
-    role: { $in: ['admin', 'super_admin', 'employee'] },
+    role: { $in: ["admin", "super_admin", "employee"] },
     isActive: true,
-  }).select('_id name email role').lean();
-  res.json(new ApiResponse(200, admins, 'Org admins fetched'));
+  })
+    .select("_id name email role")
+    .lean();
+  res.json(new ApiResponse(200, admins, "Org admins fetched"));
 });
 
 /**
@@ -161,14 +185,14 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   try {
     const transfer = await stripe.transfers.create({
       amount: Math.round(amount * 100),
-      currency: 'usd',
+      currency: "usd",
       destination: driver.stripeConnectAccountId,
       description: payout.description,
       metadata: { payoutId: payout._id.toString(), loadId: loadId.toString() },
     });
 
     payout.stripeTransferId = transfer.id;
-    payout.status = 'paid';
+    payout.status = "paid";
     payout.paidAt = new Date();
     await payout.save();
 
@@ -184,9 +208,17 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     await activityService.logFinancialActivity(driverId, orgId, 'payout_received', amount, `Received payout for load ${load.loadNumber}`, { loadId: load._id.toString(), payoutId: payout._id.toString() });
 
     res.status(201).json(new ApiResponse(201, payout, 'Payout sent successfully'));
+    logger.info(
+      { payoutId: payout._id, driverId, amount },
+      "Driver payout sent successfully",
+    );
+
+    res
+      .status(201)
+      .json(new ApiResponse(201, payout, "Driver payout sent successfully"));
   } catch (stripeError: any) {
-    payout.status = 'failed';
-    payout.failureReason = stripeError?.message || 'Stripe transfer failed';
+    payout.status = "failed";
+    payout.failureReason = stripeError?.message || "Stripe transfer failed";
     await payout.save();
     throw new ApiError(402, `Payout failed: ${payout.failureReason}`);
   }
@@ -197,7 +229,7 @@ const getPayouts = asyncHandler(async (req: Request, res: Response) => {
   const { status, driverId } = req.query;
 
   const filter: any = { organizationId: orgId };
-  if (status && status !== 'all') filter.status = status;
+  if (status && status !== "all") filter.status = status;
   if (driverId) filter.driverId = driverId;
 
   const payouts = await DriverPayout.find(filter)

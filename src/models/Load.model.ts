@@ -40,7 +40,7 @@ const LocationBlockSchema = new Schema<ILocationBlock>(
     isTwicRequired: { type: Boolean, default: false },
     notes: { type: String, trim: true, maxlength: 500 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Load Vehicle ─────────────────────────────────────────────────────────────
@@ -74,14 +74,18 @@ const LoadVehicleSchema = new Schema<ILoadVehicle>(
     model: { type: String, trim: true },
     color: { type: String, trim: true },
     trailerType: { type: String, required: true, trim: true },
-    condition: { type: String, enum: ["Operable", "Inoperable"], default: "Operable" },
+    condition: {
+      type: String,
+      enum: ["Operable", "Inoperable"],
+      default: "Operable",
+    },
     oversized: { type: Boolean, default: false },
     lotNumber: { type: String, trim: true },
     licensePlate: { type: String, trim: true, uppercase: true },
     licenseState: { type: String, trim: true, uppercase: true },
     carrierNotes: { type: String, trim: true, maxlength: 500 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Load Dates ───────────────────────────────────────────────────────────────
@@ -102,7 +106,7 @@ const LoadDatesSchema = new Schema<ILoadDates>(
     deliveryDeadline: { type: Date },
     notes: { type: String, trim: true, maxlength: 500 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Load Pricing ─────────────────────────────────────────────────────────────
@@ -126,7 +130,7 @@ const LoadPricingSchema = new Schema<ILoadPricing>(
     copCodAmount: { type: Number, default: 0 },
     balanceAmount: { type: Number },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Additional Info ──────────────────────────────────────────────────────────
@@ -145,13 +149,17 @@ const LoadAdditionalInfoSchema = new Schema<ILoadAdditionalInfo>(
   {
     notes: { type: String, trim: true, maxlength: 4000 },
     instructions: { type: String, trim: true, maxlength: 4000 },
-    visibility: { type: String, enum: ["public", "private"], default: "public" },
+    visibility: {
+      type: String,
+      enum: ["public", "private"],
+      default: "public",
+    },
     internalLoadId: { type: String, trim: true, maxlength: 50 },
     preDispatchNotes: { type: String, trim: true, maxlength: 4000 },
     specialInstructions: { type: String, trim: true, maxlength: 4000 },
     loadSpecificTerms: { type: String, trim: true, maxlength: 500 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -168,7 +176,7 @@ const LoadContractSchema = new Schema<ILoadContract>(
     signatureName: { type: String, trim: true, maxlength: 200 },
     signedAt: { type: Date },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
@@ -242,7 +250,12 @@ const LoadSchema = new Schema<ILoad>(
   {
     organizationId: { type: String, required: true },
     orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
-    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
 
     loadNumber: { type: String, unique: true, sparse: true },
 
@@ -292,14 +305,18 @@ const LoadSchema = new Schema<ILoad>(
         driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
         driverName: { type: String, required: true },
         requestedAt: { type: Date, default: Date.now },
-        status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+        status: {
+          type: String,
+          enum: ["pending", "approved", "rejected"],
+          default: "pending",
+        },
         reviewedAt: { type: Date },
         reviewedBy: { type: Schema.Types.ObjectId, ref: "User" },
         rejectionReason: { type: String, trim: true },
       },
     ],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Auto-compute balanceAmount before save
@@ -315,7 +332,10 @@ LoadSchema.pre("save", function (next) {
 LoadSchema.index({ organizationId: 1, createdAt: -1 });
 LoadSchema.index({ organizationId: 1, status: 1 });
 LoadSchema.index({ organizationId: 1, "additionalInfo.visibility": 1 });
-LoadSchema.index({ "pendingDriverRequests.driverId": 1, "pendingDriverRequests.status": 1 });
+LoadSchema.index({
+  "pendingDriverRequests.driverId": 1,
+  "pendingDriverRequests.status": 1,
+});
 
 const Load = mongoose.model<ILoad>("Load", LoadSchema);
 

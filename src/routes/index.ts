@@ -139,11 +139,6 @@ const defaultRoutes = [
     path: "/crm/timeproof",
     route: crmTimeprofRoute,
   },
-
-  {
-    path: "/crm/biometric",
-    route: crmBiometricRoute,
-  },
   {
     path: "/supraspace",
     route: supraSpaceRoute,
@@ -181,20 +176,24 @@ const defaultRoutes = [
     route: customerLeadRoute,
   },
   {
-    path: "/day-pulse",
-    route: dayPulseRoute,
+    path: "/crm/feeds/reactions",
+    route: feedReactionRoute
   },
   {
-    path: "/feed",
-    route: feedRoute,
+    path: "/crm/feeds",
+    route: feedRoute
   },
   {
-    path: "/feed-reactions",
-    route: feedReactionRoute,
+    path: "/crm/feeds",
+    route: feedCommentRoute
   },
   {
-    path: "/feed-comments",
-    route: feedCommentRoute,
+    path: "/crm/biometric",
+    route: crmBiometricRoute
+  },
+  {
+    path: "/crm/daypulse",
+    route: dayPulseRoute
   },
   {
     path: "/org-lead",
