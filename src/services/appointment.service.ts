@@ -9,6 +9,7 @@ import customerBookingService from './customerbooking.service';
 import { ApiError } from '../utils/ApiError';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import CrmUser from '../models/CrmUser.model';
 
 interface CreateAppointmentData {
   title: string;
@@ -33,6 +34,12 @@ interface CreateAppointmentData {
   meetingLink?: string;
   notes?: string;
 }
+
+const resolveCalendarTarget = async (userId: string, orgId: string) => {
+  const isCrmUser = await CrmUser.exists({ _id: userId });
+  if (isCrmUser) return { type: 'crmUser' as const, id: userId };
+  return { type: 'org' as const, id: orgId };
+};
 
 const createAppointment = async (userId: string, orgId: string, data: CreateAppointmentData) => {
   const start = new Date(data.startTime);
@@ -89,8 +96,9 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   console.log('Appointment created:', appointment._id);
 
   try {
-    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, userId);
-    console.log('Synced to organizer\'s Google Calendar');
+    const target = await resolveCalendarTarget(userId, orgId);
+    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, target);
+    console.log(`Synced to ${target.type}'s Google Calendar`);
   } catch (error) {
     console.error('Failed to sync to Google Calendar:', error);
   }
@@ -319,7 +327,8 @@ const updateAppointment = async (
   await appointment.save();
 
   try {
-    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, userId);
+    const target = await resolveCalendarTarget(userId, orgId);
+    await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, target);
   } catch (error) {
     console.error('Failed to sync update to Google Calendar:', error);
   }
@@ -390,9 +399,10 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
 
   if (appointment.googleCalendarEventId) {
     try {
+      const target = await resolveCalendarTarget(appointment.createdBy._id.toString(), orgId);
       await googleCalendarService.deleteFromGoogleCalendar(
         appointment.googleCalendarEventId,
-        orgId // Changed from userId
+        target
       );
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
@@ -462,9 +472,10 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
 
   if (appointment.googleCalendarEventId) {
     try {
+      const target = await resolveCalendarTarget(appointment.createdBy._id.toString(), orgId);
       await googleCalendarService.deleteFromGoogleCalendar(
         appointment.googleCalendarEventId,
-        orgId // Use orgId instead of userId
+        target
       );
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
@@ -552,9 +563,10 @@ const handleGuestResponse = async (
 
     if (status === 'accepted' && googleAccessToken) {
       try {
+        const target = await resolveCalendarTarget(appointment.createdBy.toString(), appointment.organizationId.toString());
         const eventId = await googleCalendarService.syncAppointmentToGoogleCalendar(
           appointment,
-          appointment.createdBy.toString()
+          target
         );
         if (eventId) {
           appointment.guestEmails[guestIndex].googleCalendarEventId = eventId;

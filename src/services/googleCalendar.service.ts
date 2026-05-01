@@ -5,6 +5,7 @@ import Appointment from '../models/Appointment.model';
 import { ApiError } from '../utils/ApiError';
 import { decrypt, encrypt } from '../utils/crypto';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import { IUser } from '../models/User.model';
 import { IAppointment } from '../models/Appointment.model';
 
@@ -46,29 +47,49 @@ class GoogleCalendarService {
 
 
 
-  private async getCalendarClient(orgId: string): Promise<calendar_v3.Calendar> {
-    const config = await OrgLeadConfig.findOne({ organizationId: orgId });
-
-    if (!config) {
-      throw new ApiError(404, `Calendar configuration not found for Organization: ${orgId}. Ensure the organization is connected.`);
+  private async getCalendarClient(target: { type: 'org' | 'crmUser'; id: string }): Promise<calendar_v3.Calendar> {
+    let config: any;
+    
+    if (target.type === 'org') {
+      config = await OrgLeadConfig.findOne({ organizationId: target.id });
+    } else {
+      config = await CrmUser.findById(target.id);
     }
 
-    if (!config.calendarConnected || !config.accessToken || !config.refreshToken) {
-      throw new ApiError(401, 'Google Calendar not connected for this organization');
+    if (!config) {
+      throw new ApiError(404, `Calendar configuration not found for ${target.type}: ${target.id}.`);
+    }
+
+    // Handle different field nesting (CrmUser has .googleCalendar sub-doc)
+    const tokens = target.type === 'org' ? config : config.googleCalendar;
+
+    if (!tokens || !tokens.calendarConnected || !tokens.accessToken || !tokens.refreshToken) {
+      throw new ApiError(401, 'Google Calendar not connected');
     }
 
     const oauth2Client = this.createOAuthClient();
     oauth2Client.setCredentials({
-      access_token:  decrypt(config.accessToken),
-      refresh_token: decrypt(config.refreshToken),
-      expiry_date:   config.expiryDate,
+      access_token:  decrypt(tokens.accessToken),
+      refresh_token: decrypt(tokens.refreshToken),
+      expiry_date:   tokens.expiryDate,
     });
 
-    oauth2Client.on('tokens', async (tokens: any) => {
-      const update: Record<string, any> = { expiryDate: tokens.expiry_date };
-      if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
-      if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
-      await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
+    oauth2Client.on('tokens', async (newTokens: any) => {
+      const update: Record<string, any> = {};
+      if (newTokens.expiry_date)   update['expiryDate'] = newTokens.expiry_date;
+      if (newTokens.access_token)  update['accessToken']  = encrypt(newTokens.access_token);
+      if (newTokens.refresh_token) update['refreshToken'] = encrypt(newTokens.refresh_token);
+
+      if (target.type === 'org') {
+        await OrgLeadConfig.updateOne({ organizationId: target.id }, { $set: update });
+      } else {
+        // Nested update for CrmUser.googleCalendar
+        const nestedUpdate: Record<string, any> = {};
+        for (const [key, val] of Object.entries(update)) {
+          nestedUpdate[`googleCalendar.${key}`] = val;
+        }
+        await CrmUser.updateOne({ _id: target.id }, { $set: nestedUpdate });
+      }
     });
 
     return google.calendar({ version: 'v3', auth: oauth2Client });
@@ -90,18 +111,29 @@ class GoogleCalendarService {
     }
   }
 
+  async isCrmUserCalendarConnected(crmUserId: string): Promise<boolean> {
+    try {
+      const user = await CrmUser.findById(crmUserId).select('googleCalendar');
+      return !!(user?.googleCalendar?.calendarConnected && user.googleCalendar.accessToken);
+    } catch {
+      return false;
+    }
+  }
+
   // ─── Core paginated fetch ───────────────────────────────────────────────────
 
   private async fetchAllEventsFromGoogle(
     calendar: calendar_v3.Calendar,
-    timeMin: Date,
-    timeMax: Date
-  ): Promise<calendar_v3.Schema$Event[]> {
+    timeMin?: Date,
+    timeMax?: Date,
+    syncToken?: string
+  ): Promise<{ items: calendar_v3.Schema$Event[]; nextSyncToken?: string | null }> {
     const allEvents: calendar_v3.Schema$Event[] = [];
     let pageToken: string | undefined;
+    let nextSyncToken: string | null | undefined;
     let page = 0;
 
-    console.log(`📅 Google Calendar fetch: ${timeMin.toISOString()} → ${timeMax.toISOString()}`);
+    console.log(`📅 Google Calendar fetch: ${syncToken ? 'Incremental (token)' : 'Full Scan'}`);
 
     do {
       page++;
@@ -110,20 +142,27 @@ class GoogleCalendarService {
         break;
       }
 
-      const response = await calendar.events.list({
+      const params: calendar_v3.Params$Resource$Events$List = {
         calendarId:   'primary',
-        timeMin:      timeMin.toISOString(),
-        timeMax:      timeMax.toISOString(),
         maxResults:   2500,
-        singleEvents: true,
-        showDeleted:  true,
-        orderBy:      'startTime',
         pageToken,
-      });
+      };
+
+      if (syncToken) {
+        params.syncToken = syncToken;
+      } else if (timeMin && timeMax) {
+        params.timeMin = timeMin.toISOString();
+        params.timeMax = timeMax.toISOString();
+        params.singleEvents = true;
+        params.showDeleted = true;
+      }
+
+      const response = await calendar.events.list(params);
 
       const items = response.data.items ?? [];
       allEvents.push(...items);
       pageToken = response.data.nextPageToken ?? undefined;
+      nextSyncToken = response.data.nextSyncToken;
 
       console.log(
         `  Page ${page}: ${items.length} events (running total: ${allEvents.length})` +
@@ -131,7 +170,7 @@ class GoogleCalendarService {
       );
     } while (pageToken);
 
-    return allEvents;
+    return { items: allEvents, nextSyncToken };
   }
 
   private parseEventTimes(
@@ -161,90 +200,87 @@ class GoogleCalendarService {
 
   // ─── Sync Logic ────────────────────────────────────────────────────────────
 
-  async fetchAllGoogleCalendarEvents(id: string, providedOrgId?: string, triggeringUserId?: string): Promise<number> {
-    const calendar = await this.getCalendarClient(id);
+  /**
+   * Internal core sync engine
+   */
+  private async syncInternal(target: { type: 'org' | 'crmUser'; id: string }, triggeringUserId?: string, forceFullSync?: boolean): Promise<number> {
+    const calendar = await this.getCalendarClient(target);
+    
+    // 1. Resolve Identity and Context
+    let organizationId: string;
+    let userIdForAttribution: mongoose.Types.ObjectId;
+    let currentSyncToken: string | undefined;
 
-    // Resolve organization ID
-    let organizationId = providedOrgId;
-    let user: any = null;
-
-    // 1. Resolve organizationId if missing
-    if (!organizationId) {
-      user = await User.findById(id).select('organizationId');
-      if (user) organizationId = (user as any).organizationId?.toString();
-    }
-
-    if (!organizationId) throw new ApiError(400, 'Organization ID could not be resolved for sync.');
-
-    // 2. Resolve User context (mandatory for Appointment creation)
-    const userIdToLookup = triggeringUserId || (organizationId === id ? null : id);
-    if (userIdToLookup) {
-      user = await User.findById(userIdToLookup);
-    }
-
-    // 3. Fallback: If no user context, find first active admin in the organization
-    if (!user && organizationId) {
-      console.log(`[CalendarSync] No triggering user found, searching for organization admin fallback for org: ${organizationId}`);
-      user = await User.findOne({ organizationId, role: 'admin', isActive: true });
-      
-      // Final fallback: any active user in the organization
-      if (!user) {
-        user = await User.findOne({ organizationId, isActive: true });
+    if (target.type === 'org') {
+      organizationId = target.id;
+      const admin = await User.findOne({ organizationId, role: 'admin', isActive: true });
+      if (!admin) throw new ApiError(400, 'No admin found for organization sync attribution.');
+      userIdForAttribution = admin._id;
+    } else {
+      const crmUser = await CrmUser.findById(target.id);
+      if (!crmUser) throw new ApiError(404, 'CRM User not found');
+      organizationId = crmUser.organizationId.toString();
+      userIdForAttribution = crmUser._id;
+      if (!forceFullSync) {
+        currentSyncToken = crmUser.googleCalendar?.syncToken;
       }
     }
 
-    if (!user) {
-      throw new ApiError(400, 'Could not find a valid user context to attribute synced events to.');
-    }
-
+    // 2. Fetch from Google
     const { timeMin, timeMax } = getSyncWindow();
-    let events: calendar_v3.Schema$Event[];
+    let result: { items: calendar_v3.Schema$Event[]; nextSyncToken?: string | null };
+    let usedFallback = false;
+    
     try {
-      events = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
-    } catch (err: any) {
-      const msg: string = err?.message ?? err?.errors?.[0]?.message ?? '';
-      const isInsufficientScopes =
-        msg.toLowerCase().includes('insufficient') ||
-        msg.toLowerCase().includes('insufficientauthenticateduser') ||
-        err?.status === 403 ||
-        err?.code === 403;
-
-      if (isInsufficientScopes) {
-        // Clear the stored connection so the user is prompted to reconnect
-        await OrgLeadConfig.updateOne(
-          { organizationId },
-          { $set: { calendarConnected: false } }
-        );
-        throw new ApiError(
-          403,
-          'Google Calendar authorization is missing calendar permissions. Please disconnect and reconnect your calendar.'
-        );
+      if (forceFullSync) {
+        console.log('🔄 forceFullSync=true, bypassing syncToken and using full date-range scan');
+        result = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+      } else {
+        result = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax, currentSyncToken);
       }
-      throw err;
+    } catch (err: any) {
+      if (err.code === 410) { // GONE - syncToken invalid
+        console.log('🔄 syncToken expired (410 GONE), performing full scan...');
+        result = await this.fetchAllEventsFromGoogle(calendar, timeMin, timeMax);
+        usedFallback = true;
+      } else {
+        const msg: string = err?.message ?? '';
+        if (msg.toLowerCase().includes('insufficient') || err?.code === 403) {
+          await this.markDisconnected(target);
+          throw new ApiError(403, 'Insufficient permissions. Please reconnect your calendar.');
+        }
+        throw err;
+      }
     }
 
-    // ── Bulk upsert — one DB round-trip instead of N+1 ──────────────────────
-    const validEvents = events.filter(e => e.id && e.status !== 'cancelled');
-    const cancelledIds = events
-      .filter(e => e.id && e.status === 'cancelled')
-      .map(e => e.id as string);
+    const { items: events, nextSyncToken } = result;
 
-    // Fetch all existing docs in one query
-    const allIds = events.map(e => e.id).filter(Boolean) as string[];
-    const existingDocs = await Appointment.find({ googleCalendarEventId: { $in: allIds } })
-      .select('_id googleCalendarEventId status')
-      .lean();
+    // Re-destructure results
+    const { items: finalEvents, nextSyncToken: finalSyncToken } = result;
+
+    // 3. Process Events
+    const validEvents = finalEvents.filter(e => e.id && e.status !== 'cancelled');
+    const cancelledIds = finalEvents.filter(e => e.id && e.status === 'cancelled').map(e => e.id as string);
+
+    console.log(`📊 Sync stats: validEvents=${validEvents.length}, cancelledIds=${cancelledIds.length}, used fallback=${usedFallback}`);
+
+    // Fetch existing docs to avoid duplicates (scoped to THIS user/org)
+    const allIds = finalEvents.map(e => e.id).filter(Boolean) as string[];
+    const existingDocs = await Appointment.find({ 
+      googleCalendarEventId: { $in: allIds },
+      createdBy: userIdForAttribution // Important: Isolation
+    }).select('_id googleCalendarEventId').lean();
+    
     const existingMap = new Map(existingDocs.map(d => [d.googleCalendarEventId, d]));
 
-    // Cancel in bulk
+    // Bulk Cancel
     if (cancelledIds.length > 0) {
       await Appointment.updateMany(
-        { googleCalendarEventId: { $in: cancelledIds }, status: { $ne: 'cancelled' } },
+        { googleCalendarEventId: { $in: cancelledIds }, createdBy: userIdForAttribution },
         { $set: { status: 'cancelled' } }
       );
     }
 
-    // Build bulkWrite ops for valid events
     const ops: any[] = [];
     for (const event of validEvents) {
       const times = this.parseEventTimes(event);
@@ -266,7 +302,7 @@ class GoogleCalendarService {
       if (existingMap.has(event.id!)) {
         ops.push({
           updateOne: {
-            filter: { googleCalendarEventId: event.id },
+            filter: { googleCalendarEventId: event.id, createdBy: userIdForAttribution },
             update: {
               $set: {
                 title:        event.summary || undefined,
@@ -275,7 +311,7 @@ class GoogleCalendarService {
                 endTime,
                 location:     event.location || undefined,
                 meetingLink:  meetingLink || undefined,
-                organizationId,
+                lastSyncedAt: new Date(),
               },
             },
           },
@@ -292,9 +328,9 @@ class GoogleCalendarService {
               type,
               entryType,
               status:                   'scheduled',
-              createdBy:                user._id,
+              createdBy:                userIdForAttribution,
               organizationId,
-              participants:             [user._id],
+              participants:             [userIdForAttribution],
               googleCalendarEventId:    event.id,
               syncedWithGoogleCalendar: true,
               lastSyncedAt:             new Date(),
@@ -307,22 +343,65 @@ class GoogleCalendarService {
 
     let processed = 0;
     if (ops.length > 0) {
-      const result = await Appointment.bulkWrite(ops, { ordered: false });
-      processed = (result.insertedCount ?? 0) + (result.modifiedCount ?? 0);
+      console.log(`📝 Preparing to bulkWrite ${ops.length} operations...`);
+      try {
+        const bulkResult = await Appointment.bulkWrite(ops, { ordered: false });
+        processed = (bulkResult.insertedCount ?? 0) + (bulkResult.modifiedCount ?? 0);
+        console.log(`✅ BulkWrite complete: inserted=${bulkResult.insertedCount}, modified=${bulkResult.modifiedCount}, processed=${processed}`);
+      } catch (bulkErr: any) {
+        console.error(`❌ BulkWrite error: ${bulkErr.message}`, bulkErr);
+        throw bulkErr;
+      }
+    } else {
+      console.log(`⚠️  No operations to write (ops.length=${ops.length})`);
     }
-    console.log(`✅ Bulk sync complete: ${processed} events processed, ${cancelledIds.length} cancelled`);
+
+    // 4. Update syncToken and lastSyncAt
+    if (finalSyncToken) {
+      if (target.type === 'org') {
+        await OrgLeadConfig.updateOne(
+          { organizationId: target.id },
+          { $set: { syncToken: finalSyncToken, lastSyncAt: new Date() } }
+        );
+        console.log(`🔐 Updated org syncToken for ${target.id}`);
+      } else {
+        await CrmUser.updateOne(
+          { _id: target.id },
+          { $set: { 'googleCalendar.syncToken': finalSyncToken, 'googleCalendar.lastSyncAt': new Date() } }
+        );
+        console.log(`🔐 Updated CrmUser syncToken for ${target.id}`);
+      }
+    } else {
+      console.log(`⚠️  No nextSyncToken received from Google; syncToken not updated`);
+    }
+
+    console.log(`✅ Sync complete for ${target.type} ${target.id}: ${processed} events (fallback=${usedFallback})`);
     return processed;
   }
 
-  async syncAllEvents(orgId: string, triggeringUserId?: string): Promise<number> {
-    return this.fetchAllGoogleCalendarEvents(orgId, orgId, triggeringUserId);
+  private async markDisconnected(target: { type: 'org' | 'crmUser'; id: string }) {
+    if (target.type === 'org') {
+      await OrgLeadConfig.updateOne({ organizationId: target.id }, { $set: { calendarConnected: false } });
+    } else {
+      await CrmUser.updateOne({ _id: target.id }, { $set: { 'googleCalendar.calendarConnected': false } });
+    }
+  }
+
+  async syncAllEvents(orgId: string, triggeringUserId?: string, forceFullSync?: boolean): Promise<number> {
+    return this.syncInternal({ type: 'org', id: orgId }, triggeringUserId, forceFullSync);
+  }
+
+  async syncCrmUserCalendar(crmUserId: string, forceFullSync?: boolean): Promise<number> {
+    return this.syncInternal({ type: 'crmUser', id: crmUserId }, undefined, forceFullSync);
   }
 
   // ─── Outbound Sync ──────────────────────────────────────────────────────────
 
-  async syncAppointmentToGoogleCalendar(appointment: IAppointment, orgId: string): Promise<string | null> {
+  // ─── Outbound Sync ──────────────────────────────────────────────────────────
+  
+  async syncAppointmentToGoogleCalendar(appointment: IAppointment, target: { type: 'org' | 'crmUser'; id: string }): Promise<string | null> {
     try {
-      const calendar = await this.getCalendarClient(orgId);
+      const calendar = await this.getCalendarClient(target);
       const eventData: calendar_v3.Schema$Event = {
         summary: appointment.title,
         description: this.buildEventDescription(appointment),
@@ -356,12 +435,53 @@ class GoogleCalendarService {
     }
   }
 
-  async deleteFromGoogleCalendar(eventId: string, orgId: string): Promise<void> {
+  async deleteFromGoogleCalendar(eventId: string, target: { type: 'org' | 'crmUser'; id: string }): Promise<void> {
     try {
-      const calendar = await this.getCalendarClient(orgId);
+      const calendar = await this.getCalendarClient(target);
       await calendar.events.delete({ calendarId: 'primary', eventId });
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
+    }
+  }
+
+  // ─── Webhooks & Maintenance ──────────────────────────────────────────────────
+
+  async disconnectCalendar(crmUserId: string): Promise<void> {
+    await CrmUser.updateOne({ _id: crmUserId }, { $set: { 'googleCalendar.calendarConnected': false } });
+  }
+
+  async setupWebhook(target: { type: 'org' | 'crmUser'; id: string }, channelId: string): Promise<void> {
+    try {
+      const calendar   = await this.getCalendarClient(target);
+      const webhookUrl = `${process.env.BACKEND_URL}/api/crm-calendar/webhook`;
+      await calendar.events.watch({
+        calendarId:  'primary',
+        requestBody: { id: channelId, type: 'web_hook', address: webhookUrl },
+      });
+      console.log(`✅ Calendar webhook set up successfully for ${target.type}`);
+    } catch (error) {
+      console.error('⚠️ Failed to set up calendar webhook:', error);
+    }
+  }
+
+  async processWebhookNotification(channelId: string, resourceState: string, resourceId: string): Promise<void> {
+    // Webhook logic...
+    console.log(`Processing webhook for channel ${channelId}`);
+  }
+
+  async updateRSVPStatusFromGoogle(appointmentId: string, target: { type: 'org' | 'crmUser'; id: string }): Promise<void> {
+    try {
+      const appointment = await Appointment.findById(appointmentId);
+      if (!appointment || !appointment.googleCalendarEventId) return;
+      
+      const calendar = await this.getCalendarClient(target);
+      const event = await calendar.events.get({ calendarId: 'primary', eventId: appointment.googleCalendarEventId });
+      
+      // RSVP update logic can be added here if needed
+      
+      await appointment.save();
+    } catch (error) {
+      console.error('Failed to update RSVP:', error);
     }
   }
 
@@ -372,52 +492,6 @@ class GoogleCalendarService {
     d += `\nMeeting Type: ${appointment.type}`;
     if (appointment.meetingLink) d += `\nJoin Meeting: ${appointment.meetingLink}`;
     return d.trim();
-  }
-
-  // ─── Webhooks & Maintenance ──────────────────────────────────────────────────
-
-  async disconnectCalendar(userId: string): Promise<void> {
-    const user = await User.findById(userId).select('organizationId');
-    if (!user || !(user as any).organizationId) return;
-    const orgId = (user as any).organizationId;
-    await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { calendarConnected: false } });
-  }
-
-  async setupWebhook(orgId: string, channelId: string): Promise<void> {
-    try {
-      const calendar   = await this.getCalendarClient(orgId);
-      const webhookUrl = `${process.env.BACKEND_URL}/api/google-calendar/webhook`;
-      const response   = await calendar.events.watch({
-        calendarId:  'primary',
-        requestBody: { id: channelId, type: 'web_hook', address: webhookUrl },
-      });
-      console.log('✅ Org-wide calendar webhook set up successfully');
-    } catch (error) {
-      console.error('⚠️ Failed to set up calendar webhook:', error);
-    }
-  }
-
-  async processWebhookNotification(channelId: string, resourceState: string, resourceId: string): Promise<void> {
-    // Org-wide webhook processing logic would go here
-    // For now, this requires a way to map channelId to orgId
-  }
-
-  async updateRSVPStatusFromGoogle(appointmentId: string, userId: string): Promise<void> {
-    try {
-      const appointment = await Appointment.findById(appointmentId);
-      if (!appointment || !appointment.googleCalendarEventId) return;
-      
-      const calendar = await this.getCalendarClient(userId);
-      const event = await calendar.events.get({ calendarId: 'primary', eventId: appointment.googleCalendarEventId });
-      // RSVP logic...
-      await appointment.save();
-    } catch (error) {
-      console.error('Failed to update RSVP:', error);
-    }
-  }
-
-  async renewWebhook(userId: string): Promise<void> {
-    await this.setupWebhook(userId, `org_renew_${Date.now()}`);
   }
 }
 

@@ -219,6 +219,7 @@ export interface ILoad extends Document {
   driverAcceptedAt?: Date;
   acceptedAt?: Date;
   pickedUpAt?: Date;
+  inTransitAt?: Date;
   deliveredAt?: Date;
   droppedAt?: Date;
 
@@ -294,6 +295,7 @@ const LoadSchema = new Schema<ILoad>(
     driverAcceptedAt: { type: Date },
     acceptedAt: { type: Date },
     pickedUpAt: { type: Date },
+    inTransitAt: { type: Date },
     deliveredAt: { type: Date },
     droppedAt: { type: Date },
 

@@ -13,6 +13,15 @@ export interface ICrmUser extends Document {
   lastLoginAt?: Date;
   resetOtp?: string;
   resetOtpExpiry?: Date;
+  googleCalendar?: {
+    calendarConnected: boolean;
+    gmailAddress?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    expiryDate?: number;
+    lastSyncAt?: Date;
+    syncToken?: string;
+  };
   createdAt: Date;
   updatedAt: Date;
   isPasswordMatch(password: string): Promise<boolean>;
@@ -75,6 +84,15 @@ const CrmUserSchema = new Schema<ICrmUser>(
     resetOtpExpiry: {
       type: Date,
       select: false,
+    },
+    googleCalendar: {
+      calendarConnected: { type: Boolean, default: false },
+      gmailAddress: { type: String },
+      accessToken: { type: String },
+      refreshToken: { type: String },
+      expiryDate: { type: Number },
+      lastSyncAt: { type: Date },
+      syncToken: { type: String },
     },
   },
   {

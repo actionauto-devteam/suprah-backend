@@ -38,6 +38,7 @@ import dayPulseRoute from "./dayPulse.routes";
 import feedRoute from "./feed.route";
 import feedReactionRoute from "./feedReaction.routes";
 import feedCommentRoute from "./feedComment.routes";
+import crmCalendarRoute from "./crmCalendar.routes";
 
 const router = express.Router();
 
@@ -197,6 +198,10 @@ const defaultRoutes = [
   {
     path: "/driver-profile",
     route: driverProfileRoute,
+  },
+  {
+    path: "/crm/calendar",
+    route: crmCalendarRoute,
   },
 ];
 

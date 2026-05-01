@@ -158,7 +158,7 @@ const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) 
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
 
-    const result = await enhancedGoogleCalendarService.fetchAllGoogleCalendarEvents(userId, orgId);
+    const result = await enhancedGoogleCalendarService.syncAllEvents(orgId, userId);
 
     res.json(
         new ApiResponse(200, result, 'Synced with Google Calendar successfully')

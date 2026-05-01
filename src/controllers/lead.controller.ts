@@ -910,7 +910,10 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
           status: 'scheduled' as const
       };
 
-      await googleCalendarService.syncAppointmentToGoogleCalendar(appointmentData as any, userId.toString());
+      await googleCalendarService.syncAppointmentToGoogleCalendar(
+        appointmentData as any, 
+        { type: 'org', id: orgId as string }
+      );
   } catch (syncError) {
       console.warn('[LeadSync] Google Calendar sync failed for lead appointment:', syncError);
   }

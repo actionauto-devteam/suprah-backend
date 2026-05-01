@@ -302,7 +302,12 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const isDriver = user?.role === "driver";
 
   const [rawLoads, total] = await Promise.all([
-    Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    Load.find(filter)
+      .populate("assignedDriverId", "name email phone avatar")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Load.countDocuments(filter),
   ]);
 
@@ -368,7 +373,9 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
   const user = getUser(req);
 
-  const raw = await Load.findOne({ _id: req.params.id, organizationId }).lean();
+  const raw = await Load.findOne({ _id: req.params.id, organizationId })
+    .populate("assignedDriverId", "name email phone avatar")
+    .lean();
   if (!raw) throw new ApiError(404, "Load not found");
 
   const load = user?.role === "driver"

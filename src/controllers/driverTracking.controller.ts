@@ -14,6 +14,7 @@ import {
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { getSocketIO } from "../utils/socketEmitter";
 import { getSignedProofUrl } from "../utils/signedUrlCache";
+import { maskLoadForDriver } from "../utils/loadMask";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -651,6 +652,7 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
   if (load.status !== "Picked Up") throw new ApiError(400, "Load must be in Picked Up status to start route");
 
   load.status = "In-Transit";
+  load.inTransitAt = new Date();
   await load.save();
 
   await DriverLocation.findOneAndUpdate(
@@ -669,6 +671,7 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
         loadId: load._id.toString(),
         driverId: user._id.toString(),
         driverName: user.name || user.email,
+        status: "In-Transit",
       },
     );
     const io = getSocketIO();
@@ -677,6 +680,7 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
         action: "in-route",
         loadId,
         driverId: user._id.toString(),
+        status: "In-Transit",
       });
   }
   res.json(
@@ -692,7 +696,7 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
     action: "UPDATE",
     reason: "Driver started route",
     performedBy: user._id,
-    changes: { status: "In-Transit" },
+    changes: { status: "In-Transit", inTransitAt: load.inTransitAt },
   });
 });
 
@@ -727,7 +731,7 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const [loads, total] = await Promise.all([
     Load.find(loadFilter)
       .select(
-        "_id loadNumber status pickupLocation deliveryLocation vehicles dates pricing pendingDriverRequests createdAt",
+        "_id loadNumber status pickupLocation deliveryLocation vehicles dates pricing pendingDriverRequests createdAt trailerType",
       )
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -753,7 +757,7 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
       status: l.status,
       requestedPickupDate: l.dates?.firstAvailable,
       scheduledDelivery: l.dates?.deliveryDeadline,
-      trailerTypeRequired: firstVehicle?.trailerType,
+      trailerTypeRequired: l.trailerType,
       vehicleCount: l.vehicles?.length || 0,
       carrierPayAmount: l.pricing?.carrierPayAmount,
       estimatedRate: l.pricing?.estimatedRate,
@@ -960,6 +964,95 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
       "My load requests fetched",
     ),
   );
+});
+
+const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  const { loadId } = req.params;
+
+  if (!loadId) {
+    throw new ApiError(400, "Load ID is required");
+  }
+
+  const user = req.user as IUser;
+  const load = await Load.findById(loadId)
+    .populate("assignedDriverId", "name email phone avatar")
+    .lean();
+
+  if (!load) {
+    throw new ApiError(404, "Load not found");
+  }
+
+  const isDriver = user.role === "driver";
+  if (isDriver) {
+    // 1. Check organization access
+    const loadOrgId = load.organizationId?.toString();
+    const userOrgId = user.organizationId?.toString();
+
+    if (loadOrgId !== userOrgId) {
+      throw new ApiError(403, "You do not have access to this load");
+    }
+
+    // 2. Check assignment access
+    // Drivers can only see full details of loads assigned to them OR loads that are available ("Posted")
+    const isAssignedToMe = load.assignedDriverId && (load.assignedDriverId as any)._id?.toString() === userId;
+    const isPosted = load.status === "Posted";
+    const hasRequested = load.pendingDriverRequests?.some(
+      (r: any) => r.driverId.toString() === userId,
+    );
+
+    if (!isAssignedToMe && !isPosted && !hasRequested) {
+      throw new ApiError(403, "You are not assigned to this load");
+    }
+  }
+
+  // Apply masking for drivers
+  const processedLoad = isDriver
+    ? maskLoadForDriver(load as unknown as Record<string, unknown>)
+    : load;
+
+  // Sign proof of delivery URL if exists
+  const loadObj = processedLoad as any;
+  if (loadObj.proofOfDelivery?.imageUrl) {
+    const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
+    if (signed) {
+      loadObj.proofOfDelivery.imageUrl = signed;
+    }
+  }
+
+  // Normalize for driver view (consistent with original implementation)
+  const myRequest = load.pendingDriverRequests?.find(
+    (r: any) => r.driverId.toString() === userId,
+  );
+
+  const firstVehicle = load.vehicles?.[0];
+  const vehicleName = firstVehicle
+    ? `${firstVehicle.year || ""} ${firstVehicle.make || ""} ${firstVehicle.model || ""}`.trim()
+    : undefined;
+
+  const normalized = {
+    ...loadObj,
+    __docType: "load",
+    origin: `${load.pickupLocation?.city || ""}${load.pickupLocation?.state ? `, ${load.pickupLocation.state}` : ""}`,
+    destination: `${load.deliveryLocation?.city || ""}${load.deliveryLocation?.state ? `, ${load.deliveryLocation.state}` : ""}`,
+    trackingNumber: load.loadNumber,
+    requestedPickupDate: load.dates?.firstAvailable,
+    scheduledDelivery: load.dates?.deliveryDeadline,
+    trailerTypeRequired: load.trailerType,
+    vehicleCount: load.vehicles?.length || 0,
+    carrierPayAmount: loadObj.pricing?.carrierPayAmount,
+    estimatedRate: load.pricing?.estimatedRate,
+    miles: load.pricing?.miles,
+    vehicles: load.vehicles,
+    preservedQuoteData: vehicleName
+      ? { vehicleName, units: load.vehicles?.length }
+      : undefined,
+    myRequestStatus: myRequest?.status || null,
+    myRequestedAt: myRequest?.requestedAt || null,
+    rejectionReason: myRequest?.rejectionReason || null,
+  };
+
+  res.json(new ApiResponse(200, normalized, "Load details fetched"));
 });
 
 const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
@@ -1266,6 +1359,7 @@ const getDriverDashboardStats = asyncHandler(
     }, "Dashboard stats fetched"));
   });
 
+
 // POST /mark-picked-up — driver marks vehicle picked up at origin (Accepted → Picked Up)
 const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
@@ -1342,5 +1436,6 @@ export default {
   approveLoadRequest,
   rejectLoadRequest,
   getLoadRequests,
+  getLoadDetail,
   getDriverDashboardStats,
 };

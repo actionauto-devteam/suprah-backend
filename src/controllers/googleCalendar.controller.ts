@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import googleCalendarService from '../services/googleCalendar.service';
 import { ApiResponse } from '../utils/ApiResponse';
+import { ApiError } from '../utils/ApiError';
 import { IUser } from '../models/User.model';
 
 /**
@@ -69,9 +70,13 @@ const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
  * @access Private
  */
 const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req.user as IUser)._id.toString();
+  const user = req.user as IUser;
   const { appointmentId } = req.params;
-  await googleCalendarService.updateRSVPStatusFromGoogle(appointmentId, userId);
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(400, 'Organization context missing');
+  
+  const target = { type: 'org' as const, id: orgId };
+  await googleCalendarService.updateRSVPStatusFromGoogle(appointmentId, target);
   res.json(new ApiResponse(200, null, 'RSVP status synced successfully'));
 });
 
@@ -81,8 +86,11 @@ const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
  * @access Private
  */
 const syncEvents = asyncHandler(async (req: Request, res: Response) => {
-  const userId = (req.user as IUser)._id.toString();
-  const syncedAppointments = await googleCalendarService.syncAllEvents(userId);
+  const user = req.user as IUser;
+  const orgId = user.organizationId?.toString();
+  if (!orgId) throw new ApiError(400, 'Organization context missing');
+  
+  const syncedAppointments = await googleCalendarService.syncAllEvents(orgId, user._id.toString());
 
   res.json(
     new ApiResponse(
