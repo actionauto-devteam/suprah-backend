@@ -67,7 +67,17 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
 // ─── Get Payments ─────────────────────────────────────────────────────────────
 const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const { status, search, limit = '50', skip = '0' } = req.query;
+  const {
+    status,
+    search,
+    limit = '50',
+    skip = '0',
+    minAmount,
+    maxAmount,
+    fromDate,
+    toDate,
+    paymentMethod,
+  } = req.query;
 
   const filter: Record<string, unknown> = { organizationId: orgId };
   if (status && status !== 'all') filter.status = status;
@@ -83,6 +93,32 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
     ];
   }
 
+  if (minAmount || maxAmount) {
+    filter.amount = {} as Record<string, number>;
+    if (minAmount !== undefined && minAmount !== '') {
+      (filter.amount as Record<string, number>).$gte = Number(minAmount);
+    }
+    if (maxAmount !== undefined && maxAmount !== '') {
+      (filter.amount as Record<string, number>).$lte = Number(maxAmount);
+    }
+  }
+
+  if (fromDate || toDate) {
+    filter.createdAt = {} as Record<string, Date>;
+    if (fromDate) {
+      (filter.createdAt as Record<string, Date>).$gte = new Date(fromDate as string);
+    }
+    if (toDate) {
+      const endDate = new Date(toDate as string);
+      endDate.setHours(23, 59, 59, 999);
+      (filter.createdAt as Record<string, Date>).$lte = endDate;
+    }
+  }
+
+  if (paymentMethod) {
+    filter.paymentMethod = new RegExp(paymentMethod as string, 'i');
+  }
+
   const [payments, total] = await Promise.all([
     Payment.find(filter)
       .populate('quoteId', 'firstName lastName vehicleName')
@@ -95,7 +131,18 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
     Payment.countDocuments(filter),
   ]);
 
-  res.json(new ApiResponse(200, { payments, total }, 'Payments fetched successfully'));
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        payments,
+        total,
+        page: Math.floor(parseInt(skip as string) / Math.max(parseInt(limit as string) || 1, 1)) + 1,
+        limit: parseInt(limit as string),
+      },
+      'Payments fetched successfully',
+    ),
+  );
 });
 
 // ─── Get Pending Payments ─────────────────────────────────────────────────────
