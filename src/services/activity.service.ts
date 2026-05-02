@@ -61,7 +61,7 @@ const getOrganizationActivities = async (
   skip = 0
 ): Promise<any[]> => {
   const query: any = {};
-  
+
   if (organizationId) {
     query.organizationId = new mongoose.Types.ObjectId(organizationId);
   }

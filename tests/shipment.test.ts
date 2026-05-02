@@ -55,7 +55,7 @@ describe('Shipment API - Organization Isolation', () => {
 
         // Create dummy quotes for shipments
         const qA = await Quote.create({
-            firstName: 'A', lastName: 'A', email: 'ship_q1@a.com', phone: '1', 
+            firstName: 'A', lastName: 'A', email: 'ship_q1@a.com', phone: '1',
             organizationId: orgA._id.toString(),
             fromZip: '1', toZip: '2', fromAddress: '1', toAddress: '2', miles: 1, rate: 1,
             eta: { min: 1, max: 2 }, status: 'accepted', units: 1
@@ -63,7 +63,7 @@ describe('Shipment API - Organization Isolation', () => {
         quoteA_id = qA._id as mongoose.Types.ObjectId;
 
         const qB = await Quote.create({
-            firstName: 'B', lastName: 'B', email: 'ship_q2@b.com', phone: '2', 
+            firstName: 'B', lastName: 'B', email: 'ship_q2@b.com', phone: '2',
             organizationId: orgB._id.toString(),
             fromZip: '3', toZip: '4', fromAddress: '3', toAddress: '4', miles: 2, rate: 2,
             eta: { min: 2, max: 3 }, status: 'accepted', units: 1
@@ -76,7 +76,7 @@ describe('Shipment API - Organization Isolation', () => {
         await Organization.deleteMany({ _id: { $in: [orgA?._id, orgB?._id] } });
         await Quote.deleteMany({ _id: { $in: [quoteA_id, quoteB_id] } });
         await Shipment.deleteMany({ organizationId: { $in: [orgA?._id.toString(), orgB?._id.toString()] } });
-        
+
         if (mongoose.connection.db?.databaseName === 'actionauto_test') {
             await mongoose.disconnect();
         }
@@ -110,7 +110,7 @@ describe('Shipment API - Organization Isolation', () => {
 
     it('should assign correct organizationId when creating a new shipment', async () => {
         const freshQ = await Quote.create({
-            firstName: 'New', lastName: 'Q', email: 'ship_new@q.com', phone: '5', 
+            firstName: 'New', lastName: 'Q', email: 'ship_new@q.com', phone: '5',
             organizationId: orgA._id.toString(),
             fromZip: '1', toZip: '2', fromAddress: '1', toAddress: '2', miles: 1, rate: 1,
             eta: { min: 1, max: 2 }, status: 'accepted', units: 1

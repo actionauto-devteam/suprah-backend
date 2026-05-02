@@ -83,7 +83,7 @@ const handleCallback = asyncHandler(async (req: Request, res: Response) => {
         // --- NEW: Set up Calendar Webhook (non-critical) ---
         try {
             const channelId = uuidv4();
-            await googleCalendarService.setupWebhook(orgId, channelId);
+            await googleCalendarService.setupWebhook({ type: 'org', id: orgId }, channelId);
             console.log(`[OrgConfig] Calendar webhook set up for org ${orgId}`);
         } catch (webhookErr: any) {
             console.warn(`[OrgConfig] Webhook setup fail (ignorable): ${webhookErr.message}`);

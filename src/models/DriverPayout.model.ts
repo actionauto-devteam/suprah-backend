@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IDriverPayout extends Document {
   organizationId: string;
-  shipmentId: mongoose.Types.ObjectId;
+  loadId: mongoose.Types.ObjectId;
   driverId: mongoose.Types.ObjectId;
   driverName: string;
   driverEmail: string;
@@ -27,9 +27,9 @@ const DriverPayoutSchema: Schema<IDriverPayout> = new Schema(
       required: true,
       index: true,
     },
-    shipmentId: {
+    loadId: {
       type: Schema.Types.ObjectId,
-      ref: 'Shipment',
+      ref: 'Load',
       required: true,
     },
     driverId: {

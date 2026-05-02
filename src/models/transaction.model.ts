@@ -15,8 +15,9 @@ export interface ITransaction extends Document {
     };
 
     referralId?: mongoose.Types.ObjectId; // Link back to the generating referral if applicable
+    quoteId?: mongoose.Types.ObjectId;
+    loadId?: mongoose.Types.ObjectId;
     paymentId?: mongoose.Types.ObjectId; // Link to the specific payment that triggered this
-    shipmentId?: mongoose.Types.ObjectId; // Link to the specific shipment linked to this
     createdAt: Date;
     updatedAt: Date;
 }
@@ -68,14 +69,9 @@ const TransactionSchema = new Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Referral',
         },
-        paymentId: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: 'Payment',
-        },
-        shipmentId: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: 'Shipment',
-        },
+        quoteId: { type: Schema.Types.ObjectId, ref: 'Quote' },
+        loadId: { type: Schema.Types.ObjectId, ref: 'Load' },
+        paymentId: { type: Schema.Types.ObjectId, ref: 'Payment' },
     },
     {
         timestamps: true,

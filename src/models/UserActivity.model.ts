@@ -10,9 +10,9 @@ export type ActivityType =
   | 'quote_created'
   | 'quote_updated'
   | 'quote_deleted'
-  | 'shipment_created'
-  | 'shipment_updated'
-  | 'shipment_deleted'
+  | 'load_created'
+  | 'load_updated'
+  | 'load_deleted'
   | 'appointment_created'
   | 'appointment_updated'
   | 'appointment_cancelled'
@@ -24,6 +24,7 @@ export type ActivityType =
   // Driver Actions
   | 'load_posted'
   | 'load_assigned'
+  | 'load_updated'
   | 'load_delivered'
   | 'compliance_uploaded'
   | 'doc_verified'
@@ -76,9 +77,9 @@ const UserActivitySchema = new Schema(
         'quote_created',
         'quote_updated',
         'quote_deleted',
-        'shipment_created',
-        'shipment_updated',
-        'shipment_deleted',
+        'load_created',
+        'load_updated',
+        'load_deleted',
         'appointment_created',
         'appointment_updated',
         'appointment_cancelled',
@@ -89,6 +90,7 @@ const UserActivitySchema = new Schema(
         'avatar_updated',
         'load_posted',
         'load_assigned',
+        'load_updated',
         'load_delivered',
         'compliance_uploaded',
         'doc_verified',

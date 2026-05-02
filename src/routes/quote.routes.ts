@@ -24,4 +24,8 @@ router
     .route('/:id/status')
     .patch(quoteController.updateQuoteStatus);
 
+router
+    .route('/:id/convert-to-load')
+    .post(quoteController.convertToLoad);
+
 export default router;

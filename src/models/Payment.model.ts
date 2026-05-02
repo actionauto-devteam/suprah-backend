@@ -22,6 +22,7 @@ export interface IPayment extends Document {
 
   quoteId?: mongoose.Types.ObjectId;
   shipmentId?: mongoose.Types.ObjectId;
+  loadId?: mongoose.Types.ObjectId;
   invoiceNumber?: string;
 
   failureReason?: string;
@@ -65,6 +66,7 @@ const PaymentSchema: Schema<IPayment> = new Schema(
     receiptUrl: { type: String, trim: true },
     quoteId: { type: Schema.Types.ObjectId, ref: 'Quote' },
     shipmentId: { type: Schema.Types.ObjectId, ref: 'Shipment' },
+    loadId: { type: Schema.Types.ObjectId, ref: 'Load' },
     invoiceNumber: { type: String, trim: true, index: true },
     failureReason: { type: String, trim: true },
     notes: { type: String, trim: true },

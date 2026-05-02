@@ -44,7 +44,7 @@ describe('Dashboard Routes - Organization Isolation', () => {
         await Organization.deleteMany({ _id: testOrg?._id });
         await Vehicle.deleteMany({ vin: 'VIN-DASH-123' });
         await Quote.deleteMany({ organizationId: testOrg?._id.toString() });
-        
+
         if (mongoose.connection.db?.databaseName === 'actionauto_test') {
             await mongoose.disconnect();
         }
@@ -53,7 +53,7 @@ describe('Dashboard Routes - Organization Isolation', () => {
     test('GET /api/dashboard/metrics should return isolated metrics', async () => {
         // Seed some quotes for our org and another org
         await Quote.create({
-            firstName: 'My', lastName: 'Quote', email: 'dash_my@q.com', phone: '1', 
+            firstName: 'My', lastName: 'Quote', email: 'dash_my@q.com', phone: '1',
             organizationId: testOrg._id.toString(),
             fromZip: '1', toZip: '2', fromAddress: '1', toAddress: '2', miles: 1, rate: 500,
             eta: { min: 1, max: 2 }, status: 'booked',
@@ -61,7 +61,7 @@ describe('Dashboard Routes - Organization Isolation', () => {
         });
 
         await Quote.create({
-            firstName: 'Other', lastName: 'Quote', email: 'dash_other@q.com', phone: '2', 
+            firstName: 'Other', lastName: 'Quote', email: 'dash_other@q.com', phone: '2',
             organizationId: 'other_org_id',
             fromZip: '3', toZip: '4', fromAddress: '3', toAddress: '4', miles: 2, rate: 1000,
             eta: { min: 2, max: 3 }, status: 'booked',

@@ -252,7 +252,7 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
 
   // SYNC: Tell other devices to dismiss the push notification
   const preferenceKey = PREFERENCE_MAP[notification.type] || 'general';
-  PushService.dismiss(userId, preferenceKey).catch(err => 
+  PushService.dismiss(userId, preferenceKey).catch(err =>
     logger.error(err, '[NotificationService] Sync dismiss failed')
   );
 

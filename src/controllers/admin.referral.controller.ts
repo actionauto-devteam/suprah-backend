@@ -5,7 +5,7 @@ import User from '../models/User.model';
 import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
 import AuditLog from '../models/AuditLog.model';
-import Shipment from '../models/Shipment.model';
+import Load from '../models/Load.model';
 import Payment from '../models/Payment.model';
 import { safeCreateNotification } from '../utils/safeNotification';
 import mongoose from 'mongoose';
@@ -193,10 +193,10 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
             }
         }
 
-        // Fetch linked Shipment and Payment for "Full Receipt" verification
-        let shipmentInfo = null;
-        if (e.shipmentId) {
-            shipmentInfo = await Shipment.findById(e.shipmentId).select('trackingNumber status origin destination').lean();
+        // Fetch linked Load and Payment for "Full Receipt" verification
+        let loadInfo = null;
+        if (e.loadId) {
+            loadInfo = await Load.findById(e.loadId).select('trackingNumber status origin destination').lean();
         }
 
         let paymentInfo = null;
@@ -204,7 +204,7 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
             paymentInfo = await Payment.findById(e.paymentId).select('amount status stripeChargeId receiptUrl createdAt invoiceNumber').lean();
         }
 
-        return { ...e, referralInfo, shipmentInfo, paymentInfo };
+        return { ...e, referralInfo, loadInfo, paymentInfo };
     }));
 
     res.json(new ApiResponse(200, {

@@ -142,4 +142,4 @@ export const emitToUser = (io: Server, userId: string, event: string, data: any)
 // Helper function to emit to conversation
 export const emitToConversation = (io: Server, conversationId: string, event: string, data: any) => {
   io.to(`conversation:${conversationId}`).emit(event, data);
-};
+};

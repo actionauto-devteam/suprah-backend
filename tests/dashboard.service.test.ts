@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
 import { DashboardService } from '../dashboard.service';
-import Shipment from '../../models/Shipment.model';
+import Load from '../../models/Load.model';
 import DriverProfile from '../../models/DriverProfile.model';
 import AnalyticsAggregate from '../../models/AnalyticsAggregate.model';
 
 // Mock the models
-jest.mock('../../models/Shipment.model');
+jest.mock('../../models/Load.model');
 jest.mock('../../models/DriverProfile.model');
 jest.mock('../../models/AnalyticsAggregate.model');
 jest.mock('../../models/Quote.model');
@@ -25,27 +25,23 @@ describe('DashboardService Intelligence Metrics', () => {
   });
 
   describe('getLogisticsStatus', () => {
-    it('should calculate net margin for delivered shipments', async () => {
-      const mockShipments = [
-        {
-          status: 'Delivered',
-          preservedQuoteData: { rate: 1500 },
-          carrierPayAmount: 1200
+    it('should calculate net margin for delivered loads', async () => {
+      const mockLoads = [
+        { 
+          status: 'Delivered', 
+          pricing: { totalRate: 1500, carrierPayAmount: 1200 }
         },
-        {
-          status: 'Delivered',
-          preservedQuoteData: { rate: 2000 },
-          carrierPayAmount: 1600
+        { 
+          status: 'Delivered', 
+          pricing: { totalRate: 2000, carrierPayAmount: 1600 }
         }
       ];
 
-      (Shipment.find as jest.Mock).mockResolvedValue(mockShipments);
+      const Load = require('../../models/Load.model').default;
+      (Load.aggregate as jest.Mock).mockResolvedValue([{ _id: null, totalMargin: 700 }]);
 
-      // We'll call a private method or the main metrics method
-      // For now, let's assume we'll implement these as static methods
       const margin = await (DashboardService as any).getLogisticsMargin(orgId);
-
-      // (1500-1200) + (2000-1600) = 300 + 400 = 700
+      
       expect(margin).toBe(700);
     });
   });

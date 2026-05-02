@@ -22,7 +22,7 @@ describe('Referral Automation Integration Tests', () => {
     const referrerEmail = 'referrer.automation.test@example.com';
     const customerEmail = 'customer.automation.test@example.com';
     const adminEmail = 'admin.automation.test@example.com';
-    
+
     let referrerCode = '';
     let testOrg: any;
     let referrerToken: string;
@@ -122,7 +122,7 @@ describe('Referral Automation Integration Tests', () => {
 
     test('Phase 2: Automated $100 Payout on Manual Payment Success', async () => {
         const customer = await User.findOne({ email: customerEmail });
-        
+
         // Create a pending payment for the customer linked to a quote
         const payment = await Payment.create({
             organizationId: testOrg._id.toString(),

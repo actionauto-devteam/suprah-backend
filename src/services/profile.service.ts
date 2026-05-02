@@ -52,14 +52,14 @@ const getProfile = async (userId: string) => {
 
   // Calculate account stats
   const Quote = (await import('../models/Quote.model')).default;
-  const Shipment = (await import('../models/Shipment.model')).default;
+  const Load = (await import('../models/Load.model')).default;
   const Appointment = (await import('../models/Appointment.model')).default;
 
   const orgId = user.organizationId?.toString();
 
-  const [totalQuotes, totalShipments, totalAppointments] = await Promise.all([
+  const [totalQuotes, totalLoads, totalAppointments] = await Promise.all([
     Quote.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
-    Shipment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
+    Load.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
     Appointment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
   ]);
 
@@ -82,7 +82,7 @@ const getProfile = async (userId: string) => {
     lastActive: user.lastActive,
     memberSince: user.createdAt,
     totalQuotes,
-    totalShipments,
+    totalLoads,
     totalAppointments,
   };
 
@@ -273,43 +273,42 @@ const removeAvatar = async (userId: string, orgId?: string) => {
  * Get driver-specific stats (deliveries, on-time rate, etc.)
  */
 const getDriverStats = async (userId: string) => {
-  const Shipment = (await import('../models/Shipment.model')).default;
+  const Load = (await import('../models/Load.model')).default;
 
   // Drivers are global, but we scope stats to the current requesting organization if applicable
   // If we want global stats, we'd omit organizationId, but for multi-tenancy, orgs should see what the driver did for THEM.
   // Note: This function might need an orgId parameter passed from the controller.
   // For now, consistent with other services, we'll look for or require it.
 
-  // Total deliveries assigned to this driver
-  const totalAssigned = await Shipment.countDocuments({ assignedDriverId: userId }).catch(() => 0);
+   // Total deliveries assigned to this driver
+  const totalAssigned = await Load.countDocuments({ assignedDriverId: userId }).catch(() => 0);
 
   // Completed deliveries
-  const deliveriesCompleted = await Shipment.countDocuments({
+  const deliveriesCompleted = await Load.countDocuments({
     assignedDriverId: userId,
     status: 'Delivered'
   }).catch(() => 0);
 
   // Active deliveries (in transit)
-  const activeDeliveries = await Shipment.countDocuments({
+  const activeDeliveries = await Load.countDocuments({
     assignedDriverId: userId,
-    status: { $in: ['Dispatched', 'In Transit', 'Picked Up'] }
+    status: { $in: ['Assigned', 'Accepted', 'Picked Up', 'In-Transit'] }
   }).catch(() => 0);
 
   // Calculate on-time rate from delivered shipments
-  // A delivery is "on-time" if it was delivered before or on the estimated delivery date
   let onTimeRate = 0;
   if (deliveriesCompleted > 0) {
-    const onTimeCount = await Shipment.countDocuments({
+    const onTimeCount = await Load.countDocuments({
       assignedDriverId: userId,
       status: 'Delivered',
       $expr: {
         $or: [
-          { $eq: ['$dates.estimatedDelivery', null] }, // No estimate = on-time by default
-          { $lte: ['$dates.delivered', '$dates.estimatedDelivery'] },
+          { $eq: ['$dates.delivery', null] }, 
+          { $lte: ['$deliveredAt', '$dates.delivery'] },
         ],
       },
-    }).catch(() => deliveriesCompleted); // Default to all on-time if query fails
-    onTimeRate = Math.round((onTimeCount / deliveriesCompleted) * 1000) / 10;
+    }).catch(() => deliveriesCompleted);
+    onTimeRate = Math.round((onTimeCount / deliveriesCompleted) * 100) ;
   }
 
   return {
@@ -354,9 +353,9 @@ const updateNotificationPreferences = async (
     quoteCreated: boolean;
     quoteUpdated: boolean;
     quoteDeleted: boolean;
-    shipmentCreated: boolean;
-    shipmentUpdated: boolean;
-    shipmentDeleted: boolean;
+    loadCreated: boolean;
+    loadUpdated: boolean;
+    loadDeleted: boolean;
     passwordChanged: boolean;
     emailChanged: boolean;
     profileUpdated: boolean;

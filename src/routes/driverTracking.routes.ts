@@ -17,6 +17,7 @@ router.post("/start-route", driverTrackingController.startRoute);
 router.get("/available-loads", driverTrackingController.getAvailableLoads);
 router.post("/request-load", driverTrackingController.requestLoad);
 router.get("/my-requests", driverTrackingController.getMyRequests);
+router.get("/loads/:loadId", driverTrackingController.getLoadDetail);
 router.get(
   "/dashboard-stats",
   driverTrackingController.getDriverDashboardStats,

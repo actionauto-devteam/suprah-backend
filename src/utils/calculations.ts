@@ -1,5 +1,6 @@
 import axios from "axios";
 import logger from "./logger";
+import { cacheService } from "../services/cache.service";
 
 interface Coordinates {
     lat: number;
@@ -17,6 +18,12 @@ interface ETARange {
  * Falls back to Nominatim if zippopotam returns no result.
  */
 export async function getCoordinatesFromZip(zipCode: string): Promise<Coordinates | null> {
+    const cacheKey = `zip:coords:${zipCode}`;
+    const cached = await cacheService.get<Coordinates>(cacheKey);
+    if (cached) return cached;
+
+    let result: Coordinates | null = null;
+
     // Primary: zippopotam.us — reliable for all US ZIP codes
     try {
         const res = await axios.get(
@@ -25,7 +32,7 @@ export async function getCoordinatesFromZip(zipCode: string): Promise<Coordinate
         );
         const place = res.data?.places?.[0];
         if (place) {
-            return {
+            result = {
                 lat: parseFloat(place.latitude),
                 lon: parseFloat(place.longitude),
             };
@@ -35,25 +42,28 @@ export async function getCoordinatesFromZip(zipCode: string): Promise<Coordinate
     }
 
     // Fallback: Nominatim
-    try {
-        const res = await axios.get(
-            `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=US&format=json&limit=1`,
-            {
-                headers: { "User-Agent": "VehicleShippingApp/1.0" },
-                timeout: 8000,
+    if (!result) {
+        try {
+            const res = await axios.get(
+                `https://nominatim.openstreetmap.org/search?postalcode=${zipCode}&country=US&format=json&limit=1`,
+                {
+                    headers: { "User-Agent": "VehicleShippingApp/1.0" },
+                    timeout: 8000,
+                }
+            );
+            if (res.data?.length > 0) {
+                result = {
+                    lat: parseFloat(res.data[0].lat),
+                    lon: parseFloat(res.data[0].lon),
+                };
             }
-        );
-        if (res.data?.length > 0) {
-            return {
-                lat: parseFloat(res.data[0].lat),
-                lon: parseFloat(res.data[0].lon),
-            };
+        } catch (error) {
+            logger.error({ error, zipCode }, "Error fetching coordinates for ZIP");
         }
-    } catch (error) {
-        logger.error({ error, zipCode }, "Error fetching coordinates for ZIP");
     }
 
-    return null;
+    if (result) await cacheService.set(cacheKey, result, 86400 * 7); // 7 days
+    return result;
 }
 
 /** Fetches coordinates for two ZIPs in parallel — zippopotam.us has no rate limits. */

@@ -2,7 +2,6 @@ import express from "express";
 import vehicleRoute from "./vehicle.route";
 import dashboardRoute from "./dashboard.route";
 import syncRoute from "./sync.route";
-import shipmentRoute from "./shipment.routes";
 import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
 import profileRoute from "./profile.route";
@@ -39,6 +38,7 @@ import dayPulseRoute from "./dayPulse.routes";
 import feedRoute from "./feed.route";
 import feedReactionRoute from "./feedReaction.routes";
 import feedCommentRoute from "./feedComment.routes";
+import crmCalendarRoute from "./crmCalendar.routes";
 
 const router = express.Router();
 
@@ -54,10 +54,6 @@ const defaultRoutes = [
   {
     path: "/sync",
     route: syncRoute,
-  },
-  {
-    path: "/shipments",
-    route: shipmentRoute,
   },
   {
     path: "/quotes",
@@ -202,6 +198,10 @@ const defaultRoutes = [
   {
     path: "/driver-profile",
     route: driverProfileRoute,
+  },
+  {
+    path: "/crm/calendar",
+    route: crmCalendarRoute,
   },
 ];
 
