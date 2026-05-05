@@ -3,9 +3,8 @@ name: Build and Deploy to VPS
 on:
   push:
     branches:
-      - main  # Adjust this if your main branch is named differently
+      - main
 
-# Prevent multiple deployments from running simultaneously
 concurrency:
   group: production_deploy
   cancel-in-progress: true
@@ -13,6 +12,7 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -42,6 +42,7 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -54,6 +55,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "deploy/*"
           target: "/opt/actionauto/deploy/"
+          timeout: 30s
+          command_timeout: 2m
 
       - name: Execute deployment commands via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -61,20 +64,23 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 10m
           script: |
+            set -e
+
             cd /opt/actionauto/deploy
-            
+
             # Pull latest images for all services defined in prod manifest
             sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
-            
+
             # Restart the entire stack atomically
             sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
-            
+
             # Force Nginx to re-resolve the API's internal IP (Stale IP Prevention)
             sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
-            
+
             # Cleanup old images to prevent EBS volume saturation
             sudo docker image prune -a -f
-            
+
             # Verification
             sudo docker ps
