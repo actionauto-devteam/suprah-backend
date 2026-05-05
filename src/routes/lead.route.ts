@@ -14,7 +14,7 @@ import {
   getThreadMessages,
   getCentralSyncStatus,
 } from '../controllers/lead.controller';
-import auth from '../middleware/auth.middleware';
+import crmAuth from '../middleware/crmAuth.middleware';
 import { adfLimiter, syncLimiter, replyLimiter } from '../middleware/rate-limit.middleware';
 import { validateAdfSignature } from '../middleware/adfValidation.middleware';
 
@@ -29,7 +29,7 @@ router.post('/adf', adfLimiter, validateAdfSignature, receiveADF);
 // Leads are already scoped to the individual user via createdBy: userId.
 // requireOrg would block users without an organizationId from accessing
 // their own leads, which is incorrect behaviour.
-router.use(auth());
+router.use(crmAuth());
 
 // ── Static routes BEFORE dynamic :id routes ──────────────────────────────────
 

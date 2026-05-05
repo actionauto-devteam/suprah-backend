@@ -16,6 +16,7 @@ router.get('/appointments', crmCalendarController.getAppointments);
 router.post('/appointments', crmCalendarController.createAppointment);
 router.put('/appointments/:id', crmCalendarController.updateAppointment);
 router.post('/appointments/:id/cancel', crmCalendarController.cancelAppointment);
+router.post('/appointments/:id/status', crmCalendarController.updateStatus);
 router.delete('/appointments/:id', crmCalendarController.deleteAppointment);
 router.post('/sync', crmCalendarController.sync);
 router.post('/disconnect', crmCalendarController.disconnect);

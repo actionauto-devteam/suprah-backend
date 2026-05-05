@@ -227,13 +227,16 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
 
 const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const { shipmentId, driverId } = req.body as {
+  const { shipmentId, loadId, driverId } = req.body as {
     shipmentId?: string;
+    loadId?: string;
     driverId?: string;
   };
 
-  if (!shipmentId || !driverId) {
-    throw new ApiError(400, "Shipment ID and driver ID are required");
+  const targetLoadId = loadId || shipmentId;
+
+  if (!targetLoadId || !driverId) {
+    throw new ApiError(400, "Load ID and driver ID are required");
   }
 
   const driver = await User.findById(driverId);
@@ -253,7 +256,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Prevent double-assignment: reject if already assigned and not in an unassigned state
-  const load = await Load.findOne({ _id: shipmentId, organizationId: orgId });
+  const load = await Load.findOne({ _id: targetLoadId, organizationId: orgId });
   if (load) {
     const alreadyAssigned = load.assignedDriverId;
     const unassignableStatuses = ["Posted", "Draft"];
@@ -263,7 +266,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const updatedLoad = await Load.findOneAndUpdate(
-    { _id: shipmentId, organizationId: orgId },
+    { _id: targetLoadId, organizationId: orgId },
     {
       $set: {
         assignedDriverId: driver._id,
@@ -448,7 +451,9 @@ const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
 
 const removeLoad = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const { shipmentId: loadId } = req.body as { shipmentId?: string };
+  const { shipmentId, loadId: bLoadId } = req.body as { shipmentId?: string; loadId?: string };
+  const loadId = bLoadId || shipmentId;
+
   if (!loadId) throw new ApiError(400, "Load ID is required");
 
   const load = await Load.findOne({ _id: loadId, organizationId: orgId });
@@ -557,10 +562,12 @@ const dropLoad = asyncHandler(async (req: Request, res: Response) => {
 
 const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const { shipmentId: loadId, newDriverId } = req.body as {
+  const { shipmentId, loadId: bLoadId, newDriverId } = req.body as {
     shipmentId?: string;
+    loadId?: string;
     newDriverId?: string;
   };
+  const loadId = bLoadId || shipmentId;
   if (!loadId || !newDriverId)
     throw new ApiError(400, "Load ID and new driver ID are required");
 

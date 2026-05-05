@@ -17,6 +17,11 @@ interface EmailOptions {
     organizationId?: string; // Multi-tenant support
 }
 
+interface IEmailOrganizer {
+    name: string;
+    email: string;
+}
+
 class EmailService {
     private transporter: nodemailer.Transporter;
 
@@ -163,7 +168,7 @@ class EmailService {
      */
     private generateICS(
         appointment: IAppointment,
-        organizer: IUser,
+        organizer: IEmailOrganizer,
         guestEmail: string,
         method: 'REQUEST' | 'CANCEL' = 'REQUEST'
     ): any {
@@ -237,7 +242,7 @@ class EmailService {
      */
     async sendAppointmentInvitation(
         appointment: IAppointment,
-        organizer: IUser,
+        organizer: IEmailOrganizer,
         guestEmail: string,
         token: string,
         organizationId?: string
@@ -504,7 +509,7 @@ Questions? Contact ${organizer.email}
      */
     async sendAppointmentUpdate(
         appointment: IAppointment,
-        organizer: IUser,
+        organizer: IEmailOrganizer,
         guestEmail: string,
         organizationId?: string
     ): Promise<void> {
@@ -643,7 +648,7 @@ Questions? Contact ${organizer.email}
      */
     async sendAppointmentCancellation(
         appointment: IAppointment,
-        organizer: IUser,
+        organizer: IEmailOrganizer,
         guestEmail: string,
         organizationId?: string
     ): Promise<void> {

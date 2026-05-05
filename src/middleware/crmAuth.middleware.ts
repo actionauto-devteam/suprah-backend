@@ -64,6 +64,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       if (!crmUser.isActive) throw new ApiError(403, 'CRM account has been deactivated');
 
       req.crmUser = crmUser;
+      req.orgId = crmUser.organizationId.toString();
       return next();
     }
 
@@ -112,6 +113,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       }) as ICrmUser;
 
       req.crmUser = syntheticCrmUser;
+      req.orgId = payload.orgId;
       return next();
     }
 

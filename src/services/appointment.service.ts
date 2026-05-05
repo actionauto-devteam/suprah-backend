@@ -31,14 +31,65 @@ interface CreateAppointmentData {
   vehicleId?: string;
   quoteId?: string;
   shipmentId?: string;
+  leadId?: string;
   meetingLink?: string;
   notes?: string;
+  outcomeNotes?: string;
 }
 
 const resolveCalendarTarget = async (userId: string, orgId: string) => {
   const isCrmUser = await CrmUser.exists({ _id: userId });
   if (isCrmUser) return { type: 'crmUser' as const, id: userId };
   return { type: 'org' as const, id: orgId };
+};
+
+/**
+ * Senior Fix: Resolve organizer identity from either User or CrmUser collections
+ */
+const resolveOrganizer = async (userId: string) => {
+  // 1. Try standard User
+  const user = await User.findById(userId).select('name fullName email');
+  if (user) return { name: user.name || (user as any).fullName, email: user.email };
+
+  // 2. Try CRM User
+  const crmUser = await CrmUser.findById(userId).select('fullName email');
+  if (crmUser) return { name: crmUser.fullName, email: crmUser.email };
+
+  return null;
+};
+
+/**
+ * Checks for overlapping appointments for a user
+ * logic: (StartA < EndB) and (EndA > StartB)
+ */
+const checkUserAvailability = async (userId: string, startTime: Date, endTime: Date, excludeAppointmentId?: string) => {
+  const filter: any = {
+    participants: new mongoose.Types.ObjectId(userId),
+    status: { $ne: 'cancelled' },
+    transparency: { $ne: 'transparent' }, // Ignore "Free" events
+    $and: [
+      { startTime: { $lt: endTime } },
+      { endTime: { $gt: startTime } }
+    ],
+    // SENIOR FIX: All-Day events (spanning 23+ hours) are typically informational markers 
+    // and should not block granular scheduling in the grid.
+    $expr: {
+      $lt: [
+        { $subtract: ["$endTime", "$startTime"] },
+        23 * 60 * 60 * 1000 // 23 hours in milliseconds
+      ]
+    }
+  };
+
+  if (excludeAppointmentId) {
+    filter._id = { $ne: new mongoose.Types.ObjectId(excludeAppointmentId) };
+  }
+
+  const conflict = await Appointment.findOne(filter);
+  if (conflict) {
+    const timeStr = `${conflict.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${conflict.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    throw new ApiError(409, `Double-Booking Conflict: You already have "${conflict.title}" scheduled for ${timeStr}.`);
+  }
 };
 
 const createAppointment = async (userId: string, orgId: string, data: CreateAppointmentData) => {
@@ -48,6 +99,9 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   if (start >= end) {
     throw new ApiError(400, 'End time must be after start time');
   }
+
+  // Double-Booking Prevention
+  await checkUserAvailability(userId, start, end);
 
   if (start < new Date()) {
     throw new ApiError(400, 'Cannot schedule appointments in the past');
@@ -76,18 +130,24 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     };
   }
 
+  const isCrmUser = await CrmUser.exists({ _id: userId });
+  const identityModel = isCrmUser ? 'CrmUser' : 'User';
+
   const appointment = await Appointment.create({
     ...data,
     createdBy: userId,
+    createdByModel: identityModel,
+    participantModel: identityModel,
     organizationId: orgId,
     participants,
     guestEmails,
     customerBooking,
+    leadId: data.leadId ? new mongoose.Types.ObjectId(data.leadId) : undefined,
     status: 'scheduled',
     entryType: data.entryType || 'appointment'
   });
 
-  const organizer = await User.findById(userId).select('name email');
+  const organizer = await resolveOrganizer(userId);
 
   if (!organizer) {
     throw new ApiError(404, 'Organizer not found');
@@ -101,6 +161,13 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     console.log(`Synced to ${target.type}'s Google Calendar`);
   } catch (error) {
     console.error('Failed to sync to Google Calendar:', error);
+  }
+
+  // Link to lead if provided and update status
+  if (data.leadId) {
+    await Lead.findByIdAndUpdate(data.leadId, {
+      status: 'Appointment Set'
+    });
   }
 
   // Send email invitations to customer bookings
@@ -199,7 +266,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     }
   }
 
-  return appointment.populate('participants createdBy', 'name email avatar');
+  return appointment.populate('participants createdBy', 'name fullName email avatar');
 };
 
 // =============================================================================
@@ -303,10 +370,10 @@ const updateAppointment = async (
   appointmentId: string,
   orgId: string,
   userId: string,
-  updateData: Partial<CreateAppointmentData & { status: string }>
+  updateData: Partial<CreateAppointmentData & { status: string; outcomeNotes: string }>
 ) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
-    .populate('createdBy', 'name email');
+    .populate('createdBy', 'name fullName email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
@@ -324,22 +391,27 @@ const updateAppointment = async (
   }
 
   Object.assign(appointment, updateData);
+  console.log(`[AppointmentService] Saving appointment ${appointmentId}...`);
   await appointment.save();
+  console.log(`[AppointmentService] Saved. Starting sync...`);
 
   try {
     const target = await resolveCalendarTarget(userId, orgId);
+    console.log(`[AppointmentService] Syncing to Google Calendar for ${target.type} ${target.id}...`);
     await googleCalendarService.syncAppointmentToGoogleCalendar(appointment, target);
-  } catch (error) {
-    console.error('Failed to sync update to Google Calendar:', error);
+  } catch (error: any) {
+    console.error('[AppointmentService] Failed to sync update to Google Calendar:', error.message);
   }
 
+  console.log(`[AppointmentService] Notifying participants...`);
   const participantIds = appointment.participants
     .map(p => p.toString())
     .filter(p => p !== userId);
 
   await Promise.all(
-    participantIds.map(participantId =>
-      notificationService.createNotification({
+    participantIds.map(participantId => {
+      console.log(`[AppointmentService] Notifying participant ${participantId}...`);
+      return notificationService.createNotification({
         userId: participantId,
         organizationId: appointment.organizationId,
         type: 'appointment_updated',
@@ -351,13 +423,15 @@ const updateAppointment = async (
           entryType: appointment.entryType,
           updatedBy: userId
         }
-      })
-    )
+      });
+    })
   );
 
+  console.log(`[AppointmentService] Sending emails...`);
   if (appointment.guestEmails.length > 0) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
+      console.log(`[AppointmentService] Sending update to ${appointment.guestEmails.length} guests...`);
       await Promise.allSettled(
         appointment.guestEmails.map(guest =>
           emailService.sendAppointmentUpdate(appointment, organizer, guest.email)
@@ -368,9 +442,10 @@ const updateAppointment = async (
 
   // Send update email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {
+        console.log(`[AppointmentService] Sending update to customer ${appointment.customerBooking.email}...`);
         await emailService.sendAppointmentUpdate(appointment, organizer, appointment.customerBooking.email);
         console.log(`✅ Sent customer booking update to ${appointment.customerBooking.email}`);
       } catch (error) {
@@ -379,12 +454,13 @@ const updateAppointment = async (
     }
   }
 
+  console.log(`[AppointmentService] Update complete.`);
   return appointment.populate('participants createdBy', 'name email avatar');
 };
 
 const cancelAppointment = async (appointmentId: string, orgId: string, userId: string) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
-    .populate('createdBy', 'name email');
+    .populate('createdBy', 'name fullName email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
@@ -432,7 +508,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
   );
 
   if (appointment.guestEmails.length > 0) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       await Promise.allSettled(
         appointment.guestEmails.map(guest =>
@@ -444,7 +520,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
 
   // Send cancellation email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {
         await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
@@ -460,7 +536,7 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
 
 const deleteAppointment = async (appointmentId: string, orgId: string, userId: string) => {
   const appointment = await Appointment.findOne({ _id: appointmentId, organizationId: orgId })
-    .populate('createdBy', 'name email');
+    .populate('createdBy', 'name fullName email');
 
   if (!appointment) {
     throw new ApiError(404, 'Appointment not found');
@@ -470,21 +546,25 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     throw new ApiError(403, 'Only the creator can delete this appointment');
   }
 
+  console.log(`[AppointmentService] Deleting appointment ${appointmentId}...`);
   if (appointment.googleCalendarEventId) {
     try {
       const target = await resolveCalendarTarget(appointment.createdBy._id.toString(), orgId);
+      console.log(`[AppointmentService] Deleting from Google Calendar for ${target.type} ${target.id}...`);
       await googleCalendarService.deleteFromGoogleCalendar(
         appointment.googleCalendarEventId,
         target
       );
-    } catch (error) {
-      console.error('Failed to delete from Google Calendar:', error);
+    } catch (error: any) {
+      console.error('[AppointmentService] Failed to delete from Google Calendar:', error.message);
     }
   }
 
+  console.log(`[AppointmentService] Sending cancellation emails...`);
   if (appointment.guestEmails.length > 0) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
+      console.log(`[AppointmentService] Notifying ${appointment.guestEmails.length} guests...`);
       await Promise.allSettled(
         appointment.guestEmails.map(guest =>
           emailService.sendAppointmentCancellation(appointment, organizer, guest.email)
@@ -495,9 +575,10 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
 
   // Send cancellation email to customer booking
   if (appointment.customerBooking?.isCustomerBooking) {
-    const organizer = await User.findById(appointment.createdBy).select('name email');
+    const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       try {
+        console.log(`[AppointmentService] Sending cancellation to customer ${appointment.customerBooking.email}...`);
         await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
         console.log(`✅ Sent customer booking cancellation to ${appointment.customerBooking.email}`);
       } catch (error) {
@@ -506,7 +587,9 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
     }
   }
 
+  console.log(`[AppointmentService] Removing from database...`);
   await Appointment.findByIdAndDelete(appointmentId);
+  console.log(`[AppointmentService] Delete complete.`);
 };
 
 const getAppointmentById = async (appointmentId: string, orgId: string, userId: string) => {
@@ -563,7 +646,8 @@ const handleGuestResponse = async (
 
     if (status === 'accepted' && googleAccessToken) {
       try {
-        const target = await resolveCalendarTarget(appointment.createdBy.toString(), appointment.organizationId.toString());
+        const organizerId = (appointment.createdBy as any)._id?.toString() || appointment.createdBy.toString();
+        const target = await resolveCalendarTarget(organizerId, appointment.organizationId.toString());
         const eventId = await googleCalendarService.syncAppointmentToGoogleCalendar(
           appointment,
           target
@@ -578,9 +662,10 @@ const handleGuestResponse = async (
 
     await appointment.save();
 
+    const organizerId = (appointment.createdBy as any)._id?.toString() || appointment.createdBy.toString();
     await notificationService.createNotification({
-      userId: appointment.createdBy.toString(),
-      organizationId: appointment.organizationId,
+      userId: organizerId,
+      organizationId: appointment.organizationId.toString(),
       type: 'guest_response',
       title: 'Guest Response',
       message: `${decoded.email} has ${status} your invitation to "${appointment.title}"`,
@@ -656,5 +741,6 @@ export default {
   cancelAppointment,
   deleteAppointment,
   handleGuestResponse,
-  removeDuplicateAppointments
+  removeDuplicateAppointments,
+  checkUserAvailability
 };

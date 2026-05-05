@@ -17,21 +17,6 @@ interface GoogleTokens {
   token_type?: string;
 }
 
-// ─── Sync window ──────────────────────────────────────────────────────────────
-// 3 months back → 6 months forward keeps the dataset small and the sync fast.
-function getSyncWindow(): { timeMin: Date; timeMax: Date } {
-  const now = new Date();
-  const timeMin = new Date(now);
-  timeMin.setMonth(timeMin.getMonth() - 3);
-  timeMin.setHours(0, 0, 0, 0);
-
-  const timeMax = new Date(now);
-  timeMax.setMonth(timeMax.getMonth() + 6);
-  timeMax.setHours(23, 59, 59, 999);
-
-  return { timeMin, timeMax };
-}
-
 const MAX_PAGES = 5; // 5 × 2500 = 12,500 events — more than enough for a rolling 9-month window
 
 class GoogleCalendarService {
@@ -64,7 +49,8 @@ class GoogleCalendarService {
     const tokens = target.type === 'org' ? config : config.googleCalendar;
 
     if (!tokens || !tokens.calendarConnected || !tokens.accessToken || !tokens.refreshToken) {
-      throw new ApiError(401, 'Google Calendar not connected');
+      // SENIOR FIX: User-friendly error message
+      throw new ApiError(401, 'Google Calendar is not connected. Please go to Settings to link your account before syncing.');
     }
 
     const oauth2Client = this.createOAuthClient();
@@ -95,6 +81,25 @@ class GoogleCalendarService {
     return google.calendar({ version: 'v3', auth: oauth2Client });
   }
 
+  /**
+   * Calculates the sync window based on whether it's an initial or daily sync.
+   * Initial: 3 months back, 6 months forward (9 months total)
+   * Daily: 3 months back, 2 months forward (5 months total)
+   */
+  private getSyncWindow(isInitial: boolean): { timeMin: Date; timeMax: Date } {
+    const now = new Date();
+    const timeMin = new Date(now);
+    timeMin.setMonth(timeMin.getMonth() - 3);
+    timeMin.setHours(0, 0, 0, 0);
+
+    const timeMax = new Date(now);
+    const monthsForward = isInitial ? 6 : 2;
+    timeMax.setMonth(timeMax.getMonth() + monthsForward);
+    timeMax.setHours(23, 59, 59, 999);
+
+    return { timeMin, timeMax };
+  }
+
   async isGoogleCalendarConnected(userId: string): Promise<boolean> {
     try {
       const user = await User.findById(userId).select('organizationId');
@@ -103,7 +108,7 @@ class GoogleCalendarService {
       const config = await OrgLeadConfig.findOne({ 
         organizationId: (user as any).organizationId,
         calendarConnected: true 
-      });
+       });
       
       return !!(config && config.accessToken && config.refreshToken);
     } catch {
@@ -175,7 +180,7 @@ class GoogleCalendarService {
 
   private parseEventTimes(
     event: calendar_v3.Schema$Event
-  ): { startTime: Date; endTime: Date } | null {
+  ): { startTime: Date; endTime: Date; transparency: 'opaque' | 'transparent' } | null {
     const rawStart = event.start?.dateTime ?? event.start?.date;
     const rawEnd   = event.end?.dateTime   ?? event.end?.date;
     if (!rawStart || !rawEnd) return null;
@@ -189,13 +194,17 @@ class GoogleCalendarService {
       startTime = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0));
       const [ey, em, ed] = rawEnd.split('-').map(Number);
       endTime = new Date(Date.UTC(ey, em - 1, ed, 0, 0, 0) - 1);
+      return { startTime, endTime, transparency: 'transparent' };
     } else {
       startTime = new Date(rawStart);
       endTime   = new Date(rawEnd);
+      if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) return null;
+      return { 
+        startTime, 
+        endTime, 
+        transparency: (event.transparency as 'opaque' | 'transparent') || 'opaque' 
+      };
     }
-
-    if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) return null;
-    return { startTime, endTime };
   }
 
   // ─── Sync Logic ────────────────────────────────────────────────────────────
@@ -210,24 +219,30 @@ class GoogleCalendarService {
     let organizationId: string;
     let userIdForAttribution: mongoose.Types.ObjectId;
     let currentSyncToken: string | undefined;
+    let isInitialSync = false;
 
     if (target.type === 'org') {
       organizationId = target.id;
       const admin = await User.findOne({ organizationId, role: 'admin', isActive: true });
       if (!admin) throw new ApiError(400, 'No admin found for organization sync attribution.');
       userIdForAttribution = admin._id;
+      // For org sync, check OrgLeadConfig for history
+      const config = await OrgLeadConfig.findOne({ organizationId });
+      isInitialSync = !config?.lastSyncAt;
     } else {
       const crmUser = await CrmUser.findById(target.id);
       if (!crmUser) throw new ApiError(404, 'CRM User not found');
       organizationId = crmUser.organizationId.toString();
       userIdForAttribution = crmUser._id;
+      isInitialSync = !crmUser.googleCalendar?.lastSyncAt;
       if (!forceFullSync) {
         currentSyncToken = crmUser.googleCalendar?.syncToken;
       }
     }
 
     // 2. Fetch from Google
-    const { timeMin, timeMax } = getSyncWindow();
+    // SENIOR: Use 9 months for initial/forced, otherwise use 5-month rolling window
+    const { timeMin, timeMax } = this.getSyncWindow(isInitialSync || !!forceFullSync);
     let result: { items: calendar_v3.Schema$Event[]; nextSyncToken?: string | null };
     let usedFallback = false;
     
@@ -253,16 +268,23 @@ class GoogleCalendarService {
       }
     }
 
-    const { items: events, nextSyncToken } = result;
-
-    // Re-destructure results
     const { items: finalEvents, nextSyncToken: finalSyncToken } = result;
 
     // 3. Process Events
-    const validEvents = finalEvents.filter(e => e.id && e.status !== 'cancelled');
-    const cancelledIds = finalEvents.filter(e => e.id && e.status === 'cancelled').map(e => e.id as string);
+    // SENIOR FIX: Deletions are processed globally. Inserts/Updates are filtered by window.
+    const cancelledIds = finalEvents
+      .filter(e => e.id && e.status === 'cancelled')
+      .map(e => e.id as string);
 
-    console.log(`📊 Sync stats: validEvents=${validEvents.length}, cancelledIds=${cancelledIds.length}, used fallback=${usedFallback}`);
+    const validEvents = finalEvents.filter(e => {
+      if (!e.id || e.status === 'cancelled') return false;
+      const times = this.parseEventTimes(e);
+      if (!times) return false;
+      // Filter by window
+      return times.startTime >= timeMin && times.startTime <= timeMax;
+    });
+
+    console.log(`📊 Sync stats: totalReceived=${finalEvents.length}, filteredToSync=${validEvents.length}, deletions=${cancelledIds.length}, isInitialSync=${isInitialSync}`);
 
     // Fetch existing docs to avoid duplicates (scoped to THIS user/org)
     const allIds = finalEvents.map(e => e.id).filter(Boolean) as string[];
@@ -273,8 +295,9 @@ class GoogleCalendarService {
     
     const existingMap = new Map(existingDocs.map(d => [d.googleCalendarEventId, d]));
 
-    // Bulk Cancel
+    // Bulk Cancel/Remove Deletions
     if (cancelledIds.length > 0) {
+      // SENIOR: We perform a hard status update to 'cancelled' for deleted events
       await Appointment.updateMany(
         { googleCalendarEventId: { $in: cancelledIds }, createdBy: userIdForAttribution },
         { $set: { status: 'cancelled' } }
@@ -285,7 +308,7 @@ class GoogleCalendarService {
     for (const event of validEvents) {
       const times = this.parseEventTimes(event);
       if (!times) continue;
-      const { startTime, endTime } = times;
+      const { startTime, endTime, transparency } = times;
 
       const titleLower = (event.summary ?? '').toLowerCase();
       let entryType: 'event' | 'task' | 'reminder' | 'appointment' = 'event';
@@ -311,6 +334,7 @@ class GoogleCalendarService {
                 endTime,
                 location:     event.location || undefined,
                 meetingLink:  meetingLink || undefined,
+                transparency,
                 lastSyncedAt: new Date(),
               },
             },
@@ -335,6 +359,7 @@ class GoogleCalendarService {
               syncedWithGoogleCalendar: true,
               lastSyncedAt:             new Date(),
               meetingLink,
+              transparency,
             },
           },
         });
