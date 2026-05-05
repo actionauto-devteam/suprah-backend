@@ -37,7 +37,7 @@ import logger from '../utils/logger';
 let io: IOServer;
 
 // ── Mirrors crmAuth.middleware.ts secret resolution exactly ──────────────────
-const CRM_JWT_SECRET = config.jwt.accessSecret || 'crm-secret-key';
+const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
 
 // ── Parse allowed origins from centralized config ────────────────────────────
 function getCorsOrigins(): string | string[] {

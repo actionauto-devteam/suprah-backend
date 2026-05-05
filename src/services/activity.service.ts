@@ -1,5 +1,9 @@
-import UserActivity, { IUserActivity, ActivityType } from '../models/UserActivity.model';
-import mongoose from 'mongoose';
+import UserActivity, {
+  IUserActivity,
+  ActivityType,
+} from "../models/UserActivity.model";
+import mongoose from "mongoose";
+import { getSocketIO } from "../utils/socketEmitter";
 
 interface CreateActivityParams {
   userId: string;
@@ -15,10 +19,14 @@ interface CreateActivityParams {
 /**
  * Create a new user activity log
  */
-const createActivity = async (params: CreateActivityParams): Promise<IUserActivity> => {
+const createActivity = async (
+  params: CreateActivityParams,
+): Promise<IUserActivity> => {
   const activity = await UserActivity.create({
     userId: new mongoose.Types.ObjectId(params.userId),
-    organizationId: params.organizationId ? new mongoose.Types.ObjectId(params.organizationId) : undefined,
+    organizationId: params.organizationId
+      ? new mongoose.Types.ObjectId(params.organizationId)
+      : undefined,
     type: params.type,
     title: params.title,
     description: params.description,
@@ -27,8 +35,42 @@ const createActivity = async (params: CreateActivityParams): Promise<IUserActivi
     userAgent: params.userAgent,
   });
 
+  // Emit real-time event
+  try {
+    const io = getSocketIO();
+    if (io && params.userId) {
+      io.to(`user:${params.userId}`).emit("profile:activity_created", {
+        _id: activity._id,
+        type: activity.type,
+        title: activity.title,
+        description: activity.description,
+        timestamp: activity.createdAt,
+      });
+    }
+  } catch (error) {
+    // Socket emission is non-critical
+    console.error("Failed to emit activity event:", error);
+  }
+
   return activity;
 };
+
+// Only surface meaningful actions — login/logout, page views, and other noise excluded
+const IMPORTANT_ACTIVITY_TYPES: ActivityType[] = [
+  'profile_update',
+  'avatar_updated',
+  'shipment_created',
+  'shipment_updated',
+  'shipment_deleted',
+  'load_posted',
+  'load_assigned',
+  'load_delivered',
+  'quote_created',
+  'quote_updated',
+  'quote_deleted',
+  'payment_completed',
+  'payout_received',
+];
 
 /**
  * Get recent activities for a user
@@ -37,16 +79,19 @@ const createActivity = async (params: CreateActivityParams): Promise<IUserActivi
 const getRecentActivities = async (
   userId: string,
   limit = 20,
-  skip = 0
+  skip = 0,
 ): Promise<any[]> => {
-  const activities = await UserActivity.find({ userId: new mongoose.Types.ObjectId(userId) })
+  const activities = await UserActivity.find({
+    userId: new mongoose.Types.ObjectId(userId),
+    type: { $in: IMPORTANT_ACTIVITY_TYPES },
+  })
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .lean();
 
   // Map createdAt to timestamp for frontend compatibility
-  return activities.map(activity => ({
+  return activities.map((activity) => ({
     ...activity,
     timestamp: activity.createdAt,
   }));
@@ -58,7 +103,7 @@ const getRecentActivities = async (
 const getOrganizationActivities = async (
   organizationId?: string,
   limit = 50,
-  skip = 0
+  skip = 0,
 ): Promise<any[]> => {
   const query: any = {};
 
@@ -67,25 +112,26 @@ const getOrganizationActivities = async (
   }
 
   const activities = await UserActivity.find(query)
-    .populate('userId', 'name email avatar')
+    .populate("userId", "name email avatar")
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .lean();
 
   // Map createdAt to timestamp for frontend compatibility
-  return activities.map(activity => ({
+  return activities.map((activity) => ({
     ...activity,
     timestamp: activity.createdAt,
   }));
 };
 
-
 /**
  * Get activity count for a user
  */
 const getActivityCount = async (userId: string): Promise<number> => {
-  return UserActivity.countDocuments({ userId: new mongoose.Types.ObjectId(userId) });
+  return UserActivity.countDocuments({
+    userId: new mongoose.Types.ObjectId(userId),
+  });
 };
 
 /**
@@ -110,14 +156,14 @@ const logProfileUpdate = async (
   organizationId: string | undefined,
   updatedFields: string[],
   ipAddress?: string,
-  userAgent?: string
+  userAgent?: string,
 ): Promise<IUserActivity> => {
   return createActivity({
     userId,
     organizationId,
-    type: 'profile_update',
-    title: 'Profile Updated',
-    description: `Updated: ${updatedFields.join(', ')}`,
+    type: "profile_update",
+    title: "Profile Updated",
+    description: `Updated: ${updatedFields.join(", ")}`,
     metadata: { updatedFields },
     ipAddress,
     userAgent,
@@ -131,14 +177,14 @@ const logLogin = async (
   userId: string,
   organizationId: string | undefined,
   ipAddress?: string,
-  userAgent?: string
+  userAgent?: string,
 ): Promise<IUserActivity> => {
   return createActivity({
     userId,
     organizationId,
-    type: 'login',
-    title: 'Signed In',
-    description: 'Successfully signed into the account',
+    type: "login",
+    title: "Signed In",
+    description: "Successfully signed into the account",
     ipAddress,
     userAgent,
   });
@@ -149,14 +195,14 @@ const logLogin = async (
  */
 const logAvatarUpdate = async (
   userId: string,
-  organizationId: string | undefined
+  organizationId: string | undefined,
 ): Promise<IUserActivity> => {
   return createActivity({
     userId,
     organizationId,
-    type: 'avatar_updated',
-    title: 'Profile Picture Updated',
-    description: 'Changed profile picture',
+    type: "avatar_updated",
+    title: "Profile Picture Updated",
+    description: "Changed profile picture",
   });
 };
 
@@ -169,19 +215,19 @@ const logLoadActivity = async (
   type: ActivityType,
   loadId: string,
   description: string,
-  metadata?: Record<string, any>
+  metadata?: Record<string, any>,
 ): Promise<IUserActivity> => {
   const titles: Record<string, string> = {
-    load_posted: 'New Load Posted',
-    load_assigned: 'Load Assigned',
-    load_delivered: 'Load Delivered',
+    load_posted: "New Load Posted",
+    load_assigned: "Load Assigned",
+    load_delivered: "Load Delivered",
   };
 
   return createActivity({
     userId,
     organizationId,
     type,
-    title: titles[type] || 'Load Activity',
+    title: titles[type] || "Load Activity",
     description,
     metadata: { ...metadata, loadId },
   });
@@ -195,18 +241,18 @@ const logComplianceActivity = async (
   organizationId: string | undefined,
   type: ActivityType,
   documentType: string,
-  status: string
+  status: string,
 ): Promise<IUserActivity> => {
   const titles: Record<string, string> = {
-    compliance_uploaded: 'Compliance Document Uploaded',
-    doc_verified: 'Document Verified',
+    compliance_uploaded: "Compliance Document Uploaded",
+    doc_verified: "Document Verified",
   };
 
   return createActivity({
     userId,
     organizationId,
     type,
-    title: titles[type] || 'Compliance Update',
+    title: titles[type] || "Compliance Update",
     description: `${documentType} is now ${status}`,
     metadata: { documentType, status },
   });
@@ -221,21 +267,21 @@ const logFinancialActivity = async (
   type: ActivityType,
   amount: number,
   description: string,
-  metadata?: Record<string, any>
+  metadata?: Record<string, any>,
 ): Promise<IUserActivity> => {
   const titles: Record<string, string> = {
-    payout_received: 'Payout Received',
-    referral_applied: 'Referral Bonus Applied',
-    withdrawal_requested: 'Withdrawal Requested',
-    wallet_adjustment: 'Wallet Adjusted',
+    payout_received: "Payout Received",
+    referral_applied: "Referral Bonus Applied",
+    withdrawal_requested: "Withdrawal Requested",
+    wallet_adjustment: "Wallet Adjusted",
   };
 
   return createActivity({
     userId,
     organizationId,
     type,
-    title: titles[type] || 'Financial Activity',
-    description: `${description} (${amount > 0 ? '+' : ''}${amount})`,
+    title: titles[type] || "Financial Activity",
+    description: `${description} (${amount > 0 ? "+" : ""}${amount})`,
     metadata: { ...metadata, amount },
   });
 };
@@ -248,21 +294,21 @@ const logAdminAction = async (
   organizationId: string | undefined,
   type: ActivityType,
   targetUserId: string,
-  description: string
+  description: string,
 ): Promise<IUserActivity> => {
   const titles: Record<string, string> = {
-    user_suspended: 'User Suspended',
-    user_activated: 'User Activated',
-    org_suspended: 'Organization Suspended',
-    subscription_changed: 'Subscription Updated',
-    logs_cleared: 'System Logs Cleared',
+    user_suspended: "User Suspended",
+    user_activated: "User Activated",
+    org_suspended: "Organization Suspended",
+    subscription_changed: "Subscription Updated",
+    logs_cleared: "System Logs Cleared",
   };
 
   return createActivity({
     userId: adminId,
     organizationId,
     type,
-    title: titles[type] || 'Admin Action',
+    title: titles[type] || "Admin Action",
     description,
     metadata: { targetUserId },
   });
