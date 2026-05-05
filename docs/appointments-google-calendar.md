@@ -253,6 +253,9 @@ Safely casts a string to `mongoose.Types.ObjectId` without throwing. Falls back 
 **Business rules:**
 - `endTime` must be after `startTime` — throws 400 otherwise.
 - `startTime` must be in the future — throws 400 otherwise.
+- **Intelligent Conflict Detection**: The system checks for overlapping events on the user's Google Calendar. It intelligently ignores "All-Day" events (spanning >23 hours) and events marked as "transparent" (Free), preventing false-positive double-booking errors.
+- **Polymorphic Identity Support**: All operations (Create, Update, Delete) are identity-agnostic, resolving the correct `User` or `CrmUser` context based on `orgId` and session data.
+- **Terminal Status Validation**: Mandatory `outcomeNotes` are required when updating an appointment to terminal statuses (`completed`, `no-show`).
 - `participants` array is deduplicated; creator's ID is always included.
 - `guestEmails` are normalized to lowercase/trimmed and stored with `status: 'pending'`.
 
@@ -263,7 +266,8 @@ Safely casts a string to `mongoose.Types.ObjectId` without throwing. Falls back 
 4. Sends invitation emails to all `guestEmails` via `Promise.allSettled` (partial failure doesn't abort).
 5. Creates in-app notifications for all participants except the creator.
 6. Calls `customerBookingService.updateBookingHistory()` if it's a customer booking.
-7. **Lead status transition:** If a matching `Lead` record exists for the customer's email in the same org, sets its `status` to `'Appointment Set'` and emits `lead:update` over Socket.io to `org:<orgId>`.
+7. **Automated Lead Transition**: If a lead is associated with the appointment (either via `leadId` or a matching customer email), the backend automatically transitions the lead to the `'Appointment Set'` status and broadcasts the update via Socket.io.
+8. **Email Sync**: Sends a rich ICS invitation with automated RSVP tracking to all guests and the customer.
 
 **Returns:** Populated appointment document (`participants`, `createdBy` with `name email avatar`).
 
@@ -445,13 +449,23 @@ Throws 401 if `calendarConnected` is false or tokens are missing.
 
 ---
 
-### `isGoogleCalendarConnected(userId): Promise<boolean>`
+### Conflict Detection Logic
 
-Checks the org-level calendar connection for the given user. Looks up `OrgLeadConfig` via the user's `organizationId`. Returns `false` on any error.
+The service implements `checkUserAvailability(userId, orgId, startTime, endTime, appointmentId?)` to prevent double-booking.
 
-### `isCrmUserCalendarConnected(crmUserId): Promise<boolean>`
+**Refined Rules:**
+- **Ignores All-Day Events**: Any Google Calendar event with a duration > 23 hours is treated as a background event (e.g., birthdays, holidays) and does not block scheduling.
+- **Ignores Transparent Events**: Events marked as `transparent` (Free) in Google Calendar are ignored.
+- **Supports Partial Overlap**: Only strictly `opaque` (Busy) events that overlap with the requested time-slot will trigger a 409 Conflict.
 
-Checks the CRM user's personal calendar connection. Returns `false` on any error.
+---
+
+### Inbound Sync Pipeline Updates
+
+The inbound sync has been hardened to handle cross-collection identities:
+- Correctly resolves `CrmUser` or `User` for `createdBy` attribution.
+- Supports polymorphic `refPath` for participants.
+- Automatically handles Gmail token refreshes via the `'tokens'` event listener.
 
 ---
 

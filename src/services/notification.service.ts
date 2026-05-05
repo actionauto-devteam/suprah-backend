@@ -1,5 +1,6 @@
 import Notification from '../models/Notification.model';
 import User from '../models/User.model';
+import CrmUser from '../models/CrmUser.model';
 import { ApiError } from '../utils/ApiError';
 import { emitToUser } from '../utils/socketEmitter';
 import PushService from './push.service';
@@ -99,14 +100,15 @@ const createNotification = async (params: CreateNotificationParams) => {
     throw new ApiError(400, 'Notification message must be less than 1000 characters');
   }
 
-  const user = await User.findById(userId);
+  // Identity resolution for notifications
+  const user = await User.findById(userId) || await CrmUser.findById(userId);
   if (!user) {
-    throw new ApiError(404, 'User not found');
+    throw new ApiError(404, 'Notification target user not found');
   }
 
   const preferenceKey = PREFERENCE_MAP[type];
-  if (preferenceKey && user.notificationPreferences) {
-    const isEnabled = (user.notificationPreferences as any)[preferenceKey];
+  if (preferenceKey && (user as any).notificationPreferences) {
+    const isEnabled = ((user as any).notificationPreferences as any)[preferenceKey];
     if (isEnabled === false) {
       return null;
     }

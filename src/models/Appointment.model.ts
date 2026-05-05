@@ -32,14 +32,16 @@ export interface IAppointment extends Document {
   endTime: Date;
   location?: string;
   type: 'in-person' | 'phone' | 'video' | 'other';
-  status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed';
+  status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed' | 'no-show';
 
   entryType: EntryType;
   organizationId: string;
 
   // Participants
   createdBy: mongoose.Types.ObjectId;
+  createdByModel: 'User' | 'CrmUser';
   participants: mongoose.Types.ObjectId[];
+  participantModel: 'User' | 'CrmUser';
 
   // External guests
   guestEmails: IGuestResponse[];
@@ -48,6 +50,7 @@ export interface IAppointment extends Document {
   customerBooking?: ICustomerBooking;
 
   // Related entities
+  leadId?: mongoose.Types.ObjectId;
   conversationId?: mongoose.Types.ObjectId;
   vehicleId?: mongoose.Types.ObjectId;
   quoteId?: mongoose.Types.ObjectId;
@@ -64,6 +67,8 @@ export interface IAppointment extends Document {
   lastSyncedAt?: Date;
 
   notes?: string;
+  outcomeNotes?: string;
+  transparency?: 'opaque' | 'transparent';
 
   createdAt: Date;
   updatedAt: Date;
@@ -110,7 +115,7 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     },
     status: {
       type: String,
-      enum: ['scheduled', 'confirmed', 'cancelled', 'completed'],
+      enum: ['scheduled', 'confirmed', 'cancelled', 'completed', 'no-show'],
       default: 'scheduled',
       index: true
     },
@@ -130,20 +135,37 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
 
     createdBy: {
       type: Schema.Types.ObjectId,
-      ref: 'User',
+      refPath: 'createdByModel',
       required: true,
       index: true
     },
+    createdByModel: {
+      type: String,
+      required: true,
+      enum: ['User', 'CrmUser'],
+      default: 'User'
+    },
     participants: [{
       type: Schema.Types.ObjectId,
-      ref: 'User'
+      refPath: 'participantModel'
     }],
+    participantModel: {
+      type: String,
+      required: true,
+      enum: ['User', 'CrmUser'],
+      default: 'User'
+    },
 
     guestEmails: [GuestResponseSchema],
 
     // NEW: Customer booking
     customerBooking: CustomerBookingSchema,
 
+    leadId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Lead',
+      index: true
+    },
     conversationId: {
       type: Schema.Types.ObjectId,
       ref: 'Conversation'
@@ -169,7 +191,9 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     syncedWithGoogleCalendar: { type: Boolean, default: false },
     lastSyncedAt: Date,
 
-    notes: { type: String, trim: true }
+    notes: { type: String, trim: true },
+    outcomeNotes: { type: String, trim: true },
+    transparency: { type: String, enum: ['opaque', 'transparent'], default: 'opaque' }
   },
   {
     timestamps: true

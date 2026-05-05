@@ -1,4 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
+import appointmentService from '../services/appointment.service';
+import googleCalendarService from '../services/googleCalendar.service';
 import Lead from '../models/lead.model';
 import { parseStringPromise } from 'xml2js';
 import User, { IUser } from '../models/User.model';
@@ -20,8 +22,9 @@ import { getSocketIO } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
-import googleCalendarService from '../services/googleCalendar.service';
 import customerService from '../services/customer.service';
+import { ApiError } from '../utils/ApiError';
+import CrmUser from '../models/CrmUser.model';
 
 /**
  * STRICT SOURCE FILTER — only leads from this address are ingested.
@@ -282,7 +285,9 @@ export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    const userId = (req.user as IUser)._id;
+    const user = req.user || req.crmUser;
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    const userId = user._id;
     const orgId = req.orgId;
 
     const lead = await Lead.findOneAndUpdate(
@@ -340,7 +345,9 @@ export const updateLead = async (req: Request, res: Response) => {
 export const createInquiry = async (req: Request, res: Response) => {
   try {
     const { firstName, lastName, email, phone, vehicle, comments, source, channel } = req.body;
-    const userId = (req.user as IUser)._id;
+    const user = req.user || req.crmUser;
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    const userId = user._id;
 
     if (!firstName || !email || !phone) {
       return res.status(400).json({
@@ -498,7 +505,9 @@ export const replyToInquiry = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { message } = req.body;
-    const userId = (req.user as IUser)._id;
+    const user = req.user || req.crmUser;
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    const userId = user._id;
     const orgId = req.orgId;
 
     if (!message) {
@@ -867,81 +876,96 @@ export const getCentralSyncStatus = asyncHandler(async (req: Request, res: Respo
 export const setAppointmentForLead = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { date, time, notes, locationOrVehicle } = req.body;
-  const userId = (req.user as IUser)._id;
-
+  const user = req.user || req.crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  
+  const userId = user._id;
   const orgId = req.orgId;
-  const lead = await Lead.findOneAndUpdate(
-    { _id: id, organizationId: orgId },
-    {
-      status: 'Appointment Set',
-      appointment: {
-        date: new Date(date),
-        time,
-        notes: notes || '',
-        location: locationOrVehicle || '',
-      },
-    },
-    { new: true }
+
+  // 1. Resolve Identity and Connection Check
+  const crmUser = await CrmUser.exists({ _id: userId });
+  if (crmUser) {
+    const isConnected = await googleCalendarService.isCrmUserCalendarConnected(userId.toString());
+    if (!isConnected) {
+      throw new ApiError(401, 'Google Calendar is not connected. Please go to Settings to link your account before scheduling lead appointments.');
+    }
+  }
+
+  // 2. Fetch Lead to ensure it exists
+  const lead = await Lead.findOne({ _id: id, organizationId: orgId });
+  if (!lead) {
+    throw new ApiError(404, 'Lead not found');
+  }
+
+  // 3. Prepare Appointment Data
+  const startTime = new Date(date);
+  const [hours, minutes] = time.split(':');
+  startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+  
+  const endTime = new Date(startTime);
+  endTime.setHours(startTime.getHours() + 1); // Default 1hr
+
+  const appointmentData = {
+      title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
+      description: notes || `Lead Appointment for ${lead.firstName}`,
+      startTime,
+      endTime,
+      location: locationOrVehicle || '',
+      type: 'in-person' as const,
+      entryType: 'appointment' as const,
+      participants: [userId.toString()],
+      leadId: lead._id.toString(),
+      customerBooking: {
+        isCustomerBooking: true,
+        firstName: lead.firstName,
+        lastName: lead.lastName || '',
+        email: lead.email || '',
+        phone: lead.phone || ''
+      }
+  };
+
+  // 4. Create Unified Appointment (This includes Conflict Detection)
+  const appointment = await appointmentService.createAppointment(
+    userId.toString(),
+    orgId as string,
+    appointmentData
   );
 
-  if (!lead) {
-    return res.status(404).json(new ApiResponse(404, null, 'Lead not found'));
-  }
+  // 5. Update Lead Status (AppointmentService.createAppointment also does this, but we reinforce it here with the link)
+  lead.status = 'Appointment Set';
+  // Keep the legacy field updated for backward compatibility
+  lead.appointment = {
+    date: new Date(date),
+    time,
+    notes: notes || '',
+    location: locationOrVehicle || '',
+  };
+  await lead.save();
 
-  // 1. Sync to Google Calendar (New Stability Update)
-  try {
-      const startTime = new Date(date);
-      const [hours, minutes] = time.split(':');
-      startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
-      
-      const endTime = new Date(startTime);
-      endTime.setHours(startTime.getHours() + 1); // Default 1hr
-
-      const appointmentData = {
-          title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
-          description: notes,
-          startTime,
-          endTime,
-          location: locationOrVehicle,
-          organizationId: orgId,
-          createdBy: userId,
-          participants: [userId.toString()],
-          entryType: 'appointment' as const,
-          status: 'scheduled' as const
-      };
-
-      await googleCalendarService.syncAppointmentToGoogleCalendar(
-        appointmentData as any, 
-        { type: 'org', id: orgId as string }
-      );
-  } catch (syncError) {
-      console.warn('[LeadSync] Google Calendar sync failed for lead appointment:', syncError);
-  }
-
-  // 2. Audit Log
+  // 6. Audit Log
   await activityService.createActivity({
     userId: userId.toString(),
     organizationId: orgId || 'global',
     type: 'other',
     title: 'Appointment Set for Lead',
     description: `Scheduled ${lead.firstName}'s appointment for ${date} at ${time}`,
-    metadata: { leadId: lead._id.toString(), date, time }
+    metadata: { leadId: lead._id.toString(), appointmentId: appointment._id, date, time }
   });
 
-  logger.info({ leadId: lead._id, userId, date, time }, 'Appointment set for lead');
-
-  // 3. Socket broadcast
+  // 7. Socket broadcast
   const io = getSocketIO();
   if (io) {
     io.to(`org:${orgId}`).emit('lead:update', lead);
   }
 
-  res.json(new ApiResponse(200, lead, 'Appointment saved and synced successfully'));
+  res.json(new ApiResponse(200, { lead, appointment }, 'Appointment scheduled and synced successfully'));
 });
 
 export const getThreadMessages = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const userId = (req.user as IUser)._id;
+  const user = req.user || req.crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  const userId = user._id;
 
   const lead = await Lead.findOne({ _id: id, organizationId: req.orgId });
   if (!lead || !lead.threadId) {
@@ -1002,6 +1026,10 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
     await cacheService.set(threadCacheKey, { messages }, 1800); // 30 mins
     res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
   } catch (error: any) {
+    // If it's a configuration error (centralized sync not set up), return empty list instead of 400
+    if (error.message?.includes('connect your email leads') || error.message?.includes('configuration not found')) {
+      return res.json(new ApiResponse(200, { messages: [] }, 'Centralized sync not configured'));
+    }
     console.error('[THREAD] Error fetching thread messages:', error);
     res.status(400).json(new ApiResponse(400, null, 'Failed to fetch thread messages'));
   }

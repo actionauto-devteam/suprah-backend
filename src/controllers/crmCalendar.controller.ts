@@ -103,7 +103,9 @@ export const crmCalendarController = {
     const count = await googleCalendarService.syncCrmUserCalendar(crmUserId, forceFullSync);
     res.json({ 
       success: true, 
-      message: `Synced ${count} events${forceFullSync ? ' (full sync)' : ''}`, 
+      message: forceFullSync 
+        ? `Full sync complete: ${count} events updated across 9-month window.`
+        : `Quick sync complete: ${count} events updated for current rolling window.`, 
       count,
       forceFullSync 
     });
@@ -152,6 +154,7 @@ export const crmCalendarController = {
 
     const appointments = await Appointment
       .find(filter)
+      .populate('createdBy participants', 'fullName name email avatar') // SENIOR FIX: Populate for UI
       .sort({ startTime: 1 })
       .skip(Number(skip))
       .limit(Number(limit))
@@ -231,7 +234,38 @@ export const crmCalendarController = {
   }),
 
   /**
-   * 10. Delete Appointment
+   * 11. Update Status (Quick Actions)
+   */
+  updateStatus: asyncHandler(async (req: Request, res: Response) => {
+    const crmUserId = (req.crmUser as any)._id.toString();
+    const orgId = (req.crmUser as any).organizationId.toString();
+    const { id } = req.params;
+    const { status, outcomeNotes } = req.body;
+
+    if (!['scheduled', 'confirmed', 'cancelled', 'completed', 'no-show'].includes(status)) {
+      throw new ApiError(400, 'Invalid status');
+    }
+
+    if (['completed', 'no-show'].includes(status) && !outcomeNotes) {
+      throw new ApiError(400, `Outcome notes are required when marking an appointment as ${status}`);
+    }
+
+    const appointment = await appointmentService.updateAppointment(
+      id,
+      orgId,
+      crmUserId,
+      { status, outcomeNotes }
+    );
+
+    res.json({
+      success: true,
+      data: appointment,
+      message: `Appointment status updated to ${status}`,
+    });
+  }),
+
+  /**
+   * 12. Delete Appointment
    */
   deleteAppointment: asyncHandler(async (req: Request, res: Response) => {
     const crmUserId = (req.crmUser as any)._id.toString();
