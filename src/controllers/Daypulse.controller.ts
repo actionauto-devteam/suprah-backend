@@ -3,15 +3,16 @@ import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import DayPulse, { DAYPULSE_DEPARTMENTS, DayPulseDepartment } from '../models/Daypulse.model';
+import DayPulse, { DAYPULSE_DEPARTMENTS, DayPulseDepartment, IDayPulseAttachment } from '../models/Daypulse.model';
 import FeedComment from '../models/FeedComment.model';
 import FeedReaction from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
+import { BucketType, storageService } from '../services/storage.service';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_LIMIT = 20;
-const MAX_LIMIT     = 50;
+const MAX_LIMIT = 50;
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
@@ -35,9 +36,27 @@ function toMidnightUTC(dateStr: string): Date {
  */
 function dayRange(date: Date): { $gte: Date; $lt: Date } {
   const start = new Date(date);
-  const end   = new Date(date);
+  const end = new Date(date);
   end.setUTCDate(end.getUTCDate() + 1);
   return { $gte: start, $lt: end };
+}
+
+async function signAttachments<T extends { attachments?: IDayPulseAttachment[] }>(report: T): Promise<T> {
+  if (!Array.isArray(report.attachments) || report.attachments.length === 0) {
+    return report;
+  }
+
+  await Promise.all(report.attachments.map(async (attachment) => {
+    const signedUrl = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+    if (signedUrl) {
+      attachment.url = signedUrl;
+      if (attachment.thumbnailUrl) {
+        attachment.thumbnailUrl = signedUrl;
+      }
+    }
+  }));
+
+  return report;
 }
 
 // ─── Create DayPulse Report ───────────────────────────────────────────────────
@@ -55,6 +74,9 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
   if (!actor.organizationId) throw new ApiError(403, 'You must belong to an organization to post');
 
   const { department, reportDate, accomplishment, blockers, inProgress } = req.body;
+  const uploadedFiles = (req.files || []) as Express.Multer.File[];
+  const attachments: IDayPulseAttachment[] = [];
+  const uploadedKeys: string[] = [];
 
   // ── Validate department ──
   if (!department || !DAYPULSE_DEPARTMENTS.includes(department as DayPulseDepartment)) {
@@ -93,27 +115,49 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
     throw new ApiError(400, 'In Progress cannot exceed 5000 characters');
   }
 
-  const report = await DayPulse.create({
-    organizationId: actor.organizationId,
-    userId:         actor._id,
-    authorName:     actor.fullName,
-    authorAvatar:   actor.avatar || null,
-    authorRole:     actor.role,
-    department:     department as DayPulseDepartment,
-    reportDate:     parsedDate,
-    accomplishment: accomplishment.trim(),
-    blockers:       blockers.trim(),
-    inProgress:     inProgress.trim(),
-    isEdited:       false,
-  });
-
   try {
+    for (const file of uploadedFiles) {
+      const fileUrl = await storageService.upload(file, 'daypulse-attachments', BucketType.PRIVATE);
+      const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
+      uploadedKeys.push(fileKey);
+
+      const isImage = file.mimetype.startsWith('image/');
+      attachments.push({
+        url: fileKey,
+        fileKey,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        thumbnailUrl: isImage ? fileKey : undefined,
+      });
+    }
+
+    const report = await DayPulse.create({
+      organizationId: actor.organizationId,
+      userId: actor._id,
+      authorName: actor.fullName,
+      authorAvatar: actor.avatar || null,
+      authorRole: actor.role,
+      department: department as DayPulseDepartment,
+      reportDate: parsedDate,
+      accomplishment: accomplishment.trim(),
+      blockers: blockers.trim(),
+      inProgress: inProgress.trim(),
+      attachments,
+      isEdited: false,
+    });
+
+    const reportForClient = await signAttachments(report.toObject());
+
     getIO()
       .to(`org:${actor.organizationId.toString()}`)
-      .emit('daypulse:new', { report });
-  } catch { /* Socket.IO not initialised */ }
+      .emit('daypulse:new', { report: reportForClient });
 
-  res.status(201).json(new ApiResponse(201, { report }, 'DayPulse report created'));
+    res.status(201).json(new ApiResponse(201, { report: reportForClient }, 'DayPulse report created'));
+  } catch (error) {
+    await Promise.all(uploadedKeys.map((key) => storageService.delete(key, BucketType.PRIVATE).catch(() => undefined)));
+    throw error;
+  }
 });
 
 // ─── Get Reports (paginated, filtered by department + date) ───────────────────
@@ -132,9 +176,9 @@ export const getReports = asyncHandler(async (req: Request, res: Response) => {
 
   const { department, date } = req.query as { department?: string; date?: string };
 
-  const page  = parsePositiveInt(req.query.page,  1);
+  const page = parsePositiveInt(req.query.page, 1);
   const limit = Math.min(parsePositiveInt(req.query.limit, DEFAULT_LIMIT), MAX_LIMIT);
-  const skip  = (page - 1) * limit;
+  const skip = (page - 1) * limit;
 
   // Build filter incrementally
   const filter: Record<string, unknown> = {
@@ -163,9 +207,11 @@ export const getReports = asyncHandler(async (req: Request, res: Response) => {
     DayPulse.countDocuments(filter),
   ]);
 
+  const reportsWithAttachments = await Promise.all((reports as Array<Record<string, any>>).map((report) => signAttachments(report)));
+
   const hasMore = skip + reports.length < total;
 
-  res.json(new ApiResponse(200, { reports, total, page, limit, hasMore }, 'DayPulse reports fetched'));
+  res.json(new ApiResponse(200, { reports: reportsWithAttachments, total, page, limit, hasMore }, 'DayPulse reports fetched'));
 });
 
 // ─── Update Report ────────────────────────────────────────────────────────────
@@ -186,12 +232,12 @@ export const updateReport = asyncHandler(async (req: Request, res: Response) => 
   const { accomplishment, blockers, inProgress } = req.body;
 
   if (!accomplishment || !accomplishment.trim()) throw new ApiError(400, 'Accomplishment section cannot be empty');
-  if (!blockers       || !blockers.trim())       throw new ApiError(400, 'Blockers section cannot be empty');
-  if (!inProgress     || !inProgress.trim())     throw new ApiError(400, 'In Progress section cannot be empty');
+  if (!blockers || !blockers.trim()) throw new ApiError(400, 'Blockers section cannot be empty');
+  if (!inProgress || !inProgress.trim()) throw new ApiError(400, 'In Progress section cannot be empty');
 
   if (accomplishment.trim().length > 5000) throw new ApiError(400, 'Accomplishment cannot exceed 5000 characters');
-  if (blockers.trim().length > 5000)       throw new ApiError(400, 'Blockers cannot exceed 5000 characters');
-  if (inProgress.trim().length > 5000)     throw new ApiError(400, 'In Progress cannot exceed 5000 characters');
+  if (blockers.trim().length > 5000) throw new ApiError(400, 'Blockers cannot exceed 5000 characters');
+  if (inProgress.trim().length > 5000) throw new ApiError(400, 'In Progress cannot exceed 5000 characters');
 
   const report = await DayPulse.findOne({ _id: id, deletedAt: null });
   if (!report) throw new ApiError(404, 'Report not found');
@@ -201,18 +247,20 @@ export const updateReport = asyncHandler(async (req: Request, res: Response) => 
   if (!isOwner && !isAdmin) throw new ApiError(403, 'You can only edit your own reports');
 
   report.accomplishment = accomplishment.trim();
-  report.blockers       = blockers.trim();
-  report.inProgress     = inProgress.trim();
-  report.isEdited       = true;
+  report.blockers = blockers.trim();
+  report.inProgress = inProgress.trim();
+  report.isEdited = true;
   await report.save();
+
+  const reportForClient = await signAttachments(report.toObject());
 
   try {
     getIO()
       .to(`org:${actor.organizationId!.toString()}`)
-      .emit('daypulse:updated', { report });
+      .emit('daypulse:updated', { report: reportForClient });
   } catch { /* swallow */ }
 
-  res.json(new ApiResponse(200, { report }, 'Report updated'));
+  res.json(new ApiResponse(200, { report: reportForClient }, 'Report updated'));
 });
 
 // ─── Delete Report ────────────────────────────────────────────────────────────
@@ -236,6 +284,14 @@ export const deleteReport = asyncHandler(async (req: Request, res: Response) => 
   const isOwner = report.userId.toString() === actor._id.toString();
   const isAdmin = actor.role === 'admin';
   if (!isOwner && !isAdmin) throw new ApiError(403, 'You can only delete your own reports');
+
+  if (Array.isArray((report as any).attachments) && (report as any).attachments.length > 0) {
+    await Promise.all(
+      (report as any).attachments.map((attachment: IDayPulseAttachment) =>
+        storageService.delete(attachment.fileKey || attachment.url, BucketType.PRIVATE).catch(() => undefined)
+      )
+    );
+  }
 
   report.deletedAt = new Date();
   await report.save();

@@ -26,22 +26,32 @@ export type DayPulseDepartment = typeof DAYPULSE_DEPARTMENTS[number];
 
 export interface IDayPulse extends Document {
   organizationId: mongoose.Types.ObjectId;
-  userId:         mongoose.Types.ObjectId;
-  authorName:     string;
-  authorAvatar?:  string | null;
-  authorRole:     string;
-  department:     DayPulseDepartment;   // Which hashtag/team this report belongs to
-  reportDate:     Date;                 // The calendar date this report covers (not createdAt)
+  userId: mongoose.Types.ObjectId;
+  authorName: string;
+  authorAvatar?: string | null;
+  authorRole: string;
+  department: DayPulseDepartment;   // Which hashtag/team this report belongs to
+  reportDate: Date;                 // The calendar date this report covers (not createdAt)
   accomplishment: string;               // Section 1: What was accomplished
-  blockers:       string;               // Section 2: What is blocking progress
-  inProgress:     string;               // Section 3: What is currently in progress
-  isEdited:       boolean;
-  deletedAt?:     Date | null;
-  createdAt:      Date;
-  updatedAt:      Date;
+  blockers: string;               // Section 2: What is blocking progress
+  inProgress: string;               // Section 3: What is currently in progress
+  attachments: IDayPulseAttachment[];
+  isEdited: boolean;
+  deletedAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-export interface IDayPulseModel extends Model<IDayPulse> {}
+export interface IDayPulseAttachment {
+  url: string;
+  fileKey: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  thumbnailUrl?: string | null;
+}
+
+export interface IDayPulseModel extends Model<IDayPulse> { }
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -107,6 +117,23 @@ const DayPulseSchema = new Schema<IDayPulse>(
       required: true,
       trim: true,
       maxlength: 5000,
+    },
+
+    attachments: {
+      type: [
+        new Schema<IDayPulseAttachment>(
+          {
+            url: { type: String, required: true },
+            fileKey: { type: String, required: true },
+            originalName: { type: String, required: true },
+            mimeType: { type: String, required: true },
+            size: { type: Number, required: true },
+            thumbnailUrl: { type: String, default: null },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
     },
 
     isEdited: {

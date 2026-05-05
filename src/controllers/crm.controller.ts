@@ -386,27 +386,119 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const query: Record<string, any> = { organizationId: actor.organizationId };
+  const {
+    page = '1',
+    limit = '10',
+    search,
+    role,
+    status,
+    dateJoined,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+  } = req.query;
 
-  const search = (req.query.search as string | undefined)?.trim();
-  if (search) {
-    const regex = new RegExp(search, 'i');
-    query.$or = [
-      { fullName: regex },
-      { username: regex },
-      { email: regex },
+  const pageNum = Math.max(Number(page) || 1, 1);
+  const limitNum = Math.min(Math.max(Number(limit) || 10, 1), 50);
+  const skip = (pageNum - 1) * limitNum;
+
+  const filter: any = { organizationId: actor.organizationId };
+
+  const searchValue = typeof search === 'string' ? search.trim() : '';
+  if (searchValue) {
+    const escapedSearch = searchValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    filter.$or = [
+      { fullName: { $regex: escapedSearch, $options: 'i' } },
+      { email: { $regex: escapedSearch, $options: 'i' } },
+      { username: { $regex: escapedSearch, $options: 'i' } },
     ];
   }
 
-  const users = await CrmUser.find(query)
-    .select("fullName username email role isActive lastLoginAt createdAt avatar")
-    .sort({ createdAt: -1 });
+  const roleValue = typeof role === 'string' ? role.toLowerCase() : '';
+  if (['employee', 'manager', 'admin'].includes(roleValue)) {
+    filter.role = roleValue;
+  }
+
+  const statusValue = typeof status === 'string' ? status.toLowerCase() : '';
+  if (statusValue === 'active') {
+    filter.isActive = true;
+  } else if (statusValue === 'inactive') {
+    filter.isActive = false;
+  }
+
+  const dateJoinedValue = typeof dateJoined === 'string' ? dateJoined.toLowerCase() : '';
+  if (dateJoinedValue && dateJoinedValue !== 'all') {
+    const now = new Date();
+    let startDate: Date | null = null;
+
+    if (dateJoinedValue === '7d') {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 7);
+    } else if (dateJoinedValue === '30d') {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 30);
+    } else if (dateJoinedValue === '90d') {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 90);
+    } else if (dateJoinedValue === 'year') {
+      startDate = new Date(now.getFullYear(), 0, 1);
+    }
+
+    if (startDate) {
+      filter.createdAt = { ...(filter.createdAt || {}), $gte: startDate };
+    }
+  }
+
+  const sortFieldMap: Record<string, string> = {
+    fullName: 'fullName',
+    username: 'username',
+    email: 'email',
+    role: 'role',
+    status: 'isActive',
+    isActive: 'isActive',
+    createdAt: 'createdAt',
+    joined: 'createdAt',
+    lastLoginAt: 'lastLoginAt',
+  };
+
+  const resolvedSortBy =
+    typeof sortBy === 'string' && sortFieldMap[sortBy]
+      ? sortFieldMap[sortBy]
+      : 'createdAt';
+  const resolvedSortOrder = sortOrder === 'asc' ? 1 : -1;
+
+  const sortQuery: Record<string, 1 | -1> = {
+    [resolvedSortBy]: resolvedSortOrder,
+  };
+
+  if (resolvedSortBy !== 'createdAt') {
+    sortQuery.createdAt = -1;
+  }
+
+  const [users, total] = await Promise.all([
+    CrmUser.find(filter)
+      .select('fullName username email avatar role isActive lastLoginAt createdAt')
+      .sort(sortQuery)
+      .skip(skip)
+      .limit(limitNum),
+    CrmUser.countDocuments(filter),
+  ]);
+
+  const totalPages = Math.ceil(total / limitNum);
 
   res.json(
     new ApiResponse(
       200,
-      { users, total: users.length },
-      "Users fetched successfully",
+      {
+        users,
+        total,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages,
+        },
+      },
+      'Users fetched successfully',
     ),
   );
 });
