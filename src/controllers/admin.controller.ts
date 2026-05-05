@@ -134,7 +134,7 @@ export const getSystemStats = asyncHandler(async (req: Request, res: Response) =
  */
 export const getProcessStats = asyncHandler(async (req: Request, res: Response) => {
   const stats = await pidusage(process.pid);
-  
+
   const formattedStats = {
     performance: {
       cpu: Math.round(stats.cpu * 100) / 100,
@@ -149,8 +149,8 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
       },
       errors: {
         total: metrics.errorsTotal,
-        rate: metrics.requestsTotal > 0 
-          ? Math.round((metrics.errorsTotal / metrics.requestsTotal) * 10000) / 100 
+        rate: metrics.requestsTotal > 0
+          ? Math.round((metrics.errorsTotal / metrics.requestsTotal) * 10000) / 100
           : 0,
         count4xx: metrics.errors4xx,
         count5xx: metrics.errors5xx
@@ -176,12 +176,12 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
  * Retrieves system logs from the indexed database with advanced filtering.
  */
 export const getSystemLogs = asyncHandler(async (req: Request, res: Response) => {
-  const { 
-    level, 
-    search, 
-    from, 
-    to, 
-    page = 1, 
+  const {
+    level,
+    search,
+    from,
+    to,
+    page = 1,
     limit = 50,
     requestId,
     userId,
@@ -210,7 +210,7 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
   // Search filter (High-performance Unified Text Search)
   if (search) {
     const searchTerm = search as string;
-    
+
     // If it looks like a specific ID (Request ID, User ID), we use prioritized match
     if (searchTerm.includes('_') || searchTerm.length > 20) {
       filter.$or = [
@@ -257,31 +257,31 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
  */
 export const getLogStats = asyncHandler(async (req: Request, res: Response) => {
   const { from, to, interval = 'hour' } = req.query;
-  
+
   const startTime = from ? new Date(from as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
   const endTime = to ? new Date(to as string) : new Date();
 
   // Create a time-series aggregation for logs
   const stats = await SystemLog.aggregate([
-    { 
-      $match: { 
-        timestamp: { $gte: startTime, $lte: endTime } 
-      } 
+    {
+      $match: {
+        timestamp: { $gte: startTime, $lte: endTime }
+      }
     },
     {
       $group: {
         _id: {
-          $dateToString: { 
-            format: interval === 'day' ? "%Y-%m-%d" : "%Y-%m-%dT%H:00:00Z", 
-            date: "$timestamp" 
+          $dateToString: {
+            format: interval === 'day' ? "%Y-%m-%d" : "%Y-%m-%dT%H:00:00Z",
+            date: "$timestamp"
           }
         },
         count: { $sum: 1 },
-        errors: { 
-          $sum: { $cond: [{ $in: ["$level", ["ERROR", "FATAL"]] }, 1, 0] } 
+        errors: {
+          $sum: { $cond: [{ $in: ["$level", ["ERROR", "FATAL"]] }, 1, 0] }
         },
-        warnings: { 
-          $sum: { $cond: [{ $eq: ["$level", "WARN"] }, 1, 0] } 
+        warnings: {
+          $sum: { $cond: [{ $eq: ["$level", "WARN"] }, 1, 0] }
         }
       }
     },
@@ -306,7 +306,7 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
   // --- DATABASE SECURITY GATEKEEPER ---
   const MONGODB_URI = process.env.MONGODB_URI || '';
   const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
-  
+
   if (isAtlas && process.env.ALLOW_WIPE !== 'true') {
     logger.error('Attempted to clear system logs on a Cloud Atlas instance without ALLOW_WIPE=true');
     throw new ApiError(403, "Database Protection: Bulk log deletion is blocked on live clusters. Set ALLOW_WIPE=true to override.");
@@ -314,7 +314,7 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
   // ------------------------------------
 
   const logPath = path.join(process.cwd(), 'logs', 'app.log');
-  
+
   if (fs.existsSync(logPath)) {
     fs.writeFileSync(logPath, '');
   }
