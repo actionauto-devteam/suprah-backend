@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type ActivityType = 
+export type ActivityType =
   | 'login'
   | 'logout'
   | 'profile_update'
@@ -10,6 +10,9 @@ export type ActivityType =
   | 'quote_created'
   | 'quote_updated'
   | 'quote_deleted'
+  | 'shipment_created'
+  | 'shipment_updated'
+  | 'shipment_deleted'
   | 'load_created'
   | 'load_updated'
   | 'load_deleted'
@@ -77,6 +80,9 @@ const UserActivitySchema = new Schema(
         'quote_created',
         'quote_updated',
         'quote_deleted',
+        'shipment_created',
+        'shipment_updated',
+        'shipment_deleted',
         'load_created',
         'load_updated',
         'load_deleted',

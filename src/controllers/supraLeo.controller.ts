@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -14,11 +14,14 @@ import Feed from '../models/Feed.model';
 import FeedComment from '../models/FeedComment.model';
 import Appointment from '../models/Appointment.model';
 
-// ─── Anthropic client ────────────────────────────────────────────────────────
+// ─── Groq client (OpenAI-compatible) ─────────────────────────────────────────
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || '',
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY || '',
+  baseURL: 'https://api.groq.com/openai/v1',
 });
+
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
 // ─── System prompt builder ───────────────────────────────────────────────────
 
@@ -183,7 +186,6 @@ async function fetchModuleContext(module: string, userId: string, orgId: string)
         .populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName' } })
         .lean();
 
-      // Count unread
       const unreadCount = await SupraSpaceMessage.countDocuments({
         conversationId: { $in: conversations.map((c: any) => c._id) },
         readBy: { $ne: userId },
@@ -194,7 +196,6 @@ async function fetchModuleContext(module: string, userId: string, orgId: string)
     }
 
     case 'biometrics': {
-      // Return basic user security info (no sensitive credentials)
       const user = await CrmUser.findById(userId).select('fullName username lastLoginAt').lean();
       return { user, message: 'Biometric credentials are managed client-side via WebAuthn.' };
     }
@@ -416,7 +417,7 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
   const { message, module = 'general', context: clientContext, stream = false } = req.body;
 
   if (!message?.trim()) throw new ApiError(400, 'Message is required');
-  if (!process.env.ANTHROPIC_API_KEY) throw new ApiError(500, 'AI service not configured');
+  if (!process.env.GROQ_API_KEY) throw new ApiError(500, 'AI service not configured');
 
   // Get or create chat document for this user
   let chatDoc = await SupraLeoChat.findOne({ userId: user._id });
@@ -453,18 +454,21 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     let fullResponse = '';
 
     try {
-      const stream = anthropic.messages.stream({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
+      const streamResponse = await groq.chat.completions.create({
+        model: GROQ_MODEL,
         max_tokens: 1024,
-        system: systemPrompt,
-        messages: recentMessages,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...recentMessages,
+        ],
+        stream: true,
       });
 
-      for await (const event of stream) {
-        console.log('Event:', event.type);
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          fullResponse += event.delta.text;
-          res.write(`data: ${JSON.stringify({ type: 'delta', text: event.delta.text })}\n\n`);
+      for await (const chunk of streamResponse) {
+        const text = chunk.choices[0]?.delta?.content || '';
+        if (text) {
+          fullResponse += text;
+          res.write(`data: ${JSON.stringify({ type: 'delta', text })}\n\n`);
         }
       }
 
@@ -473,9 +477,9 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
       chatDoc.messages.push({ role: 'assistant', content: fullResponse, module: module as any, createdAt: new Date() });
 
       // Cap history at 200 messages
-     if (chatDoc.messages.length > 200) {
-  chatDoc.messages.splice(0, chatDoc.messages.length - 200);
-}
+      if (chatDoc.messages.length > 200) {
+        chatDoc.messages.splice(0, chatDoc.messages.length - 200);
+      }
       await chatDoc.save();
 
       res.write(`data: ${JSON.stringify({ type: 'done', messageId: chatDoc.messages[chatDoc.messages.length - 1]._id })}\n\n`);
@@ -486,17 +490,17 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     }
   } else {
     // ── Non-streaming response ──
-    const response = await anthropic.messages.create({
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
+    const response = await groq.chat.completions.create({
+      model: GROQ_MODEL,
       max_tokens: 1024,
-      system: systemPrompt,
-      messages: recentMessages,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...recentMessages,
+      ],
+      stream: false,
     });
 
-    const assistantText = response.content
-      .filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join('');
+    const assistantText = response.choices[0]?.message?.content || '';
 
     // Persist
     chatDoc.messages.push({ role: 'user', content: message.trim(), module: module as any, context: mergedContext, createdAt: new Date() });
@@ -525,10 +529,10 @@ export const getChatHistory = asyncHandler(async (req: Request, res: Response) =
     return res.json(new ApiResponse(200, { messages: [], total: 0, hasMore: false }, 'No history'));
   }
 
-const allMessages = chatDoc.messages.toObject ? chatDoc.messages.toObject() : [...chatDoc.messages];
-const messages = (module && module !== 'all')
-  ? allMessages.filter((m: any) => m.module === module || !m.module || m.module === 'general')
-  : allMessages;
+  const allMessages = chatDoc.messages.toObject ? chatDoc.messages.toObject() : [...chatDoc.messages];
+  const messages = (module && module !== 'all')
+    ? allMessages.filter((m: any) => m.module === module || !m.module || m.module === 'general')
+    : allMessages;
 
   const total = messages.length;
   const pageNum = parseInt(page as string);
@@ -678,7 +682,7 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
     },
     ttsEngine: 'web-speech-api',
     sttEngine: 'web-speech-api',
-    aiModel: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
+    aiModel: GROQ_MODEL,
   }, 'Supra Leo AI status'));
 });
 
