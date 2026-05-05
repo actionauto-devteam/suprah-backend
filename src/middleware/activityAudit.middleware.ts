@@ -60,9 +60,9 @@ function inferActivityType(pathname: string, method: string): ActivityType {
   }
 
   if (path.startsWith("/api/shipments")) {
-    if (method === "POST") return "load_created";
-    if (method === "PATCH" || method === "PUT") return "load_updated";
-    if (method === "DELETE") return "load_deleted";
+    if (method === "POST") return "shipment_created";
+    if (method === "PATCH" || method === "PUT") return "shipment_updated";
+    if (method === "DELETE") return "shipment_deleted";
   }
 
   if (path.startsWith("/api/appointments")) {

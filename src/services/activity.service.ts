@@ -59,6 +59,9 @@ const createActivity = async (
 const IMPORTANT_ACTIVITY_TYPES: ActivityType[] = [
   'profile_update',
   'avatar_updated',
+  'shipment_created',
+  'shipment_updated',
+  'shipment_deleted',
   'load_created',
   'load_updated',
   'load_deleted',
