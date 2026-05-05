@@ -1,7 +1,7 @@
 services:
   # API Service
   api:
-    image: jolo0/actionauto-api:latest
+    image: devteamaau/actionauto-api:latest
     container_name: actionauto-api
     restart: unless-stopped
     env_file:
