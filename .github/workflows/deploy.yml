@@ -5,6 +5,11 @@ on:
     branches:
       - main  # Adjust this if your main branch is named differently
 
+# Prevent multiple deployments from running simultaneously
+concurrency:
+  group: production_deploy
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -48,7 +53,7 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "deploy/*"
-          target: "/opt/actionauto/"
+          target: "/opt/actionauto/deploy/"
 
       - name: Execute deployment commands via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -60,16 +65,16 @@ jobs:
             cd /opt/actionauto/deploy
             
             # Pull latest images for all services defined in prod manifest
-            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
+            sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
             
             # Restart the entire stack atomically
-            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
+            sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml up -d --remove-orphans
             
             # Force Nginx to re-resolve the API's internal IP (Stale IP Prevention)
-            docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
+            sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml restart nginx
             
             # Cleanup old images to prevent EBS volume saturation
-            docker image prune -a -f
+            sudo docker image prune -a -f
             
             # Verification
-            docker ps
+            sudo docker ps
