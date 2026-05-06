@@ -10,6 +10,11 @@ import { RequestHandler } from 'express';
 const router = Router();
 const MAX_DAYPULSE_ATTACHMENTS = 5;
 const MAX_DAYPULSE_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024;
+const DAYPULSE_ATTACHMENT_FIELDS = [
+    { name: 'attachmentsAccomplishment', maxCount: MAX_DAYPULSE_ATTACHMENTS },
+    { name: 'attachmentsBlockers', maxCount: MAX_DAYPULSE_ATTACHMENTS },
+    { name: 'attachmentsInProgress', maxCount: MAX_DAYPULSE_ATTACHMENTS },
+];
 const ALLOWED_DAYPULSE_ATTACHMENT_MIME_TYPES = new Set([
     'image/jpeg',
     'image/png',
@@ -32,7 +37,7 @@ const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
         fileSize: MAX_DAYPULSE_ATTACHMENT_SIZE_BYTES,
-        files: MAX_DAYPULSE_ATTACHMENTS,
+        files: MAX_DAYPULSE_ATTACHMENTS * DAYPULSE_ATTACHMENT_FIELDS.length,
     },
     fileFilter: (_req, file, cb) => {
         const extension = path.extname(file.originalname).toLowerCase();
@@ -53,7 +58,7 @@ const parseAttachments: RequestHandler = (req, res, next) => {
         return next();
     }
 
-    upload.array('attachments', MAX_DAYPULSE_ATTACHMENTS)(req, res, (err: any) => {
+    upload.fields(DAYPULSE_ATTACHMENT_FIELDS)(req, res, (err: any) => {
         if (!err) return next();
 
         if (err instanceof multer.MulterError) {
@@ -61,8 +66,8 @@ const parseAttachments: RequestHandler = (req, res, next) => {
                 return next(new ApiError(400, 'Each attachment must be 25 MB or smaller.'));
             }
 
-            if (err.code === 'LIMIT_FILE_COUNT') {
-                return next(new ApiError(400, `You can attach up to ${MAX_DAYPULSE_ATTACHMENTS} files.`));
+            if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+                return next(new ApiError(400, `You can attach up to ${MAX_DAYPULSE_ATTACHMENTS} files per section.`));
             }
 
             return next(new ApiError(400, err.message));

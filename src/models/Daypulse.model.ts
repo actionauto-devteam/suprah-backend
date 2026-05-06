@@ -20,6 +20,8 @@ export const DAYPULSE_DEPARTMENTS = [
 
 export type DayPulseDepartment = typeof DAYPULSE_DEPARTMENTS[number];
 
+export type DayPulseAttachmentSection = 'accomplishment' | 'blockers' | 'inProgress';
+
 // ─── Interface ────────────────────────────────────────────────────────────────
 // A DayPulse post is a structured daily report with three required sections.
 // Each post is scoped to one department (hashtag) and one report date.
@@ -49,6 +51,7 @@ export interface IDayPulseAttachment {
   mimeType: string;
   size: number;
   thumbnailUrl?: string | null;
+  section?: DayPulseAttachmentSection;
 }
 
 export interface IDayPulseModel extends Model<IDayPulse> { }
@@ -129,6 +132,11 @@ const DayPulseSchema = new Schema<IDayPulse>(
             mimeType: { type: String, required: true },
             size: { type: Number, required: true },
             thumbnailUrl: { type: String, default: null },
+            section: {
+              type: String,
+              enum: ['accomplishment', 'blockers', 'inProgress'],
+              default: undefined,
+            },
           },
           { _id: false }
         ),

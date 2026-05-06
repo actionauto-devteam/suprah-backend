@@ -32,6 +32,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HttpServer } from 'http';
 import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
+import { getSocketIO } from '../utils/socketEmitter';
 
 // Module-level singleton — initialised once, reused everywhere via getIO()
 let io: SocketIOServer | null = null;
@@ -68,7 +69,7 @@ export function initFeedSocket(httpServer: HttpServer): SocketIOServer {
       if (!token) return next(new Error('Authentication required'));
 
       // Verify the JWT using the same secret as the REST middleware
-      const secret  = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || '';
+      const secret = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || '';
       const decoded = jwt.verify(token, secret) as { id: string };
 
       // Confirm the user still exists and is active in the DB
@@ -118,6 +119,7 @@ export function initFeedSocket(httpServer: HttpServer): SocketIOServer {
  * feed controller wrap this in try/catch so the REST API is unaffected.
  */
 export function getIO(): SocketIOServer {
-  if (!io) throw new Error('Socket.IO not initialised — call initFeedSocket() first');
-  return io;
+  const activeIO = io ?? getSocketIO();
+  if (!activeIO) throw new Error('Socket.IO not initialised — call initFeedSocket() first');
+  return activeIO;
 }

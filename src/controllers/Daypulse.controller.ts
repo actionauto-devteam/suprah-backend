@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import DayPulse, { DAYPULSE_DEPARTMENTS, DayPulseDepartment, IDayPulseAttachment } from '../models/Daypulse.model';
+import DayPulse, { DAYPULSE_DEPARTMENTS, DayPulseAttachmentSection, DayPulseDepartment, IDayPulseAttachment } from '../models/Daypulse.model';
 import FeedComment from '../models/FeedComment.model';
 import FeedReaction from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
@@ -13,6 +13,11 @@ import { BucketType, storageService } from '../services/storage.service';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
+const DAYPULSE_ATTACHMENT_FIELDS: Array<{ field: string; section: DayPulseAttachmentSection }> = [
+  { field: 'attachmentsAccomplishment', section: 'accomplishment' },
+  { field: 'attachmentsBlockers', section: 'blockers' },
+  { field: 'attachmentsInProgress', section: 'inProgress' },
+];
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
@@ -74,7 +79,7 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
   if (!actor.organizationId) throw new ApiError(403, 'You must belong to an organization to post');
 
   const { department, reportDate, accomplishment, blockers, inProgress } = req.body;
-  const uploadedFiles = (req.files || []) as Express.Multer.File[];
+  const uploadedFiles = (req.files || {}) as Record<string, Express.Multer.File[]>;
   const attachments: IDayPulseAttachment[] = [];
   const uploadedKeys: string[] = [];
 
@@ -116,20 +121,25 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
   }
 
   try {
-    for (const file of uploadedFiles) {
-      const fileUrl = await storageService.upload(file, 'daypulse-attachments', BucketType.PRIVATE);
-      const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
-      uploadedKeys.push(fileKey);
+    for (const { field, section } of DAYPULSE_ATTACHMENT_FIELDS) {
+      const files = uploadedFiles[field] || [];
 
-      const isImage = file.mimetype.startsWith('image/');
-      attachments.push({
-        url: fileKey,
-        fileKey,
-        originalName: file.originalname,
-        mimeType: file.mimetype,
-        size: file.size,
-        thumbnailUrl: isImage ? fileKey : undefined,
-      });
+      for (const file of files) {
+        const fileUrl = await storageService.upload(file, 'daypulse-attachments', BucketType.PRIVATE);
+        const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
+        uploadedKeys.push(fileKey);
+
+        const isImage = file.mimetype.startsWith('image/');
+        attachments.push({
+          url: fileKey,
+          fileKey,
+          originalName: file.originalname,
+          mimeType: file.mimetype,
+          size: file.size,
+          thumbnailUrl: isImage ? fileKey : undefined,
+          section,
+        });
+      }
     }
 
     const report = await DayPulse.create({
