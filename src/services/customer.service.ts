@@ -1,10 +1,11 @@
 import Customer, { ICustomer, ICustomerTransaction, ICustomerConversation } from '../models/Customer.model';
+import Lead from '../models/lead.model';
 import mongoose from 'mongoose';
 import logger from '../utils/logger';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface CreateCustomerDTO {
+export interface CreateCustomerInput {
   organizationId: string;
   createdBy: string;
   firstName: string;
@@ -13,32 +14,48 @@ export interface CreateCustomerDTO {
   phone: string;
   alternatePhone?: string;
   dateOfBirth?: Date;
-  address?: ICustomer['address'];
+  address?: {
+    street?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    country?: string;
+  };
   notes?: string;
   tags?: string[];
-  preferredContactMethod?: ICustomer['preferredContactMethod'];
-  source?: ICustomer['source'];
+  preferredContactMethod?: 'email' | 'phone' | 'sms';
+  vehicleInterest?: {
+    year?: string;
+    make?: string;
+    model?: string;
+    trim?: string;
+    vin?: string;
+    budget?: string;
+    condition?: 'new' | 'used' | 'certified';
+  };
+  source: 'lead' | 'manual' | 'import' | 'booking';
   sourceLeadId?: string;
-  vehicleInterest?: ICustomer['vehicleInterest'];
 }
 
-export interface UpdateCustomerDTO {
-  updatedBy: string;
-  firstName?: string;
-  lastName?: string;
-  email?: string;
-  phone?: string;
-  alternatePhone?: string;
-  dateOfBirth?: Date;
-  address?: ICustomer['address'];
-  notes?: string;
-  tags?: string[];
-  preferredContactMethod?: ICustomer['preferredContactMethod'];
-  vehicleInterest?: ICustomer['vehicleInterest'];
-  isActive?: boolean;
+export interface UpsertFromLeadInput {
+  organizationId: string;
+  createdBy: string;
+  leadId: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  vehicleInterest?: {
+    year?: string;
+    make?: string;
+    model?: string;
+  };
+  channel?: string;
+  comments?: string;
+  source?: string;
 }
 
-export interface CustomerListOptions {
+export interface GetCustomersOptions {
   page?: number;
   limit?: number;
   search?: string;
@@ -50,374 +67,445 @@ export interface CustomerListOptions {
   endDate?: Date;
 }
 
-// ─── Service ──────────────────────────────────────────────────────────────────
-
-class CustomerService {
-  /**
-   * Create a new customer, preventing duplicates by email within the same org.
-   * Returns the existing customer if a duplicate is found.
-   */
-  async createCustomer(dto: CreateCustomerDTO): Promise<{ customer: ICustomer; isNew: boolean }> {
-    const normalizedEmail = dto.email.toLowerCase().trim();
-
-    // Deduplication check
-    const existing = await Customer.findOne({
-      organizationId: dto.organizationId,
-      email: normalizedEmail,
-    });
-
-    if (existing) {
-      logger.info(
-        { customerId: existing._id, email: normalizedEmail },
-        'Customer already exists — returning existing record'
-      );
-      return { customer: existing, isNew: false };
-    }
-
-    const now = new Date();
-
-    const customer = await Customer.create({
-      organizationId: dto.organizationId,
-      createdBy: new mongoose.Types.ObjectId(dto.createdBy),
-      firstName: dto.firstName.trim(),
-      lastName: (dto.lastName || '').trim(),
-      email: normalizedEmail,
-      phone: dto.phone?.trim() || '',
-      alternatePhone: dto.alternatePhone?.trim(),
-      dateOfBirth: dto.dateOfBirth,
-      address: dto.address,
-      notes: dto.notes,
-      tags: dto.tags || [],
-      preferredContactMethod: dto.preferredContactMethod || 'email',
-      source: dto.source || 'manual',
-      sourceLeadId: dto.sourceLeadId
-        ? new mongoose.Types.ObjectId(dto.sourceLeadId)
-        : undefined,
-      vehicleInterest: dto.vehicleInterest,
-      stats: {
-        totalTransactions: 0,
-        totalConversations: 0,
-        totalAppointments: 0,
-        firstContactedAt: now,
-        lastContactedAt: now,
-      },
-    });
-
-    logger.info(
-      { customerId: customer._id, orgId: dto.organizationId, source: dto.source },
-      'Customer created'
-    );
-
-    return { customer, isNew: true };
-  }
-
-  /**
-   * Upsert a customer from a Lead record. Called automatically when a lead is synced.
-   */
-  async upsertFromLead(params: {
-    organizationId: string;
-    createdBy: string;
-    leadId: string;
-    firstName: string;
-    lastName: string;
-    email: string;
-    phone: string;
-    vehicleInterest?: ICustomer['vehicleInterest'];
-    channel?: string;
-    comments?: string;
-    source?: string;
-  }): Promise<ICustomer> {
-    const normalizedEmail = params.email?.toLowerCase().trim();
-    if (!normalizedEmail) {
-      throw new Error('Email is required to upsert customer from lead');
-    }
-
-    const now = new Date();
-
-    const customer = await Customer.findOneAndUpdate(
-      { organizationId: params.organizationId, email: normalizedEmail },
-      {
-        $setOnInsert: {
-          organizationId: params.organizationId,
-          createdBy: new mongoose.Types.ObjectId(params.createdBy),
-          source: 'lead',
-          sourceLeadId: new mongoose.Types.ObjectId(params.leadId),
-          'stats.firstContactedAt': now,
-        },
-        $set: {
-          firstName: params.firstName?.trim() || 'Unknown',
-          lastName: params.lastName?.trim() || '',
-          phone: params.phone?.trim() || '',
-          ...(params.vehicleInterest && { vehicleInterest: params.vehicleInterest }),
-          'stats.lastContactedAt': now,
-        },
-        $inc: { 'stats.totalTransactions': 1 },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-
-    // Append a transaction record for this lead ingestion (avoid duplicates)
-    const alreadyLogged = customer.transactions.some(
-      (t) => t.referenceId === params.leadId && t.type === 'lead'
-    );
-
-    if (!alreadyLogged) {
-      customer.transactions.push({
-        type: 'lead',
-        status: 'active',
-        title: `Lead from ${params.source || 'Unknown Source'}`,
-        description: params.comments || '',
-        referenceId: params.leadId,
-        referenceModel: 'Lead',
-        metadata: { channel: params.channel },
-        occurredAt: now,
-      } as ICustomerTransaction);
-
-      if (params.comments) {
-        customer.conversations.push({
-          channel: (params.channel as any) || 'email',
-          direction: 'inbound',
-          senderType: 'customer',
-          senderName: `${params.firstName} ${params.lastName}`.trim(),
-          content: params.comments,
-          subject: 'Lead Inquiry',
-          referenceId: params.leadId,
-          referenceModel: 'Lead',
-          sentAt: now,
-        } as ICustomerConversation);
-        customer.stats.totalConversations += 1;
-      }
-
-      await customer.save();
-    }
-
-    logger.info(
-      { customerId: customer._id, leadId: params.leadId },
-      'Customer upserted from lead'
-    );
-
-    return customer;
-  }
-
-  /**
-   * Get paginated list of customers for an organisation.
-   */
-  async getCustomers(
-    orgId: string,
-    options: CustomerListOptions = {}
-  ): Promise<{ customers: ICustomer[]; total: number; page: number; pages: number }> {
-    const {
-      page = 1,
-      limit = 25,
-      search,
-      source,
-      isActive,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      startDate,
-      endDate,
-    } = options;
-
-    const skip = (page - 1) * limit;
-    const filter: any = { organizationId: orgId };
-
-    if (search) {
-      filter.$or = [
-        { firstName: { $regex: search, $options: 'i' } },
-        { lastName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-      ];
-    }
-
-    if (source) filter.source = source;
-    if (isActive !== undefined) filter.isActive = isActive;
-    if (startDate || endDate) {
-      filter.createdAt = {};
-      if (startDate) filter.createdAt.$gte = startDate;
-      if (endDate) filter.createdAt.$lte = endDate;
-    }
-
-    const [customers, total] = await Promise.all([
-      Customer.find(filter)
-        .select(
-          'firstName lastName email phone source isActive stats vehicleInterest tags notes createdAt updatedAt'
-        )
-        .sort({ [sortBy]: sortOrder === 'asc' ? 1 : -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean({ virtuals: true }) as unknown as ICustomer[],
-      Customer.countDocuments(filter),
-    ]);
-
-    return {
-      customers,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-    };
-  }
-
-  /**
-   * Get a full customer profile including embedded transactions and conversations.
-   */
-  async getCustomerById(id: string, orgId: string): Promise<ICustomer | null> {
-    return Customer.findOne({ _id: id, organizationId: orgId })
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email')
-      .lean({ virtuals: true }) as unknown as Promise<ICustomer | null>;
-  }
-
-  /**
-   * Get a customer by email within an org.
-   */
-  async getCustomerByEmail(email: string, orgId: string): Promise<ICustomer | null> {
-    return Customer.findOne({
-      organizationId: orgId,
-      email: email.toLowerCase().trim(),
-    }).lean({ virtuals: true }) as unknown as Promise<ICustomer | null>;
-  }
-
-  /**
-   * Update customer profile fields.
-   */
-  async updateCustomer(
-    id: string,
-    orgId: string,
-    dto: UpdateCustomerDTO
-  ): Promise<ICustomer | null> {
-    const update: any = {
-      updatedBy: new mongoose.Types.ObjectId(dto.updatedBy),
-    };
-
-    const fields = [
-      'firstName', 'lastName', 'email', 'phone', 'alternatePhone',
-      'dateOfBirth', 'address', 'notes', 'tags', 'preferredContactMethod',
-      'vehicleInterest', 'isActive',
-    ] as const;
-
-    for (const f of fields) {
-      if (dto[f] !== undefined) {
-        update[f] = f === 'email' ? (dto[f] as string).toLowerCase().trim() : dto[f];
-      }
-    }
-
-    const customer = await Customer.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      { $set: update },
-      { new: true, runValidators: true }
-    ).lean({ virtuals: true }) as unknown as ICustomer | null;
-
-    if (customer) {
-      logger.info({ customerId: id, orgId }, 'Customer updated');
-    }
-
-    return customer;
-  }
-
-  /**
-   * Soft-delete a customer by setting isActive = false.
-   */
-  async deactivateCustomer(id: string, orgId: string): Promise<ICustomer | null> {
-    return Customer.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      { $set: { isActive: false } },
-      { new: true }
-    ).lean({ virtuals: true }) as unknown as Promise<ICustomer | null>;
-  }
-
-  /**
-   * Hard-delete a customer record.
-   */
-  async deleteCustomer(id: string, orgId: string): Promise<boolean> {
-    const result = await Customer.findOneAndDelete({ _id: id, organizationId: orgId });
-    if (result) {
-      logger.warn({ customerId: id, orgId }, 'Customer permanently deleted');
-      return true;
-    }
-    return false;
-  }
-
-  // ─── Transactions ───────────────────────────────────────────────────────────
-
-  async addTransaction(
-    customerId: string,
-    orgId: string,
-    transaction: Omit<ICustomerTransaction, '_id' | 'createdAt' | 'updatedAt'>
-  ): Promise<ICustomer | null> {
-    const customer = await Customer.findOneAndUpdate(
-      { _id: customerId, organizationId: orgId },
-      {
-        $push: { transactions: { ...transaction, occurredAt: transaction.occurredAt || new Date() } },
-        $inc: { 'stats.totalTransactions': 1 },
-        $set: { 'stats.lastContactedAt': new Date() },
-      },
-      { new: true }
-    );
-    return customer;
-  }
-
-  async updateTransaction(
-    customerId: string,
-    orgId: string,
-    transactionId: string,
-    update: Partial<ICustomerTransaction>
-  ): Promise<ICustomer | null> {
-    const setFields: any = {};
-    for (const [k, v] of Object.entries(update)) {
-      setFields[`transactions.$.${k}`] = v;
-    }
-
-    return Customer.findOneAndUpdate(
-      {
-        _id: customerId,
-        organizationId: orgId,
-        'transactions._id': new mongoose.Types.ObjectId(transactionId),
-      },
-      { $set: setFields },
-      { new: true }
-    );
-  }
-
-  // ─── Conversations ──────────────────────────────────────────────────────────
-
-  async addConversation(
-    customerId: string,
-    orgId: string,
-    conversation: Omit<ICustomerConversation, '_id' | 'createdAt'>
-  ): Promise<ICustomer | null> {
-    return Customer.findOneAndUpdate(
-      { _id: customerId, organizationId: orgId },
-      {
-        $push: { conversations: { ...conversation, sentAt: conversation.sentAt || new Date() } },
-        $inc: { 'stats.totalConversations': 1 },
-        $set: { 'stats.lastContactedAt': new Date() },
-      },
-      { new: true }
-    );
-  }
-
-  // ─── Stats ──────────────────────────────────────────────────────────────────
-
-  async getOrgStats(orgId: string): Promise<{
-    total: number;
-    active: number;
-    fromLeads: number;
-    manual: number;
-    recentlyAdded: number;
-  }> {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-    const [total, active, fromLeads, manual, recentlyAdded] = await Promise.all([
-      Customer.countDocuments({ organizationId: orgId }),
-      Customer.countDocuments({ organizationId: orgId, isActive: true }),
-      Customer.countDocuments({ organizationId: orgId, source: 'lead' }),
-      Customer.countDocuments({ organizationId: orgId, source: 'manual' }),
-      Customer.countDocuments({ organizationId: orgId, createdAt: { $gte: thirtyDaysAgo } }),
-    ]);
-
-    return { total, active, fromLeads, manual, recentlyAdded };
-  }
+export interface DuplicateCheckResult {
+  isDuplicate: boolean;
+  existingCustomer?: ICustomer | null;
+  matchType?: 'email_and_phone' | 'email_only' | 'phone_only';
 }
 
-export default new CustomerService();
+// ─── Duplicate Detection ──────────────────────────────────────────────────────
+
+/**
+ * Normalises a phone number to digits only for comparison.
+ * e.g. "+1 (555) 000-0000" → "15550000000"
+ */
+function normalisePhone(phone: string): string {
+  return phone.replace(/\D/g, '');
+}
+
+/**
+ * Checks for duplicate customers within an organisation.
+ *
+ * Priority order:
+ *   1. Same email AND same phone  → email_and_phone
+ *   2. Same email only            → email_only
+ *   3. Same phone only (≥7 digits)→ phone_only
+ */
+async function checkDuplicate(
+  orgId: string,
+  email: string,
+  phone: string,
+  excludeId?: string,
+): Promise<DuplicateCheckResult> {
+  const normalisedPhone = normalisePhone(phone || '');
+  const normalisedEmail = (email || '').toLowerCase().trim();
+
+  const baseQuery: any = { organizationId: orgId };
+  if (excludeId) {
+    baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
+  }
+
+  // 1. Exact match on both
+  if (normalisedEmail && normalisedPhone.length >= 7) {
+    const bothMatch = await Customer.findOne({
+      ...baseQuery,
+      email: normalisedEmail,
+    }).lean();
+
+    if (bothMatch) {
+      const existingNorm = normalisePhone(bothMatch.phone || '');
+      if (existingNorm === normalisedPhone) {
+        return { isDuplicate: true, existingCustomer: bothMatch as any, matchType: 'email_and_phone' };
+      }
+    }
+  }
+
+  // 2. Email only
+  if (normalisedEmail) {
+    const emailMatch = await Customer.findOne({
+      ...baseQuery,
+      email: normalisedEmail,
+    }).lean();
+
+    if (emailMatch) {
+      return { isDuplicate: true, existingCustomer: emailMatch as any, matchType: 'email_only' };
+    }
+  }
+
+  // 3. Phone only (require at least 7 digits to avoid false positives)
+  if (normalisedPhone.length >= 7) {
+    const allInOrg = await Customer.find({
+      ...baseQuery,
+      phone: { $exists: true, $ne: '' },
+    })
+      .select('_id phone')
+      .lean();
+
+    const phoneMatch = allInOrg.find(
+      (c) => normalisePhone(c.phone || '') === normalisedPhone,
+    );
+
+    if (phoneMatch) {
+      const full = await Customer.findById(phoneMatch._id).lean();
+      return { isDuplicate: true, existingCustomer: full as any, matchType: 'phone_only' };
+    }
+  }
+
+  return { isDuplicate: false };
+}
+
+// ─── Service Methods ──────────────────────────────────────────────────────────
+
+/**
+ * Creates a new customer with duplicate prevention.
+ * Returns { customer, isNew } — isNew=false if an existing record was returned.
+ */
+async function createCustomer(
+  input: CreateCustomerInput,
+): Promise<{ customer: ICustomer; isNew: boolean; duplicateType?: string }> {
+  const {
+    organizationId, createdBy, firstName, lastName, email, phone,
+    source = 'manual', sourceLeadId, ...rest
+  } = input;
+
+  // ── Duplicate check ────────────────────────────────────────────────────────
+  const dupCheck = await checkDuplicate(organizationId, email, phone);
+  if (dupCheck.isDuplicate && dupCheck.existingCustomer) {
+    logger.info(
+      { customerId: dupCheck.existingCustomer._id, matchType: dupCheck.matchType },
+      'Duplicate customer detected — returning existing record',
+    );
+    return {
+      customer: dupCheck.existingCustomer as ICustomer,
+      isNew: false,
+      duplicateType: dupCheck.matchType,
+    };
+  }
+
+  // ── Create ─────────────────────────────────────────────────────────────────
+  const customer = new Customer({
+    organizationId,
+    createdBy: new mongoose.Types.ObjectId(createdBy),
+    firstName: firstName.trim(),
+    lastName: (lastName || '').trim(),
+    email: email.toLowerCase().trim(),
+    phone: phone.trim(),
+    source,
+    sourceLeadId: sourceLeadId ? new mongoose.Types.ObjectId(sourceLeadId) : undefined,
+    isActive: true,
+    stats: {
+      totalTransactions: 0,
+      totalConversations: 0,
+      totalAppointments: 0,
+    },
+    ...rest,
+  });
+
+  await customer.save();
+  logger.info({ customerId: customer._id, orgId: organizationId, source }, 'Customer created');
+  return { customer, isNew: true };
+}
+
+/**
+ * Upserts a customer record derived from a lead.
+ *
+ * Logic:
+ *   - If duplicate found   → update vehicle interest & source tracking, add lead transaction
+ *   - If no duplicate      → create new customer record
+ */
+async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
+  const {
+    organizationId, createdBy, leadId,
+    firstName, lastName, email, phone,
+    vehicleInterest, channel, comments, source,
+  } = input;
+
+  const normEmail = (email || '').toLowerCase().trim();
+  const normPhone = (phone || '').trim();
+
+  // ── Check for existing customer ────────────────────────────────────────────
+  const dupCheck = await checkDuplicate(organizationId, normEmail, normPhone);
+
+  const vehicleTitle = vehicleInterest
+    ? `${vehicleInterest.year || ''} ${vehicleInterest.make || ''} ${vehicleInterest.model || ''}`.trim()
+    : 'Vehicle Inquiry';
+
+  const transactionEntry = {
+    type: 'lead' as const,
+    status: 'pending' as const,
+    title: vehicleTitle || 'Lead Inquiry',
+    description: comments || `Lead from ${source || 'Unknown source'}`,
+    referenceId: leadId,
+    referenceModel: 'Lead',
+    metadata: { channel, source },
+    occurredAt: new Date(),
+  };
+
+  // ── Existing customer: enrich and link ─────────────────────────────────────
+  if (dupCheck.isDuplicate && dupCheck.existingCustomer) {
+    const existing = await Customer.findById(dupCheck.existingCustomer._id);
+    if (!existing) throw new Error('Duplicate found but document missing');
+
+    // Prevent duplicate lead transactions
+    const alreadyLinked = existing.transactions.some(
+      (tx) => tx.referenceId === leadId,
+    );
+
+    if (!alreadyLinked) {
+      existing.transactions.push(transactionEntry as any);
+      existing.stats.totalTransactions = existing.transactions.length;
+    }
+
+    // Enrich vehicle interest if currently empty
+    if (vehicleInterest?.make && !existing.vehicleInterest?.make) {
+      existing.vehicleInterest = {
+        year: vehicleInterest.year,
+        make: vehicleInterest.make,
+        model: vehicleInterest.model,
+      };
+    }
+
+    // Update first/last contact timestamps
+    const now = new Date();
+    if (!existing.stats.firstContactedAt) {
+      existing.stats.firstContactedAt = now;
+    }
+    existing.stats.lastContactedAt = now;
+
+    // Link lead if not already set
+    if (!existing.sourceLeadId) {
+      existing.sourceLeadId = new mongoose.Types.ObjectId(leadId);
+    }
+
+    await existing.save();
+    logger.info(
+      { customerId: existing._id, leadId, matchType: dupCheck.matchType },
+      'Lead linked to existing customer (no duplicate created)',
+    );
+    return existing;
+  }
+
+  // ── New customer ───────────────────────────────────────────────────────────
+  const now = new Date();
+  const customer = new Customer({
+    organizationId,
+    createdBy: new mongoose.Types.ObjectId(createdBy),
+    firstName: (firstName || 'Unknown').trim(),
+    lastName: (lastName || '').trim(),
+    email: normEmail,
+    phone: normPhone,
+    source: 'lead',
+    sourceLeadId: new mongoose.Types.ObjectId(leadId),
+    vehicleInterest: vehicleInterest
+      ? {
+          year: vehicleInterest.year,
+          make: vehicleInterest.make,
+          model: vehicleInterest.model,
+        }
+      : undefined,
+    isActive: true,
+    transactions: [transactionEntry],
+    stats: {
+      totalTransactions: 1,
+      totalConversations: 0,
+      totalAppointments: 0,
+      firstContactedAt: now,
+      lastContactedAt: now,
+    },
+  });
+
+  await customer.save();
+  logger.info(
+    { customerId: customer._id, leadId, orgId: organizationId },
+    'New customer auto-created from lead',
+  );
+  return customer;
+}
+
+/**
+ * Paginated customer list with search and filters.
+ */
+async function getCustomers(orgId: string, opts: GetCustomersOptions) {
+  const {
+    page = 1, limit = 25, search, source, isActive,
+    sortBy = 'createdAt', sortOrder = 'desc',
+    startDate, endDate,
+  } = opts;
+
+  const query: any = { organizationId: orgId };
+
+  if (isActive !== undefined) query.isActive = isActive;
+  if (source) query.source = source;
+  if (startDate || endDate) {
+    query.createdAt = {};
+    if (startDate) query.createdAt.$gte = startDate;
+    if (endDate) query.createdAt.$lte = endDate;
+  }
+
+  if (search && search.trim()) {
+    const s = search.trim();
+    const isDigits = /^\d+$/.test(s.replace(/\D/g, ''));
+    if (isDigits && s.replace(/\D/g, '').length >= 4) {
+      // Phone search — scan in-memory for normalised match
+      const phoneDigits = s.replace(/\D/g, '');
+      const all = await Customer.find(query)
+        .select('_id phone firstName lastName email source createdAt stats isActive vehicleInterest')
+        .lean();
+      const matched = all.filter((c) =>
+        normalisePhone(c.phone || '').includes(phoneDigits),
+      );
+      const total = matched.length;
+      const paginated = matched
+        .sort((a: any, b: any) =>
+          sortOrder === 'desc'
+            ? new Date(b[sortBy] || b.createdAt).getTime() - new Date(a[sortBy] || a.createdAt).getTime()
+            : new Date(a[sortBy] || a.createdAt).getTime() - new Date(b[sortBy] || b.createdAt).getTime(),
+        )
+        .slice((page - 1) * limit, page * limit);
+      return { customers: paginated, total, page, pages: Math.ceil(total / limit) };
+    }
+
+    // Text search on indexed fields
+    query.$or = [
+      { firstName: { $regex: s, $options: 'i' } },
+      { lastName: { $regex: s, $options: 'i' } },
+      { email: { $regex: s, $options: 'i' } },
+      { phone: { $regex: s, $options: 'i' } },
+      { 'vehicleInterest.make': { $regex: s, $options: 'i' } },
+      { 'vehicleInterest.model': { $regex: s, $options: 'i' } },
+    ];
+  }
+
+  const sortObj: any = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+  const total = await Customer.countDocuments(query);
+  const customers = await Customer.find(query)
+    .select('-transactions -conversations') // keep list light
+    .sort(sortObj)
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .lean();
+
+  return { customers, total, page, pages: Math.ceil(total / limit) };
+}
+
+/**
+ * Full customer document (with embedded transactions + conversations).
+ */
+async function getCustomerById(id: string, orgId: string): Promise<ICustomer | null> {
+  return Customer.findOne({ _id: id, organizationId: orgId }).lean() as any;
+}
+
+/**
+ * Aggregate stats for the organisation dashboard card.
+ */
+async function getOrgStats(orgId: string) {
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const [total, active, fromLeads, manual, recentlyAdded] = await Promise.all([
+    Customer.countDocuments({ organizationId: orgId }),
+    Customer.countDocuments({ organizationId: orgId, isActive: true }),
+    Customer.countDocuments({ organizationId: orgId, source: 'lead' }),
+    Customer.countDocuments({ organizationId: orgId, source: 'manual' }),
+    Customer.countDocuments({ organizationId: orgId, createdAt: { $gte: thirtyDaysAgo } }),
+  ]);
+
+  return { total, active, fromLeads, manual, recentlyAdded };
+}
+
+/**
+ * Update a customer (partial update, respects org boundary).
+ */
+async function updateCustomer(
+  id: string,
+  orgId: string,
+  data: Partial<ICustomer> & { updatedBy?: string },
+): Promise<ICustomer | null> {
+  const { updatedBy, ...rest } = data;
+  const update: any = { ...rest };
+  if (updatedBy) update.updatedBy = new mongoose.Types.ObjectId(updatedBy);
+
+  return Customer.findOneAndUpdate(
+    { _id: id, organizationId: orgId },
+    { $set: update },
+    { new: true },
+  ).lean() as any;
+}
+
+/**
+ * Hard delete a customer record.
+ */
+async function deleteCustomer(id: string, orgId: string): Promise<boolean> {
+  const result = await Customer.findOneAndDelete({ _id: id, organizationId: orgId });
+  return !!result;
+}
+
+// ─── Embedded sub-document helpers ───────────────────────────────────────────
+
+async function addTransaction(
+  id: string,
+  orgId: string,
+  tx: Omit<ICustomerTransaction, '_id'>,
+): Promise<ICustomer | null> {
+  const customer = await Customer.findOne({ _id: id, organizationId: orgId });
+  if (!customer) return null;
+
+  customer.transactions.push(tx as any);
+  customer.stats.totalTransactions = customer.transactions.length;
+  await customer.save();
+  return customer;
+}
+
+async function updateTransaction(
+  customerId: string,
+  orgId: string,
+  txId: string,
+  data: Partial<ICustomerTransaction>,
+): Promise<ICustomer | null> {
+  const customer = await Customer.findOne({ _id: customerId, organizationId: orgId });
+  if (!customer) return null;
+
+  const tx = customer.transactions.find(
+    (t) => t._id?.toString() === txId,
+  );
+  if (!tx) return null;
+
+  Object.assign(tx, data);
+  await customer.save();
+  return customer;
+}
+
+async function addConversation(
+  id: string,
+  orgId: string,
+  conv: Omit<ICustomerConversation, '_id'>,
+): Promise<ICustomer | null> {
+  const customer = await Customer.findOne({ _id: id, organizationId: orgId });
+  if (!customer) return null;
+
+  customer.conversations.push(conv as any);
+  customer.stats.totalConversations = customer.conversations.length;
+
+  const now = new Date();
+  if (!customer.stats.firstContactedAt) customer.stats.firstContactedAt = now;
+  customer.stats.lastContactedAt = now;
+
+  await customer.save();
+  return customer;
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+
+export default {
+  checkDuplicate,
+  createCustomer,
+  upsertFromLead,
+  getCustomers,
+  getCustomerById,
+  getOrgStats,
+  updateCustomer,
+  deleteCustomer,
+  addTransaction,
+  updateTransaction,
+  addConversation,
+};

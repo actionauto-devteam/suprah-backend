@@ -12,6 +12,9 @@ router.use(requireOrg);
 // ─── Stats (static, must come before :id) ────────────────────────────────────
 router.get('/stats', customerController.getCustomerStats);
 
+// ─── Duplicate check (before :id to avoid route conflict) ────────────────────
+router.get('/check-duplicate', customerController.checkDuplicate);
+
 // ─── Sync from lead ───────────────────────────────────────────────────────────
 router.post('/sync-from-lead', customerController.syncFromLead);
 

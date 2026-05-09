@@ -11,7 +11,7 @@ import logger from '../utils/logger';
 
 /**
  * POST /api/customers
- * Create a new customer record manually.
+ * Create a new customer record manually — with duplicate prevention.
  */
 export const createCustomer = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
@@ -27,7 +27,7 @@ export const createCustomer = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'firstName, email, and phone are required');
   }
 
-  const { customer, isNew } = await customerService.createCustomer({
+  const { customer, isNew, duplicateType } = await customerService.createCustomer({
     organizationId: orgId,
     createdBy: userId,
     firstName,
@@ -46,7 +46,8 @@ export const createCustomer = asyncHandler(async (req: Request, res: Response) =
 
   if (!isNew) {
     return res.status(200).json(
-      new ApiResponse(200, customer, 'Customer with this email already exists — returned existing record')
+      new ApiResponse(200, { customer, isDuplicate: true, duplicateType }, 
+        `Duplicate detected (${duplicateType?.replace('_', ' ')}). Returning existing record.`)
     );
   }
 
@@ -61,7 +62,7 @@ export const createCustomer = asyncHandler(async (req: Request, res: Response) =
 
   logger.info({ customerId: customer._id, orgId, userId }, 'Customer created manually');
 
-  res.status(201).json(new ApiResponse(201, customer, 'Customer created successfully'));
+  res.status(201).json(new ApiResponse(201, { customer, isDuplicate: false }, 'Customer created successfully'));
 });
 
 /**
@@ -97,6 +98,29 @@ export const getCustomerStats = asyncHandler(async (req: Request, res: Response)
   const orgId = req.orgId as string;
   const stats = await customerService.getOrgStats(orgId);
   res.json(new ApiResponse(200, stats, 'Customer stats fetched'));
+});
+
+/**
+ * GET /api/customers/check-duplicate
+ * Check if a customer with the given email/phone already exists.
+ * Query params: email, phone
+ */
+export const checkDuplicate = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const { email, phone, excludeId } = req.query;
+
+  if (!email && !phone) {
+    throw new ApiError(400, 'At least email or phone is required');
+  }
+
+  const result = await customerService.checkDuplicate(
+    orgId,
+    (email as string) || '',
+    (phone as string) || '',
+    excludeId as string | undefined,
+  );
+
+  res.json(new ApiResponse(200, result, result.isDuplicate ? 'Duplicate found' : 'No duplicate'));
 });
 
 /**
@@ -169,84 +193,51 @@ export const deleteCustomer = asyncHandler(async (req: Request, res: Response) =
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
-/**
- * POST /api/customers/:id/transactions
- * Add a transaction to a customer record.
- */
 export const addTransaction = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id } = req.params;
-
   const { type, status, title, description, amount, currency, referenceId, referenceModel, metadata } = req.body;
 
   if (!type || !title) throw new ApiError(400, 'type and title are required');
 
   const customer = await customerService.addTransaction(id, orgId, {
-    type,
-    status: status || 'pending',
-    title,
-    description,
-    amount,
-    currency,
-    referenceId,
-    referenceModel,
-    metadata,
+    type, status: status || 'pending', title, description, amount, currency,
+    referenceId, referenceModel, metadata,
     occurredAt: req.body.occurredAt ? new Date(req.body.occurredAt) : new Date(),
   });
 
   if (!customer) throw new ApiError(404, 'Customer not found');
-
   res.status(201).json(new ApiResponse(201, customer, 'Transaction added'));
 });
 
-/**
- * PATCH /api/customers/:id/transactions/:txId
- * Update a specific transaction.
- */
 export const updateTransaction = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { id, txId } = req.params;
-
   const customer = await customerService.updateTransaction(id, orgId, txId, req.body);
   if (!customer) throw new ApiError(404, 'Customer or transaction not found');
-
   res.json(new ApiResponse(200, customer, 'Transaction updated'));
 });
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 
-/**
- * POST /api/customers/:id/conversations
- * Log a conversation entry for a customer.
- */
 export const addConversation = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const userId = (req.user as IUser)._id.toString();
   const { id } = req.params;
-
   const { channel, direction, senderType, senderName, content, subject, referenceId, referenceModel, metadata } = req.body;
 
   if (!channel || !content) throw new ApiError(400, 'channel and content are required');
 
   const customer = await customerService.addConversation(id, orgId, {
-    channel,
-    direction: direction || 'outbound',
-    senderType: senderType || 'agent',
-    senderName,
-    content,
-    subject,
-    referenceId,
-    referenceModel,
-    metadata,
+    channel, direction: direction || 'outbound', senderType: senderType || 'agent',
+    senderName, content, subject, referenceId, referenceModel, metadata,
     sentAt: req.body.sentAt ? new Date(req.body.sentAt) : new Date(),
   });
 
   if (!customer) throw new ApiError(404, 'Customer not found');
 
   await activityService.createActivity({
-    userId,
-    organizationId: orgId,
-    type: 'other',
+    userId, organizationId: orgId, type: 'other',
     title: 'Conversation Logged',
     description: `${direction || 'outbound'} ${channel} conversation logged for customer`,
     metadata: { customerId: id },
@@ -255,36 +246,19 @@ export const addConversation = asyncHandler(async (req: Request, res: Response) 
   res.status(201).json(new ApiResponse(201, customer, 'Conversation logged'));
 });
 
-// ─── Lead → Customer Sync (internal, also exposed as endpoint) ────────────────
+// ─── Lead → Customer Sync ─────────────────────────────────────────────────────
 
-/**
- * POST /api/customers/sync-from-lead
- * Internal endpoint — upserts a customer record from a lead payload.
- * Called automatically by the lead sync pipeline; can also be triggered manually.
- */
 export const syncFromLead = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const userId = (req.user as IUser)._id.toString();
-
-  const {
-    leadId, firstName, lastName, email, phone,
-    vehicleInterest, channel, comments, source,
-  } = req.body;
+  const { leadId, firstName, lastName, email, phone, vehicleInterest, channel, comments, source } = req.body;
 
   if (!leadId || !email) throw new ApiError(400, 'leadId and email are required');
 
   const customer = await customerService.upsertFromLead({
-    organizationId: orgId,
-    createdBy: userId,
-    leadId,
-    firstName: firstName || 'Unknown',
-    lastName: lastName || '',
-    email,
-    phone: phone || '',
-    vehicleInterest,
-    channel,
-    comments,
-    source,
+    organizationId: orgId, createdBy: userId, leadId,
+    firstName: firstName || 'Unknown', lastName: lastName || '',
+    email, phone: phone || '', vehicleInterest, channel, comments, source,
   });
 
   res.json(new ApiResponse(200, customer, 'Customer synced from lead'));
@@ -294,6 +268,7 @@ export default {
   createCustomer,
   getCustomers,
   getCustomerStats,
+  checkDuplicate,
   getCustomerById,
   updateCustomer,
   deleteCustomer,
