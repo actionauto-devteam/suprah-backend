@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from 'express';
 import appointmentService from '../services/appointment.service';
 import googleCalendarService from '../services/googleCalendar.service';
 import Lead from '../models/lead.model';
-import { parseStringPromise } from 'xml2js';
 import User, { IUser } from '../models/User.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -28,9 +27,31 @@ import CrmUser from '../models/CrmUser.model';
 
 /**
  * STRICT SOURCE FILTER — only leads from this address are ingested.
- * All other senders are silently ignored during Gmail sync.
  */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
+
+// ─── Cached system user lookup ────────────────────────────────────────────────
+// Cached in-process to avoid a DB round-trip on every single lead ingested.
+// Cleared on process restart only.
+let _cachedSystemUserId: string | null = null;
+
+async function getSystemUserId(orgId?: string): Promise<string | null> {
+  if (_cachedSystemUserId) return _cachedSystemUserId;
+
+  // Priority: super_admin → admin → any user in the system
+  const user =
+    await User.findOne({ role: 'super_admin' }).select('_id').lean() ||
+    await User.findOne({ role: 'admin' }).select('_id').lean() ||
+    await User.findOne({}).select('_id').lean();
+
+  if (user) {
+    _cachedSystemUserId = (user as any)._id.toString();
+    return _cachedSystemUserId;
+  }
+
+  logger.error({ orgId }, '[AUTO-SYNC] No system user found — cannot sync leads to customers');
+  return null;
+}
 
 async function getCentralOAuth2Client(orgId: string) {
   const oauth2Client = new google.auth.OAuth2(
@@ -52,11 +73,11 @@ async function getCentralOAuth2Client(orgId: string) {
   if (orgConfig && orgConfig.gmailConnected && orgConfig.refreshToken) {
     const isCached = !!(await cacheService.get(cacheKey));
     console.log(`[CENTRAL-AUTH] Using tokens from OrgLeadConfig for org: ${orgId}${isCached ? ' (Cached)' : ''}`);
-    
+
     oauth2Client.setCredentials({
-      access_token:  orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
+      access_token: orgConfig.accessToken ? decrypt(orgConfig.accessToken) : undefined,
       refresh_token: decrypt(orgConfig.refreshToken),
-      expiry_date:   orgConfig.expiryDate,
+      expiry_date: orgConfig.expiryDate,
     });
   } else {
     console.error(`[CENTRAL-AUTH] ERROR: No Gmail credentials found for organization: ${orgId}`);
@@ -67,7 +88,7 @@ async function getCentralOAuth2Client(orgId: string) {
     try {
       console.log(`[CENTRAL-AUTH] Tokens refreshed for org ${orgId}, updating OrgLeadConfig...`);
       const update: any = { expiryDate: tokens.expiry_date };
-      if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
+      if (tokens.access_token) update.accessToken = encrypt(tokens.access_token);
       if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
       await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
       await cacheService.del(`config:org:${orgId}`);
@@ -103,10 +124,10 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay =
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ─────────────────────────────────────────────────────────────
-// AUTO-SYNC: Convert Lead to Customer
-// Triggered automatically when leads are created/ingested
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-SYNC: Convert Lead to Customer immediately on lead creation.
+// Non-fatal — a sync failure NEVER blocks lead creation.
+// ─────────────────────────────────────────────────────────────────────────────
 async function autoSyncLeadToCustomer(
   orgId: string,
   leadId: string,
@@ -120,47 +141,45 @@ async function autoSyncLeadToCustomer(
   source?: string,
 ): Promise<void> {
   try {
-    const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
-    if (!systemUser) {
-      logger.warn({ leadId }, 'No system user available for auto-sync');
+    // Guard: skip leads with no email — no useful customer record possible
+    if (!email || !email.trim()) {
+      logger.warn({ leadId }, '[AUTO-SYNC] Skipping — lead has no email');
       return;
     }
 
-    logger.info(
-      { leadId, email, phone, orgId },
-      'Auto-syncing lead to customer database'
-    );
+    const systemUserId = await getSystemUserId(orgId);
+    if (!systemUserId) {
+      // Logged inside getSystemUserId; just bail silently here
+      return;
+    }
+
+    logger.info({ leadId, email, orgId }, '[AUTO-SYNC] Syncing lead to customer database');
 
     await customerService.upsertFromLead({
       organizationId: orgId,
-      createdBy: systemUser._id.toString(),
+      createdBy: systemUserId,
       leadId,
-      firstName: firstName || 'Unknown',
-      lastName: lastName || '',
-      email,
-      phone: phone || '',
-      vehicleInterest: vehicleInfo ? {
-        year: vehicleInfo.year,
-        make: vehicleInfo.make,
-        model: vehicleInfo.model,
-      } : undefined,
+      firstName: (firstName || 'Unknown').trim(),
+      lastName: (lastName || '').trim(),
+      email: email.trim(),
+      phone: (phone || '').trim(),
+      vehicleInterest: vehicleInfo
+        ? { year: vehicleInfo.year, make: vehicleInfo.make, model: vehicleInfo.model }
+        : undefined,
       channel,
       comments,
       source,
     });
 
-    logger.info(
-      { leadId, email },
-      'Lead successfully synced to customer credentials'
-    );
+    logger.info({ leadId, email }, '[AUTO-SYNC] Lead successfully synced to customer credentials');
   } catch (error) {
-    logger.error({ error, leadId }, 'Lead-to-customer auto-sync failed (non-fatal)');
+    logger.error({ error, leadId, orgId }, '[AUTO-SYNC] Lead-to-customer sync failed (non-fatal)');
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // Handle incoming ADF XML (public endpoint for email webhooks)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 export const receiveADF = async (req: Request, res: Response) => {
   try {
     let xmlData = (req as any).rawBody || req.body;
@@ -177,15 +196,15 @@ export const receiveADF = async (req: Request, res: Response) => {
     const orgId = req.query.orgId || req.body.organizationId;
     const config = (req as any).orgLeadConfig;
 
-    const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
-    if (!systemUser) {
+    const systemUserId = await getSystemUserId(orgId as string);
+    if (!systemUserId) {
       console.error('[ADF-ERROR] No administrative user found to associate with lead creation');
       return res.status(500).json({ message: 'Internal server error: No administrative context' });
     }
 
     const newLead = new Lead({
       organizationId: orgId,
-      createdBy: systemUser._id,
+      createdBy: systemUserId,
       firstName: adfData.firstName,
       lastName: adfData.lastName,
       email: adfData.email,
@@ -202,7 +221,7 @@ export const receiveADF = async (req: Request, res: Response) => {
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
 
-    // ✨ AUTO-SYNC: Automatically add to customer database
+    // ✨ AUTO-SYNC: Immediately add to customer database
     await autoSyncLeadToCustomer(
       orgId as string,
       newLead._id.toString(),
@@ -234,7 +253,7 @@ export const receiveADF = async (req: Request, res: Response) => {
 
     await notifyOrgAdmins(
       orgId as string,
-      "new_lead",
+      'new_lead',
       title,
       message,
       {
@@ -247,13 +266,13 @@ export const receiveADF = async (req: Request, res: Response) => {
     );
 
     await activityService.createActivity({
-      userId: systemUser._id.toString(),
+      userId: systemUserId,
       organizationId: orgId || 'global',
       type: 'other',
       title: 'New Lead Ingested',
       description: `New lead ${adfData.firstName} ${adfData.lastName} from ${newLead.source}`,
       metadata: { leadId: newLead._id.toString(), channel: 'adf' },
-      ipAddress: req.ip
+      ipAddress: req.ip,
     });
 
     logger.info({ leadId: newLead._id, orgId, source: newLead.source }, 'New lead via ADF webhook');
@@ -416,7 +435,7 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const savedLead = await newLead.save();
 
-    // ✨ AUTO-SYNC: Automatically add to customer database
+    // ✨ AUTO-SYNC: Immediately add to customer database
     await autoSyncLeadToCustomer(
       req.orgId as string,
       savedLead._id.toString(),
@@ -567,11 +586,11 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
       const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-      const user = await User.findById(userId);
-      const senderDisplay = user?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
+      const replyingUser = await User.findById(userId);
+      const senderDisplay = replyingUser?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
 
       const recipientEmail = lead.senderEmail || lead.email;
-      const headers = [
+      const emailHeaders = [
         `From: ${senderDisplay}`,
         `To: ${recipientEmail}`,
         `Subject: Re: ${lead.subject || 'Inquiry Response'}`,
@@ -582,7 +601,7 @@ export const replyToInquiry = async (req: Request, res: Response) => {
         'Content-Transfer-Encoding: 7bit',
       ].join('\n');
 
-      const emailBody = [headers, '', message].join('\n');
+      const emailBody = [emailHeaders, '', message].join('\n');
       const encodedMessage = Buffer.from(emailBody)
         .toString('base64')
         .replace(/\+/g, '-')
@@ -799,7 +818,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         try {
           await newLead.save();
 
-          // ✨ AUTO-SYNC: Automatically add to customer database
+          // ✨ AUTO-SYNC: Immediately add to customer database
           await autoSyncLeadToCustomer(
             req.orgId as string,
             newLead._id.toString(),
@@ -827,7 +846,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
             organizationId: req.orgId || 'global',
             type: 'other',
             title: 'Lead Synced from Gmail',
-            description: `Lead ${firstName} ${lastName} synced from DealtCloud filter`,
+            description: `Lead ${firstName} ${lastName} synced from DealersCloud filter`,
             metadata: { leadId: newLead._id.toString(), threadId: details.data.threadId }
           });
 
@@ -868,17 +887,16 @@ export const syncGmailInquiries = asyncHandler(async (req: Request, res: Respons
 export const getCentralSyncStatus = asyncHandler(async (req: Request, res: Response) => {
   const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
   const connected = !!(config && config.gmailConnected && config.refreshToken);
-  
   const email = connected ? config.gmailAddress : null;
 
   res.json(
     new ApiResponse(
       200,
-      { 
-        connected, 
-        email, 
+      {
+        connected,
+        email,
         leadsSourceEmail: LEADS_SOURCE_EMAIL,
-        mode: connected ? 'organization' : 'unconfigured'
+        mode: connected ? 'organization' : 'unconfigured',
       },
       connected ? 'Lead ingestion active' : 'Not configured'
     )
@@ -890,7 +908,7 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   const { date, time, notes, locationOrVehicle } = req.body;
   const user = req.user || req.crmUser;
   if (!user) throw new ApiError(401, 'Please authenticate');
-  
+
   const userId = user._id;
   const orgId = req.orgId;
 
@@ -910,27 +928,27 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   const startTime = new Date(date);
   const [hours, minutes] = time.split(':');
   startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
-  
+
   const endTime = new Date(startTime);
   endTime.setHours(startTime.getHours() + 1);
 
   const appointmentData = {
-      title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
-      description: notes || `Lead Appointment for ${lead.firstName}`,
-      startTime,
-      endTime,
-      location: locationOrVehicle || '',
-      type: 'in-person' as const,
-      entryType: 'appointment' as const,
-      participants: [userId.toString()],
-      leadId: lead._id.toString(),
-      customerBooking: {
-        isCustomerBooking: true,
-        firstName: lead.firstName,
-        lastName: lead.lastName || '',
-        email: lead.email || '',
-        phone: lead.phone || ''
-      }
+    title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
+    description: notes || `Lead Appointment for ${lead.firstName}`,
+    startTime,
+    endTime,
+    location: locationOrVehicle || '',
+    type: 'in-person' as const,
+    entryType: 'appointment' as const,
+    participants: [userId.toString()],
+    leadId: lead._id.toString(),
+    customerBooking: {
+      isCustomerBooking: true,
+      firstName: lead.firstName,
+      lastName: lead.lastName || '',
+      email: lead.email || '',
+      phone: lead.phone || '',
+    },
   };
 
   const appointment = await appointmentService.createAppointment(
@@ -993,7 +1011,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
       format: 'full',
     }));
 
-    const user = await User.findById(userId);
+    const threadUser = await User.findById(userId);
 
     const messages = (threadData.data.messages || [])
       .filter((msg: any) => msg.id !== lead.messageId)
@@ -1023,7 +1041,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
           senderEmail: email,
           message: body,
           timestamp: new Date(parseInt(msg.internalDate || Date.now())),
-          isOwn: email === user?.email || (config?.gmailAddress === email),
+          isOwn: email === threadUser?.email || (config?.gmailAddress === email),
         };
       });
 

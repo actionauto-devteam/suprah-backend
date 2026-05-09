@@ -6,6 +6,8 @@ import { IUser } from '../models/User.model';
 import customerService from '../services/customer.service';
 import activityService from '../services/activity.service';
 import logger from '../utils/logger';
+import Lead from '../models/lead.model';
+import User from '../models/User.model';
 
 // ─── Customers CRUD ───────────────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ export const createCustomer = asyncHandler(async (req: Request, res: Response) =
 
   if (!isNew) {
     return res.status(200).json(
-      new ApiResponse(200, { customer, isDuplicate: true, duplicateType }, 
+      new ApiResponse(200, { customer, isDuplicate: true, duplicateType },
         `Duplicate detected (${duplicateType?.replace('_', ' ')}). Returning existing record.`)
     );
   }
@@ -103,12 +105,6 @@ export const getCustomerStats = asyncHandler(async (req: Request, res: Response)
 /**
  * GET /api/customers/check-duplicate
  * Check if a customer with the given email/phone already exists.
- * Query params: email, phone
- * 
- * Duplicate detection priority:
- *   1. Same email + phone (100% confidence)
- *   2. Same email only (95% confidence)
- *   3. Same phone only (90% confidence)
  */
 export const checkDuplicate = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
@@ -269,6 +265,124 @@ export const syncFromLead = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, customer, 'Customer synced from lead'));
 });
 
+// ─── Backfill: Sync ALL existing leads → Customers ───────────────────────────
+
+/**
+ * POST /api/customers/backfill-from-leads
+ *
+ * One-shot job that iterates every Lead in the org and upserts a Customer
+ * record for each one. Safe to call multiple times — duplicate detection
+ * inside upsertFromLead prevents double-entries.
+ *
+ * Returns { total, synced, skipped, failed } so the UI can show progress.
+ *
+ * Runs in batches of 50 to avoid memory spikes on large datasets.
+ */
+export const backfillFromLeads = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const userId = (req.user as IUser)._id.toString();
+
+  logger.info({ orgId, userId }, '[BACKFILL] Starting lead→customer backfill');
+
+  // ── Find the best available system user for createdBy ─────────────────────
+  // Priority: the requesting user → super_admin → admin → any user in org
+  let systemUserId = userId;
+  if (!systemUserId) {
+    const fallback =
+      await User.findOne({ role: 'super_admin' }).lean() ||
+      await User.findOne({ role: 'admin' }).lean() ||
+      await User.findOne({}).lean();
+    if (!fallback) throw new ApiError(500, 'No users found in system');
+    systemUserId = fallback._id.toString();
+  }
+
+  // ── Count total leads for this org ─────────────────────────────────────────
+  const total = await Lead.countDocuments({ organizationId: orgId });
+
+  if (total === 0) {
+    return res.json(new ApiResponse(200, {
+      total: 0, synced: 0, skipped: 0, failed: 0,
+    }, 'No leads found to backfill'));
+  }
+
+  logger.info({ orgId, total }, '[BACKFILL] Total leads to process');
+
+  // ── Batch processing ────────────────────────────────────────────────────────
+  const BATCH_SIZE = 50;
+  let synced = 0;
+  let skipped = 0;
+  let failed = 0;
+  let skip = 0;
+
+  while (skip < total) {
+    const batch = await Lead.find({ organizationId: orgId })
+      .select('_id firstName lastName email phone vehicle comments source channel createdAt')
+      .sort({ createdAt: 1 }) // oldest first so sourceLeadId points to original
+      .skip(skip)
+      .limit(BATCH_SIZE)
+      .lean();
+
+    if (batch.length === 0) break;
+
+    for (const lead of batch) {
+      try {
+        // Skip leads with no email — can't create a meaningful customer record
+        if (!lead.email || !lead.email.trim()) {
+          skipped++;
+          continue;
+        }
+
+        await customerService.upsertFromLead({
+          organizationId: orgId,
+          createdBy: systemUserId,
+          leadId: lead._id.toString(),
+          firstName: lead.firstName || 'Unknown',
+          lastName: lead.lastName || '',
+          email: lead.email,
+          phone: lead.phone || '',
+          vehicleInterest: lead.vehicle
+            ? {
+                year: lead.vehicle.year,
+                make: lead.vehicle.make,
+                model: lead.vehicle.model,
+              }
+            : undefined,
+          channel: lead.channel,
+          comments: lead.comments || '',
+          source: lead.source || 'lead',
+        });
+
+        synced++;
+      } catch (err) {
+        logger.error({ err, leadId: lead._id }, '[BACKFILL] Failed to sync lead');
+        failed++;
+      }
+    }
+
+    skip += BATCH_SIZE;
+    logger.info({ orgId, skip, total, synced, failed }, '[BACKFILL] Batch progress');
+  }
+
+  // ── Log the activity ────────────────────────────────────────────────────────
+  await activityService.createActivity({
+    userId,
+    organizationId: orgId,
+    type: 'other',
+    title: 'Lead Backfill Completed',
+    description: `Backfilled ${synced} customers from ${total} leads (${skipped} skipped, ${failed} failed)`,
+    metadata: { total, synced, skipped, failed },
+  });
+
+  logger.info({ orgId, total, synced, skipped, failed }, '[BACKFILL] Backfill complete');
+
+  res.json(new ApiResponse(200, {
+    total,
+    synced,
+    skipped,
+    failed,
+  }, `Backfill complete. ${synced} customers synced from ${total} leads.`));
+});
+
 export default {
   createCustomer,
   getCustomers,
@@ -281,4 +395,5 @@ export default {
   updateTransaction,
   addConversation,
   syncFromLead,
+  backfillFromLeads,
 };
