@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -265,27 +265,24 @@ export const syncFromLead = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, customer, 'Customer synced from lead'));
 });
 
-// ─── Backfill: Sync ALL existing leads → Customers ───────────────────────────
+// ─── Sync All Leads → Customers (incremental, safe to call repeatedly) ───────
 
 /**
- * POST /api/customers/backfill-from-leads
+ * POST /api/customers/sync-from-leads
  *
- * One-shot job that iterates every Lead in the org and upserts a Customer
- * record for each one. Safe to call multiple times — duplicate detection
- * inside upsertFromLead prevents double-entries.
+ * Syncs ALL leads in the org that don't yet have a corresponding customer.
+ * Uses sourceLeadId to detect already-synced leads — skips them efficiently.
+ * Safe to call multiple times (idempotent via upsert logic in service).
  *
- * Returns { total, synced, skipped, failed } so the UI can show progress.
- *
- * Runs in batches of 50 to avoid memory spikes on large datasets.
+ * Returns { total, synced, skipped, failed, alreadySynced }
  */
-export const backfillFromLeads = asyncHandler(async (req: Request, res: Response) => {
+export const syncFromLeads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const userId = (req.user as IUser)._id.toString();
 
-  logger.info({ orgId, userId }, '[BACKFILL] Starting lead→customer backfill');
+  logger.info({ orgId, userId }, '[SYNC] Starting incremental lead→customer sync');
 
-  // ── Find the best available system user for createdBy ─────────────────────
-  // Priority: the requesting user → super_admin → admin → any user in org
+  // Find the best available user for createdBy
   let systemUserId = userId;
   if (!systemUserId) {
     const fallback =
@@ -293,31 +290,49 @@ export const backfillFromLeads = asyncHandler(async (req: Request, res: Response
       await User.findOne({ role: 'admin' }).lean() ||
       await User.findOne({}).lean();
     if (!fallback) throw new ApiError(500, 'No users found in system');
-    systemUserId = fallback._id.toString();
+    systemUserId = (fallback as any)._id.toString();
   }
 
-  // ── Count total leads for this org ─────────────────────────────────────────
-  const total = await Lead.countDocuments({ organizationId: orgId });
+  // Get all leads for this org that have an email (required for customer creation)
+  const total = await Lead.countDocuments({ organizationId: orgId, email: { $exists: true, $ne: '' } });
 
   if (total === 0) {
     return res.json(new ApiResponse(200, {
-      total: 0, synced: 0, skipped: 0, failed: 0,
-    }, 'No leads found to backfill'));
+      total: 0, synced: 0, skipped: 0, failed: 0, alreadySynced: 0,
+    }, 'No leads with email found to sync'));
   }
 
-  logger.info({ orgId, total }, '[BACKFILL] Total leads to process');
+  logger.info({ orgId, total }, '[SYNC] Total leads to process');
 
-  // ── Batch processing ────────────────────────────────────────────────────────
   const BATCH_SIZE = 50;
   let synced = 0;
   let skipped = 0;
   let failed = 0;
+  let alreadySynced = 0;
   let skip = 0;
 
+  // Get all sourceLeadIds already in customers to skip efficiently
+  const existingSourceLeadIds = new Set(
+    (await Lead.find({ organizationId: orgId })
+      .select('_id')
+      .lean()
+      // We cross-reference against customers that already have a sourceLeadId
+      .then(async () => {
+        const { default: Customer } = await import('../models/Customer.model');
+        return Customer.find({ organizationId: orgId, sourceLeadId: { $exists: true } })
+          .select('sourceLeadId')
+          .lean();
+      })
+    ).map((c: any) => c.sourceLeadId?.toString()).filter(Boolean)
+  );
+
   while (skip < total) {
-    const batch = await Lead.find({ organizationId: orgId })
+    const batch = await Lead.find({
+      organizationId: orgId,
+      email: { $exists: true, $ne: '' },
+    })
       .select('_id firstName lastName email phone vehicle comments source channel createdAt')
-      .sort({ createdAt: 1 }) // oldest first so sourceLeadId points to original
+      .sort({ createdAt: 1 })
       .skip(skip)
       .limit(BATCH_SIZE)
       .lean();
@@ -326,7 +341,14 @@ export const backfillFromLeads = asyncHandler(async (req: Request, res: Response
 
     for (const lead of batch) {
       try {
-        // Skip leads with no email — can't create a meaningful customer record
+        const leadIdStr = (lead as any)._id.toString();
+
+        // Fast-skip leads that are already linked to a customer via sourceLeadId
+        if (existingSourceLeadIds.has(leadIdStr)) {
+          alreadySynced++;
+          continue;
+        }
+
         if (!lead.email || !lead.email.trim()) {
           skipped++;
           continue;
@@ -335,52 +357,64 @@ export const backfillFromLeads = asyncHandler(async (req: Request, res: Response
         await customerService.upsertFromLead({
           organizationId: orgId,
           createdBy: systemUserId,
-          leadId: lead._id.toString(),
-          firstName: lead.firstName || 'Unknown',
-          lastName: lead.lastName || '',
+          leadId: leadIdStr,
+          firstName: (lead as any).firstName || 'Unknown',
+          lastName: (lead as any).lastName || '',
           email: lead.email,
-          phone: lead.phone || '',
-          vehicleInterest: lead.vehicle
+          phone: (lead as any).phone || '',
+          vehicleInterest: (lead as any).vehicle
             ? {
-                year: lead.vehicle.year,
-                make: lead.vehicle.make,
-                model: lead.vehicle.model,
+                year: (lead as any).vehicle.year,
+                make: (lead as any).vehicle.make,
+                model: (lead as any).vehicle.model,
               }
             : undefined,
-          channel: lead.channel,
-          comments: lead.comments || '',
-          source: lead.source || 'lead',
+          channel: (lead as any).channel,
+          comments: (lead as any).comments || '',
+          source: (lead as any).source || 'lead',
         });
 
         synced++;
+        existingSourceLeadIds.add(leadIdStr); // prevent re-processing in same run
       } catch (err) {
-        logger.error({ err, leadId: lead._id }, '[BACKFILL] Failed to sync lead');
+        logger.error({ err, leadId: (lead as any)._id }, '[SYNC] Failed to sync lead');
         failed++;
       }
     }
 
     skip += BATCH_SIZE;
-    logger.info({ orgId, skip, total, synced, failed }, '[BACKFILL] Batch progress');
+    logger.info({ orgId, skip, total, synced, failed, alreadySynced }, '[SYNC] Batch progress');
   }
 
-  // ── Log the activity ────────────────────────────────────────────────────────
   await activityService.createActivity({
     userId,
     organizationId: orgId,
     type: 'other',
-    title: 'Lead Backfill Completed',
-    description: `Backfilled ${synced} customers from ${total} leads (${skipped} skipped, ${failed} failed)`,
-    metadata: { total, synced, skipped, failed },
+    title: 'Lead Sync Completed',
+    description: `Synced ${synced} new customers from ${total} leads (${alreadySynced} already synced, ${skipped} skipped, ${failed} failed)`,
+    metadata: { total, synced, skipped, failed, alreadySynced },
   });
 
-  logger.info({ orgId, total, synced, skipped, failed }, '[BACKFILL] Backfill complete');
+  logger.info({ orgId, total, synced, skipped, failed, alreadySynced }, '[SYNC] Sync complete');
 
   res.json(new ApiResponse(200, {
     total,
     synced,
     skipped,
     failed,
-  }, `Backfill complete. ${synced} customers synced from ${total} leads.`));
+    alreadySynced,
+  }, `Sync complete. ${synced} new customers synced, ${alreadySynced} already existed.`));
+});
+
+// ─── Backfill: Sync ALL existing leads → Customers (alias for sync-from-leads) ──
+
+/**
+ * POST /api/customers/backfill-from-leads
+ * Kept for backwards compatibility — delegates to syncFromLeads logic.
+ */
+export const backfillFromLeads = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  // Delegate to the unified sync handler
+  return syncFromLeads(req, res, next);
 });
 
 export default {
@@ -395,5 +429,6 @@ export default {
   updateTransaction,
   addConversation,
   syncFromLead,
+  syncFromLeads,
   backfillFromLeads,
 };

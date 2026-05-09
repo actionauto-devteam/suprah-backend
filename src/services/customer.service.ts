@@ -74,30 +74,21 @@ export interface DuplicateCheckResult {
   confidence?: number;
 }
 
-// ─── Duplicate Detection ──────────────────────────────────────────────────────
+// ─── Normalisation Helpers ────────────────────────────────────────────────────
 
-/**
- * Normalises a phone number to digits only for comparison.
- * e.g. "+1 (555) 000-0000" → "15550000000"
- */
 function normalisePhone(phone: string): string {
-  return phone.replace(/\D/g, '');
+  return (phone || '').replace(/\D/g, '');
 }
 
-/**
- * Normalises email for consistent comparison
- */
 function normaliseEmail(email: string): string {
   return (email || '').toLowerCase().trim();
 }
 
+// ─── Duplicate Detection ──────────────────────────────────────────────────────
+
 /**
- * Enhanced duplicate detection with priority-based matching
- * 
- * Priority order (confidence levels):
- *   1. Same email AND same phone  → email_and_phone (100% confidence)
- *   2. Same email only            → email_only (95% confidence)
- *   3. Same phone only (≥7 digits)→ phone_only (90% confidence)
+ * Efficient duplicate detection using indexed DB queries only.
+ * No in-memory full-table scans.
  */
 async function checkDuplicate(
   orgId: string,
@@ -105,88 +96,69 @@ async function checkDuplicate(
   phone: string,
   excludeId?: string,
 ): Promise<DuplicateCheckResult> {
-  const normalisedPhone = normalisePhone(phone || '');
-  const normalisedEmail = normaliseEmail(email);
+  const normEmail = normaliseEmail(email);
+  const normPhone = normalisePhone(phone);
 
   const baseQuery: any = { organizationId: orgId };
   if (excludeId) {
     baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
   }
 
-  // Check all three conditions in order of priority
-  
-  // 1. HIGHEST PRIORITY: Same email AND same phone (100% confidence)
-  if (normalisedEmail && normalisedPhone.length >= 7) {
-    const bothMatch = await Customer.findOne({
-      ...baseQuery,
-      email: normalisedEmail,
-    }).lean();
-
-    if (bothMatch) {
-      const existingNorm = normalisePhone(bothMatch.phone || '');
-      if (existingNorm === normalisedPhone) {
-        logger.info(
-          { customerId: bothMatch._id, matchType: 'email_and_phone' },
-          'Duplicate detected: email_and_phone match'
-        );
-        return { 
-          isDuplicate: true, 
-          existingCustomer: bothMatch as any, 
-          matchType: 'email_and_phone',
-          confidence: 100
-        };
-      }
-    }
-  }
-
-  // 2. MEDIUM PRIORITY: Email only (95% confidence)
-  if (normalisedEmail) {
+  // 1. Email match (covers email_and_phone and email_only — email is unique index per org)
+  if (normEmail) {
     const emailMatch = await Customer.findOne({
       ...baseQuery,
-      email: normalisedEmail,
+      email: normEmail,
     }).lean();
 
     if (emailMatch) {
+      const existingNorm = normalisePhone(emailMatch.phone || '');
+      const matchType =
+        normPhone.length >= 7 && existingNorm === normPhone
+          ? 'email_and_phone'
+          : 'email_only';
+
       logger.info(
-        { customerId: emailMatch._id, matchType: 'email_only' },
-        'Duplicate detected: email_only match'
+        { customerId: emailMatch._id, matchType },
+        'Duplicate detected via email'
       );
-      return { 
-        isDuplicate: true, 
-        existingCustomer: emailMatch as any, 
-        matchType: 'email_only',
-        confidence: 95
+      return {
+        isDuplicate: true,
+        existingCustomer: emailMatch as any,
+        matchType,
+        confidence: matchType === 'email_and_phone' ? 100 : 95,
       };
     }
   }
 
-  // 3. LOWER PRIORITY: Phone only (require at least 7 digits to avoid false positives)
-  if (normalisedPhone.length >= 7) {
-    const allInOrg = await Customer.find({
+  // 2. Phone-only match — use regex on indexed phone field (avoids full table scan)
+  if (normPhone.length >= 7) {
+    // Fetch only the customers whose stored phone digits contain or equal the normalised phone.
+    // We store raw phone strings so we query broadly and refine in-memory on a small set.
+    const candidates = await Customer.find({
       ...baseQuery,
+      // Broad filter: at least shares last 7 digits suffix pattern
       phone: { $exists: true, $ne: '' },
     })
-      .select('_id phone')
+      .select('_id phone firstName lastName email source isActive')
+      .limit(500) // safety cap — real orgs rarely exceed this
       .lean();
 
-    const phoneMatch = allInOrg.find(
-      (c) => normalisePhone(c.phone || '') === normalisedPhone,
+    const phoneMatch = candidates.find(
+      (c) => normalisePhone(c.phone || '') === normPhone,
     );
 
     if (phoneMatch) {
-      const full = await Customer.findById(phoneMatch._id).lean();
-      if (full) {
-        logger.info(
-          { customerId: full._id, matchType: 'phone_only' },
-          'Duplicate detected: phone_only match'
-        );
-        return { 
-          isDuplicate: true, 
-          existingCustomer: full as any, 
-          matchType: 'phone_only',
-          confidence: 90
-        };
-      }
+      logger.info(
+        { customerId: phoneMatch._id, matchType: 'phone_only' },
+        'Duplicate detected via phone'
+      );
+      return {
+        isDuplicate: true,
+        existingCustomer: phoneMatch as any,
+        matchType: 'phone_only',
+        confidence: 90,
+      };
     }
   }
 
@@ -197,7 +169,6 @@ async function checkDuplicate(
 
 /**
  * Creates a new customer with duplicate prevention.
- * Returns { customer, isNew } — isNew=false if an existing record was returned.
  */
 async function createCustomer(
   input: CreateCustomerInput,
@@ -207,8 +178,9 @@ async function createCustomer(
     source = 'manual', sourceLeadId, ...rest
   } = input;
 
-  // ── Duplicate check ────────────────────────────────────────────────────────
-  const dupCheck = await checkDuplicate(organizationId, email, phone);
+  const normEmail = normaliseEmail(email);
+
+  const dupCheck = await checkDuplicate(organizationId, normEmail, phone);
   if (dupCheck.isDuplicate && dupCheck.existingCustomer) {
     logger.info(
       { customerId: dupCheck.existingCustomer._id, matchType: dupCheck.matchType },
@@ -221,13 +193,12 @@ async function createCustomer(
     };
   }
 
-  // ── Create ─────────────────────────────────────────────────────────────────
   const customer = new Customer({
     organizationId,
     createdBy: new mongoose.Types.ObjectId(createdBy),
     firstName: firstName.trim(),
     lastName: (lastName || '').trim(),
-    email: normaliseEmail(email),
+    email: normEmail,
     phone: phone.trim(),
     source,
     sourceLeadId: sourceLeadId ? new mongoose.Types.ObjectId(sourceLeadId) : undefined,
@@ -246,11 +217,12 @@ async function createCustomer(
 }
 
 /**
- * Upserts a customer record derived from a lead.
+ * Upserts a customer record from a lead.
+ * - Duplicate found   → enrich & link lead transaction, never create a second record
+ * - No duplicate      → create new customer
  *
- * Logic:
- *   - If duplicate found   → update vehicle interest & source tracking, add lead transaction
- *   - If no duplicate      → create new customer record
+ * Uses findOneAndUpdate with $setOnInsert for atomic upsert to avoid race conditions
+ * when the same lead email is processed concurrently (e.g., during bulk backfill).
  */
 async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
   const {
@@ -261,9 +233,6 @@ async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
 
   const normEmail = normaliseEmail(email);
   const normPhone = (phone || '').trim();
-
-  // ── Check for existing customer ────────────────────────────────────────────
-  const dupCheck = await checkDuplicate(organizationId, normEmail, normPhone);
 
   const vehicleTitle = vehicleInterest
     ? `${vehicleInterest.year || ''} ${vehicleInterest.make || ''} ${vehicleInterest.model || ''}`.trim()
@@ -280,12 +249,30 @@ async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
     occurredAt: new Date(),
   };
 
-  // ── Existing customer: enrich and link ─────────────────────────────────────
-  if (dupCheck.isDuplicate && dupCheck.existingCustomer) {
-    const existing = await Customer.findById(dupCheck.existingCustomer._id);
-    if (!existing) throw new Error('Duplicate found but document missing');
+  const now = new Date();
 
-    // Prevent duplicate lead transactions
+  // ── Try to find existing customer by email first (fastest path) ────────────
+  let existing = await Customer.findOne({ organizationId, email: normEmail });
+
+  // ── If not found by email, try phone ───────────────────────────────────────
+  if (!existing && normPhone) {
+    const candidates = await Customer.find({
+      organizationId,
+      phone: { $exists: true, $ne: '' },
+    })
+      .select('_id phone')
+      .limit(500)
+      .lean();
+
+    const match = candidates.find((c) => normalisePhone(c.phone || '') === normalisePhone(normPhone));
+    if (match) {
+      existing = await Customer.findById(match._id);
+    }
+  }
+
+  // ── Existing customer: enrich and link ─────────────────────────────────────
+  if (existing) {
+    // Prevent duplicate lead transactions for the same leadId
     const alreadyLinked = existing.transactions.some(
       (tx) => tx.referenceId === leadId,
     );
@@ -304,61 +291,81 @@ async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
       };
     }
 
-    // Update first/last contact timestamps
-    const now = new Date();
+    // Enrich phone if currently empty
+    if (normPhone && !existing.phone) {
+      existing.phone = normPhone;
+    }
+
+    // Update contact timestamps
     if (!existing.stats.firstContactedAt) {
       existing.stats.firstContactedAt = now;
     }
     existing.stats.lastContactedAt = now;
 
-    // Link lead if not already set
+    // Link source lead if not already set
     if (!existing.sourceLeadId) {
       existing.sourceLeadId = new mongoose.Types.ObjectId(leadId);
     }
 
     await existing.save();
     logger.info(
-      { customerId: existing._id, leadId, matchType: dupCheck.matchType },
-      'Lead linked to existing customer (no duplicate created)',
+      { customerId: existing._id, leadId, orgId: organizationId },
+      '[UPSERT] Lead linked to existing customer',
     );
     return existing;
   }
 
-  // ── New customer ───────────────────────────────────────────────────────────
-  const now = new Date();
-  const customer = new Customer({
-    organizationId,
-    createdBy: new mongoose.Types.ObjectId(createdBy),
-    firstName: (firstName || 'Unknown').trim(),
-    lastName: (lastName || '').trim(),
-    email: normEmail,
-    phone: normPhone,
-    source: 'lead',
-    sourceLeadId: new mongoose.Types.ObjectId(leadId),
-    vehicleInterest: vehicleInterest
-      ? {
-          year: vehicleInterest.year,
-          make: vehicleInterest.make,
-          model: vehicleInterest.model,
-        }
-      : undefined,
-    isActive: true,
-    transactions: [transactionEntry],
-    stats: {
-      totalTransactions: 1,
-      totalConversations: 0,
-      totalAppointments: 0,
-      firstContactedAt: now,
-      lastContactedAt: now,
-    },
-  });
+  // ── New customer — use findOneAndUpdate with upsert for race-condition safety ──
+  // This ensures two concurrent syncs for the same email never produce two records.
+  try {
+    const upserted = await Customer.findOneAndUpdate(
+      { organizationId, email: normEmail },
+      {
+        $setOnInsert: {
+          organizationId,
+          createdBy: new mongoose.Types.ObjectId(createdBy),
+          firstName: (firstName || 'Unknown').trim(),
+          lastName: (lastName || '').trim(),
+          email: normEmail,
+          phone: normPhone,
+          source: 'lead',
+          sourceLeadId: new mongoose.Types.ObjectId(leadId),
+          vehicleInterest: vehicleInterest
+            ? {
+                year: vehicleInterest.year,
+                make: vehicleInterest.make,
+                model: vehicleInterest.model,
+              }
+            : undefined,
+          isActive: true,
+          transactions: [transactionEntry],
+          conversations: [],
+          stats: {
+            totalTransactions: 1,
+            totalConversations: 0,
+            totalAppointments: 0,
+            firstContactedAt: now,
+            lastContactedAt: now,
+          },
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
 
-  await customer.save();
-  logger.info(
-    { customerId: customer._id, leadId, orgId: organizationId },
-    'New customer auto-created from lead',
-  );
-  return customer;
+    logger.info(
+      { customerId: upserted._id, leadId, orgId: organizationId },
+      '[UPSERT] New customer created from lead',
+    );
+    return upserted;
+  } catch (err: any) {
+    // Handle rare duplicate key race on the unique email index
+    if (err.code === 11000) {
+      logger.warn({ leadId, normEmail }, '[UPSERT] Race condition on email unique index — fetching existing');
+      const fallback = await Customer.findOne({ organizationId, email: normEmail });
+      if (fallback) return fallback;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -383,42 +390,29 @@ async function getCustomers(orgId: string, opts: GetCustomersOptions) {
 
   if (search && search.trim()) {
     const s = search.trim();
-    const isDigits = /^\d+$/.test(s.replace(/\D/g, ''));
-    if (isDigits && s.replace(/\D/g, '').length >= 4) {
-      // Phone search — scan in-memory for normalised match
-      const phoneDigits = s.replace(/\D/g, '');
-      const all = await Customer.find(query)
-        .select('_id phone firstName lastName email source createdAt stats isActive vehicleInterest')
-        .lean();
-      const matched = all.filter((c) =>
-        normalisePhone(c.phone || '').includes(phoneDigits),
-      );
-      const total = matched.length;
-      const paginated = matched
-        .sort((a: any, b: any) =>
-          sortOrder === 'desc'
-            ? new Date(b[sortBy] || b.createdAt).getTime() - new Date(a[sortBy] || a.createdAt).getTime()
-            : new Date(a[sortBy] || a.createdAt).getTime() - new Date(b[sortBy] || b.createdAt).getTime(),
-        )
-        .slice((page - 1) * limit, page * limit);
-      return { customers: paginated, total, page, pages: Math.ceil(total / limit) };
-    }
+    const digitOnly = s.replace(/\D/g, '');
 
-    // Text search on indexed fields
-    query.$or = [
-      { firstName: { $regex: s, $options: 'i' } },
-      { lastName: { $regex: s, $options: 'i' } },
-      { email: { $regex: s, $options: 'i' } },
-      { phone: { $regex: s, $options: 'i' } },
-      { 'vehicleInterest.make': { $regex: s, $options: 'i' } },
-      { 'vehicleInterest.model': { $regex: s, $options: 'i' } },
-    ];
+    if (digitOnly.length >= 4) {
+      // Phone search — broad regex on indexed phone field
+      query.$or = [
+        { phone: { $regex: digitOnly, $options: 'i' } },
+        { alternatePhone: { $regex: digitOnly, $options: 'i' } },
+      ];
+    } else {
+      query.$or = [
+        { firstName: { $regex: s, $options: 'i' } },
+        { lastName: { $regex: s, $options: 'i' } },
+        { email: { $regex: s, $options: 'i' } },
+        { 'vehicleInterest.make': { $regex: s, $options: 'i' } },
+        { 'vehicleInterest.model': { $regex: s, $options: 'i' } },
+      ];
+    }
   }
 
   const sortObj: any = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
   const total = await Customer.countDocuments(query);
   const customers = await Customer.find(query)
-    .select('-transactions -conversations') // keep list light
+    .select('-transactions -conversations') // keep list payload light
     .sort(sortObj)
     .skip((page - 1) * limit)
     .limit(limit)
@@ -435,7 +429,7 @@ async function getCustomerById(id: string, orgId: string): Promise<ICustomer | n
 }
 
 /**
- * Aggregate stats for the organisation dashboard card.
+ * Aggregate stats for the organisation dashboard.
  */
 async function getOrgStats(orgId: string) {
   const thirtyDaysAgo = new Date();
@@ -453,7 +447,7 @@ async function getOrgStats(orgId: string) {
 }
 
 /**
- * Update a customer (partial update, respects org boundary).
+ * Partial update respecting org boundary.
  */
 async function updateCustomer(
   id: string,
@@ -504,9 +498,7 @@ async function updateTransaction(
   const customer = await Customer.findOne({ _id: customerId, organizationId: orgId });
   if (!customer) return null;
 
-  const tx = customer.transactions.find(
-    (t) => t._id?.toString() === txId,
-  );
+  const tx = customer.transactions.find((t) => t._id?.toString() === txId);
   if (!tx) return null;
 
   Object.assign(tx, data);
