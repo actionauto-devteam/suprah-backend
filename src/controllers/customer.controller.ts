@@ -104,6 +104,11 @@ export const getCustomerStats = asyncHandler(async (req: Request, res: Response)
  * GET /api/customers/check-duplicate
  * Check if a customer with the given email/phone already exists.
  * Query params: email, phone
+ * 
+ * Duplicate detection priority:
+ *   1. Same email + phone (100% confidence)
+ *   2. Same email only (95% confidence)
+ *   3. Same phone only (90% confidence)
  */
 export const checkDuplicate = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
@@ -246,7 +251,7 @@ export const addConversation = asyncHandler(async (req: Request, res: Response) 
   res.status(201).json(new ApiResponse(201, customer, 'Conversation logged'));
 });
 
-// ─── Lead → Customer Sync ─────────────────────────────────────────────────────
+// ─── Lead → Customer Sync (Auto-triggered from lead controller) ──────────────
 
 export const syncFromLead = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;

@@ -71,6 +71,7 @@ export interface DuplicateCheckResult {
   isDuplicate: boolean;
   existingCustomer?: ICustomer | null;
   matchType?: 'email_and_phone' | 'email_only' | 'phone_only';
+  confidence?: number;
 }
 
 // ─── Duplicate Detection ──────────────────────────────────────────────────────
@@ -84,12 +85,19 @@ function normalisePhone(phone: string): string {
 }
 
 /**
- * Checks for duplicate customers within an organisation.
- *
- * Priority order:
- *   1. Same email AND same phone  → email_and_phone
- *   2. Same email only            → email_only
- *   3. Same phone only (≥7 digits)→ phone_only
+ * Normalises email for consistent comparison
+ */
+function normaliseEmail(email: string): string {
+  return (email || '').toLowerCase().trim();
+}
+
+/**
+ * Enhanced duplicate detection with priority-based matching
+ * 
+ * Priority order (confidence levels):
+ *   1. Same email AND same phone  → email_and_phone (100% confidence)
+ *   2. Same email only            → email_only (95% confidence)
+ *   3. Same phone only (≥7 digits)→ phone_only (90% confidence)
  */
 async function checkDuplicate(
   orgId: string,
@@ -98,14 +106,16 @@ async function checkDuplicate(
   excludeId?: string,
 ): Promise<DuplicateCheckResult> {
   const normalisedPhone = normalisePhone(phone || '');
-  const normalisedEmail = (email || '').toLowerCase().trim();
+  const normalisedEmail = normaliseEmail(email);
 
   const baseQuery: any = { organizationId: orgId };
   if (excludeId) {
     baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
   }
 
-  // 1. Exact match on both
+  // Check all three conditions in order of priority
+  
+  // 1. HIGHEST PRIORITY: Same email AND same phone (100% confidence)
   if (normalisedEmail && normalisedPhone.length >= 7) {
     const bothMatch = await Customer.findOne({
       ...baseQuery,
@@ -115,12 +125,21 @@ async function checkDuplicate(
     if (bothMatch) {
       const existingNorm = normalisePhone(bothMatch.phone || '');
       if (existingNorm === normalisedPhone) {
-        return { isDuplicate: true, existingCustomer: bothMatch as any, matchType: 'email_and_phone' };
+        logger.info(
+          { customerId: bothMatch._id, matchType: 'email_and_phone' },
+          'Duplicate detected: email_and_phone match'
+        );
+        return { 
+          isDuplicate: true, 
+          existingCustomer: bothMatch as any, 
+          matchType: 'email_and_phone',
+          confidence: 100
+        };
       }
     }
   }
 
-  // 2. Email only
+  // 2. MEDIUM PRIORITY: Email only (95% confidence)
   if (normalisedEmail) {
     const emailMatch = await Customer.findOne({
       ...baseQuery,
@@ -128,11 +147,20 @@ async function checkDuplicate(
     }).lean();
 
     if (emailMatch) {
-      return { isDuplicate: true, existingCustomer: emailMatch as any, matchType: 'email_only' };
+      logger.info(
+        { customerId: emailMatch._id, matchType: 'email_only' },
+        'Duplicate detected: email_only match'
+      );
+      return { 
+        isDuplicate: true, 
+        existingCustomer: emailMatch as any, 
+        matchType: 'email_only',
+        confidence: 95
+      };
     }
   }
 
-  // 3. Phone only (require at least 7 digits to avoid false positives)
+  // 3. LOWER PRIORITY: Phone only (require at least 7 digits to avoid false positives)
   if (normalisedPhone.length >= 7) {
     const allInOrg = await Customer.find({
       ...baseQuery,
@@ -147,11 +175,22 @@ async function checkDuplicate(
 
     if (phoneMatch) {
       const full = await Customer.findById(phoneMatch._id).lean();
-      return { isDuplicate: true, existingCustomer: full as any, matchType: 'phone_only' };
+      if (full) {
+        logger.info(
+          { customerId: full._id, matchType: 'phone_only' },
+          'Duplicate detected: phone_only match'
+        );
+        return { 
+          isDuplicate: true, 
+          existingCustomer: full as any, 
+          matchType: 'phone_only',
+          confidence: 90
+        };
+      }
     }
   }
 
-  return { isDuplicate: false };
+  return { isDuplicate: false, confidence: 0 };
 }
 
 // ─── Service Methods ──────────────────────────────────────────────────────────
@@ -188,7 +227,7 @@ async function createCustomer(
     createdBy: new mongoose.Types.ObjectId(createdBy),
     firstName: firstName.trim(),
     lastName: (lastName || '').trim(),
-    email: email.toLowerCase().trim(),
+    email: normaliseEmail(email),
     phone: phone.trim(),
     source,
     sourceLeadId: sourceLeadId ? new mongoose.Types.ObjectId(sourceLeadId) : undefined,
@@ -220,7 +259,7 @@ async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
     vehicleInterest, channel, comments, source,
   } = input;
 
-  const normEmail = (email || '').toLowerCase().trim();
+  const normEmail = normaliseEmail(email);
   const normPhone = (phone || '').trim();
 
   // ── Check for existing customer ────────────────────────────────────────────

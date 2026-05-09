@@ -45,7 +45,7 @@ async function getCentralOAuth2Client(orgId: string) {
   if (!orgConfig) {
     orgConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
     if (orgConfig) {
-      await cacheService.set(cacheKey, orgConfig, 3600); // 1hr
+      await cacheService.set(cacheKey, orgConfig, 3600);
     }
   }
 
@@ -63,7 +63,6 @@ async function getCentralOAuth2Client(orgId: string) {
     throw new Error('Please connect your email leads into the CRM settings.');
   }
 
-  // Persistence listener: update database when tokens are refreshed
   oauth2Client.on('tokens', async (tokens) => {
     try {
       console.log(`[CENTRAL-AUTH] Tokens refreshed for org ${orgId}, updating OrgLeadConfig...`);
@@ -71,7 +70,7 @@ async function getCentralOAuth2Client(orgId: string) {
       if (tokens.access_token)  update.accessToken  = encrypt(tokens.access_token);
       if (tokens.refresh_token) update.refreshToken = encrypt(tokens.refresh_token);
       await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: update });
-      await cacheService.del(`config:org:${orgId}`); // Invalidate cache
+      await cacheService.del(`config:org:${orgId}`);
     } catch (err) {
       console.error('[CENTRAL-AUTH] Failed to persist refreshed tokens:', err);
     }
@@ -80,10 +79,6 @@ async function getCentralOAuth2Client(orgId: string) {
   return oauth2Client;
 }
 
-/**
- * Robust retry wrapper with exponential backoff for Google API calls.
- * Handles 403 (Quota Exceeded) and 429 (Too Many Requests).
- */
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 1000): Promise<T> {
   let lastError: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -109,6 +104,61 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay =
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─────────────────────────────────────────────────────────────
+// AUTO-SYNC: Convert Lead to Customer
+// Triggered automatically when leads are created/ingested
+// ─────────────────────────────────────────────────────────────
+async function autoSyncLeadToCustomer(
+  orgId: string,
+  leadId: string,
+  firstName: string,
+  lastName: string,
+  email: string,
+  phone: string,
+  vehicleInfo?: { year?: string; make?: string; model?: string },
+  channel?: string,
+  comments?: string,
+  source?: string,
+): Promise<void> {
+  try {
+    const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
+    if (!systemUser) {
+      logger.warn({ leadId }, 'No system user available for auto-sync');
+      return;
+    }
+
+    logger.info(
+      { leadId, email, phone, orgId },
+      'Auto-syncing lead to customer database'
+    );
+
+    await customerService.upsertFromLead({
+      organizationId: orgId,
+      createdBy: systemUser._id.toString(),
+      leadId,
+      firstName: firstName || 'Unknown',
+      lastName: lastName || '',
+      email,
+      phone: phone || '',
+      vehicleInterest: vehicleInfo ? {
+        year: vehicleInfo.year,
+        make: vehicleInfo.make,
+        model: vehicleInfo.model,
+      } : undefined,
+      channel,
+      comments,
+      source,
+    });
+
+    logger.info(
+      { leadId, email },
+      'Lead successfully synced to customer credentials'
+    );
+  } catch (error) {
+    logger.error({ error, leadId }, 'Lead-to-customer auto-sync failed (non-fatal)');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Handle incoming ADF XML (public endpoint for email webhooks)
 // ─────────────────────────────────────────────────────────────
 export const receiveADF = async (req: Request, res: Response) => {
@@ -125,9 +175,8 @@ export const receiveADF = async (req: Request, res: Response) => {
     }
 
     const orgId = req.query.orgId || req.body.organizationId;
-    const config = (req as any).orgLeadConfig; // Attached by validateAdfSignature middleware
+    const config = (req as any).orgLeadConfig;
 
-    // Find a system user to associate with automated ingestion
     const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
     if (!systemUser) {
       console.error('[ADF-ERROR] No administrative user found to associate with lead creation');
@@ -153,36 +202,26 @@ export const receiveADF = async (req: Request, res: Response) => {
     await newLead.save();
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
 
-     try {
-      await customerService.upsertFromLead({
-        organizationId: orgId as string,
-        createdBy: systemUser._id.toString(),
-        leadId: newLead._id.toString(),
-        firstName: adfData.firstName,
-        lastName: adfData.lastName,
-        email: adfData.email,
-        phone: adfData.phone,
-        vehicleInterest: adfData.vehicle ? {
-          year: adfData.vehicle.year,
-          make: adfData.vehicle.make,
-          model: adfData.vehicle.model,
-        } : undefined,
-        channel: 'adf',
-        comments: adfData.comments,
-        source: adfData.source || 'ADF Email',
-      });
-    } catch (custErr) {
-      console.warn('[ADF] Customer upsert failed (non-fatal):', custErr);
-    }
+    // ✨ AUTO-SYNC: Automatically add to customer database
+    await autoSyncLeadToCustomer(
+      orgId as string,
+      newLead._id.toString(),
+      adfData.firstName,
+      adfData.lastName,
+      adfData.email,
+      adfData.phone,
+      adfData.vehicle,
+      'adf',
+      adfData.comments,
+      adfData.source || 'ADF Email'
+    );
 
-    // Emit real-time notification to the organization
     const io = getSocketIO();
     if (io) {
       const orgIdString = req.query.orgId || req.body.organizationId || 'global';
       io.to(`org:${orgIdString}`).emit('lead:new', newLead);
     }
 
-    // Broadcast to Org Admins
     const vehicleInterest = adfData.vehicle
       ? `${adfData.vehicle.year} ${adfData.vehicle.make} ${adfData.vehicle.model}`.trim()
       : undefined;
@@ -326,7 +365,6 @@ export const updateLead = async (req: Request, res: Response) => {
 
       logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
 
-      // Socket broadcast
       const io = getSocketIO();
       if (io) {
         io.to(`org:${orgId}`).emit('lead:update', lead);
@@ -377,36 +415,28 @@ export const createInquiry = async (req: Request, res: Response) => {
     });
 
     const savedLead = await newLead.save();
-    try {
-    await customerService.upsertFromLead({
-      organizationId: req.orgId as string,
-      createdBy: userId.toString(),
-      leadId: savedLead._id.toString(),
+
+    // ✨ AUTO-SYNC: Automatically add to customer database
+    await autoSyncLeadToCustomer(
+      req.orgId as string,
+      savedLead._id.toString(),
       firstName,
-      lastName: lastName || '',
+      lastName || '',
       email,
       phone,
-      vehicleInterest: vehicle ? {
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-      } : undefined,
-      channel: detectedChannel,
-      comments: comments || '',
-      source: source || 'Manual Entry',
-    });
-  } catch (custErr) {
-    console.warn('[createInquiry] Customer upsert failed (non-fatal):', custErr);
-  }
+      vehicle,
+      detectedChannel,
+      comments || '',
+      source || 'Manual Entry'
+    );
+
     console.log(`[SUCCESS] New Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
 
-    // Emit real-time notification to the organization
     const io = getSocketIO();
     if (io) {
       io.to(`org:${req.orgId}`).emit('lead:new', savedLead);
     }
 
-    // Broadcast to Org Admins
     if (req.orgId) {
       const vehicleInterest = vehicle
         ? `${vehicle?.year || ''} ${vehicle?.make || ''} ${vehicle?.model || ''}`.trim()
@@ -464,7 +494,6 @@ export const markAsRead = async (req: Request, res: Response) => {
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
 
-    // Socket broadcast
     const io = getSocketIO();
     if (io) {
       io.to(`org:${orgId}`).emit('lead:update', lead);
@@ -488,7 +517,6 @@ export const markAsPending = async (req: Request, res: Response) => {
     );
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
 
-    // Socket broadcast
     const io = getSocketIO();
     if (io) {
       io.to(`org:${orgId}`).emit('lead:update', lead);
@@ -573,7 +601,6 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
     }
 
-    // Cache Invalidation & Socket Broadcast
     await cacheService.del(`lead:thread:${id}`);
     const io = getSocketIO();
     if (io) {
@@ -611,11 +638,6 @@ async function fetchAllMessageIds(
   return all;
 }
 
-// ─────────────────────────────────────────────────────────────
-// CENTRALIZED GMAIL SYNC
-// Syncs ONLY from leads@dealerscloud.com via actionautoutah.dev@gmail.com
-// Paginates through ALL matching emails — not capped at 100.
-// ─────────────────────────────────────────────────────────────
 export const syncCentralGmail = asyncHandler(async (req: Request, res: Response) => {
   try {
     const userId = (req.user as IUser)._id.toString();
@@ -777,29 +799,19 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         try {
           await newLead.save();
 
-          try {
-            if (leadEmail) {
-              await customerService.upsertFromLead({
-                organizationId: req.orgId as string,
-                createdBy: userId,
-                leadId: newLead._id.toString(),
-                firstName,
-                lastName,
-                email: leadEmail,
-                phone: leadPhone,
-                vehicleInterest: vehicleInfo ? {
-                  year: vehicleInfo.year,
-                  make: vehicleInfo.make,
-                  model: vehicleInfo.model,
-                } : undefined,
-                channel: parsed.channel,
-                comments,
-                source: leadSource,
-              });
-            }
-          } catch (custErr) {
-            console.warn('[CENTRAL-SYNC] Customer upsert failed (non-fatal):', custErr);
-          }
+          // ✨ AUTO-SYNC: Automatically add to customer database
+          await autoSyncLeadToCustomer(
+            req.orgId as string,
+            newLead._id.toString(),
+            firstName,
+            lastName,
+            leadEmail,
+            leadPhone,
+            vehicleInfo,
+            parsed.channel,
+            comments,
+            leadSource
+          );
 
           existingThreadIds.add(details.data.threadId);
           syncedCount++;
@@ -882,7 +894,6 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   const userId = user._id;
   const orgId = req.orgId;
 
-  // 1. Resolve Identity and Connection Check
   const crmUser = await CrmUser.exists({ _id: userId });
   if (crmUser) {
     const isConnected = await googleCalendarService.isCrmUserCalendarConnected(userId.toString());
@@ -891,19 +902,17 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     }
   }
 
-  // 2. Fetch Lead to ensure it exists
   const lead = await Lead.findOne({ _id: id, organizationId: orgId });
   if (!lead) {
     throw new ApiError(404, 'Lead not found');
   }
 
-  // 3. Prepare Appointment Data
   const startTime = new Date(date);
   const [hours, minutes] = time.split(':');
   startTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
   
   const endTime = new Date(startTime);
-  endTime.setHours(startTime.getHours() + 1); // Default 1hr
+  endTime.setHours(startTime.getHours() + 1);
 
   const appointmentData = {
       title: `Appointment: ${lead.firstName} ${lead.lastName || ''}`,
@@ -924,16 +933,13 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
       }
   };
 
-  // 4. Create Unified Appointment (This includes Conflict Detection)
   const appointment = await appointmentService.createAppointment(
     userId.toString(),
     orgId as string,
     appointmentData
   );
 
-  // 5. Update Lead Status (AppointmentService.createAppointment also does this, but we reinforce it here with the link)
   lead.status = 'Appointment Set';
-  // Keep the legacy field updated for backward compatibility
   lead.appointment = {
     date: new Date(date),
     time,
@@ -942,7 +948,6 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   };
   await lead.save();
 
-  // 6. Audit Log
   await activityService.createActivity({
     userId: userId.toString(),
     organizationId: orgId || 'global',
@@ -952,7 +957,6 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     metadata: { leadId: lead._id.toString(), appointmentId: appointment._id, date, time }
   });
 
-  // 7. Socket broadcast
   const io = getSocketIO();
   if (io) {
     io.to(`org:${orgId}`).emit('lead:update', lead);
@@ -1023,10 +1027,9 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
         };
       });
 
-    await cacheService.set(threadCacheKey, { messages }, 1800); // 30 mins
+    await cacheService.set(threadCacheKey, { messages }, 1800);
     res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
   } catch (error: any) {
-    // If it's a configuration error (centralized sync not set up), return empty list instead of 400
     if (error.message?.includes('connect your email leads') || error.message?.includes('configuration not found')) {
       return res.json(new ApiResponse(200, { messages: [] }, 'Centralized sync not configured'));
     }
@@ -1034,3 +1037,18 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
     res.status(400).json(new ApiResponse(400, null, 'Failed to fetch thread messages'));
   }
 });
+
+export default {
+  receiveADF,
+  getAllLeads,
+  updateLead,
+  createInquiry,
+  markAsRead,
+  markAsPending,
+  replyToInquiry,
+  syncCentralGmail,
+  syncGmailInquiries,
+  setAppointmentForLead,
+  getThreadMessages,
+  getCentralSyncStatus,
+};
