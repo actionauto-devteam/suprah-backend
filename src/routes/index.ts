@@ -6,6 +6,7 @@ import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
 import profileRoute from "./profile.route";
 import appointmentRoute from "./appointment.route";
+import appointmentDashboardRoute from "./appointmentDashboard.routes"; // ← ADD THIS
 import userRoute from "./user.route";
 import googleCalendarRoute from "./googleCalendar.routes";
 import organizationRoute from "./organization.routes";
@@ -66,6 +67,11 @@ const defaultRoutes = [
   {
     path: "/profile",
     route: profileRoute,
+  },
+
+  {
+    path: "/appointments/dashboard",
+    route: appointmentDashboardRoute,
   },
   {
     path: "/appointments",
