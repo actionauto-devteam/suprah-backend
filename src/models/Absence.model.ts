@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-export type AbsenceType = 'absence' | 'day_off' | 'vacation' | 'sick' | 'wfh' | 'other';
+export type AbsenceType = 'absence' | 'day_off' | 'vacation' | 'sick' | 'other';
 
 export interface IAbsence extends Document {
   organizationId: mongoose.Types.ObjectId;
@@ -9,7 +9,9 @@ export interface IAbsence extends Document {
   userAvatar?: string | null;
   date: Date;
   type: AbsenceType;
+  title?: string;
   note?: string;
+  otherText?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -18,27 +20,19 @@ export interface IAbsenceModel extends Model<IAbsence> {}
 
 const AbsenceSchema = new Schema<IAbsence>(
   {
-    organizationId: {
-      type: Schema.Types.ObjectId,
-      ref: 'Organization',
-      required: true,
-      index: true,
-    },
-    userId: {
-      type: Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-      index: true,
-    },
-    userName: { type: String, required: true, trim: true },
-    userAvatar: { type: String, default: null },
-    date: { type: Date, required: true, index: true },
+    organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', required: true, index: true },
+    userId:         { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userName:       { type: String, required: true, trim: true },
+    userAvatar:     { type: String, default: null },
+    date:           { type: Date, required: true, index: true },
     type: {
       type: String,
-      enum: ['absence', 'day_off', 'vacation', 'sick', 'wfh', 'other'],
+      enum: ['absence', 'day_off', 'vacation', 'sick', 'other'],
       required: true,
     },
-    note: { type: String, maxlength: 500 },
+    title:     { type: String, trim: true, maxlength: 100 },
+    note:      { type: String, trim: true, maxlength: 500 },
+    otherText: { type: String, trim: true, maxlength: 200 },
   },
   { timestamps: true }
 );

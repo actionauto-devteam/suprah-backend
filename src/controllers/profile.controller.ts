@@ -4,6 +4,7 @@ import profileService from '../services/profile.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
+import User from '../models/User.model';
 
 /**
  * Get user profile with extended information
@@ -226,6 +227,12 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+const heartbeat = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user._id;
+  await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+  res.json(new ApiResponse(200, null, 'ok'));
+});
+
 export default {
   getProfile,
   updateProfile,
@@ -239,4 +246,5 @@ export default {
   updateEmail,
   updateNotificationPreferences,
   updateTheme,
+  heartbeat,
 };

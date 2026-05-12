@@ -6,6 +6,8 @@ import User, { IUser } from '../models/User.model';
 import Absence from '../models/Absence.model';
 import BoardNote from '../models/BoardNote.model';
 
+const PRESENCE_TTL_MS = 3 * 60 * 1000; // 3 minutes — if lastActive is older, treat as offline
+
 // ── Members ───────────────────────────────────────────────────────────────────
 
 const getMembers = asyncHandler(async (req: Request, res: Response) => {
@@ -22,12 +24,21 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
         .select('name avatar onlineStatus customStatus lastActive role personalInfo')
         .lean();
 
-    members.sort((a, b) => {
+    const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
+
+    // If a user is set "online" but their lastActive heartbeat is stale → show as offline
+    const adjusted = members.map((m) => {
+        const stale = !m.lastActive || new Date(m.lastActive) < cutoff;
+        const effectiveStatus = (m.onlineStatus === 'online' && stale) ? 'offline' : m.onlineStatus;
+        return { ...m, onlineStatus: effectiveStatus };
+    });
+
+    adjusted.sort((a, b) => {
         const diff = (statusOrder[a.onlineStatus] ?? 5) - (statusOrder[b.onlineStatus] ?? 5);
         return diff !== 0 ? diff : a.name.localeCompare(b.name);
     });
 
-    res.json(new ApiResponse(200, members, 'Team members fetched'));
+    res.json(new ApiResponse(200, adjusted, 'Team members fetched'));
 });
 
 // ── Absences ──────────────────────────────────────────────────────────────────
@@ -40,7 +51,7 @@ const getAbsences = asyncHandler(async (req: Request, res: Response) => {
     const m = parseInt(month as string) || new Date().getMonth() + 1;
 
     const from = new Date(y, m - 1, 1);
-    const to = new Date(y, m, 0, 23, 59, 59);
+    const to   = new Date(y, m, 0, 23, 59, 59);
 
     const absences = await Absence.find({
         organizationId: orgId,
@@ -54,12 +65,13 @@ const createAbsence = asyncHandler(async (req: Request, res: Response) => {
     const user = req.user as IUser;
     const userId = user._id.toString();
     const orgId = req.orgId as string;
-    const { date, type, note } = req.body;
+    const { date, type, title, note, otherText } = req.body;
 
     if (!date || !type) throw new ApiError(400, 'date and type are required');
+    if (type === 'other' && !otherText?.trim()) throw new ApiError(400, 'Please specify what "Other" means');
 
-    const parsedDate = new Date(date);
-    parsedDate.setUTCHours(12, 0, 0, 0);
+    const [y, mo, d] = (date as string).split('-').map(Number);
+    const parsedDate = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0));
 
     const existing = await Absence.findOne({ organizationId: orgId, userId, date: parsedDate });
     if (existing) throw new ApiError(409, 'You already have an entry for this date');
@@ -71,10 +83,32 @@ const createAbsence = asyncHandler(async (req: Request, res: Response) => {
         userAvatar: user.avatar,
         date: parsedDate,
         type,
-        note,
+        title: title?.trim(),
+        note: note?.trim(),
+        otherText: type === 'other' ? otherText?.trim() : undefined,
     });
 
     res.status(201).json(new ApiResponse(201, absence, 'Absence created'));
+});
+
+const updateAbsence = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser;
+    const orgId = req.orgId as string;
+    const { id } = req.params;
+    const { title, note, otherText } = req.body;
+
+    const absence = await Absence.findOne({ _id: id, organizationId: orgId });
+    if (!absence) throw new ApiError(404, 'Absence not found');
+
+    const isOwner = absence.userId.toString() === user._id.toString();
+    if (!isOwner) throw new ApiError(403, 'Not authorized');
+
+    if (title !== undefined) absence.title = title?.trim();
+    if (note !== undefined) absence.note = note?.trim();
+    if (otherText !== undefined) absence.otherText = otherText?.trim();
+
+    await absence.save();
+    res.json(new ApiResponse(200, absence, 'Absence updated'));
 });
 
 const deleteAbsence = asyncHandler(async (req: Request, res: Response) => {
@@ -104,8 +138,8 @@ const getBoardNotes = asyncHandler(async (req: Request, res: Response) => {
         organizationId: orgId,
         $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
     })
-        .sort({ pinned: -1, createdAt: -1 })
-        .limit(60)
+        .sort({ pinned: -1, sortOrder: 1, createdAt: -1 })
+        .limit(80)
         .lean();
 
     res.json(new ApiResponse(200, notes, 'Board notes fetched'));
@@ -114,7 +148,7 @@ const getBoardNotes = asyncHandler(async (req: Request, res: Response) => {
 const createBoardNote = asyncHandler(async (req: Request, res: Response) => {
     const user = req.user as IUser;
     const orgId = req.orgId as string;
-    const { content, color, title, durationDays } = req.body;
+    const { content, color, title, durationDays, announcementType, emoji } = req.body;
 
     if (!content?.trim()) throw new ApiError(400, 'content is required');
 
@@ -134,9 +168,32 @@ const createBoardNote = asyncHandler(async (req: Request, res: Response) => {
         color: color || 'yellow',
         durationDays: durationDays || null,
         expiresAt,
+        announcementType: announcementType || 'general',
+        emoji: emoji || undefined,
     });
 
     res.status(201).json(new ApiResponse(201, note, 'Note created'));
+});
+
+const updateBoardNote = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser;
+    const orgId = req.orgId as string;
+    const { id } = req.params;
+    const { title, content, color, emoji } = req.body;
+
+    const note = await BoardNote.findOne({ _id: id, organizationId: orgId });
+    if (!note) throw new ApiError(404, 'Note not found');
+
+    const isOwner = note.userId.toString() === user._id.toString();
+    if (!isOwner) throw new ApiError(403, 'Only the creator can edit this note');
+
+    if (title !== undefined) note.title = title?.trim() || undefined;
+    if (content?.trim()) note.content = content.trim();
+    if (color) note.color = color;
+    if (emoji !== undefined) note.emoji = emoji || undefined;
+
+    await note.save();
+    res.json(new ApiResponse(200, note, 'Note updated'));
 });
 
 const deleteBoardNote = asyncHandler(async (req: Request, res: Response) => {
@@ -172,8 +229,23 @@ const togglePinNote = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, note, 'Note pinned state toggled'));
 });
 
+const reorderBoardNotes = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const { orderedIds } = req.body as { orderedIds: string[] };
+
+    if (!Array.isArray(orderedIds)) throw new ApiError(400, 'orderedIds must be an array');
+
+    await Promise.all(
+        orderedIds.map((id, index) =>
+            BoardNote.updateOne({ _id: id, organizationId: orgId }, { sortOrder: index })
+        )
+    );
+
+    res.json(new ApiResponse(200, null, 'Order updated'));
+});
+
 export default {
     getMembers,
-    getAbsences, createAbsence, deleteAbsence,
-    getBoardNotes, createBoardNote, deleteBoardNote, togglePinNote,
+    getAbsences, createAbsence, updateAbsence, deleteAbsence,
+    getBoardNotes, createBoardNote, updateBoardNote, deleteBoardNote, togglePinNote, reorderBoardNotes,
 };

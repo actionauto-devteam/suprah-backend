@@ -47,4 +47,7 @@ router.patch('/notification-preferences', profileController.updateNotificationPr
 // Update theme
 router.patch('/theme', profileController.updateTheme);
 
+// Presence heartbeat — updates lastActive without changing manual status
+router.patch('/heartbeat', profileController.heartbeat);
+
 export default router;
