@@ -292,13 +292,19 @@ export class DashboardService {
      * Lightweight rep metadata for dashboard headers
      */
     private static async getActiveReps(orgId: string) {
-        return await User.find({
+        const statusOrder: Record<string, number> = {
+            online: 0, busy: 1, away: 2, idle: 3, do_not_disturb: 4, offline: 5,
+        };
+        const users = await User.find({
             organizationId: orgId,
-            role: { $in: ['employee', 'admin', 'super_admin'] }
+            role: { $in: ['employee', 'admin', 'super_admin'] },
         })
-            .select('name avatar')
-            .sort({ createdAt: -1 })
-            .limit(6);
+            .select('name avatar onlineStatus')
+            .lean();
+        return users.sort((a, b) => {
+            const diff = (statusOrder[a.onlineStatus] ?? 5) - (statusOrder[b.onlineStatus] ?? 5);
+            return diff !== 0 ? diff : a.name.localeCompare(b.name);
+        });
     }
 
     /**
