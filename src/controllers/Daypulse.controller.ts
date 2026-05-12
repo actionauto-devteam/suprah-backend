@@ -149,9 +149,11 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
 
     const reportForClient = await signAttachments(report.toObject());
 
-    getIO()
-      .to(`org:${actor.organizationId.toString()}`)
-      .emit('daypulse:new', { report: reportForClient });
+    try {
+      getIO()
+        .to(`org:${actor.organizationId.toString()}`)
+        .emit('daypulse:new', { report: reportForClient });
+    } catch { /* Socket.IO not yet initialised — REST response unaffected */ }
 
     res.status(201).json(new ApiResponse(201, { report: reportForClient }, 'DayPulse report created'));
   } catch (error) {

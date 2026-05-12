@@ -207,14 +207,17 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * POST /api/supraspace/conversations/:id/messages
- * Send a plain text message (with optional replyTo)
+ * Send a text message with optional pre-uploaded attachments (e.g. from DayPulse).
+ * When `attachments` is provided in the JSON body the files are already stored in R2
+ * so no re-upload is needed — we just save the metadata and sign the URLs.
  */
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { content, replyTo } = req.body;
+  const { content, replyTo, attachments } = req.body;
 
-  if (!content?.trim()) throw new ApiError(400, 'Message content is required');
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (!content?.trim() && !hasAttachments) throw new ApiError(400, 'Message content is required');
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
@@ -222,11 +225,18 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Not a member of this conversation');
   }
 
+  let msgType: 'text' | 'image' | 'file' = 'text';
+  if (hasAttachments) {
+    const hasImage = attachments.some((a: any) => a.mimeType?.startsWith('image/'));
+    msgType = hasImage && attachments.length === 1 ? 'image' : 'file';
+  }
+
   const message = await SupraSpaceMessage.create({
     conversationId: id,
     sender: userId,
-    content: content.trim(),
-    type: 'text',
+    content: content?.trim() || '',
+    type: msgType,
+    attachments: hasAttachments ? attachments : [],
     replyTo: replyTo || null,
     readBy: [userId],
   });
@@ -243,19 +253,31 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   conversation.lastMessageAt = message.createdAt;
   await conversation.save();
 
+  // Sign attachment URLs so the chat UI can render them immediately
+  const messageForClient = message.toObject() as any;
+  if (hasAttachments) {
+    for (const attachment of messageForClient.attachments) {
+      if (attachment.url && !attachment.url.startsWith('http')) {
+        const signed = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+        if (signed) {
+          attachment.url = signed;
+          if (attachment.thumbnailUrl) attachment.thumbnailUrl = signed;
+        }
+      }
+    }
+  }
+
   try {
     const io = getIO();
-    // Emit to personal user rooms (catches users not currently in the conv room)
-    // AND to the conv room (catches users actively viewing the conversation)
     conversation.members.forEach((memberId) => {
-      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message });
+      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message: messageForClient });
     });
-    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message });
+    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message: messageForClient });
   } catch (socketErr) {
     console.warn('[SupraSpace] Socket emit failed on send:', socketErr);
   }
 
-  res.status(201).json(new ApiResponse(201, message, 'Message sent'));
+  res.status(201).json(new ApiResponse(201, messageForClient, 'Message sent'));
 });
 
 /**
