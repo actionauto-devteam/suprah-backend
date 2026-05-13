@@ -339,6 +339,29 @@ export const getAllLeads = async (req: Request, res: Response) => {
   }
 };
 
+export const getLeadById = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    const { id } = req.params;
+
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId })
+      .select(
+        'firstName lastName email phone senderEmail senderName subject ' +
+        'parsedContent threadId messageId isRead isPending channel ' +
+        'source status vehicle comments appointment createdAt updatedAt ' +
+        'centralIngestion labels'
+      )
+      .lean();
+
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    res.json(new ApiResponse(200, lead));
+  } catch (error) {
+    console.error('[ERROR] Error fetching lead by id:', error);
+    res.status(500).json({ message: 'Error fetching lead' });
+  }
+};
+
 export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;

@@ -79,15 +79,21 @@ class AuthService {
             user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
             await user.save();
 
-            await emailService.sendEmail({
-                to: user.email,
-                subject: 'Verify Your Action Auto Account',
-                text: `Your verification code is: ${otp}`,
-                html: `<h1>Account Verification</h1><p>Welcome to Action Auto! Your verification code is: <strong>${otp}</strong></p>`
-            });
+            let emailSent = true;
+            try {
+                await emailService.sendEmail({
+                    to: user.email,
+                    subject: 'Verify Your Action Auto Account',
+                    text: `Your verification code is: ${otp}`,
+                    html: `<h1>Account Verification</h1><p>Welcome to Action Auto! Your verification code is: <strong>${otp}</strong></p>`
+                });
+            } catch (emailErr) {
+                console.error('[AuthService] Failed to send verification email:', emailErr);
+                emailSent = false;
+            }
 
             // Do NOT return tokens yet - user must verify first
-            return { user: this.sanitizeUser(user) };
+            return { user: this.sanitizeUser(user), emailSent };
         } catch (error) {
             console.error('[AuthService] Register Error:', error);
             throw error;
@@ -131,12 +137,17 @@ class AuthService {
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
         await user.save();
 
-        await emailService.sendEmail({
-            to: user.email,
-            subject: 'Your Action Auto Verification Code',
-            text: `Your verification code is: ${otp}`,
-            html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code will expire in 15 minutes.</p>`
-        });
+        try {
+            await emailService.sendEmail({
+                to: user.email,
+                subject: 'Your Action Auto Verification Code',
+                text: `Your verification code is: ${otp}`,
+                html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code will expire in 15 minutes.</p>`
+            });
+        } catch (emailErr) {
+            console.error('[AuthService] Failed to resend OTP email:', emailErr);
+            throw new ApiError(500, 'Could not send verification email. Please try again later.');
+        }
 
         return { message: 'New verification code sent' };
     }

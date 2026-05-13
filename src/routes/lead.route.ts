@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   receiveADF,
   getAllLeads,
+  getLeadById,
   updateLead,
   createInquiry,
   markAsRead,
@@ -46,6 +47,7 @@ router.get('/', getAllLeads);
 router.post('/', syncLimiter, createInquiry);
  
 // ── Dynamic :id routes ────────────────────────────────────────────────────────
+router.get('/:id', getLeadById);
 router.get('/:id/thread', getThreadMessages);
 router.patch('/:id/read', markAsRead);
 router.patch('/:id/pending', markAsPending);

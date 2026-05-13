@@ -25,10 +25,14 @@ class AuthController {
         const validatedData = registerSchema.parse(req.body);
         const result = await authService.register(validatedData);
 
-        logger.info({ email: validatedData.email }, 'User registered');
+        logger.info({ email: validatedData.email, emailSent: result.emailSent }, 'User registered');
+
+        const message = result.emailSent
+            ? 'Registration successful. Please verify your email.'
+            : 'Registration successful. We could not send the verification email — please use Resend Code on the verification page.';
 
         res.status(201).json(
-            new ApiResponse(201, result, 'Registration successful. Please verify your email.')
+            new ApiResponse(201, { user: result.user, emailSent: result.emailSent }, message)
         );
     });
 
