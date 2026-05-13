@@ -295,16 +295,27 @@ export class DashboardService {
         const statusOrder: Record<string, number> = {
             online: 0, busy: 1, away: 2, idle: 3, do_not_disturb: 4, offline: 5,
         };
+        const PRESENCE_TTL_MS = 3 * 60 * 1000; // same TTL as teamPulse.controller
+        const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
+
         const users = await User.find({
             organizationId: orgId,
             role: { $in: ['employee', 'admin', 'super_admin'] },
         })
-            .select('name avatar onlineStatus')
+            .select('name avatar onlineStatus lastActive')
             .lean();
-        return users.sort((a, b) => {
-            const diff = (statusOrder[a.onlineStatus] ?? 5) - (statusOrder[b.onlineStatus] ?? 5);
-            return diff !== 0 ? diff : a.name.localeCompare(b.name);
-        });
+
+        // Apply presence TTL: "online" users with stale heartbeat → offline
+        return users
+            .map((u) => {
+                const stale = !u.lastActive || new Date(u.lastActive) < cutoff;
+                const effectiveStatus = (u.onlineStatus === 'online' && stale) ? 'offline' : u.onlineStatus;
+                return { ...u, onlineStatus: effectiveStatus };
+            })
+            .sort((a, b) => {
+                const diff = (statusOrder[a.onlineStatus] ?? 5) - (statusOrder[b.onlineStatus] ?? 5);
+                return diff !== 0 ? diff : a.name.localeCompare(b.name);
+            });
     }
 
     /**
