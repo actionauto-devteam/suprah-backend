@@ -41,6 +41,7 @@ import feedReactionRoute from "./feedReaction.routes";
 import feedCommentRoute from "./feedComment.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
+import wiseRoute from "./wise.routes";
 
 const router = express.Router();
 
@@ -209,6 +210,10 @@ const defaultRoutes = [
   {
     path: "/crm/calendar",
     route: crmCalendarRoute,
+  },
+  {
+    path: "/billing",
+    route: wiseRoute,
   },
   {
     path: "/team-pulse",

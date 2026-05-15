@@ -11,7 +11,6 @@ export interface IGuestResponse {
   guestPhone?: string;
 }
 
-// NEW: Customer booking information
 export interface ICustomerBooking {
   firstName: string;
   lastName: string;
@@ -31,36 +30,31 @@ export interface IAppointment extends Document {
   startTime: Date;
   endTime: Date;
   location?: string;
-  type: 'in-person' | 'phone' | 'video' | 'other';
+  type: string;
+  customTypeDetails?: string;
   status: 'scheduled' | 'confirmed' | 'cancelled' | 'completed' | 'no-show';
 
   entryType: EntryType;
   organizationId: string;
 
-  // Participants
   createdBy: mongoose.Types.ObjectId;
   createdByModel: 'User' | 'CrmUser';
   participants: mongoose.Types.ObjectId[];
   participantModel: 'User' | 'CrmUser';
 
-  // External guests
   guestEmails: IGuestResponse[];
-
-  // NEW: Customer booking
   customerBooking?: ICustomerBooking;
 
-  // Related entities
   leadId?: mongoose.Types.ObjectId;
   conversationId?: mongoose.Types.ObjectId;
   vehicleId?: mongoose.Types.ObjectId;
+  vehicleIds?: mongoose.Types.ObjectId[];
   quoteId?: mongoose.Types.ObjectId;
   shipmentId?: mongoose.Types.ObjectId;
 
-  // Reminders
   reminderSent: boolean;
   reminderTime?: Date;
 
-  // Google Calendar integration
   googleCalendarEventId?: string;
   meetingLink?: string;
   syncedWithGoogleCalendar: boolean;
@@ -87,7 +81,6 @@ const GuestResponseSchema = new Schema({
   guestPhone: String
 }, { _id: false });
 
-// NEW: Customer booking schema
 const CustomerBookingSchema = new Schema({
   firstName: { type: String, required: true, trim: true },
   lastName: { type: String, required: true, trim: true },
@@ -110,16 +103,15 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     location: { type: String, trim: true },
     type: {
       type: String,
-      enum: ['in-person', 'phone', 'video', 'other'],
       default: 'in-person'
     },
+    customTypeDetails: { type: String, trim: true },
     status: {
       type: String,
       enum: ['scheduled', 'confirmed', 'cancelled', 'completed', 'no-show'],
       default: 'scheduled',
       index: true
     },
-
     entryType: {
       type: String,
       enum: ['event', 'task', 'reminder', 'appointment'],
@@ -132,7 +124,6 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       required: true,
       index: true
     },
-
     createdBy: {
       type: Schema.Types.ObjectId,
       refPath: 'createdByModel',
@@ -155,12 +146,8 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       enum: ['User', 'CrmUser'],
       default: 'User'
     },
-
     guestEmails: [GuestResponseSchema],
-
-    // NEW: Customer booking
     customerBooking: CustomerBookingSchema,
-
     leadId: {
       type: Schema.Types.ObjectId,
       ref: 'Lead',
@@ -174,6 +161,10 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       type: Schema.Types.ObjectId,
       ref: 'Vehicle'
     },
+    vehicleIds: [{
+      type: Schema.Types.ObjectId,
+      ref: 'Vehicle'
+    }],
     quoteId: {
       type: Schema.Types.ObjectId,
       ref: 'Quote'
@@ -182,15 +173,12 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
       type: Schema.Types.ObjectId,
       ref: 'Shipment'
     },
-
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
-
     googleCalendarEventId: String,
     meetingLink: String,
     syncedWithGoogleCalendar: { type: Boolean, default: false },
     lastSyncedAt: Date,
-
     notes: { type: String, trim: true },
     outcomeNotes: { type: String, trim: true },
     transparency: { type: String, enum: ['opaque', 'transparent'], default: 'opaque' }
@@ -200,13 +188,11 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
   }
 );
 
-// Compound indexes
 AppointmentSchema.index({ createdBy: 1, startTime: -1 });
 AppointmentSchema.index({ participants: 1, startTime: -1 });
 AppointmentSchema.index({ status: 1, startTime: 1 });
 AppointmentSchema.index({ entryType: 1, startTime: 1 });
 AppointmentSchema.index({ 'guestEmails.email': 1 });
-// NEW: Customer booking indexes
 AppointmentSchema.index({ 'customerBooking.email': 1 });
 AppointmentSchema.index({ 'customerBooking.phone': 1 });
 AppointmentSchema.index({ 'customerBooking.firstName': 1, 'customerBooking.lastName': 1 });

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
+import Appointment from '../models/Appointment.model';
 import appointmentService from '../services/appointment.service';
 import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
@@ -17,9 +18,7 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
 
-    // Check for duplicate customer booking
     if (req.body.customerBooking?.isCustomerBooking) {
-        // Inject organizationId for duplicate check
         const bookingData = { ...req.body.customerBooking, organizationId: orgId };
         const duplicateCheck = await customerBookingService.checkDuplicateBooking(
             bookingData,
@@ -168,14 +167,34 @@ const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) 
 });
 
 /**
- * Get a specific appointment by ID
+ * Get a specific appointment by ID (Modified to populate multi-vehicle array)
  */
 const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
-    const userId = (req.user as IUser)._id.toString();
     const { id } = req.params;
-
     const orgId = req.orgId as string;
-    const appointment = await appointmentService.getAppointmentById(id, orgId, userId);
+
+    const appointment = await Appointment.findOne({ _id: id, organizationId: orgId })
+        .populate({
+            path: 'createdBy',
+            select: 'fullName email username name',
+            model: 'CrmUser'
+        })
+        .populate({
+            path: 'participants',
+            select: 'fullName email username name avatar',
+            model: 'CrmUser'
+        })
+        .populate({
+            path: 'vehicleIds',
+            model: 'Vehicle'
+        })
+        .lean();
+
+    if (!appointment) {
+        return res.status(404).json(
+            new ApiResponse(404, null, 'Appointment not found')
+        );
+    }
 
     res.json(
         new ApiResponse(200, appointment, 'Appointment fetched successfully')
@@ -189,10 +208,8 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { id } = req.params;
 
-    // Check for duplicate customer booking if updating customer booking info
     if (req.body.customerBooking?.isCustomerBooking) {
         const orgId = req.orgId as string;
-        // Inject organizationId for duplicate check
         const bookingData = { ...req.body.customerBooking, organizationId: orgId };
         const duplicateCheck = await customerBookingService.checkDuplicateBooking(
             bookingData,

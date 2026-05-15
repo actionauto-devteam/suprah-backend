@@ -71,6 +71,10 @@ router.patch('/conversations/:id', supraSpaceController.updateConversation);
 router.get('/conversations/:id/messages', supraSpaceController.getMessages);
 router.post('/conversations/:id/messages', supraSpaceController.sendMessage);
 
+// Video Conferencing ..
+
+router.post('/conversations/:id/video-token', supraSpaceController.generateVideoToken);
+
 const uploadMiddlewareChain = [
   uploadLimiter,
   uploadFiles,

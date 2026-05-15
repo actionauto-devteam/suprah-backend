@@ -9,6 +9,7 @@ import CrmUser from '../models/CrmUser.model';
 import { getIO } from '../socket/supraspace.socket';
 import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
+import jwt from 'jsonwebtoken';
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 
@@ -32,6 +33,45 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
 
   res.json(new ApiResponse(200, conversations, 'Conversations fetched'));
 });
+
+
+// Video Conferencing
+
+const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!conversation.members.map(String).includes(userId.toString())) {
+    throw new ApiError(403, 'Not a member of this conversation');
+  }
+
+  const user = req.crmUser!;
+  const roomName = `supraspace-${id}`;
+
+  // Generate JWT token for Jitsi
+  const payload = {
+    context: {
+      user: {
+        id: userId.toString(),
+        name: user.fullName,
+        avatar: user.avatar,
+        email: user.username,
+      },
+    },
+    aud: process.env.JITSI_APP_ID,
+    iss: process.env.JITSI_APP_ID,
+    sub: process.env.NEXT_PUBLIC_JITSI_DOMAIN,
+    room: roomName,
+    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24), // 24 hours
+  };
+
+  const token = jwt.sign(payload, process.env.JITSI_APP_SECRET || 'secret');
+
+  res.json(new ApiResponse(200, { token, roomName }, 'Video token generated'));
+});
+
 
 /**
  * POST /api/supraspace/conversations/direct
@@ -468,6 +508,7 @@ const supraSpaceController = {
   uploadAttachment,
   deleteMessage,
   getCrmUsers,
+  generateVideoToken,
 };
 
 export default supraSpaceController;

@@ -11,7 +11,6 @@ import logger from '../utils/logger';
 /**
  * GET /api/appointments/dashboard
  * Fetch all booked appointments for a specific date (organization-wide)
- * Requires: date query parameter (ISO string or YYYY-MM-DD)
  */
 export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
@@ -25,7 +24,6 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
     throw new ApiError(400, 'Date parameter is required (ISO string or YYYY-MM-DD)');
   }
 
-  // Parse the date (handle both ISO string and YYYY-MM-DD format)
   let dateObj: Date;
   try {
     const dateStr = (date as string).trim();
@@ -40,24 +38,21 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
     throw new ApiError(400, 'Invalid date format. Use ISO string or YYYY-MM-DD');
   }
 
-  // Create date range for the entire day (UTC)
   const startOfDay = new Date(dateObj);
   startOfDay.setUTCHours(0, 0, 0, 0);
   
   const endOfDay = new Date(dateObj);
   endOfDay.setUTCHours(23, 59, 59, 999);
 
-  // Build query
   const query: any = {
     organizationId: orgId,
     startTime: {
       $gte: startOfDay,
       $lte: endOfDay,
     },
-    'customerBooking.isCustomerBooking': true, // Only customer bookings
+    'customerBooking.isCustomerBooking': true,
   };
 
-  // Apply optional filters
   if (status && status !== 'all') {
     query.status = status;
   }
@@ -66,10 +61,9 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
     query.type = type;
   }
 
-  // Fetch appointments with related data
   const appointments = await Appointment.find(query)
     .select(
-      'title description startTime endTime type status customerBooking ' +
+      'title description startTime endTime type customTypeDetails status customerBooking vehicleIds ' +
       'createdBy source organizationId createdAt updatedAt entryType'
     )
     .populate({
@@ -77,18 +71,20 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
       select: 'fullName email username',
       model: 'CrmUser',
     })
+    .populate({
+      path: 'vehicleIds',
+      model: 'Vehicle'
+    })
     .sort({ startTime: 1 })
     .limit(parseInt(limit as string) || 100)
     .skip(parseInt(skip as string) || 0)
     .lean();
 
-  // Enrich with additional data
   const enrichedAppointments = await Promise.all(
     appointments.map(async (apt: any) => {
       let customerData: any = null;
       let sourceInfo = apt.source || 'Manual Booking';
 
-      // Try to fetch customer by email if available
       if (apt.customerBooking?.email) {
         try {
           customerData = await Customer.findOne({
@@ -102,7 +98,6 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
         }
       }
 
-      // Determine appointment source
       if (customerData && customerData.source) {
         sourceInfo = customerData.source.charAt(0).toUpperCase() + customerData.source.slice(1);
       }
@@ -114,6 +109,7 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
         startTime: apt.startTime,
         endTime: apt.endTime,
         type: apt.type || 'in-person',
+        customTypeDetails: apt.customTypeDetails || '',
         status: apt.status || 'scheduled',
         entryType: apt.entryType || 'appointment',
         source: sourceInfo,
@@ -130,6 +126,7 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
           email: apt.createdBy?.email,
           username: apt.createdBy?.username,
         },
+        vehicles: apt.vehicleIds || [],
         vehicleInterest: customerData?.vehicleInterest,
         createdAt: apt.createdAt,
         updatedAt: apt.updatedAt,
@@ -137,7 +134,6 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
     })
   );
 
-  // Get total count
   const total = await Appointment.countDocuments(query);
 
   res.json(
@@ -156,7 +152,6 @@ export const getAppointmentsDashboard = asyncHandler(async (req: Request, res: R
 
 /**
  * GET /api/appointments/dashboard/stats
- * Get appointment statistics for a specific date
  */
 export const getAppointmentsDashboardStats = asyncHandler(
   async (req: Request, res: Response) => {
@@ -171,7 +166,6 @@ export const getAppointmentsDashboardStats = asyncHandler(
       throw new ApiError(400, 'Date parameter is required');
     }
 
-    // Parse the date
     let dateObj: Date;
     try {
       const dateStr = (date as string).trim();
@@ -241,7 +235,6 @@ export const getAppointmentsDashboardStats = asyncHandler(
 
 /**
  * GET /api/appointments/dashboard/export
- * Export dashboard appointments as CSV or JSON
  */
 export const exportAppointmentsDashboard = asyncHandler(
   async (req: Request, res: Response) => {
@@ -256,7 +249,6 @@ export const exportAppointmentsDashboard = asyncHandler(
       throw new ApiError(400, 'Date parameter is required');
     }
 
-    // Parse the date
     let dateObj: Date;
     try {
       const dateStr = (date as string).trim();
@@ -295,7 +287,6 @@ export const exportAppointmentsDashboard = asyncHandler(
       .lean();
 
     if (format === 'csv') {
-      // Generate CSV
       const headers = [
         'Customer Name',
         'Email',
@@ -331,7 +322,6 @@ export const exportAppointmentsDashboard = asyncHandler(
       res.setHeader('Content-Disposition', `attachment; filename="appointments-${date}.csv"`);
       res.send(csv);
     } else {
-      // JSON response
       res.json(
         new ApiResponse(200, { appointments, exportDate: date }, 'Export data ready')
       );

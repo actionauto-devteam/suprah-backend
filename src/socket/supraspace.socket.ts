@@ -1,31 +1,3 @@
-/**
- * supraspace.socket.ts
- *
- * JWT secret chain mirrors crmAuth.middleware.ts exactly:
- *   process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key'
- *
- * Token payload shape (set by generateCrmToken):
- *   { id: userId, type: 'crm' }
- *
- * Socket path: /socket/supraspace
- *
- * ── Events emitted TO client:
- *   message:new        { conversationId, message }
- *   message:deleted    { conversationId, messageId }
- *   conversation:new   { conversation }
- *   presence:update    { userId, status: 'online' | 'offline' }
- *   typing:start       { conversationId, userId, fullName }
- *   typing:stop        { conversationId, userId }
- *   messages:read      { conversationId, userId }
- *
- * ── Events received FROM client:
- *   join:conversation  { conversationId }
- *   leave:conversation { conversationId }
- *   typing:start       { conversationId }
- *   typing:stop        { conversationId }
- *   mark:read          { conversationId }
- */
-
 import { Server as HttpServer } from 'http';
 import { Server as IOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
