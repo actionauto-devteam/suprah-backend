@@ -13,6 +13,10 @@ export interface ICrmUser extends Document {
   lastLoginAt?: Date;
   resetOtp?: string;
   resetOtpExpiry?: Date;
+  birthday?: Date;
+  hireDate?: Date;
+  isOffboarded: boolean;
+  offboardedAt?: Date;
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -84,6 +88,22 @@ const CrmUserSchema = new Schema<ICrmUser>(
     resetOtpExpiry: {
       type: Date,
       select: false,
+    },
+    birthday: {
+      type: Date,
+      default: null,
+    },
+    hireDate: {
+      type: Date,
+      default: null,
+    },
+    isOffboarded: {
+      type: Boolean,
+      default: false,
+    },
+    offboardedAt: {
+      type: Date,
+      default: null,
     },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },

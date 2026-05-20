@@ -323,7 +323,7 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const { fullName, email, password, role } = req.body;
+  const { fullName, email, password, role, birthday, hireDate } = req.body;
 
   if (!fullName?.trim() || !email?.trim() || !password || !role) {
     throw new ApiError(400, "fullName, email, password, and role are required");
@@ -348,6 +348,8 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     password,
     role,
     isActive: true,
+    birthday: birthday ? new Date(birthday) : undefined,
+    hireDate: hireDate ? new Date(hireDate) : undefined,
   });
 
   res.status(201).json(
@@ -458,6 +460,8 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     createdAt: 'createdAt',
     joined: 'createdAt',
     lastLoginAt: 'lastLoginAt',
+    hireDate: 'hireDate',
+    birthday: 'birthday',
   };
 
   const resolvedSortBy =
@@ -476,7 +480,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum),
@@ -516,7 +520,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role } = req.body;
+  const { fullName, email, role, birthday, hireDate } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -538,6 +542,14 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (role && ["employee", "manager", "admin"].includes(role)) {
     user.role = role;
+  }
+
+  if (birthday !== undefined) {
+    user.birthday = birthday ? new Date(birthday) : undefined;
+  }
+
+  if (hireDate !== undefined) {
+    user.hireDate = hireDate ? new Date(hireDate) : undefined;
   }
 
   await user.save({ validateModifiedOnly: true });
@@ -742,6 +754,42 @@ const resetPassword = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "Password reset successfully"));
 });
 
+/**
+ * Offboard a CRM user (soft-deactivate, preserve records)
+ * POST /api/crm/users/:id/offboard
+ * Admin only
+ */
+const offboardUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== "admin") {
+    throw new ApiError(403, "Only admins can offboard users");
+  }
+
+  const { id } = req.params;
+
+  if (id === actor._id.toString()) {
+    throw new ApiError(400, "You cannot offboard your own account");
+  }
+
+  const user = await CrmUser.findOne({
+    _id: id,
+    organizationId: actor.organizationId,
+  });
+  if (!user) throw new ApiError(404, "User not found");
+
+  if (user.isOffboarded) {
+    throw new ApiError(409, "User is already offboarded");
+  }
+
+  user.isActive = false;
+  user.isOffboarded = true;
+  user.offboardedAt = new Date();
+  await user.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, null, "User offboarded successfully"));
+});
+
 export default {
   login,
   logout,
@@ -757,4 +805,5 @@ export default {
   toggleUserStatus,
   deleteUser,
   resetPassword,
+  offboardUser,
 };

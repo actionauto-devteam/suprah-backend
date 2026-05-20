@@ -14,6 +14,7 @@ import passport from "./config/passport";
 import config from "./config";
 import { initSyncScheduler } from "./schedulers/sync.scheduler";
 import { initCleanupScheduler } from "./schedulers/cleanup.scheduler";
+import { initMilestoneScheduler } from "./schedulers/milestone.scheduler";
 import healthRoute from "./routes/health.route";
 import supraSpaceRoute from "./routes/supraspace.route";
 import { initSupraSpaceSocket } from "./socket/supraspace.socket";
@@ -170,6 +171,7 @@ app.use(errorHandler);
 if (require.main === module) {
   initSyncScheduler();
   initCleanupScheduler();
+  initMilestoneScheduler();
 
   const server = httpServer.listen(config.port, () => {
     logger.info(`Server running on port ${config.port}`);

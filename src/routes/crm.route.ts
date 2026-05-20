@@ -2,9 +2,10 @@
 
 import express from 'express';
 import crmController from '../controllers/crm.controller';
+import hrController from '../controllers/hr.controller';
 import feedController from '../controllers/feed.controller';
 import feedCommentController from '../controllers/feedComment.controller';
-import feedReactionRouter from './feedReaction.routes';          // ← ADD THIS
+import feedReactionRouter from './feedReaction.routes';
 import crmAuth from '../middleware/crmAuth.middleware';
 
 const router = express.Router();
@@ -29,7 +30,12 @@ router.post('/users',                     crmController.createUser);
 router.patch('/users/:id',                crmController.updateUser);
 router.patch('/users/:id/status',         crmController.toggleUserStatus);
 router.patch('/users/:id/reset-password', crmController.resetPassword);
+router.post('/users/:id/offboard',        crmController.offboardUser);
 router.delete('/users/:id',               crmController.deleteUser);
+
+// ── HR ──
+router.get('/hr/milestones',  hrController.getMilestones);
+router.get('/hr/offboarded',  hrController.getOffboarded);
 
 // ── Feed posts ──
 router.get('/feeds',        feedController.getPosts);
