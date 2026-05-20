@@ -1,5 +1,3 @@
-// controllers/user.controller.ts
-
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -10,7 +8,6 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 
 const searchUsers = asyncHandler(async (req: Request, res: Response) => {
-    // ... (existing searchUsers logic unchanged)
     const { q, limit = 10, excludeSelf = 'true' } = req.query;
     const currentUserId = (req.user as IUser)._id.toString();
 
@@ -42,7 +39,6 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
             .lean()
             .exec();
 
-        // Transform to plain objects with proper typing
         const transformedUsers = users.map(user => ({
             _id: user._id.toString(),
             name: user.name,
@@ -59,7 +55,6 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getProfile = asyncHandler(async (req: Request, res: Response) => {
-    // ... (existing getProfile logic unchanged)
     const userId = req.params.id || (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
 
@@ -73,7 +68,6 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
-    // ... (existing updateProfile logic unchanged)
     const userId = (req.user as IUser)._id.toString();
 
     // Don't allow updating sensitive fields through this method
