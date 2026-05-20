@@ -6,9 +6,7 @@ import User, { IUser } from '../models/User.model';
 import Absence from '../models/Absence.model';
 import BoardNote from '../models/BoardNote.model';
 
-const PRESENCE_TTL_MS = 3 * 60 * 1000; // 3 minutes — if lastActive is older, treat as offline
-
-// ── Members ───────────────────────────────────────────────────────────────────
+const PRESENCE_TTL_MS = 3 * 60 * 1000;
 
 const getMembers = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
@@ -26,7 +24,6 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
 
-    // If a user is set "online" but their lastActive heartbeat is stale → show as offline
     const adjusted = members.map((m) => {
         const stale = !m.lastActive || new Date(m.lastActive) < cutoff;
         const effectiveStatus = (m.onlineStatus === 'online' && stale) ? 'offline' : m.onlineStatus;
@@ -40,8 +37,6 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, adjusted, 'Team members fetched'));
 });
-
-// ── Absences ──────────────────────────────────────────────────────────────────
 
 const getAbsences = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
@@ -127,8 +122,6 @@ const deleteAbsence = asyncHandler(async (req: Request, res: Response) => {
     await absence.deleteOne();
     res.json(new ApiResponse(200, null, 'Absence deleted'));
 });
-
-// ── Board Notes ───────────────────────────────────────────────────────────────
 
 const getBoardNotes = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
