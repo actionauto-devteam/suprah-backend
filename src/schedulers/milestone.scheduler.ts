@@ -51,14 +51,21 @@ async function postSupraSpaceAnnouncement(
   const memberIds = orgMembers.map((m) => m._id);
   if (memberIds.length < 2) return;
 
-  // Find the active group conversation with the most org members
-  const conv = await SupraSpaceConversation.findOne({
-    type: "group",
-    isActive: true,
-    members: { $in: memberIds },
-  })
-    .sort({ lastMessageAt: -1, createdAt: 1 })
-    .select("_id members");
+  // Prefer a conversation named "General" (case-insensitive); fall back to most recently active group
+  const conv =
+    (await SupraSpaceConversation.findOne({
+      type: "group",
+      isActive: true,
+      name: { $regex: /^general$/i },
+      members: { $in: memberIds },
+    }).select("_id members")) ??
+    (await SupraSpaceConversation.findOne({
+      type: "group",
+      isActive: true,
+      members: { $in: memberIds },
+    })
+      .sort({ lastMessageAt: -1, createdAt: 1 })
+      .select("_id members"));
 
   if (!conv) return;
 
