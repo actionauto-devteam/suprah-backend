@@ -32,20 +32,22 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
     organizationId: actor.organizationId,
     isActive: true,
     $or: [{ birthday: { $ne: null } }, { hireDate: { $ne: null } }],
-  }).select("fullName avatar birthday hireDate");
+  }).select("fullName username avatar role birthday hireDate");
 
-  const birthdays: Array<{
-    user: { _id: unknown; fullName: string; avatar?: string | null };
+  type MilestoneEntry = {
+    _id: string;
+    fullName: string;
+    username: string;
+    avatar?: string | null;
+    role: string;
     daysUntil: number;
     date: Date;
-  }> = [];
+    type: "birthday" | "anniversary";
+    yearsCount?: number;
+  };
 
-  const anniversaries: Array<{
-    user: { _id: unknown; fullName: string; avatar?: string | null };
-    daysUntil: number;
-    date: Date;
-    yearsOfService: number;
-  }> = [];
+  const birthdays: MilestoneEntry[] = [];
+  const anniversaries: MilestoneEntry[] = [];
 
   const currentYear = new Date().getFullYear();
 
@@ -54,23 +56,33 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
       const d = daysUntilNextOccurrence(u.birthday.getMonth(), u.birthday.getDate());
       if (d <= window) {
         birthdays.push({
-          user: { _id: u._id, fullName: u.fullName, avatar: u.avatar },
+          _id: u._id.toString(),
+          fullName: u.fullName,
+          username: u.username,
+          avatar: u.avatar,
+          role: u.role,
           daysUntil: d,
           date: u.birthday,
+          type: "birthday",
         });
       }
     }
 
     if (u.hireDate) {
-      const yearsOfService = currentYear - u.hireDate.getFullYear();
-      if (yearsOfService > 0) {
+      const yearsCount = currentYear - u.hireDate.getFullYear();
+      if (yearsCount > 0) {
         const d = daysUntilNextOccurrence(u.hireDate.getMonth(), u.hireDate.getDate());
         if (d <= window) {
           anniversaries.push({
-            user: { _id: u._id, fullName: u.fullName, avatar: u.avatar },
+            _id: u._id.toString(),
+            fullName: u.fullName,
+            username: u.username,
+            avatar: u.avatar,
+            role: u.role,
             daysUntil: d,
             date: u.hireDate,
-            yearsOfService,
+            type: "anniversary",
+            yearsCount,
           });
         }
       }
