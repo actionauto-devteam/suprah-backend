@@ -138,6 +138,8 @@ const createNotification = async (params: CreateNotificationParams) => {
       shipment_arrived_at_pickup: '/driver-tracker',
       shipment_arrived_at_delivery: '/driver-tracker',
       new_lead: '/crm/dashboard',
+      crm_task_due: metadata?.route || '/crm/leads',
+      reminder: metadata?.route || '/crm/leads',
       driver_request: '/driver-tracker',
       driver_request_approved: '/driver/loads',
       driver_request_rejected: '/notifications',

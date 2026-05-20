@@ -53,6 +53,20 @@ export interface ILead extends Document {
   };
   comments: string;
 
+  followUp?: {
+    lastCustomerActivityAt?: Date;
+    lastRepResponseAt?: Date;
+    lastReminderSentAt?: Date;
+    reminderCount?: number;
+    reminderHistory?: Array<{
+      sentAt: Date;
+      userId?: mongoose.Types.ObjectId;
+      thresholdMinutes: number;
+      notificationId?: mongoose.Types.ObjectId;
+      note?: string;
+    }>;
+  };
+
   /** Whether this lead was ingested via the centralized account */
   centralIngestion?: boolean;
 
@@ -125,6 +139,20 @@ const LeadSchema: Schema = new Schema({
   },
   comments: String,
 
+  followUp: {
+    lastCustomerActivityAt: { type: Date, default: Date.now, index: true },
+    lastRepResponseAt: { type: Date, default: null },
+    lastReminderSentAt: { type: Date, default: null, index: true },
+    reminderCount: { type: Number, default: 0 },
+    reminderHistory: [{
+      sentAt: { type: Date, default: Date.now },
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      thresholdMinutes: Number,
+      notificationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Notification' },
+      note: String,
+    }],
+  },
+
   centralIngestion: { type: Boolean, default: false },
 }, { timestamps: true });
 
@@ -135,5 +163,7 @@ LeadSchema.index({ organizationId: 1, createdAt: -1 });
 LeadSchema.index({ createdBy: 1, createdAt: -1 });
 // Index for channel-based filtering
 LeadSchema.index({ createdBy: 1, channel: 1, createdAt: -1 });
+// Index for unanswered inquiry reminder scans
+LeadSchema.index({ organizationId: 1, status: 1, 'followUp.lastCustomerActivityAt': 1 });
 
 export default mongoose.model<ILead>('Lead', LeadSchema);

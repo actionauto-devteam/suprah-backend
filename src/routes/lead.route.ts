@@ -3,6 +3,8 @@ import {
   receiveADF,
   getAllLeads,
   getLeadById,
+  getUnansweredInquiryReminders,
+  runUnansweredInquiryReminderCheck,
   updateLead,
   createInquiry,
   markAsRead,
@@ -41,6 +43,10 @@ router.post('/sync-gmail', syncLimiter, syncGmailInquiries);
  
 // Centralized ingestion status
 router.get('/sync-status', getCentralSyncStatus);
+
+// Automated unanswered inquiry reminders
+router.get('/reminders/unanswered', getUnansweredInquiryReminders);
+router.post('/reminders/unanswered/run', runUnansweredInquiryReminderCheck);
  
 // Base CRUD
 router.get('/', getAllLeads);

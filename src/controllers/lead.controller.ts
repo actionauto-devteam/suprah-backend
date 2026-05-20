@@ -29,6 +29,67 @@ import CrmUser from '../models/CrmUser.model';
  * STRICT SOURCE FILTER — only leads from this address are ingested.
  */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
+const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
+const UNANSWERED_LEAD_STATUSES = ['New', 'Pending'];
+
+function parseReminderThreshold(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_UNANSWERED_THRESHOLD_MINUTES;
+  return Math.min(Math.max(Math.round(parsed), 5), 1440);
+}
+
+function leadCustomerName(lead: any) {
+  return `${lead.firstName || 'Unknown'} ${lead.lastName || ''}`.trim();
+}
+
+function leadLastCustomerActivityAt(lead: any) {
+  return lead.followUp?.lastCustomerActivityAt || lead.createdAt || lead.updatedAt;
+}
+
+function serializeUnansweredLead(lead: any, now = Date.now()) {
+  const lastActivity = leadLastCustomerActivityAt(lead);
+  const lastActivityTime = lastActivity ? new Date(lastActivity).getTime() : now;
+
+  return {
+    _id: lead._id.toString(),
+    customerName: leadCustomerName(lead),
+    email: lead.email,
+    phone: lead.phone,
+    subject: lead.subject,
+    source: lead.source,
+    channel: lead.channel,
+    status: lead.status,
+    createdAt: lead.createdAt,
+    updatedAt: lead.updatedAt,
+    lastCustomerActivityAt: lastActivity,
+    lastReminderSentAt: lead.followUp?.lastReminderSentAt || null,
+    reminderCount: lead.followUp?.reminderCount || 0,
+    minutesUnanswered: Math.max(0, Math.floor((now - lastActivityTime) / 60000)),
+  };
+}
+
+async function getCrmReminderTargets(orgId: string, lead: any) {
+  const crmUsers = await CrmUser.find({ organizationId: orgId, isActive: true })
+    .select('_id')
+    .lean();
+  const targetIds = crmUsers.map((crmUser: any) => crmUser._id.toString());
+  if (lead.createdBy) targetIds.push(lead.createdBy.toString());
+  return Array.from(new Set(targetIds));
+}
+
+function buildUnansweredReminderQuery(orgId: string, cutoff: Date) {
+  return {
+    organizationId: orgId,
+    status: { $in: UNANSWERED_LEAD_STATUSES },
+    $or: [
+      { 'followUp.lastCustomerActivityAt': { $lte: cutoff } },
+      {
+        'followUp.lastCustomerActivityAt': { $exists: false },
+        createdAt: { $lte: cutoff },
+      },
+    ],
+  };
+}
 
 // ─── Cached system user lookup ────────────────────────────────────────────────
 // Cached in-process to avoid a DB round-trip on every single lead ingested.
@@ -216,6 +277,11 @@ export const receiveADF = async (req: Request, res: Response) => {
       source: adfData.source || 'ADF Email',
       senderEmail: config?.leadSourceEmail || LEADS_SOURCE_EMAIL,
       centralIngestion: true,
+      followUp: {
+        lastCustomerActivityAt: new Date(),
+        reminderCount: 0,
+        reminderHistory: [],
+      },
     });
 
     await newLead.save();
@@ -320,7 +386,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels'
+        'centralIngestion labels followUp'
       )
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -349,7 +415,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels'
+        'centralIngestion labels followUp'
       )
       .lean();
 
@@ -362,6 +428,130 @@ export const getLeadById = async (req: Request, res: Response) => {
   }
 };
 
+export const getUnansweredInquiryReminders = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+
+    const thresholdMinutes = parseReminderThreshold(req.query.thresholdMinutes);
+    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    const cutoff = new Date(Date.now() - thresholdMinutes * 60000);
+
+    const leads = await Lead.find(buildUnansweredReminderQuery(orgId, cutoff))
+      .select(
+        'firstName lastName email phone subject channel source status ' +
+        'createdAt updatedAt followUp'
+      )
+      .sort({ 'followUp.lastCustomerActivityAt': 1, createdAt: 1 })
+      .limit(limit)
+      .lean();
+
+    res.json(new ApiResponse(200, {
+      thresholdMinutes,
+      count: leads.length,
+      reminders: leads.map((lead) => serializeUnansweredLead(lead)),
+    }));
+  } catch (error) {
+    logger.error(error, '[LEAD-REMINDERS] Error fetching unanswered inquiries');
+    res.status(500).json({ message: 'Error fetching unanswered inquiry reminders' });
+  }
+};
+
+export const runUnansweredInquiryReminderCheck = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+
+    const thresholdMinutes = parseReminderThreshold(req.query.thresholdMinutes || req.body?.thresholdMinutes);
+    const limit = Math.min(parseInt((req.query.limit || req.body?.limit) as string) || 25, 50);
+    const now = Date.now();
+    const cutoff = new Date(now - thresholdMinutes * 60000);
+
+    const leads = await Lead.find(buildUnansweredReminderQuery(orgId, cutoff))
+      .select(
+        'createdBy firstName lastName email phone subject channel source status ' +
+        'createdAt updatedAt followUp'
+      )
+      .sort({ 'followUp.lastCustomerActivityAt': 1, createdAt: 1 })
+      .limit(limit)
+      .lean();
+
+    const remindedLeads: any[] = [];
+    let notificationCount = 0;
+
+    for (const lead of leads) {
+      const lastReminderSentAt = lead.followUp?.lastReminderSentAt
+        ? new Date(lead.followUp.lastReminderSentAt).getTime()
+        : 0;
+
+      if (lastReminderSentAt > now - thresholdMinutes * 60000) {
+        continue;
+      }
+
+      const customerName = leadCustomerName(lead);
+      const targetUserIds = await getCrmReminderTargets(orgId, lead);
+      const notifications = [];
+
+      for (const userId of targetUserIds) {
+        const notification = await safeCreateNotification({
+          userId,
+          organizationId: orgId,
+          type: 'crm_task_due',
+          title: 'Unanswered customer inquiry',
+          message: `${customerName} has not received a response for ${thresholdMinutes}+ minutes.`,
+          metadata: {
+            reminderKind: 'unanswered_inquiry',
+            leadId: lead._id.toString(),
+            customerName,
+            email: lead.email,
+            channel: lead.channel,
+            thresholdMinutes,
+            route: `/crm/leads?leadId=${lead._id.toString()}`,
+          },
+        });
+
+        if (notification) {
+          notificationCount++;
+          notifications.push({
+            sentAt: new Date(),
+            userId,
+            thresholdMinutes,
+            notificationId: (notification as any)._id,
+            note: 'Automated unanswered inquiry reminder',
+          });
+        }
+      }
+
+      if (notifications.length > 0) {
+        await Lead.updateOne(
+          { _id: lead._id, organizationId: orgId },
+          {
+            $set: { 'followUp.lastReminderSentAt': new Date() },
+            $inc: { 'followUp.reminderCount': 1 },
+            $push: { 'followUp.reminderHistory': { $each: notifications } },
+          }
+        );
+        remindedLeads.push(serializeUnansweredLead(lead, now));
+      }
+    }
+
+    res.json(new ApiResponse(200, {
+      thresholdMinutes,
+      scanned: leads.length,
+      reminderCount: remindedLeads.length,
+      notificationCount,
+      reminders: remindedLeads,
+    }));
+  } catch (error) {
+    logger.error(error, '[LEAD-REMINDERS] Error running unanswered inquiry reminders');
+    res.status(500).json({ message: 'Error running unanswered inquiry reminder check' });
+  }
+};
+
 export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -371,9 +561,15 @@ export const updateLead = async (req: Request, res: Response) => {
     const userId = user._id;
     const orgId = req.orgId;
 
+    const leadUpdate: any = { status };
+    if (['Contacted', 'Appointment Set', 'Closed'].includes(status)) {
+      leadUpdate.isPending = false;
+      leadUpdate['followUp.lastRepResponseAt'] = new Date();
+    }
+
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
-      { status },
+      leadUpdate,
       { new: true }
     );
 
@@ -454,6 +650,11 @@ export const createInquiry = async (req: Request, res: Response) => {
       source: source || 'Manual Entry',
       channel: detectedChannel,
       status: 'New',
+      followUp: {
+        lastCustomerActivityAt: new Date(),
+        reminderCount: 0,
+        reminderHistory: [],
+      },
     });
 
     const savedLead = await newLead.save();
@@ -586,7 +787,7 @@ export const replyToInquiry = async (req: Request, res: Response) => {
 
     const lead = await Lead.findOneAndUpdate(
       { _id: id, organizationId: orgId },
-      { status: 'Contacted', isRead: true },
+      { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': new Date() },
       { new: true }
     );
 
@@ -836,6 +1037,11 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           centralIngestion: true,
           vehicle: vehicleInfo,
           comments,
+          followUp: {
+            lastCustomerActivityAt: new Date(),
+            reminderCount: 0,
+            reminderHistory: [],
+          },
         });
 
         try {
