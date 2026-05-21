@@ -34,8 +34,9 @@ router.post('/users/:id/offboard',        crmController.offboardUser);
 router.delete('/users/:id',               crmController.deleteUser);
 
 // ── HR ──
-router.get('/hr/milestones',  hrController.getMilestones);
-router.get('/hr/offboarded',  hrController.getOffboarded);
+router.get('/hr/milestones',           hrController.getMilestones);
+router.get('/hr/offboarded',           hrController.getOffboarded);
+router.post('/hr/milestones/trigger',  hrController.triggerMilestones);
 
 // ── Feed posts ──
 router.get('/feeds',        feedController.getPosts);

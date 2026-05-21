@@ -323,7 +323,7 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const { fullName, email, password, role, birthday, hireDate } = req.body;
+  const { fullName, email, password, role, birthday, hireDate, gender } = req.body;
 
   if (!fullName?.trim() || !email?.trim() || !password || !role) {
     throw new ApiError(400, "fullName, email, password, and role are required");
@@ -350,6 +350,7 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     isActive: true,
     birthday: birthday ? new Date(birthday) : undefined,
     hireDate: hireDate ? new Date(hireDate) : undefined,
+    gender: gender && ['male', 'female'].includes(gender) ? gender : undefined,
   });
 
   res.status(201).json(
@@ -480,7 +481,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum),
@@ -520,7 +521,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -552,6 +553,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   if (hireDate !== undefined) {
     user.hireDate = hireDate ? new Date(hireDate) : undefined;
     user.markModified("hireDate");
+  }
+
+  if (gender !== undefined) {
+    user.gender = gender && ['male', 'female'].includes(gender) ? gender : undefined;
   }
 
   await user.save({ validateModifiedOnly: true });

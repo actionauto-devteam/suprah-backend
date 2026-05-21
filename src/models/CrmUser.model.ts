@@ -15,6 +15,7 @@ export interface ICrmUser extends Document {
   resetOtpExpiry?: Date;
   birthday?: Date;
   hireDate?: Date;
+  gender?: 'male' | 'female';
   isOffboarded: boolean;
   offboardedAt?: Date;
   googleCalendar?: {
@@ -95,6 +96,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
     },
     hireDate: {
       type: Date,
+      default: null,
+    },
+    gender: {
+      type: String,
+      enum: ['male', 'female'],
       default: null,
     },
     isOffboarded: {

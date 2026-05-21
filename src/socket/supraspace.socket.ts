@@ -101,6 +101,11 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     // Join personal room — used by controller to push targeted events
     socket.join(`user:${userId}`);
 
+    // Join org room — used for org-wide broadcasts (feed announcements, milestone alerts)
+    if (user.organizationId) {
+      socket.join(`org:${user.organizationId.toString()}`);
+    }
+
     // Announce online presence to all connected clients
     io.emit('presence:update', { userId, status: 'online' });
 

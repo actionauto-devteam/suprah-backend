@@ -3,6 +3,7 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
+import { runMilestoneCheck } from "../schedulers/milestone.scheduler";
 
 function daysUntilNextOccurrence(month: number, day: number): number {
   const now = new Date();
@@ -32,7 +33,7 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
     organizationId: actor.organizationId,
     isActive: true,
     $or: [{ birthday: { $ne: null } }, { hireDate: { $ne: null } }],
-  }).select("fullName username avatar role birthday hireDate");
+  }).select("fullName username avatar role birthday hireDate gender");
 
   type MilestoneEntry = {
     _id: string;
@@ -44,6 +45,7 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
     date: Date;
     type: "birthday" | "anniversary";
     yearsCount?: number;
+    gender?: string | null;
   };
 
   const birthdays: MilestoneEntry[] = [];
@@ -64,6 +66,7 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
           daysUntil: d,
           date: u.birthday,
           type: "birthday",
+          gender: u.gender ?? null,
         });
       }
     }
@@ -83,6 +86,7 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
             date: u.hireDate,
             type: "anniversary",
             yearsCount,
+            gender: u.gender ?? null,
           });
         }
       }
@@ -120,4 +124,18 @@ const getOffboarded = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { users }, "Offboarded users fetched successfully"));
 });
 
-export default { getMilestones, getOffboarded };
+/**
+ * Manually trigger the milestone check (admin only)
+ * POST /api/crm/hr/milestones/trigger
+ */
+const triggerMilestones = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, "Not authenticated");
+  if (actor.role !== "admin") throw new ApiError(403, "Admin access required");
+
+  const stats = await runMilestoneCheck();
+
+  res.json(new ApiResponse(200, stats, "Milestone check completed"));
+});
+
+export default { getMilestones, getOffboarded, triggerMilestones };
