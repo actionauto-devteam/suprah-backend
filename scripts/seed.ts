@@ -8,7 +8,7 @@ import User from '../src/models/User.model';
 dotenv.config();
 
 // --- DATABASE SECURITY GATEKEEPER ----
-// Prevent accidental wipes of production/live data
+// Prevent accidental wipes of production/live data!
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/vehicle-management';
 const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
 
