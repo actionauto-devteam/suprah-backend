@@ -546,10 +546,12 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (birthday !== undefined) {
     user.birthday = birthday ? new Date(birthday) : undefined;
+    user.markModified("birthday");
   }
 
   if (hireDate !== undefined) {
     user.hireDate = hireDate ? new Date(hireDate) : undefined;
+    user.markModified("hireDate");
   }
 
   await user.save({ validateModifiedOnly: true });
