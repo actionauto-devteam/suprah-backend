@@ -6,6 +6,7 @@ import User from '../models/User.model';
 import Organization from '../models/Organization.model';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
+import { invalidateUserCache } from '../utils/cache.util';
 
 const searchUsers = asyncHandler(async (req: Request, res: Response) => {
     const { q, limit = 10, excludeSelf = 'true' } = req.query;
@@ -150,6 +151,9 @@ const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
         },
         { new: true }
     ).select('-password');
+
+    // ← CACHE INVALIDATION FIX: Clear cache so next request fetches fresh user data
+    invalidateUserCache(userId.toString());
 
     await activityService.createActivity({
         userId: user!._id.toString(),

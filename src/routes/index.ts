@@ -42,6 +42,8 @@ import feedCommentRoute from "./feedComment.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
 import wiseRoute from "./wise.routes";
+import aftermarketRoute from "./aftermarket.route";
+import crmAftermarketRoute from "./crmAftermarket.route";
 
 const router = express.Router();
 
@@ -102,6 +104,14 @@ const defaultRoutes = [
   {
     path: "/invitations",
     route: invitationRoute,
+  },
+    {
+    path: "/crm/aftermarket",  
+    route: crmAftermarketRoute,
+  },
+  {
+    path: "/aftermarket",       
+    route: aftermarketRoute,
   },
   {
     path: "/driver-tracking",

@@ -123,13 +123,31 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         }
 
         // 7. Security Checks: Email Verification, Onboarding & Driver Approval
+        //
+        // Whitelisted routes bypass the onboarding / email-verification gates.
+        // NOTE on aftermarket: we open the *browse* endpoints so customers can
+        // window-shop before finishing onboarding, but we intentionally do NOT
+        // whitelist checkout — placing an order still requires a verified,
+        // onboarded account (handled by the explicit !isAftermarketCheckout
+        // guard below).
+        const url = req.originalUrl;
+
+        // Is this an aftermarket request, and if so is it the checkout action?
+        const isAftermarketRequest = url.includes('/api/aftermarket');
+        const isAftermarketCheckout =
+            isAftermarketRequest && url.includes('/api/aftermarket/checkout');
+
+        // Aftermarket browse/read is whitelisted; checkout is explicitly excluded.
+        const isAftermarketBrowse = isAftermarketRequest && !isAftermarketCheckout;
+
         const isWhitelisted =
-            req.originalUrl.includes('/api/auth/complete-onboarding') ||
-            req.originalUrl.includes('/api/users/me') ||
-            req.originalUrl.includes('/api/notifications') ||
-            req.originalUrl.includes('/api/invitations/accept') ||
-            req.originalUrl.includes('/api/push/subscribe') ||
-            req.originalUrl.includes('/api/driver-requests/my-status');
+            url.includes('/api/auth/complete-onboarding') ||
+            url.includes('/api/users/me') ||
+            url.includes('/api/notifications') ||
+            isAftermarketBrowse ||
+            url.includes('/api/invitations/accept') ||
+            url.includes('/api/push/subscribe') ||
+            url.includes('/api/driver-requests/my-status');
 
         if (!user.onboardingCompleted && !isWhitelisted) {
             throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');

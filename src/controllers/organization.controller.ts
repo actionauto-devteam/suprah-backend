@@ -1,3 +1,5 @@
+// controllers/organization.controller.ts
+
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Organization from '../models/Organization.model';
@@ -7,6 +9,7 @@ import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotificati
 import mongoose from 'mongoose';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
+import { invalidateUserCache } from '../utils/cache.util';
 
 export const createOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { name, slug } = req.body;
@@ -47,6 +50,9 @@ export const createOrganization = asyncHandler(async (req: Request, res: Respons
     user.organizationId = org._id as mongoose.Types.ObjectId;
     (user as any).organizationRole = 'admin';
     await user.save();
+
+    // ← CACHE INVALIDATION FIX: Clear cache so next request fetches fresh user data with new organizationId
+    invalidateUserCache(user._id.toString());
 
     res.status(201).json({
         success: true,
@@ -278,3 +284,12 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
         message: 'Member removed',
     });
 });
+
+export default {
+    createOrganization,
+    getOrganization,
+    updateOrganization,
+    deleteOrganization,
+    getMembers,
+    removeMember
+};
