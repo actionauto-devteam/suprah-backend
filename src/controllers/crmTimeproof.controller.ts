@@ -685,7 +685,13 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const todayTotalActiveSeconds = activityIntervalTotal > 0 ? activityIntervalTotal : todayTotalWorkedSeconds;
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
-  const currentIntervalStartAt = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
+  const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
+  // Before the tray sends its first heartbeat, fall back to shiftStartedAt so the CRM
+  // timer counts from clock-in instead of showing 00:00 until the heartbeat arrives.
+  const currentIntervalStartAt = rawIntervalStart ??
+    (isOnShift && !isOnBreak && shiftStartedAt
+      ? new Date(shiftStartedAt).toISOString()
+      : null);
 
   res.json(new ApiResponse(200, {
     isOnShift,
