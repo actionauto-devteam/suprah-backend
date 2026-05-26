@@ -19,8 +19,9 @@ router.post('/reset-password',  crmController.confirmResetPassword);
 router.use(crmAuth());
 
 // ── General employee routes ──
-router.get('/me',          crmController.getMe);
-router.post('/time-clock', crmController.timeClock);
+router.get('/me',             crmController.getMe);
+router.post('/token-refresh', crmController.tokenRefresh);
+router.post('/time-clock',    crmController.timeClock);
 router.get('/time-logs',   crmController.getTimeLogs);
 
 // ── User management ──

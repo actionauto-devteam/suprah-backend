@@ -19,6 +19,9 @@ const COOKIE_OPTIONS = {
   maxAge: 12 * 60 * 60 * 1000, // 12 hours
 };
 
+// Company operates on Mountain Daylight Time (MDT = UTC-6).
+const COMPANY_TZ_OFFSET_MINUTES = -360;
+
 /**
  * CRM Login
  * POST /api/crm/login
@@ -102,11 +105,13 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(401, "Not authenticated");
   }
 
-  // Get today's time logs
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  // Get today's time logs using MDT (UTC-6) day boundaries
+  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const today = new Date(todayMDTStartUTC);
+  const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
   const todayLogs = await TimeLog.find({
     userId: user._id,
@@ -142,49 +147,35 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
 
   const { type, note } = req.body;
 
-  if (!type || !["time-in", "time-out"].includes(type)) {
-    throw new ApiError(400, 'Type must be "time-in" or "time-out"');
+  const VALID_TYPES = ["time-in", "time-out", "break-in", "break-out"] as const;
+  if (!type || !VALID_TYPES.includes(type)) {
+    throw new ApiError(400, 'Type must be "time-in", "time-out", "break-in", or "break-out"');
   }
 
-  // Check for duplicate time-in today (prevent double clock-in)
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  // Use MDT (UTC-6) day boundaries so cross-UTC-midnight sessions are scoped correctly
+  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const today = new Date(todayMDTStartUTC);
+  const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
-  if (type === "time-in") {
-    const existingTimeIn = await TimeLog.findOne({
-      userId: user._id,
-      type: "time-in",
-      timestamp: { $gte: today, $lt: tomorrow },
-    });
+  const [timeInCount, timeOutCount, breakInCount, breakOutCount] = await Promise.all([
+    TimeLog.countDocuments({ userId: user._id, type: "time-in",   timestamp: { $gte: today, $lt: tomorrow } }),
+    TimeLog.countDocuments({ userId: user._id, type: "time-out",  timestamp: { $gte: today, $lt: tomorrow } }),
+    TimeLog.countDocuments({ userId: user._id, type: "break-in",  timestamp: { $gte: today, $lt: tomorrow } }),
+    TimeLog.countDocuments({ userId: user._id, type: "break-out", timestamp: { $gte: today, $lt: tomorrow } }),
+  ]);
 
-    if (existingTimeIn) {
-      throw new ApiError(400, "You have already clocked in today");
-    }
-  }
+  const hasActiveSession = timeInCount > timeOutCount;
+  const hasActiveBreak   = breakInCount > breakOutCount;
 
-  if (type === "time-out") {
-    const existingTimeIn = await TimeLog.findOne({
-      userId: user._id,
-      type: "time-in",
-      timestamp: { $gte: today, $lt: tomorrow },
-    });
-
-    if (!existingTimeIn) {
-      throw new ApiError(400, "You must clock in before clocking out");
-    }
-
-    const existingTimeOut = await TimeLog.findOne({
-      userId: user._id,
-      type: "time-out",
-      timestamp: { $gte: today, $lt: tomorrow },
-    });
-
-    if (existingTimeOut) {
-      throw new ApiError(400, "You have already clocked out today");
-    }
-  }
+  if (type === "time-in"   && hasActiveSession)  throw new ApiError(400, "You are already clocked in");
+  if (type === "time-out"  && !hasActiveSession)  throw new ApiError(400, "You must clock in before clocking out");
+  if (type === "time-out"  && hasActiveBreak)     throw new ApiError(400, "Please end your break before clocking out");
+  if (type === "break-in"  && !hasActiveSession)  throw new ApiError(400, "You must be clocked in to start a break");
+  if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
+  if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
 
   const timeLog = await TimeLog.create({
     userId: user._id,
@@ -194,19 +185,67 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
   });
 
-  // Emit real-time event
+  // Compute gross worked seconds for all completed sessions before this time-in
+  let todayTotalWorkedSeconds = 0;
+  if (type === 'time-in') {
+    const prevLogs = await TimeLog.find({
+      userId: user._id,
+      type: { $in: ['time-in', 'time-out'] },
+      timestamp: { $gte: today, $lt: timeLog.timestamp },
+    }).sort({ timestamp: 1 }).lean();
+    let sessionIn: Date | null = null;
+    for (const log of prevLogs) {
+      if (log.type === 'time-in') {
+        sessionIn = new Date(log.timestamp);
+      } else if (log.type === 'time-out' && sessionIn) {
+        todayTotalWorkedSeconds += (new Date(log.timestamp).getTime() - sessionIn.getTime()) / 1000;
+        sessionIn = null;
+      }
+    }
+  }
+
+  // Compute total completed break seconds for the CURRENT session on break-out events
+  let totalBreakSeconds = 0;
+  if (type === 'break-out') {
+    // Find the latest time-in to scope breaks to the current session only
+    const latestTimeIn = await TimeLog.findOne({
+      userId: user._id,
+      type: 'time-in',
+      timestamp: { $gte: today, $lt: tomorrow },
+    }).sort({ timestamp: -1 }).lean();
+
+    const sessionStart = latestTimeIn?.timestamp ?? today;
+    const breakLogs = await TimeLog.find({
+      userId: user._id,
+      type: { $in: ['break-in', 'break-out'] },
+      timestamp: { $gte: sessionStart, $lt: tomorrow },
+    }).sort({ timestamp: 1 }).lean();
+
+    let currentBreakIn: Date | null = null;
+    for (const log of breakLogs) {
+      if (log.type === 'break-in') {
+        currentBreakIn = new Date(log.timestamp);
+      } else if (log.type === 'break-out' && currentBreakIn) {
+        totalBreakSeconds += (new Date(log.timestamp).getTime() - currentBreakIn.getTime()) / 1000;
+        currentBreakIn = null;
+      }
+    }
+  }
+
+  // Emit real-time event to tray app and CRM
   try {
     const io = getSocketIO();
     if (io) {
-      io.to(`user:${user._id.toString()}`).emit("crm:time_log_created", {
+      io.to(`user:${user._id.toString()}`).emit(type, {
         _id: timeLog._id,
         type: timeLog.type,
         timestamp: timeLog.timestamp,
-        note: timeLog.note,
+        ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
+        ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
+        ...(type === "break-out" && { totalBreakSeconds }),
       });
     }
   } catch (error) {
-    // Socket emission is non-critical
     console.error("Failed to emit time log event:", error);
   }
 
@@ -216,15 +255,14 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     timestamp: { $gte: today, $lt: tomorrow },
   }).sort({ timestamp: -1 });
 
-  res
-    .status(201)
-    .json(
-      new ApiResponse(
-        201,
-        { entry: timeLog, todayLogs },
-        `${type === "time-in" ? "Clocked in" : "Clocked out"} successfully`,
-      ),
-    );
+  const typeLabel: Record<string, string> = {
+    "time-in": "Clocked in", "time-out": "Clocked out",
+    "break-in": "Break started", "break-out": "Break ended",
+  };
+
+  res.status(201).json(
+    new ApiResponse(201, { entry: timeLog, todayLogs }, `${typeLabel[type]} successfully`),
+  );
 });
 
 /**
@@ -797,6 +835,18 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "User offboarded successfully"));
 });
 
+/**
+ * POST /api/crm/token-refresh
+ * Renews the CRM JWT token. Requires a valid (not yet expired) token.
+ * Tray app calls this on startup and whenever it receives a 401.
+ */
+const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const newToken = generateCrmToken(user._id.toString());
+  res.cookie(CRM_TOKEN_COOKIE, newToken, COOKIE_OPTIONS);
+  res.json(new ApiResponse(200, { token: newToken }, "Token refreshed"));
+});
+
 export default {
   login,
   logout,
@@ -813,4 +863,5 @@ export default {
   deleteUser,
   resetPassword,
   offboardUser,
+  tokenRefresh,
 };

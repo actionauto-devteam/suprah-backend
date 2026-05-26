@@ -19,21 +19,28 @@ export const setupSocket = (io: Server) => {
         return next(new Error('Authentication error: No token provided'));
       }
 
-      // Verify token
+      // Verify token — try main app JWT first, then CRM JWT
+      let decoded: any;
       try {
-        const decoded = jwt.verify(token, config.jwt.accessSecret) as any;
-        socket.userId = decoded.sub; // tokenService uses 'sub' for userId
-        socket.organizationId = decoded.orgId; // tokenService uses 'orgId'
+        decoded = jwt.verify(token, config.jwt.accessSecret) as any;
+        socket.userId = decoded.sub;
+        socket.organizationId = decoded.orgId;
         socket.role = decoded.role;
-      } catch (jwtError: any) {
-        // If JWT verification fails, still allow connection in development
-        if (config.env === 'development') {
-          logger.warn('Socket auth: Using development mode, allowing connection');
-          socket.userId = 'dev-user';
-          socket.role = 'super_admin'; // Allow debugging in dev
-          return next();
+      } catch {
+        try {
+          const CRM_SECRET = config.jwt.crmJwtSecret || 'crm-secret-key';
+          decoded = jwt.verify(token, CRM_SECRET) as any;
+          socket.userId = decoded.id; // CRM tokens use 'id', not 'sub'
+          socket.role = 'crm';
+        } catch (crmErr: any) {
+          if (config.env === 'development') {
+            logger.warn('Socket auth: dev fallback active');
+            socket.userId = 'dev-user';
+            socket.role = 'super_admin';
+            return next();
+          }
+          throw crmErr;
         }
-        throw jwtError;
       }
 
       logger.debug({ userId: socket.userId, role: socket.role }, 'Socket authenticated');

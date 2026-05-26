@@ -64,3 +64,9 @@ export const uploadDriverDocument = multer({
   fileFilter: driverDocumentFilter,
   limits: { fileSize: 5 * 1024 * 1024 },
 }).single('document');
+
+export const uploadScreenshot = multer({
+  storage: storage,
+  fileFilter: imageFileFilter,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+}).single('screenshot');
