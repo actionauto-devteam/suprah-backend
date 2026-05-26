@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ITimeLog extends Document {
   userId: mongoose.Types.ObjectId;
-  type: 'time-in' | 'time-out';
+  type: 'time-in' | 'time-out' | 'break-in' | 'break-out';
   timestamp: Date;
   note?: string;
   ipAddress?: string;
@@ -20,7 +20,7 @@ const TimeLogSchema = new Schema<ITimeLog>(
     },
     type: {
       type: String,
-      enum: ['time-in', 'time-out'],
+      enum: ['time-in', 'time-out', 'break-in', 'break-out'],
       required: true,
     },
     timestamp: {

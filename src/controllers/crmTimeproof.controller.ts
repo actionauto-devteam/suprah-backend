@@ -4,6 +4,20 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
 import CrmUser from '../models/CrmUser.model';
+import Screenshot from '../models/Screenshot.model';
+import AgentHeartbeat from '../models/AgentHeartbeat.model';
+import ActivityInterval from '../models/ActivityInterval.model';
+import { storageService, BucketType } from '../services/storage.service';
+import { getSignedProofUrl } from '../utils/signedUrlCache';
+import { emitToUser } from '../utils/socketEmitter';
+import CrmPushService from '../services/crmPush.service';
+
+const BREAK_LIMIT_SECONDS = 3600; // 3600
+
+// Company operates on Mountain Daylight Time (MDT = UTC-6).
+// All timeproof calendar dates are computed in this fixed offset
+// regardless of where the user's device is physically located.
+const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 
 /* ──────────────────────────────────────────────────────────────────────────
    Helpers
@@ -47,8 +61,14 @@ const buildSessions = (logs: any[]) => {
   return sessions;
 };
 
-/** Date → "YYYY-MM-DD" */
+/** Date → "YYYY-MM-DD" (UTC) */
 const toDateStr = (date: Date) => date.toISOString().split('T')[0];
+
+/** Date → "YYYY-MM-DD" in the user's local timezone (tzOffsetMinutes = minutes east of UTC, e.g. +480 for UTC+8) */
+const toLocalDateStr = (date: Date, tzOffsetMinutes: number): string => {
+  const local = new Date(date.getTime() + tzOffsetMinutes * 60_000);
+  return local.toISOString().split('T')[0];
+};
 
 /** Start of ISO week (Monday 00:00:00) */
 const getWeekStart = (date: Date) => {
@@ -60,47 +80,197 @@ const getWeekStart = (date: Date) => {
   return d;
 };
 
-/** Build per-day calendar map from raw log array */
-const buildCalendarMap = (logs: any[]) => {
-  const byDate: Record<string, any[]> = {};
-  for (const log of logs) {
-    const d = toDateStr(new Date(log.timestamp));
-    (byDate[d] ??= []).push(log);
+/** Pair break-in / break-out logs into break sessions */
+const buildBreakSessions = (logs: any[]) => {
+  const sorted = [...logs]
+    .filter((l) => l.type === 'break-in' || l.type === 'break-out')
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  const breaks: { in: Date; out: Date | null; duration: number; isActive: boolean }[] = [];
+  let currentBreakIn: Date | null = null;
+
+  for (const log of sorted) {
+    if (log.type === 'break-in') {
+      currentBreakIn = new Date(log.timestamp);
+    } else if (log.type === 'break-out' && currentBreakIn) {
+      const out = new Date(log.timestamp);
+      breaks.push({
+        in: currentBreakIn,
+        out,
+        duration: (out.getTime() - currentBreakIn.getTime()) / 1000,
+        isActive: false,
+      });
+      currentBreakIn = null;
+    }
   }
 
-  const calendar: Record<
-    string,
-    { sessions: ReturnType<typeof buildSessions>; totalSeconds: number }
-  > = {};
-
-  for (const [date, dateLogs] of Object.entries(byDate)) {
-    const sessions = buildSessions(dateLogs);
-    const totalSeconds = sessions.reduce((sum, s) => sum + s.duration, 0);
-    calendar[date] = { sessions, totalSeconds };
+  if (currentBreakIn) {
+    const now = new Date();
+    breaks.push({
+      in: currentBreakIn,
+      out: null,
+      duration: (now.getTime() - currentBreakIn.getTime()) / 1000,
+      isActive: true,
+    });
   }
+
+  return breaks;
+};
+
+/**
+ * Splits a time range into calendar-day segments using LOCAL midnight boundaries.
+ * tzOffsetMinutes: minutes east of UTC (e.g. +480 for UTC+8 Philippines).
+ * Each segment belongs to exactly one local calendar day.
+ */
+const getMidnightSegments = (
+  startTime: Date,
+  endTime: Date,
+  tzOffsetMinutes: number
+): Array<{ date: string; segStart: Date; segEnd: Date }> => {
+  const result: Array<{ date: string; segStart: Date; segEnd: Date }> = [];
+  let segStart = new Date(startTime);
+
+  while (true) {
+    const segDateStr = toLocalDateStr(segStart, tzOffsetMinutes);
+    // Compute the next local midnight as a UTC timestamp:
+    // Local midnight of (segDate + 1 day) = segDate "T00:00:00Z" + 24h - tzOffset
+    const localDayStartUTC = new Date(segDateStr + 'T00:00:00.000Z').getTime();
+    const nextLocalMidnightUTC = new Date(localDayStartUTC + 24 * 60 * 60 * 1000 - tzOffsetMinutes * 60_000);
+
+    if (endTime <= nextLocalMidnightUTC) {
+      result.push({ date: segDateStr, segStart: new Date(segStart), segEnd: new Date(endTime) });
+      break;
+    }
+
+    result.push({ date: segDateStr, segStart: new Date(segStart), segEnd: new Date(nextLocalMidnightUTC) });
+    segStart = new Date(nextLocalMidnightUTC);
+  }
+
+  return result;
+};
+
+type CalendarDay = {
+  sessions: Array<{ in: Date; out: Date | null; duration: number; isLive: boolean }>;
+  totalSeconds: number;
+  breaks: Array<{ in: Date; out: Date | null; duration: number; isActive: boolean }>;
+  breakSeconds: number;
+  weekTotalSeconds?: number;
+};
+
+/**
+ * Attach weekTotalSeconds to the Saturday of each Sun–Sat week.
+ * If the user has worked days in a week, the total is placed on that week's Saturday.
+ * A skeleton CalendarDay is created for Saturday if no logs exist on that day,
+ * so the frontend can still render the green badge.
+ * Break time is excluded from the week total.
+ */
+const attachWeekTotals = (calendar: Record<string, CalendarDay>) => {
+  // Group worked dates by their week's Saturday
+  const weekMap: Record<string, string[]> = {};
+
+  for (const dateStr of Object.keys(calendar)) {
+    if (calendar[dateStr].totalSeconds === 0) continue;
+    const d = new Date(dateStr + 'T12:00:00Z');
+    const dayOfWeek = d.getUTCDay(); // 0=Sun … 6=Sat
+    const daysToSaturday = dayOfWeek === 0 ? 6 : 6 - dayOfWeek;
+    const saturday = new Date(d);
+    saturday.setUTCDate(d.getUTCDate() + daysToSaturday);
+    const saturdayStr = toDateStr(saturday);
+    (weekMap[saturdayStr] ??= []).push(dateStr);
+  }
+
+  for (const [saturdayStr, dates] of Object.entries(weekMap)) {
+    const weekTotal = dates.reduce((sum, d) => sum + calendar[d].totalSeconds, 0);
+
+    // Ensure Saturday entry exists even if no logs that day
+    if (!calendar[saturdayStr]) {
+      calendar[saturdayStr] = { sessions: [], totalSeconds: 0, breaks: [], breakSeconds: 0 };
+    }
+    calendar[saturdayStr].weekTotalSeconds = weekTotal;
+  }
+};
+
+/** Build per-day calendar map from raw log array with local-midnight-split support */
+const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
+  // Build sessions and breaks globally so cross-midnight pairs are handled
+  const allSessions = buildSessions(logs);
+  const allBreaks = buildBreakSessions(logs);
+
+  const byDate: Record<string, {
+    sessions: CalendarDay['sessions'];
+    breaks: CalendarDay['breaks'];
+  }> = {};
+
+  const ensure = (d: string) => {
+    if (!byDate[d]) byDate[d] = { sessions: [], breaks: [] };
+  };
+
+  for (const s of allSessions) {
+    const endTime = s.out ?? new Date();
+    const segments = getMidnightSegments(s.in, endTime, tzOffsetMinutes);
+    for (const { date, segStart, segEnd } of segments) {
+      ensure(date);
+      const isLast = segEnd.getTime() === endTime.getTime();
+      byDate[date].sessions.push({
+        in: segStart,
+        out: s.out && isLast ? s.out : segEnd,
+        duration: (segEnd.getTime() - segStart.getTime()) / 1000,
+        isLive: s.isLive && isLast,
+      });
+    }
+  }
+
+  for (const b of allBreaks) {
+    const endTime = b.out ?? new Date();
+    const segments = getMidnightSegments(b.in, endTime, tzOffsetMinutes);
+    for (const { date, segStart, segEnd } of segments) {
+      ensure(date);
+      const isLast = segEnd.getTime() === endTime.getTime();
+      byDate[date].breaks.push({
+        in: segStart,
+        out: b.out && isLast ? b.out : segEnd,
+        duration: (segEnd.getTime() - segStart.getTime()) / 1000,
+        isActive: b.isActive && isLast,
+      });
+    }
+  }
+
+  const calendar: Record<string, CalendarDay> = {};
+  for (const [date, data] of Object.entries(byDate)) {
+    calendar[date] = {
+      sessions: data.sessions,
+      totalSeconds: data.sessions.reduce((sum, s) => sum + s.duration, 0),
+      breaks: data.breaks,
+      breakSeconds: data.breaks.reduce((sum, b) => sum + b.duration, 0),
+    };
+  }
+
+  attachWeekTotals(calendar);
 
   return calendar;
 };
 
-/** Compute consecutive working-day streak */
-const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>) => {
+/** Compute consecutive working-day streak using local calendar dates */
+const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
   const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  const todayStr = toDateStr(now);
+  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
+  const todayStr = localNow.toISOString().split('T')[0];
 
   let streak = 0;
-  const check = new Date(now);
+  // Walk backwards one UTC-day at a time (date strings are local, so stepping by 1 day is fine)
+  const check = new Date(localNow);
+  check.setUTCHours(12, 0, 0, 0); // pin to noon to avoid DST edge cases
 
   while (true) {
-    const dateStr = toDateStr(check);
+    const dateStr = check.toISOString().split('T')[0];
     const hasWork = !!calendar[dateStr] && calendar[dateStr].totalSeconds > 0;
 
     if (hasWork) {
       streak++;
-      check.setDate(check.getDate() - 1);
+      check.setUTCDate(check.getUTCDate() - 1);
     } else if (dateStr === todayStr) {
       // Today hasn't been worked yet — look back from yesterday
-      check.setDate(check.getDate() - 1);
+      check.setUTCDate(check.getUTCDate() - 1);
     } else {
       break;
     }
@@ -122,12 +292,13 @@ const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>) => {
   return { streak, longestStreak: longest };
 };
 
-/** Build 24-element array: how many clock-ins per hour-of-day */
-const buildHourPattern = (logs: any[]) => {
+/** Build 24-element array: how many clock-ins per hour-of-day (in user's local time) */
+const buildHourPattern = (logs: any[], tzOffsetMinutes = 0) => {
   const pattern = new Array(24).fill(0);
   for (const log of logs) {
     if (log.type === 'time-in') {
-      const h = new Date(log.timestamp).getHours();
+      const localTs = new Date(new Date(log.timestamp).getTime() + tzOffsetMinutes * 60_000);
+      const h = localTs.getUTCHours();
       pattern[h]++;
     }
   }
@@ -141,22 +312,30 @@ const formatHours = (seconds: number) => ({
   decimal: parseFloat((seconds / 3600).toFixed(2)),
 });
 
-/** Aggregate per-day data into week/month buckets */
-const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>) => {
+/** Aggregate per-day data into week/month buckets using local calendar dates */
+const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
   const now = new Date();
-  const todayStr = toDateStr(now);
-  const weekStart = getWeekStart(now);
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  // Shift "now" into the user's local timezone for date-string comparisons
+  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
+  const todayStr = localNow.toISOString().split('T')[0];
+
+  // Local week start (Monday) as a date string
+  const localDay = localNow.getUTCDay(); // 0=Sun … 6=Sat
+  const daysFromMonday = localDay === 0 ? 6 : localDay - 1;
+  const localWeekStartMs = localNow.getTime() - daysFromMonday * 86_400_000;
+  const weekStartStr = new Date(localWeekStartMs).toISOString().split('T')[0];
+
+  // Local month start as a date string  ("YYYY-MM-01")
+  const monthStartStr = todayStr.slice(0, 7) + '-01';
 
   let todaySeconds = 0;
   let weekSeconds = 0;
   let monthSeconds = 0;
 
   for (const [dateStr, data] of Object.entries(calendar)) {
-    const d = new Date(dateStr + 'T12:00:00');
     if (dateStr === todayStr) todaySeconds += data.totalSeconds;
-    if (d >= weekStart) weekSeconds += data.totalSeconds;
-    if (d >= monthStart) monthSeconds += data.totalSeconds;
+    if (dateStr >= weekStartStr) weekSeconds += data.totalSeconds;
+    if (dateStr >= monthStartStr) monthSeconds += data.totalSeconds;
   }
 
   return {
@@ -189,13 +368,12 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     timestamp: { $gte: startDate, $lte: endDate },
   }).sort({ timestamp: 1 }).lean();
 
-  const calendar = buildCalendarMap(logs);
-  const summary = aggregateSummary(calendar);
-  const { streak, longestStreak } = computeStreak(calendar);
-  const hourPattern = buildHourPattern(logs);
+  const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
+  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
+  const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  // Is currently clocked in?
-  const todayStr = toDateStr(new Date());
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
   res.json(
@@ -230,10 +408,17 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
 
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
+
+  // Use MDT window for today so shift-state matches getShiftState
+  const nowMDT = new Date(now.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const tomorrowMDTStartUTC = todayMDTStartUTC + 24 * 60 * 60 * 1000;
+  const todayStart = new Date(todayMDTStartUTC);
+  const tomorrow   = new Date(tomorrowMDTStartUTC);
   const weekStart = getWeekStart(now);
-  const todayStr = toDateStr(now);
+  const todayStr = todayMDTStr;
 
   const users = await CrmUser.find({ isActive: true }).select('-password').lean();
 
@@ -249,6 +434,55 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const { streak } = computeStreak(calendar);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
+      // ── Timer state: exact same logic as getShiftState so admin board ──────
+      // and tray always compute from the same source.
+      const todayLogs = logs.filter(l => {
+        const ts = new Date(l.timestamp);
+        return ts >= todayStart && ts < tomorrow;
+      });
+
+      const timeIns  = todayLogs.filter(l => l.type === 'time-in');
+      const timeOuts = todayLogs.filter(l => l.type === 'time-out');
+      const isOnShift = timeIns.length > timeOuts.length;
+      const shiftStartedAt = isOnShift
+        ? new Date(timeIns.at(-1)!.timestamp).toISOString()
+        : null;
+
+      // Completed session wall-times (same as tray's todayTotalWorkedSeconds)
+      const allTodaySessions = buildSessions(todayLogs);
+      const todayTotalWorkedSeconds = allTodaySessions
+        .filter(s => !s.isLive)
+        .reduce((sum, s) => sum + s.duration, 0);
+
+      // Completed break seconds in current session only (same as tray's totalBreakSeconds)
+      const currentSessionStart = isOnShift && shiftStartedAt
+        ? new Date(shiftStartedAt)
+        : null;
+      const breakLogs = todayLogs
+        .filter(l =>
+          (l.type === 'break-in' || l.type === 'break-out') &&
+          (!currentSessionStart || new Date(l.timestamp) >= currentSessionStart)
+        )
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      let totalBreakSeconds = 0;
+      let bIn: Date | null = null;
+      for (const log of breakLogs) {
+        if (log.type === 'break-in') {
+          bIn = new Date(log.timestamp);
+        } else if (log.type === 'break-out' && bIn) {
+          totalBreakSeconds += (new Date(log.timestamp).getTime() - bIn.getTime()) / 1000;
+          bIn = null;
+        }
+      }
+
+      // Snapshot for the non-live fallback (frozen display when offline/off-shift)
+      const liveWallSec = isOnShift && shiftStartedAt
+        ? (now.getTime() - new Date(shiftStartedAt).getTime()) / 1000
+        : 0;
+      const todayNetSnapshot = todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds);
+      const today = formatHours(todayNetSnapshot);
+
       return {
         user: {
           _id: u._id,
@@ -257,11 +491,14 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
           avatar: u.avatar,
           role: u.role,
         },
-        today: summary.today,
+        today,
         thisWeek: summary.thisWeek,
         thisMonth: summary.thisMonth,
         streak,
         isLive,
+        shiftStartedAt,
+        todayTotalWorkedSeconds,
+        totalBreakSeconds,
       };
     })
   );
@@ -299,12 +536,12 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     timestamp: { $gte: startDate, $lte: endDate },
   }).sort({ timestamp: 1 }).lean();
 
-  const calendar = buildCalendarMap(logs);
-  const summary = aggregateSummary(calendar);
-  const { streak, longestStreak } = computeStreak(calendar);
-  const hourPattern = buildHourPattern(logs);
+  const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
+  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
+  const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  const todayStr = toDateStr(new Date());
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
   res.json(
@@ -352,14 +589,19 @@ export const exportTimeproof = asyncHandler(async (req: Request, res: Response) 
 
   const calendar = buildCalendarMap(logs);
 
-  const rows = ['Date,Sessions,Total Hours,Total Minutes'];
+  const rows = ['Date,Work Sessions,Work Hours,Work Minutes,Break Sessions,Break Hours,Break Minutes'];
   for (const [date, data] of Object.entries(calendar).sort()) {
-    const sessions = data.sessions.map(s =>
+    const workSessions = data.sessions.map(s =>
       `${new Date(s.in).toLocaleTimeString()}→${s.out ? new Date(s.out).toLocaleTimeString() : 'ongoing'}`
     ).join(' | ');
-    const h = Math.floor(data.totalSeconds / 3600);
-    const m = Math.floor((data.totalSeconds % 3600) / 60);
-    rows.push(`${date},"${sessions}",${h},${m}`);
+    const wh = Math.floor(data.totalSeconds / 3600);
+    const wm = Math.floor((data.totalSeconds % 3600) / 60);
+    const breakSessions = data.breaks.map(b =>
+      `${new Date(b.in).toLocaleTimeString()}→${b.out ? new Date(b.out).toLocaleTimeString() : 'ongoing'}`
+    ).join(' | ');
+    const bh = Math.floor(data.breakSeconds / 3600);
+    const bm = Math.floor((data.breakSeconds % 3600) / 60);
+    rows.push(`${date},"${workSessions}",${wh},${wm},"${breakSessions}",${bh},${bm}`);
   }
 
   res.setHeader('Content-Type', 'text/csv');
@@ -367,9 +609,440 @@ export const exportTimeproof = asyncHandler(async (req: Request, res: Response) 
   res.send(rows.join('\n'));
 });
 
+/**
+ * GET /api/crm/timeproof/shift-state
+ * Returns the current shift/break state of the authenticated user.
+ * Used by the tray app on startup to sync its initial state.
+ */
+export const getShiftState = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  // Look back 2 days so sessions that started on a previous UTC date
+  // (e.g. Philippine users whose shift begins on what is "yesterday" UTC)
+  // are still detected as active when no time-out has been recorded.
+  const lookbackStart = new Date();
+  lookbackStart.setDate(lookbackStart.getDate() - 2);
+  lookbackStart.setHours(0, 0, 0, 0);
+
+  const logs = await TimeLog.find({
+    userId: user._id,
+    timestamp: { $gte: lookbackStart },
+  }).sort({ timestamp: 1 }).lean();
+
+  const timeIns   = logs.filter(l => l.type === 'time-in');
+  const timeOuts  = logs.filter(l => l.type === 'time-out');
+  const breakIns  = logs.filter(l => l.type === 'break-in');
+  const breakOuts = logs.filter(l => l.type === 'break-out');
+
+  const isOnShift  = timeIns.length > timeOuts.length;
+  const isOnBreak  = breakIns.length > breakOuts.length;
+
+  const shiftStartedAt = isOnShift ? timeIns.at(-1)!.timestamp : null;
+  const breakStartedAt = isOnBreak ? breakIns.at(-1)!.timestamp : null;
+
+  // Compute total seconds spent in completed breaks in the CURRENT session only
+  const currentSessionStart = isOnShift && shiftStartedAt ? new Date(shiftStartedAt) : null;
+  const breakLogs = logs
+    .filter(l =>
+      (l.type === 'break-in' || l.type === 'break-out') &&
+      (!currentSessionStart || new Date(l.timestamp) >= currentSessionStart)
+    )
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  let totalBreakSeconds = 0;
+  let currentBreakIn: Date | null = null;
+  for (const log of breakLogs) {
+    if (log.type === 'break-in') {
+      currentBreakIn = new Date(log.timestamp);
+    } else if (log.type === 'break-out' && currentBreakIn) {
+      totalBreakSeconds += (new Date(log.timestamp).getTime() - currentBreakIn.getTime()) / 1000;
+      currentBreakIn = null;
+    }
+  }
+
+  // Total worked seconds from COMPLETED sessions within TODAY's MDT window only.
+  // The lookback spans 2 days, so we must exclude completed sessions from yesterday
+  // to avoid inflating the tray's running total.
+  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  // MDT midnight expressed as a UTC timestamp  (e.g. 2026-05-25 00:00 MDT = 2026-05-25 06:00 UTC)
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+
+  const allSessions = buildSessions(logs);
+  const todayTotalWorkedSeconds = allSessions
+    .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC)
+    .reduce((sum, s) => sum + s.duration, 0);
+
+  // Activity-based tracking: sum of completed ActivityIntervals for today
+  const activityIntervals = await ActivityInterval.find({
+    userId: user._id,
+    shiftDate: todayMDTStr,
+  }).lean();
+  const activityIntervalTotal = activityIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
+  // Fall back to wall-clock session time when no activity intervals exist (tray save failed,
+  // tray not running, etc.) so the timer continues from prior sessions instead of resetting to 0.
+  const todayTotalActiveSeconds = activityIntervalTotal > 0 ? activityIntervalTotal : todayTotalWorkedSeconds;
+
+  const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
+  const currentIntervalStartAt = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
+
+  res.json(new ApiResponse(200, {
+    isOnShift,
+    isOnBreak,
+    shiftStartedAt,
+    breakStartedAt,
+    totalBreakSeconds,
+    todayTotalWorkedSeconds,
+    todayTotalActiveSeconds,
+    currentIntervalStartAt,
+  }, 'Shift state fetched'));
+});
+
+/**
+ * GET /api/crm/timeproof/my-agent
+ * Returns whether the current user's tray agent is online.
+ */
+export const getMyAgentStatus = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const OFFLINE_THRESHOLD_MS = 2 * 60 * 1000;
+
+  const hb = await AgentHeartbeat.findOne({ userId: user._id }).lean();
+  const isOnline = hb
+    ? new Date().getTime() - new Date(hb.lastSeenAt).getTime() < OFFLINE_THRESHOLD_MS
+    : false;
+
+  res.json(new ApiResponse(200, {
+    isOnline,
+    isIdle: isOnline ? hb!.isIdle : false,
+    lastSeenAt: hb?.lastSeenAt ?? null,
+  }, 'Agent status fetched'));
+});
+
+/**
+ * POST /api/crm/timeproof/heartbeat
+ * Tray app pings every 60s — upserts AgentHeartbeat, emits idle/break alerts to admins.
+ */
+export const postHeartbeat = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const {
+    isIdle = false,
+    platform = 'win32',
+    isOnBreak = false,
+    breakDurationSeconds = 0,
+    isOnShift = false,
+    currentIntervalStartAt,
+  } = req.body;
+
+  const existing = await AgentHeartbeat.findOne({ userId: user._id });
+  const wasIdle = existing?.isIdle ?? false;
+  const wasOnBreak = existing?.isOnBreak ?? false;
+  const hadBreakNotification = existing?.lastBreakNotifiedAt ?? null;
+
+  // Determine lastBreakNotifiedAt for this upsert
+  let lastBreakNotifiedAt = hadBreakNotification;
+  if (!isOnBreak && wasOnBreak) {
+    // Break ended — reset so the next break can trigger a notification again
+    lastBreakNotifiedAt = null;
+  }
+
+  await AgentHeartbeat.findOneAndUpdate(
+    { userId: user._id },
+    {
+      isIdle,
+      isOnBreak,
+      breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? existing?.breakStartedAt ?? null : null),
+      lastBreakNotifiedAt,
+      platform,
+      lastSeenAt: new Date(),
+      ...(currentIntervalStartAt !== undefined && {
+        currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
+      }),
+    },
+    { upsert: true, new: true }
+  );
+
+  // ── Notify admins: agent went idle ────────────────────────────────────────
+  if (!wasIdle && isIdle && isOnShift) {
+    const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    for (const admin of admins) {
+      emitToUser(admin._id.toString(), 'agent:idle', {
+        userId: user._id,
+        fullName: user.fullName,
+        isIdle: true,
+        at: new Date(),
+      });
+    }
+
+    // Push notification to admins across all devices
+    CrmPushService.sendToAdmins({
+      title: '⚪ Agent Idle',
+      body: `${user.fullName} has been idle for 10 minutes.`,
+      icon: '/icon-192x192.png',
+      tag: `crm-idle-${user._id}`,
+      data: { url: '/crm/timeproof' },
+    }).catch(() => {});
+  }
+
+  // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
+  if (isOnBreak && isOnShift && breakDurationSeconds >= BREAK_LIMIT_SECONDS && !lastBreakNotifiedAt) {
+    await AgentHeartbeat.updateOne(
+      { userId: user._id },
+      { lastBreakNotifiedAt: new Date() }
+    );
+
+    const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    for (const admin of admins) {
+      emitToUser(admin._id.toString(), 'agent:break-exceeded', {
+        userId: user._id,
+        fullName: user.fullName,
+        breakDurationSeconds,
+        at: new Date(),
+      });
+    }
+
+    CrmPushService.sendToAdmins({
+      title: '☕ Break Exceeded',
+      body: `${user.fullName} exceeds break time.`,
+      icon: '/icon-192x192.png',
+      tag: `crm-break-${user._id}`,
+      data: { url: '/crm/timeproof' },
+    }).catch(() => {});
+  }
+
+  res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
+});
+
+/**
+ * GET /api/crm/timeproof/agent-status
+ * Admin/Manager: real-time view of all agents — online, offline, idle.
+ */
+export const getAgentStatus = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied');
+  }
+
+  const OFFLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+  const now = new Date();
+
+  const users = await CrmUser.find({ isActive: true }).select('-password').lean();
+  const heartbeats = await AgentHeartbeat.find({
+    userId: { $in: users.map(u => u._id) },
+  }).lean();
+
+  const hbMap = new Map(heartbeats.map(h => [h.userId.toString(), h]));
+
+  const agents = users.map(u => {
+    const hb = hbMap.get(u._id.toString());
+    const isOnline = hb ? now.getTime() - new Date(hb.lastSeenAt).getTime() < OFFLINE_THRESHOLD_MS : false;
+
+    const isOnBreak = isOnline && (hb?.isOnBreak ?? false);
+    return {
+      user: { _id: u._id, fullName: u.fullName, username: u.username, avatar: u.avatar, role: u.role },
+      isOnline,
+      isIdle: isOnline ? (hb?.isIdle ?? false) : false,
+      isOnBreak,
+      breakStartedAt: isOnBreak ? (hb?.breakStartedAt?.toISOString() ?? null) : null,
+      platform: hb?.platform ?? null,
+      lastSeenAt: hb?.lastSeenAt ?? null,
+    };
+  });
+
+  agents.sort((a, b) => {
+    if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
+    return a.user.fullName.localeCompare(b.user.fullName);
+  });
+
+  res.json(new ApiResponse(200, { agents }, 'Agent status fetched'));
+});
+
+/**
+ * POST /api/crm/timeproof/screenshots
+ * Tray app uploads a screenshot — stored in R2 private bucket.
+ * Expects multipart/form-data: screenshot (file) + capturedAt + shiftDate + idleDetected
+ */
+export const submitScreenshot = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  if (!req.file) throw new ApiError(400, 'Screenshot file is required');
+
+  const { capturedAt, shiftDate, idleDetected = 'false' } = req.body;
+  if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
+    throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
+  }
+
+  const r2Key = await storageService.upload(
+    req.file,
+    `screenshots/${user._id.toString()}/${shiftDate}`,
+    BucketType.PRIVATE,
+    { allowLocalFallback: true }
+  );
+
+  const screenshot = await Screenshot.create({
+    userId: user._id,
+    r2Key,
+    shiftDate,
+    capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
+    idleDetected: idleDetected === 'true',
+  });
+
+  res.json(new ApiResponse(201, { _id: screenshot._id, r2Key }, 'Screenshot uploaded'));
+});
+
+/**
+ * GET /api/crm/timeproof/screenshots?date=YYYY-MM-DD&userId=...
+ * Returns screenshots for a given date with signed R2 URLs.
+ * Employees: own only. Admin/Manager: any userId.
+ */
+export const getScreenshots = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  const { date, userId } = req.query;
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date as string)) {
+    throw new ApiError(400, 'date query param required (YYYY-MM-DD)');
+  }
+
+  const targetId =
+    userId && ['admin', 'manager'].includes(requestor.role)
+      ? (userId as string)
+      : requestor._id.toString();
+
+  if (targetId !== requestor._id.toString() && !['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied');
+  }
+
+  // Query by capturedAt within the MDT day window so screenshots stored with
+  // legacy PHT-based shiftDate are still found by their actual capture time.
+  const dayStartUTC = new Date((date as string) + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const dayEndUTC = dayStartUTC + 24 * 60 * 60 * 1000;
+
+  const screenshots = await Screenshot.find({
+    userId: targetId,
+    capturedAt: { $gte: new Date(dayStartUTC), $lt: new Date(dayEndUTC) },
+  }).sort({ capturedAt: -1 }).lean();
+
+  const withUrls = await Promise.all(
+    screenshots.map(async (s) => ({
+      _id: s._id,
+      capturedAt: s.capturedAt,
+      idleDetected: s.idleDetected,
+      url: await getSignedProofUrl(s.r2Key),
+    }))
+  );
+
+  res.json(new ApiResponse(200, { screenshots: withUrls }, 'Screenshots fetched'));
+});
+
+/**
+ * POST /api/crm/timeproof/push/subscribe
+ * Save a Web Push subscription for the authenticated CRM user (admin/manager only).
+ */
+export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  if (!['admin', 'manager'].includes(user.role)) {
+    throw new ApiError(403, 'Push subscriptions are for admins and managers only');
+  }
+
+  const { subscription, deviceHint } = req.body;
+  if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+    throw new ApiError(400, 'Invalid push subscription object');
+  }
+
+  // Upsert by endpoint — replace if it already exists, otherwise push
+  await CrmUser.updateOne(
+    { _id: user._id, 'pushSubscriptions.endpoint': subscription.endpoint },
+    {
+      $set: {
+        'pushSubscriptions.$': {
+          endpoint: subscription.endpoint,
+          keys: subscription.keys,
+          deviceHint: deviceHint ?? 'unknown',
+          createdAt: new Date(),
+        },
+      },
+    }
+  );
+
+  // If no existing entry was matched, push a new one
+  await CrmUser.updateOne(
+    { _id: user._id, 'pushSubscriptions.endpoint': { $ne: subscription.endpoint } },
+    {
+      $push: {
+        pushSubscriptions: {
+          endpoint: subscription.endpoint,
+          keys: subscription.keys,
+          deviceHint: deviceHint ?? 'unknown',
+          createdAt: new Date(),
+        },
+      },
+    }
+  );
+
+  res.json(new ApiResponse(200, { subscribed: true }, 'Push subscription saved'));
+});
+
+/**
+ * DELETE /api/crm/timeproof/push/subscribe
+ * Remove a Web Push subscription for the authenticated CRM user.
+ */
+export const unsubscribeCrmPush = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { endpoint } = req.body;
+
+  if (!endpoint) throw new ApiError(400, 'endpoint is required');
+
+  await CrmUser.updateOne(
+    { _id: user._id },
+    { $pull: { pushSubscriptions: { endpoint } } }
+  );
+
+  res.json(new ApiResponse(200, { unsubscribed: true }, 'Push subscription removed'));
+});
+
+/**
+ * POST /api/crm/timeproof/activity-interval
+ * Tray app posts a completed active period when the user goes idle.
+ */
+export const postActivityInterval = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { startAt, endAt } = req.body;
+
+  if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const durationSeconds = Math.round((end.getTime() - start.getTime()) / 1000);
+
+  if (durationSeconds < 30) {
+    return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
+  }
+
+  // Assign the interval to its MDT calendar date
+  const shiftDate = toLocalDateStr(start, COMPANY_TZ_OFFSET_MINUTES);
+
+  await ActivityInterval.create({
+    userId: user._id,
+    shiftDate,
+    startAt: start,
+    endAt: end,
+    durationSeconds,
+  });
+
+  res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
+});
+
 export default {
   getMyTimeproof,
   getAllUsersTimeproof,
   getUserTimeproof,
   exportTimeproof,
+  postHeartbeat,
+  postActivityInterval,
+  getAgentStatus,
+  submitScreenshot,
+  getScreenshots,
+  subscribeCrmPush,
+  unsubscribeCrmPush,
 };

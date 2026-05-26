@@ -1,20 +1,42 @@
 import express from 'express';
 import crmAuth from '../middleware/crmAuth.middleware';
+import { uploadScreenshot } from '../middleware/upload.middleware';
 import {
   getMyTimeproof,
   getAllUsersTimeproof,
   getUserTimeproof,
   exportTimeproof,
+  getShiftState,
+  postHeartbeat,
+  postActivityInterval,
+  getMyAgentStatus,
+  getAgentStatus,
+  submitScreenshot,
+  getScreenshots,
+  subscribeCrmPush,
+  unsubscribeCrmPush,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
 
-// All timeproof routes require CRM authentication
 router.use(crmAuth());
 
 router.get('/my', getMyTimeproof);
 router.get('/users', getAllUsersTimeproof);
 router.get('/user/:userId', getUserTimeproof);
 router.get('/export', exportTimeproof);
+
+// Agent / tray app endpoints
+router.get('/shift-state', getShiftState);
+router.get('/my-agent', getMyAgentStatus);
+router.post('/heartbeat', postHeartbeat);
+router.post('/activity-interval', postActivityInterval);
+router.get('/agent-status', getAgentStatus);
+router.post('/screenshots', uploadScreenshot, submitScreenshot);
+router.get('/screenshots', getScreenshots);
+
+// Push notification subscription (admin/manager only)
+router.post('/push/subscribe', subscribeCrmPush);
+router.delete('/push/subscribe', unsubscribeCrmPush);
 
 export default router;

@@ -1,6 +1,16 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
+export interface ICrmPushSubscription {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+  deviceHint?: string;
+  createdAt?: Date;
+}
+
 export interface ICrmUser extends Document {
   organizationId: mongoose.Types.ObjectId;
   fullName: string;
@@ -18,6 +28,7 @@ export interface ICrmUser extends Document {
   gender?: 'male' | 'female';
   isOffboarded: boolean;
   offboardedAt?: Date;
+  pushSubscriptions: ICrmPushSubscription[];
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -111,6 +122,17 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: Date,
       default: null,
     },
+    pushSubscriptions: [
+      {
+        endpoint: { type: String, required: true },
+        keys: {
+          p256dh: { type: String, required: true },
+          auth: { type: String, required: true },
+        },
+        deviceHint: { type: String },
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },
       gmailAddress: { type: String },
