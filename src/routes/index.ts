@@ -6,7 +6,7 @@ import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
 import profileRoute from "./profile.route";
 import appointmentRoute from "./appointment.route";
-import appointmentDashboardRoute from "./appointmentDashboard.routes"; // ← ADD THIS
+import appointmentDashboardRoute from "./appointmentDashboard.routes";
 import userRoute from "./user.route";
 import googleCalendarRoute from "./googleCalendar.routes";
 import organizationRoute from "./organization.routes";
@@ -73,6 +73,9 @@ const defaultRoutes = [
     route: profileRoute,
   },
 
+  // NOTE: "/appointments/dashboard" MUST stay registered before "/appointments"
+  // so dashboard sub-paths (including the nested /chat and /vehicle-history
+  // routers defined inside appointmentDashboard.routes.ts) resolve correctly.
   {
     path: "/appointments/dashboard",
     route: appointmentDashboardRoute,

@@ -10,8 +10,89 @@ import { IUser } from "../models/User.model";
 import logger from "../utils/logger";
 
 /**
+ * Resolve the dashboard query window from the request query.
+ *
+ *  - view=month&month=YYYY-MM  -> full calendar month (UTC)
+ *  - date=YYYY-MM-DD | ISO     -> single day (UTC, existing behaviour)
+ *
+ * The frontend sends `date` in every request for backward compatibility, and
+ * additionally sends `view=month&month=YYYY-MM` when the "entire month" filter
+ * is active. Ranges are computed in UTC to match the original single-day logic.
+ */
+interface DashboardRange {
+  start: Date;
+  end: Date;
+  isMonth: boolean;
+  /** YYYY-MM for a month, YYYY-MM-DD for a single day. */
+  label: string;
+}
+
+function resolveDashboardRange(query: any): DashboardRange {
+  const isMonth = query.view === "month" || !!query.month;
+
+  if (isMonth) {
+    // Prefer explicit month=YYYY-MM, else derive from date=YYYY-MM-DD, else now.
+    const monthStr: string =
+      (query.month as string) ||
+      (query.date ? String(query.date).slice(0, 7) : "") ||
+      new Date().toISOString().slice(0, 7);
+
+    const [y, m] = monthStr.split("-").map((n: string) => parseInt(n, 10));
+
+    if (!y || !m || m < 1 || m > 12) {
+      throw new ApiError(400, "Invalid month format. Use YYYY-MM");
+    }
+
+    // First instant of the month .. last instant of the month (UTC).
+    const start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
+    const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999)); // day 0 = last day of prev month
+
+    return { start, end, isMonth: true, label: monthStr };
+  }
+
+  // Single-day window (unchanged from the original implementation).
+  const dateRaw = query.date;
+  if (!dateRaw) {
+    throw new ApiError(
+      400,
+      "Date parameter is required (ISO string or YYYY-MM-DD)",
+    );
+  }
+
+  let dateObj: Date;
+  try {
+    const dateStr = String(dateRaw).trim();
+    dateObj = dateStr.includes("T")
+      ? new Date(dateStr)
+      : new Date(`${dateStr}T00:00:00Z`);
+
+    if (isNaN(dateObj.getTime())) {
+      throw new Error("Invalid date");
+    }
+  } catch (err) {
+    throw new ApiError(
+      400,
+      "Invalid date format. Use ISO string or YYYY-MM-DD",
+    );
+  }
+
+  const start = new Date(dateObj);
+  start.setUTCHours(0, 0, 0, 0);
+
+  const end = new Date(dateObj);
+  end.setUTCHours(23, 59, 59, 999);
+
+  return {
+    start,
+    end,
+    isMonth: false,
+    label: dateObj.toISOString().split("T")[0],
+  };
+}
+
+/**
  * GET /api/appointments/dashboard
- * Fetch all booked appointments for a specific date (organization-wide)
+ * Fetch all booked appointments for a specific date or month (organization-wide)
  */
 export const getAppointmentsDashboard = asyncHandler(
   async (req: Request, res: Response) => {
@@ -20,46 +101,26 @@ export const getAppointmentsDashboard = asyncHandler(
       throw new ApiError(400, "Organization context missing");
     }
 
-    const { date, status, type, limit = 100, skip = 0 } = req.query;
+    const { status, type, skip = 0 } = req.query;
 
-    if (!date) {
-      throw new ApiError(
-        400,
-        "Date parameter is required (ISO string or YYYY-MM-DD)",
-      );
-    }
+    // Resolve day OR month window.
+    const range = resolveDashboardRange(req.query);
 
-    // Parse the date (handle both ISO string and YYYY-MM-DD format)
-    let dateObj: Date;
-    try {
-      const dateStr = (date as string).trim();
-      dateObj = dateStr.includes("T")
-        ? new Date(dateStr)
-        : new Date(`${dateStr}T00:00:00Z`);
-
-      if (isNaN(dateObj.getTime())) {
-        throw new Error("Invalid date");
-      }
-    } catch (err) {
-      throw new ApiError(
-        400,
-        "Invalid date format. Use ISO string or YYYY-MM-DD",
-      );
-    }
-
-    // Create date range for the entire day (UTC)
-    const startOfDay = new Date(dateObj);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-
-    const endOfDay = new Date(dateObj);
-    endOfDay.setUTCHours(23, 59, 59, 999);
+    // A whole month can hold far more than a single day, so allow a higher
+    // default cap when in month view. Callers may still override with ?limit.
+    const limit =
+      req.query.limit !== undefined
+        ? parseInt(req.query.limit as string) || 100
+        : range.isMonth
+          ? 1000
+          : 100;
 
     // Build query
     const query: any = {
       organizationId: orgId,
       startTime: {
-        $gte: startOfDay,
-        $lte: endOfDay,
+        $gte: range.start,
+        $lte: range.end,
       },
       "customerBooking.isCustomerBooking": true, // Only customer bookings
     };
@@ -85,7 +146,7 @@ export const getAppointmentsDashboard = asyncHandler(
         model: "CrmUser",
       })
       .sort({ startTime: 1 })
-      .limit(parseInt(limit as string) || 100)
+      .limit(limit)
       .skip(parseInt(skip as string) || 0)
       .lean();
 
@@ -162,7 +223,8 @@ export const getAppointmentsDashboard = asyncHandler(
         {
           appointments: enrichedAppointments,
           total,
-          date: dateObj.toISOString().split("T")[0],
+          date: range.label,
+          view: range.isMonth ? "month" : "day",
           count: enrichedAppointments.length,
         },
         "Appointments dashboard fetched successfully",
@@ -173,6 +235,7 @@ export const getAppointmentsDashboard = asyncHandler(
 
 /**
  * GET /api/appointments/dashboard/stats
+ * Stat cards for the selected day OR month.
  */
 export const getAppointmentsDashboardStats = asyncHandler(
   async (req: Request, res: Response) => {
@@ -181,37 +244,13 @@ export const getAppointmentsDashboardStats = asyncHandler(
       throw new ApiError(400, "Organization context missing");
     }
 
-    const { date } = req.query;
-
-    if (!date) {
-      throw new ApiError(400, "Date parameter is required");
-    }
-
-    let dateObj: Date;
-    try {
-      const dateStr = (date as string).trim();
-      dateObj = dateStr.includes("T")
-        ? new Date(dateStr)
-        : new Date(`${dateStr}T00:00:00Z`);
-
-      if (isNaN(dateObj.getTime())) {
-        throw new Error("Invalid date");
-      }
-    } catch (err) {
-      throw new ApiError(400, "Invalid date format");
-    }
-
-    const startOfDay = new Date(dateObj);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-
-    const endOfDay = new Date(dateObj);
-    endOfDay.setUTCHours(23, 59, 59, 999);
+    const range = resolveDashboardRange(req.query);
 
     const baseQuery = {
       organizationId: orgId,
       startTime: {
-        $gte: startOfDay,
-        $lte: endOfDay,
+        $gte: range.start,
+        $lte: range.end,
       },
       "customerBooking.isCustomerBooking": true,
     };
@@ -256,6 +295,7 @@ export const getAppointmentsDashboardStats = asyncHandler(
 
 /**
  * GET /api/appointments/dashboard/export
+ * Export the selected day OR month as JSON or CSV.
  */
 export const exportAppointmentsDashboard = asyncHandler(
   async (req: Request, res: Response) => {
@@ -264,37 +304,15 @@ export const exportAppointmentsDashboard = asyncHandler(
       throw new ApiError(400, "Organization context missing");
     }
 
-    const { date, format = "json" } = req.query;
+    const { format = "json" } = req.query;
 
-    if (!date) {
-      throw new ApiError(400, "Date parameter is required");
-    }
-
-    let dateObj: Date;
-    try {
-      const dateStr = (date as string).trim();
-      dateObj = dateStr.includes("T")
-        ? new Date(dateStr)
-        : new Date(`${dateStr}T00:00:00Z`);
-
-      if (isNaN(dateObj.getTime())) {
-        throw new Error("Invalid date");
-      }
-    } catch (err) {
-      throw new ApiError(400, "Invalid date format");
-    }
-
-    const startOfDay = new Date(dateObj);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-
-    const endOfDay = new Date(dateObj);
-    endOfDay.setUTCHours(23, 59, 59, 999);
+    const range = resolveDashboardRange(req.query);
 
     const query = {
       organizationId: orgId,
       startTime: {
-        $gte: startOfDay,
-        $lte: endOfDay,
+        $gte: range.start,
+        $lte: range.end,
       },
       "customerBooking.isCustomerBooking": true,
     };
@@ -305,6 +323,7 @@ export const exportAppointmentsDashboard = asyncHandler(
         select: "fullName email",
         model: "CrmUser",
       })
+      .sort({ startTime: 1 })
       .lean();
 
     if (format === "csv") {
@@ -345,14 +364,14 @@ export const exportAppointmentsDashboard = asyncHandler(
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="appointments-${date}.csv"`,
+        `attachment; filename="appointments-${range.label}.csv"`,
       );
       res.send(csv);
     } else {
       res.json(
         new ApiResponse(
           200,
-          { appointments, exportDate: date },
+          { appointments, exportDate: range.label },
           "Export data ready",
         ),
       );
@@ -363,6 +382,9 @@ export const exportAppointmentsDashboard = asyncHandler(
 /**
  * GET /api/appointments/dashboard/posts
  * Fetch appointment dashboard posts (visible to all authenticated CRM users)
+ *
+ * NOTE: `createdBy` / `createdByModel` are now selected so the frontend can
+ * show the delete control only on posts the current admin authored.
  */
 export const getAppointmentDashboardPosts = asyncHandler(
   async (req: Request, res: Response) => {
@@ -375,7 +397,9 @@ export const getAppointmentDashboardPosts = asyncHandler(
     const parsedLimit = Math.max(1, Math.min(100, Number(limit) || 20));
 
     const posts = await AppointmentDashboardPost.find({ organizationId: orgId })
-      .select("type title content authorName authorRole createdAt updatedAt")
+      .select(
+        "type title content authorName authorRole createdBy createdByModel createdAt updatedAt",
+      )
       .sort({ createdAt: -1 })
       .limit(parsedLimit)
       .lean();
@@ -448,10 +472,62 @@ export const createAppointmentDashboardPost = asyncHandler(
   },
 );
 
+/**
+ * DELETE /api/appointments/dashboard/posts/:id
+ * Delete a dashboard post.
+ *
+ * Authorization: an admin may delete a post they authored.
+ *  - org isolation enforced via organizationId
+ *  - ownership enforced via createdBy === actor._id
+ */
+export const deleteAppointmentDashboardPost = asyncHandler(
+  async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    if (!orgId) {
+      throw new ApiError(400, "Organization context missing");
+    }
+
+    const actor = req.crmUser;
+    if (!actor) {
+      throw new ApiError(401, "Not authenticated");
+    }
+
+    if (actor.role !== "admin") {
+      throw new ApiError(403, "Only admins can delete dashboard posts");
+    }
+
+    const { id } = req.params;
+
+    const post = await AppointmentDashboardPost.findOne({
+      _id: id,
+      organizationId: orgId,
+    });
+
+    if (!post) {
+      throw new ApiError(404, "Post not found");
+    }
+
+    // Only the author may delete their own post.
+    if (post.createdBy?.toString() !== actor._id.toString()) {
+      throw new ApiError(403, "You can only delete your own posts");
+    }
+
+    await post.deleteOne();
+
+    logger.info(
+      { postId: id, userId: actor._id, orgId },
+      "Dashboard post deleted",
+    );
+
+    res.json(new ApiResponse(200, { _id: id }, "Post deleted successfully"));
+  },
+);
+
 export default {
   getAppointmentsDashboard,
   getAppointmentsDashboardStats,
   exportAppointmentsDashboard,
   getAppointmentDashboardPosts,
   createAppointmentDashboardPost,
+  deleteAppointmentDashboardPost,
 };

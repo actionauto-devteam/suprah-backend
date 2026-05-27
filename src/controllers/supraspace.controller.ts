@@ -11,17 +11,48 @@ import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
 import jwt from 'jsonwebtoken';
 
-// ─── Conversations ────────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────
 
-/**
- * GET /api/supraspace/conversations
- */
+const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function emitToConversation(conv: any, event: string, payload: any) {
+  try {
+    const io = getIO();
+    (conv.members || []).forEach((m: any) => {
+      io.to(`user:${m.toString ? m.toString() : m}`).emit(event, payload);
+    });
+    if (conv._id) io.to(`conv:${conv._id.toString()}`).emit(event, payload);
+  } catch (err) {
+    console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
+  }
+}
+
+async function signAttachments(message: any) {
+  if (Array.isArray(message?.attachments)) {
+    for (const a of message.attachments) {
+      if (a.url && !a.url.startsWith('http')) {
+        const signed = await storageService.getSignedUrl(a.fileKey || a.url);
+        if (signed) {
+          a.url = signed;
+          if (a.thumbnailUrl) a.thumbnailUrl = signed;
+        }
+      }
+    }
+  }
+  return message;
+}
+
+// ─── Conversations ───────────────────────────────────────────────────────────
+
+/** GET /api/supraspace/conversations */
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
 
   const conversations = await SupraSpaceConversation.find({
     members: userId,
     isActive: true,
+    deletedFor: { $ne: userId },
   })
     .populate('members', 'fullName username avatar role')
     .populate({
@@ -34,49 +65,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, conversations, 'Conversations fetched'));
 });
 
-
-// Video Conferencing
-
-const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
-  const userId = req.crmUser!._id;
-  const { id } = req.params;
-
-  const conversation = await SupraSpaceConversation.findById(id);
-  if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!conversation.members.map(String).includes(userId.toString())) {
-    throw new ApiError(403, 'Not a member of this conversation');
-  }
-
-  const user = req.crmUser!;
-  const roomName = `supraspace-${id}`;
-
-  // Generate JWT token for Jitsi
-  const payload = {
-    context: {
-      user: {
-        id: userId.toString(),
-        name: user.fullName,
-        avatar: user.avatar,
-        email: user.username,
-      },
-    },
-    aud: process.env.JITSI_APP_ID,
-    iss: process.env.JITSI_APP_ID,
-    sub: process.env.NEXT_PUBLIC_JITSI_DOMAIN,
-    room: roomName,
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24), // 24 hours
-  };
-
-  const token = jwt.sign(payload, process.env.JITSI_APP_SECRET || 'secret');
-
-  res.json(new ApiResponse(200, { token, roomName }, 'Video token generated'));
-});
-
-
-/**
- * POST /api/supraspace/conversations/direct
- * Get or create a DM between two users
- */
+/** POST /api/supraspace/conversations/direct */
 const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { targetUserId } = req.body;
@@ -87,7 +76,6 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   const target = await CrmUser.findById(targetUserId);
   if (!target) throw new ApiError(404, 'User not found');
 
-  // Check if DM already exists
   let conversation = await SupraSpaceConversation.findOne({
     type: 'direct',
     members: { $all: [userId, targetUserId], $size: 2 },
@@ -106,15 +94,20 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
       createdBy: userId,
     });
     await conversation.populate('members', 'fullName username avatar role');
+  } else {
+    // Un-hide for the requester if previously deleted
+    if (idIn(conversation.deletedFor as any, userId)) {
+      conversation.deletedFor = (conversation.deletedFor as any).filter(
+        (m: any) => m.toString() !== userId.toString()
+      );
+      await conversation.save();
+    }
   }
 
   res.json(new ApiResponse(200, conversation, 'Direct conversation ready'));
 });
 
-/**
- * POST /api/supraspace/conversations/group
- * Create a new group conversation
- */
+/** POST /api/supraspace/conversations/group */
 const createGroup = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { name, memberIds } = req.body;
@@ -135,23 +128,12 @@ const createGroup = asyncHandler(async (req: Request, res: Response) => {
   });
 
   await conversation.populate('members', 'fullName username avatar role');
-
-  try {
-    const io = getIO();
-    uniqueMembers.forEach((memberId) => {
-      io.to(`user:${memberId}`).emit('conversation:new', conversation);
-    });
-  } catch (socketErr) {
-    console.warn('[SupraSpace] Socket emit failed on group create:', socketErr);
-  }
+  emitToConversation(conversation, 'conversation:new', conversation);
 
   res.status(201).json(new ApiResponse(201, conversation, 'Group created'));
 });
 
-/**
- * PATCH /api/supraspace/conversations/:id
- * Update group name / members (admin only)
- */
+/** PATCH /api/supraspace/conversations/:id  — name + add/remove members */
 const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -160,38 +142,171 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be updated');
-  if (!conversation.admins.map(String).includes(userId.toString())) {
-    throw new ApiError(403, 'Only admins can update the group');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const isAdmin = idIn(conversation.admins as any, userId);
+
+  if (name !== undefined) {
+    if (!isAdmin) throw new ApiError(403, 'Only admins can rename the group');
+    conversation.name = (name || '').trim();
   }
 
-  if (name) conversation.name = name.trim();
-
+  // Any member can add new members; only admin (or self) may remove
   if (Array.isArray(addMembers)) {
     addMembers.forEach((m) => {
-      if (!conversation.members.map(String).includes(m)) {
+      if (!idIn(conversation.members as any, m)) {
         conversation.members.push(new mongoose.Types.ObjectId(m));
       }
     });
   }
 
-  if (Array.isArray(removeMembers)) {
+  if (Array.isArray(removeMembers) && removeMembers.length) {
+    const removingOnlySelf = removeMembers.length === 1 && removeMembers[0] === userId.toString();
+    if (!isAdmin && !removingOnlySelf) throw new ApiError(403, 'Only admins can remove members');
     conversation.members = conversation.members.filter(
+      (m) => !removeMembers.includes(m.toString())
+    ) as any;
+    conversation.admins = conversation.admins.filter(
       (m) => !removeMembers.includes(m.toString())
     ) as any;
   }
 
   await conversation.save();
   await conversation.populate('members', 'fullName username avatar role');
+  emitToConversation(conversation, 'conversation:updated', conversation);
 
   res.json(new ApiResponse(200, conversation, 'Group updated'));
 });
 
+/** POST /api/supraspace/conversations/:id/avatar  — channel photo (multipart, field 'avatar') */
+const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (conversation.type !== 'group') throw new ApiError(400, 'Only channels support custom photos');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const file = (req.file as Express.Multer.File) || (req.files as Express.Multer.File[] | undefined)?.[0];
+  if (!file) throw new ApiError(400, 'No image uploaded');
+  if (!file.mimetype.startsWith('image/')) throw new ApiError(400, 'Avatar must be an image');
+
+  let url: string;
+  try {
+    url = await storageService.upload(file, 'chat-avatars', BucketType.PRIVATE, { allowLocalFallback: false });
+  } catch (err: any) {
+    logger.error({ err, conversationId: id }, '[SupraSpace] Avatar upload failed');
+    throw new ApiError(503, 'Avatar upload is temporarily unavailable. Please try again.');
+  }
+
+  // Clean previous avatar
+  if (conversation.avatarKey) {
+    await storageService.delete(conversation.avatarKey).catch(() => {});
+  }
+
+  conversation.avatarKey = storageService.getKeyFromUrl(url) || url;
+  conversation.avatar = (await storageService.getSignedUrl(conversation.avatarKey)) || url;
+  await conversation.save();
+
+  emitToConversation(conversation, 'conversation:updated', { _id: id, avatar: conversation.avatar });
+  res.json(new ApiResponse(200, { _id: id, avatar: conversation.avatar }, 'Channel photo updated'));
+});
+
+/** DELETE /api/supraspace/conversations/:id  — delete channel (admin) or hide DM/thread (per user) */
+const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const isAdmin = idIn(conversation.admins as any, userId) || conversation.createdBy.toString() === userId.toString();
+
+  if (conversation.type === 'group' && isAdmin) {
+    // Permanently delete the channel for everyone
+    conversation.isActive = false;
+    conversation.deletedAt = new Date();
+    await conversation.save();
+    await SupraSpaceMessage.updateMany(
+      { conversationId: id },
+      { $set: { isDeleted: true, deletedAt: new Date() } }
+    );
+    emitToConversation(conversation, 'conversation:deleted', { conversationId: id });
+    return res.json(new ApiResponse(200, { conversationId: id, permanent: true }, 'Channel deleted'));
+  }
+
+  // Otherwise hide the conversation only for this user
+  if (!idIn(conversation.deletedFor as any, userId)) {
+    conversation.deletedFor.push(userId as any);
+    await conversation.save();
+  }
+  res.json(new ApiResponse(200, { conversationId: id, permanent: false }, 'Conversation removed'));
+});
+
+/** POST /api/supraspace/conversations/:id/archive  { archived: boolean } */
+const archiveConversation = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const archived = req.body?.archived !== false;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  if (archived) {
+    if (!idIn(conversation.archivedBy as any, userId)) conversation.archivedBy.push(userId as any);
+  } else {
+    conversation.archivedBy = conversation.archivedBy.filter((m) => m.toString() !== userId.toString()) as any;
+  }
+  await conversation.save();
+  res.json(new ApiResponse(200, { conversationId: id, archived }, archived ? 'Conversation archived' : 'Conversation unarchived'));
+});
+
+/** POST /api/supraspace/conversations/:id/pin  { pinned: boolean } */
+const pinConversation = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const pinned = req.body?.pinned !== false;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  if (pinned) {
+    if (!idIn(conversation.pinnedBy as any, userId)) conversation.pinnedBy.push(userId as any);
+  } else {
+    conversation.pinnedBy = conversation.pinnedBy.filter((m) => m.toString() !== userId.toString()) as any;
+  }
+  await conversation.save();
+  res.json(new ApiResponse(200, { conversationId: id, pinned }, pinned ? 'Conversation pinned' : 'Conversation unpinned'));
+});
+
+/** PATCH /api/supraspace/conversations/:id/theme  { theme } */
+const setTheme = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { theme } = req.body;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  conversation.theme = {
+    accent: theme?.accent ?? null,
+    bubble: theme?.bubble ?? null,
+    wallpaper: theme?.wallpaper ?? null,
+    emoji: theme?.emoji ?? null,
+  };
+  await conversation.save();
+  emitToConversation(conversation, 'conversation:theme', { conversationId: id, theme: conversation.theme });
+  res.json(new ApiResponse(200, { conversationId: id, theme: conversation.theme }, 'Theme updated'));
+});
+
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
-/**
- * GET /api/supraspace/conversations/:id/messages
- * Cursor-based pagination (newest first, reversed for display)
- */
+/** GET /api/supraspace/conversations/:id/messages */
 const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -199,74 +314,93 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!conversation.members.map(String).includes(userId.toString())) {
-    throw new ApiError(403, 'Not a member of this conversation');
-  }
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
   const filter: any = { conversationId: id, isDeleted: false };
-  if (before) {
-    filter.createdAt = { $lt: new Date(before as string) };
-  }
+  if (before) filter.createdAt = { $lt: new Date(before as string) };
 
   const messages = await SupraSpaceMessage.find(filter)
     .populate('sender', 'fullName username avatar')
-    .populate({
-      path: 'replyTo',
-      populate: { path: 'sender', select: 'fullName username avatar' },
-    })
+    .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
     .sort({ createdAt: -1 })
     .limit(parseInt(limit as string))
     .lean();
 
-  // Mark as read
   await SupraSpaceMessage.updateMany(
     { conversationId: id, readBy: { $ne: userId } },
     { $addToSet: { readBy: userId } }
   );
 
-  // Sign attachment URLs for each message
-  const messagesWithSignedUrls = await Promise.all(messages.map(async (msg: any) => {
-    if (msg.attachments && msg.attachments.length > 0) {
-      for (const attachment of msg.attachments) {
-        if (attachment.url && !attachment.url.startsWith('http')) {
-          const signed = await storageService.getSignedUrl(attachment.url);
-          if (signed) {
-            attachment.url = signed;
-            if (attachment.thumbnailUrl && !attachment.thumbnailUrl.startsWith('http')) {
-              attachment.thumbnailUrl = signed;
-            }
-          }
-        }
-      }
-    }
-    return msg;
-  }));
-
-  res.json(new ApiResponse(200, messagesWithSignedUrls.reverse(), 'Messages fetched'));
+  const signed = await Promise.all(messages.map((m: any) => signAttachments(m)));
+  res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
 });
 
-/**
- * POST /api/supraspace/conversations/:id/messages
- * Send a text message with optional pre-uploaded attachments (e.g. from DayPulse).
- * When `attachments` is provided in the JSON body the files are already stored in R2
- * so no re-upload is needed — we just save the metadata and sign the URLs.
- */
-const sendMessage = asyncHandler(async (req: Request, res: Response) => {
+/** GET /api/supraspace/conversations/:id/search?q=  — search inside a conversation */
+const searchInConversation = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { content, replyTo, attachments } = req.body;
-
-  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
-  if (!content?.trim() && !hasAttachments) throw new ApiError(400, 'Message content is required');
+  const q = (req.query.q as string) || '';
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!conversation.members.map(String).includes(userId.toString())) {
-    throw new ApiError(403, 'Not a member of this conversation');
-  }
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!q.trim()) return res.json(new ApiResponse(200, [], 'No query'));
 
-  let msgType: 'text' | 'image' | 'file' = 'text';
-  if (hasAttachments) {
+  const rx = new RegExp(escapeRegex(q.trim()), 'i');
+  const messages = await SupraSpaceMessage.find({ conversationId: id, isDeleted: false, content: rx })
+    .populate('sender', 'fullName username avatar')
+    .sort({ createdAt: -1 })
+    .limit(50)
+    .lean();
+
+  res.json(new ApiResponse(200, messages, 'Search results'));
+});
+
+/** GET /api/supraspace/search?q=  — global message search across the user's conversations */
+const searchMessages = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const q = (req.query.q as string) || '';
+  if (!q.trim() || q.trim().length < 2) return res.json(new ApiResponse(200, [], 'No query'));
+
+  const convs = await SupraSpaceConversation.find({
+    members: userId,
+    isActive: true,
+    deletedFor: { $ne: userId },
+  }).select('_id').lean();
+  const convIds = convs.map((c: any) => c._id);
+
+  const rx = new RegExp(escapeRegex(q.trim()), 'i');
+  const messages = await SupraSpaceMessage.find({
+    conversationId: { $in: convIds },
+    isDeleted: false,
+    content: rx,
+  })
+    .populate('sender', 'fullName username avatar')
+    .populate('conversationId', 'name type members avatar')
+    .sort({ createdAt: -1 })
+    .limit(30)
+    .lean();
+
+  res.json(new ApiResponse(200, messages, 'Search results'));
+});
+
+/** POST /api/supraspace/conversations/:id/messages  — text / gif / pre-uploaded attachments */
+const sendMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { content, replyTo, attachments, gif } = req.body;
+
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  const hasGif = !!gif?.url;
+  if (!content?.trim() && !hasAttachments && !hasGif) throw new ApiError(400, 'Message content is required');
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  let msgType: any = 'text';
+  if (hasGif) msgType = 'gif';
+  else if (hasAttachments) {
     const hasImage = attachments.some((a: any) => a.mimeType?.startsWith('image/'));
     msgType = hasImage && attachments.length === 1 ? 'image' : 'file';
   }
@@ -277,80 +411,50 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     content: content?.trim() || '',
     type: msgType,
     attachments: hasAttachments ? attachments : [],
+    gif: hasGif ? gif : null,
     replyTo: replyTo || null,
     readBy: [userId],
   });
 
   await message.populate('sender', 'fullName username avatar');
-  if (replyTo) {
-    await message.populate({
-      path: 'replyTo',
-      populate: { path: 'sender', select: 'fullName username avatar' },
-    });
-  }
+  if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
+  conversation.deletedFor = [] as any; // bring it back for anyone who hid it
   await conversation.save();
 
-  // Sign attachment URLs so the chat UI can render them immediately
-  const messageForClient = message.toObject() as any;
-  if (hasAttachments) {
-    for (const attachment of messageForClient.attachments) {
-      if (attachment.url && !attachment.url.startsWith('http')) {
-        const signed = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
-        if (signed) {
-          attachment.url = signed;
-          if (attachment.thumbnailUrl) attachment.thumbnailUrl = signed;
-        }
-      }
-    }
-  }
-
-  try {
-    const io = getIO();
-    conversation.members.forEach((memberId) => {
-      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message: messageForClient });
-    });
-    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message: messageForClient });
-  } catch (socketErr) {
-    console.warn('[SupraSpace] Socket emit failed on send:', socketErr);
-  }
-
+  const messageForClient = await signAttachments(message.toObject() as any);
+  emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
   res.status(201).json(new ApiResponse(201, messageForClient, 'Message sent'));
 });
 
-/**
- * POST /api/supraspace/conversations/:id/upload
- * Upload files to cloud storage and send as a message
- */
+/** POST /api/supraspace/conversations/:id/upload  — files & voice notes */
 const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { replyTo, content } = req.body;
+  const { replyTo, content, duration } = req.body;
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!conversation.members.map(String).includes(userId.toString())) {
-    throw new ApiError(403, 'Not a member of this conversation');
-  }
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
   const files = req.files as Express.Multer.File[];
   if (!files || files.length === 0) throw new ApiError(400, 'No files uploaded');
 
-  const attachments = [];
+  const attachments: any[] = [];
   let hasImage = false;
+  let hasAudio = false;
 
   for (const file of files) {
     const isImage = file.mimetype.startsWith('image/');
+    const isAudio = file.mimetype.startsWith('audio/');
     if (isImage) hasImage = true;
+    if (isAudio) hasAudio = true;
 
-    // Upload to R2 (Private bucket). Local fallback is disabled for chat attachments.
     let fileUrl: string;
     try {
-      fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, {
-        allowLocalFallback: false,
-      });
+      fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
     } catch (err: any) {
       logger.error({ err, conversationId: id, fileName: file.originalname }, '[SupraSpace] Attachment upload failed');
       throw new ApiError(503, 'Attachment upload is temporarily unavailable. Please try again.');
@@ -364,138 +468,284 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
       mimeType: file.mimetype,
       size: file.size,
       thumbnailUrl: isImage ? fileUrl : undefined,
+      duration: isAudio && duration ? Number(duration) : undefined,
     });
   }
+
+  const type = hasAudio && files.length === 1 ? 'voice'
+    : hasImage && files.length === 1 ? 'image'
+    : 'file';
 
   const message = await SupraSpaceMessage.create({
     conversationId: id,
     sender: userId,
     content: content?.trim() || '',
-    type: hasImage && files.length === 1 ? 'image' : 'file',
+    type,
     attachments,
     replyTo: replyTo || null,
     readBy: [userId],
   });
 
   await message.populate('sender', 'fullName username avatar');
-  if (replyTo) {
-    await message.populate({
-      path: 'replyTo',
-      populate: { path: 'sender', select: 'fullName username avatar' },
-    });
-  }
+  if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
+  conversation.deletedFor = [] as any;
   await conversation.save();
 
-  // Emit/return signed URLs so attachments are immediately usable in the chat UI.
-  const messageForClient = message.toObject() as any;
-  if (Array.isArray(messageForClient.attachments)) {
-    for (const attachment of messageForClient.attachments) {
-      const signedUrl = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
-      if (signedUrl) {
-        attachment.url = signedUrl;
-        if (attachment.thumbnailUrl) {
-          attachment.thumbnailUrl = signedUrl;
-        }
-      }
-    }
-  }
-
-  try {
-    const io = getIO();
-    conversation.members.forEach((memberId) => {
-      io.to(`user:${memberId.toString()}`).emit('message:new', { conversationId: id, message: messageForClient });
-    });
-    io.to(`conv:${id}`).emit('message:new', { conversationId: id, message: messageForClient });
-  } catch (socketErr) {
-    console.warn('[SupraSpace] Socket emit failed on upload:', socketErr);
-  }
-
+  const messageForClient = await signAttachments(message.toObject() as any);
+  emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
   res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
 
-/**
- * DELETE /api/supraspace/messages/:messageId
- * Soft-delete — sender only.
- * Uses findByIdAndUpdate to avoid Mongoose subdocument validation
- * errors that occur when assigning [] to an array of subdocs via .save().
- */
+/** POST /api/supraspace/messages/:messageId/react  { emoji }  — toggle reaction */
+const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const { emoji } = req.body;
+  if (!emoji) throw new ApiError(400, 'emoji is required');
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const existing = message.reactions.find((r) => r.emoji === emoji);
+  if (existing) {
+    if (idIn(existing.users as any, userId)) {
+      existing.users = existing.users.filter((u) => u.toString() !== userId.toString()) as any;
+      if (existing.users.length === 0) message.reactions = message.reactions.filter((r) => r.emoji !== emoji) as any;
+    } else {
+      existing.users.push(userId as any);
+    }
+  } else {
+    message.reactions.push({ emoji, users: [userId] } as any);
+  }
+  await message.save();
+
+  const payload = { conversationId: message.conversationId.toString(), messageId, reactions: message.reactions };
+  emitToConversation(conversation, 'message:reaction', payload);
+  res.json(new ApiResponse(200, payload, 'Reaction updated'));
+});
+
+/** DELETE /api/supraspace/messages/:messageId  — soft delete (sender only) */
 const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { messageId } = req.params;
 
-  // Fetch lean copy first to verify ownership without loading full doc
   const message = await SupraSpaceMessage.findById(messageId).lean();
   if (!message) throw new ApiError(404, 'Message not found');
-  if (message.sender.toString() !== userId.toString()) {
-    throw new ApiError(403, 'You can only delete your own messages');
-  }
-  if (message.isDeleted) {
-    return res.json(new ApiResponse(200, null, 'Message already deleted'));
-  }
+  if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only delete your own messages');
+  if (message.isDeleted) return res.json(new ApiResponse(200, null, 'Message already deleted'));
 
-  // Use $set + runValidators:false to bypass subdocument array validation
   await SupraSpaceMessage.findByIdAndUpdate(
     messageId,
-    {
-      $set: {
-        isDeleted: true,
-        deletedAt: new Date(),
-        content: '',
-        attachments: [],
-      },
-    },
+    { $set: { isDeleted: true, deletedAt: new Date(), content: '', attachments: [], gif: null, poll: null, event: null } },
     { runValidators: false }
   );
 
-  // Clean up R2 attachments
   if (message.attachments && message.attachments.length > 0) {
-    for (const attachment of message.attachments) {
-      if (attachment.fileKey) {
-        await storageService.delete(attachment.fileKey).catch((err) => {
-          console.warn('[SupraSpace] Failed to delete R2 attachment:', err.message);
-        });
-      }
+    for (const a of message.attachments) {
+      if (a.fileKey) await storageService.delete(a.fileKey).catch((e) => console.warn('[SupraSpace] R2 delete:', e.message));
     }
   }
 
-  // Emit socket event — wrapped so a socket failure does not 500 the request
-  try {
-    const io = getIO();
-    const conversation = await SupraSpaceConversation.findById(
-      message.conversationId
-    ).lean();
-    if (conversation) {
-      conversation.members.forEach((memberId) => {
-        io.to(`user:${memberId.toString()}`).emit('message:deleted', {
-          conversationId: message.conversationId.toString(),
-          messageId,
-        });
-      });
-    }
-  } catch (socketErr) {
-    // Non-fatal — the DB update already succeeded
-    console.warn('[SupraSpace] Socket emit failed on delete:', socketErr);
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (conversation) {
+    emitToConversation(conversation, 'message:deleted', {
+      conversationId: message.conversationId.toString(),
+      messageId,
+    });
   }
-
   res.json(new ApiResponse(200, null, 'Message deleted'));
 });
 
-/**
- * GET /api/supraspace/users
- * List all active CRM users except the requester
- */
+// ─── Polls ───────────────────────────────────────────────────────────────────
+
+/** POST /api/supraspace/conversations/:id/poll  { question, options[], allowMultiple } */
+const createPoll = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { question, options, allowMultiple } = req.body;
+
+  if (!question?.trim()) throw new ApiError(400, 'Poll question is required');
+  const opts = (options || []).map((t: string) => t?.trim()).filter(Boolean);
+  if (opts.length < 2) throw new ApiError(400, 'At least two options are required');
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const message = await SupraSpaceMessage.create({
+    conversationId: id,
+    sender: userId,
+    type: 'poll',
+    content: '',
+    poll: {
+      question: question.trim(),
+      allowMultiple: !!allowMultiple,
+      closed: false,
+      options: opts.map((text: string, i: number) => ({ id: `opt_${i}_${Date.now()}`, text, votes: [] })),
+    },
+    readBy: [userId],
+  });
+
+  await message.populate('sender', 'fullName username avatar');
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  await conversation.save();
+
+  const messageForClient = message.toObject();
+  emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+  res.status(201).json(new ApiResponse(201, messageForClient, 'Poll created'));
+});
+
+/** POST /api/supraspace/messages/:messageId/poll/vote  { optionId } */
+const votePoll = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const { optionId } = req.body;
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || !message.poll) throw new ApiError(404, 'Poll not found');
+  if (message.poll.closed) throw new ApiError(400, 'This poll is closed');
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const uid = userId.toString();
+  message.poll.options = message.poll.options.map((o) => {
+    const hasVoted = idIn(o.votes as any, userId);
+    if (o.id === optionId) {
+      o.votes = hasVoted ? (o.votes.filter((v) => v.toString() !== uid) as any) : ([...o.votes, userId] as any);
+    } else if (!message.poll!.allowMultiple) {
+      o.votes = o.votes.filter((v) => v.toString() !== uid) as any;
+    }
+    return o;
+  }) as any;
+  message.markModified('poll');
+  await message.save();
+
+  const payload = { conversationId: message.conversationId.toString(), messageId, poll: message.poll };
+  emitToConversation(conversation, 'message:poll', payload);
+  res.json(new ApiResponse(200, payload, 'Vote recorded'));
+});
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+
+/** POST /api/supraspace/conversations/:id/event */
+const createEvent = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { title, description, location, startTime, endTime } = req.body;
+
+  if (!title?.trim()) throw new ApiError(400, 'Event title is required');
+  if (!startTime) throw new ApiError(400, 'Event start time is required');
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const message = await SupraSpaceMessage.create({
+    conversationId: id,
+    sender: userId,
+    type: 'event',
+    content: '',
+    event: {
+      title: title.trim(),
+      description: description?.trim() || '',
+      location: location?.trim() || '',
+      startTime: new Date(startTime),
+      endTime: endTime ? new Date(endTime) : null,
+      going: [userId],
+      maybe: [],
+      declined: [],
+    },
+    readBy: [userId],
+  });
+
+  await message.populate('sender', 'fullName username avatar');
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  await conversation.save();
+
+  const messageForClient = message.toObject();
+  emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+  res.status(201).json(new ApiResponse(201, messageForClient, 'Event created'));
+});
+
+/** POST /api/supraspace/messages/:messageId/event/rsvp  { response: going|maybe|declined } */
+const rsvpEvent = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const { response } = req.body;
+  if (!['going', 'maybe', 'declined'].includes(response)) throw new ApiError(400, 'Invalid RSVP response');
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || !message.event) throw new ApiError(404, 'Event not found');
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const uid = userId.toString();
+  (['going', 'maybe', 'declined'] as const).forEach((key) => {
+    message.event![key] = (message.event![key] as any).filter((u: any) => u.toString() !== uid);
+  });
+  (message.event as any)[response].push(userId);
+  message.markModified('event');
+  await message.save();
+
+  const payload = { conversationId: message.conversationId.toString(), messageId, event: message.event };
+  emitToConversation(conversation, 'message:event', payload);
+  res.json(new ApiResponse(200, payload, 'RSVP recorded'));
+});
+
+// ─── Users / Presence ──────────────────────────────────────────────────────
+
+/** GET /api/supraspace/users */
 const getCrmUsers = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
-
   const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
     .select('fullName username avatar role')
     .sort({ fullName: 1 })
     .lean();
-
   res.json(new ApiResponse(200, users, 'Users fetched'));
+});
+
+/** GET /api/supraspace/active  — all team users (presence resolved live via socket) */
+const getActiveUsers = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
+    .select('fullName username avatar role')
+    .sort({ fullName: 1 })
+    .lean();
+  res.json(new ApiResponse(200, users, 'Team users fetched'));
+});
+
+// ─── Video Conferencing ────────────────────────────────────────────────────
+
+const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const user = req.crmUser!;
+  const roomName = `supraspace-${id}`;
+  const payload = {
+    context: { user: { id: userId.toString(), name: user.fullName, avatar: user.avatar, email: user.username } },
+    aud: process.env.JITSI_APP_ID,
+    iss: process.env.JITSI_APP_ID,
+    sub: process.env.NEXT_PUBLIC_JITSI_DOMAIN,
+    room: roomName,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24,
+  };
+  const token = jwt.sign(payload, process.env.JITSI_APP_SECRET || 'secret');
+  res.json(new ApiResponse(200, { token, roomName }, 'Video token generated'));
 });
 
 const supraSpaceController = {
@@ -503,11 +753,24 @@ const supraSpaceController = {
   getOrCreateDirect,
   createGroup,
   updateConversation,
+  updateAvatar,
+  deleteConversation,
+  archiveConversation,
+  pinConversation,
+  setTheme,
   getMessages,
+  searchInConversation,
+  searchMessages,
   sendMessage,
   uploadAttachment,
+  reactToMessage,
   deleteMessage,
+  createPoll,
+  votePoll,
+  createEvent,
+  rsvpEvent,
   getCrmUsers,
+  getActiveUsers,
   generateVideoToken,
 };
 
