@@ -47,14 +47,19 @@ const buildSessions = (logs: any[]) => {
     }
   }
 
-  // Currently clocked in (no matching time-out)
+  // Currently clocked in (no matching time-out).
+  // Cap at 12 hours so a single forgotten clock-out cannot inflate every subsequent
+  // calendar day with 24:00 entries (one unclosed session → one live slice per day).
   if (currentIn) {
     const now = new Date();
+    const MAX_LIVE_MS = 12 * 60 * 60 * 1000;
+    const elapsedMs = now.getTime() - currentIn.getTime();
+    const isCapped = elapsedMs > MAX_LIVE_MS;
     sessions.push({
       in: currentIn,
       out: null,
-      duration: (now.getTime() - currentIn.getTime()) / 1000,
-      isLive: true,
+      duration: Math.min(elapsedMs, MAX_LIVE_MS) / 1000,
+      isLive: !isCapped,
     });
   }
 
@@ -206,7 +211,9 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
   };
 
   for (const s of allSessions) {
-    const endTime = s.out ?? new Date();
+    // For capped sessions (out=null, isLive=false), reconstruct effective end from duration
+    // so getMidnightSegments doesn't spread the session to "now" across all subsequent days.
+    const endTime = s.out ?? (s.isLive ? new Date() : new Date(s.in.getTime() + s.duration * 1000));
     const segments = getMidnightSegments(s.in, endTime, tzOffsetMinutes);
     for (const { date, segStart, segEnd } of segments) {
       ensure(date);
@@ -688,14 +695,20 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
   // Before the tray sends its first heartbeat, fall back to shiftStartedAt so the CRM
   // timer counts from clock-in instead of showing 00:00 until the heartbeat arrives.
+  // Only apply this fallback for same-day shifts — if the shift started on a previous
+  // MDT day, returning that timestamp would make the CRM timer jump to 20+ hours.
+  const isShiftFromToday = shiftStartedAt
+    ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC
+    : false;
   const currentIntervalStartAt = rawIntervalStart ??
-    (isOnShift && !isOnBreak && shiftStartedAt
-      ? new Date(shiftStartedAt).toISOString()
+    (isOnShift && !isOnBreak && isShiftFromToday
+      ? new Date(shiftStartedAt!).toISOString()
       : null);
 
   res.json(new ApiResponse(200, {
     isOnShift,
     isOnBreak,
+    isShiftFromToday,
     shiftStartedAt,
     breakStartedAt,
     totalBreakSeconds,
