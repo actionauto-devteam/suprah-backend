@@ -5,6 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
 import User from '../models/User.model';
+import { emitToOrg } from '../utils/socketEmitter';
 
 /**
  * Get user profile with extended information
@@ -46,6 +47,7 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
  */
 const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
+  const orgId = (req as any).orgId as string | undefined;
   const { status, customStatus } = req.body;
 
   if (!status) {
@@ -58,6 +60,15 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const user = await profileService.updateOnlineStatus(userId, status, customStatus);
+
+  if (orgId) {
+    emitToOrg(orgId, 'presence_update', {
+      userId: userId.toString(),
+      onlineStatus: status,
+      customStatus: customStatus ?? null,
+      lastActive: new Date().toISOString(),
+    });
+  }
 
   res.json(
     new ApiResponse(200, user, 'Online status updated successfully')
@@ -229,7 +240,25 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
 
 const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
-  await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+  const orgId = (req as any).orgId as string | undefined;
+
+  const current = await User.findById(userId).select('onlineStatus').lean();
+  const updateData: any = { lastActive: new Date() };
+  if (current?.onlineStatus === 'offline') {
+    updateData.onlineStatus = 'online';
+  }
+
+  const updated = await User.findByIdAndUpdate(userId, updateData, { new: true })
+    .select('onlineStatus lastActive').lean();
+
+  if (orgId && updated) {
+    emitToOrg(orgId, 'presence_update', {
+      userId: userId.toString(),
+      onlineStatus: updated.onlineStatus,
+      lastActive: updated.lastActive,
+    });
+  }
+
   res.json(new ApiResponse(200, null, 'ok'));
 });
 

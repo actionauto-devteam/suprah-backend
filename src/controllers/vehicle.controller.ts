@@ -37,13 +37,27 @@ const normalizeVehicle = (vehicle: any) => ({
   interiorColor: vehicle.interiorColor || "N/A",
   stockNumber: vehicle.stockNumber || "N/A",
   price: vehicle.price || 0,
+  cost: vehicle.cost || 0,
   marketPrice: vehicle.msrp || 0,
   mileage: vehicle.mileage || 0,
   transmission: vehicle.transmission || "Automatic",
   fuelType: vehicle.fuelType || "Gasoline",
+  engine: vehicle.engine || "",
+  bodyStyle: vehicle.bodyStyle || "",
+  driveTrain: vehicle.driveTrain || "",
+  cylinders: vehicle.cylinders || 0,
+  doors: vehicle.doors || 0,
+  options: vehicle.options || "",
+  vehicleType: vehicle.vehicleType || "",
+  featured: vehicle.featured || false,
+  certified: vehicle.certified || false,
+  isNewVehicle: vehicle.isNewVehicle || false,
+  videoUrl: vehicle.vdpUrl || "",
   location: vehicle.dealerCity
     ? `${vehicle.dealerCity}${vehicle.dealerState ? ", " + vehicle.dealerState : ""}${vehicle.dealerZip ? ", " + vehicle.dealerZip : ""}`
     : "Unknown",
+  dealerName: vehicle.dealerName || "",
+  dealerAddress: vehicle.dealerAddress || "",
   image:
     vehicle.images && vehicle.images.length > 0
       ? vehicle.images[0]

@@ -2,6 +2,7 @@ import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import config from './config';
 import logger from './utils/logger';
+import User from './models/User.model';
 
 interface AuthSocket extends Socket {
   userId?: string;
@@ -130,9 +131,27 @@ export const setupSocket = (io: Server) => {
       });
     });
 
-    // Disconnect
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       logger.info({ userId: socket.userId }, 'Socket disconnected');
+      if (socket.userId) {
+        try {
+          const MANUAL_STATUSES = ['away', 'busy', 'do_not_disturb'];
+          const user = await User.findById(socket.userId).select('onlineStatus organizationId').lean();
+          if (user && !MANUAL_STATUSES.includes(user.onlineStatus)) {
+            await User.findByIdAndUpdate(socket.userId, { onlineStatus: 'offline' });
+            const orgId = socket.organizationId || user.organizationId?.toString();
+            if (orgId) {
+              io.to(`org:${orgId}`).emit('presence_update', {
+                userId: socket.userId,
+                onlineStatus: 'offline',
+                lastActive: new Date().toISOString(),
+              });
+            }
+          }
+        } catch (err) {
+          logger.error(err, 'Failed to mark user offline on disconnect');
+        }
+      }
     });
   });
 

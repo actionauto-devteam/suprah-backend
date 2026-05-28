@@ -6,13 +6,13 @@ import User, { IUser } from '../models/User.model';
 import Absence from '../models/Absence.model';
 import BoardNote from '../models/BoardNote.model';
 
-const PRESENCE_TTL_MS = 3 * 60 * 1000;
+const PRESENCE_TTL_MS = 2 * 60 * 1000;
 
 const getMembers = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
 
     const statusOrder: Record<string, number> = {
-        online: 0, busy: 1, away: 2, idle: 3, do_not_disturb: 4, offline: 5,
+        online: 0, busy: 1, do_not_disturb: 2, away: 3, idle: 4, offline: 5,
     };
 
     const members = await User.find({
@@ -24,9 +24,10 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
 
+    const AUTO_STATUSES = ['online', 'idle', 'away'];
     const adjusted = members.map((m) => {
         const stale = !m.lastActive || new Date(m.lastActive) < cutoff;
-        const effectiveStatus = (m.onlineStatus === 'online' && stale) ? 'offline' : m.onlineStatus;
+        const effectiveStatus = (AUTO_STATUSES.includes(m.onlineStatus) && stale) ? 'offline' : m.onlineStatus;
         return { ...m, onlineStatus: effectiveStatus };
     });
 
