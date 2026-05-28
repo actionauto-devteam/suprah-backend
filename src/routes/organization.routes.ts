@@ -3,6 +3,7 @@ import auth from '../middleware/auth.middleware';
 import authorize from '../middleware/role.middleware';
 import { requireAdmin } from '../middleware/rbac.middleware';
 import {
+    listPublicOrganizations,
     createOrganization,
     deleteOrganization,
     getMembers,
@@ -13,7 +14,11 @@ import {
 
 const router = express.Router();
 
-// All routes require authentication
+// PUBLIC — no auth. Must stay above `router.use(auth())` and above '/:id'
+// so prospective customers can list dealerships during signup.
+router.get('/public', listPublicOrganizations);
+
+// All routes below require authentication
 router.use(auth());
 
 // Global admin/super_admin or org-admin can manage orgs

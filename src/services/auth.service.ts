@@ -11,8 +11,16 @@ import DriverRequest from '../models/DriverRequest.model';
 import notificationService from './notification.service';
 
 class AuthService {
-    async register(userData: { name: string; email: string; password: string; role?: string; inviteToken?: string }) {
-        const { email, password, name, role, inviteToken } = userData;
+    async register(userData: {
+        name: string;
+        email: string;
+        password: string;
+        role?: string;
+        inviteToken?: string;
+        organizationId?: string;   // optional: explicit dealership id (e.g. from a dealership signup link)
+        dealershipSlug?: string;   // optional: dealership slug (e.g. customer signed up from /d/<slug>)
+    }) {
+        const { email, password, name, role, inviteToken, organizationId, dealershipSlug } = userData;
 
         const existingUser = await User.findOne({ email: email?.toLowerCase() });
         if (existingUser) {
@@ -20,7 +28,7 @@ class AuthService {
         }
 
         let roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
-        let orgId = undefined;
+        let orgId: mongoose.Types.ObjectId | undefined = undefined;
         let orgRole = undefined;
         let onboardingCompleted = true; // Default true if role is picked
         let isApproved = true;
@@ -55,6 +63,20 @@ class AuthService {
             let finalGlobalRole = roleToAssign;
             if (roleToAssign === 'member') {
                 finalGlobalRole = 'employee';
+            }
+
+            // ── Link customers to a dealership organization ──────────────────
+            // Customers were previously created with no organizationId, which
+            // made every org-scoped feature (e.g. Aftermarket) return a 403
+            // ("No organization context"). Resolve and attach an org here.
+            if (!orgId && finalGlobalRole === 'customer') {
+                orgId = await this.resolveCustomerOrgId({ organizationId, dealershipSlug });
+                if (!orgId) {
+                    console.warn(
+                        '[AuthService] Customer registered without an organization. ' +
+                        'Pass organizationId/dealershipSlug at signup, or ensure exactly one Organization exists.'
+                    );
+                }
             }
 
             const user = await User.create({
@@ -412,11 +434,50 @@ class AuthService {
             await this.ensureDriverRequest(user);
         }
 
+        // Customers must be linked to a dealership org so org-scoped features work.
+        if (roleToAssign === 'customer' && !user.organizationId) {
+            const resolved = await this.resolveCustomerOrgId({});
+            if (resolved) {
+                user.organizationId = resolved as any;
+            }
+        }
+
         await user.save();
         return this.sanitizeUser(user);
     }
 
     // -- Private Helpers --
+
+    /**
+     * Resolve which dealership Organization a new customer belongs to.
+     * Priority: explicit id → slug → (single-dealership deployment) the only org.
+     * Returns undefined when it genuinely can't be determined.
+     */
+    private async resolveCustomerOrgId(opts: {
+        organizationId?: string;
+        dealershipSlug?: string;
+    }): Promise<mongoose.Types.ObjectId | undefined> {
+        // 1. Explicit organization id
+        if (opts.organizationId && mongoose.isValidObjectId(opts.organizationId)) {
+            const org = await Organization.findById(opts.organizationId).select('_id');
+            if (org) return org._id as any;
+        }
+
+        // 2. Explicit dealership slug
+        if (opts.dealershipSlug) {
+            const org = await Organization.findOne({ slug: opts.dealershipSlug }).select('_id');
+            if (org) return org._id as any;
+        }
+
+        // 3. Single-dealership deployment: if exactly one org exists, use it.
+        const orgCount = await Organization.countDocuments({});
+        if (orgCount === 1) {
+            const only = await Organization.findOne().select('_id');
+            if (only) return only._id as any;
+        }
+
+        return undefined;
+    }
 
     private async ensureDriverRequest(user: IUser) {
         try {

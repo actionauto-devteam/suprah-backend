@@ -1,5 +1,3 @@
-// controllers/organization.controller.ts
-
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Organization from '../models/Organization.model';
@@ -10,6 +8,23 @@ import mongoose from 'mongoose';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
+
+/**
+ * Public list of dealerships for the customer signup dropdown.
+ * No auth — runs before the auth middleware so prospective customers can
+ * pick the dealership they belong to during registration.
+ * @route GET /api/organizations/public
+ */
+export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
+    const organizations = await Organization.find({ status: { $ne: 'suspended' } })
+        .select('name slug logoUrl')
+        .sort({ name: 1 });
+
+    res.status(200).json({
+        success: true,
+        data: organizations,
+    });
+});
 
 export const createOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { name, slug } = req.body;
@@ -286,6 +301,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
 });
 
 export default {
+    listPublicOrganizations,
     createOrganization,
     getOrganization,
     updateOrganization,

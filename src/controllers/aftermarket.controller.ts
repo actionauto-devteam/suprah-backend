@@ -83,6 +83,9 @@ const createProduct = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'price must be a non-negative number');
   }
 
+  // 🔎 DEBUG: org this product is being stamped with
+  console.log('[Aftermarket][CREATE] stamping organizationId =', actor.organizationId.toString());
+
   const files = req.files as MulterFiles;
   const [fileAttachment, mediaAttachment] = await Promise.all([
     uploadFile(files?.file?.[0]),
@@ -287,6 +290,13 @@ const getProductsForCustomer = asyncHandler(async (req: Request, res: Response) 
     .select('name price description file media createdAt')
     .sort({ createdAt: -1 });
 
+  // 🔎 DEBUG: org the customer is querying with + how many matched
+  console.log(
+    '[Aftermarket][CUSTOMER] querying organizationId =', orgId,
+    '| matched =', products.length,
+    '| total active in collection =', await AftermarketProduct.countDocuments({ isActive: true })
+  );
+
   res.json(new ApiResponse(200, products, 'Aftermarket products fetched'));
 });
 
@@ -312,9 +322,6 @@ const getProductById = asyncHandler(async (req: Request, res: Response) => {
 /**
  * Place an order (cart checkout)
  * POST /api/aftermarket/checkout  (authenticated customer)
- *
- * NOTE: Payment is intentionally deferred. The order is created in 'pending'
- * status. Wire Stripe / Wise / Wallet here when ready (see TODO below).
  */
 const checkout = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
@@ -364,12 +371,6 @@ const checkout = asyncHandler(async (req: Request, res: Response) => {
     total,
     status: 'pending',
   });
-
-  // TODO: integrate payment here.
-  //   - Stripe Connect: create PaymentIntent against the org's stripeConnectAccountId
-  //   - Wise: hand off to the billing route
-  //   - Wallet: decrement user.walletBalance
-  // On success, set order.status = 'paid', order.paymentRef = <ref>, await order.save().
 
   res.status(201).json(
     new ApiResponse(201, order, 'Order placed successfully. Awaiting payment processing.')
