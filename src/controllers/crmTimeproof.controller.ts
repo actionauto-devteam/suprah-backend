@@ -703,17 +703,26 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const todayTotalActiveSeconds = activityIntervalTotal > 0 ? activityIntervalTotal : todayTotalWorkedSeconds;
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
-  // When on break the tray sets activityStartMs=null so the heartbeat already sends
-  // currentIntervalStartAt=null — no need to override here, and overriding based on
-  // the computed isOnBreak flag causes false-nulls when break logs are stale.
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
   const isShiftFromToday = shiftStartedAt
     ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC
     : false;
-  const currentIntervalStartAt = rawIntervalStart ??
-    (isOnShift && isShiftFromToday
-      ? new Date(shiftStartedAt!).toISOString()
-      : null);
+
+  // Decide the live-interval start that the CRM timer counts from.
+  //  • Tray actively reporting (fresh heartbeat): trust its value verbatim — including
+  //    null, which means the user is idle/on-break and the timer must FREEZE. This keeps
+  //    the CRM in lock-step with the tray (same machine clock → no drift).
+  //  • Tray offline / never ran: fall back to shiftStartedAt so a CRM-only user still
+  //    sees a running timer instead of 00:00:00.
+  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
+  const heartbeatFresh = heartbeat
+    ? Date.now() - new Date(heartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
+    : false;
+  const currentIntervalStartAt = heartbeatFresh
+    ? rawIntervalStart
+    : (isOnShift && !isOnBreak && isShiftFromToday
+        ? new Date(shiftStartedAt!).toISOString()
+        : null);
 
   res.json(new ApiResponse(200, {
     isOnShift,
