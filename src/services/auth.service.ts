@@ -17,8 +17,8 @@ class AuthService {
         password: string;
         role?: string;
         inviteToken?: string;
-        organizationId?: string;   // optional: explicit dealership id (e.g. from a dealership signup link)
-        dealershipSlug?: string;   // optional: dealership slug (e.g. customer signed up from /d/<slug>)
+        organizationId?: string;
+        dealershipSlug?: string;
     }) {
         const { email, password, name, role, inviteToken, organizationId, dealershipSlug } = userData;
 
@@ -30,7 +30,7 @@ class AuthService {
         let roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
         let orgId: mongoose.Types.ObjectId | undefined = undefined;
         let orgRole = undefined;
-        let onboardingCompleted = true; // Default true if role is picked
+        let onboardingCompleted = false; // Always false on register — completed via onboarding flow
         let isApproved = true;
 
         try {
@@ -43,10 +43,9 @@ class AuthService {
                     roleToAssign = invite.role;
                     orgId = invite.organizationId;
                     orgRole = invite.role;
-                    onboardingCompleted = true;
+                    onboardingCompleted = true; // Invited users skip onboarding
                     isApproved = true;
 
-                    // Mark invite as accepted
                     invite.status = 'accepted';
                     await invite.save();
                 } else {
@@ -59,29 +58,23 @@ class AuthService {
             }
 
             // Map internal roles correctly for DB
-            // 'member' invite -> 'employee' global role
             let finalGlobalRole = roleToAssign;
             if (roleToAssign === 'member') {
                 finalGlobalRole = 'employee';
             }
 
-            // ── Link customers to a dealership organization ──────────────────
-            // Customers were previously created with no organizationId, which
-            // made every org-scoped feature (e.g. Aftermarket) return a 403
-            // ("No organization context"). Resolve and attach an org here.
-            if (!orgId && finalGlobalRole === 'customer') {
+            // Invited users or non-customers can still get org resolved here.
+            // Regular customers now pick their org explicitly in the onboarding
+            // org-select step, so we skip the auto-resolve for them.
+            if (!orgId && finalGlobalRole !== 'customer') {
+                // Non-customer roles (employee, admin, driver via invite etc.)
+                // still benefit from the existing slug/id resolution.
                 orgId = await this.resolveCustomerOrgId({ organizationId, dealershipSlug });
-                if (!orgId) {
-                    console.warn(
-                        '[AuthService] Customer registered without an organization. ' +
-                        'Pass organizationId/dealershipSlug at signup, or ensure exactly one Organization exists.'
-                    );
-                }
             }
 
             const user = await User.create({
                 email: email?.toLowerCase(),
-                password, // Hashed via pre-save hook
+                password,
                 name,
                 role: finalGlobalRole,
                 organizationId: orgId,
@@ -95,10 +88,10 @@ class AuthService {
                 await this.ensureDriverRequest(user as any);
             }
 
-            // Generate and send OTP for verification
+            // Generate and send OTP for email verification
             const otp = Math.floor(100000 + Math.random() * 900000).toString();
             user.otpCode = otp;
-            user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+            user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
             await user.save();
 
             let emailSent = true;
@@ -114,7 +107,6 @@ class AuthService {
                 emailSent = false;
             }
 
-            // Do NOT return tokens yet - user must verify first
             return { user: this.sanitizeUser(user), emailSent };
         } catch (error) {
             console.error('[AuthService] Register Error:', error);
@@ -153,10 +145,9 @@ class AuthService {
             throw new ApiError(400, 'Email is already verified');
         }
 
-        // Generate and send new OTP
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
 
         try {
@@ -184,13 +175,11 @@ class AuthService {
         session.startTransaction();
 
         try {
-            // 1. Create User
             const existingUser = await User.findOne({ email: email.toLowerCase() }).session(session);
             if (existingUser) {
                 throw new ApiError(400, 'User with this email already exists');
             }
 
-            // Dealership slug must be unique
             const existingOrg = await Organization.findOne({ slug: dealershipSlug }).session(session);
             if (existingOrg) {
                 throw new ApiError(400, 'Dealership slug is already taken');
@@ -200,13 +189,12 @@ class AuthService {
                 email: email.toLowerCase(),
                 password,
                 name,
-                role: 'admin', // Owner is an admin of their org
+                role: 'admin',
                 emailVerified: false,
-                onboardingCompleted: true,
+                onboardingCompleted: true, // Dealership registration is a single complete flow
             });
             await user.save({ session });
 
-            // 2. Create Organization
             const organization = new Organization({
                 name: dealershipName,
                 slug: dealershipSlug,
@@ -215,11 +203,9 @@ class AuthService {
             });
             await organization.save({ session });
 
-            // 3. Link User to Organization
             user.organizationId = organization._id as any;
             user.organizationRole = 'owner';
 
-            // Generate OTP
             const otp = Math.floor(100000 + Math.random() * 900000).toString();
             user.otpCode = otp;
             user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
@@ -257,7 +243,6 @@ class AuthService {
             throw new ApiError(401, 'Invalid email or password');
         }
 
-        // Detect Legacy Clerk User (Phase 4 Logic)
         if (!user.password && !user.googleId) {
             throw new ApiError(401, 'LEGACY_USER_UPGRADE_REQUIRED');
         }
@@ -266,12 +251,10 @@ class AuthService {
             throw new ApiError(401, 'Password required');
         }
 
-        // If user has no password but HAS a googleId, prompt them to use Google
         if (!user.password && user.googleId) {
             throw new ApiError(401, 'Please sign in with Google');
         }
 
-        // Fallback for any other case where password is missing
         if (!user.password) {
             throw new ApiError(401, 'Invalid email or password');
         }
@@ -296,7 +279,7 @@ class AuthService {
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
 
         await emailService.sendEmail({
@@ -321,7 +304,6 @@ class AuthService {
         user.password = newPassword;
         user.otpCode = undefined;
         user.otpExpiresAt = undefined;
-        // user.clerkId = undefined; // We KEEP it for now (Phase 6 Purge rule)
         await user.save();
 
         const tokens = await this.generateAuthTokens(user);
@@ -345,10 +327,8 @@ class AuthService {
             throw new ApiError(401, 'User not found');
         }
 
-        // Rotate Refresh Token (Strict Security)
         await session.deleteOne();
         const tokens = await this.generateAuthTokens(user);
-
         return tokens;
     }
 
@@ -366,14 +346,12 @@ class AuthService {
     async sendForgotPasswordOTP(email: string) {
         const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
         if (!user) {
-            // We return success even if user not found for security (avoid enumeration)
-            // But we don't actually send an email.
             return { message: 'If an account exists, a reset code has been sent' };
         }
 
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
 
         await emailService.sendEmail({
@@ -412,34 +390,39 @@ class AuthService {
     }
 
     /**
-     * Complete onboarding - set role and mark as completed
+     * Step 1 of onboarding — set role.
+     *
+     * For dealers this also flips onboardingCompleted immediately since
+     * they create their own org and don't need the org-select step.
+     *
+     * For customers, pass { skipComplete: true } from the controller so
+     * onboardingCompleted stays false until selectOnboardingOrg is called.
      */
-    async completeOnboarding(userId: string, role: string) {
+    async completeOnboarding(userId: string, role: string, options?: { skipComplete?: boolean }) {
         const user = await User.findById(userId);
         if (!user) {
             throw new ApiError(404, 'User not found');
         }
 
+        // Allow re-entry if only the role was set but onboarding isn't done yet
+        // (i.e. customer who set role but hasn't picked an org).
+        // Block true re-entry where onboarding is already fully complete.
         if (user.onboardingCompleted) {
             throw new ApiError(400, 'Onboarding already completed');
         }
 
         const roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
         user.role = roleToAssign as any;
-        user.onboardingCompleted = true;
 
-        // Drivers need approval
         if (roleToAssign === 'driver') {
             user.isApproved = false;
             await this.ensureDriverRequest(user);
         }
 
-        // Customers must be linked to a dealership org so org-scoped features work.
-        if (roleToAssign === 'customer' && !user.organizationId) {
-            const resolved = await this.resolveCustomerOrgId({});
-            if (resolved) {
-                user.organizationId = resolved as any;
-            }
+        // Only flip the flag when we're not deferring to the org-select step.
+        // Dealers finish here; customers finish in selectOnboardingOrg.
+        if (!options?.skipComplete) {
+            user.onboardingCompleted = true;
         }
 
         await user.save();
@@ -450,26 +433,23 @@ class AuthService {
 
     /**
      * Resolve which dealership Organization a new customer belongs to.
-     * Priority: explicit id → slug → (single-dealership deployment) the only org.
+     * Priority: explicit id → slug → single-org deployment fallback.
      * Returns undefined when it genuinely can't be determined.
      */
     private async resolveCustomerOrgId(opts: {
         organizationId?: string;
         dealershipSlug?: string;
     }): Promise<mongoose.Types.ObjectId | undefined> {
-        // 1. Explicit organization id
         if (opts.organizationId && mongoose.isValidObjectId(opts.organizationId)) {
             const org = await Organization.findById(opts.organizationId).select('_id');
             if (org) return org._id as any;
         }
 
-        // 2. Explicit dealership slug
         if (opts.dealershipSlug) {
             const org = await Organization.findOne({ slug: opts.dealershipSlug }).select('_id');
             if (org) return org._id as any;
         }
 
-        // 3. Single-dealership deployment: if exactly one org exists, use it.
         const orgCount = await Organization.countDocuments({});
         if (orgCount === 1) {
             const only = await Organization.findOne().select('_id');
@@ -488,7 +468,6 @@ class AuthService {
                     status: 'pending'
                 });
 
-                // Notify Super Admins
                 const superAdmins = await User.find({ role: 'super_admin' });
                 for (const admin of superAdmins) {
                     await notificationService.createNotification({
@@ -515,7 +494,7 @@ class AuthService {
         const refreshToken = tokenService.generateRefreshToken(user);
 
         const refreshTokenHash = this.hashToken(refreshToken);
-        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
         await Session.create({
             userId: user._id,

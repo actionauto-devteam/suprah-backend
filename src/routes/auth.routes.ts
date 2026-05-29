@@ -42,7 +42,6 @@ router.get('/google/callback',
         try {
             console.log(`[Google Callback] Success for user: ${req.user?._id}`);
 
-            // Extract redirect_url from state
             let redirect_url = '';
             try {
                 if (req.query.state) {
@@ -53,11 +52,9 @@ router.get('/google/callback',
                 console.error('[Google Callback] Failed to parse state:', e);
             }
 
-            // req.user is populated by Passport
             const tokens = await authController.handleOAuthCallback(req.user);
 
             const isProduction = process.env.NODE_ENV === 'production';
-            // Set Refresh Token in Cookie
             res.cookie('refreshToken', tokens.refreshToken, {
                 httpOnly: true,
                 secure: isProduction,
@@ -66,7 +63,6 @@ router.get('/google/callback',
             });
 
             console.log('[Google Callback] Redirecting to frontend with redirect_url:', redirect_url);
-            // Redirect to frontend with Access Token and any preserved redirect_url
             let finalRedirect = `${config.frontendUrl}/auth/callback?token=${tokens.accessToken}`;
             if (redirect_url) {
                 finalRedirect += `&redirect_url=${encodeURIComponent(redirect_url)}`;
@@ -80,6 +76,10 @@ router.get('/google/callback',
     }
 );
 
-router.post('/complete-onboarding', authMiddleware(), authController.completeOnboarding);
+// Onboarding — both routes require a valid auth token.
+// Step 1: set role (customers stop here; dealers finish immediately)
+// Step 2: customers only — link to a dealership org, then flip onboardingCompleted
+router.post('/complete-onboarding',   authMiddleware(), authController.completeOnboarding);
+router.post('/select-onboarding-org', authMiddleware(), authController.selectOnboardingOrg);
 
 export default router;

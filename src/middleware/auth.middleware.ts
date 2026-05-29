@@ -5,7 +5,6 @@ import Organization from '../models/Organization.model';
 import tokenService from '../services/token.service';
 import { userAuthCache, orgStatusCache } from '../utils/cache.util';
 
-// Extend Express Request type to include auth property for backward compatibility
 declare global {
     namespace Express {
         interface Request {
@@ -21,19 +20,15 @@ declare global {
             };
             leadContext?: {
                 organizationId: string;
-                vehicle: any; // Using any for IVehicle to avoid circular dependency in declaration file
+                vehicle: any;
             };
         }
     }
 }
 
-/**
- * Custom Authentication Middleware
- * Replaces Clerk with local JWT verification
- */
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
-        // 1. Get the token from the header
+        // 1. Extract token
         const authHeader = req.headers.authorization;
         const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
@@ -41,20 +36,16 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'Please authenticate');
         }
 
-        // 2. Verify the token using our TokenService
+        // 2. Verify token
         const payload = tokenService.verifyAccessToken(token);
-
-        // The 'sub' claim in our token is the MongoDB User ID
         const userId = payload.sub;
 
         if (!userId) {
             throw new ApiError(401, 'Invalid token payload');
         }
 
-        // 3. Find user in local database (with TTL cache)
-        const now = Date.now();
+        // 3. Resolve user (cache-first)
         let user: IUser | undefined | null;
-
         const cachedUser = userAuthCache.get(userId);
         if (cachedUser) {
             user = cachedUser;
@@ -67,16 +58,14 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'User not found');
         }
 
-
-        // 4. Attach user and org info to request
+        // 4. Resolve org context
         let orgId = user.organizationId?.toString();
         let orgRole = (user as any).organizationRole;
 
-        // --- IMPERSONATION logic for Super Admins ---
+        // Super-admin impersonation
         if (user.role === 'super_admin') {
             const impersonateId = req.headers['x-impersonate-org-id'] as string;
             if (impersonateId) {
-                // Validate impersonated orgId exists (cached)
                 let orgExists = false;
                 const cachedOrg = orgStatusCache.get(impersonateId);
                 if (cachedOrg) {
@@ -94,11 +83,11 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                 }
 
                 orgId = impersonateId;
-                orgRole = 'admin'; // Assume admin role in the target org
+                orgRole = 'admin';
             }
         }
 
-        // Boost global admins (but not super_admins, who handle authority via impersonation)
+        // Boost global admins (not super_admins — they use impersonation instead)
         let finalOrgRole = orgRole;
         if (user.role === 'admin') {
             finalOrgRole = 'admin';
@@ -108,40 +97,37 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         req.orgId = orgId;
         req.orgRole = finalOrgRole;
 
-        // 5. Compatibility Layer: req.auth
         req.auth = {
-            userId: userId,
+            userId,
             sessionId: 'local_session',
             orgId,
             orgRole: finalOrgRole,
             getToken: async () => token,
         };
 
-        // 6. Security Checks
+        // 5. Account active check
         if (!user.isActive) {
             throw new ApiError(403, 'Account Suspended');
         }
 
-        // 7. Security Checks: Email Verification, Onboarding & Driver Approval
+        // 6. Whitelist check
         //
-        // Whitelisted routes bypass the onboarding / email-verification gates.
-        // NOTE on aftermarket: we open the *browse* endpoints so customers can
-        // window-shop before finishing onboarding, but we intentionally do NOT
-        // whitelist checkout — placing an order still requires a verified,
-        // onboarded account (handled by the explicit !isAftermarketCheckout
-        // guard below).
+        // Routes in this list bypass the email-verification, onboarding, and
+        // driver-approval gates below. Add a route here when it must be
+        // reachable before the user has finished setting up their account.
         const url = req.originalUrl;
 
-        // Is this an aftermarket request, and if so is it the checkout action?
-        const isAftermarketRequest = url.includes('/api/aftermarket');
-        const isAftermarketCheckout =
-            isAftermarketRequest && url.includes('/api/aftermarket/checkout');
-
-        // Aftermarket browse/read is whitelisted; checkout is explicitly excluded.
-        const isAftermarketBrowse = isAftermarketRequest && !isAftermarketCheckout;
+        const isAftermarketRequest  = url.includes('/api/aftermarket');
+        const isAftermarketCheckout = isAftermarketRequest && url.includes('/api/aftermarket/checkout');
+        const isAftermarketBrowse   = isAftermarketRequest && !isAftermarketCheckout;
 
         const isWhitelisted =
+            // Onboarding flow — both steps must be reachable before onboarding is done
             url.includes('/api/auth/complete-onboarding') ||
+            url.includes('/api/auth/select-onboarding-org') ||
+            // Org list needed so the customer can pick a dealership in step 2
+            url.includes('/api/organizations/public') ||
+            // Standard always-open routes
             url.includes('/api/users/me') ||
             url.includes('/api/notifications') ||
             isAftermarketBrowse ||
@@ -149,20 +135,22 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             url.includes('/api/push/subscribe') ||
             url.includes('/api/driver-requests/my-status');
 
+        // 7. Onboarding gate
         if (!user.onboardingCompleted && !isWhitelisted) {
             throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');
         }
 
+        // 8. Email verification gate
         if (!user.emailVerified && !isWhitelisted) {
             throw new ApiError(403, 'Email not verified. Please verify your email to access this feature.');
         }
 
-        // 8. Driver Approval Check
+        // 9. Driver approval gate
         if (user.role === 'driver' && !user.isApproved && !isWhitelisted) {
             throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
         }
 
-        // 9. Organization Suspension Check (with TTL cache)
+        // 10. Organization suspension check (cache-first)
         if (req.orgId) {
             let status: string | undefined;
             const cachedOrg = orgStatusCache.get(req.orgId);
@@ -177,11 +165,8 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
                 }
             }
 
-            if (status === 'suspended') {
-                // Super Admins can still access to fix things
-                if (user.role !== 'super_admin') {
-                    throw new ApiError(403, 'Organization Suspended');
-                }
+            if (status === 'suspended' && user.role !== 'super_admin') {
+                throw new ApiError(403, 'Organization Suspended');
             }
         }
 

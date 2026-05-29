@@ -5,6 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import AftermarketProduct from '../models/AftermarketProduct.model';
 import AftermarketOrder from '../models/AftermarketOrder.model';
+import Organization from '../models/Organization.model';
 import storageService, { BucketType } from '../services/storage.service';
 import { getSocketIO } from '../utils/socketEmitter';
 
@@ -12,7 +13,24 @@ import { getSocketIO } from '../utils/socketEmitter';
 
 type MulterFiles = { [field: string]: Express.Multer.File[] } | undefined;
 
-/** Broadcast a product change to everyone in the organization room. */
+/**
+ * Resolve the organization a customer request should be scoped to.
+ * Prefers the org on the user (req.orgId). If the customer has no org AND
+ * the deployment has exactly one dealership, fall back to that single org
+ * so a misconfigured/legacy customer account can still browse. Returns
+ * undefined only for genuine multi-dealership ambiguity.
+ */
+async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
+  if (req.orgId) return req.orgId;
+
+  const orgCount = await Organization.countDocuments({});
+  if (orgCount === 1) {
+    const only = await Organization.findOne().select('_id');
+    if (only) return only._id.toString();
+  }
+  return undefined;
+}
+
 function emitProductEvent(
   organizationId: string,
   event: 'aftermarket:product_created' | 'aftermarket:product_updated' | 'aftermarket:product_deleted',
@@ -24,12 +42,10 @@ function emitProductEvent(
       io.to(`org:${organizationId}`).emit(event, payload);
     }
   } catch (error) {
-    // Socket emission is non-critical — never fail the request because of it.
     console.error('[Aftermarket] Failed to emit socket event:', error);
   }
 }
 
-/** Push an uploaded media file to R2 and return an attachment subdocument. */
 async function uploadMedia(file?: Express.Multer.File) {
   if (!file) return undefined;
   const url = await storageService.upload(file, 'aftermarket/media', BucketType.PUBLIC);
@@ -43,7 +59,6 @@ async function uploadMedia(file?: Express.Multer.File) {
   };
 }
 
-/** Push an uploaded document attachment to R2. */
 async function uploadFile(file?: Express.Multer.File) {
   if (!file) return undefined;
   const url = await storageService.upload(file, 'aftermarket/files', BucketType.PUBLIC);
@@ -58,10 +73,6 @@ async function uploadFile(file?: Express.Multer.File) {
 
 // ─── Admin (CRM) endpoints ───────────────────────────────────────────────────
 
-/**
- * Create a product
- * POST /api/crm/aftermarket   (CRM admin only, multipart/form-data)
- */
 const createProduct = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -83,7 +94,6 @@ const createProduct = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'price must be a non-negative number');
   }
 
-  // 🔎 DEBUG: org this product is being stamped with
   console.log('[Aftermarket][CREATE] stamping organizationId =', actor.organizationId.toString());
 
   const files = req.files as MulterFiles;
@@ -108,10 +118,6 @@ const createProduct = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(new ApiResponse(201, product, 'Product created successfully'));
 });
 
-/**
- * Update a product
- * PATCH /api/crm/aftermarket/:id   (CRM admin only, multipart/form-data)
- */
 const updateProduct = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -148,7 +154,6 @@ const updateProduct = asyncHandler(async (req: Request, res: Response) => {
 
   const files = req.files as MulterFiles;
 
-  // Replace or remove the document attachment
   if (files?.file?.[0]) {
     if (product.file?.url) {
       await storageService.delete(product.file.url, BucketType.PUBLIC).catch(() => {});
@@ -161,7 +166,6 @@ const updateProduct = asyncHandler(async (req: Request, res: Response) => {
     product.file = undefined;
   }
 
-  // Replace or remove the media attachment
   if (files?.media?.[0]) {
     if (product.media?.url) {
       await storageService.delete(product.media.url, BucketType.PUBLIC).catch(() => {});
@@ -181,10 +185,6 @@ const updateProduct = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, product, 'Product updated successfully'));
 });
 
-/**
- * Delete a product
- * DELETE /api/crm/aftermarket/:id   (CRM admin only)
- */
 const deleteProduct = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -202,7 +202,6 @@ const deleteProduct = asyncHandler(async (req: Request, res: Response) => {
   });
   if (!product) throw new ApiError(404, 'Product not found');
 
-  // Best-effort cleanup of R2 assets
   if (product.file?.url) {
     await storageService.delete(product.file.url, BucketType.PUBLIC).catch(() => {});
   }
@@ -215,10 +214,6 @@ const deleteProduct = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { _id: id }, 'Product deleted successfully'));
 });
 
-/**
- * List products for the CRM management table (includes inactive)
- * GET /api/crm/aftermarket
- */
 const getProductsForCrm = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
@@ -261,12 +256,15 @@ const getProductsForCrm = asyncHandler(async (req: Request, res: Response) => {
 
 // ─── Customer (Portal) endpoints ──────────────────────────────────────────────
 
-/**
- * List active products for the customer Aftermarket browse view
- * GET /api/aftermarket  (authenticated customer)
- */
 const getProductsForCustomer = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId;
+  const orgId = await resolveCustomerOrg(req);
+
+  console.log(
+    '[Aftermarket][CUSTOMER] req.orgId =', req.orgId,
+    '| resolved =', orgId,
+    '| user =', (req.user as any)?._id?.toString(), (req.user as any)?.email
+  );
+
   if (!orgId) {
     throw new ApiError(403, 'No organization context for this account.');
   }
@@ -290,22 +288,13 @@ const getProductsForCustomer = asyncHandler(async (req: Request, res: Response) 
     .select('name price description file media createdAt')
     .sort({ createdAt: -1 });
 
-  // 🔎 DEBUG: org the customer is querying with + how many matched
-  console.log(
-    '[Aftermarket][CUSTOMER] querying organizationId =', orgId,
-    '| matched =', products.length,
-    '| total active in collection =', await AftermarketProduct.countDocuments({ isActive: true })
-  );
+  console.log('[Aftermarket][CUSTOMER] matched =', products.length);
 
   res.json(new ApiResponse(200, products, 'Aftermarket products fetched'));
 });
 
-/**
- * Get a single active product
- * GET /api/aftermarket/:id  (authenticated customer)
- */
 const getProductById = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId;
+  const orgId = await resolveCustomerOrg(req);
   if (!orgId) throw new ApiError(403, 'No organization context for this account.');
 
   const product = await AftermarketProduct.findOne({
@@ -319,12 +308,8 @@ const getProductById = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, product, 'Product fetched'));
 });
 
-/**
- * Place an order (cart checkout)
- * POST /api/aftermarket/checkout  (authenticated customer)
- */
 const checkout = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId;
+  const orgId = await resolveCustomerOrg(req);
   const customerId = (req.user as { _id: mongoose.Types.ObjectId })?._id;
 
   if (!customerId) throw new ApiError(401, 'Not authenticated');
@@ -336,7 +321,6 @@ const checkout = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Cart is empty');
   }
 
-  // Re-fetch products server-side so we never trust client-supplied prices.
   const productIds = items.map((i) => i.productId);
   const products = await AftermarketProduct.find({
     _id: { $in: productIds },
@@ -361,7 +345,7 @@ const checkout = asyncHandler(async (req: Request, res: Response) => {
   });
 
   const subtotal = orderItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
-  const total = subtotal; // add tax/fees here if needed
+  const total = subtotal;
 
   const order = await AftermarketOrder.create({
     organizationId: orgId,
@@ -377,29 +361,24 @@ const checkout = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * List the current customer's orders
- * GET /api/aftermarket/orders/mine  (authenticated customer)
- */
 const getMyOrders = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId;
+  const orgId = await resolveCustomerOrg(req);
   const customerId = (req.user as { _id: mongoose.Types.ObjectId })?._id;
   if (!customerId) throw new ApiError(401, 'Not authenticated');
 
-  const orders = await AftermarketOrder.find({ customerId, organizationId: orgId }).sort({
-    createdAt: -1,
-  });
+  const filter: Record<string, unknown> = { customerId };
+  if (orgId) filter.organizationId = orgId;
+
+  const orders = await AftermarketOrder.find(filter).sort({ createdAt: -1 });
 
   res.json(new ApiResponse(200, orders, 'Orders fetched'));
 });
 
 export default {
-  // admin
   createProduct,
   updateProduct,
   deleteProduct,
   getProductsForCrm,
-  // customer
   getProductsForCustomer,
   getProductById,
   checkout,
