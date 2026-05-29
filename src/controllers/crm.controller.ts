@@ -9,7 +9,8 @@ import {
   CRM_TOKEN_COOKIE,
 } from "../middleware/crmAuth.middleware";
 import emailService from "../services/email.service";
-import { getSocketIO } from "../utils/socketEmitter";
+import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
+import CrmPushService from "../services/crmPush.service";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -232,18 +233,40 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Emit real-time event to tray app and CRM
+  // Emit real-time event to tray app / CRM and to Live Shift Board
   try {
     const io = getSocketIO();
+    const payload = {
+      _id: timeLog._id,
+      type: timeLog.type,
+      timestamp: timeLog.timestamp,
+      userId: user._id.toString(),
+      ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
+      ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
+      ...(type === "break-out" && { totalBreakSeconds }),
+    };
     if (io) {
-      io.to(`user:${user._id.toString()}`).emit(type, {
-        _id: timeLog._id,
-        type: timeLog.type,
-        timestamp: timeLog.timestamp,
-        ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
-        ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
-        ...(type === "break-out" && { totalBreakSeconds }),
-      });
+      io.to(`user:${user._id.toString()}`).emit(type, payload);
+    }
+    // Also notify the Live Shift Board so admins see instant updates
+    emitToShiftBoard(type, payload);
+
+    // When a user ends shift early with a reason, notify admins immediately
+    if (type === 'time-out' && note) {
+      const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+      const earlyEndPayload = { userId: user._id, fullName: user.fullName, reason: note, at: new Date() };
+      for (const admin of admins) {
+        emitToUser(admin._id.toString(), 'crm:early-end', earlyEndPayload);
+      }
+      emitToShiftBoard('crm:early-end', earlyEndPayload);
+      // Push notification to all admin devices (desktop, mobile, tablet)
+      CrmPushService.sendToAdmins({
+        title: '🚪 Early End Shift',
+        body: `${user.fullName} ended their shift early.\nReason: ${note}`,
+        icon: '/icon-192x192.png',
+        tag: `crm-early-end-${user._id}`,
+        data: { url: '/crm/timeproof' },
+      }).catch(() => {});
     }
   } catch (error) {
     console.error("Failed to emit time log event:", error);

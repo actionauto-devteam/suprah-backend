@@ -7,6 +7,7 @@ import {
   getUserTimeproof,
   exportTimeproof,
   getShiftState,
+  getResumableShift,
   postHeartbeat,
   postActivityInterval,
   getMyAgentStatus,
@@ -28,6 +29,7 @@ router.get('/export', exportTimeproof);
 
 // Agent / tray app endpoints
 router.get('/shift-state', getShiftState);
+router.get('/resumable-shift', getResumableShift);
 router.get('/my-agent', getMyAgentStatus);
 router.post('/heartbeat', postHeartbeat);
 router.post('/activity-interval', postActivityInterval);

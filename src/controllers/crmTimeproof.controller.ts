@@ -9,7 +9,7 @@ import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
-import { emitToUser } from '../utils/socketEmitter';
+import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
 import CrmPushService from '../services/crmPush.service';
 
 const BREAK_LIMIT_SECONDS = 3600; // 3600
@@ -636,13 +636,24 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     timestamp: { $gte: lookbackStart },
   }).sort({ timestamp: 1 }).lean();
 
-  const timeIns   = logs.filter(l => l.type === 'time-in');
-  const timeOuts  = logs.filter(l => l.type === 'time-out');
-  const breakIns  = logs.filter(l => l.type === 'break-in');
-  const breakOuts = logs.filter(l => l.type === 'break-out');
+  const timeIns  = logs.filter(l => l.type === 'time-in');
+  const timeOuts = logs.filter(l => l.type === 'time-out');
 
-  const isOnShift  = timeIns.length > timeOuts.length;
-  const isOnBreak  = breakIns.length > breakOuts.length;
+  const isOnShift = timeIns.length > timeOuts.length;
+
+  // Scope break detection to the current session only (logs after the most recent
+  // time-in). Without this, a stale unpaired break-in from a previous session in
+  // the 2-day lookback window falsely sets isOnBreak=true and wipes the timer.
+  const lastTimeIn = isOnShift && timeIns.length > 0
+    ? new Date(timeIns[timeIns.length - 1].timestamp)
+    : null;
+  const sessionLogs = lastTimeIn
+    ? logs.filter(l => new Date(l.timestamp) >= lastTimeIn!)
+    : logs;
+  const breakIns  = sessionLogs.filter(l => l.type === 'break-in');
+  const breakOuts = sessionLogs.filter(l => l.type === 'break-out');
+
+  const isOnBreak = breakIns.length > breakOuts.length;
 
   const shiftStartedAt = isOnShift ? timeIns.at(-1)!.timestamp : null;
   const breakStartedAt = isOnBreak ? breakIns.at(-1)!.timestamp : null;
@@ -692,16 +703,15 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const todayTotalActiveSeconds = activityIntervalTotal > 0 ? activityIntervalTotal : todayTotalWorkedSeconds;
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
+  // When on break the tray sets activityStartMs=null so the heartbeat already sends
+  // currentIntervalStartAt=null — no need to override here, and overriding based on
+  // the computed isOnBreak flag causes false-nulls when break logs are stale.
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
-  // Before the tray sends its first heartbeat, fall back to shiftStartedAt so the CRM
-  // timer counts from clock-in instead of showing 00:00 until the heartbeat arrives.
-  // Only apply this fallback for same-day shifts — if the shift started on a previous
-  // MDT day, returning that timestamp would make the CRM timer jump to 20+ hours.
   const isShiftFromToday = shiftStartedAt
     ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC
     : false;
   const currentIntervalStartAt = rawIntervalStart ??
-    (isOnShift && !isOnBreak && isShiftFromToday
+    (isOnShift && isShiftFromToday
       ? new Date(shiftStartedAt!).toISOString()
       : null);
 
@@ -724,7 +734,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
  */
 export const getMyAgentStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const OFFLINE_THRESHOLD_MS = 2 * 60 * 1000;
+  const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
 
   const hb = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const isOnline = hb
@@ -784,14 +794,11 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   // ── Notify admins: agent went idle ────────────────────────────────────────
   if (!wasIdle && isIdle && isOnShift) {
     const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    const idlePayload = { userId: user._id, fullName: user.fullName, isIdle: true, at: new Date() };
     for (const admin of admins) {
-      emitToUser(admin._id.toString(), 'agent:idle', {
-        userId: user._id,
-        fullName: user.fullName,
-        isIdle: true,
-        at: new Date(),
-      });
+      emitToUser(admin._id.toString(), 'agent:idle', idlePayload);
     }
+    emitToShiftBoard('agent:idle', idlePayload);
 
     // Push notification to admins across all devices
     CrmPushService.sendToAdmins({
@@ -842,7 +849,9 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, 'Access denied');
   }
 
-  const OFFLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+  // 5-minute window: tray heartbeats every 60s, so a user needs to miss 4
+  // consecutive heartbeats before appearing offline — resilient to network hiccups.
+  const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
   const now = new Date();
 
   const users = await CrmUser.find({ isActive: true }).select('-password').lean();
@@ -854,7 +863,9 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
 
   const agents = users.map(u => {
     const hb = hbMap.get(u._id.toString());
-    const isOnline = hb ? now.getTime() - new Date(hb.lastSeenAt).getTime() < OFFLINE_THRESHOLD_MS : false;
+    // Online if tray heartbeat is fresh OR CRM tab is open (active socket connection)
+    const isOnline = isCrmUserOnline(u._id.toString()) ||
+      (hb ? now.getTime() - new Date(hb.lastSeenAt).getTime() < OFFLINE_THRESHOLD_MS : false);
 
     const isOnBreak = isOnline && (hb?.isOnBreak ?? false);
     return {
@@ -1052,6 +1063,39 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
 });
 
+/**
+ * GET /api/crm/timeproof/resumable-shift
+ * Returns whether the user has a clock-out today they can resume from.
+ * Used by the CRM dashboard to show a "Resume Shift?" prompt on Start Shift.
+ */
+export const getResumableShift = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+
+  const todayLogs = await TimeLog.find({
+    userId: user._id,
+    timestamp: { $gte: new Date(todayMDTStartUTC) },
+  }).sort({ timestamp: 1 }).lean();
+
+  const timeIns  = todayLogs.filter(l => l.type === 'time-in');
+  const timeOuts = todayLogs.filter(l => l.type === 'time-out');
+
+  // Resumable only if user has clocked in AND clocked out today (not currently on shift)
+  const isOnShift = timeIns.length > timeOuts.length;
+  const hasClockOutToday = timeOuts.length > 0;
+  const resumable = !isOnShift && hasClockOutToday;
+
+  const originalClockIn = resumable && timeIns.length > 0
+    ? new Date(timeIns[0].timestamp).toISOString()
+    : null;
+
+  res.json(new ApiResponse(200, { resumable, originalClockIn }, 'Resumable shift checked'));
+});
+
 export default {
   getMyTimeproof,
   getAllUsersTimeproof,
@@ -1060,6 +1104,7 @@ export default {
   postHeartbeat,
   postActivityInterval,
   getAgentStatus,
+  getResumableShift,
   submitScreenshot,
   getScreenshots,
   subscribeCrmPush,

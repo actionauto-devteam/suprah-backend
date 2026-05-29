@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import config from './config';
 import logger from './utils/logger';
 import User from './models/User.model';
+import CrmUser from './models/CrmUser.model';
+import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard } from './utils/socketEmitter';
 
 interface AuthSocket extends Socket {
   userId?: string;
@@ -62,6 +64,28 @@ export const setupSocket = (io: Server) => {
     if (socket.organizationId) {
       socket.join(`org:${socket.organizationId}`);
     }
+
+    // CRM presence tracking: mark online + join shift-board room if admin/manager
+    if (socket.role === 'crm' && socket.userId) {
+      addCrmOnlineUser(socket.userId);
+      CrmUser.findById(socket.userId).select('role fullName').lean()
+        .then((crmUser: any) => {
+          if (!crmUser) return;
+          if (['admin', 'manager'].includes(crmUser.role)) {
+            socket.join('crm:shift-board');
+          }
+          emitToShiftBoard('crm:presence', { userId: socket.userId, online: true });
+        })
+        .catch(() => {});
+    }
+
+    // Allow any CRM user to manually join the shift-board room (Live Shift Board page)
+    socket.on('join_shift_board', () => {
+      socket.join('crm:shift-board');
+    });
+    socket.on('leave_shift_board', () => {
+      socket.leave('crm:shift-board');
+    });
 
     // --- Admin Monitoring Room ---
     socket.on('join_system_monitoring', () => {
@@ -133,6 +157,10 @@ export const setupSocket = (io: Server) => {
 
     socket.on('disconnect', async () => {
       logger.info({ userId: socket.userId }, 'Socket disconnected');
+      if (socket.role === 'crm' && socket.userId) {
+        removeCrmOnlineUser(socket.userId);
+        emitToShiftBoard('crm:presence', { userId: socket.userId, online: false });
+      }
       if (socket.userId) {
         try {
           const MANUAL_STATUSES = ['away', 'busy', 'do_not_disturb'];
