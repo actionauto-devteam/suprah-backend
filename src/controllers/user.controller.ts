@@ -29,7 +29,6 @@ const searchUsers = asyncHandler(async (req: Request, res: Response) => {
             ]
         };
 
-        // Exclude current user if specified
         if (excludeSelf === 'true') {
             searchCriteria._id = { $ne: currentUserId };
         }
@@ -71,7 +70,6 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
 
-    // Don't allow updating sensitive fields through this method
     const sensitiveFields = [
         'password', 'email', 'role', 'googleId', 'emailVerified',
         'isApproved', 'onboardingCompleted', 'otpCode', 'otpExpiresAt',
@@ -119,6 +117,12 @@ const getUserOrganizations = asyncHandler(async (req: Request, res: Response) =>
     res.json(new ApiResponse(200, organizations, 'User organizations fetched successfully'));
 });
 
+/**
+ * POST /api/users/me/select-org
+ *
+ * Used AFTER onboarding is complete to switch between orgs the user already
+ * belongs to. Requires prior membership (owner or member).
+ */
 const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { organizationId } = req.body;
     const userId = (req.user as IUser)._id;
@@ -133,7 +137,7 @@ const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
         return res.status(404).json(new ApiResponse(404, null, 'Organization not found'));
     }
 
-    // Verify membership
+    // Verify prior membership — this route is for switching, not joining
     const isOwner = organization.ownerId.toString() === userId.toString();
     const isMember = organization.members?.some((id: any) => id.toString() === userId.toString());
 
@@ -147,12 +151,12 @@ const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
         userId,
         {
             organizationId: organization._id,
-            organizationRole: role
+            organizationRole: role,
+            onboardingCompleted: true,
         },
         { new: true }
     ).select('-password');
 
-    // ← CACHE INVALIDATION FIX: Clear cache so next request fetches fresh user data
     invalidateUserCache(userId.toString());
 
     await activityService.createActivity({
@@ -170,10 +174,113 @@ const selectOrganization = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, user, `Selected organization: ${organization.name}`));
 });
 
+/**
+ * POST /api/users/me/join-org
+ *
+ * Used DURING onboarding (step 2) when a customer picks the dealership they
+ * purchased from. No prior membership required — this IS the join action.
+ * Sets onboardingCompleted: true so the user won't be redirected back here.
+ */
+const joinOnboardingOrg = asyncHandler(async (req: Request, res: Response) => {
+    const { organizationId } = req.body;
+    const userId = (req.user as IUser)._id;
+
+    if (!organizationId) {
+        return res.status(400).json(new ApiResponse(400, null, 'Organization ID is required'));
+    }
+
+    const organization = await Organization.findById(organizationId);
+
+    if (!organization) {
+        return res.status(404).json(new ApiResponse(404, null, 'Organization not found'));
+    }
+
+    const user = await User.findByIdAndUpdate(
+        userId,
+        {
+            organizationId: organization._id,
+            organizationRole: 'member',
+            onboardingCompleted: true,
+        },
+        { new: true }
+    ).select('-password');
+
+    if (!user) {
+        return res.status(404).json(new ApiResponse(404, null, 'User not found'));
+    }
+
+    invalidateUserCache(userId.toString());
+
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: organization._id.toString(),
+        type: 'other',
+        title: 'Joined Dealership',
+        description: `Customer joined dealership during onboarding: ${organization.name}`,
+        metadata: { organizationId: organization._id },
+        ipAddress: req.ip,
+    });
+
+    logger.info({ userId: user._id, orgId: organization._id }, 'Customer joined org during onboarding');
+
+    res.json(new ApiResponse(200, user, `Joined ${organization.name} successfully`));
+});
+
+/**
+ * POST /api/users/me/complete-onboarding
+ *
+ * Step 1 of the onboarding flow. Sets the user's role:
+ *   - 'customer'   → role stays 'customer', proceed to org selection (skipOrgSelect: false)
+ *   - 'dealership' → role set to 'employee', onboarding marked complete (skipOrgSelect: true)
+ */
+const completeOnboarding = asyncHandler(async (req: Request, res: Response) => {
+    const { role } = req.body;
+    const userId = (req.user as IUser)._id;
+
+    const validRoles = ['customer', 'dealership'];
+    if (!role || !validRoles.includes(role)) {
+        return res.status(400).json(new ApiResponse(400, null, 'Invalid role. Must be "customer" or "dealership"'));
+    }
+
+    const mappedRole = role === 'dealership' ? 'employee' : 'customer';
+    const skipOrgSelect = role === 'dealership';
+
+    const user = await User.findByIdAndUpdate(
+        userId,
+        {
+            role: mappedRole,
+            ...(skipOrgSelect && { onboardingCompleted: true }),
+        },
+        { new: true }
+    ).select('-password');
+
+    if (!user) {
+        return res.status(404).json(new ApiResponse(404, null, 'User not found'));
+    }
+
+    invalidateUserCache(userId.toString());
+
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: user.organizationId?.toString(),
+        type: 'other',
+        title: 'Onboarding Role Set',
+        description: `User selected role: ${role}`,
+        metadata: { role, mappedRole, skipOrgSelect },
+        ipAddress: req.ip,
+    });
+
+    logger.info({ userId: user._id, role: mappedRole, skipOrgSelect }, 'Onboarding role set');
+
+    res.json(new ApiResponse(200, { ...user.toObject(), skipOrgSelect }, 'Role set successfully'));
+});
+
 export default {
     searchUsers,
     getProfile,
     updateProfile,
     getUserOrganizations,
-    selectOrganization
+    selectOrganization,
+    joinOnboardingOrg,
+    completeOnboarding,
 };
