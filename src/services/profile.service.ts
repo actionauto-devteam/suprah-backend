@@ -183,14 +183,18 @@ const updateProfile = async (userId: string, updateData: {
 /**
  * Update online status
  */
-const updateOnlineStatus = async (userId: string, status: OnlineStatus, customStatus?: string) => {
+const updateOnlineStatus = async (userId: string, status: OnlineStatus, customStatus?: string, statusExpiresAt?: Date | null) => {
   const updateData: Record<string, unknown> = {
     onlineStatus: status,
     lastActive: new Date(),
   };
 
-  if (customStatus !== undefined) {
-    updateData.customStatus = customStatus;
+  if (customStatus !== undefined) updateData.customStatus = customStatus;
+
+  if (statusExpiresAt !== undefined) {
+    updateData.statusExpiresAt = statusExpiresAt;
+  } else if (status === 'online') {
+    updateData.statusExpiresAt = null;
   }
 
   const user = await User.findByIdAndUpdate(

@@ -6,6 +6,14 @@ export type NoteColor =
 
 export type AnnouncementType = 'general' | 'important' | 'urgent' | 'reminder' | 'event';
 
+export interface IBoardNoteAttachment {
+  url: string;
+  fileKey: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface IBoardNote extends Document {
   organizationId: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
@@ -20,11 +28,26 @@ export interface IBoardNote extends Document {
   durationDays?: number | null;
   expiresAt?: Date | null;
   sortOrder?: number;
+  postedAt?: Date | null;
+  attachments: IBoardNoteAttachment[];
+  requiresAck: boolean;
+  ackedBy: mongoose.Types.ObjectId[];
   createdAt: Date;
   updatedAt: Date;
 }
 
 export interface IBoardNoteModel extends Model<IBoardNote> {}
+
+const BoardNoteAttachmentSchema = new Schema<IBoardNoteAttachment>(
+  {
+    url:          { type: String, required: true },
+    fileKey:      { type: String, required: true },
+    originalName: { type: String, required: true },
+    mimeType:     { type: String, required: true },
+    size:         { type: Number, required: true },
+  },
+  { _id: false }
+);
 
 const BoardNoteSchema = new Schema<IBoardNote>(
   {
@@ -45,6 +68,10 @@ const BoardNoteSchema = new Schema<IBoardNote>(
     durationDays:     { type: Number, default: null },
     expiresAt:        { type: Date, default: null },
     sortOrder:        { type: Number, default: 0 },
+    postedAt:         { type: Date, default: null },
+    attachments:      { type: [BoardNoteAttachmentSchema], default: [] },
+    requiresAck:      { type: Boolean, default: false },
+    ackedBy:          { type: [Schema.Types.ObjectId], ref: 'User', default: [] },
   },
   { timestamps: true }
 );

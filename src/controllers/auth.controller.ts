@@ -14,9 +14,10 @@ import {
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
-import { userAuthCache, invalidateUserCache } from '../utils/cache.util';
-import Organization from '../models/Organization.model';
-import mongoose from 'mongoose';
+import { userAuthCache } from '../utils/cache.util';
+import jwt from 'jsonwebtoken';
+import CrmUser from '../models/CrmUser.model';
+
 
 class AuthController {
     /**
@@ -229,6 +230,9 @@ class AuthController {
     });
 
     /**
+     * Handle OAuth Callback (Internal)
+     */
+    /**
      * Resend verification OTP
      */
     resendOTP = asyncHandler(async (req: Request, res: Response) => {
@@ -239,105 +243,42 @@ class AuthController {
         res.json(new ApiResponse(200, null, 'Verification code resent successfully'));
     });
 
-    /**
-     * Step 1 of customer onboarding — set role.
-     *
-     * - Dealers: flip onboardingCompleted immediately (they create their own org).
-     * - Customers: set role only; onboardingCompleted stays false until
-     *   selectOnboardingOrg is called in step 2.
-     */
     completeOnboarding = asyncHandler(async (req: any, res: Response) => {
         const { role } = completeOnboardingSchema.parse(req.body);
+        const result = await authService.completeOnboarding(req.user._id, role);
 
-        if (role === 'dealership') {
-            // Delegate to the existing service — it handles org creation etc.
-            const result = await authService.completeOnboarding(req.user._id, role);
-            invalidateUserCache(req.user._id.toString());
-
-            return res.status(200).json(
-                new ApiResponse(200, { ...result, skipOrgSelect: true }, 'Onboarding completed successfully')
-            );
-        }
-
-        // Customer path — set role but do NOT complete onboarding yet.
-        // The user must pick an org in step 2 before the flag is flipped.
-        const result = await authService.completeOnboarding(req.user._id, role, { skipComplete: true });
-        invalidateUserCache(req.user._id.toString());
+        // Invalidate auth cache so the new onboarding status is picked up immediately
+        userAuthCache.delete(req.user._id.toString());
 
         res.status(200).json(
-            new ApiResponse(200, { ...result, skipOrgSelect: false }, 'Role set. Please select your dealership.')
+            new ApiResponse(200, result, 'Onboarding completed successfully')
         );
     });
 
-    /**
-     * Step 2 of customer onboarding — link org and complete.
-     *
-     * Receives { organizationId } in the body.
-     * Sets user.organizationId, user.organizationRole = 'member',
-     * and flips onboardingCompleted = true.
-     * Only callable by users whose role is 'customer' and whose
-     * onboardingCompleted is still false.
-     */
-    selectOnboardingOrg = asyncHandler(async (req: any, res: Response) => {
-        const { organizationId } = req.body;
 
-        if (!organizationId) {
-            throw new ApiError(400, 'organizationId is required');
-        }
-
-        const user = req.user;
-
-        // Guard: only customers who haven't finished onboarding
-        if (user.role !== 'customer') {
-            throw new ApiError(403, 'Only customers need to select a dealership during onboarding');
-        }
-
-        if (user.onboardingCompleted) {
-            throw new ApiError(409, 'Onboarding is already complete');
-        }
-
-        const org = await Organization.findById(organizationId);
-        if (!org) {
-            throw new ApiError(404, 'Organization not found');
-        }
-        if (org.status === 'suspended') {
-            throw new ApiError(403, 'This dealership is currently unavailable');
-        }
-
-        user.organizationId = org._id as mongoose.Types.ObjectId;
-        (user as any).organizationRole = 'member';
-        user.onboardingCompleted = true;
-        await user.save();
-
-        invalidateUserCache(user._id.toString());
-
-        await activityService.createActivity({
-            userId: user._id.toString(),
-            organizationId: org._id.toString(),
-            type: 'other',
-            title: 'Customer joined organization',
-            description: `Customer completed onboarding and joined ${org.name}`,
-            ipAddress: req.ip,
-            userAgent: req.get('user-agent'),
-        });
-
-        logger.info({ userId: user._id, orgId: org._id }, 'Customer completed onboarding with org');
-
-        // Return the updated user (strip password just in case)
-        const updatedUser = user.toObject ? user.toObject() : user;
-        delete updatedUser.password;
-
-        res.status(200).json(
-            new ApiResponse(200, { user: updatedUser }, 'Onboarding completed successfully')
-        );
-    });
-
-    /**
-     * Handle OAuth Callback (Internal)
-     */
     handleOAuthCallback = async (user: any) => {
         return await authService.handleOAuthCallback(user);
     };
+
+    getCrmSsoToken = asyncHandler(async (req: Request, res: Response) => {
+        const mainUser = (req as any).user;
+        if (!mainUser?.email) throw new ApiError(401, 'Unauthorized');
+
+        const crmUser = await CrmUser.findOne({ email: mainUser.email })
+            .select('_id email fullName role')
+            .lean();
+
+        if (!crmUser) throw new ApiError(404, 'No CRM account found for this user. Contact your admin.');
+
+        const CRM_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+        const token = jwt.sign(
+            { id: crmUser._id, role: crmUser.role },
+            CRM_SECRET,
+            { expiresIn: '30d' }
+        );
+
+        res.json(new ApiResponse(200, { token, crmUserId: crmUser._id.toString() }, 'CRM token issued'));
+    });
 }
 
 export default new AuthController();

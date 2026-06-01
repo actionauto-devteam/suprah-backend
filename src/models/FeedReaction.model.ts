@@ -13,7 +13,7 @@ export interface IFeedReaction extends Document {
   organizationId: mongoose.Types.ObjectId;
   userId:         mongoose.Types.ObjectId;
   authorName:     string;                  // Denormalised for display in "who reacted" lists
-  targetType:     'post' | 'comment';      // Polymorphic: reacts to either a post or a comment
+  targetType:     'post' | 'comment' | 'board_note';
   targetId:       mongoose.Types.ObjectId; // The Feed._id or FeedComment._id
   reaction:       ReactionType;
   createdAt:      Date;
@@ -44,7 +44,7 @@ const FeedReactionSchema = new Schema<IFeedReaction>(
     },
     targetType: {
       type: String,
-      enum: ['post', 'comment'],
+      enum: ['post', 'comment', 'board_note'],
       required: true,
     },
     targetId: {

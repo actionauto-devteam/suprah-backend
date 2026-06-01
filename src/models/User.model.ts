@@ -57,6 +57,11 @@ export interface IUser extends Document {
   personalInfo?: IPersonalInfo;
   lastActive?: Date;
   lastPasswordChange?: Date;
+  breakStatus?: {
+    isOnBreak: boolean;
+    startedAt?: Date;
+  };
+  statusExpiresAt?: Date;
   onboardingCompleted: boolean;
 
   passwordResetToken?: string;
@@ -211,6 +216,14 @@ const UserSchema = new Schema(
     lastActive: {
       type: Date,
       default: Date.now,
+    },
+    breakStatus: {
+      isOnBreak: { type: Boolean, default: false },
+      startedAt: { type: Date },
+    },
+    statusExpiresAt: {
+      type: Date,
+      default: null,
     },
     lastPasswordChange: {
       type: Date,

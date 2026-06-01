@@ -125,6 +125,12 @@ const NotificationSchema = new Schema(
         'referral_joined',
         'referral_rewarded',
 
+        // Team Pulse
+        'ping',
+        'absence_approved',
+        'absence_rejected',
+        'board_note_posted',
+
         // Legacy/Compatibility
         'proof_submitted',
         'delivery_confirmed',

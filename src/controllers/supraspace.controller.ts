@@ -6,10 +6,13 @@ import { ApiError } from '../utils/ApiError';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
 import jwt from 'jsonwebtoken';
+import config from '../config';
+import { IUser } from '../models/User.model';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -73,12 +76,22 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   if (!targetUserId) throw new ApiError(400, 'targetUserId is required');
   if (targetUserId === userId.toString()) throw new ApiError(400, 'Cannot DM yourself');
 
-  const target = await CrmUser.findById(targetUserId);
+  let target = await CrmUser.findById(targetUserId).lean();
+
+  if (!target) {
+    const mainUser = await User.findById(targetUserId).select('email').lean();
+    if (mainUser?.email) {
+      target = await CrmUser.findOne({ email: mainUser.email }).lean();
+    }
+  }
+
   if (!target) throw new ApiError(404, 'User not found');
+
+  const resolvedTargetId = target._id;
 
   let conversation = await SupraSpaceConversation.findOne({
     type: 'direct',
-    members: { $all: [userId, targetUserId], $size: 2 },
+    members: { $all: [userId, resolvedTargetId], $size: 2 },
   })
     .populate('members', 'fullName username avatar role')
     .populate({
@@ -89,13 +102,12 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   if (!conversation) {
     conversation = await SupraSpaceConversation.create({
       type: 'direct',
-      members: [userId, targetUserId],
+      members: [userId, resolvedTargetId],
       admins: [],
       createdBy: userId,
     });
     await conversation.populate('members', 'fullName username avatar role');
   } else {
-    // Un-hide for the requester if previously deleted
     if (idIn(conversation.deletedFor as any, userId)) {
       conversation.deletedFor = (conversation.deletedFor as any).filter(
         (m: any) => m.toString() !== userId.toString()
@@ -748,7 +760,22 @@ const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { token, roomName }, 'Video token generated'));
 });
 
+const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
+  const mainUser = req.user as IUser;
+  const crmUser = await CrmUser.findOne({ email: mainUser.email }).select('_id').lean();
+  if (!crmUser) throw new ApiError(404, 'No CRM account linked to this user. Please contact your administrator.');
+
+  const token = jwt.sign(
+    { id: crmUser._id.toString() },
+    config.jwt.crmJwtSecret || 'crm-secret-key',
+    { expiresIn: '30d' }
+  );
+
+  res.json(new ApiResponse(200, { token }, 'Session token issued'));
+});
+
 const supraSpaceController = {
+  getSessionToken,
   getConversations,
   getOrCreateDirect,
   createGroup,
