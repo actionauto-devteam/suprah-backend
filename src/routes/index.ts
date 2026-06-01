@@ -44,6 +44,7 @@ import teamPulseRoute from "./teamPulse.routes";
 import wiseRoute from "./wise.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
+import customerConcernRoute from "./customerConcern.route";
 
 const router = express.Router();
 
@@ -73,9 +74,6 @@ const defaultRoutes = [
     route: profileRoute,
   },
 
-  // NOTE: "/appointments/dashboard" MUST stay registered before "/appointments"
-  // so dashboard sub-paths (including the nested /chat and /vehicle-history
-  // routers defined inside appointmentDashboard.routes.ts) resolve correctly.
   {
     path: "/appointments/dashboard",
     route: appointmentDashboardRoute,
@@ -108,12 +106,12 @@ const defaultRoutes = [
     path: "/invitations",
     route: invitationRoute,
   },
-    {
-    path: "/crm/aftermarket",  
+  {
+    path: "/crm/aftermarket",
     route: crmAftermarketRoute,
   },
   {
-    path: "/aftermarket",       
+    path: "/aftermarket",
     route: aftermarketRoute,
   },
   {
@@ -194,23 +192,23 @@ const defaultRoutes = [
   },
   {
     path: "/crm/feeds/reactions",
-    route: feedReactionRoute
+    route: feedReactionRoute,
   },
   {
     path: "/crm/feeds",
-    route: feedRoute
+    route: feedRoute,
   },
   {
     path: "/crm/feeds",
-    route: feedCommentRoute
+    route: feedCommentRoute,
   },
   {
     path: "/crm/biometric",
-    route: crmBiometricRoute
+    route: crmBiometricRoute,
   },
   {
     path: "/crm/daypulse",
-    route: dayPulseRoute
+    route: dayPulseRoute,
   },
   {
     path: "/org-lead",
@@ -231,6 +229,10 @@ const defaultRoutes = [
   {
     path: "/team-pulse",
     route: teamPulseRoute,
+  },
+  {
+    path: "/customer-concern",
+    route: customerConcernRoute,
   },
 ];
 
