@@ -2,6 +2,7 @@ import express, { RequestHandler } from 'express';
 import multer from 'multer';
 import supraSpaceController from '../controllers/supraspace.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
+import mainAuth from '../middleware/auth.middleware';
 import { uploadLimiter } from '../middleware/rate-limit.middleware';
 import { ApiError } from '../utils/ApiError';
 

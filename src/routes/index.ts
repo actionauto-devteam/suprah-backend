@@ -41,6 +41,8 @@ import feedReactionRoute from "./feedReaction.routes";
 import feedCommentRoute from "./feedComment.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
+import dealBoardRoute from "./dealBoard.routes";
+import scheduleRoute from "./schedule.routes";
 import wiseRoute from "./wise.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
@@ -233,6 +235,14 @@ const defaultRoutes = [
   {
     path: "/customer-concern",
     route: customerConcernRoute,
+  },
+  {
+    path: "/deal-board",
+    route: dealBoardRoute,
+  },
+  {
+    path: "/schedules",
+    route: scheduleRoute,
   },
 ];
 

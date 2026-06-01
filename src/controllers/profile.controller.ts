@@ -5,6 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
 import User from '../models/User.model';
+import PresenceEvent from '../models/PresenceEvent.model';
 import { emitToOrg } from '../utils/socketEmitter';
 
 /**
@@ -45,21 +46,37 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
 /**
  * Update online status
  */
+const PRESENCE_LOG_STATUSES = new Set(['offline', 'away', 'busy', 'do_not_disturb']);
+const PRESENCE_DESCS: Record<string, (name: string) => string> = {
+  online:           (n) => `${n} is back Online`,
+  offline:          (n) => `${n} went Offline`,
+  away:             (n) => `${n} is Away`,
+  busy:             (n) => `${n} set status to Busy`,
+  do_not_disturb:   (n) => `${n} set Do Not Disturb`,
+};
+
 const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const orgId = (req as any).orgId as string | undefined;
-  const { status, customStatus } = req.body;
+  const { status, customStatus, expiresIn } = req.body;
 
-  if (!status) {
-    throw new ApiError(400, 'Status is required');
-  }
+  if (!status) throw new ApiError(400, 'Status is required');
 
   const validStatuses = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'];
-  if (!validStatuses.includes(status)) {
-    throw new ApiError(400, 'Invalid status value');
-  }
+  if (!validStatuses.includes(status)) throw new ApiError(400, 'Invalid status value');
 
-  const user = await profileService.updateOnlineStatus(userId, status, customStatus);
+  const needsPrev = status === 'online';
+  const currentUser = (PRESENCE_LOG_STATUSES.has(status) || needsPrev)
+    ? await User.findById(userId).select('name avatar onlineStatus').lean()
+    : null;
+
+  const prevStatus = currentUser?.onlineStatus;
+
+  const statusExpiresAt = expiresIn && Number.isFinite(Number(expiresIn)) && Number(expiresIn) > 0
+    ? new Date(Date.now() + Number(expiresIn) * 60_000)
+    : null;
+
+  const user = await profileService.updateOnlineStatus(userId, status, customStatus, statusExpiresAt);
 
   if (orgId) {
     emitToOrg(orgId, 'presence_update', {
@@ -67,12 +84,28 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
       onlineStatus: status,
       customStatus: customStatus ?? null,
       lastActive: new Date().toISOString(),
+      statusExpiresAt: statusExpiresAt?.toISOString() ?? null,
     });
+
+    const shouldLog =
+      PRESENCE_LOG_STATUSES.has(status) ||
+      (status === 'online' && prevStatus && !['online', 'idle'].includes(prevStatus));
+
+    if (shouldLog && currentUser) {
+      const descFn = PRESENCE_DESCS[status];
+      const event = await PresenceEvent.create({
+        organizationId: orgId,
+        userId,
+        userName: currentUser.name,
+        userAvatar: currentUser.avatar,
+        type: status,
+        description: descFn ? descFn(currentUser.name) : `${currentUser.name} → ${status}`,
+      });
+      emitToOrg(orgId, 'activity:new', event);
+    }
   }
 
-  res.json(
-    new ApiResponse(200, user, 'Online status updated successfully')
-  );
+  res.json(new ApiResponse(200, user, 'Online status updated successfully'));
 });
 
 /**
@@ -238,28 +271,54 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+const MANUAL_STATUSES_SET = new Set(['away', 'busy', 'do_not_disturb']);
+
 const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const orgId = (req as any).orgId as string | undefined;
 
-  const current = await User.findById(userId).select('onlineStatus').lean();
-  const updateData: any = { lastActive: new Date() };
-  if (current?.onlineStatus === 'offline') {
+  const current = await User.findById(userId)
+    .select('onlineStatus customStatus statusExpiresAt name avatar')
+    .lean();
+
+  const now = new Date();
+  const updateData: any = { lastActive: now };
+  let statusExpired = false;
+
+  if (current?.statusExpiresAt && current.statusExpiresAt < now) {
+    updateData.onlineStatus = 'online';
+    updateData.customStatus = '';
+    updateData.statusExpiresAt = null;
+    statusExpired = true;
+  } else if (current?.onlineStatus === 'offline') {
     updateData.onlineStatus = 'online';
   }
 
   const updated = await User.findByIdAndUpdate(userId, updateData, { new: true })
-    .select('onlineStatus lastActive').lean();
+    .select('onlineStatus customStatus lastActive').lean();
 
   if (orgId && updated) {
     emitToOrg(orgId, 'presence_update', {
       userId: userId.toString(),
       onlineStatus: updated.onlineStatus,
+      customStatus: updated.customStatus ?? null,
       lastActive: updated.lastActive,
     });
+
+    if (statusExpired && current) {
+      const event = await PresenceEvent.create({
+        organizationId: orgId,
+        userId,
+        userName: current.name,
+        userAvatar: current.avatar,
+        type: 'online',
+        description: `${current.name} status cleared (expired)`,
+      });
+      emitToOrg(orgId, 'activity:new', event);
+    }
   }
 
-  res.json(new ApiResponse(200, null, 'ok'));
+  res.json(new ApiResponse(200, { onlineStatus: updated?.onlineStatus ?? 'online' }, 'ok'));
 });
 
 export default {
