@@ -6,15 +6,30 @@ import { ApiError } from '../utils/ApiError';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
-import CustomerUser from '../models/User.model'; 
-import { getIO } from '../socket/supraspace.socket';
+import Organization from '../models/Organization.model';
 import { storageService, BucketType } from '../services/storage.service';
+import { getIO } from '../socket/supraspace.socket';
 import logger from '../utils/logger';
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Helpers (mirrored from aftermarket.controller.ts) ──────────────────────
 
 const idIn = (arr: any[], id: any) =>
   (arr || []).map(String).includes(id.toString());
+
+/**
+ * Resolve the org a customer request should be scoped to.
+ * Identical logic to aftermarket.controller.ts resolveCustomerOrg.
+ */
+async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
+  if (req.orgId) return req.orgId;
+
+  const orgCount = await Organization.countDocuments({});
+  if (orgCount === 1) {
+    const only = await Organization.findOne().select('_id');
+    if (only) return only._id.toString();
+  }
+  return undefined;
+}
 
 function emitToConversation(conv: any, event: string, payload: any) {
   try {
@@ -41,8 +56,7 @@ async function signAttachments(message: any) {
 }
 
 /**
- * Returns all CRM users that should be auto-members of concern conversations.
- * Extend this as needed (e.g. filter by organizationId).
+ * All CRM staff who should be auto-members of every concern conversation.
  */
 async function getCrmStaffIds(): Promise<mongoose.Types.ObjectId[]> {
   const staff = await CrmUser.find({
@@ -52,135 +66,180 @@ async function getCrmStaffIds(): Promise<mongoose.Types.ObjectId[]> {
   return staff.map((u: any) => u._id);
 }
 
-// ─── Init / get concern conversation ───────────────────────────────────────
+/**
+ * Build a stable, valid ObjectId for a customer from their string id.
+ * The customer is not a CrmUser, so we derive a sentinel ID that is
+ * consistent across messages from the same customer.
+ */
+function customerSentinelId(customerId: string): mongoose.Types.ObjectId {
+  // Pad/truncate to 24 hex chars (12 bytes). This is deterministic per customer.
+  const hex = Buffer.from(customerId.padEnd(12, '\0').slice(0, 12)).toString('hex');
+  return new mongoose.Types.ObjectId(hex);
+}
+
+/**
+ * Lazily get or create the single concern conversation for a customer.
+ * orgId is used to scope staff membership in future multi-org setups.
+ */
+async function getOrCreateConcernConv(
+  customerId: string,
+  customerName: string,
+  customerEmail: string,
+  orgId?: string
+): Promise<any> {
+  let conversation = await SupraSpaceConversation.findOne({
+    'metadata.type': 'customer_concern',
+    'metadata.customerUserId': customerId,
+    isActive: true,
+  });
+
+  if (!conversation) {
+    const staffIds = await getCrmStaffIds();
+    conversation = await SupraSpaceConversation.create({
+      type: 'group',
+      name: `${customerName} — Support`,
+      members: staffIds,
+      admins: [],
+      createdBy: staffIds[0] || new mongoose.Types.ObjectId(),
+      metadata: {
+        type: 'customer_concern',
+        customerUserId: customerId,
+        customerName,
+        customerEmail,
+      },
+    });
+    emitToConversation(conversation, 'concern:new', conversation.toObject());
+  }
+
+  return conversation;
+}
+
+// ─── Customer-facing handlers ────────────────────────────────────────────────
+//
+// Auth: standard auth() middleware (same as aftermarket.route.ts).
+// User identity lives on req.user._id (mongoose ObjectId) and req.user.
+// Display name/email come from whatever fields your User model exposes —
+// the same fields aftermarket.controller.ts uses for the customer object.
 
 /**
  * GET /api/customer-concern/init
- *
- * Called by the customer UI on load. Returns (or lazily creates) the one
- * concern conversation for this customer.
- *
- * Requires: req.customerUser (set by customer auth middleware)
+ * Returns (or lazily creates) the concern conversation for the logged-in customer.
  */
 export const initConcernConversation = asyncHandler(
   async (req: Request, res: Response) => {
-    const customerId = (req as any).customerUser?._id;
-    if (!customerId) throw new ApiError(401, 'Not authenticated as customer');
+    const user = req.user as any;
+    if (!user?._id) throw new ApiError(401, 'Not authenticated');
 
-    const customer = await CustomerUser.findById(customerId).lean();
-    if (!customer) throw new ApiError(404, 'Customer not found');
+    const orgId = await resolveCustomerOrg(req);
+    if (!orgId) throw new ApiError(403, 'No organization context for this account.');
 
-    // Check for existing concern conversation
-    let conversation = await SupraSpaceConversation.findOne({
-      'metadata.type': 'customer_concern',
-      'metadata.customerUserId': customerId.toString(),
-      isActive: true,
-    })
-      .populate('members', 'fullName username avatar role')
-      .lean();
+    const customerId = user._id.toString();
+    const customerName =
+      user.fullName || user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Customer';
+    const customerEmail = user.email || user.primaryEmailAddress?.emailAddress || '';
 
-    if (!conversation) {
-      // Create new concern conversation with all CRM staff as members
-      const staffIds = await getCrmStaffIds();
-      const uniqueMembers = [...new Set([...staffIds.map(String)])];
+    const conversation = await getOrCreateConcernConv(customerId, customerName, customerEmail, orgId);
 
-      const newConv = await SupraSpaceConversation.create({
-        type: 'group', // stored as group so multi-staff can join
-        name: `${(customer as any).fullName || (customer as any).name || 'Customer'} — Support`,
-        members: uniqueMembers,
-        admins: [],
-        createdBy: staffIds[0] || new mongoose.Types.ObjectId(),
-        metadata: {
-          type: 'customer_concern',
-          customerUserId: customerId.toString(),
-          customerName: (customer as any).fullName || (customer as any).name || 'Customer',
-          customerEmail: (customer as any).email || '',
-        },
-      });
-
-      await newConv.populate('members', 'fullName username avatar role');
-
-      // Emit to all staff so the conversation appears immediately
-      emitToConversation(newConv, 'concern:new', newConv.toObject());
-
-      conversation = newConv.toObject() as any;
-    }
+    await SupraSpaceConversation.populate(conversation, {
+      path: 'members',
+      select: 'fullName username avatar role',
+    });
 
     res.json(new ApiResponse(200, conversation, 'Concern conversation ready'));
   }
 );
 
-// ─── Customer: send message ─────────────────────────────────────────────────
-
 /**
- * POST /api/customer-concern/messages
- * Body: { content, attachments? }
- *
- * Sends a message from the customer into their concern conversation.
- * The sender is stored as a virtual "customer sender" object because
- * customers are not CrmUsers — the message is tagged with
- * metadata.customerSender for display purposes.
+ * GET /api/customer-concern/messages
+ * Fetch message history for the customer's concern conversation.
  */
-export const customerSendMessage = asyncHandler(
+export const customerGetMessages = asyncHandler(
   async (req: Request, res: Response) => {
-    const customerId = (req as any).customerUser?._id;
-    if (!customerId) throw new ApiError(401, 'Not authenticated as customer');
+    const user = req.user as any;
+    if (!user?._id) throw new ApiError(401, 'Not authenticated');
 
-    const customer = await CustomerUser.findById(customerId).lean();
-    if (!customer) throw new ApiError(404, 'Customer not found');
+    const orgId = await resolveCustomerOrg(req);
+    if (!orgId) throw new ApiError(403, 'No organization context for this account.');
 
-    const { content, attachments, replyTo } = req.body;
-    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
-    if (!content?.trim() && !hasAttachments) {
-      throw new ApiError(400, 'Message content is required');
-    }
+    const customerId = user._id.toString();
+    const { before, limit = '40' } = req.query;
 
-    // Find or lazily create the concern conversation
-    let conversation = await SupraSpaceConversation.findOne({
+    const conversation = await SupraSpaceConversation.findOne({
       'metadata.type': 'customer_concern',
-      'metadata.customerUserId': customerId.toString(),
+      'metadata.customerUserId': customerId,
       isActive: true,
     });
 
     if (!conversation) {
-      // Lazy-create (same logic as initConcernConversation)
-      const staffIds = await getCrmStaffIds();
-      conversation = await SupraSpaceConversation.create({
-        type: 'group',
-        name: `${(customer as any).fullName || 'Customer'} — Support`,
-        members: staffIds,
-        admins: [],
-        createdBy: staffIds[0] || new mongoose.Types.ObjectId(),
-        metadata: {
-          type: 'customer_concern',
-          customerUserId: customerId.toString(),
-          customerName: (customer as any).fullName || (customer as any).name || 'Customer',
-          customerEmail: (customer as any).email || '',
-        },
-      });
-      emitToConversation(conversation, 'concern:new', conversation.toObject());
+      return res.json(new ApiResponse(200, [], 'No conversation yet'));
     }
 
-    // Use a sentinel ObjectId for the customer sender (not a real CrmUser).
-    // We tag metadata.customerSender with the display info instead.
-    const CUSTOMER_SENTINEL_ID = new mongoose.Types.ObjectId(
-      Buffer.from(customerId.toString().padEnd(24, '0').slice(0, 24), 'utf8').toString('hex').slice(0, 24)
-    );
+    const filter: any = { conversationId: conversation._id, isDeleted: false };
+    if (before) filter.createdAt = { $lt: new Date(before as string) };
+
+    const messages = await SupraSpaceMessage.find(filter)
+      .populate('sender', 'fullName username avatar')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit as string))
+      .lean();
+
+    // Hydrate the customer sender display info from metadata
+    const hydrated = messages.map((m: any) => {
+      if (m.metadata?.isCustomerMessage) {
+        m.sender = {
+          _id: m.metadata.customerUserId,
+          fullName: m.metadata.customerName || 'Customer',
+          avatar: m.metadata.customerAvatar || '',
+          isCustomer: true,
+        };
+      }
+      return m;
+    });
+
+    const signed = await Promise.all(hydrated.map(signAttachments));
+    res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
+  }
+);
+
+/**
+ * POST /api/customer-concern/messages
+ * Send a text message from the customer.
+ */
+export const customerSendMessage = asyncHandler(
+  async (req: Request, res: Response) => {
+    const user = req.user as any;
+    if (!user?._id) throw new ApiError(401, 'Not authenticated');
+
+    const orgId = await resolveCustomerOrg(req);
+    if (!orgId) throw new ApiError(403, 'No organization context for this account.');
+
+    const { content, replyTo } = req.body;
+    if (!content?.trim()) throw new ApiError(400, 'Message content is required');
+
+    const customerId = user._id.toString();
+    const customerName =
+      user.fullName || user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Customer';
+    const customerEmail = user.email || user.primaryEmailAddress?.emailAddress || '';
+    const customerAvatar = user.imageUrl || user.avatar || '';
+
+    const conversation = await getOrCreateConcernConv(customerId, customerName, customerEmail, orgId);
+
+    const sentinelId = customerSentinelId(customerId);
 
     const message = await SupraSpaceMessage.create({
       conversationId: conversation._id,
-      sender: CUSTOMER_SENTINEL_ID,
-      content: content?.trim() || '',
-      type: hasAttachments ? 'file' : 'text',
-      attachments: hasAttachments ? attachments : [],
+      sender: sentinelId,
+      content: content.trim(),
+      type: 'text',
+      attachments: [],
       replyTo: replyTo || null,
       readBy: [],
       metadata: {
         isCustomerMessage: true,
-        customerUserId: customerId.toString(),
-        customerName: (customer as any).fullName || (customer as any).name || 'Customer',
-        customerEmail: (customer as any).email || '',
-        customerAvatar: (customer as any).avatar || (customer as any).imageUrl || '',
+        customerUserId: customerId,
+        customerName,
+        customerEmail,
+        customerAvatar,
       },
     });
 
@@ -188,69 +247,47 @@ export const customerSendMessage = asyncHandler(
     conversation.lastMessageAt = message.createdAt;
     await conversation.save();
 
-    const msgObj = await signAttachments(message.toObject() as any);
-
-    // Attach virtual sender for the client so it renders correctly
-    (msgObj as any).sender = {
-      _id: CUSTOMER_SENTINEL_ID.toString(),
-      fullName: (customer as any).fullName || (customer as any).name || 'Customer',
-      avatar: (customer as any).avatar || (customer as any).imageUrl || '',
-      isCustomer: true,
-    };
+    const msgObj = message.toObject() as any;
+    msgObj.sender = { _id: customerId, fullName: customerName, avatar: customerAvatar, isCustomer: true };
 
     emitToConversation(conversation, 'message:new', {
       conversationId: conversation._id.toString(),
       message: msgObj,
     });
 
-    // Also emit a dedicated event for the CRM concern tab badge / notification
-    getIO()
-      .to('crm:staff')
-      .emit('concern:message', {
+    try {
+      getIO().to('crm:staff').emit('concern:message', {
         conversationId: conversation._id.toString(),
-        customerName: (customer as any).fullName || 'Customer',
-        preview: content?.trim()?.slice(0, 80) || '📎 Attachment',
+        customerName,
+        preview: content.trim().slice(0, 80),
       });
+    } catch {}
 
     res.status(201).json(new ApiResponse(201, msgObj, 'Message sent'));
   }
 );
 
-// ─── Customer: upload attachment ────────────────────────────────────────────
-
+/**
+ * POST /api/customer-concern/upload
+ * Upload file attachments from the customer.
+ */
 export const customerUploadAttachment = asyncHandler(
   async (req: Request, res: Response) => {
-    const customerId = (req as any).customerUser?._id;
-    if (!customerId) throw new ApiError(401, 'Not authenticated as customer');
+    const user = req.user as any;
+    if (!user?._id) throw new ApiError(401, 'Not authenticated');
 
-    const customer = await CustomerUser.findById(customerId).lean();
-    if (!customer) throw new ApiError(404, 'Customer not found');
+    const orgId = await resolveCustomerOrg(req);
+    if (!orgId) throw new ApiError(403, 'No organization context for this account.');
 
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) throw new ApiError(400, 'No files uploaded');
 
-    let conversation = await SupraSpaceConversation.findOne({
-      'metadata.type': 'customer_concern',
-      'metadata.customerUserId': customerId.toString(),
-      isActive: true,
-    });
+    const customerId = user._id.toString();
+    const customerName =
+      user.fullName || user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Customer';
+    const customerEmail = user.email || user.primaryEmailAddress?.emailAddress || '';
 
-    if (!conversation) {
-      const staffIds = await getCrmStaffIds();
-      conversation = await SupraSpaceConversation.create({
-        type: 'group',
-        name: `${(customer as any).fullName || 'Customer'} — Support`,
-        members: staffIds,
-        admins: [],
-        createdBy: staffIds[0] || new mongoose.Types.ObjectId(),
-        metadata: {
-          type: 'customer_concern',
-          customerUserId: customerId.toString(),
-          customerName: (customer as any).fullName || (customer as any).name || 'Customer',
-          customerEmail: (customer as any).email || '',
-        },
-      });
-    }
+    const conversation = await getOrCreateConcernConv(customerId, customerName, customerEmail, orgId);
 
     const attachments: any[] = [];
     for (const file of files) {
@@ -274,27 +311,24 @@ export const customerUploadAttachment = asyncHandler(
       });
     }
 
-    const CUSTOMER_SENTINEL_ID = new mongoose.Types.ObjectId(
-      Buffer.from(customerId.toString().padEnd(24, '0').slice(0, 24), 'utf8').toString('hex').slice(0, 24)
-    );
-
     const type =
-      attachments.length === 1 && attachments[0].mimeType.startsWith('image/')
-        ? 'image'
-        : 'file';
+      attachments.length === 1 && attachments[0].mimeType.startsWith('image/') ? 'image' : 'file';
+
+    const sentinelId = customerSentinelId(customerId);
 
     const message = await SupraSpaceMessage.create({
       conversationId: conversation._id,
-      sender: CUSTOMER_SENTINEL_ID,
+      sender: sentinelId,
       content: req.body.content?.trim() || '',
       type,
       attachments,
       readBy: [],
       metadata: {
         isCustomerMessage: true,
-        customerUserId: customerId.toString(),
-        customerName: (customer as any).fullName || (customer as any).name || 'Customer',
-        customerEmail: (customer as any).email || '',
+        customerUserId: customerId,
+        customerName,
+        customerEmail,
+        customerAvatar: user.imageUrl || user.avatar || '',
       },
     });
 
@@ -303,12 +337,7 @@ export const customerUploadAttachment = asyncHandler(
     await conversation.save();
 
     const msgObj = await signAttachments(message.toObject() as any);
-    (msgObj as any).sender = {
-      _id: CUSTOMER_SENTINEL_ID.toString(),
-      fullName: (customer as any).fullName || (customer as any).name || 'Customer',
-      avatar: (customer as any).avatar || '',
-      isCustomer: true,
-    };
+    msgObj.sender = { _id: customerId, fullName: customerName, avatar: user.imageUrl || '', isCustomer: true };
 
     emitToConversation(conversation, 'message:new', {
       conversationId: conversation._id.toString(),
@@ -319,73 +348,22 @@ export const customerUploadAttachment = asyncHandler(
   }
 );
 
-// ─── Customer: fetch messages ───────────────────────────────────────────────
-
-export const customerGetMessages = asyncHandler(
-  async (req: Request, res: Response) => {
-    const customerId = (req as any).customerUser?._id;
-    if (!customerId) throw new ApiError(401, 'Not authenticated as customer');
-
-    const { before, limit = '40' } = req.query;
-
-    const conversation = await SupraSpaceConversation.findOne({
-      'metadata.type': 'customer_concern',
-      'metadata.customerUserId': customerId.toString(),
-      isActive: true,
-    });
-
-    if (!conversation) {
-      return res.json(new ApiResponse(200, [], 'No conversation yet'));
-    }
-
-    const filter: any = { conversationId: conversation._id, isDeleted: false };
-    if (before) filter.createdAt = { $lt: new Date(before as string) };
-
-    const messages = await SupraSpaceMessage.find(filter)
-      .populate('sender', 'fullName username avatar')
-      .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit as string))
-      .lean();
-
-    // Hydrate customer sender metadata so the UI renders correctly
-    const hydrated = messages.map((m: any) => {
-      if (m.metadata?.isCustomerMessage) {
-        m.sender = {
-          _id: m.sender?._id || m.metadata.customerUserId,
-          fullName: m.metadata.customerName || 'Customer',
-          avatar: m.metadata.customerAvatar || '',
-          isCustomer: true,
-        };
-      }
-      return m;
-    });
-
-    const signed = await Promise.all(hydrated.map(signAttachments));
-    res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
-  }
-);
-
-// ─── CRM: list all concern conversations ───────────────────────────────────
+// ─── CRM staff handlers ───────────────────────────────────────────────────────
+// Auth: crmAuth() middleware — populates req.crmUser.
 
 /**
  * GET /api/customer-concern/crm/conversations
- *
- * Used by the new "Customer's Concern" tab in the Appointments page.
- * Returns all active concern conversations with last message preview,
- * sorted by most recent activity. Requires crmAuth.
+ * All concern conversations, newest first, with unread badge counts.
  */
 export const crmListConcernConversations = asyncHandler(
   async (req: Request, res: Response) => {
-    const { search, status } = req.query;
+    const { search } = req.query;
+    const crmUserId = (req as any).crmUser?._id;
 
-    const query: any = {
-      'metadata.type': 'customer_concern',
-      isActive: true,
-    };
+    const query: any = { 'metadata.type': 'customer_concern', isActive: true };
 
     if (search) {
-      const rx = new RegExp(search as string, 'i');
+      const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [
         { 'metadata.customerName': rx },
         { 'metadata.customerEmail': rx },
@@ -395,21 +373,16 @@ export const crmListConcernConversations = asyncHandler(
 
     const conversations = await SupraSpaceConversation.find(query)
       .populate('members', 'fullName username avatar role')
-      .populate({
-        path: 'lastMessage',
-        populate: { path: 'sender', select: 'fullName username avatar' },
-      })
+      .populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName username avatar' } })
       .sort({ lastMessageAt: -1, createdAt: -1 })
       .lean();
 
-    // Attach unread count per conversation for badge display
-    const userId = (req as any).crmUser?._id;
     const enriched = await Promise.all(
       conversations.map(async (c: any) => {
         const unread = await SupraSpaceMessage.countDocuments({
           conversationId: c._id,
           isDeleted: false,
-          readBy: { $ne: userId },
+          readBy: { $ne: crmUserId },
           'metadata.isCustomerMessage': true,
         });
         return { ...c, unreadCount: unread };
@@ -420,12 +393,13 @@ export const crmListConcernConversations = asyncHandler(
   }
 );
 
-// ─── CRM: get messages for a concern conversation ──────────────────────────
-
+/**
+ * GET /api/customer-concern/crm/conversations/:conversationId/messages
+ */
 export const crmGetConcernMessages = asyncHandler(
   async (req: Request, res: Response) => {
     const { conversationId } = req.params;
-    const userId = (req as any).crmUser?._id;
+    const crmUserId = (req as any).crmUser?._id;
     const { before, limit = '40' } = req.query;
 
     const conversation = await SupraSpaceConversation.findOne({
@@ -433,7 +407,6 @@ export const crmGetConcernMessages = asyncHandler(
       'metadata.type': 'customer_concern',
       isActive: true,
     });
-
     if (!conversation) throw new ApiError(404, 'Concern conversation not found');
 
     const filter: any = { conversationId, isDeleted: false };
@@ -441,15 +414,14 @@ export const crmGetConcernMessages = asyncHandler(
 
     const messages = await SupraSpaceMessage.find(filter)
       .populate('sender', 'fullName username avatar')
-      .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
       .sort({ createdAt: -1 })
       .limit(parseInt(limit as string))
       .lean();
 
-    // Mark as read
+    // Mark customer messages as read by this CRM user
     await SupraSpaceMessage.updateMany(
-      { conversationId, readBy: { $ne: userId } },
-      { $addToSet: { readBy: userId } }
+      { conversationId, 'metadata.isCustomerMessage': true, readBy: { $ne: crmUserId } },
+      { $addToSet: { readBy: crmUserId } }
     );
 
     const hydrated = messages.map((m: any) => {
@@ -469,25 +441,24 @@ export const crmGetConcernMessages = asyncHandler(
   }
 );
 
-// ─── CRM: reply to a concern conversation ──────────────────────────────────
-
+/**
+ * POST /api/customer-concern/crm/conversations/:conversationId/reply
+ */
 export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = (req as any).crmUser!;
   const { conversationId } = req.params;
-  const { content, attachments, replyTo } = req.body;
+  const { content, replyTo } = req.body;
 
-  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
-  if (!content?.trim() && !hasAttachments) throw new ApiError(400, 'Content is required');
+  if (!content?.trim()) throw new ApiError(400, 'Content is required');
 
   const conversation = await SupraSpaceConversation.findOne({
     _id: conversationId,
     'metadata.type': 'customer_concern',
     isActive: true,
   });
-
   if (!conversation) throw new ApiError(404, 'Concern conversation not found');
 
-  // Ensure this CRM user is a member (auto-add if not)
+  // Auto-add this CRM user as a member if they aren't already
   if (!idIn(conversation.members as any, crmUser._id)) {
     conversation.members.push(crmUser._id as any);
     await conversation.save();
@@ -496,9 +467,9 @@ export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) 
   const message = await SupraSpaceMessage.create({
     conversationId,
     sender: crmUser._id,
-    content: content?.trim() || '',
-    type: hasAttachments ? 'file' : 'text',
-    attachments: hasAttachments ? attachments : [],
+    content: content.trim(),
+    type: 'text',
+    attachments: [],
     replyTo: replyTo || null,
     readBy: [crmUser._id],
     metadata: {
@@ -516,28 +487,22 @@ export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) 
 
   const msgObj = await signAttachments(message.toObject() as any);
 
-  // Emit to the conversation room (staff) + the customer's personal room
-  emitToConversation(conversation, 'message:new', {
-    conversationId,
-    message: msgObj,
-  });
+  emitToConversation(conversation, 'message:new', { conversationId, message: msgObj });
 
-  // Emit to the customer's socket room so they receive the reply in real-time
-  const customerUserId = conversation.get('metadata.customerUserId');
+  // Notify the customer in real time
+  const customerUserId = (conversation as any).metadata?.customerUserId;
   if (customerUserId) {
     try {
-      getIO().to(`customer:${customerUserId}`).emit('concern:reply', {
-        conversationId,
-        message: msgObj,
-      });
+      getIO().to(`user:${customerUserId}`).emit('concern:reply', { conversationId, message: msgObj });
     } catch {}
   }
 
   res.status(201).json(new ApiResponse(201, msgObj, 'Reply sent'));
 });
 
-// ─── CRM: resolve / reopen concern ─────────────────────────────────────────
-
+/**
+ * PATCH /api/customer-concern/crm/conversations/:conversationId/resolve
+ */
 export const crmResolveConcern = asyncHandler(async (req: Request, res: Response) => {
   const { conversationId } = req.params;
   const { resolved } = req.body;
@@ -546,29 +511,25 @@ export const crmResolveConcern = asyncHandler(async (req: Request, res: Response
     _id: conversationId,
     'metadata.type': 'customer_concern',
   });
-
   if (!conversation) throw new ApiError(404, 'Concern conversation not found');
 
-  conversation.set('metadata.resolved', !!resolved);
-  conversation.set('metadata.resolvedAt', resolved ? new Date() : null);
+  (conversation as any).metadata.resolved = !!resolved;
+  (conversation as any).metadata.resolvedAt = resolved ? new Date() : null;
+  conversation.markModified('metadata');
   await conversation.save();
 
-  emitToConversation(conversation, 'concern:resolved', {
-    conversationId,
-    resolved: !!resolved,
-  });
+  emitToConversation(conversation, 'concern:resolved', { conversationId, resolved: !!resolved });
 
-  // Notify the customer
-  const customerUserId = conversation.get('metadata.customerUserId');
+  const customerUserId = (conversation as any).metadata?.customerUserId;
   if (customerUserId) {
     try {
       getIO()
-        .to(`customer:${customerUserId}`)
+        .to(`user:${customerUserId}`)
         .emit('concern:resolved', { conversationId, resolved: !!resolved });
     } catch {}
   }
 
   res.json(
-    new ApiResponse(200, { conversationId, resolved }, resolved ? 'Concern resolved' : 'Concern reopened')
+    new ApiResponse(200, { conversationId, resolved: !!resolved }, resolved ? 'Concern resolved' : 'Concern reopened')
   );
 });

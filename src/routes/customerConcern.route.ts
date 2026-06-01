@@ -10,7 +10,7 @@ import {
   crmReplyConcern,
   crmResolveConcern,
 } from '../controllers/customerConcern.controller';
-import customerAuth from '../middleware/auth.middleware'; 
+import auth from '../middleware/auth.middleware';   
 import crmAuth from '../middleware/crmAuth.middleware';
 import { uploadLimiter } from '../middleware/rate-limit.middleware';
 import { ApiError } from '../utils/ApiError';
@@ -39,24 +39,22 @@ const uploadFiles: RequestHandler = (req, res, next) => {
   });
 };
 
-// ─── Customer-facing routes ─────────────────────────────────────────────────
+// ─── Customer-facing routes ───────────────────────────────────────────────────
+// Protected by the standard auth() middleware — the exact same one used in
+// aftermarket.route.ts. It populates req.user and req.orgId so the controller
+// can call resolveCustomerOrg(req) without any additional setup.
 
-router.get('/init', customerAuth(), initConcernConversation);
-router.get('/messages', customerAuth(), customerGetMessages);
-router.post('/messages', customerAuth(), customerSendMessage);
-router.post(
-  '/upload',
-  customerAuth(),
-  uploadLimiter,
-  uploadFiles,
-  customerUploadAttachment
-);
+router.get('/init',     auth(), initConcernConversation);
+router.get('/messages', auth(), customerGetMessages);
+router.post('/messages', auth(), customerSendMessage);
+router.post('/upload',  auth(), uploadLimiter, uploadFiles, customerUploadAttachment);
 
-// ─── CRM staff routes ───────────────────────────────────────────────────────
+// ─── CRM staff routes ─────────────────────────────────────────────────────────
+// Protected by crmAuth() — same as supraspace.route.ts.
 
-router.get('/crm/conversations', crmAuth(), crmListConcernConversations);
-router.get('/crm/conversations/:conversationId/messages', crmAuth(), crmGetConcernMessages);
-router.post('/crm/conversations/:conversationId/reply', crmAuth(), crmReplyConcern);
+router.get('/crm/conversations',                           crmAuth(), crmListConcernConversations);
+router.get('/crm/conversations/:conversationId/messages',  crmAuth(), crmGetConcernMessages);
+router.post('/crm/conversations/:conversationId/reply',    crmAuth(), crmReplyConcern);
 router.patch('/crm/conversations/:conversationId/resolve', crmAuth(), crmResolveConcern);
 
 export default router;
