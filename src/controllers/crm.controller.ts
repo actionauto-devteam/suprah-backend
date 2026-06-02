@@ -161,15 +161,22 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
-  const [timeInCount, timeOutCount, breakInCount, breakOutCount] = await Promise.all([
-    TimeLog.countDocuments({ userId: user._id, type: "time-in",   timestamp: { $gte: today, $lt: tomorrow } }),
-    TimeLog.countDocuments({ userId: user._id, type: "time-out",  timestamp: { $gte: today, $lt: tomorrow } }),
-    TimeLog.countDocuments({ userId: user._id, type: "break-in",  timestamp: { $gte: today, $lt: tomorrow } }),
-    TimeLog.countDocuments({ userId: user._id, type: "break-out", timestamp: { $gte: today, $lt: tomorrow } }),
-  ]);
+  // Walk today's logs chronologically — orphan time-outs (no preceding time-in)
+  // or stray break events from a prior session would otherwise make counts
+  // misalign and reject valid clock-in/break attempts with "already clocked in".
+  const todayLogsForState = await TimeLog.find({
+    userId: user._id,
+    timestamp: { $gte: today, $lt: tomorrow },
+  }).sort({ timestamp: 1 }).lean();
 
-  const hasActiveSession = timeInCount > timeOutCount;
-  const hasActiveBreak   = breakInCount > breakOutCount;
+  let hasActiveSession = false;
+  let hasActiveBreak = false;
+  for (const log of todayLogsForState) {
+    if (log.type === 'time-in') { hasActiveSession = true; }
+    else if (log.type === 'time-out') { hasActiveSession = false; hasActiveBreak = false; }
+    else if (log.type === 'break-in') { hasActiveBreak = true; }
+    else if (log.type === 'break-out') { hasActiveBreak = false; }
+  }
 
   if (type === "time-in"   && hasActiveSession)  throw new ApiError(400, "You are already clocked in");
   if (type === "time-out"  && !hasActiveSession)  throw new ApiError(400, "You must clock in before clocking out");

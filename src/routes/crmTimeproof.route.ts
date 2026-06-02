@@ -14,6 +14,7 @@ import {
   getAgentStatus,
   submitScreenshot,
   getScreenshots,
+  wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
 } from '../controllers/crmTimeproof.controller';
@@ -36,6 +37,7 @@ router.post('/activity-interval', postActivityInterval);
 router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
+router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, role check inside
 
 // Push notification subscription (admin/manager only)
 router.post('/push/subscribe', subscribeCrmPush);

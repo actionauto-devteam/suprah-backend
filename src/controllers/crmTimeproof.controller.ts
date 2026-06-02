@@ -639,7 +639,25 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const timeIns  = logs.filter(l => l.type === 'time-in');
   const timeOuts = logs.filter(l => l.type === 'time-out');
 
-  const isOnShift = timeIns.length > timeOuts.length;
+  // Walk the logs chronologically and track whether the latest event leaves the
+  // user clocked-in. This is more accurate than counting time-ins vs time-outs,
+  // which breaks if any orphan log exists in the lookback window (e.g. a
+  // time-out without a matching time-in from a prior desync). Orphans caused
+  // the tray to see isOnShift=false even with an active clock-in today.
+  let isOnShiftWalk = false;
+  let walkShiftStartedAt: string | null = null;
+  for (const log of logs) {
+    if (log.type === 'time-in') {
+      isOnShiftWalk = true;
+      walkShiftStartedAt = log.timestamp instanceof Date
+        ? log.timestamp.toISOString()
+        : String(log.timestamp);
+    } else if (log.type === 'time-out') {
+      isOnShiftWalk = false;
+      walkShiftStartedAt = null;
+    }
+  }
+  const isOnShift = isOnShiftWalk;
 
   // Scope break detection to the current session only (logs after the most recent
   // time-in). Without this, a stale unpaired break-in from a previous session in
@@ -1077,6 +1095,22 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
  * Returns whether the user has a clock-out today they can resume from.
  * Used by the CRM dashboard to show a "Resume Shift?" prompt on Start Shift.
  */
+/**
+ * POST /api/crm/timeproof/screenshots/wipe-all
+ * Admin-only one-time operation: deletes ALL screenshots from R2 and MongoDB.
+ * TimeLog (clock-in/out history) is preserved. Use to free storage when the
+ * archive is full. There is no undo — the binaries are permanently removed.
+ */
+export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (requestor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can wipe all screenshots');
+  }
+  const { wipeAllScreenshots } = await import('../schedulers/screenshotRetention.scheduler');
+  const result = await wipeAllScreenshots();
+  res.json(new ApiResponse(200, result, `Wiped ${result.deleted} screenshot record(s)`));
+});
+
 export const getResumableShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
@@ -1116,6 +1150,7 @@ export default {
   getResumableShift,
   submitScreenshot,
   getScreenshots,
+  wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
 };
