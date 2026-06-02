@@ -127,10 +127,13 @@ const normalizeCustomerVehicle = (vehicle: any) => ({
     ? `${vehicle.dealerCity}${vehicle.dealerState ? ", " + vehicle.dealerState : ""}${vehicle.dealerZip ? ", " + vehicle.dealerZip : ""}`
     : "Unknown",
   image:
-    vehicle.images && vehicle.images.length > 0
-      ? vehicle.images[0]
-      : "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop",
-  images: vehicle.images || [],
+    (Array.isArray(vehicle.images)
+      ? vehicle.images.find((img: string) => typeof img === "string" && img.trim().length > 0)
+      : null) ||
+    "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop",
+  images: Array.isArray(vehicle.images)
+    ? vehicle.images.filter((img: string) => typeof img === "string" && img.trim().length > 0)
+    : [],
   status: vehicle.status,
   daysOnLot: vehicle.daysOnLot || 0,
   engine: vehicle.engine || "",

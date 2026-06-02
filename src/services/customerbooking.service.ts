@@ -182,17 +182,49 @@ class CustomerBookingService {
     const upcomingBookings = bookings.filter(b => new Date(b.startTime) > new Date()).length;
     const completedBookings = bookings.filter(b => b.status === 'completed').length;
     const cancelledBookings = bookings.filter(b => b.status === 'cancelled').length;
+    const bookedByMap = new Map<string, { organizerId: string; organizerName: string; count: number }>();
+
+    bookings.forEach(booking => {
+      const organizerId = (booking.createdBy as any)?._id?.toString?.() || (booking.createdBy as any)?.email || 'unknown';
+      const organizerName = (booking.createdBy as any)?.name || (booking.createdBy as any)?.email || 'Unknown';
+      const existing = bookedByMap.get(organizerId);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        bookedByMap.set(organizerId, { organizerId, organizerName, count: 1 });
+      }
+    });
 
     return {
+      customer: bookings[0]?.customerBooking
+        ? {
+            firstName: bookings[0].customerBooking.firstName,
+            lastName: bookings[0].customerBooking.lastName,
+            email: bookings[0].customerBooking.email,
+            phone: bookings[0].customerBooking.phone,
+          }
+        : email || phone || firstName || lastName
+          ? {
+              firstName: firstName || bookings[0]?.customerBooking?.firstName || '',
+              lastName: lastName || bookings[0]?.customerBooking?.lastName || '',
+              email: email || bookings[0]?.customerBooking?.email || '',
+              phone: phone || bookings[0]?.customerBooking?.phone || '',
+            }
+          : null,
       bookings,
       statistics: {
+        total: totalBookings,
         totalBookings,
+        upcoming: upcomingBookings,
         upcomingBookings,
+        completed: completedBookings,
         completedBookings,
+        cancelled: cancelledBookings,
         cancelledBookings,
         firstBooking: bookings[bookings.length - 1]?.startTime,
-        lastBooking: bookings[0]?.startTime
-      }
+        lastBooking: bookings[0]?.startTime,
+      },
+      bookedBy: Array.from(bookedByMap.values()),
     };
   }
 
