@@ -74,6 +74,7 @@ const PREFERENCE_MAP: Record<string, string> = {
   crm_task_due: 'crmActivity',
   crm_biometric: 'crmActivity',
   crm_timeproof: 'crmActivity',
+  reminder: 'crmActivity',
   team_invite_sent: 'crmActivity',
   team_member_joined: 'crmActivity',
   team_member_left: 'crmActivity',

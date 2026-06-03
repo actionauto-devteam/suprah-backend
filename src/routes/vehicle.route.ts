@@ -2,7 +2,6 @@ import express from 'express';
 import vehicleController from '../controllers/vehicle.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
-import authorize from '../middleware/role.middleware';
 import { marketplaceLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
@@ -24,11 +23,14 @@ const requireOrgForMutation = (req: express.Request, res: express.Response, next
 router.use(requireOrgForMutation);
 
 /**
- * SECURE MARKETPLACE ROUTES
- * Global access restricted to customers and authorized staff
+ * MARKETPLACE ROUTES
+ * Any authenticated user may browse the public inventory (only "Ready for Sale"
+ * vehicles are returned by the controller). Role-gating was removed because the
+ * controller already hard-filters to public-safe data, and excluding roles like
+ * 'employee' or 'driver' caused spurious 403 errors for valid sessions.
  */
-router.get('/marketplace', marketplaceLimiter, authorize(['customer', 'admin', 'super_admin']), vehicleController.getMarketplaceVehicles);
-router.get('/marketplace/filters', authorize(['customer', 'admin', 'super_admin']), vehicleController.getMarketplaceFilters);
+router.get('/marketplace', marketplaceLimiter, vehicleController.getMarketplaceVehicles);
+router.get('/marketplace/filters', vehicleController.getMarketplaceFilters);
 
 // Filter and statistics routes (must be before /:id routes)
 router.get('/filters', vehicleController.getFilters);
