@@ -16,6 +16,7 @@ import { initSyncScheduler } from "./schedulers/sync.scheduler";
 import { initCleanupScheduler } from "./schedulers/cleanup.scheduler";
 import { initMilestoneScheduler } from "./schedulers/milestone.scheduler";
 import { initScreenshotRetentionScheduler } from "./schedulers/screenshotRetention.scheduler";
+import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivityReminder.scheduler";
 import healthRoute from "./routes/health.route";
 import supraSpaceRoute from "./routes/supraspace.route";
 import { initSupraSpaceSocket } from "./socket/supraspace.socket";
@@ -174,6 +175,7 @@ if (require.main === module) {
   initCleanupScheduler();
   initMilestoneScheduler();
   initScreenshotRetentionScheduler();
+  initLeadInactivityReminderScheduler();
 
   const server = httpServer.listen(config.port, () => {
     logger.info(`Server running on port ${config.port}`);
