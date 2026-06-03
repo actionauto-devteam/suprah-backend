@@ -26,10 +26,6 @@ router.post(
       return res.status(400).json(new ApiResponse(400, null, `Invalid role. Use: ${validRoles.join(", ")}`));
     }
 
-    if (!["admin", "super_admin"].includes(user.role)) {
-      return res.status(403).json(new ApiResponse(403, null, "Only admin or super_admin can switch roles"));
-    }
-
     const originalRole = user.role;
     const updated = await User.findByIdAndUpdate(
       user._id,
