@@ -47,6 +47,7 @@ import wiseRoute from "./wise.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
 import customerConcernRoute from "./customerConcern.route";
+import customerCallRoute from "./customerCall.route";
 
 const router = express.Router();
 
@@ -235,6 +236,10 @@ const defaultRoutes = [
   {
     path: "/customer-concern",
     route: customerConcernRoute,
+  },
+  {
+    path: "/customer-call",
+    route: customerCallRoute,
   },
   {
     path: "/deal-board",
