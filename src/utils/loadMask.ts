@@ -3,7 +3,7 @@
 //
 // Drivers see city/state/zip only when load is pre-dispatch (Posted/Draft).
 // Full address is revealed once the load is Assigned, In-Transit, or Delivered.
-// Financial and contract details are never shown to drivers.
+// Financial and contract details are never shown to drivers...
 
 const POST_DISPATCH_STATUSES = new Set(["Assigned", "In-Transit", "Delivered"]);
 
