@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
 import config from '../config';
@@ -188,6 +188,35 @@ class StorageService {
         } catch (error: any) {
             console.error('[StorageService] R2 Delete Error:', error);
         }
+    }
+
+    /**
+     * Lists all keys under a prefix in the given bucket. Used to enumerate
+     * objects without a database index — e.g. all screenshots for a user/date.
+     * Returns the keys as strings (no signed URLs — call getSignedProofUrl per key).
+     */
+    async list(prefix: string, type: BucketType = BucketType.PRIVATE): Promise<Array<{ key: string; lastModified?: Date }>> {
+        if (!this.isConfigured || !this.s3Client) return [];
+
+        const results: Array<{ key: string; lastModified?: Date }> = [];
+        let continuationToken: string | undefined;
+
+        do {
+            const command = new ListObjectsV2Command({
+                Bucket: this.getBucketName(type),
+                Prefix: prefix,
+                ContinuationToken: continuationToken,
+            });
+            const response = await this.s3Client.send(command);
+            for (const obj of response.Contents ?? []) {
+                if (obj.Key) {
+                    results.push({ key: obj.Key, lastModified: obj.LastModified });
+                }
+            }
+            continuationToken = response.NextContinuationToken;
+        } while (continuationToken);
+
+        return results;
     }
 
     /**

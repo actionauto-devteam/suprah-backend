@@ -4,7 +4,6 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
 import CrmUser from '../models/CrmUser.model';
-import Screenshot from '../models/Screenshot.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
@@ -244,11 +243,15 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
 
   const calendar: Record<string, CalendarDay> = {};
   for (const [date, data] of Object.entries(byDate)) {
+    const grossSessionSeconds = data.sessions.reduce((sum, s) => sum + s.duration, 0);
+    const breakSeconds = data.breaks.reduce((sum, b) => sum + b.duration, 0);
+    // totalSeconds is the NET work time (excludes breaks). Both the time clock
+    // and this calendar use net work for consistency.
     calendar[date] = {
       sessions: data.sessions,
-      totalSeconds: data.sessions.reduce((sum, s) => sum + s.duration, 0),
+      totalSeconds: Math.max(0, grossSessionSeconds - breakSeconds),
       breaks: data.breaks,
-      breakSeconds: data.breaks.reduce((sum, b) => sum + b.duration, 0),
+      breakSeconds,
     };
   }
 
@@ -376,11 +379,39 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   }).sort({ timestamp: 1 }).lean();
 
   const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+
+  // Override TODAY's calendar entry to use activity-based time (matches the
+  // dashboard time clock). Without this, a stale unclosed clock-in from earlier
+  // today / yesterday inflates today's calendar value with "ghost" hours that
+  // were never actually worked (the tray was offline). Past days keep their
+  // session-wall-clock-minus-breaks value because completed sessions are accurate.
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
+  const todayActivityIntervals = await ActivityInterval.find({
+    userId: user._id,
+    shiftDate: todayStr,
+  }).lean();
+  const todayActivityTotal = todayActivityIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
+  const todayHeartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
+  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
+  const heartbeatFresh = todayHeartbeat
+    ? Date.now() - new Date(todayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
+    : false;
+  const liveActiveSeconds = heartbeatFresh && todayHeartbeat?.currentIntervalStartAt
+    ? Math.max(0, (Date.now() - new Date(todayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
+    : 0;
+  const todayActiveSeconds = todayActivityTotal + liveActiveSeconds;
+  if (calendar[todayStr]) {
+    // Only override if activity-based time is smaller (i.e. real work < ghost wall-clock).
+    // Keeps backward-compat for users who legitimately have a fresh same-day session.
+    if (todayActiveSeconds < calendar[todayStr].totalSeconds) {
+      calendar[todayStr].totalSeconds = todayActiveSeconds;
+    }
+  }
+
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
   res.json(
@@ -544,11 +575,29 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   }).sort({ timestamp: 1 }).lean();
 
   const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+
+  // Override TODAY with activity-based time to avoid ghost hours from stale
+  // unclosed clock-ins (same fix as getMyTimeproof).
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
+  const userTodayIntervals = await ActivityInterval.find({ userId, shiftDate: todayStr }).lean();
+  const userTodayIntervalTotal = userTodayIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
+  const userTodayHeartbeat = await AgentHeartbeat.findOne({ userId }).lean();
+  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
+  const userHeartbeatFresh = userTodayHeartbeat
+    ? Date.now() - new Date(userTodayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
+    : false;
+  const userLiveActiveSeconds = userHeartbeatFresh && userTodayHeartbeat?.currentIntervalStartAt
+    ? Math.max(0, (Date.now() - new Date(userTodayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
+    : 0;
+  const userTodayActiveSeconds = userTodayIntervalTotal + userLiveActiveSeconds;
+  if (calendar[todayStr] && userTodayActiveSeconds < calendar[todayStr].totalSeconds) {
+    calendar[todayStr].totalSeconds = userTodayActiveSeconds;
+  }
+
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
   res.json(
@@ -710,15 +759,26 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, s) => sum + s.duration, 0);
 
+  // Sum of ALL break seconds that fall within today's MDT window (across all
+  // sessions today, completed or live). Used to net out break time from the
+  // wall-clock fallback so the time clock matches the calendar's net work time.
+  const allBreakSessions = buildBreakSessions(logs);
+  const todayBreakTotalSeconds = allBreakSessions
+    .filter(b => new Date(b.in).getTime() >= todayMDTStartUTC)
+    .reduce((sum, b) => sum + b.duration, 0);
+
   // Activity-based tracking: sum of completed ActivityIntervals for today
   const activityIntervals = await ActivityInterval.find({
     userId: user._id,
     shiftDate: todayMDTStr,
   }).lean();
   const activityIntervalTotal = activityIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
-  // Fall back to wall-clock session time when no activity intervals exist (tray save failed,
-  // tray not running, etc.) so the timer continues from prior sessions instead of resetting to 0.
-  const todayTotalActiveSeconds = activityIntervalTotal > 0 ? activityIntervalTotal : todayTotalWorkedSeconds;
+  // When ActivityIntervals are absent (tray not running, save failed, etc.), the
+  // fallback uses session wall-clock MINUS today's breaks → net work time. Without
+  // the break subtraction the time clock would over-count by the break duration.
+  const todayTotalActiveSeconds = activityIntervalTotal > 0
+    ? activityIntervalTotal
+    : Math.max(0, todayTotalWorkedSeconds - todayBreakTotalSeconds);
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
@@ -730,17 +790,19 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   //  • Tray actively reporting (fresh heartbeat): trust its value verbatim — including
   //    null, which means the user is idle/on-break and the timer must FREEZE. This keeps
   //    the CRM in lock-step with the tray (same machine clock → no drift).
-  //  • Tray offline / never ran: fall back to shiftStartedAt so a CRM-only user still
-  //    sees a running timer instead of 00:00:00.
+  //  • Tray offline / never ran: fall back to (shiftStartedAt + currentSessionBreaks)
+  //    so (now - fallbackStart) excludes break time. Without this shift, a CRM-only
+  //    user's live counter over-counts every break they took during the current shift.
   const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const heartbeatFresh = heartbeat
     ? Date.now() - new Date(heartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
+  const fallbackShiftedStart = isOnShift && !isOnBreak && isShiftFromToday && shiftStartedAt
+    ? new Date(new Date(shiftStartedAt).getTime() + (totalBreakSeconds * 1000)).toISOString()
+    : null;
   const currentIntervalStartAt = heartbeatFresh
     ? rawIntervalStart
-    : (isOnShift && !isOnBreak && isShiftFromToday
-        ? new Date(shiftStartedAt!).toISOString()
-        : null);
+    : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
     isOnShift,
@@ -916,8 +978,12 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
 
 /**
  * POST /api/crm/timeproof/screenshots
- * Tray app uploads a screenshot — stored in R2 private bucket.
- * Expects multipart/form-data: screenshot (file) + capturedAt + shiftDate + idleDetected
+ * Tray app uploads a screenshot. Stored ONLY in R2 — no MongoDB metadata.
+ * All info needed (userId, shiftDate, capturedAt, idleDetected) is encoded
+ * in the R2 object key so we can query by listing with a prefix.
+ *
+ * Key shape: screenshots/{userId}/{shiftDate}/{capturedAtMs}-{flag}.jpg
+ *   flag = "idle" or "active"
  */
 export const submitScreenshot = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -929,28 +995,29 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
     throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
   }
 
+  const capturedAtDate = capturedAt ? new Date(capturedAt) : new Date();
+  const flag = idleDetected === 'true' ? 'idle' : 'active';
+  // Override the multer file name so storageService.upload puts the key in our
+  // structured layout. We don't need a hash suffix because capturedAtMs is unique.
+  const customFileName = `${capturedAtDate.getTime()}-${flag}.jpg`;
+  const fileWithName: Express.Multer.File = { ...req.file, originalname: customFileName };
+
   const r2Key = await storageService.upload(
-    req.file,
+    fileWithName,
     `screenshots/${user._id.toString()}/${shiftDate}`,
     BucketType.PRIVATE,
     { allowLocalFallback: true }
   );
 
-  const screenshot = await Screenshot.create({
-    userId: user._id,
-    r2Key,
-    shiftDate,
-    capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
-    idleDetected: idleDetected === 'true',
-  });
-
-  res.json(new ApiResponse(201, { _id: screenshot._id, r2Key }, 'Screenshot uploaded'));
+  res.json(new ApiResponse(201, { r2Key }, 'Screenshot uploaded'));
 });
 
 /**
  * GET /api/crm/timeproof/screenshots?date=YYYY-MM-DD&userId=...
- * Returns screenshots for a given date with signed R2 URLs.
+ * Lists screenshots for a given date directly from R2 — no MongoDB lookup.
  * Employees: own only. Admin/Manager: any userId.
+ *
+ * Key shape parsed: screenshots/{userId}/{shiftDate}/{capturedAtMs}-{flag}.jpg
  */
 export const getScreenshots = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -969,20 +1036,32 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, 'Access denied');
   }
 
-  // Query by capturedAt within the MDT day window so screenshots stored with
-  // legacy PHT-based shiftDate are still found by their actual capture time.
-  const dayStartUTC = new Date((date as string) + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
-  const dayEndUTC = dayStartUTC + 24 * 60 * 60 * 1000;
+  const prefix = `screenshots/${targetId}/${date}/`;
+  const objects = await storageService.list(prefix, BucketType.PRIVATE);
 
-  const screenshots = await Screenshot.find({
-    userId: targetId,
-    capturedAt: { $gte: new Date(dayStartUTC), $lt: new Date(dayEndUTC) },
-  }).sort({ capturedAt: -1 }).lean();
+  // Parse each key into structured screenshot data
+  const parsed = objects
+    .map((obj) => {
+      // key suffix after prefix is "{capturedAtMs}-{flag}.jpg" — anything else is ignored
+      const tail = obj.key.slice(prefix.length).replace(/\.jpg$/i, '');
+      const dashIdx = tail.lastIndexOf('-');
+      if (dashIdx < 0) return null;
+      const msStr = tail.slice(0, dashIdx);
+      const flag = tail.slice(dashIdx + 1);
+      const ms = parseInt(msStr, 10);
+      if (!Number.isFinite(ms)) return null;
+      return {
+        r2Key: obj.key,
+        capturedAt: new Date(ms),
+        idleDetected: flag === 'idle',
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x)
+    .sort((a, b) => b.capturedAt.getTime() - a.capturedAt.getTime());
 
   const withUrls = await Promise.all(
-    screenshots.map(async (s) => ({
-      _id: s._id,
+    parsed.map(async (s) => ({
+      _id: s.r2Key, // use the key as the unique identifier
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
       url: await getSignedProofUrl(s.r2Key),

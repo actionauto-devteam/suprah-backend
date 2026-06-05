@@ -11,6 +11,7 @@ import {
 import emailService from "../services/email.service";
 import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
 import CrmPushService from "../services/crmPush.service";
+import Absence from "../models/Absence.model";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -161,17 +162,23 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
-  // Walk today's logs chronologically — orphan time-outs (no preceding time-in)
-  // or stray break events from a prior session would otherwise make counts
-  // misalign and reject valid clock-in/break attempts with "already clocked in".
-  const todayLogsForState = await TimeLog.find({
+  // Walk the last 2 days of logs chronologically. The 2-day window matches
+  // getShiftState's lookback so a user with an unclosed clock-in from yesterday
+  // (e.g. a forgotten clock-out) can still cleanly end the shift today. Walking
+  // chronologically is orphan-safe — any stray events naturally cancel out and
+  // the LAST event determines the actual active state.
+  const lookbackStart = new Date();
+  lookbackStart.setDate(lookbackStart.getDate() - 2);
+  lookbackStart.setHours(0, 0, 0, 0);
+
+  const recentLogsForState = await TimeLog.find({
     userId: user._id,
-    timestamp: { $gte: today, $lt: tomorrow },
+    timestamp: { $gte: lookbackStart },
   }).sort({ timestamp: 1 }).lean();
 
   let hasActiveSession = false;
   let hasActiveBreak = false;
-  for (const log of todayLogsForState) {
+  for (const log of recentLogsForState) {
     if (log.type === 'time-in') { hasActiveSession = true; }
     else if (log.type === 'time-out') { hasActiveSession = false; hasActiveBreak = false; }
     else if (log.type === 'break-in') { hasActiveBreak = true; }
@@ -274,6 +281,33 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
         tag: `crm-early-end-${user._id}`,
         data: { url: '/crm/timeproof' },
       }).catch(() => {});
+
+      // Mirror the early-out onto the Team Pulse calendar so HR can see all
+      // out-of-office / early-out records in one place (per HR feedback).
+      // Stored as a pending "other" absence so the HR team can review/approve.
+      try {
+        const existingAbsence = await Absence.findOne({
+          organizationId: user.organizationId,
+          userId: user._id,
+          date: { $gte: today, $lt: tomorrow },
+        });
+        if (!existingAbsence) {
+          await Absence.create({
+            organizationId: user.organizationId,
+            userId: user._id,
+            userName: user.fullName,
+            userAvatar: user.avatar,
+            date: today,
+            type: 'other',
+            title: 'Early Out',
+            note,
+            otherText: 'Early Out',
+            status: 'pending',
+          });
+        }
+      } catch (absErr) {
+        console.error('Failed to record early-out absence:', absErr);
+      }
     }
   } catch (error) {
     console.error("Failed to emit time log event:", error);
