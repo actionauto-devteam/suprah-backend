@@ -7,7 +7,7 @@
     "dev": "cross-env NODE_OPTIONS=--max-old-space-size=4096 ts-node-dev --transpile-only --respawn --no-notify src/server.ts",
     "dev:ftp": "dotenv -e .env -- cross-env NODE_OPTIONS=--max-old-space-size=4096 ts-node-dev --transpile-only --respawn --no-notify src/ftp-worker.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "ts-node --transpile-only -r tsconfig-paths/register src/server.ts",
     "start:ftp": "node dist/ftp-worker.js",
     "seed": "ts-node --transpile-only scripts/seed.ts",
     "seed:dev": "ts-node-dev --transpile-only scripts/seed.ts",
@@ -73,7 +73,9 @@
     "socket.io": "^4.8.3",
     "stripe": "^20.3.1",
     "svix": "^1.84.1",
+    "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.9.3",
     "web-push": "^3.6.7",
     "xlsx": "^0.18.5",
     "xml2js": "^0.6.2",
@@ -115,8 +117,6 @@
     "selfsigned": "^5.5.0",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
-    "ts-node": "^10.9.2",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.9.3"
+    "ts-node-dev": "^2.0.0"
   }
 }
