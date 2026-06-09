@@ -13,6 +13,9 @@ export interface IOwnedVehicle {
     purchaseDate?: Date;
     status: 'ACTIVE' | 'SOLD' | 'TRADED_IN';
     images: string[];
+    source?: 'MANUAL' | 'DEALERSHIP_TRANSFER';
+    dealershipName?: string;
+    transferredAt?: Date;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -31,6 +34,12 @@ const OwnedVehicleSchema: Schema = new Schema(
         purchaseDate: { type: Date },
         status: { type: String, enum: ['ACTIVE', 'SOLD', 'TRADED_IN'], default: 'ACTIVE' },
         images: [{ type: String }],
+        // Provenance — set when the Finance team transfers an inventory vehicle
+        // into this garage from the CRM "Garage Review" screen. Manual adds keep
+        // the MANUAL default, so existing behaviour is unchanged.
+        source: { type: String, enum: ['MANUAL', 'DEALERSHIP_TRANSFER'], default: 'MANUAL' },
+        dealershipName: { type: String },
+        transferredAt: { type: Date },
     },
     {
         timestamps: true,
