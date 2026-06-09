@@ -9,6 +9,7 @@ import {
   safeCreateNotification,
   notifyOrgAdmins,
 } from "../utils/safeNotification";
+import { SavedVehicle } from "../models/SavedVehicle.model";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { IUser } from "../models/User.model";
 import cacheService from "../services/cache.service";
@@ -666,6 +667,27 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     { vehicleId: vehicle._id, status: vehicle.status, orgId },
     "Vehicle updated",
   );
+
+  // Price drop alert: notify customers who saved this vehicle
+  const newPrice = updateData.price != null ? Number(updateData.price) : null;
+  const oldPrice = existingVehicle.price != null ? Number(existingVehicle.price) : null;
+  if (newPrice !== null && oldPrice !== null && newPrice < oldPrice) {
+    try {
+      const savers = await SavedVehicle.find({ vehicleId: vehicle._id }).select('userId');
+      for (const saver of savers) {
+        await safeCreateNotification({
+          userId: saver.userId.toString(),
+          organizationId: orgId,
+          type: 'vehicle_updated',
+          title: 'Price Drop Alert',
+          message: `${vehicleName} dropped to $${newPrice.toLocaleString()} (was $${oldPrice.toLocaleString()})`,
+          metadata: { vehicleId: vehicle._id.toString(), newPrice, oldPrice, route: '/customer/saved' },
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to send price drop alerts');
+    }
+  }
 
   res.json(
     new ApiResponse(

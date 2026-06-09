@@ -48,6 +48,7 @@ import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
 import customerConcernRoute from "./customerConcern.route";
 import customerCallRoute from "./customerCall.route";
+import savedVehicleRoute from "./savedVehicle.route";
 
 const router = express.Router();
 
@@ -248,6 +249,10 @@ const defaultRoutes = [
   {
     path: "/schedules",
     route: scheduleRoute,
+  },
+  {
+    path: "/customer/saved-vehicles",
+    route: savedVehicleRoute,
   },
 ];
 
