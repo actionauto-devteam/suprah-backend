@@ -1,3 +1,4 @@
+// repush
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -380,17 +381,24 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
 
   const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  // Override TODAY's calendar entry to use activity-based time (matches the
-  // dashboard time clock). Without this, a stale unclosed clock-in from earlier
-  // today / yesterday inflates today's calendar value with "ghost" hours that
-  // were never actually worked (the tray was offline). Past days keep their
-  // session-wall-clock-minus-breaks value because completed sessions are accurate.
+  // Override EVERY day's calendar entry with the activity-based total when it's
+  // smaller than the session wall-clock. A multi-day unclosed clock-in (e.g. the
+  // user forgot to clock out for two days) otherwise paints the intermediate
+  // days as 24h "work" via the midnight segment splitter — pure ghost time the
+  // user never actually worked. Activity intervals (saved per real active
+  // period) are the authoritative truth, so we prefer them whenever they exist.
   const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
-  const todayActivityIntervals = await ActivityInterval.find({
+  const allActivityIntervals = await ActivityInterval.find({
     userId: user._id,
-    shiftDate: todayStr,
+    shiftDate: { $in: Object.keys(calendar) },
   }).lean();
-  const todayActivityTotal = todayActivityIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
+  const activityByDate: Record<string, number> = {};
+  for (const i of allActivityIntervals) {
+    activityByDate[i.shiftDate] = (activityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
+  }
+
+  // For today specifically, also include the currently-running interval (if any)
+  // so the displayed total tracks the live timer.
   const todayHeartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const heartbeatFresh = todayHeartbeat
@@ -399,12 +407,14 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   const liveActiveSeconds = heartbeatFresh && todayHeartbeat?.currentIntervalStartAt
     ? Math.max(0, (Date.now() - new Date(todayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
     : 0;
-  const todayActiveSeconds = todayActivityTotal + liveActiveSeconds;
-  if (calendar[todayStr]) {
-    // Only override if activity-based time is smaller (i.e. real work < ghost wall-clock).
-    // Keeps backward-compat for users who legitimately have a fresh same-day session.
-    if (todayActiveSeconds < calendar[todayStr].totalSeconds) {
-      calendar[todayStr].totalSeconds = todayActiveSeconds;
+  activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
+
+  for (const dateStr of Object.keys(calendar)) {
+    const activeForDate = activityByDate[dateStr] ?? 0;
+    // Only override when the activity-based number is SMALLER — i.e. the wall-clock
+    // is inflated. If activity is larger (rare/impossible) we keep the wall-clock.
+    if (activeForDate > 0 && activeForDate < calendar[dateStr].totalSeconds) {
+      calendar[dateStr].totalSeconds = activeForDate;
     }
   }
 
