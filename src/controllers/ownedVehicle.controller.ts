@@ -5,6 +5,7 @@ import { OwnedVehicle } from "../models/OwnedVehicle.model";
 import mongoose from "mongoose";
 import axios from "axios";
 import Vehicle from "../models/Vehicle.model";
+import storageService from "../services/storage.service";
 
 // Create vehicle
 export const addOwnedVehicle = asyncHandler(
@@ -188,6 +189,45 @@ export const updateOwnedVehicle = asyncHandler(
     }
     if (images !== undefined) vehicle.images = images;
 
+    await vehicle.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ...vehicle.toObject(),
+        id: vehicle._id.toString(),
+      },
+    });
+  },
+);
+
+// Upload/replace the primary vehicle photo
+export const uploadOwnedVehicleImage = asyncHandler(
+  async (req: Request, res: Response) => {
+    const userId = req.user?._id;
+    if (!userId) {
+      throw new ApiError(401, "Please authenticate");
+    }
+
+    const { id } = req.params;
+    const file = req.file;
+    if (!file) {
+      throw new ApiError(400, "An image file is required");
+    }
+
+    const vehicle = await OwnedVehicle.findOne({ _id: id, userId });
+    if (!vehicle) {
+      throw new ApiError(404, "Vehicle not found");
+    }
+
+    const previousImage = vehicle.images?.[0];
+    const imageUrl = await storageService.upload(file, "vehicles");
+
+    if (previousImage) {
+      await storageService.delete(previousImage);
+    }
+
+    vehicle.images = [imageUrl, ...(vehicle.images || []).slice(1)];
     await vehicle.save();
 
     res.status(200).json({
