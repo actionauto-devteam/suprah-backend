@@ -1,5 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export type ServiceStatus = 'received' | 'in_service' | 'quality_check' | 'ready' | 'completed';
+
 export interface IServiceRecord {
     vehicleId: mongoose.Types.ObjectId;
     serviceType: 'OIL_CHANGE' | 'TIRES' | 'BRAKES' | 'INSPECTION' | 'OTHER';
@@ -8,6 +10,9 @@ export interface IServiceRecord {
     locationName: string;
     cost?: number;
     notes?: string;
+    serviceStatus: ServiceStatus;
+    statusUpdatedAt?: Date;
+    statusUpdatedBy?: string;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -25,6 +30,14 @@ const ServiceRecordSchema: Schema = new Schema(
         locationName: { type: String, required: true },
         cost: { type: Number },
         notes: { type: String },
+        serviceStatus: {
+            type: String,
+            enum: ['received', 'in_service', 'quality_check', 'ready', 'completed'],
+            default: 'completed',
+            index: true,
+        },
+        statusUpdatedAt: { type: Date },
+        statusUpdatedBy: { type: String },
     },
     {
         timestamps: true,

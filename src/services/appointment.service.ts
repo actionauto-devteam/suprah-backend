@@ -107,7 +107,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     throw new ApiError(400, 'Cannot schedule appointments in the past');
   }
 
-  const participants = [...new Set([userId, ...data.participants])];
+  const participants = [...new Set([userId, ...(data.participants ?? [])])];
 
   const guestEmails = (data.guestEmails || []).map(email => ({
     email: email.toLowerCase().trim(),

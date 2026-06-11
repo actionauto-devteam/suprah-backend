@@ -69,11 +69,15 @@ export const setupSocket = (io: Server) => {
     // CRM presence tracking: mark online + join shift-board room if admin/manager
     if (socket.role === 'crm' && socket.userId) {
       addCrmOnlineUser(socket.userId);
-      CrmUser.findById(socket.userId).select('role fullName').lean()
+      CrmUser.findById(socket.userId).select('role fullName organizationId').lean()
         .then((crmUser: any) => {
           if (!crmUser) return;
           if (['admin', 'manager'].includes(crmUser.role)) {
             socket.join('crm:shift-board');
+          }
+          // Join org room so CRM staff receive org-wide real-time events
+          if (crmUser.organizationId) {
+            socket.join(`org:${crmUser.organizationId}`);
           }
           emitToShiftBoard('crm:presence', { userId: socket.userId, online: true });
         })

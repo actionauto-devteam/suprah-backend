@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Appointment from '../models/Appointment.model';
+import ServiceSlot from '../models/ServiceSlot.model';
 import appointmentService from '../services/appointment.service';
 import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
@@ -10,6 +11,7 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { emitToOrg } from '../utils/socketEmitter';
 
 /**
  * Create a new appointment (with customer booking support)
@@ -32,9 +34,60 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const appointment = await appointmentService.createAppointment(userId, orgId, req.body);
+    // Atomically consume the slot if the customer selected one
+    let slotConsumed = false;
+    if (req.body.slotId) {
+        const slot = await ServiceSlot.findOneAndUpdate(
+            {
+                _id: req.body.slotId,
+                isBlocked: false,
+                $expr: { $lt: ['$currentBookings', '$maxBookings'] },
+            },
+            { $inc: { currentBookings: 1 } },
+            { new: true }
+        );
+        if (!slot) {
+            return res.status(409).json(
+                new ApiResponse(409, null, 'This time slot is no longer available. Please choose another time.')
+            );
+        }
+        slotConsumed = true;
+    }
+
+    let appointment: any;
+    try {
+        appointment = await appointmentService.createAppointment(userId, orgId, req.body);
+    } catch (err) {
+        if (slotConsumed) {
+            await ServiceSlot.findByIdAndUpdate(req.body.slotId, { $inc: { currentBookings: -1 } });
+        }
+        throw err;
+    }
 
     if (orgId) {
+        // Real-time push: new booking appears in CRM without reload
+        emitToOrg(orgId, 'appointment:new', {
+            _id: appointment._id?.toString(),
+            title: appointment.title,
+            startTime: appointment.startTime,
+            status: appointment.status,
+            slotId: req.body.slotId,
+        });
+        // If a slot was consumed, push updated availability to all listeners
+        if (slotConsumed && req.body.slotId) {
+            const updatedSlot = await ServiceSlot.findById(req.body.slotId).lean();
+            if (updatedSlot) {
+                emitToOrg(orgId, 'slot:availability_changed', {
+                    _id: updatedSlot._id?.toString(),
+                    currentBookings: updatedSlot.currentBookings,
+                    maxBookings: updatedSlot.maxBookings,
+                    isFull: updatedSlot.currentBookings >= updatedSlot.maxBookings,
+                    date: updatedSlot.date,
+                    time: updatedSlot.time,
+                });
+            }
+        }
+
         const { title, message } = notificationTemplates.appointment_created({
             title: appointment.title || 'Untitled',
             startTime: appointment.startTime ? new Date(appointment.startTime).toLocaleString() : undefined,

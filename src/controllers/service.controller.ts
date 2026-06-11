@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import ServiceLocation from '../models/ServiceLocation.model';
-import { ServiceRecord } from '../models/ServiceRecord.model';
+import { ServiceRecord, ServiceStatus } from '../models/ServiceRecord.model';
 import { OwnedVehicle } from '../models/OwnedVehicle.model';
 
 /**
@@ -90,12 +90,8 @@ export const getVehicleServiceHistory = asyncHandler(async (req: Request, res: R
 
     const { vehicleId } = req.params;
 
-    // Security verify
     const vehicle = await OwnedVehicle.findOne({ _id: vehicleId, userId });
-
-    if (!vehicle) {
-        throw new ApiError(403, 'Unauthorized access to vehicle history');
-    }
+    if (!vehicle) throw new ApiError(403, 'Unauthorized access to vehicle history');
 
     const records = await ServiceRecord.find({ vehicleId }).sort({ date: -1 });
 
@@ -103,5 +99,66 @@ export const getVehicleServiceHistory = asyncHandler(async (req: Request, res: R
         success: true,
         count: records.length,
         data: records
+    });
+});
+
+/**
+ * @desc    Get the active (in-progress) service record for a vehicle — customer polling
+ * @route   GET /api/service/active/:vehicleId
+ * @access  Private
+ */
+export const getActiveServiceStatus = asyncHandler(async (req: Request, res: Response) => {
+    const userId = req.user?._id;
+    if (!userId) throw new ApiError(401, 'Unauthorized');
+
+    const { vehicleId } = req.params;
+
+    const vehicle = await OwnedVehicle.findOne({ _id: vehicleId, userId });
+    if (!vehicle) throw new ApiError(403, 'Unauthorized');
+
+    const activeRecord = await ServiceRecord.findOne({
+        vehicleId,
+        serviceStatus: { $in: ['received', 'in_service', 'quality_check', 'ready'] },
+    }).sort({ updatedAt: -1 });
+
+    res.status(200).json({
+        success: true,
+        data: activeRecord || null,
+    });
+});
+
+const VALID_STATUSES: ServiceStatus[] = ['received', 'in_service', 'quality_check', 'ready', 'completed'];
+
+/**
+ * @desc    Update service status — staff only (admin / employee)
+ * @route   PATCH /api/service/status/:serviceId
+ * @access  Private (admin / employee)
+ */
+export const updateServiceStatus = asyncHandler(async (req: Request, res: Response) => {
+    const userId = req.user?._id?.toString();
+    if (!userId) throw new ApiError(401, 'Unauthorized');
+
+    const { serviceId } = req.params;
+    const { status } = req.body as { status: ServiceStatus };
+
+    if (!status || !VALID_STATUSES.includes(status)) {
+        throw new ApiError(400, `status must be one of: ${VALID_STATUSES.join(', ')}`);
+    }
+
+    const record = await ServiceRecord.findByIdAndUpdate(
+        serviceId,
+        {
+            serviceStatus: status,
+            statusUpdatedAt: new Date(),
+            statusUpdatedBy: userId,
+        },
+        { new: true }
+    );
+
+    if (!record) throw new ApiError(404, 'Service record not found');
+
+    res.status(200).json({
+        success: true,
+        data: record,
     });
 });
