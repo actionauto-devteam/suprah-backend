@@ -50,6 +50,12 @@ export const uploadVehicleImage = multer({
   limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB max for vehicle photos
 }).single('image');
 
+export const uploadListingPhoto = multer({
+  storage: storage,
+  fileFilter: avatarFileFilter,
+  limits: { fileSize: 8 * 1024 * 1024 },
+}).single('photo');
+
 const driverDocumentFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
   const allowedMimeTypes = [
     'image/jpeg', 'image/png', 'image/webp',

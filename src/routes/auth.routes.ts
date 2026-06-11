@@ -4,6 +4,7 @@ import authController from '../controllers/auth.controller';
 import { authLimiter, otpLimiter } from '../middleware/rate-limit.middleware';
 import config from '../config';
 import authMiddleware from '../middleware/auth.middleware';
+import { isDbOutageError } from '../utils/dbOutage';
 
 const router = express.Router();
 
@@ -37,7 +38,20 @@ router.get('/google', (req, res, next) => {
 });
 
 router.get('/google/callback',
-    passport.authenticate('google', { failureRedirect: `${config.frontendUrl}/login?error=oauth_failed`, session: false }),
+    (req: any, res, next) => {
+        passport.authenticate('google', { session: false }, (err: any, user: any) => {
+            if (err) {
+                console.error('[Google Callback] Strategy error:', err);
+                const code = isDbOutageError(err) ? 'service_unavailable' : 'oauth_failed';
+                return res.redirect(`${config.frontendUrl}/sign-in?error=${code}`);
+            }
+            if (!user) {
+                return res.redirect(`${config.frontendUrl}/sign-in?error=oauth_failed`);
+            }
+            req.user = user;
+            next();
+        })(req, res, next);
+    },
     async (req: any, res) => {
         try {
             console.log(`[Google Callback] Success for user: ${req.user?._id}`);
@@ -75,7 +89,8 @@ router.get('/google/callback',
             res.redirect(finalRedirect);
         } catch (error) {
             console.error('[Google Callback] Error:', error);
-            res.redirect(`${config.frontendUrl}/login?error=handle_oauth_failed`);
+            const code = isDbOutageError(error) ? 'service_unavailable' : 'oauth_failed';
+            res.redirect(`${config.frontendUrl}/sign-in?error=${code}`);
         }
     }
 );

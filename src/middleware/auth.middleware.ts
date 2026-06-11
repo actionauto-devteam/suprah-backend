@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ApiError } from '../utils/ApiError';
+import { isDbOutageError, DB_OUTAGE_MESSAGE } from '../utils/dbOutage';
 import User, { IUser } from '../models/User.model';
 import Organization from '../models/Organization.model';
 import tokenService from '../services/token.service';
@@ -175,6 +176,8 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         console.error('Auth Middleware Error:', error);
         if (error instanceof ApiError) {
             next(error);
+        } else if (isDbOutageError(error)) {
+            next(new ApiError(503, DB_OUTAGE_MESSAGE));
         } else {
             next(new ApiError(401, 'Please authenticate'));
         }
