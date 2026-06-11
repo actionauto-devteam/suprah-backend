@@ -47,6 +47,7 @@ import wiseRoute from "./wise.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
 import garageReviewRoute from "./garageReview.route";
+import serviceSlotRoute from "./serviceSlot.route";
 import customerConcernRoute from "./customerConcern.route";
 import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
@@ -119,6 +120,10 @@ const defaultRoutes = [
   {
     path: "/crm/garage-review",
     route: garageReviewRoute,
+  },
+  {
+    path: "/crm/service-slots",
+    route: serviceSlotRoute,
   },
   {
     path: "/aftermarket",

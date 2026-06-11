@@ -8,6 +8,7 @@ import { ApiError } from '../utils/ApiError';
 import { asyncHandler } from '../utils/asyncHandler';
 import config from '../config';
 import appointmentService from '../services/appointment.service';
+import { emitToOrg, emitToUser } from '../utils/socketEmitter';
 
 
 const SCOPES = [
@@ -256,6 +257,13 @@ export const crmCalendarController = {
       crmUserId,
       { status, outcomeNotes }
     );
+
+    // Push update to org (CRM table refreshes live) and to the customer (stepper advances live)
+    emitToOrg(orgId, 'appointment:status_updated', { _id: id, status, orgId });
+    const customerId = (appointment as any)?.createdBy?.toString?.();
+    if (customerId) {
+      emitToUser(customerId, 'appointment:status_updated', { _id: id, status });
+    }
 
     res.json({
       success: true,
