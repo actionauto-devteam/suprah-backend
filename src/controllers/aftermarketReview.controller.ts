@@ -104,9 +104,13 @@ export const getProductReviews = asyncHandler(async (req: Request, res: Response
 
   const baseFilter = { productId, organizationId: orgId, isVisible: true };
 
-  // Aggregate stats
+  // Aggregate stats — must use ObjectId for both fields; aggregate() bypasses Mongoose coercion
   const [stats] = await AftermarketReview.aggregate([
-    { $match: { ...baseFilter, productId: new mongoose.Types.ObjectId(productId) } },
+    { $match: {
+      productId: new mongoose.Types.ObjectId(productId),
+      organizationId: new mongoose.Types.ObjectId(orgId.toString()),
+      isVisible: true,
+    } },
     {
       $group: {
         _id: null,

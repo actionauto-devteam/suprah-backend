@@ -238,7 +238,6 @@ export const crmCalendarController = {
    * 11. Update Status (Quick Actions)
    */
   updateStatus: asyncHandler(async (req: Request, res: Response) => {
-    const crmUserId = (req.crmUser as any)._id.toString();
     const orgId = (req.crmUser as any).organizationId.toString();
     const { id } = req.params;
     const { status, outcomeNotes } = req.body;
@@ -247,16 +246,17 @@ export const crmCalendarController = {
       throw new ApiError(400, 'Invalid status');
     }
 
-    if (['completed', 'no-show'].includes(status) && !outcomeNotes) {
-      throw new ApiError(400, `Outcome notes are required when marking an appointment as ${status}`);
-    }
+    // Direct update — CRM staff can update any booking in their org without creator check
+    const updateFields: Record<string, any> = { status };
+    if (outcomeNotes) updateFields.outcomeNotes = outcomeNotes;
 
-    const appointment = await appointmentService.updateAppointment(
-      id,
-      orgId,
-      crmUserId,
-      { status, outcomeNotes }
+    const appointment = await Appointment.findOneAndUpdate(
+      { _id: id, organizationId: orgId },
+      updateFields,
+      { new: true }
     );
+
+    if (!appointment) throw new ApiError(404, 'Appointment not found');
 
     // Push update to org (CRM table refreshes live) and to the customer (stepper advances live)
     emitToOrg(orgId, 'appointment:status_updated', { _id: id, status, orgId });
