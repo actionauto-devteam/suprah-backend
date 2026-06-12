@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import jwt, { SignOptions } from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import User from '../models/User.model';
@@ -19,12 +19,16 @@ const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || '
 const CRM_TOKEN_COOKIE = 'crm_token';
 
 /**
- * Generate JWT for CRM user
+ * Generate JWT for CRM user.
+ * Always carries `type: 'crm'` so the SupraSpace socket and crmAuth middleware
+ * accept it. Expiry is configurable (defaults to 12h; SSO/session flows pass 30d).
  */
-export const generateCrmToken = (userId: string): string => {
-  return jwt.sign({ id: userId, type: 'crm' }, CRM_JWT_SECRET, {
-    expiresIn: '12h',
-  });
+export const generateCrmToken = (
+  userId: string,
+  expiresIn: string | number = '12h',
+): string => {
+  const options: SignOptions = { expiresIn: expiresIn as SignOptions['expiresIn'] };
+  return jwt.sign({ id: userId, type: 'crm' }, CRM_JWT_SECRET, options);
 };
 
 /**

@@ -43,15 +43,15 @@ import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
 import dealBoardRoute from "./dealBoard.routes";
 import scheduleRoute from "./schedule.routes";
-import wiseRoute from "./wise.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
 import garageReviewRoute from "./garageReview.route";
-import serviceSlotRoute from "./serviceSlot.route";
 import customerConcernRoute from "./customerConcern.route";
 import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
 import auctionListingRoute from "./auctionListing.route";
+import linkedAccountRoute from "./linkedAccount.routes";
+import callRoute from "./call.route";
 
 const router = express.Router();
 
@@ -120,10 +120,6 @@ const defaultRoutes = [
   {
     path: "/crm/garage-review",
     route: garageReviewRoute,
-  },
-  {
-    path: "/crm/service-slots",
-    route: serviceSlotRoute,
   },
   {
     path: "/aftermarket",
@@ -238,8 +234,9 @@ const defaultRoutes = [
     route: crmCalendarRoute,
   },
   {
-    path: "/billing",
-    route: wiseRoute,
+    // NEW: unified Wise + PayPal connect / status / sync / transactions / transfer / disconnect
+    path: "/linked-accounts",
+    route: linkedAccountRoute,
   },
   {
     path: "/team-pulse",
@@ -268,6 +265,11 @@ const defaultRoutes = [
   {
     path: "/customer/auction-listings",
     route: auctionListingRoute,
+  },
+  {
+    // NEW: SupraSpace calling — start / join / end / status
+    path: "/calls",
+    route: callRoute,
   },
 ];
 

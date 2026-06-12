@@ -6,7 +6,18 @@ import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
 import ReferralService from '../services/referral.service';
 import activityService from '../services/activity.service';
+import linkedAccountService from '../services/linkedAccount.service';
 import logger from '../utils/logger';
+
+/**
+ * NOTE ON BALANCE SOURCE
+ * ----------------------
+ * Per product decision the PRIMARY linked-account balance REPLACES the wallet
+ * balance. linkedAccount.service.syncBalances() writes that figure into
+ * User.walletBalance, so reading User.walletBalance here is correct and the
+ * withdrawal validation below stays meaningful. We attempt a best-effort live
+ * sync first so the dashboard reflects the freshest number.
+ */
 
 // 1. Get Wallet Dashboard Data
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
@@ -17,22 +28,28 @@ const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
         return res.status(401).json(new ApiResponse(401, null, 'User ID not found'));
     }
 
-    // A. User Wallet Data - User is already in req.user, but we might want fresh data
-    const userProfile = await User.findById(userId).select('walletBalance totalEarned referralCode').lean();
+    // Best-effort live sync of the connected balance into User.walletBalance.
+    // Never fail the dashboard if the provider is briefly unreachable.
+    let linkedStatus: any = { connected: false, primary: null, accounts: [] };
+    try {
+        linkedStatus = await linkedAccountService.getStatus(userId.toString());
+        if (linkedStatus.connected) {
+            await linkedAccountService.syncBalances(userId.toString());
+        }
+    } catch (e) {
+        logger.warn({ userId, err: (e as Error).message }, 'Wallet live-sync skipped');
+    }
+
+    const userProfile = await User.findById(userId)
+        .select('walletBalance totalEarned referralCode')
+        .lean();
     if (!userProfile) {
         return res.status(404).json(new ApiResponse(404, null, 'User not found'));
     }
 
-    // B. Pending Leads Count (How many people have they referred)
-    // Query by referrerId (ObjectId) first, fallback to clerkId for legacy
-    const pendingLeadsCount = await Referral.countDocuments({
-        referrerId: userId
-    });
+    const pendingLeadsCount = await Referral.countDocuments({ referrerId: userId });
 
-    // C. Recent Transaction Ledger
-    const transactions = await Transaction.find({
-        userId: userId
-    })
+    const transactions = await Transaction.find({ userId })
         .sort({ createdAt: -1 })
         .limit(20)
         .lean();
@@ -42,11 +59,12 @@ const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
         totalEarned: userProfile.totalEarned,
         referralCode: userProfile.referralCode,
         pendingLeads: pendingLeadsCount,
-        recentTransactions: transactions
+        recentTransactions: transactions,
+        linkedAccount: linkedStatus, // { connected, primary, accounts }
     }, 'Wallet dashboard fetched successfully'));
 });
 
-// 2. Link a New Referral
+// 2. Link a New Referral (unchanged)
 const linkReferral = asyncHandler(async (req: Request, res: Response) => {
     const { referralCode } = req.body;
     const newUser = (req.user as IUser);
@@ -56,42 +74,31 @@ const linkReferral = asyncHandler(async (req: Request, res: Response) => {
         return res.status(400).json(new ApiResponse(400, null, 'Referral code and User ID required'));
     }
 
-    // Validate the referral code belongs to a real user
     const referrer = await User.findOne({ referralCode: referralCode.trim().toUpperCase() });
-
     if (!referrer) {
         return res.status(404).json(new ApiResponse(404, null, 'Invalid referral code'));
     }
-
     if (referrer._id.toString() === newUserId.toString()) {
         return res.status(400).json(new ApiResponse(400, null, 'You cannot refer yourself'));
     }
 
-    // Check if this user was already referred
-    const existingReferral = await Referral.findOne({
-        referredUserId: newUserId
-    });
+    const existingReferral = await Referral.findOne({ referredUserId: newUserId });
     if (existingReferral) {
         return res.status(400).json(new ApiResponse(400, null, 'You have already been referred'));
     }
 
-    // Create the Referral link
     const newReferral = await Referral.create({
         referrerId: referrer._id,
         referredUserId: newUserId,
         referralCodeUsed: referrer.referralCode
     });
 
-    // Notify Referrer about the new signup
     try {
         await ReferralService.notifyReferralSignup(newReferral._id.toString());
     } catch (error) {
         console.error('[Referral] Error sending signup notification:', error);
     }
 
-    console.log(`[Referral Engine] SUCCESS: User ${newUserId} (Native) joined via ${referrer.name}'s link (${referralCode})!`);
-
-    // Log activity (Persona: Customer applying a referral)
     await activityService.createActivity({
         userId: newUserId.toString(),
         organizationId: newUser.organizationId?.toString(),
@@ -102,11 +109,10 @@ const linkReferral = asyncHandler(async (req: Request, res: Response) => {
     });
 
     logger.info({ userId: newUserId, referrerId: referrer._id, referralCode }, 'Referral linked successfully');
-
     res.status(201).json(new ApiResponse(201, newReferral, 'Referral linked successfully'));
 });
 
-// 3. Request a Withdrawal
+// 3. Request a Withdrawal  (FIX: Transaction.organizationId is REQUIRED)
 const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     const { amount, methodType, methodDetails } = req.body;
     const user = (req.user as IUser);
@@ -121,49 +127,43 @@ const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         return res.status(404).json(new ApiResponse(404, null, 'User not found'));
     }
 
-    // Calculate "Net Available Balance" (Total Balance - Pending Withdrawals)
-    const pendingWithdrawals = await Transaction.aggregate([
-        {
-            $match: {
-                userId: userId,
-                type: 'withdrawal',
-                status: 'pending'
-            }
-        },
-        { $group: { _id: null, total: { $sum: "$amount" } } }
-    ]);
-    const totalPending = pendingWithdrawals.length > 0 ? pendingWithdrawals[0].total : 0;
-    const netAvailable = user.walletBalance - totalPending;
-
-    if (netAvailable < amount) {
-        return res.status(400).json(new ApiResponse(400, null, `Insufficient available balance. You have $${totalPending.toFixed(2)} in pending withdrawals.`));
+    const organizationId = dbUser.organizationId || req.orgId;
+    if (!organizationId) {
+        return res.status(400).json(new ApiResponse(400, null, 'No organization context for this withdrawal'));
     }
 
-    // Create strictly pending transaction
+    const pendingWithdrawals = await Transaction.aggregate([
+        { $match: { userId: userId, type: 'withdrawal', status: 'pending' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const totalPending = pendingWithdrawals.length > 0 ? pendingWithdrawals[0].total : 0;
+    const netAvailable = (dbUser.walletBalance ?? 0) - totalPending;
+
+    if (netAvailable < amount) {
+        return res.status(400).json(new ApiResponse(400, null,
+            `Insufficient available balance. You have $${totalPending.toFixed(2)} in pending withdrawals.`));
+    }
+
     const withdrawal = await Transaction.create({
+        organizationId,            // ← required field, was missing before
         userId,
         type: 'withdrawal',
-        status: 'pending', // VERY IMPORTANT: Admin must approve to deduct
+        status: 'pending',
         amount,
         note: `Withdrawal request to ${methodType}`,
-        withdrawalMethod: {
-            type: methodType,
-            details: methodDetails
-        }
+        withdrawalMethod: { type: methodType, details: methodDetails }
     });
 
-    // Log activity (Persona: Customer requesting withdrawal)
     await activityService.logFinancialActivity(
         userId.toString(),
-        dbUser.organizationId?.toString(),
+        organizationId.toString(),
         'withdrawal_requested',
         amount,
         `Requested withdrawal of $${amount.toFixed(2)} via ${methodType}`,
         { transactionId: withdrawal._id.toString(), methodType }
     );
 
-    logger.info({ userId: userId, amount, methodType }, 'Withdrawal request submitted');
-
+    logger.info({ userId, amount, methodType }, 'Withdrawal request submitted');
     res.status(201).json(new ApiResponse(201, withdrawal, 'Withdrawal request submitted for Admin review'));
 });
 

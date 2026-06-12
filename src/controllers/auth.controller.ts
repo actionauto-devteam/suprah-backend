@@ -15,8 +15,8 @@ import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { userAuthCache } from '../utils/cache.util';
-import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
+import { generateCrmToken } from '../middleware/crmAuth.middleware';
 
 
 class AuthController {
@@ -260,6 +260,13 @@ class AuthController {
         return await authService.handleOAuthCallback(user);
     };
 
+    /**
+     * Issue a CRM token for a main-app user (SSO into SupraSpace / CRM).
+     *
+     * Routed through generateCrmToken so the token always carries `type: 'crm'`
+     * and uses the same secret chain as crmAuth + the SupraSpace socket.
+     * (Fixes the "Invalid CRM token type" socket error.)
+     */
     getCrmSsoToken = asyncHandler(async (req: Request, res: Response) => {
         const mainUser = (req as any).user;
         if (!mainUser?.email) throw new ApiError(401, 'Unauthorized');
@@ -270,12 +277,7 @@ class AuthController {
 
         if (!crmUser) throw new ApiError(404, 'No CRM account found for this user. Contact your admin.');
 
-        const CRM_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
-        const token = jwt.sign(
-            { id: crmUser._id, role: crmUser.role },
-            CRM_SECRET,
-            { expiresIn: '30d' }
-        );
+        const token = generateCrmToken(crmUser._id.toString(), '30d');
 
         res.json(new ApiResponse(200, { token, crmUserId: crmUser._id.toString() }, 'CRM token issued'));
     });

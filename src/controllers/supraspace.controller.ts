@@ -10,9 +10,9 @@ import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
-import jwt from 'jsonwebtoken';
-import config from '../config';
 import { IUser } from '../models/User.model';
+import { generateCrmToken } from '../middleware/crmAuth.middleware';
+import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -52,10 +52,17 @@ async function signAttachments(message: any) {
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
 
+  // Hide deprecated auto-generated technical/orphan groups (configurable via env).
+  const deprecated = (process.env.DEPRECATED_AUTO_GROUPS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   const conversations = await SupraSpaceConversation.find({
     members: userId,
     isActive: true,
     deletedFor: { $ne: userId },
+    ...(deprecated.length ? { name: { $nin: deprecated } } : {}),
   })
     .populate('members', 'fullName username avatar role')
     .populate({
@@ -748,16 +755,22 @@ const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
 
   const user = req.crmUser!;
   const roomName = `supraspace-${id}`;
-  const payload = {
-    context: { user: { id: userId.toString(), name: user.fullName, avatar: user.avatar, email: user.username } },
-    aud: process.env.JITSI_APP_ID,
-    iss: process.env.JITSI_APP_ID,
-    sub: process.env.NEXT_PUBLIC_JITSI_DOMAIN,
-    room: roomName,
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24,
-  };
-  const token = jwt.sign(payload, process.env.JITSI_APP_SECRET || 'secret');
-  res.json(new ApiResponse(200, { token, roomName }, 'Video token generated'));
+
+  // No JaaS configured → return room only (fallback path, identity via userInfo).
+  if (!jaasConfigured()) {
+    return res.json(new ApiResponse(200, { token: undefined, roomName, domain: JAAS_DOMAIN }, 'JaaS not configured'));
+  }
+
+  const token = generateJaasToken({
+    user: {
+      id: userId.toString(),
+      name: user.fullName,
+      email: user.username,
+      avatar: user.avatar,
+      moderator: true,
+    },
+  });
+  res.json(new ApiResponse(200, { token, roomName: jaasRoomName(roomName), domain: JAAS_DOMAIN }, 'Video token generated'));
 });
 
 const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
@@ -765,11 +778,9 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = await CrmUser.findOne({ email: mainUser.email }).select('_id').lean();
   if (!crmUser) throw new ApiError(404, 'No CRM account linked to this user. Please contact your administrator.');
 
-  const token = jwt.sign(
-    { id: crmUser._id.toString() },
-    config.jwt.crmJwtSecret || 'crm-secret-key',
-    { expiresIn: '30d' }
-  );
+  // Routed through generateCrmToken so the token carries type:'crm' and uses the
+  // same secret chain as the SupraSpace socket. (Fixes "Invalid CRM token type".)
+  const token = generateCrmToken(crmUser._id.toString(), '30d');
 
   res.json(new ApiResponse(200, { token }, 'Session token issued'));
 });
