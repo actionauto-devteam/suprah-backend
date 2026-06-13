@@ -18,10 +18,4 @@ router.get('/transfers', garageReviewController.getTransfers);
 // ─── The transfer action ────────────────────────────────────────────────────────
 router.post('/transfer', garageReviewController.transferVehicle);
 
-// ─── Service queue ────────────────────────────────────────────────────────────
-router.get('/service/queue',                                  garageReviewController.getServiceQueue);
-router.get('/service/customer-vehicles/:customerId',          garageReviewController.getCustomerVehiclesForService);
-router.post('/service/checkin',                               garageReviewController.checkInVehicle);
-router.patch('/service/status/:serviceId',                    garageReviewController.updateQueueServiceStatus);
-
 export default router;
