@@ -46,6 +46,8 @@ export interface IAuctionListing {
     withdrawnAt?: Date;
     soldAt?: Date;
     rejectionReason?: string;
+    reviewerNotes?: string;
+    convertedVehicleId?: mongoose.Types.ObjectId;
     reviewedAt?: Date;
     reviewedBy?: mongoose.Types.ObjectId;
     statusHistory: { status: ListingStatus; at: Date; note?: string }[];
@@ -96,6 +98,8 @@ const AuctionListingSchema: Schema = new Schema(
         withdrawnAt: { type: Date },
         soldAt: { type: Date },
         rejectionReason: { type: String },
+        reviewerNotes: { type: String },
+        convertedVehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle' },
         reviewedAt: { type: Date },
         reviewedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         statusHistory: [

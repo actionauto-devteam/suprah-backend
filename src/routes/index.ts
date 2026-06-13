@@ -52,6 +52,7 @@ import savedVehicleRoute from "./savedVehicle.route";
 import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
 import callRoute from "./call.route";
+import auctionListingReviewRoute from "./auctionListingReview.route";
 
 const router = express.Router();
 
@@ -120,6 +121,10 @@ const defaultRoutes = [
   {
     path: "/crm/garage-review",
     route: garageReviewRoute,
+  },
+  {
+    path: "/crm/auction-review",
+    route: auctionListingReviewRoute,
   },
   {
     path: "/aftermarket",
