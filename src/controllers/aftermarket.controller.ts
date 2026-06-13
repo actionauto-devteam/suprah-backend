@@ -85,13 +85,16 @@ const createProduct = asyncHandler(async (req: Request, res: Response) => {
 
   const { name, price, description } = req.body;
 
-  if (!name?.trim() || !description?.trim() || price === undefined || price === '') {
-    throw new ApiError(400, 'name, price, and description are required');
+  if (!name?.trim() || !description?.trim()) {
+    throw new ApiError(400, 'name and description are required');
   }
 
-  const priceNum = Number(price);
-  if (Number.isNaN(priceNum) || priceNum < 0) {
-    throw new ApiError(400, 'price must be a non-negative number');
+  let priceNum: number | undefined;
+  if (price !== undefined && price !== '') {
+    priceNum = Number(price);
+    if (Number.isNaN(priceNum) || priceNum < 0) {
+      throw new ApiError(400, 'price must be a non-negative number');
+    }
   }
 
   console.log('[Aftermarket][CREATE] stamping organizationId =', actor.organizationId.toString());
@@ -105,7 +108,7 @@ const createProduct = asyncHandler(async (req: Request, res: Response) => {
   const product = await AftermarketProduct.create({
     organizationId: actor.organizationId,
     name: name.trim(),
-    price: priceNum,
+    ...(priceNum !== undefined && { price: priceNum }),
     description: description.trim(),
     file: fileAttachment,
     media: mediaAttachment,
@@ -140,7 +143,9 @@ const updateProduct = asyncHandler(async (req: Request, res: Response) => {
   if (name?.trim()) product.name = name.trim();
   if (description?.trim()) product.description = description.trim();
 
-  if (price !== undefined && price !== '') {
+  if (price === '' || price === null) {
+    product.price = undefined;
+  } else if (price !== undefined) {
     const priceNum = Number(price);
     if (Number.isNaN(priceNum) || priceNum < 0) {
       throw new ApiError(400, 'price must be a non-negative number');
@@ -334,6 +339,9 @@ const checkout = asyncHandler(async (req: Request, res: Response) => {
     const product = productMap.get(item.productId);
     if (!product) {
       throw new ApiError(400, `Product ${item.productId} is unavailable`);
+    }
+    if (product.price == null) {
+      throw new ApiError(400, `Product "${product.name}" has no price. Please contact us for pricing.`);
     }
     const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
     return {

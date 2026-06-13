@@ -59,7 +59,7 @@ function emitToConversation(conv: any, event: string, payload: any) {
  * the customer is asking about — no back-and-forth needed.
  */
 function buildInquiryMessageContent(
-  product: { name: string; _id: any; price: number },
+  product: { name: string; _id: any; price?: number },
   question: string,
   customerName: string,
 ): string {

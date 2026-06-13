@@ -11,7 +11,7 @@ export interface IAftermarketAttachment {
 export interface IAftermarketProduct extends Document {
   organizationId: mongoose.Types.ObjectId;
   name: string;
-  price: number;
+  price?: number;
   description: string;
   /** Optional document attachment (brochure, spec sheet, PDF, etc.) */
   file?: IAftermarketAttachment;
@@ -50,8 +50,9 @@ const AftermarketProductSchema = new Schema<IAftermarketProduct>(
     },
     price: {
       type: Number,
-      required: true,
+      required: false,
       min: 0,
+      default: undefined,
     },
     description: {
       type: String,
