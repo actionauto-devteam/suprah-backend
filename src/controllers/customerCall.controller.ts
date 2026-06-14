@@ -7,6 +7,7 @@ import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import User, { IUser } from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
+import { emitToUser } from '../utils/socketEmitter';
 import logger from '../utils/logger';
 import jwt from 'jsonwebtoken';
 
@@ -48,12 +49,7 @@ function emitToConversation(conv: any, event: string, payload: any) {
 
 /** Notify the customer's main-app socket room directly (one-way push). */
 function emitToCustomer(customerUserId: string, event: string, payload: any) {
-  try {
-    const io = getIO();
-    io.to(`user:${customerUserId}`).emit(event, payload);
-  } catch (err) {
-    console.warn(`[CustomerCall] Customer emit failed on ${event}:`, err);
-  }
+  emitToUser(customerUserId, event, payload);
 }
 
 const VALID_MODES = ['voice', 'video'] as const;

@@ -2,13 +2,17 @@ import express, { RequestHandler } from 'express';
 import multer from 'multer';
 import {
   initConcernConversation,
+  getCustomerCases,
+  createCustomerCase,
   customerSendMessage,
   customerUploadAttachment,
   customerGetMessages,
   crmListConcernConversations,
   crmGetConcernMessages,
   crmReplyConcern,
+  crmReplyConcernWithFiles,
   crmResolveConcern,
+  crmGetRelatedCases,
 } from '../controllers/customerConcern.controller';
 import auth from '../middleware/auth.middleware';   
 import crmAuth from '../middleware/crmAuth.middleware';
@@ -45,6 +49,8 @@ const uploadFiles: RequestHandler = (req, res, next) => {
 // can call resolveCustomerOrg(req) without any additional setup.
 
 router.get('/init',     auth(), initConcernConversation);
+router.get('/cases',    auth(), getCustomerCases);
+router.post('/cases',   auth(), createCustomerCase);
 router.get('/messages', auth(), customerGetMessages);
 router.post('/messages', auth(), customerSendMessage);
 router.post('/upload',  auth(), uploadLimiter, uploadFiles, customerUploadAttachment);
@@ -55,6 +61,8 @@ router.post('/upload',  auth(), uploadLimiter, uploadFiles, customerUploadAttach
 router.get('/crm/conversations',                           crmAuth(), crmListConcernConversations);
 router.get('/crm/conversations/:conversationId/messages',  crmAuth(), crmGetConcernMessages);
 router.post('/crm/conversations/:conversationId/reply',    crmAuth(), crmReplyConcern);
+router.post('/crm/conversations/:conversationId/reply-upload', crmAuth(), uploadLimiter, uploadFiles, crmReplyConcernWithFiles);
 router.patch('/crm/conversations/:conversationId/resolve', crmAuth(), crmResolveConcern);
+router.get('/crm/conversations/:conversationId/related',   crmAuth(), crmGetRelatedCases);
 
 export default router;

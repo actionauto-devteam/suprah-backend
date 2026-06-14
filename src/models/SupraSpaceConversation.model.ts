@@ -18,6 +18,7 @@ export interface ISupraSpaceConversationMetadata {
   customerEmail?: string | null;
   resolved?: boolean;
   resolvedAt?: Date | null;
+  caseNumber?: number | null;
 }
 
 // ─── Main interface ───────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ const MetadataSchema = new Schema<ISupraSpaceConversationMetadata>(
     customerEmail:  { type: String, default: null },
     resolved:       { type: Boolean, default: false },
     resolvedAt:     { type: Date, default: null },
+    caseNumber:     { type: Number, default: null },
   },
   { _id: false }
 );
@@ -102,7 +104,7 @@ SupraSpaceConversationSchema.index({ members: 1 });
 SupraSpaceConversationSchema.index({ lastMessageAt: -1 });
 
 // Customer concern lookups
-SupraSpaceConversationSchema.index({ 'metadata.type': 1, 'metadata.customerUserId': 1 });
+SupraSpaceConversationSchema.index({ 'metadata.type': 1, 'metadata.customerUserId': 1, lastMessageAt: -1 });
 SupraSpaceConversationSchema.index({ 'metadata.resolved': 1, lastMessageAt: -1 });
 
 // ─── Model ────────────────────────────────────────────────────────────────────

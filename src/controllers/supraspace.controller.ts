@@ -62,6 +62,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     members: userId,
     isActive: true,
     deletedFor: { $ne: userId },
+    'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
     ...(deprecated.length ? { name: { $nin: deprecated } } : {}),
   })
     .populate('members', 'fullName username avatar role')
@@ -385,6 +386,7 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
     members: userId,
     isActive: true,
     deletedFor: { $ne: userId },
+    'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
   }).select('_id').lean();
   const convIds = convs.map((c: any) => c._id);
 
