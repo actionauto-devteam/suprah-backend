@@ -248,15 +248,16 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
   const domain = process.env.JITSI_DOMAIN || '8x8.vc';
   const publicJoinUrl = `${config.frontendUrl}/support/call/${encodeURIComponent(room)}`;
 
-  // Send email invitation to the lead if they provided an email
+  // Send email invitation — fire and forget (non-blocking), use org Gmail API if connected
   if (lead.email) {
     const callTypeLabel = lead.requestType === 'voice' ? 'Voice Call' : 'Video Call';
     const accentColor   = lead.requestType === 'voice' ? '#10b981' : '#3b82f6';
 
+    console.log(`[ReferralCall] Sending invitation email to ${lead.email} for lead ${lead._id}`);
     emailService.sendEmail({
       to:      lead.email,
       subject: `${repName} is inviting you to a ${callTypeLabel} — Action Auto`,
-      text:    `Hi ${lead.name},\n\nYour Action Auto representative, ${repName}, has started a ${callTypeLabel} and is ready to speak with you.\n\nJoin the call here:\n${publicJoinUrl}\n\nThis link is personal to you. Just open it, enter your name, and you'll be connected.\n\nAction Auto Utah`,
+      text:           `Hi ${lead.name},\n\nYour Action Auto representative, ${repName}, has started a ${callTypeLabel} and is ready to speak with you.\n\nJoin the call here:\n${publicJoinUrl}\n\nOpen the link, enter your email address (${lead.email}), and you'll be connected instantly.\n\nAction Auto Utah`,
       html: `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -294,12 +295,11 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
               </tr>
             </table>
 
-            <p style="margin:0 0 8px;font-size:12px;color:#a1a1aa;">Or copy this link into your browser:</p>
-            <p style="margin:0 0 24px;font-size:11px;color:#6366f1;word-break:break-all;background:#f4f4f5;padding:10px 14px;border-radius:8px;font-family:monospace;">${publicJoinUrl}</p>
+            <p style="margin:0 0 6px;font-size:12px;color:#a1a1aa;">When prompted, enter your email address to verify:</p>
+            <p style="margin:0 0 24px;font-size:12px;font-weight:700;color:#18181b;background:#f4f4f5;padding:10px 14px;border-radius:8px;">${lead.email}</p>
 
-            <p style="margin:0;font-size:12px;color:#a1a1aa;line-height:1.6;">
-              This link is personal to you. Just open it, enter your name, and you'll be connected to your representative.
-            </p>
+            <p style="margin:0 0 8px;font-size:12px;color:#a1a1aa;">Or copy the link into your browser:</p>
+            <p style="margin:0 0 24px;font-size:11px;color:#6366f1;word-break:break-all;background:#f4f4f5;padding:10px 14px;border-radius:8px;font-family:monospace;">${publicJoinUrl}</p>
           </td>
         </tr>
 
@@ -315,7 +315,9 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
   </table>
 </body>
 </html>`,
-    }).catch((err: any) => console.error('[ReferralCall] Email send failed:', err));
+    })
+      .then(() => console.log(`[ReferralCall] Invitation email sent to ${lead.email}`))
+      .catch((err: any) => console.error('[ReferralCall] Email send failed:', err));
   }
 
   res.json(new ApiResponse(200, {
