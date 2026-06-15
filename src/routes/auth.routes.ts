@@ -39,14 +39,15 @@ router.get('/google', (req, res, next) => {
 
 router.get('/google/callback',
     (req: any, res, next) => {
-        passport.authenticate('google', { session: false }, (err: any, user: any) => {
+        passport.authenticate('google', { session: false }, (err: any, user: any, info: any) => {
             if (err) {
                 console.error('[Google Callback] Strategy error:', err);
                 const code = isDbOutageError(err) ? 'service_unavailable' : 'oauth_failed';
                 return res.redirect(`${config.frontendUrl}/sign-in?error=${code}`);
             }
             if (!user) {
-                return res.redirect(`${config.frontendUrl}/sign-in?error=oauth_failed`);
+                const code = info?.message === 'no_account' ? 'no_account' : 'oauth_failed';
+                return res.redirect(`${config.frontendUrl}/sign-in?error=${code}`);
             }
             req.user = user;
             next();

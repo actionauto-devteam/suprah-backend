@@ -3,8 +3,6 @@ import mongoose from 'mongoose';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import config from './index';
 import User from '../models/User.model';
-import DriverRequest from '../models/DriverRequest.model';
-import notificationService from '../services/notification.service';
 
 passport.use(
     new GoogleStrategy(
@@ -95,7 +93,15 @@ passport.use(
                     return done(null, user);
                 }
 
-                // Create new user if not found
+                // No existing account found.
+                // Only allow account creation through a valid invitation link.
+                // Without an invite, Google sign-in is blocked — accounts must be
+                // created by a representative first.
+                if (!inviteToken || !orgId) {
+                    return done(null, false, { message: 'no_account' });
+                }
+
+                // Valid invite present — create the account
                 user = await User.create({
                     googleId: profile.id,
                     email: email.toLowerCase(),
@@ -108,35 +114,6 @@ passport.use(
                     isApproved,
                     onboardingCompleted,
                 });
-
-                // If specialized as a driver WITHOUT an invitation, create an approval request
-                if (roleToAssign === 'driver' && !inviteToken) {
-                    try {
-                        const driverRequest = await DriverRequest.create({
-                            driverUserId: user._id,
-                            status: 'pending'
-                        });
-
-                        // Notify Super Admins
-                        const superAdmins = await User.find({ role: 'super_admin' });
-                        for (const admin of superAdmins) {
-                            await notificationService.createNotification({
-                                userId: admin._id.toString(),
-                                organizationId: admin.organizationId?.toString() || 'global',
-                                type: 'driver_request',
-                                title: 'New Driver Request (Google)',
-                                message: `${user.name} (${user.email}) has signed up via Google as a driver and needs approval.`,
-                                metadata: {
-                                    driverRequestId: driverRequest._id.toString(),
-                                    driverName: user.name,
-                                    driverEmail: user.email
-                                }
-                            }).catch(err => console.error('[Passport] Notification failed:', err));
-                        }
-                    } catch (err) {
-                        console.error('[Passport] Failed to create driver request:', err);
-                    }
-                }
 
                 done(null, user);
             } catch (error) {

@@ -53,6 +53,7 @@ import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
 import callRoute from "./call.route";
 import auctionListingReviewRoute from "./auctionListingReview.route";
+import referralLeadRoute from "./referralLead.routes";
 
 const router = express.Router();
 
@@ -275,6 +276,10 @@ const defaultRoutes = [
     // NEW: SupraSpace calling — start / join / end / status
     path: "/calls",
     route: callRoute,
+  },
+  {
+    path: "/referral-leads",
+    route: referralLeadRoute,
   },
 ];
 
