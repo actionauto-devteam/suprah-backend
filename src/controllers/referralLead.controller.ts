@@ -11,17 +11,37 @@ import { emitToOrg } from '../utils/socketEmitter';
 import config from '../config';
 import emailService from '../services/email.service';
 
-// ─── Jitsi token helper (same pattern as customerCall.controller) ─────────────
-function referralJitsiToken(opts: { id: string; name: string; room: string }) {
+// ─── JaaS JWT helper ──────────────────────────────────────────────────────────
+const JAAS_APP_ID     = process.env.JAAS_APP_ID     || '';
+const JAAS_KID        = process.env.JAAS_KID        || '';
+const JAAS_PRIVATE_KEY = (process.env.JAAS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+
+function referralJitsiToken(opts: { id: string; name: string; email?: string; room: string }) {
   const payload = {
-    context: { user: { id: opts.id, name: opts.name } },
-    aud: process.env.JITSI_APP_ID,
-    iss: process.env.JITSI_APP_ID,
-    sub: process.env.NEXT_PUBLIC_JITSI_DOMAIN,
-    room: opts.room,
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 4,
+    context: {
+      user: {
+        id:    opts.id,
+        name:  opts.name,
+        ...(opts.email ? { email: opts.email } : {}),
+      },
+      features: {
+        livestreaming:   false,
+        recording:       false,
+        transcription:   false,
+        'outbound-call': false,
+      },
+    },
+    aud:  'jitsi',
+    iss:  'chat',
+    sub:  JAAS_APP_ID,
+    room: '*',
+    exp:  Math.floor(Date.now() / 1000) + 60 * 60 * 4,
+    nbf:  Math.floor(Date.now() / 1000) - 10,
   };
-  return jwt.sign(payload, process.env.JITSI_APP_SECRET || 'secret');
+  return jwt.sign(payload, JAAS_PRIVATE_KEY, {
+    algorithm: 'RS256',
+    header:    { alg: 'RS256', kid: JAAS_KID, typ: 'JWT' } as any,
+  });
 }
 
 // ─── PUBLIC: Validate code & return referrer first name ───────────────────────
@@ -220,11 +240,12 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
   const repName = crmUser?.fullName || crmUser?.username || 'Representative';
   const repId   = crmUser?._id?.toString() || 'crm-rep';
 
-  const room = `referral-${lead._id.toString()}`;
+  const room      = `referral-${lead._id.toString()}`;
+  const jitsiRoom = `${JAAS_APP_ID}/${room}`;
 
-  const staffToken = referralJitsiToken({ id: repId, name: repName, room });
+  const staffToken = referralJitsiToken({ id: repId, name: repName, email: crmUser?.username, room });
 
-  const domain = process.env.NEXT_PUBLIC_JITSI_DOMAIN || '8x8.vc';
+  const domain = process.env.JITSI_DOMAIN || '8x8.vc';
   const publicJoinUrl = `${config.frontendUrl}/support/call/${encodeURIComponent(room)}`;
 
   // Send email invitation to the lead if they provided an email
@@ -300,6 +321,7 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, {
     domain,
     room,
+    jitsiRoom,
     jwt:            staffToken,
     publicJoinUrl,
     callType:       lead.requestType,
@@ -329,12 +351,14 @@ export const getGuestCallToken = asyncHandler(async (req: Request, res: Response
   }
 
   const guestToken = referralJitsiToken({
-    id:   `guest-${Date.now()}`,
-    name: lead.name.slice(0, 50),
+    id:    `guest-${Date.now()}`,
+    name:  lead.name.slice(0, 50),
+    email: lead.email,
     room,
   });
 
-  const domain = process.env.NEXT_PUBLIC_JITSI_DOMAIN || '8x8.vc';
+  const domain    = process.env.JITSI_DOMAIN || '8x8.vc';
+  const jitsiRoom = `${JAAS_APP_ID}/${room}`;
 
-  res.json(new ApiResponse(200, { domain, room, jwt: guestToken, displayName: lead.name }, 'Guest token issued'));
+  res.json(new ApiResponse(200, { domain, room, jitsiRoom, jwt: guestToken, displayName: lead.name }, 'Guest token issued'));
 });
