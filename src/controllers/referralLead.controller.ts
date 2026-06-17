@@ -12,11 +12,16 @@ import config from '../config';
 import emailService from '../services/email.service';
 
 // ─── JaaS JWT helper ──────────────────────────────────────────────────────────
-const JAAS_APP_ID     = process.env.JAAS_APP_ID     || '';
-const JAAS_KID        = process.env.JAAS_KID        || '';
+const JAAS_APP_ID      = process.env.JAAS_APP_ID      || '';
+const JAAS_KID         = process.env.JAAS_KID         || '';
 const JAAS_PRIVATE_KEY = (process.env.JAAS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 
-function referralJitsiToken(opts: { id: string; name: string; email?: string; room: string }) {
+function referralJitsiToken(opts: {
+  id:    string;
+  name:  string;
+  email?: string;
+  room:  string;
+}) {
   const payload = {
     context: {
       user: {
@@ -86,6 +91,24 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
 
   if (!referrer) throw new ApiError(404, 'Invalid referral code');
   if (!referrer.organizationId) throw new ApiError(400, 'Referrer is not linked to a dealership');
+
+  // Duplicate check — block if phone OR email already has an active lead in this org
+  const [dupPhone, dupEmail] = await Promise.all([
+    ReferralLead.findOne({
+      phone:          phone.trim(),
+      organizationId: referrer.organizationId,
+      status:         { $in: ['pending', 'contacted'] },
+    }).select('_id').lean(),
+    ReferralLead.findOne({
+      email:          email.trim().toLowerCase(),
+      organizationId: referrer.organizationId,
+      status:         { $in: ['pending', 'contacted'] },
+    }).select('_id').lean(),
+  ]);
+
+  if (dupPhone || dupEmail) {
+    throw new ApiError(409, 'You already have a pending inquiry with this dealership. Our team will be in touch soon — no need to submit again.');
+  }
 
   const lead = await ReferralLead.create({
     name:           name.trim(),
@@ -324,13 +347,13 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
     domain,
     room,
     jitsiRoom,
-    jwt:            staffToken,
+    jwt:             staffToken,
     publicJoinUrl,
-    callType:       lead.requestType,
-    leadName:       lead.name,
-    leadPhone:      lead.phone,
-    leadEmail:      lead.email || null,
-    emailSent:      !!lead.email,
+    callType:        lead.requestType,
+    leadName:        lead.name,
+    leadPhone:       lead.phone,
+    leadEmail:       lead.email || null,
+    emailSent:  !!lead.email,
   }, 'Call room ready'));
 });
 
@@ -364,3 +387,4 @@ export const getGuestCallToken = asyncHandler(async (req: Request, res: Response
 
   res.json(new ApiResponse(200, { domain, room, jitsiRoom, jwt: guestToken, displayName: lead.name }, 'Guest token issued'));
 });
+
