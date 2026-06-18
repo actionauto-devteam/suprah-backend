@@ -15,6 +15,7 @@ import { IUser } from "../models/User.model";
 import cacheService from "../services/cache.service";
 import logger from "../utils/logger";
 import activityService from "../services/activity.service";
+import membershipService from "../services/membership.service";
 
 const VEH_CACHE_TTL = 60 * 60; // 1 hour
 
@@ -107,7 +108,15 @@ const normalizePublicVehicle = (vehicle: any) => ({
   comments: vehicle.comments || "",
 });
 
-const normalizeCustomerVehicle = (vehicle: any) => ({
+const normalizeCustomerVehicle = (
+  vehicle: any,
+  member?: { discountPercent: number; tierName: string; tierSlug: string },
+) => {
+  const price = vehicle.price || 0;
+  const discountPercent = member?.discountPercent ?? 0;
+  const memberPrice = membershipService.computeMemberPrice(price, vehicle.cost, discountPercent);
+  const memberSavings = Math.max(0, price - memberPrice);
+  return {
   id: vehicle._id.toString(),
   vin: vehicle.vin,
   year: vehicle.year,
@@ -119,7 +128,11 @@ const normalizeCustomerVehicle = (vehicle: any) => ({
   exteriorColor: vehicle.exteriorColor || "N/A",
   interiorColor: vehicle.interiorColor || "N/A",
   stockNumber: vehicle.stockNumber || "N/A",
-  price: vehicle.price || 0,
+  price,
+  memberPrice,
+  memberSavings,
+  memberDiscountPercent: memberSavings > 0 ? discountPercent : 0,
+  tierName: memberSavings > 0 ? member?.tierName ?? "" : "",
   marketPrice: vehicle.msrp || 0,
   mileage: vehicle.mileage || 0,
   transmission: vehicle.transmission || "Automatic",
@@ -141,7 +154,8 @@ const normalizeCustomerVehicle = (vehicle: any) => ({
   driveTrain: vehicle.driveTrain || "",
   comments: vehicle.comments || "",
   options: vehicle.options || "",
-});
+  };
+};
 
 const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
@@ -1642,8 +1656,13 @@ const getMarketplaceVehicles = asyncHandler(
     const total = result.metadata[0]?.total || 0;
     const vehicles = result.data || [];
 
-    // SECURE NORMALIZATION: Scrubs internal data
-    const normalized = vehicles.map((v: any) => normalizeCustomerVehicle(v));
+    const userId = getUserId(req);
+    const member = userId
+      ? await membershipService.getMemberPricingForUser(userId).catch(() => undefined)
+      : undefined;
+
+    // SECURE NORMALIZATION: Scrubs internal data; member price derived server-side
+    const normalized = vehicles.map((v: any) => normalizeCustomerVehicle(v, member));
 
     res.json(
       new ApiResponse(

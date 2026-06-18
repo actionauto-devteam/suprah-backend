@@ -7,6 +7,7 @@ import { ApiError } from '../utils/ApiError';
 import ReferralLead from '../models/ReferralLead.model';
 import User from '../models/User.model';
 import Referral from '../models/referral.model';
+import membershipService from '../services/membership.service';
 import { emitToOrg } from '../utils/socketEmitter';
 import config from '../config';
 import emailService from '../services/email.service';
@@ -317,6 +318,22 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   })
     .then(() => console.log(`[ConvertLead] Welcome email sent to ${newUser.email}`))
     .catch((err: any) => console.error('[ConvertLead] Welcome email send failed:', err));
+
+  // Credit the referrer's membership points for the conversion (fire and forget)
+  if (lead.referrerId) {
+    const referrer = await User.findById(lead.referrerId).select('_id organizationId').lean();
+    if (referrer) {
+      membershipService.creditPoints({
+        userId: referrer._id.toString(),
+        organizationId: referrer.organizationId?.toString() || orgId || 'global',
+        delta: 300,
+        sourceType: 'referral_conversion',
+        sourceId: lead._id!.toString(),
+        description: `Referral conversion: ${lead.name || lead.email} joined`,
+        metadata: { referralLeadId: lead._id!.toString() },
+      }).catch(() => null);
+    }
+  }
 
   res.status(201).json(
     new ApiResponse(201, {

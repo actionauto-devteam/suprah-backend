@@ -2,9 +2,11 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Appointment from '../models/Appointment.model';
 import ServiceSlot from '../models/ServiceSlot.model';
+import User from '../models/User.model';
 import appointmentService from '../services/appointment.service';
 import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
+import membershipService from '../services/membership.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { IUser } from '../models/User.model';
 import logger from '../utils/logger';
@@ -278,7 +280,35 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     const orgId = req.orgId as string;
+    const prevAppointment = await Appointment.findById(id).lean();
     const appointment = await appointmentService.updateAppointment(id, orgId, userId, req.body);
+
+    if (prevAppointment?.status !== 'completed' && appointment.status === 'completed') {
+      const isTestDrive = (appointment.type || '').toLowerCase().includes('test_drive') || (appointment.type || '').toLowerCase().includes('test drive');
+      const delta = isTestDrive ? 50 : 75;
+      const sourceType = isTestDrive ? 'test_drive' as const : 'service_appointment' as const;
+
+      let customerUserId: string | undefined;
+      if (appointment.customerBooking?.email) {
+        const cu = await User.findOne({ email: appointment.customerBooking.email }).select('_id').lean();
+        customerUserId = cu?._id?.toString();
+      }
+      if (!customerUserId && appointment.createdByModel === 'User') {
+        customerUserId = appointment.createdBy?.toString();
+      }
+
+      if (customerUserId) {
+        membershipService.creditPoints({
+          userId: customerUserId,
+          organizationId: orgId || 'global',
+          delta,
+          sourceType,
+          sourceId: appointment._id!.toString(),
+          description: `${isTestDrive ? 'Test drive' : 'Service appointment'} completed`,
+          metadata: { appointmentId: appointment._id!.toString(), type: appointment.type },
+        }).catch((err: unknown) => logger.error({ err }, 'Membership: appointment credit failed'));
+      }
+    }
 
     if (orgId) {
         const { title, message } = notificationTemplates.appointment_updated({

@@ -73,6 +73,7 @@ const envVarsSchema = Joi.object()
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
 
     CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
+    MEMBERSHIP_DISCOUNT_SECRET: Joi.string().allow('').description('Membership discount JWT secret'),
     // Push Notifications
     VAPID_PUBLIC_KEY: Joi.string()
       .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
@@ -112,6 +113,7 @@ const config = {
     refreshSecret: envVars.JWT_REFRESH_SECRET,
     refreshExpiration: envVars.JWT_REFRESH_EXPIRATION,
     crmJwtSecret: envVars.CRM_JWT_SECRET,
+    membershipDiscountSecret: envVars.MEMBERSHIP_DISCOUNT_SECRET || 'membership-discount-dev-secret',
   },
   ftp: {
     host: envVars.DEALERSCLOUD_FTP_HOST,

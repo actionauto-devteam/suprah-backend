@@ -47,6 +47,16 @@ async function signAttachments(message: any) {
   return message;
 }
 
+const AVATAR_SIGN_TTL = 7 * 24 * 60 * 60;
+
+async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: string | null }>(conv: T): Promise<T> {
+  if (conv?.avatarKey) {
+    const signed = await storageService.getSignedUrl(conv.avatarKey, AVATAR_SIGN_TTL);
+    if (signed) conv.avatar = signed;
+  }
+  return conv;
+}
+
 // ─── Conversations ───────────────────────────────────────────────────────────
 
 /** GET /api/supraspace/conversations */
@@ -74,7 +84,8 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     .sort({ lastMessageAt: -1 })
     .lean();
 
-  res.json(new ApiResponse(200, conversations, 'Conversations fetched'));
+  const signed = await Promise.all(conversations.map((c: any) => withFreshAvatar(c)));
+  res.json(new ApiResponse(200, signed, 'Conversations fetched'));
 });
 
 /** POST /api/supraspace/conversations/direct */
@@ -194,6 +205,7 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
 
   await conversation.save();
   await conversation.populate('members', 'fullName username avatar role');
+  await withFreshAvatar(conversation);
   emitToConversation(conversation, 'conversation:updated', conversation);
 
   res.json(new ApiResponse(200, conversation, 'Group updated'));
@@ -227,7 +239,7 @@ const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
   }
 
   conversation.avatarKey = storageService.getKeyFromUrl(url) || url;
-  conversation.avatar = (await storageService.getSignedUrl(conversation.avatarKey)) || url;
+  conversation.avatar = (await storageService.getSignedUrl(conversation.avatarKey, AVATAR_SIGN_TTL)) || url;
   await conversation.save();
 
   emitToConversation(conversation, 'conversation:updated', { _id: id, avatar: conversation.avatar });

@@ -62,4 +62,6 @@ router.patch('/reviews/:reviewId',             adminToggleReviewVisibility);
 router.get('/inquiries',                       adminListInquiries);
 router.patch('/inquiries/:inquiryId',          adminUpdateInquiryStatus);
 
+router.patch('/orders/:id/status',             aftermarketController.updateOrderStatus);
+
 export default router;

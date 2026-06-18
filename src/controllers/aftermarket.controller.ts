@@ -7,6 +7,8 @@ import AftermarketProduct from '../models/AftermarketProduct.model';
 import AftermarketOrder from '../models/AftermarketOrder.model';
 import Organization from '../models/Organization.model';
 import storageService, { BucketType } from '../services/storage.service';
+import membershipService from '../services/membership.service';
+import logger from '../utils/logger';
 import { getSocketIO } from '../utils/socketEmitter';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -382,6 +384,36 @@ const getMyOrders = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, orders, 'Orders fetched'));
 });
 
+const updateOrderStatus = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { status } = req.body as { status: string };
+
+  const allowed = ['pending', 'paid', 'fulfilled', 'cancelled'];
+  if (!allowed.includes(status)) throw new ApiError(400, `status must be one of: ${allowed.join(', ')}`);
+
+  const order = await AftermarketOrder.findById(id);
+  if (!order) throw new ApiError(404, 'Order not found');
+
+  const prevStatus = order.status;
+  order.status = status as typeof order.status;
+  await order.save();
+
+  if (prevStatus !== 'fulfilled' && status === 'fulfilled') {
+    const delta = Math.max(1, Math.floor(order.total));
+    membershipService.creditPoints({
+      userId: order.customerId.toString(),
+      organizationId: order.organizationId.toString(),
+      delta,
+      sourceType: 'aftermarket_order',
+      sourceId: order._id!.toString(),
+      description: `Aftermarket order fulfilled: $${order.total.toFixed(2)} spent`,
+      metadata: { orderId: order._id!.toString(), total: order.total },
+    }).catch((err: unknown) => logger.error({ err }, 'Membership: aftermarket credit failed'));
+  }
+
+  res.json(new ApiResponse(200, order, 'Order status updated'));
+});
+
 export default {
   createProduct,
   updateProduct,
@@ -391,4 +423,5 @@ export default {
   getProductById,
   checkout,
   getMyOrders,
+  updateOrderStatus,
 };

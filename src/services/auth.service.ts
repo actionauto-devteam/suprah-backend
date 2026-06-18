@@ -4,6 +4,7 @@ import User, { IUser } from '../models/User.model';
 import Session from '../models/Session.model';
 import tokenService from './token.service';
 import emailService from './email.service';
+import membershipService from './membership.service';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 import Organization from '../models/Organization.model';
@@ -426,6 +427,14 @@ class AuthService {
         }
 
         await user.save();
+
+        if (roleToAssign === 'customer') {
+            membershipService.rewardProfileCompletion(
+                user._id.toString(),
+                user.organizationId?.toString() || 'global',
+            ).catch(() => null);
+        }
+
         return this.sanitizeUser(user);
     }
 

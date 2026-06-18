@@ -1,6 +1,7 @@
 import express from "express";
 import adminController from "../controllers/admin.controller";
 import adminReferralController from "../controllers/admin.referral.controller";
+import { adminAdjustPoints } from "../controllers/membership.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
@@ -64,5 +65,7 @@ router.post(
   "/referrals/withdrawals/:transactionId/reject",
   adminReferralController.rejectWithdrawal,
 );
+
+router.post("/membership/adjust-points", adminAdjustPoints);
 
 export default router;

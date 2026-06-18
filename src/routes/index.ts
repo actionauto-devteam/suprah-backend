@@ -54,6 +54,7 @@ import linkedAccountRoute from "./linkedAccount.routes";
 import callRoute from "./call.route";
 import auctionListingReviewRoute from "./auctionListingReview.route";
 import referralLeadRoute from "./referralLead.routes";
+import membershipRoute from "./membership.route";
 
 const router = express.Router();
 
@@ -280,6 +281,10 @@ const defaultRoutes = [
   {
     path: "/referral-leads",
     route: referralLeadRoute,
+  },
+  {
+    path: "/membership",
+    route: membershipRoute,
   },
 ];
 
