@@ -8,6 +8,9 @@ import {
 import {
   adminListInquiries,
   adminUpdateInquiryStatus,
+  adminGetInquiryDetail,
+  adminCreateInvoiceForInquiry,
+  adminInquiriesUnreadCount,
 } from '../controllers/aftermarketInquiry.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
 import { ApiError } from '../utils/ApiError';
@@ -39,29 +42,23 @@ const uploadProductFiles = (req: any, res: any, next: any) => {
 
 router.use(crmAuth());
 
-// ─── Product CRUD ─────────────────────────────────────────────────────────────
+router.get('/inquiries',                       adminListInquiries);
+router.get('/inquiries/unread-count',          adminInquiriesUnreadCount);
+router.get('/inquiries/:inquiryId',            adminGetInquiryDetail);
+router.post('/inquiries/:inquiryId/invoice',   adminCreateInvoiceForInquiry);
+router.patch('/inquiries/:inquiryId',          adminUpdateInquiryStatus);
 
+// ─── Review moderation ────────────────────────────────────────────────────────
+router.get('/:productId/reviews',              adminListReviews);
+router.patch('/reviews/:reviewId',             adminToggleReviewVisibility);
+
+// ─── Order status (legacy cart orders) ────────────────────────────────────────
+router.patch('/orders/:id/status',             aftermarketController.updateOrderStatus);
+
+// ─── Product CRUD ─────────────────────────────────────────────────────────────
 router.get('/',           aftermarketController.getProductsForCrm);
 router.post('/',          uploadProductFiles, aftermarketController.createProduct);
 router.patch('/:id',      uploadProductFiles, aftermarketController.updateProduct);
 router.delete('/:id',     aftermarketController.deleteProduct);
-
-// ─── Review moderation ────────────────────────────────────────────────────────
-//
-//   GET   /api/crm/aftermarket/:productId/reviews          all reviews (inc hidden)
-//   PATCH /api/crm/aftermarket/reviews/:reviewId           toggle visibility
-//
-router.get('/:productId/reviews',              adminListReviews);
-router.patch('/reviews/:reviewId',             adminToggleReviewVisibility);
-
-// ─── Inquiry management ───────────────────────────────────────────────────────
-//
-//   GET   /api/crm/aftermarket/inquiries                   list (filterable)
-//   PATCH /api/crm/aftermarket/inquiries/:inquiryId        update status
-//
-router.get('/inquiries',                       adminListInquiries);
-router.patch('/inquiries/:inquiryId',          adminUpdateInquiryStatus);
-
-router.patch('/orders/:id/status',             aftermarketController.updateOrderStatus);
 
 export default router;

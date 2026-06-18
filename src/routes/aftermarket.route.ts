@@ -1,74 +1,44 @@
 import express from 'express';
-import multer from 'multer';
 import aftermarketController from '../controllers/aftermarket.controller';
 import {
-  adminToggleReviewVisibility,
-  adminListReviews,
+  submitReview,
+  getProductReviews,
+  deleteMyReview,
 } from '../controllers/aftermarketReview.controller';
 import {
-  adminListInquiries,
-  adminUpdateInquiryStatus,
-  adminGetInquiryDetail,
-  adminCreateInvoiceForInquiry,
-  adminInquiriesUnreadCount,
+  submitInquiry,
+  getMyInquiries,
 } from '../controllers/aftermarketInquiry.controller';
-import crmAuth from '../middleware/crmAuth.middleware';
-import { ApiError } from '../utils/ApiError';
+import auth from '../middleware/auth.middleware';
 
 const router = express.Router();
 
-// ─── Multer: product media / file uploads ─────────────────────────────────────
-
-const PRODUCT_MAX_FILE_SIZE = 40 * 1024 * 1024; // 40 MB
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: PRODUCT_MAX_FILE_SIZE, files: 2 },
-});
-
-const uploadProductFiles = (req: any, res: any, next: any) => {
-  upload.fields([
-    { name: 'media', maxCount: 1 },
-    { name: 'file', maxCount: 1 },
-  ])(req, res, (err: any) => {
-    if (!err) return next();
-    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-      return next(new ApiError(400, 'File must be 40 MB or smaller.'));
-    }
-    return next(new ApiError(400, err?.message || 'File processing failed.'));
-  });
-};
-
 // ─── Auth gate ────────────────────────────────────────────────────────────────
+router.use(auth());
 
-router.use(crmAuth());
+// ─── Browse ───────────────────────────────────────────────────────────────────
+router.get('/', aftermarketController.getProductsForCustomer);
 
-// ─── Inquiry management ───────────────────────────────────────────────────────
-//   NOTE: declare the static & detail inquiry routes BEFORE the product
-//   /:id routes so "inquiries" is never captured as a product id.
-//
-//   GET   /api/crm/aftermarket/inquiries                    list (filterable)
-//   GET   /api/crm/aftermarket/inquiries/unread-count       open-inquiry badge
-//   GET   /api/crm/aftermarket/inquiries/:inquiryId         full detail
-//   POST  /api/crm/aftermarket/inquiries/:inquiryId/invoice create invoice
-//   PATCH /api/crm/aftermarket/inquiries/:inquiryId         update status
-//
-router.get('/inquiries',                       adminListInquiries);
-router.get('/inquiries/unread-count',          adminInquiriesUnreadCount);
-router.get('/inquiries/:inquiryId',            adminGetInquiryDetail);
-router.post('/inquiries/:inquiryId/invoice',   adminCreateInvoiceForInquiry);
-router.patch('/inquiries/:inquiryId',          adminUpdateInquiryStatus);
+// ─── Orders ── declare before /:productId so 'orders' isn't captured ─────────
+router.get('/orders/mine', aftermarketController.getMyOrders);
+router.post('/checkout', aftermarketController.checkout);
 
-// ─── Review moderation ────────────────────────────────────────────────────────
-router.get('/:productId/reviews',              adminListReviews);
-router.patch('/reviews/:reviewId',             adminToggleReviewVisibility);
+// ─── Inquiries (mine) — declare before /:productId too ───────────────────────
+router.get('/inquiries/mine', getMyInquiries);
 
-// ─── Order status (legacy cart orders) ────────────────────────────────────────
-router.patch('/orders/:id/status',             aftermarketController.updateOrderStatus);
+// ─── Single product ───────────────────────────────────────────────────────────
+router.get('/:id', aftermarketController.getProductById);
 
-// ─── Product CRUD ─────────────────────────────────────────────────────────────
-router.get('/',           aftermarketController.getProductsForCrm);
-router.post('/',          uploadProductFiles, aftermarketController.createProduct);
-router.patch('/:id',      uploadProductFiles, aftermarketController.updateProduct);
-router.delete('/:id',     aftermarketController.deleteProduct);
+// ─── Direct purchase (priced products → ready-to-pay invoice) ────────────────
+//   POST /api/aftermarket/:productId/buy-now   Body: { quantity? }
+router.post('/:productId/buy-now', aftermarketController.buyNow);
+
+// ─── Reviews ── per-product sub-resource ─────────────────────────────────────
+router.get('/:productId/reviews',        getProductReviews);
+router.post('/:productId/reviews',       submitReview);
+router.delete('/:productId/reviews/mine', deleteMyReview);
+
+// ─── Inquiries ── per-product ─────────────────────────────────────────────────
+router.post('/:productId/inquiries', submitInquiry);
 
 export default router;
