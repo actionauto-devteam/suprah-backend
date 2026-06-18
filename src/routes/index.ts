@@ -2,6 +2,7 @@ import express from "express";
 import vehicleRoute from "./vehicle.route";
 import dashboardRoute from "./dashboard.route";
 import syncRoute from "./sync.route";
+import feedSyncRoute from "./feedSync.route";
 import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
 import profileRoute from "./profile.route";
@@ -70,6 +71,12 @@ const defaultRoutes = [
   {
     path: "/sync",
     route: syncRoute,
+  },
+  {
+    // DealersCloud (and other) inventory feed sync:
+    // config CRUD, manual/all sync triggers, and push ingest.
+    path: "/sync/feeds",
+    route: feedSyncRoute,
   },
   {
     path: "/quotes",

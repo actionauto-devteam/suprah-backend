@@ -7,7 +7,7 @@ export interface IAftermarketInquiry extends Document {
 
   // Product snapshot so the CRM side always knows what was being asked about
   productName: string;
-  productPrice: number;
+  productPrice?: number;
 
   // Customer identity snapshot
   customerName: string;
@@ -48,7 +48,7 @@ const AftermarketInquirySchema = new Schema<IAftermarketInquiry>(
       index: true,
     },
     productName:   { type: String, required: true },
-    productPrice:  { type: Number, required: true },
+    productPrice:  { type: Number, required: false },
     customerName:  { type: String, required: true },
     customerEmail: { type: String, required: true },
     question: {

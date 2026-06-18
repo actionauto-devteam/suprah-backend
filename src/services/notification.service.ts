@@ -34,6 +34,8 @@ const VALID_NOTIFICATION_TYPES = [
   'system_announcement', 'message_received', 'reminder', 'general',
   'referral_joined', 'referral_rewarded',
   'delivery_confirmed', 'proof_submitted',
+  // ── Aftermarket ──
+  'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
 ] as const;
 
 const PREFERENCE_MAP: Record<string, string> = {
@@ -80,6 +82,9 @@ const PREFERENCE_MAP: Record<string, string> = {
   team_member_left: 'crmActivity',
   referral_joined: 'referral_joined',
   referral_rewarded: 'referral_rewarded',
+  // Aftermarket inquiries are CRM activity; invoices go to the customer directly.
+  aftermarket_inquiry: 'crmActivity',
+  aftermarket_order: 'crmActivity',
 };
 
 const createNotification = async (params: CreateNotificationParams) => {
@@ -93,41 +98,25 @@ const createNotification = async (params: CreateNotificationParams) => {
     throw new ApiError(400, `Invalid notification type: ${type}`);
   }
 
-  if (title.length > 200) {
-    throw new ApiError(400, 'Notification title must be less than 200 characters');
-  }
+  if (title.length > 200) throw new ApiError(400, 'Notification title must be less than 200 characters');
+  if (message.length > 1000) throw new ApiError(400, 'Notification message must be less than 1000 characters');
 
-  if (message.length > 1000) {
-    throw new ApiError(400, 'Notification message must be less than 1000 characters');
-  }
-
-  // Identity resolution for notifications
   const user = await User.findById(userId) || await CrmUser.findById(userId);
-  if (!user) {
-    throw new ApiError(404, 'Notification target user not found');
-  }
+  if (!user) throw new ApiError(404, 'Notification target user not found');
 
   const preferenceKey = PREFERENCE_MAP[type];
   if (preferenceKey && (user as any).notificationPreferences) {
     const isEnabled = ((user as any).notificationPreferences as any)[preferenceKey];
-    if (isEnabled === false) {
-      return null;
-    }
+    if (isEnabled === false) return null;
   }
 
   const notification = await Notification.create({
-    userId,
-    organizationId,
-    type,
-    title,
-    message,
-    metadata: metadata || {},
-    isRead: false,
+    userId, organizationId, type, title, message,
+    metadata: metadata || {}, isRead: false,
   });
 
   emitToUser(userId, 'notification:new', notification);
 
-  // Trigger Web Push Notification
   try {
     const urlMap: Record<string, string> = {
       shipment_assigned: '/driver/loads',
@@ -145,25 +134,24 @@ const createNotification = async (params: CreateNotificationParams) => {
       driver_request: '/driver-tracker',
       driver_request_approved: '/driver/loads',
       driver_request_rejected: '/notifications',
+      // ── Aftermarket ──
+      aftermarket_inquiry: metadata?.route || '/crm/support-center?tab=aftermarket',
+      aftermarket_invoice: metadata?.route || '/customer/payments',
+      aftermarket_order: metadata?.route || '/crm/aftermarket',
     };
 
     const pushPayload: any = {
       title,
       body: message,
-      tag: preferenceKey || 'general', // Group by preference category
-      data: {
-        url: urlMap[type] || '/notifications',
-        notificationId: notification._id,
-      },
+      tag: preferenceKey || 'general',
+      data: { url: urlMap[type] || '/notifications', notificationId: notification._id },
     };
 
-    // Add interactive actions for driver join requests
     if (type === 'driver_request') {
       pushPayload.actions = [
         { action: 'approve', title: 'Approve' },
-        { action: 'reject', title: 'Reject' }
+        { action: 'reject', title: 'Reject' },
       ];
-      // Include the ID in data so the SW can call the API
       pushPayload.data.driverRequestId = metadata?.driverRequestId || notification._id;
     }
 
@@ -178,10 +166,7 @@ const createNotification = async (params: CreateNotificationParams) => {
 };
 
 const createNotificationBatch = async (notifications: CreateNotificationParams[]) => {
-  const results = await Promise.allSettled(
-    notifications.map(params => createNotification(params))
-  );
-
+  const results = await Promise.allSettled(notifications.map(params => createNotification(params)));
   return {
     successful: results.filter(r => r.status === 'fulfilled').length,
     failed: results.filter(r => r.status === 'rejected').length,
@@ -202,8 +187,6 @@ const getUserNotifications = async (
   const personalFilter: any = { userId };
   if (isRead !== undefined) personalFilter.isRead = isRead;
 
-  // Support legacy org-level broadcast docs that may not have userId.
-  // Newer broadcast notifications are created per-user and are already covered by personalFilter.
   const broadcastFilter: any = {
     organizationId: orgId,
     isBroadcast: true,
@@ -233,10 +216,7 @@ const getUserNotifications = async (
 
   const mergedNotifs = [...personalNotifs, ...broadcastNotifs]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(
-      normalizedSkip,
-      shouldFetchAll ? undefined : normalizedSkip + normalizedLimit,
-    );
+    .slice(normalizedSkip, shouldFetchAll ? undefined : normalizedSkip + normalizedLimit);
 
   return {
     notifications: mergedNotifs,
@@ -247,23 +227,18 @@ const getUserNotifications = async (
 
 const markAsRead = async (notificationId: string, orgId: string, userId: string) => {
   const notification = await Notification.findOneAndUpdate(
-    { _id: notificationId, userId, organizationId: orgId }, // Strict org scoping
+    { _id: notificationId, userId, organizationId: orgId },
     { isRead: true },
     { new: true }
   );
+  if (!notification) throw new ApiError(404, 'Notification not found or access denied');
 
-  if (!notification) {
-    throw new ApiError(404, 'Notification not found or access denied');
-  }
-
-  // SYNC: Tell other devices to dismiss the push notification
   const preferenceKey = PREFERENCE_MAP[notification.type] || 'general';
   PushService.dismiss(userId, preferenceKey).catch(err =>
     logger.error(err, '[NotificationService] Sync dismiss failed')
   );
 
   emitToUser(userId, 'notification:read', { notificationId });
-
   return notification;
 };
 
@@ -274,16 +249,8 @@ const markAllAsRead = async (userId: string, orgId: string) => {
 };
 
 const deleteNotification = async (notificationId: string, orgId: string, userId: string) => {
-  const notification = await Notification.findOneAndDelete({
-    _id: notificationId,
-    userId,
-    organizationId: orgId, // Strict org scoping
-  });
-
-  if (!notification) {
-    throw new ApiError(404, 'Notification not found or access denied');
-  }
-
+  const notification = await Notification.findOneAndDelete({ _id: notificationId, userId, organizationId: orgId });
+  if (!notification) throw new ApiError(404, 'Notification not found or access denied');
   return notification;
 };
 
@@ -294,34 +261,22 @@ const deleteAllRead = async (userId: string, orgId: string) => {
 
 const getUnreadCount = async (userId: string, orgId: string, userRole?: string) => {
   const broadcastFilter: any = {
-    organizationId: orgId,
-    isBroadcast: true,
-    isRead: false,
+    organizationId: orgId, isBroadcast: true, isRead: false,
     $or: [{ userId: { $exists: false } }, { userId: null }],
   };
-
-  if (userRole) {
-    broadcastFilter.roleTargets = { $in: [userRole] };
-  }
+  if (userRole) broadcastFilter.roleTargets = { $in: [userRole] };
 
   const [personalCount, broadcastCount] = await Promise.all([
     Notification.countDocuments({ userId, isRead: false }),
     Notification.countDocuments(broadcastFilter),
   ]);
-
   return personalCount + broadcastCount;
 };
 
 const cleanupOldNotifications = async (userId: string, daysOld: number = 30) => {
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-
-  const result = await Notification.deleteMany({
-    userId,
-    isRead: true,
-    createdAt: { $lt: cutoffDate },
-  });
-
+  const result = await Notification.deleteMany({ userId, isRead: true, createdAt: { $lt: cutoffDate } });
   return result.deletedCount;
 };
 
@@ -335,35 +290,21 @@ const broadcastNotification = async (params: {
 }) => {
   const { organizationId, roleTargets, type, title, message, metadata } = params;
 
-  const users = await User.find({
-    organizationId,
-    $or: roleTargets.map(role => ({ role })),
-  }).select('_id');
-
+  const users = await User.find({ organizationId, $or: roleTargets.map(role => ({ role })) }).select('_id');
   if (users.length === 0) return null;
 
   const notifications = users.map(user => ({
-    userId: user._id,
-    organizationId,
-    roleTargets,
-    type,
-    title,
-    message,
-    metadata,
-    isRead: false,
-    isBroadcast: true,
+    userId: user._id, organizationId, roleTargets, type, title, message, metadata,
+    isRead: false, isBroadcast: true,
   }));
 
   const created = await Notification.insertMany(notifications);
 
   users.forEach(user => {
     const userNotif = created.find(n => n.userId?.toString() === user._id.toString());
-    if (userNotif) {
-      emitToUser(user._id.toString(), 'notification:new', userNotif);
-    }
+    if (userNotif) emitToUser(user._id.toString(), 'notification:new', userNotif);
   });
 
-  // Trigger Web Push Broadcast
   try {
     const urlMap: Record<string, string> = {
       shipment_assigned: '/driver/loads',
@@ -373,19 +314,9 @@ const broadcastNotification = async (params: {
       new_lead: '/crm/dashboard',
       driver_request: '/notifications',
     };
-
-    const broadcastPayload = {
-      title,
-      body: message,
-      data: {
-        url: urlMap[type] || '/notifications',
-      },
-    };
-
+    const broadcastPayload = { title, body: message, data: { url: urlMap[type] || '/notifications' } };
     const userIds = users.map(u => u._id.toString());
-    PushService.broadcast(userIds, broadcastPayload).catch(err =>
-      logger.error(err, '[PushService] Broadcast failed')
-    );
+    PushService.broadcast(userIds, broadcastPayload).catch(err => logger.error(err, '[PushService] Broadcast failed'));
   } catch (error: any) {
     logger.error(error, '[NotificationService] Error triggering web push broadcast');
   }
