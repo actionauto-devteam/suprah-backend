@@ -13,6 +13,7 @@ import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
+import notificationService from '../services/notification.service';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -447,6 +448,50 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
   const messageForClient = await signAttachments(message.toObject() as any);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  // ── @mention notifications (fire-and-forget) ───────────────────────────
+  (async () => {
+    try {
+      const text = content?.trim() || '';
+      if (!text) return;
+      const mentionedNames = new Set<string>();
+      let hasAll = false;
+      const pattern = /@(\w+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = pattern.exec(text)) !== null) {
+        const name = m[1].toLowerCase();
+        if (name === 'all') hasAll = true;
+        else mentionedNames.add(name);
+      }
+      if (!hasAll && mentionedNames.size === 0) return;
+
+      const memberIds = (conversation.members as any[]).map((x: any) => x.toString()).filter((x: string) => x !== userId.toString());
+      const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName').lean();
+
+      const toNotify = hasAll
+        ? members.map((x: any) => x._id.toString())
+        : members.filter((x: any) => mentionedNames.has(x.fullName.split(' ')[0].toLowerCase())).map((x: any) => x._id.toString());
+
+      if (toNotify.length === 0) return;
+
+      const senderDoc = await CrmUser.findById(userId).select('fullName').lean();
+      const senderName = (senderDoc as any)?.fullName || 'Someone';
+      const orgId = (req.crmUser!.organizationId as any).toString();
+      const preview = text.length > 100 ? text.slice(0, 100) + '…' : text;
+
+      await Promise.allSettled(toNotify.map((memberId: string) =>
+        notificationService.createNotification({
+          userId: memberId,
+          organizationId: orgId,
+          type: 'crm_message',
+          title: `${senderName} mentioned you`,
+          message: `"${preview}"`,
+          metadata: { conversationId: id, messageId: message._id.toString(), route: '/crm/supra-space' },
+        })
+      ));
+    } catch { /* best-effort */ }
+  })();
+
   res.status(201).json(new ApiResponse(201, messageForClient, 'Message sent'));
 });
 

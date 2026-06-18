@@ -1087,9 +1087,6 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
  */
 export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  if (!['admin', 'manager'].includes(user.role)) {
-    throw new ApiError(403, 'Push subscriptions are for admins and managers only');
-  }
 
   const { subscription, deviceHint } = req.body;
   if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {

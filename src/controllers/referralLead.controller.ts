@@ -92,6 +92,17 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
   if (!referrer) throw new ApiError(404, 'Invalid referral code');
   if (!referrer.organizationId) throw new ApiError(400, 'Referrer is not linked to a dealership');
 
+  // Block if this email already belongs to a customer account in this org
+  const existingAccount = await User.findOne({
+    email:          email.trim().toLowerCase(),
+    organizationId: referrer.organizationId,
+    role:           'customer',
+  }).select('_id').lean();
+
+  if (existingAccount) {
+    throw new ApiError(409, 'An account with this email already exists at this dealership. Please log in or contact our team for assistance.');
+  }
+
   // Duplicate check — block if phone OR email already has an active lead in this org
   const [dupPhone, dupEmail] = await Promise.all([
     ReferralLead.findOne({
@@ -192,14 +203,14 @@ export const updateLeadStatus = asyncHandler(async (req: Request, res: Response)
 
 // ─── CRM: Convert lead → create customer account ─────────────────────────────
 // POST /api/referral-leads/crm-leads/:id/convert
-// Body: { email, password? }
-// If no password is provided a random temp password is generated and returned once.
+// Body: { email }
+// Password is always set to 'customer123' and emailed directly to the customer.
 export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(403, 'Not linked to an organization');
 
   const { id } = req.params;
-  const { email, password } = req.body;
+  const { email } = req.body;
   if (!email) throw new ApiError(400, 'email is required');
 
   const lead = await ReferralLead.findOne({ _id: id, organizationId: orgId });
@@ -209,21 +220,19 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   const existing = await User.findOne({ email: email.toLowerCase().trim() });
   if (existing) throw new ApiError(409, 'A user with this email already exists');
 
-  // Use provided password or generate a secure temp password
-  const isAutoPassword = !password;
-  const rawPassword = password || (Math.random().toString(36).slice(-8) + 'Aa1!');
-  const passwordHash = await bcrypt.hash(rawPassword, 10);
+  const tempPassword = 'customer123';
+  const passwordHash = await bcrypt.hash(tempPassword, 10);
 
   const newUser = await User.create({
-    name:          lead.name,
-    email:         email.toLowerCase().trim(),
+    name:           lead.name,
+    email:          email.toLowerCase().trim(),
     passwordHash,
-    role:          'customer',
+    role:           'customer',
     organizationId: orgId,
-    emailVerified: true,
-    isActive:      true,
-    isApproved:    true,
-    personalInfo:  { phone: lead.phone },
+    emailVerified:  true,
+    isActive:       true,
+    isApproved:     true,
+    personalInfo:   { phone: lead.phone },
   });
 
   // Create Referral record so the $100 reward fires when a payment is made
@@ -238,13 +247,82 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   lead.convertedUserId = newUser._id as any;
   await lead.save();
 
+  // Send welcome email with credentials directly to the customer (fire and forget)
+  emailService.sendEmail({
+    to:      newUser.email,
+    subject: 'Your Action Auto Customer Account is Ready',
+    text: `Hi ${newUser.name},\n\nOne of our representatives has created a customer account for you at Action Auto Utah.\n\nYour Login Credentials:\nEmail: ${newUser.email}\nTemporary Password: ${tempPassword}\n\nPlease log in and change your password as soon as possible to keep your account secure.\n\nAction Auto Utah`,
+    html: `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#10b981;padding:32px 40px;text-align:center;">
+            <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">Action Auto Utah</p>
+            <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">Your Account is Ready!</h1>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px;">
+            <p style="margin:0 0 8px;font-size:15px;color:#18181b;font-weight:600;">Hi ${newUser.name},</p>
+            <p style="margin:0 0 24px;font-size:14px;color:#52525b;line-height:1.6;">
+              One of our representatives has created a <strong style="color:#18181b;">customer account</strong> for you at Action Auto Utah. Use the credentials below to sign in.
+            </p>
+
+            <!-- Credentials box -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;border-radius:12px;margin-bottom:20px;">
+              <tr>
+                <td style="padding:20px 24px;">
+                  <p style="margin:0 0 12px;font-size:10px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#a1a1aa;">Your Login Credentials</p>
+                  <p style="margin:0 0 4px;font-size:12px;color:#71717a;font-weight:500;">Email</p>
+                  <p style="margin:0 0 16px;font-size:14px;font-weight:700;color:#18181b;">${newUser.email}</p>
+                  <p style="margin:0 0 4px;font-size:12px;color:#71717a;font-weight:500;">Temporary Password</p>
+                  <p style="margin:0;font-size:22px;font-weight:800;color:#10b981;font-family:'Courier New',monospace;letter-spacing:0.05em;">${tempPassword}</p>
+                </td>
+              </tr>
+            </table>
+
+            <!-- Warning box -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#fef3c7;border:1px solid #fcd34d;border-radius:10px;margin-bottom:24px;">
+              <tr>
+                <td style="padding:14px 18px;">
+                  <p style="margin:0;font-size:12px;color:#92400e;line-height:1.5;">
+                    &#9888;&#65039; <strong>Please change your password after your first login</strong> to keep your account secure.
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f4f4f5;padding:20px 40px;text-align:center;border-top:1px solid #e4e4e7;">
+            <p style="margin:0;font-size:11px;color:#a1a1aa;">© ${new Date().getFullYear()} Action Auto Utah &middot; Powered by Suprah AI</p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+  })
+    .then(() => console.log(`[ConvertLead] Welcome email sent to ${newUser.email}`))
+    .catch((err: any) => console.error('[ConvertLead] Welcome email send failed:', err));
+
   res.status(201).json(
     new ApiResponse(201, {
-      userId:       newUser._id,
-      name:         newUser.name,
-      email:        newUser.email,
-      // Only expose the temp password once, when it was auto-generated
-      ...(isAutoPassword ? { tempPassword: rawPassword } : {}),
+      userId: newUser._id,
+      name:   newUser.name,
+      email:  newUser.email,
     }, 'Customer account created successfully'),
   );
 });

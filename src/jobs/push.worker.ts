@@ -2,6 +2,7 @@ import { Worker, Job } from 'bullmq';
 import webpush from 'web-push';
 import config from '../config';
 import User from '../models/User.model';
+import CrmUser from '../models/CrmUser.model';
 import logger from '../utils/logger';
 import { bullConnection } from './push.queue';
 
@@ -31,28 +32,32 @@ if (config.redis.enabled) {
         return;
       }
 
-      const user = await User.findById(userId).select('pushSubscriptions');
-      if (!user || !user.pushSubscriptions || user.pushSubscriptions.length === 0) {
+      // Resolve subscriptions: try User first, then CrmUser (SupraSpace targets)
+      const userDoc = await User.findById(userId).select('pushSubscriptions');
+      let subscriptions: any[] = userDoc?.pushSubscriptions ?? [];
+      let isCrmUser = false;
+
+      if (subscriptions.length === 0) {
+        const crmUserDoc = await CrmUser.findById(userId).select('pushSubscriptions');
+        if (crmUserDoc?.pushSubscriptions?.length) {
+          subscriptions = crmUserDoc.pushSubscriptions as any;
+          isCrmUser = true;
+        }
+      }
+
+      if (subscriptions.length === 0) {
         logger.debug(`${LOG_PREFIX} No subscriptions for user ${userId}. Skipping.`);
         return;
       }
 
       const stringifiedPayload = JSON.stringify(payload);
       const results = await Promise.allSettled(
-        user.pushSubscriptions.map(async (sub) => {
+        subscriptions.map(async (sub: any) => {
           try {
-            await webpush.sendNotification(
-              {
-                endpoint: sub.endpoint,
-                keys: sub.keys,
-              },
-              stringifiedPayload
-            );
-            logger.info(`${LOG_PREFIX} Successfully sent notification to user ${userId} on device ${sub.deviceHint || 'unknown'}`);
+            await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, stringifiedPayload);
+            logger.info(`${LOG_PREFIX} Sent to user ${userId} on device ${sub.deviceHint || 'unknown'}`);
             return { endpoint: sub.endpoint, success: true };
           } catch (error: any) {
-            // SELF-HEALING: If the push service returns 410 (Gone) or 404 (Not Found),
-            // the subscription is no longer valid. We should remove it from the DB.
             if (error.statusCode === 410 || error.statusCode === 404) {
               logger.info(`${LOG_PREFIX} Pruning expired subscription for user ${userId}: ${sub.endpoint}`);
               return { endpoint: sub.endpoint, success: false, prune: true };
@@ -62,22 +67,13 @@ if (config.redis.enabled) {
         })
       );
 
-      // Identify endpoints that need to be pruned
       const endpointsToPrune = results
-        .filter((r): r is PromiseFulfilledResult<{ endpoint: string; success: boolean; prune?: boolean }> => 
-          r.status === 'fulfilled' && r.value.prune === true
-        )
+        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && r.value.prune === true)
         .map(r => r.value.endpoint);
 
       if (endpointsToPrune.length > 0) {
-        await User.updateOne(
-          { _id: userId },
-          {
-            $pull: {
-              pushSubscriptions: { endpoint: { $in: endpointsToPrune } },
-            },
-          }
-        );
+        const ModelToUpdate: any = isCrmUser ? CrmUser : User;
+        await ModelToUpdate.updateOne({ _id: userId }, { $pull: { pushSubscriptions: { endpoint: { $in: endpointsToPrune } } } });
       }
 
       const rejected = results.filter((r) => r.status === 'rejected');
