@@ -227,7 +227,6 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const [payments, total] = await Promise.all([
     Payment.find(filter)
       .populate('quoteId', 'firstName lastName vehicleName')
-      .populate('shipmentId', 'trackingNumber')
       .populate('createdBy', 'name email')
       .populate('aftermarketProductId', 'name media')
       .sort({ createdAt: -1 })
@@ -251,7 +250,6 @@ const getPendingPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const payments = await Payment.find({ organizationId: orgId, status: { $in: ['pending', 'failed'] } })
     .populate('quoteId', 'firstName lastName vehicleName')
-    .populate('shipmentId', 'trackingNumber')
     .sort({ dueDate: 1, createdAt: -1 })
     .lean();
   res.json(new ApiResponse(200, payments, 'Pending payments fetched successfully'));
@@ -263,7 +261,6 @@ const getPaymentById = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const payment = await Payment.findOne({ _id: id, organizationId: orgId })
     .populate('quoteId', 'firstName lastName vehicleName fromAddress toAddress')
-    .populate('shipmentId', 'trackingNumber status')
     .populate('createdBy', 'name email')
     .populate('aftermarketProductId', 'name media description');
   if (!payment) throw new ApiError(404, 'Payment not found');
