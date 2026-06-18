@@ -874,6 +874,105 @@ const confirmCustomerPayment = asyncHandler(async (req: Request, res: Response) 
   res.json(new ApiResponse(200, payment, `Payment status: ${paymentIntent.status}`));
 });
 
+// ─── Customer: Cancel an unpaid invoice ───────────────────────────────────────
+//
+// POST /api/payments/:id/cancel-mine
+// Lets a customer cancel their own invoice while it's still unpaid. Guards
+// against webhook lag: if Stripe says it was actually paid, we reconcile to
+// "succeeded" instead of cancelling.
+const cancelMyPayment = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  if (!user?.email) throw new ApiError(401, 'User not authenticated');
+
+  const { id } = req.params;
+  const payment = await Payment.findById(id);
+  if (!payment) throw new ApiError(404, 'Invoice not found');
+  if (payment.customerEmail.toLowerCase() !== user.email.toLowerCase()) {
+    throw new ApiError(403, 'You are not authorized to cancel this invoice');
+  }
+  if (payment.status === 'succeeded') {
+    throw new ApiError(400, 'This invoice has already been paid and can’t be cancelled.');
+  }
+  if (payment.status === 'refunded') {
+    throw new ApiError(400, 'This invoice has been refunded.');
+  }
+  if (payment.status === 'cancelled') {
+    return res.json(new ApiResponse(200, payment, 'Invoice already cancelled'));
+  }
+
+  // If a Checkout session exists, make sure it didn't just get paid.
+  if (payment.stripeCheckoutSessionId) {
+    try {
+      const session = await stripe.checkout.sessions.retrieve(payment.stripeCheckoutSessionId);
+      if (session.payment_status === 'paid') {
+        payment.status = 'succeeded';
+        payment.paidAt = new Date();
+        payment.stripePaymentIntentId = (session.payment_intent as string) || payment.stripePaymentIntentId;
+        await payment.save();
+        await broadcastPaymentSuccess(payment);
+        throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      // Non-fatal: couldn't reach Stripe — fall through and cancel locally.
+    }
+  }
+
+  // If a PaymentIntent exists, reconcile if paid, otherwise cancel it on Stripe.
+  if (payment.stripePaymentIntentId) {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+      if (pi.status === 'succeeded') {
+        payment.status = 'succeeded';
+        payment.paidAt = new Date();
+        payment.stripeChargeId = (pi.latest_charge as string) || payment.stripeChargeId;
+        await payment.save();
+        await broadcastPaymentSuccess(payment);
+        throw new ApiError(409, 'This invoice was already paid, so it can’t be cancelled.');
+      }
+      if (pi.status !== 'canceled') {
+        await stripe.paymentIntents.cancel(payment.stripePaymentIntentId).catch(() => {});
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      // Non-fatal: proceed to cancel locally.
+    }
+  }
+
+  payment.status = 'cancelled';
+  await payment.save();
+
+  // Let the dealership know + sync dashboards.
+  try {
+    notifyOrgAdmins(
+      payment.organizationId.toString(),
+      'general',
+      'Invoice cancelled by customer',
+      `${payment.customerName} cancelled invoice ${payment.invoiceNumber || ''} ($${payment.amount.toFixed(2)}).`,
+      { paymentId: payment._id.toString(), source: payment.source || 'manual' }
+    );
+  } catch { /* noop */ }
+  try {
+    const io = getSocketIO();
+    if (io && payment.organizationId) {
+      io.to(`org:${payment.organizationId}`).emit('payment:updated', {
+        paymentId: payment._id.toString(),
+        status: 'cancelled',
+      });
+    }
+  } catch { /* noop */ }
+  if (payment.source === 'aftermarket') {
+    try {
+      getIO().to('crm:staff').emit('aftermarket:invoice_cancelled', {
+        paymentId: payment._id.toString(),
+        inquiryId: payment.inquiryId ? payment.inquiryId.toString() : null,
+      });
+    } catch { /* noop */ }
+  }
+
+  res.json(new ApiResponse(200, payment, 'Invoice cancelled'));
+});
+
 export default {
   createPayment,
   getPayments,
@@ -894,4 +993,5 @@ export default {
   // NEW — hosted Stripe Checkout
   createCustomerCheckoutSession,
   getCheckoutSessionStatus,
+  cancelMyPayment,
 };

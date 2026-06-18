@@ -34,6 +34,9 @@ router.post('/confirm-customer', paymentController.confirmCustomerPayment);
 router.post('/create-customer-checkout', paymentController.createCustomerCheckoutSession);
 router.get('/checkout-session/:sessionId', paymentController.getCheckoutSessionStatus);
 
+// Customer cancels their own unpaid invoice.
+router.post('/:id/cancel-mine', paymentController.cancelMyPayment);
+
 // ─── Dealer / CRM management ──────────────────────────────────────────────────
 // NOTE: if you gate management actions by role, add your role middleware here
 // (e.g. router.use(requireRole('admin','manager'))) — the controller already
