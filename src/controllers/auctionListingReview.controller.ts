@@ -56,6 +56,8 @@ export const getReviewListing = asyncHandler(
     },
 );
 
+const MIN_VEHICLE_YEAR = 1980;
+
 export const approveListing = asyncHandler(
     async (req: Request, res: Response) => {
         const actor = req.crmUser;
@@ -74,51 +76,98 @@ export const approveListing = asyncHandler(
             throw new ApiError(400, "Only listings under review can be approved");
         }
 
+        // Defensive re-validation: this is about to become a permanent inventory
+        // record, so never trust that submit-time validation still holds — the
+        // listing may have been edited/migrated since, and a bad record here
+        // would silently corrupt the dealership's inventory.
+        const vin = listing.vin?.toUpperCase().trim();
+        const year = Number(listing.year);
+        const maxYear = new Date().getFullYear() + 1;
+        const missing: string[] = [];
+        if (!vin || vin.length !== 17) missing.push("vin");
+        if (!Number.isInteger(year) || year < MIN_VEHICLE_YEAR || year > maxYear) missing.push("year");
+        if (!listing.make?.trim()) missing.push("make");
+        if (!listing.model?.trim()) missing.push("model");
+        if (!listing.mileage || listing.mileage <= 0) missing.push("mileage");
+        if (!listing.askingPrice || listing.askingPrice <= 0) missing.push("askingPrice");
+        if (!listing.photos?.length) missing.push("photos");
+        if (missing.length > 0) {
+            throw new ApiError(
+                400,
+                `This listing is missing required data and cannot be approved yet: ${missing.join(", ")}`,
+                missing,
+            );
+        }
+
+        const existingVehicle = await Vehicle.findOne({ vin });
+        if (existingVehicle) {
+            throw new ApiError(
+                409,
+                `A vehicle with VIN ${vin} already exists in inventory (status: ${existingVehicle.status}). Resolve the conflict manually before approving this listing.`,
+            );
+        }
+
         const { reviewerNotes } = req.body as { reviewerNotes?: string };
         const seller = listing.userId as any;
         const sellerLabel = seller?.name || seller?.email || "customer";
 
-        const vehicle = await Vehicle.create({
-            vin: listing.vin,
-            year: Number(listing.year),
-            make: listing.make,
-            modelName: listing.model,
-            trim: listing.trim,
-            exteriorColor: listing.exteriorColor,
-            interiorColor: listing.interiorColor,
-            bodyStyle: listing.bodyStyle,
-            mileage: listing.mileage,
-            transmission: listing.transmission,
-            engine: listing.engine,
-            fuelType: listing.fuelType,
-            driveTrain: listing.driveTrain,
-            doors: listing.doors,
-            price: listing.askingPrice,
-            images: listing.photos.map((p: any) => p.url),
-            status: "In Recon",
-            dateAdded: new Date(),
-            organizationId: req.orgId,
-            notes: [
-                {
-                    text: `Acquired via customer auction listing (seller: ${sellerLabel}).`,
-                    author: actor._id,
-                    date: new Date(),
-                },
-            ],
-        });
+        let vehicle;
+        try {
+            vehicle = await Vehicle.create({
+                vin,
+                year,
+                make: listing.make,
+                modelName: listing.model,
+                trim: listing.trim,
+                exteriorColor: listing.exteriorColor,
+                interiorColor: listing.interiorColor,
+                bodyStyle: listing.bodyStyle,
+                mileage: listing.mileage,
+                transmission: listing.transmission,
+                engine: listing.engine,
+                fuelType: listing.fuelType,
+                driveTrain: listing.driveTrain,
+                doors: listing.doors,
+                price: listing.askingPrice,
+                images: listing.photos.map((p: any) => p.url),
+                status: "In Recon",
+                dateAdded: new Date(),
+                organizationId: req.orgId,
+                notes: [
+                    {
+                        text: `Acquired via customer auction listing (seller: ${sellerLabel}).`,
+                        author: actor._id,
+                        date: new Date(),
+                    },
+                ],
+            });
+        } catch (err: any) {
+            if (err?.code === 11000) {
+                throw new ApiError(409, `A vehicle with VIN ${vin} already exists in inventory.`);
+            }
+            throw err;
+        }
 
-        listing.status = "APPROVED";
-        listing.reviewedAt = new Date();
-        listing.reviewedBy = actor._id as unknown as mongoose.Types.ObjectId;
-        listing.reviewerNotes = reviewerNotes;
-        listing.rejectionReason = undefined;
-        listing.convertedVehicleId = vehicle._id as unknown as mongoose.Types.ObjectId;
-        listing.statusHistory.push({
-            status: "APPROVED",
-            at: new Date(),
-            note: reviewerNotes || "Approved by reviewer",
-        });
-        await listing.save();
+        try {
+            listing.status = "APPROVED";
+            listing.reviewedAt = new Date();
+            listing.reviewedBy = actor._id as unknown as mongoose.Types.ObjectId;
+            listing.reviewerNotes = reviewerNotes;
+            listing.rejectionReason = undefined;
+            listing.convertedVehicleId = vehicle._id as unknown as mongoose.Types.ObjectId;
+            listing.statusHistory.push({
+                status: "APPROVED",
+                at: new Date(),
+                note: reviewerNotes || "Approved by reviewer",
+            });
+            await listing.save();
+        } catch (err) {
+            // The listing failed to update after the vehicle record was created —
+            // roll back the vehicle so we never leave an orphan/duplicate record
+            // sitting in the dealership's live inventory.
+            await Vehicle.deleteOne({ _id: vehicle._id });
+            throw err;
+        }
 
         res.status(200).json({ success: true, data: serialize(listing) });
     },
