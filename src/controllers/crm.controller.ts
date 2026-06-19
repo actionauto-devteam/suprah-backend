@@ -11,6 +11,8 @@ import {
 } from "../middleware/crmAuth.middleware";
 import emailService from "../services/email.service";
 import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
+import { storageService } from "../services/storage.service";
+import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 
@@ -901,6 +903,46 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * PATCH /api/crm/me/avatar
+ * Upload a new avatar for the currently logged-in CRM user.
+ * Directly updates CrmUser.avatar and broadcasts the change over SupraSpace socket.
+ */
+const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!file) throw new ApiError(400, "Avatar image file is required");
+
+  // Upload to storage (same bucket as main profile avatars)
+  const avatarUrl = await storageService.upload(file, "avatars");
+
+  // Delete old avatar if present
+  if (user.avatar) {
+    try { await storageService.delete(user.avatar); } catch { /* best-effort */ }
+  }
+
+  // Update CrmUser directly
+  const updated = await CrmUser.findByIdAndUpdate(
+    user._id,
+    { $set: { avatar: avatarUrl } },
+    { new: true }
+  ).select("_id fullName avatar").lean();
+
+  if (!updated) throw new ApiError(404, "CRM user not found");
+
+  // Broadcast to all SupraSpace clients so avatars update in real-time
+  try {
+    const io = getSupraSpaceIO();
+    io.emit("user:profile:updated", {
+      userId: user._id.toString(),
+      avatar: avatarUrl,
+      fullName: (updated as any).fullName,
+    });
+  } catch { /* socket may not be initialised — best effort */ }
+
+  res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
+});
+
+/**
  * POST /api/crm/token-refresh
  * Renews the CRM JWT token. Requires a valid (not yet expired) token.
  * Tray app calls this on startup and whenever it receives a 401.
@@ -929,4 +971,5 @@ export default {
   resetPassword,
   offboardUser,
   tokenRefresh,
+  updateMeAvatar,
 };
