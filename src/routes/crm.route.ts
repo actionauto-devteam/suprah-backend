@@ -1,12 +1,15 @@
 // crm.route.ts
 
 import express from 'express';
+import multer from 'multer';
 import crmController from '../controllers/crm.controller';
 import hrController from '../controllers/hr.controller';
 import feedController from '../controllers/feed.controller';
 import feedCommentController from '../controllers/feedComment.controller';
 import feedReactionRouter from './feedReaction.routes';
 import crmAuth from '../middleware/crmAuth.middleware';
+
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
 
@@ -20,6 +23,7 @@ router.use(crmAuth());
 
 // ── General employee routes ──
 router.get('/me',             crmController.getMe);
+router.patch('/me/avatar',    avatarUpload.single('avatar'), crmController.updateMeAvatar);
 router.post('/token-refresh', crmController.tokenRefresh);
 router.post('/time-clock',    crmController.timeClock);
 router.get('/time-logs',   crmController.getTimeLogs);
