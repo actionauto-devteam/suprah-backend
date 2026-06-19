@@ -12,7 +12,8 @@ export interface ISupraSpaceTheme {
 // ─── Concern metadata ─────────────────────────────────────────────────────────
 
 export interface ISupraSpaceConversationMetadata {
-  type?: 'customer_concern' | null;
+  type?: 'customer_concern' | 'customer_call' | null;
+  source?: 'aftermarket' | null;
   customerUserId?: string | null;
   customerName?: string | null;
   customerEmail?: string | null;
@@ -59,6 +60,7 @@ const ThemeSchema = new Schema<ISupraSpaceTheme>(
 const MetadataSchema = new Schema<ISupraSpaceConversationMetadata>(
   {
     type:           { type: String, default: null },
+    source:         { type: String, default: null },
     customerUserId: { type: String, default: null },
     customerName:   { type: String, default: null },
     customerEmail:  { type: String, default: null },

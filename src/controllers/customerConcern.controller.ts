@@ -466,7 +466,11 @@ export const crmListConcernConversations = asyncHandler(
     const { search } = req.query;
     const crmUserId = (req as any).crmUser?._id;
 
-    const query: any = { 'metadata.type': 'customer_concern', isActive: true };
+    const query: any = {
+      'metadata.type': 'customer_concern',
+      'metadata.source': { $ne: 'aftermarket' },
+      isActive: true,
+    };
 
     if (search) {
       const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -754,6 +758,7 @@ export const crmGetRelatedCases = asyncHandler(async (req: Request, res: Respons
   const related = await SupraSpaceConversation.find({
     _id: { $ne: conversation._id },
     'metadata.type': 'customer_concern',
+    'metadata.source': { $ne: 'aftermarket' },
     'metadata.customerUserId': customerUserId,
     isActive: true,
   })

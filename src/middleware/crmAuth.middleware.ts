@@ -64,7 +64,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       if (decoded.type !== 'crm') throw new ApiError(401, 'Invalid CRM token');
 
       const crmUser = await CrmUser.findById(decoded.id);
-      if (!crmUser) throw new ApiError(401, 'CRM user not found');
+      if (!crmUser) throw new ApiError(403, 'CRM user not found');
       if (!crmUser.isActive) throw new ApiError(403, 'CRM account has been deactivated');
 
       req.crmUser = crmUser;

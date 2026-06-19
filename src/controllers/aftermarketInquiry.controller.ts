@@ -168,12 +168,12 @@ export const submitInquiry = asyncHandler(async (req: Request, res: Response) =>
       createdBy: staffIds[0] || new mongoose.Types.ObjectId(),
       metadata: {
         type: "customer_concern",
+        source: "aftermarket",
         customerUserId: customerId,
         customerName,
         customerEmail,
       },
     });
-    emitToConversation(conversation, "concern:new", conversation.toObject());
   }
 
   const messageContent = buildInquiryMessageContent(product, question, customerName);
@@ -213,16 +213,6 @@ export const submitInquiry = asyncHandler(async (req: Request, res: Response) =>
     conversationId: conversation._id.toString(),
     message: msgObj,
   });
-
-  try {
-    getIO()
-      .to("crm:staff")
-      .emit("concern:message", {
-        conversationId: conversation._id.toString(),
-        customerName,
-        preview: `📦 Product inquiry: ${product.name}`,
-      });
-  } catch { /* noop */ }
 
   // ── Persist the inquiry record ─────────────────────────────────────────────
   const inquiry = await AftermarketInquiry.create({
