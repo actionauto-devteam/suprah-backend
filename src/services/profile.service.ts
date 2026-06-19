@@ -6,13 +6,15 @@ import notificationService from './notification.service';
 import activityService from './activity.service';
 import { storageService } from './storage.service';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import CrmUser from '../models/CrmUser.model';
+import { getIO as getSupraSpaceIO } from '../socket/supraspace.socket';
 
 /**
  * Update avatar/profile picture
  * Uploads to Cloudflare R2 and updates DB. Deletes old avatar if it exists.
  */
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
-  const existingUser = await User.findById(userId).select('avatar');
+  const existingUser = await User.findById(userId).select('avatar email');
   if (!existingUser) {
     throw new ApiError(404, 'User not found');
   }
@@ -33,6 +35,28 @@ const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: s
 
   if (!user) {
     throw new ApiError(404, 'User not found');
+  }
+
+  // Sync avatar to the linked CrmUser so SupraSpace shows the updated photo
+  if (existingUser.email) {
+    const crmUser = await CrmUser.findOneAndUpdate(
+      { email: existingUser.email },
+      { $set: { avatar: avatarUrl } },
+      { new: true }
+    ).select('_id fullName').lean();
+
+    if (crmUser) {
+      try {
+        const io = getSupraSpaceIO();
+        io.emit('user:profile:updated', {
+          userId: crmUser._id.toString(),
+          avatar: avatarUrl,
+          fullName: (crmUser as any).fullName,
+        });
+      } catch {
+        // Socket may not be initialised in non-web contexts — best effort
+      }
+    }
   }
 
   // Log activity
