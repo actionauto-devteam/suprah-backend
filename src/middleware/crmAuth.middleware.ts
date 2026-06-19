@@ -80,30 +80,30 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       let payload: any;
       try {
         payload = tokenService.verifyAccessToken(mainToken);
-        console.log('[DEBUG-AUTH] Payload verified:', payload.sub);
       } catch (err) {
-        console.log('[DEBUG-AUTH] Payload verification failed:', err);
         throw new ApiError(401, 'CRM authentication required. Please log in.');
       }
 
       if (!payload.orgId) {
-        console.log('[DEBUG-AUTH] No orgId in payload');
         throw new ApiError(403, 'Your account is not linked to any organization.');
       }
 
       const mainUser = await User.findById(payload.sub).select('name email role isActive organizationId');
       if (!mainUser) {
-        console.log('[DEBUG-AUTH] User not found in DB:', payload.sub);
         throw new ApiError(401, 'Account not found or inactive');
       }
       if (!mainUser.isActive) {
-        console.log('[DEBUG-AUTH] User is inactive:', payload.sub);
         throw new ApiError(401, 'Account not found or inactive');
       }
 
       // Build a minimal ICrmUser-compatible object from the main User record.
-      // Org owners/admins in SupraSpace are treated as CRM admins automatically.
-      const syntheticCrmUser = Object.assign(Object.create(CrmUser.prototype), {
+      // IMPORTANT: this is a PLAIN object. Do NOT instantiate it off the
+      // Mongoose prototype (e.g. Object.create(CrmUser.prototype)) — doing so
+      // produces an object with the document's schema setters but none of the
+      // internal state they require ($__ / _doc), so assigning fields fires the
+      // setters and throws on Symbol(mongoose#Document#scope). Org owners/admins
+      // in SupraSpace are treated as CRM admins automatically.
+      const syntheticCrmUser = {
         _id: mainUser._id,
         organizationId: new mongoose.Types.ObjectId(payload.orgId),
         fullName: mainUser.name,
@@ -114,7 +114,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
         lastLoginAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),
-      }) as ICrmUser;
+      } as unknown as ICrmUser;
 
       req.crmUser = syntheticCrmUser;
       req.orgId = payload.orgId;
@@ -142,8 +142,10 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
       return next(error);
     }
 
-    console.error('[DEBUG-AUTH] CRM Auth Global Failure:', error);
-    next(new ApiError(401, 'CRM authentication failed'));
+    // Anything reaching here is an unexpected server-side failure, NOT an auth
+    // problem. Surface it as a 500 so real bugs don't get masked as 401s.
+    console.error('[CRM-AUTH] Unexpected failure:', error);
+    next(new ApiError(500, 'Internal authentication error'));
   }
 };
 
