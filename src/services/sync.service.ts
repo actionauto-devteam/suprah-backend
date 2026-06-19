@@ -138,6 +138,12 @@ export class SyncService {
       certified: parseBool(raw.certified),
       isNewVehicle: parseBool(raw["is new"]),
 
+      // ── Dealer info (drives the `location` field shown in the shop) ───
+      dealerId: raw["dealer id"]?.trim(),
+      dealerName: raw["dealer name"]?.trim(),
+      dealerAddress: raw["dealer street address"]?.trim(),
+      dealerCity: raw["dealer city"]?.trim(),
+      dealerState: raw["dealer state"]?.trim(),
       dealerZip: raw["dealer zip"]?.trim(),
       dealerEmail: raw["dealer crm email"]?.trim(),
 
@@ -148,15 +154,21 @@ export class SyncService {
     };
 
     if (!existingVehicle) {
-      // Create New
-      const newVehicle = await Vehicle.create(vehicleData);
+      // Create New — inventory coming from the DealersCloud feed is
+      // retail-ready, so mark it "Ready for Sale" on insert. (We set this
+      // only on create so manual status changes / recon progress on existing
+      // vehicles aren't overwritten on subsequent syncs.)
+      const newVehicle = await Vehicle.create({
+        ...vehicleData,
+        status: "Ready for Sale",
+      });
 
       await AuditLog.create({
         entityType: "Vehicle",
         entityId: newVehicle._id,
         action: "CREATE",
         reason: "New vehicle found in DealersCloud feed",
-        changes: vehicleData,
+        changes: { ...vehicleData, status: "Ready for Sale" },
         organizationId: ACTION_AUTO_ORG_ID,
       });
 
