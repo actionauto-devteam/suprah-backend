@@ -26,34 +26,45 @@ export class ActionFtpServer {
             console.log('🔍 DEBUG: env:', config.env);
 
             let tls: any = false;
-            if (config.ftpServer.tlsCertPath && config.ftpServer.tlsKeyPath) {
-                try {
-                    const certExists = existsSync(config.ftpServer.tlsCertPath);
-                    const keyExists = existsSync(config.ftpServer.tlsKeyPath);
-                    console.log('🔍 DEBUG: Cert Exists:', certExists);
-                    console.log('🔍 DEBUG: Key Exists:', keyExists);
-                    
-                    if (certExists && keyExists) {
-                        tls = {
-                            cert: await fs.readFile(config.ftpServer.tlsCertPath),
-                            key: await fs.readFile(config.ftpServer.tlsKeyPath),
-                            minVersion: 'TLSv1.2',
-                            maxVersion: 'TLSv1.2',
-                        };
-                        log.info('FTP TLS encryption enabled');
-                    } else if (config.env === 'production' && config.ftpServer.forceTls) {
-                        log.fatal('CRITICAL: FTP TLS requested for production but certificates are missing!');
-                        throw new Error('FTP TLS certificates required but not found');
-                    } else {
-                        log.warn('FTP TLS certificates not found, falling back to plaintext');
+
+            // TLS is controlled by FTP_FORCE_TLS. When it's false we run plaintext
+            // FTP (no SSL/TLS) regardless of whether cert files are present —
+            // required by some uploaders, e.g. DealersCloud.
+            if (config.ftpServer.forceTls) {
+                if (config.ftpServer.tlsCertPath && config.ftpServer.tlsKeyPath) {
+                    try {
+                        const certExists = existsSync(config.ftpServer.tlsCertPath);
+                        const keyExists = existsSync(config.ftpServer.tlsKeyPath);
+                        console.log('🔍 DEBUG: Cert Exists:', certExists);
+                        console.log('🔍 DEBUG: Key Exists:', keyExists);
+
+                        if (certExists && keyExists) {
+                            tls = {
+                                cert: await fs.readFile(config.ftpServer.tlsCertPath),
+                                key: await fs.readFile(config.ftpServer.tlsKeyPath),
+                                minVersion: 'TLSv1.2',
+                                maxVersion: 'TLSv1.2',
+                            };
+                            log.info('FTP TLS encryption enabled');
+                        } else if (config.env === 'production') {
+                            log.fatal('CRITICAL: FTP TLS requested for production but certificates are missing!');
+                            throw new Error('FTP TLS certificates required but not found');
+                        } else {
+                            log.warn('FTP TLS certificates not found, falling back to plaintext');
+                        }
+                    } catch (err) {
+                        log.error({ err }, 'Failed to load FTP TLS certificates');
+                        if (config.env === 'production') throw err;
                     }
-                } catch (err) {
-                    log.error({ err }, 'Failed to load FTP TLS certificates');
-                    if (config.env === 'production' && config.ftpServer.forceTls) throw err;
+                } else if (config.env === 'production') {
+                    log.fatal('CRITICAL: FTP TLS forced but no certificate paths configured!');
+                    throw new Error('FTP TLS configuration missing for production');
                 }
-            } else if (config.env === 'production' && config.ftpServer.forceTls) {
-                log.fatal('CRITICAL: FTP TLS forced but no certificate paths configured!');
-                throw new Error('FTP TLS configuration missing for production');
+            } else {
+                log.warn(
+                    'FTP_FORCE_TLS=false — running PLAINTEXT FTP (no encryption). ' +
+                    'Restrict the firewall to the uploader IP and use a strong password.',
+                );
             }
 
             this.ftpServer = new FtpSrv({
@@ -122,6 +133,7 @@ export class ActionFtpServer {
                     port: ftpServerConfig.port,
                     passiveUrl: ftpServerConfig.passiveUrl,
                     pasvRange: `${ftpServerConfig.pasv_min}-${ftpServerConfig.pasv_max}`,
+                    tls: tls !== false,
                 },
                 'FTP Server started successfully'
             );
