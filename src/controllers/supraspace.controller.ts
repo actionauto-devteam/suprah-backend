@@ -640,6 +640,35 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, 'Message deleted'));
 });
 
+/** PATCH /api/supraspace/messages/:messageId  { content }  — edit own text message */
+const editMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const { content } = req.body;
+
+  if (!content?.trim()) throw new ApiError(400, 'Content is required');
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
+  if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
+  if (message.type !== 'text') throw new ApiError(400, 'Only text messages can be edited');
+
+  message.content = content.trim();
+  message.isEdited = true;
+  await message.save();
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (conversation) {
+    emitToConversation(conversation, 'message:edited', {
+      conversationId: message.conversationId.toString(),
+      messageId,
+      content: message.content,
+    });
+  }
+
+  res.json(new ApiResponse(200, { content: message.content, isEdited: true }, 'Message edited'));
+});
+
 // ─── Polls ───────────────────────────────────────────────────────────────────
 
 /** POST /api/supraspace/conversations/:id/poll  { question, options[], allowMultiple } */
@@ -861,6 +890,7 @@ const supraSpaceController = {
   sendMessage,
   uploadAttachment,
   reactToMessage,
+  editMessage,
   deleteMessage,
   createPoll,
   votePoll,

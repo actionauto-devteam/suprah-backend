@@ -106,6 +106,7 @@ router.get('/conversations/:id/messages',   supraSpaceController.getMessages);
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
 router.post('/conversations/:id/messages',  supraSpaceController.sendMessage);
 router.post('/messages/:messageId/react',   supraSpaceController.reactToMessage);
+router.patch('/messages/:messageId',        supraSpaceController.editMessage);
 router.delete('/messages/:messageId',       supraSpaceController.deleteMessage);
 
 // ─── Polls & events ───────────────────────────────────────────────────────────
