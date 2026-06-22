@@ -116,6 +116,14 @@ router.post('/messages/:messageId/poll/vote',   supraSpaceController.votePoll);
 router.post('/conversations/:id/event',         supraSpaceController.createEvent);
 router.post('/messages/:messageId/event/rsvp',  supraSpaceController.rsvpEvent);
 
+// ─── Spaces ───────────────────────────────────────────────────────────────────
+
+router.get('/spaces',                              supraSpaceController.getSpaces);
+router.post('/spaces',                             supraSpaceController.createSpace);
+router.patch('/spaces/:id',                        supraSpaceController.updateSpace);
+router.delete('/spaces/:id',                       supraSpaceController.deleteSpace);
+router.patch('/conversations/:id/space',           supraSpaceController.moveConversationToSpace);
+
 // ─── Video conferencing ───────────────────────────────────────────────────────
 
 router.post('/conversations/:id/video-token', supraSpaceController.generateVideoToken);

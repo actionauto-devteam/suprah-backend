@@ -35,6 +35,7 @@ export interface ISupraSpaceConversation extends Document {
   archivedBy: mongoose.Types.ObjectId[]; // users who archived this conversation
   deletedFor: mongoose.Types.ObjectId[]; // users who deleted (hid) this conversation
   clearedAt: Record<string, Date>;       // per-user timestamp of last deletion — messages before this are hidden for that user
+  spaceId?: mongoose.Types.ObjectId | null; // Space this conversation belongs to (groups only)
   theme: ISupraSpaceTheme;
   metadata: ISupraSpaceConversationMetadata; // concern / feature metadata
   lastMessage?: mongoose.Types.ObjectId;
@@ -91,6 +92,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
     archivedBy: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     deletedFor: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     clearedAt:  { type: Schema.Types.Mixed, default: () => ({}) },
+    spaceId:    { type: Schema.Types.ObjectId, ref: 'SupraSpaceSpace', default: null },
     theme:      { type: ThemeSchema, default: () => ({}) },
     metadata:   { type: MetadataSchema, default: () => ({}) },
     lastMessage:   { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
