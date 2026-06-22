@@ -4,6 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
+import SupraSpaceSpace from '../models/SupraSpaceSpace.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
@@ -911,6 +912,130 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { token }, 'Session token issued'));
 });
 
+// ─── Spaces ───────────────────────────────────────────────────────────────────
+
+/** GET /api/supraspace/spaces */
+const getSpaces = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+
+  const spaces = await SupraSpaceSpace.find({ members: userId, isActive: true })
+    .populate('members', 'fullName username avatar role')
+    .sort({ createdAt: 1 })
+    .lean();
+
+  res.json(new ApiResponse(200, spaces, 'Spaces fetched'));
+});
+
+/** POST /api/supraspace/spaces  { name, emoji?, memberIds[] } */
+const createSpace = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { name, emoji, memberIds = [] } = req.body;
+
+  if (!name?.trim()) throw new ApiError(400, 'Space name is required');
+
+  const uniqueMembers = [...new Set([userId.toString(), ...memberIds])];
+
+  const space = await SupraSpaceSpace.create({
+    name: name.trim(),
+    emoji: emoji || null,
+    members: uniqueMembers,
+    admins: [userId],
+    createdBy: userId,
+  });
+
+  await space.populate('members', 'fullName username avatar role');
+
+  const io = getIO();
+  uniqueMembers.forEach((mId: string) => {
+    io.to(`user:${mId}`).emit('space:new', { space });
+  });
+
+  res.json(new ApiResponse(201, { space }, 'Space created'));
+});
+
+/** PATCH /api/supraspace/spaces/:id  { name?, emoji?, addMembers?, removeMembers? } */
+const updateSpace = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { name, emoji, addMembers, removeMembers } = req.body;
+
+  const space = await SupraSpaceSpace.findById(id);
+  if (!space) throw new ApiError(404, 'Space not found');
+  if (!idIn(space.admins as any, userId)) throw new ApiError(403, 'Only admins can update this space');
+
+  if (name?.trim()) space.name = name.trim();
+  if (emoji !== undefined) space.emoji = emoji;
+
+  if (Array.isArray(addMembers) && addMembers.length) {
+    addMembers.forEach((mId: string) => {
+      if (!idIn(space.members as any, mId)) space.members.push(mId as any);
+    });
+  }
+  if (Array.isArray(removeMembers) && removeMembers.length) {
+    space.members = space.members.filter(m => !removeMembers.includes(m.toString())) as any;
+  }
+
+  await space.save();
+  await space.populate('members', 'fullName username avatar role');
+
+  const io = getIO();
+  (space.members as any[]).forEach((m: any) => {
+    io.to(`user:${m._id?.toString() || m.toString()}`).emit('space:updated', { space });
+  });
+
+  res.json(new ApiResponse(200, space, 'Space updated'));
+});
+
+/** DELETE /api/supraspace/spaces/:id */
+const deleteSpace = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+
+  const space = await SupraSpaceSpace.findById(id);
+  if (!space) throw new ApiError(404, 'Space not found');
+  if (!idIn(space.admins as any, userId)) throw new ApiError(403, 'Only admins can delete this space');
+
+  // Unlink all conversations from this space (move them back to Channels)
+  await SupraSpaceConversation.updateMany({ spaceId: id }, { $set: { spaceId: null } });
+
+  space.isActive = false;
+  await space.save();
+
+  const io = getIO();
+  (space.members as any[]).forEach((m: any) => {
+    io.to(`user:${m.toString ? m.toString() : m}`).emit('space:deleted', { spaceId: id });
+  });
+
+  res.json(new ApiResponse(200, { spaceId: id }, 'Space deleted'));
+});
+
+/** PATCH /api/supraspace/conversations/:id/space  { spaceId: string | null } */
+const moveConversationToSpace = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { spaceId } = req.body;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be moved to a space');
+
+  if (spaceId) {
+    const space = await SupraSpaceSpace.findById(spaceId);
+    if (!space) throw new ApiError(404, 'Space not found');
+    if (!idIn(space.members as any, userId)) throw new ApiError(403, 'You are not a member of that space');
+    (conversation as any).spaceId = space._id;
+  } else {
+    (conversation as any).spaceId = null;
+  }
+
+  await conversation.save();
+
+  emitToConversation(conversation, 'conversation:moved', { conversationId: id, spaceId: spaceId || null });
+
+  res.json(new ApiResponse(200, { conversationId: id, spaceId: spaceId || null }, 'Conversation moved'));
+});
+
 const supraSpaceController = {
   getSessionToken,
   getConversations,
@@ -937,6 +1062,11 @@ const supraSpaceController = {
   getCrmUsers,
   getActiveUsers,
   generateVideoToken,
+  getSpaces,
+  createSpace,
+  updateSpace,
+  deleteSpace,
+  moveConversationToSpace,
 };
 
 export default supraSpaceController;
