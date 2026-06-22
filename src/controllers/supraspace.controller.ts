@@ -92,11 +92,15 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   // preview doesn't show stale content. Only null it when no new messages have
   // arrived since the clear (lastMessageAt is still <= clearedAt timestamp).
   const filtered = signed.map((c: any) => {
-    const clearedAt = c.clearedAt?.[userIdStr];
-    if (clearedAt && c.lastMessageAt && new Date(c.lastMessageAt) <= new Date(clearedAt)) {
-      return { ...c, lastMessage: null, lastMessageAt: null };
+    // Strip null member entries that can appear when a CrmUser is hard-deleted
+    // after being added to a conversation. Keeping nulls causes the frontend to
+    // crash on member._id access, triggering the "Something went wrong" error page.
+    const safeConv = { ...c, members: (c.members || []).filter(Boolean) };
+    const clearedAt = safeConv.clearedAt?.[userIdStr];
+    if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
+      return { ...safeConv, lastMessage: null, lastMessageAt: null };
     }
-    return c;
+    return safeConv;
   });
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
@@ -150,9 +154,8 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Hide old lastMessage for this user if they previously cleared the conversation
-  // and no new messages have arrived since the clear.
   const convObj: any = conversation.toObject();
+  convObj.members = (convObj.members || []).filter(Boolean);
   const clearedAt = convObj.clearedAt?.[userId.toString()];
   if (clearedAt && convObj.lastMessageAt && new Date(convObj.lastMessageAt) <= new Date(clearedAt)) {
     convObj.lastMessage = null;
@@ -398,12 +401,32 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .limit(parseInt(limit as string))
     .lean();
 
-  await SupraSpaceMessage.updateMany(
+  // Fire-and-forget: mark messages read without blocking the response.
+  // Awaiting this on large channels (e.g. 27 members, hundreds of messages)
+  // can time out or throw, which would return a 500 and leave the client
+  // showing an empty chat even though messages exist.
+  SupraSpaceMessage.updateMany(
     { conversationId: id, readBy: { $ne: userId } },
     { $addToSet: { readBy: userId } }
-  );
+  ).catch(() => {});
 
-  const signed = await Promise.all(messages.map((m: any) => signAttachments(m)));
+  // Customer messages use a synthetic sentinel ObjectId for `sender` that doesn't
+  // correspond to any CrmUser document, so populate() returns null for them.
+  // Replace null senders using the customer info stored in message metadata.
+  const fallbackSender = (m: any) => ({
+    _id: m.metadata?.customerUserId || 'unknown',
+    fullName: m.metadata?.customerName || 'Customer',
+    username: m.metadata?.customerUserId || 'customer',
+    avatar: m.metadata?.customerAvatar || null,
+    isCustomer: true,
+  });
+  const safeMsgs = messages.map((m: any) => ({
+    ...m,
+    sender: m.sender || fallbackSender(m),
+    replyTo: m.replyTo ? { ...m.replyTo, sender: m.replyTo.sender || fallbackSender(m.replyTo) } : m.replyTo,
+  }));
+
+  const signed = await Promise.all(safeMsgs.map((m: any) => signAttachments(m)));
   res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
 });
 
@@ -494,11 +517,37 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
-  conversation.deletedFor = [] as any; // bring it back for anyone who hid it
+
+  // Capture members who had this conversation hidden before we clear deletedFor.
+  // We emit conversation:new only to them so their sidebar updates immediately.
+  // We clear ALL deletedFor entries (not just the sender) so the backend DB is
+  // consistent with what we tell the frontend — otherwise the next getConversations
+  // call would re-hide the conversation for resurrected members, causing the
+  // disappear-then-reappear flicker the user reported.
+  const resurrectedFor = (conversation.deletedFor as any[])
+    .map(String)
+    .filter(id => id !== userId.toString());
+  conversation.deletedFor = [];
   await conversation.save();
 
   const messageForClient = await signAttachments(message.toObject() as any);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  // Notify previously-hidden members so their sidebar shows the conversation
+  // without waiting for a manual refresh or page reload.
+  if (resurrectedFor.length > 0) {
+    try {
+      const io = getIO();
+      const convForClient = await SupraSpaceConversation.findById(id)
+        .populate('members', 'fullName username avatar role')
+        .lean();
+      if (convForClient) {
+        resurrectedFor.forEach(memberId => {
+          io.to(`user:${memberId}`).emit('conversation:new', convForClient);
+        });
+      }
+    } catch { /* non-critical */ }
+  }
 
   // ── @mention notifications (fire-and-forget) ───────────────────────────
   (async () => {
@@ -608,11 +657,30 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
-  conversation.deletedFor = [] as any;
+
+  const resurrectedFor = (conversation.deletedFor as any[])
+    .map(String)
+    .filter(id => id !== userId.toString());
+  conversation.deletedFor = [];
   await conversation.save();
 
   const messageForClient = await signAttachments(message.toObject() as any);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  if (resurrectedFor.length > 0) {
+    try {
+      const io = getIO();
+      const convForClient = await SupraSpaceConversation.findById(id)
+        .populate('members', 'fullName username avatar role')
+        .lean();
+      if (convForClient) {
+        resurrectedFor.forEach(memberId => {
+          io.to(`user:${memberId}`).emit('conversation:new', convForClient);
+        });
+      }
+    } catch { /* non-critical */ }
+  }
+
   res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
 

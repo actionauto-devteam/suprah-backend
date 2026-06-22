@@ -8,6 +8,11 @@ import logger from '../utils/logger';
 
 let io: IOServer;
 
+// Track the number of active socket connections per CRM user so that
+// a user with multiple tabs/sockets (page + context popup) is only
+// marked offline once the LAST connection closes.
+const onlineUsers = new Map<string, number>();
+
 // ── Mirrors crmAuth.middleware.ts secret resolution exactly ──────────────────
 const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
 
@@ -106,10 +111,20 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       socket.join(`org:${user.organizationId.toString()}`);
     }
 
-    // Announce online presence to all connected clients
-    io.emit('presence:update', { userId, status: 'online' });
+    // Track connection count and announce online presence
+    const prevCount = onlineUsers.get(userId) || 0;
+    onlineUsers.set(userId, prevCount + 1);
+    if (prevCount === 0) {
+      // First connection for this user — announce to everyone
+      io.emit('presence:update', { userId, status: 'online' });
+    }
 
     logger.info({ userId, fullName: user.fullName }, '[SupraSpace] User connected');
+
+    // ── Presence sync — send the current online roster to the requesting socket ─
+    socket.on('presence:request', () => {
+      socket.emit('presence:sync', Array.from(onlineUsers.keys()));
+    });
 
     // ── Join a conversation room ──────────────────────────────────────────
     socket.on('join:conversation', ({ conversationId }: { conversationId: string }) => {
@@ -156,7 +171,16 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
 
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
-      io.emit('presence:update', { userId, status: 'offline' });
+      const remaining = (onlineUsers.get(userId) || 1) - 1;
+      if (remaining <= 0) {
+        onlineUsers.delete(userId);
+        // Only emit offline when the last connection for this user closes.
+        // Each user has two socket connections (page socket + context popup socket),
+        // so we must not mark them offline when just one of them disconnects.
+        io.emit('presence:update', { userId, status: 'offline' });
+      } else {
+        onlineUsers.set(userId, remaining);
+      }
       logger.info({ userId, reason }, '[SupraSpace] User disconnected');
     });
   });
