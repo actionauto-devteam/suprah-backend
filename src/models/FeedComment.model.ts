@@ -5,6 +5,15 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 // Author fields are denormalised (copied at comment time) so comments remain
 // readable even if the author's profile changes later.
 
+export interface IFeedCommentAttachment {
+  url: string;
+  fileKey: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  thumbnailUrl?: string | null;
+}
+
 export interface IFeedComment extends Document {
   postId: mongoose.Types.ObjectId;         // The Feed post this comment belongs to
   organizationId: mongoose.Types.ObjectId; // Mirrors the post's org for fast scoped queries
@@ -13,6 +22,7 @@ export interface IFeedComment extends Document {
   authorAvatar?: string;                   // Snapshot of commenter's avatar
   authorRole: string;                      // Snapshot of commenter's role
   content: string;                         // Comment body (max 1 000 chars)
+  attachments: IFeedCommentAttachment[];   // Files attached via R2 storage
   deletedAt?: Date | null;                 // Soft-delete timestamp
   createdAt: Date;
   updatedAt: Date;
@@ -59,6 +69,22 @@ const FeedCommentSchema = new Schema<IFeedComment>(
       required: true,
       trim: true,
       maxlength: 1000,
+    },
+    attachments: {
+      type: [
+        new Schema<IFeedCommentAttachment>(
+          {
+            url: { type: String, required: true },
+            fileKey: { type: String, required: true },
+            originalName: { type: String, required: true },
+            mimeType: { type: String, required: true },
+            size: { type: Number, required: true },
+            thumbnailUrl: { type: String, default: null },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
     },
     deletedAt: {
       type: Date,

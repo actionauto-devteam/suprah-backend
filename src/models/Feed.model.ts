@@ -5,6 +5,15 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 // Author fields are denormalised (copied from CrmUser at post time) so that
 // posts remain readable even if the user's profile is later updated/deleted.
 
+export interface IFeedAttachment {
+  url: string;
+  fileKey: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  thumbnailUrl?: string | null;
+}
+
 export interface IFeed extends Document {
   organizationId: mongoose.Types.ObjectId; // Scopes the post to one organisation (multi-tenancy)
   userId: mongoose.Types.ObjectId;         // References the author (CrmUser)
@@ -12,6 +21,7 @@ export interface IFeed extends Document {
   authorAvatar?: string;                   // Snapshot of the author's avatar URL
   authorRole: string;                      // Snapshot of the author's role (employee | manager | admin)
   content: string;                         // The actual post body (max 5 000 chars)
+  attachments: IFeedAttachment[];          // Files attached via R2 storage
   isEdited: boolean;                       // Flags whether the post has been edited after creation
   deletedAt?: Date | null;                 // Soft-delete timestamp — null means the post is live
   createdAt: Date;
@@ -58,11 +68,30 @@ const FeedSchema = new Schema<IFeed>(
     },
 
     // The post body. Trimmed on save, capped at 5 000 characters.
+    // May be empty when the post consists only of attachments.
     content: {
       type: String,
       required: true,
       trim: true,
       maxlength: 5000,
+    },
+
+    // Files attached to the post, uploaded to Cloudflare R2.
+    attachments: {
+      type: [
+        new Schema<IFeedAttachment>(
+          {
+            url: { type: String, required: true },
+            fileKey: { type: String, required: true },
+            originalName: { type: String, required: true },
+            mimeType: { type: String, required: true },
+            size: { type: Number, required: true },
+            thumbnailUrl: { type: String, default: null },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
     },
 
     // Set to true the first time a post is edited so the UI can show "(edited)".

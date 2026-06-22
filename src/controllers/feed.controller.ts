@@ -3,8 +3,9 @@ import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import Feed from '../models/Feed.model';
+import Feed, { IFeedAttachment } from '../models/Feed.model';
 import { getIO } from '../socket/feedSocket';
+import { BucketType, storageService } from '../services/storage.service';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,22 @@ function parsePositiveInt(val: unknown, fallback: number): number {
   return isNaN(n) || n < 1 ? fallback : n;
 }
 
+/**
+ * Swaps each attachment's stored R2 key for a freshly-signed, time-limited URL
+ * before the document is sent to the client.
+ */
+async function signAttachments<T extends { attachments?: IFeedAttachment[] }>(doc: T): Promise<T> {
+  if (!Array.isArray(doc.attachments) || doc.attachments.length === 0) return doc;
+  await Promise.all(doc.attachments.map(async (attachment) => {
+    const signed = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+    if (signed) {
+      attachment.url = signed;
+      if (attachment.thumbnailUrl) attachment.thumbnailUrl = signed;
+    }
+  }));
+  return doc;
+}
+
 // ─── Create Post ──────────────────────────────────────────────────────────────
 
 /**
@@ -35,13 +52,14 @@ export const createPost = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
 
-  const { content } = req.body;
+  const content = (req.body.content || '').trim();
+  const files = (req.files || []) as Express.Multer.File[];
 
-  // Guard: content must be a non-empty string within the length limit
-  if (!content || !content.trim()) {
+  // A post needs either text or at least one attachment
+  if (!content && files.length === 0) {
     throw new ApiError(400, 'Post content cannot be empty');
   }
-  if (content.trim().length > 5000) {
+  if (content.length > 5000) {
     throw new ApiError(400, 'Post content cannot exceed 5000 characters');
   }
 
@@ -50,28 +68,53 @@ export const createPost = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'You must belong to an organization to post');
   }
 
-  // Persist the post, denormalising author info at creation time
-  const post = await Feed.create({
-    organizationId: actor.organizationId,
-    userId:         actor._id,
-    authorName:     actor.fullName,
-    authorAvatar:   actor.avatar || null,
-    authorRole:     actor.role,
-    content:        content.trim(),
-    isEdited:       false,
-  });
+  const attachments: IFeedAttachment[] = [];
+  const uploadedKeys: string[] = [];
 
-  // Broadcast to every socket in the org room.
-  // Wrapped in try/catch so a missing Socket.IO instance never breaks the API.
   try {
-    getIO()
-      .to(`org:${actor.organizationId.toString()}`)
-      .emit('feed:new', { post });
-  } catch {
-    // Socket.IO not initialised — REST response is still sent below
-  }
+    for (const file of files) {
+      const fileUrl = await storageService.upload(file, 'feed-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
+      const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
+      uploadedKeys.push(fileKey);
+      attachments.push({
+        url: fileKey,
+        fileKey,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        thumbnailUrl: file.mimetype.startsWith('image/') ? fileKey : null,
+      });
+    }
 
-  res.status(201).json(new ApiResponse(201, { post }, 'Post created successfully'));
+    // Persist the post, denormalising author info at creation time
+    const post = await Feed.create({
+      organizationId: actor.organizationId,
+      userId:         actor._id,
+      authorName:     actor.fullName,
+      authorAvatar:   actor.avatar || null,
+      authorRole:     actor.role,
+      content,
+      attachments,
+      isEdited:       false,
+    });
+
+    const postForClient = await signAttachments(post.toObject());
+
+    // Broadcast to every socket in the org room.
+    // Wrapped in try/catch so a missing Socket.IO instance never breaks the API.
+    try {
+      getIO()
+        .to(`org:${actor.organizationId.toString()}`)
+        .emit('feed:new', { post: postForClient });
+    } catch {
+      // Socket.IO not initialised — REST response is still sent below
+    }
+
+    res.status(201).json(new ApiResponse(201, { post: postForClient }, 'Post created successfully'));
+  } catch (error) {
+    await Promise.all(uploadedKeys.map((key) => storageService.delete(key, BucketType.PRIVATE).catch(() => undefined)));
+    throw error;
+  }
 });
 
 // ─── Get Posts (paginated) ────────────────────────────────────────────────────
@@ -110,11 +153,13 @@ export const getPosts = asyncHandler(async (req: Request, res: Response) => {
     Feed.countDocuments(filter),
   ]);
 
+  const signedPosts = await Promise.all(posts.map((post) => signAttachments(post)));
+
   // hasMore lets the frontend know whether to show a "Load more" button
   const hasMore = skip + posts.length < total;
 
   res.json(
-    new ApiResponse(200, { posts, total, page, limit, hasMore }, 'Feed fetched successfully')
+    new ApiResponse(200, { posts: signedPosts, total, page, limit, hasMore }, 'Feed fetched successfully')
   );
 });
 
@@ -156,14 +201,16 @@ export const updatePost = asyncHandler(async (req: Request, res: Response) => {
   post.isEdited = true;
   await post.save();
 
+  const postForClient = await signAttachments(post.toObject());
+
   // Notify all org members so the edited post updates live in their feeds
   try {
     getIO()
       .to(`org:${actor.organizationId!.toString()}`)
-      .emit('feed:updated', { post });
+      .emit('feed:updated', { post: postForClient });
   } catch { /* Socket.IO not running — swallow */ }
 
-  res.json(new ApiResponse(200, { post }, 'Post updated successfully'));
+  res.json(new ApiResponse(200, { post: postForClient }, 'Post updated successfully'));
 });
 
 // ─── Delete Post ──────────────────────────────────────────────────────────────
@@ -193,6 +240,12 @@ export const deletePost = asyncHandler(async (req: Request, res: Response) => {
   const isOwner = post.userId.toString() === actor._id.toString();
   const isAdmin = actor.role === 'admin';
   if (!isOwner && !isAdmin) throw new ApiError(403, 'You can only delete your own posts');
+
+  if (post.attachments?.length) {
+    await Promise.all(
+      post.attachments.map((a) => storageService.delete(a.fileKey || a.url, BucketType.PRIVATE).catch(() => undefined))
+    );
+  }
 
   // Soft delete: stamp the timestamp instead of calling .deleteOne()
   post.deletedAt = new Date();

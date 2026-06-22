@@ -5,8 +5,21 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import Feed from '../models/Feed.model';
 import DayPulse from '../models/Daypulse.model';
-import FeedComment from '../models/FeedComment.model';
+import FeedComment, { IFeedCommentAttachment } from '../models/FeedComment.model';
 import { getIO } from '../socket/feedSocket';
+import { BucketType, storageService } from '../services/storage.service';
+
+async function signAttachments<T extends { attachments?: IFeedCommentAttachment[] }>(doc: T): Promise<T> {
+  if (!Array.isArray(doc.attachments) || doc.attachments.length === 0) return doc;
+  await Promise.all(doc.attachments.map(async (attachment) => {
+    const signed = await storageService.getSignedUrl(attachment.fileKey || attachment.url);
+    if (signed) {
+      attachment.url = signed;
+      if (attachment.thumbnailUrl) attachment.thumbnailUrl = signed;
+    }
+  }));
+  return doc;
+}
 
 async function resolveOrgId(
   postId: string,
@@ -51,31 +64,58 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
   const { postId } = req.params;
   if (!mongoose.Types.ObjectId.isValid(postId)) throw new ApiError(400, 'Invalid post ID');
 
-  const { content } = req.body;
-  if (!content || !content.trim()) throw new ApiError(400, 'Comment cannot be empty');
-  if (content.trim().length > 1000) throw new ApiError(400, 'Comment cannot exceed 1000 characters');
+  const content = (req.body.content || '').trim();
+  const files = (req.files || []) as Express.Multer.File[];
+
+  if (!content && files.length === 0) throw new ApiError(400, 'Comment cannot be empty');
+  if (content.length > 1000) throw new ApiError(400, 'Comment cannot exceed 1000 characters');
 
   // Resolve parent document — throws 403/404 on failure
   const orgId = await resolveOrgId(postId, actor.organizationId);
 
-  const comment = await FeedComment.create({
-    postId,
-    organizationId: orgId,
-    userId:         actor._id,
-    authorName:     actor.fullName,
-    authorAvatar:   actor.avatar || null,
-    authorRole:     actor.role,
-    content:        content.trim(),
-  });
+  const attachments: IFeedCommentAttachment[] = [];
+  const uploadedKeys: string[] = [];
 
-  // Broadcast to the org room so all open tabs show the new comment instantly
   try {
-    getIO()
-      .to(`org:${actor.organizationId!.toString()}`)
-      .emit('feed:comment_added', { postId, comment });
-  } catch { /* Socket.IO not running — swallow */ }
+    for (const file of files) {
+      const fileUrl = await storageService.upload(file, 'feed-comment-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
+      const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
+      uploadedKeys.push(fileKey);
+      attachments.push({
+        url: fileKey,
+        fileKey,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        thumbnailUrl: file.mimetype.startsWith('image/') ? fileKey : null,
+      });
+    }
 
-  res.status(201).json(new ApiResponse(201, { comment }, 'Comment added'));
+    const comment = await FeedComment.create({
+      postId,
+      organizationId: orgId,
+      userId:         actor._id,
+      authorName:     actor.fullName,
+      authorAvatar:   actor.avatar || null,
+      authorRole:     actor.role,
+      content,
+      attachments,
+    });
+
+    const commentForClient = await signAttachments(comment.toObject());
+
+    // Broadcast to the org room so all open tabs show the new comment instantly
+    try {
+      getIO()
+        .to(`org:${actor.organizationId!.toString()}`)
+        .emit('feed:comment_added', { postId, comment: commentForClient });
+    } catch { /* Socket.IO not running — swallow */ }
+
+    res.status(201).json(new ApiResponse(201, { comment: commentForClient }, 'Comment added'));
+  } catch (error) {
+    await Promise.all(uploadedKeys.map((key) => storageService.delete(key, BucketType.PRIVATE).catch(() => undefined)));
+    throw error;
+  }
 });
 
 // ─── Get Comments ─────────────────────────────────────────────────────────────
@@ -100,7 +140,9 @@ export const getComments = asyncHandler(async (req: Request, res: Response) => {
     .sort({ createdAt: 1 }) // Oldest first — natural thread order
     .lean();
 
-  res.json(new ApiResponse(200, { comments, total: comments.length }, 'Comments fetched'));
+  const signedComments = await Promise.all(comments.map((c) => signAttachments(c)));
+
+  res.json(new ApiResponse(200, { comments: signedComments, total: comments.length }, 'Comments fetched'));
 });
 
 // ─── Delete Comment ───────────────────────────────────────────────────────────
@@ -125,6 +167,12 @@ export const deleteComment = asyncHandler(async (req: Request, res: Response) =>
   const isOwner = comment.userId.toString() === actor._id.toString();
   const isAdmin = actor.role === 'admin';
   if (!isOwner && !isAdmin) throw new ApiError(403, 'You can only delete your own comments');
+
+  if (comment.attachments?.length) {
+    await Promise.all(
+      comment.attachments.map((a) => storageService.delete(a.fileKey || a.url, BucketType.PRIVATE).catch(() => undefined))
+    );
+  }
 
   comment.deletedAt = new Date();
   await comment.save();
