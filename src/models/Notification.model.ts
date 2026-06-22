@@ -134,6 +134,11 @@ const NotificationSchema = new Schema(
         // Legacy/Compatibility
         'proof_submitted',
         'delivery_confirmed',
+
+        // Aftermarket
+        'aftermarket_inquiry',
+        'aftermarket_invoice',
+        'aftermarket_order',
       ],
     },
     title: {
