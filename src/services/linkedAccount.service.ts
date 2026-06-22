@@ -6,8 +6,16 @@ import LinkedAccount, {
 } from "../models/LinkedAccount";
 import User from "../models/User.model";
 import { wiseClient } from "../lib/wise-client";
-import { paypalClient, PayPalClient } from "../lib/paypal-client";
 
+/**
+ * LINKED ACCOUNTS — WISE ONLY
+ * ---------------------------
+ * We connect a user's Wise account so its real balance can REPLACE the SuprahPay
+ * wallet balance (Wise exposes a true balance API). PayPal was removed: there is
+ * no API to read a connected PayPal account's balance, so it could never mirror
+ * money into the wallet. If another balance-capable provider is added later,
+ * reintroduce the `provider` branches here.
+ */
 
 const STATE_SECRET =
   process.env.LINKED_ACCOUNT_STATE_SECRET || "dev-insecure-state-secret-change-me";
@@ -61,24 +69,21 @@ export function verifyState(
 
 export const frontendUrl = () => FRONTEND_URL;
 
-/* ─────────────────────────── Authorize URLs ─────────────────────────────── */
+/* ─────────────────────────── Authorize URL ──────────────────────────────── */
 export function buildAuthorizeUrl(
   provider: LinkedProvider,
   state: string
 ): string {
-  if (provider === "wise") {
-    const base = process.env.WISE_OAUTH_URL || "https://sandbox.transferwise.tech";
-    const url = new URL(`${base}/oauth/authorize`);
-    url.searchParams.set("client_id", process.env.WISE_CLIENT_ID || "");
-    url.searchParams.set("redirect_uri", process.env.WISE_REDIRECT_URI || "");
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("state", state);
-    return url.toString();
+  if (provider !== "wise") {
+    throw new Error(`Unsupported provider: ${provider}`);
   }
-  if (provider === "paypal") {
-    return paypalClient.buildAuthorizeUrl(state);
-  }
-  throw new Error(`Unsupported provider: ${provider}`);
+  const base = process.env.WISE_OAUTH_URL || "https://sandbox.transferwise.tech";
+  const url = new URL(`${base}/oauth/authorize`);
+  url.searchParams.set("client_id", process.env.WISE_CLIENT_ID || "");
+  url.searchParams.set("redirect_uri", process.env.WISE_REDIRECT_URI || "");
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("state", state);
+  return url.toString();
 }
 
 /* ─────────────────────────── Token freshness ────────────────────────────── */
@@ -86,17 +91,10 @@ async function ensureFreshToken(account: ILinkedAccount): Promise<void> {
   if (new Date() < account.tokenExpiry) return;
   if (!account.refreshToken) return; // nothing we can do; caller handles failure
 
-  if (account.provider === "wise") {
-    const t = await wiseClient.refreshToken(account.refreshToken);
-    account.accessToken = t.access_token;
-    account.refreshToken = t.refresh_token ?? account.refreshToken;
-    account.tokenExpiry = new Date(Date.now() + t.expires_in * 1000);
-  } else {
-    const t = await paypalClient.refreshToken(account.refreshToken);
-    account.accessToken = t.access_token;
-    account.refreshToken = t.refresh_token ?? account.refreshToken;
-    account.tokenExpiry = new Date(Date.now() + t.expires_in * 1000);
-  }
+  const t = await wiseClient.refreshToken(account.refreshToken);
+  account.accessToken = t.access_token;
+  account.refreshToken = t.refresh_token ?? account.refreshToken;
+  account.tokenExpiry = new Date(Date.now() + t.expires_in * 1000);
   await account.save();
 }
 
@@ -107,79 +105,53 @@ function reportingWindow() {
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
-async function fetchProviderProfileAndBalances(
-  provider: LinkedProvider,
-  accessToken: string
-): Promise<{
+async function fetchProfileAndBalances(accessToken: string): Promise<{
   profileId: string;
   profileType: "personal" | "business";
   fullName: string;
   email: string;
   balances: { currency: string; amount: number; reservedAmount: number }[];
 }> {
-  if (provider === "wise") {
-    const profiles = await wiseClient.getProfiles(accessToken);
-    const primary = profiles[0];
-    if (!primary) throw new Error("No Wise profile found");
-    const details = await wiseClient.getProfile(accessToken, primary.id);
-    const balancesData = await wiseClient.getBalances(accessToken, primary.id);
-    const balances = (balancesData[0]?.balances || []).map((b: any) => ({
-      currency: b.currency,
-      amount: b.amount?.value ?? 0,
-      reservedAmount: b.reservedAmount?.value ?? 0,
-    }));
-    return {
-      profileId: String(primary.id),
-      profileType: primary.type === "business" ? "business" : "personal",
-      fullName: details.details?.name || primary.fullName || "Wise user",
-      email: details.details?.email || primary.email || "",
-      balances,
-    };
-  }
+  const profiles = await wiseClient.getProfiles(accessToken);
+  const primary = profiles[0];
+  if (!primary) throw new Error("No Wise profile found");
 
-  // PayPal
-  const info = await paypalClient.getUserInfo(accessToken);
-  const { start, end } = reportingWindow();
-  const derived = await paypalClient.getDerivedBalance(accessToken, start, end);
+  const details = await wiseClient.getProfile(accessToken, primary.id);
+  const balancesData = await wiseClient.getBalances(accessToken, primary.id);
+  const balances = (balancesData[0]?.balances || []).map((b: any) => ({
+    currency: b.currency,
+    amount: b.amount?.value ?? 0,
+    reservedAmount: b.reservedAmount?.value ?? 0,
+  }));
+
   return {
-    profileId: info.user_id,
-    profileType: info.account_type === "BUSINESS" ? "business" : "personal",
-    fullName: info.name || "PayPal user",
-    email: info.email || "",
-    balances: derived.length
-      ? derived.map((b) => ({ ...b, reservedAmount: 0 }))
-      : [{ currency: "USD", amount: 0, reservedAmount: 0 }],
+    profileId: String(primary.id),
+    profileType: primary.type === "business" ? "business" : "personal",
+    fullName: details.details?.name || primary.fullName || "Wise user",
+    email: details.details?.email || primary.email || "",
+    balances,
   };
 }
 
-async function fetchProviderTransactions(
-  account: ILinkedAccount,
-  currency = "USD"
-) {
-  if (account.provider === "wise") {
-    const { start, end } = reportingWindow();
-    const stmt = await wiseClient.getStatement(
-      account.accessToken,
-      account.profileId,
-      currency,
-      start,
-      end
-    );
-    return (stmt.transactions || []).map((tx: any) => ({
-      id: tx.referenceNumber,
-      date: tx.date,
-      description: tx.details?.description || "Transaction",
-      amount: Math.abs(tx.amount?.value ?? 0),
-      currency: tx.amount?.currency ?? currency,
-      type: (tx.amount?.value ?? 0) > 0 ? "credit" : "debit",
-      status: tx.runningBalance ? "completed" : "pending",
-      recipient: tx.details?.recipient?.name,
-    }));
-  }
-  // PayPal
+async function fetchTransactions(account: ILinkedAccount, currency = "USD") {
   const { start, end } = reportingWindow();
-  const raw = await paypalClient.getTransactions(account.accessToken, start, end);
-  return paypalClient.normalizeTransactions(raw);
+  const stmt = await wiseClient.getStatement(
+    account.accessToken,
+    account.profileId,
+    currency,
+    start,
+    end
+  );
+  return (stmt.transactions || []).map((tx: any) => ({
+    id: tx.referenceNumber,
+    date: tx.date,
+    description: tx.details?.description || "Transaction",
+    amount: Math.abs(tx.amount?.value ?? 0),
+    currency: tx.amount?.currency ?? currency,
+    type: (tx.amount?.value ?? 0) > 0 ? "credit" : "debit",
+    status: tx.runningBalance ? "completed" : "pending",
+    recipient: tx.details?.recipient?.name,
+  }));
 }
 
 /* ─────────────────────────── Wallet sync ────────────────────────────────── */
@@ -204,16 +176,15 @@ export async function connectProvider(
   code: string,
   userId: string
 ): Promise<ILinkedAccount> {
-  // 1. Exchange code
-  let tokens: { access_token: string; refresh_token?: string; expires_in: number };
-  if (provider === "wise") {
-    tokens = await wiseClient.exchangeCode(code);
-  } else {
-    tokens = await paypalClient.exchangeCode(code);
+  if (provider !== "wise") {
+    throw new Error(`Unsupported provider: ${provider}`);
   }
 
+  // 1. Exchange code
+  const tokens = await wiseClient.exchangeCode(code);
+
   // 2. Profile + balances
-  const info = await fetchProviderProfileAndBalances(provider, tokens.access_token);
+  const info = await fetchProfileAndBalances(tokens.access_token);
 
   // 3. Demote any existing primary; this newly connected account becomes primary
   await LinkedAccount.updateMany({ userId }, { isPrimary: false });
@@ -293,10 +264,7 @@ export async function syncBalances(userId: string) {
   if (!account) throw new Error("No connected account to sync");
 
   await ensureFreshToken(account);
-  const info = await fetchProviderProfileAndBalances(
-    account.provider,
-    account.accessToken
-  );
+  const info = await fetchProfileAndBalances(account.accessToken);
   account.balances = info.balances.map((b) => ({ ...b, lastUpdated: new Date() }));
   account.lastSyncedAt = new Date();
   await account.save();
@@ -316,7 +284,7 @@ export async function getTransactions(userId: string, currency = "USD") {
   if (!account) throw new Error("No connected account");
 
   await ensureFreshToken(account);
-  return fetchProviderTransactions(account, currency);
+  return fetchTransactions(account, currency);
 }
 
 /** Disconnect a specific provider (or the primary if none specified). */
@@ -346,7 +314,7 @@ export async function disconnect(userId: string, provider?: LinkedProvider) {
   return account;
 }
 
-/** Create a transfer/payout from the connected account. */
+/** Create a transfer/payout from the connected Wise account. */
 export async function createTransfer(
   userId: string,
   payload: {
@@ -369,20 +337,6 @@ export async function createTransfer(
 
   const currency = payload.currency || "USD";
   const txId = `SUPRAPAY-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
-
-  if (account.provider === "paypal") {
-    const result = await paypalClient.createPayout({
-      receiverEmail: payload.recipientEmail || payload.recipient,
-      amount: payload.amount,
-      currency,
-      note: payload.reference,
-      senderItemId: txId,
-    });
-    return {
-      transferId: result?.batch_header?.payout_batch_id || txId,
-      status: result?.batch_header?.batch_status || "PENDING",
-    };
-  }
 
   // Wise: quote → transfer → fund
   const quote = await wiseClient.createQuote(account.accessToken, account.profileId, {

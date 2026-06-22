@@ -6,7 +6,10 @@ import { LinkedProvider } from "../models/LinkedAccount";
 import linkedAccountService from "../services/linkedAccount.service";
 import logger from "../utils/logger";
 
-const SUPPORTED: LinkedProvider[] = ["wise", "paypal"];
+// Wise-only. PayPal was removed (no API to read a connected account's balance,
+// so it could never mirror money into the wallet). Any other provider value
+// now resolves to null → 400 "Unsupported provider".
+const SUPPORTED: LinkedProvider[] = ["wise"];
 
 function parseProvider(value: unknown): LinkedProvider | null {
   return SUPPORTED.includes(value as LinkedProvider)

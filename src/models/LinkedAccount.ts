@@ -3,16 +3,19 @@ import mongoose, { Schema, Document, Types } from "mongoose";
 /**
  * LinkedAccount
  * -------------
- * One document per (user, provider) connection. Replaces the provider-specific
- * WiseAccount model so Wise and PayPal share a single shape. The `isPrimary`
- * account is the one whose balance drives the SuprahPay wallet (balance REPLACE
- * model — see linkedAccount.service.syncBalances).
+ * One document per (user, provider) connection. The `isPrimary` account is the
+ * one whose balance drives the SuprahPay wallet (balance REPLACE model — see
+ * linkedAccount.service.syncBalances).
+ *
+ * Currently Wise-only: Wise exposes a real balance API, so its balance can
+ * mirror into the wallet. The `provider` field is kept as an enum so another
+ * balance-capable provider can be added later without a schema rewrite.
  *
  * Tokens are stored with `select: false` so they never leak through a normal
  * query; fetch them explicitly with `.select("+accessToken +refreshToken")`.
  */
 
-export type LinkedProvider = "wise" | "paypal";
+export type LinkedProvider = "wise";
 
 export interface ILinkedBalance {
   currency: string;
@@ -55,7 +58,7 @@ const LinkedAccountSchema = new Schema<ILinkedAccount>(
     },
     provider: {
       type: String,
-      enum: ["wise", "paypal"],
+      enum: ["wise"],
       required: true,
     },
     profileId: { type: String, required: true },
@@ -68,7 +71,7 @@ const LinkedAccountSchema = new Schema<ILinkedAccount>(
     email: { type: String, required: true },
 
     accessToken: { type: String, required: true, select: false },
-    refreshToken: { type: String, select: false }, // PayPal may omit on some grants
+    refreshToken: { type: String, select: false },
     tokenExpiry: { type: Date, required: true },
 
     balances: [
