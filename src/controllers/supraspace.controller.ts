@@ -84,8 +84,21 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     .sort({ lastMessageAt: -1 })
     .lean();
 
+  const userIdStr = userId.toString();
   const signed = await Promise.all(conversations.map((c: any) => withFreshAvatar(c)));
-  res.json(new ApiResponse(200, signed, 'Conversations fetched'));
+
+  // For conversations the user has cleared, hide the old lastMessage so the
+  // preview doesn't show stale content. Only null it when no new messages have
+  // arrived since the clear (lastMessageAt is still <= clearedAt timestamp).
+  const filtered = signed.map((c: any) => {
+    const clearedAt = c.clearedAt?.[userIdStr];
+    if (clearedAt && c.lastMessageAt && new Date(c.lastMessageAt) <= new Date(clearedAt)) {
+      return { ...c, lastMessage: null, lastMessageAt: null };
+    }
+    return c;
+  });
+
+  res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
 });
 
 /** POST /api/supraspace/conversations/direct */
@@ -136,7 +149,16 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  res.json(new ApiResponse(200, conversation, 'Direct conversation ready'));
+  // Hide old lastMessage for this user if they previously cleared the conversation
+  // and no new messages have arrived since the clear.
+  const convObj: any = conversation.toObject();
+  const clearedAt = convObj.clearedAt?.[userId.toString()];
+  if (clearedAt && convObj.lastMessageAt && new Date(convObj.lastMessageAt) <= new Date(clearedAt)) {
+    convObj.lastMessage = null;
+    convObj.lastMessageAt = null;
+  }
+
+  res.json(new ApiResponse(200, convObj, 'Direct conversation ready'));
 });
 
 /** POST /api/supraspace/conversations/group */
@@ -270,11 +292,18 @@ const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
     return res.json(new ApiResponse(200, { conversationId: id, permanent: true }, 'Channel deleted'));
   }
 
-  // Otherwise hide the conversation only for this user
-  if (!idIn(conversation.deletedFor as any, userId)) {
-    conversation.deletedFor.push(userId as any);
-    await conversation.save();
-  }
+  // Hide the conversation for this user and record the clear timestamp so that
+  // getMessages filters out all messages sent before this moment.
+  // Even if the user re-opens the same DM later (getOrCreateDirect removes them
+  // from deletedFor), messages sent before this timestamp remain hidden for them.
+  const userIdStr = userId.toString();
+  await SupraSpaceConversation.updateOne(
+    { _id: id },
+    {
+      $addToSet: { deletedFor: userId },
+      $set: { [`clearedAt.${userIdStr}`]: new Date() },
+    }
+  );
   res.json(new ApiResponse(200, { conversationId: id, permanent: false }, 'Conversation removed'));
 });
 
@@ -345,12 +374,21 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { before, limit = '40' } = req.query;
 
-  const conversation = await SupraSpaceConversation.findById(id);
+  // Use lean() so clearedAt comes back as a plain JS object — no Mongoose Mixed
+  // type accessor wrapping that can silently swallow bracket-notation key access.
+  const conversation = await SupraSpaceConversation.findById(id).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
   const filter: any = { conversationId: id, isDeleted: false };
-  if (before) filter.createdAt = { $lt: new Date(before as string) };
+  const createdAtFilter: any = {};
+  if (before) createdAtFilter.$lt = new Date(before as string);
+  const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
+  if (rawClearedAt) {
+    // Stored as BSON Date; ensure it's a JS Date regardless of driver version
+    createdAtFilter.$gt = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
+  }
+  if (Object.keys(createdAtFilter).length > 0) filter.createdAt = createdAtFilter;
 
   const messages = await SupraSpaceMessage.find(filter)
     .populate('sender', 'fullName username avatar')
