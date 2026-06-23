@@ -202,7 +202,7 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be updated');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const isAdmin = idIn(conversation.admins as any, userId);
+  const isAdmin = idIn(conversation.admins as any, userId) || conversation.createdBy.toString() === userId.toString();
 
   if (name !== undefined) {
     if (!isAdmin) throw new ApiError(403, 'Only admins can rename the group');
