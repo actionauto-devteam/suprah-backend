@@ -66,6 +66,13 @@ export interface ISupraSpaceMessageMetadata {
   customerAvatar?: string | null;
   crmUserName?: string | null;
   crmUserRole?: string | null;
+  meeting?: {
+    meetingId: string;
+    meetingLink: string;
+    title: string;
+    scheduledAt?: Date | null;
+    allowedDomain?: string;
+  } | null;
 }
 
 // ─── Message type ─────────────────────────────────────────────────────────────
@@ -170,6 +177,13 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
     customerAvatar:    { type: String, default: null },
     crmUserName:       { type: String, default: null },
     crmUserRole:       { type: String, default: null },
+    meeting: {
+      meetingId: { type: String, default: '' },
+      meetingLink: { type: String, default: '' },
+      title: { type: String, default: '' },
+      scheduledAt: { type: Date, default: null },
+      allowedDomain: { type: String, default: 'actionautoutah.com' },
+    },
   },
   { _id: false }
 );

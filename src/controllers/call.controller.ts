@@ -8,8 +8,10 @@ import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import { getIO } from '../socket/supraspace.socket';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
+import config from '../config';
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
+const DEFAULT_MEETING_DOMAIN = 'actionautoutah.com';
 
 const formatDuration = (sec: number) => {
   const h = Math.floor(sec / 3600);
@@ -54,6 +56,32 @@ function buildJitsi(call: ICall, crmUser: any, isModerator: boolean) {
     },
   });
   return { domain: JAAS_DOMAIN, room: jaasRoomName(call.roomName), jwt };
+}
+
+function buildMeetingLink(meetingId: string) {
+  const base = (config.frontendUrl || '').replace(/\/$/, '');
+  return `${base}/crm/supra-space?meeting=${encodeURIComponent(meetingId)}`;
+}
+
+function hasAllowedDomain(email?: string, domain = DEFAULT_MEETING_DOMAIN) {
+  return String(email || '').toLowerCase().endsWith(`@${domain.toLowerCase()}`);
+}
+
+function isApprovedForMeeting(call: ICall, userId: any, email?: string) {
+  if (hasAllowedDomain(email, call.allowedDomain)) return true;
+  if (call.moderatorUserId.toString() === userId.toString()) return true;
+  if (idIn(call.approvedUsers as any, userId)) return true;
+  return call.admissionRequests.some((r) => (
+    r.status === 'approved' &&
+    ((r.userId && r.userId.toString() === userId.toString()) || r.email.toLowerCase() === String(email || '').toLowerCase())
+  ));
+}
+
+async function activateMeetingIfNeeded(call: ICall) {
+  if (call.isLive) return;
+  call.isLive = true;
+  call.callStatus = 'calling';
+  call.startedAt = new Date();
 }
 
 /**
@@ -116,6 +144,141 @@ export const startCall = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(new ApiResponse(201, { call, jitsi: buildJitsi(call, crmUser, true) }, 'Call started'));
 });
 
+/**
+ * POST /api/calls/meeting  { conversationId, title, scheduledAt?, optionalMessage? }
+ * Creates a shareable scheduled SupraSpace meeting and posts an invite card to chat.
+ */
+export const createMeeting = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const userId = crmUser._id;
+  const { conversationId, title, scheduledAt, optionalMessage } = req.body;
+  if (!conversationId) throw new ApiError(400, 'conversationId is required');
+  if (!title?.trim()) throw new ApiError(400, 'Meeting title is required');
+
+  const conversation = await assertMember(conversationId, userId);
+  const meetingId = crypto.randomUUID();
+  const roomName = `meeting-${meetingId}`;
+  const meetingLink = buildMeetingLink(meetingId);
+  const scheduledDate = scheduledAt ? new Date(scheduledAt) : new Date();
+
+  const call = await Call.create({
+    meetingId,
+    roomName,
+    conversationId,
+    initiatedBy: userId,
+    moderatorUserId: userId,
+    participants: [],
+    callStatus: 'scheduled',
+    isLive: false,
+    title: title.trim(),
+    scheduledAt: scheduledDate,
+    optionalMessage: optionalMessage?.trim() || '',
+    meetingLink,
+    allowedDomain: DEFAULT_MEETING_DOMAIN,
+    approvedUsers: [],
+    admissionRequests: [],
+    startedAt: scheduledDate,
+  });
+
+  const contentLines = [
+    optionalMessage?.trim() || '',
+    `${title.trim()}`,
+    `Video meeting: ${meetingLink}`,
+  ].filter(Boolean);
+
+  const message = await SupraSpaceMessage.create({
+    conversationId,
+    sender: userId,
+    type: 'event',
+    content: contentLines.join('\n'),
+    event: {
+      title: title.trim(),
+      description: optionalMessage?.trim() || '',
+      location: 'SupraSpace Meeting',
+      startTime: scheduledDate,
+      endTime: null,
+      going: [userId],
+      maybe: [],
+      declined: [],
+    },
+    metadata: {
+      meeting: {
+        meetingId,
+        meetingLink,
+        title: title.trim(),
+        scheduledAt: scheduledDate,
+        allowedDomain: DEFAULT_MEETING_DOMAIN,
+      },
+    },
+    readBy: [userId],
+  });
+
+  await message.populate('sender', 'fullName username avatar');
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  await conversation.save();
+
+  const messageForClient = message.toObject();
+  await emitToConversationMembers(conversationId, 'message:new', { conversationId, message: messageForClient });
+
+  res.status(201).json(new ApiResponse(201, { call, message: messageForClient, meetingLink }, 'Meeting created'));
+});
+
+/** GET /api/calls/meeting/:meetingId */
+export const getMeeting = asyncHandler(async (req: Request, res: Response) => {
+  const { meetingId } = req.params;
+  const call = await Call.findOne({ meetingId, callStatus: { $ne: 'ended' } }).lean();
+  if (!call) throw new ApiError(404, 'Meeting not found');
+  res.json(new ApiResponse(200, { call, meetingLink: call.meetingLink || buildMeetingLink(meetingId) }, 'Meeting found'));
+});
+
+/** POST /api/calls/meeting/:meetingId/admission */
+export const decideMeetingAdmission = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const { meetingId } = req.params;
+  const { userId, email, decision } = req.body;
+  if (!['approved', 'denied'].includes(decision)) throw new ApiError(400, 'Invalid admission decision');
+
+  const call = await Call.findOne({ meetingId, callStatus: { $ne: 'ended' } });
+  if (!call) throw new ApiError(404, 'Meeting not found');
+  if (call.moderatorUserId.toString() !== crmUser._id.toString()) throw new ApiError(403, 'Only the meeting host can approve guests');
+
+  const request = call.admissionRequests.find((r) => (
+    (userId && r.userId && r.userId.toString() === String(userId)) ||
+    (email && r.email.toLowerCase() === String(email).toLowerCase())
+  ));
+  if (!request) throw new ApiError(404, 'Admission request not found');
+
+  request.status = decision;
+  request.decidedAt = new Date();
+  request.decidedBy = crmUser._id;
+  if (decision === 'approved' && request.userId && !idIn(call.approvedUsers as any, request.userId)) {
+    call.approvedUsers.push(request.userId);
+  }
+  await call.save();
+
+  await emitToConversationMembers(call.conversationId, 'meeting:admission-updated', {
+    meetingId,
+    conversationId: call.conversationId.toString(),
+    request: {
+      userId: request.userId?.toString(),
+      name: request.name,
+      email: request.email,
+      status: request.status,
+    },
+  });
+  try {
+    if (request.userId) {
+      getIO().to(`user:${request.userId.toString()}`).emit('meeting:admission-updated', {
+        meetingId,
+        status: request.status,
+      });
+    }
+  } catch { /* best-effort */ }
+
+  res.json(new ApiResponse(200, { call }, `Guest ${decision}`));
+});
+
 /** POST /api/calls/join  { meetingId } */
 export const joinCall = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
@@ -123,15 +286,44 @@ export const joinCall = asyncHandler(async (req: Request, res: Response) => {
   const { meetingId } = req.body;
   if (!meetingId) throw new ApiError(400, 'meetingId is required');
 
-  const call = await Call.findOne({ meetingId, isLive: true });
+  const call = await Call.findOne({ meetingId, callStatus: { $ne: 'ended' } });
   if (!call) throw new ApiError(404, 'No active call for this meeting');
 
-  await assertMember(call.conversationId.toString(), userId);
+  const conv = await SupraSpaceConversation.findById(call.conversationId).select('members');
+  if (!conv) throw new ApiError(404, 'Conversation not found');
+  const isConversationMember = idIn(conv.members as any, userId);
+  if (!isConversationMember && !isApprovedForMeeting(call, userId, crmUser.email)) {
+    const email = String(crmUser.email || crmUser.username || '').toLowerCase();
+    const existingRequest = call.admissionRequests.find((r) => (
+      (r.userId && r.userId.toString() === userId.toString()) || r.email.toLowerCase() === email
+    ));
+
+    if (!existingRequest) {
+      call.admissionRequests.push({
+        userId,
+        name: crmUser.fullName || crmUser.username || 'Guest',
+        email,
+        status: 'pending',
+        requestedAt: new Date(),
+        decidedAt: null,
+        decidedBy: null,
+      });
+      await call.save();
+      await emitToConversationMembers(call.conversationId, 'meeting:join-requested', {
+        meetingId,
+        conversationId: call.conversationId.toString(),
+        requester: { userId: userId.toString(), name: crmUser.fullName, email },
+      });
+    }
+
+    return res.status(202).json(new ApiResponse(202, { status: existingRequest?.status || 'pending', meetingId }, 'Waiting for host approval'));
+  }
 
   const isMod = call.moderatorUserId.toString() === userId.toString();
   if (!call.participants.find((p) => p.userId.toString() === userId.toString() && !p.leftAt)) {
     call.participants.push({ userId, joinedAt: new Date(), isModerator: isMod, leftAt: null });
   }
+  await activateMeetingIfNeeded(call);
   if (call.callStatus === 'calling') call.callStatus = 'active';
   await call.save();
 
@@ -232,4 +424,4 @@ export const getCallStatus = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, { call, jitsi: buildJitsi(call, crmUser, isMod) }, 'Active call'));
 });
 
-export default { startCall, joinCall, endCall, getCallStatus };
+export default { startCall, createMeeting, getMeeting, decideMeetingAdmission, joinCall, endCall, getCallStatus };

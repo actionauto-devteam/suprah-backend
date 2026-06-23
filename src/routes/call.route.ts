@@ -7,6 +7,9 @@ const router = express.Router();
 // All call routes require CRM authentication (same gate as SupraSpace).
 router.use(crmAuth());
 
+router.post('/meeting', callController.createMeeting);
+router.get('/meeting/:meetingId', callController.getMeeting);
+router.post('/meeting/:meetingId/admission', callController.decideMeetingAdmission);
 router.post('/start', callController.startCall);
 router.post('/join', callController.joinCall);
 router.post('/end', callController.endCall);
