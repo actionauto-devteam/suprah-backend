@@ -39,7 +39,6 @@ import customerLeadRoute from "./customerLead.route";
 import dayPulseRoute from "./dayPulse.routes";
 import feedRoute from "./feed.route";
 import feedReactionRoute from "./feedReaction.routes";
-import feedCommentRoute from "./feedComment.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
 import dealBoardRoute from "./dealBoard.routes";
@@ -216,16 +215,16 @@ const defaultRoutes = [
     route: customerLeadRoute,
   },
   {
+    // More specific first: reactions must be matched before the generic feed router.
     path: "/crm/feeds/reactions",
     route: feedReactionRoute,
   },
   {
+    // Single owner of /crm/feeds. Comment routes (/:postId/comments[...]) are
+    // now merged INTO feed.route.ts, so there is exactly ONE router — and one
+    // multer/crmAuth stack — handling every /crm/feeds request.
     path: "/crm/feeds",
     route: feedRoute,
-  },
-  {
-    path: "/crm/feeds",
-    route: feedCommentRoute,
   },
   {
     path: "/crm/biometric",
