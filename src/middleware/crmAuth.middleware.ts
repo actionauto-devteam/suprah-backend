@@ -96,6 +96,14 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
         throw new ApiError(401, 'Account not found or inactive');
       }
 
+      const linkedCrmUser = await CrmUser.findOne({ email: mainUser.email });
+      if (linkedCrmUser) {
+        if (!linkedCrmUser.isActive) throw new ApiError(403, 'CRM account has been deactivated');
+        req.crmUser = linkedCrmUser;
+        req.orgId = linkedCrmUser.organizationId.toString();
+        return next();
+      }
+
       // Build a minimal ICrmUser-compatible object from the main User record.
       // IMPORTANT: this is a PLAIN object. Do NOT instantiate it off the
       // Mongoose prototype (e.g. Object.create(CrmUser.prototype)) — doing so
