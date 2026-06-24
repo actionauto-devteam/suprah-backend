@@ -15,6 +15,7 @@ import logger from "../utils/logger";
 //   "0 0 * * *"  - midnight UTC (= 8 AM PHT / UTC+8)
 //   "0 15 * * *" - 3 PM UTC (= 8 AM MST / UTC-7, standard time)
 const CRON_SCHEDULE = process.env.MILESTONE_CRON_SCHEDULE || "0 8 * * *";
+const GENERAL_CHAT_GREETINGS_ENABLED = process.env.MILESTONE_GENERAL_GREETINGS_ENABLED === "true";
 const SYSTEM_SENDER_NAME = "Action Auto Team";
 const SYSTEM_SENDER_USERNAME = "action-auto-team";
 
@@ -210,6 +211,11 @@ interface MilestoneStats {
 }
 
 async function runMilestoneCheck(): Promise<MilestoneStats> {
+  if (!GENERAL_CHAT_GREETINGS_ENABLED) {
+    logger.info("[MilestoneScheduler] General chat greetings are disabled");
+    return { usersScanned: 0, announcementsSent: 0 };
+  }
+
   logger.info("[MilestoneScheduler] Running daily milestone check");
 
   const users = await CrmUser.find({
