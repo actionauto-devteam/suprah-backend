@@ -509,7 +509,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const limitNum = Math.min(Math.max(Number(limit) || 10, 1), 50);
   const skip = (pageNum - 1) * limitNum;
 
-  const filter: any = { organizationId: actor.organizationId };
+  const filter: any = { organizationId: actor.organizationId, isSystem: { $ne: true } };
 
   const searchValue = typeof search === 'string' ? search.trim() : '';
   if (searchValue) {

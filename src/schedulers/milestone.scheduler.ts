@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import crypto from "crypto";
 import CrmUser from "../models/CrmUser.model";
 import Feed from "../models/Feed.model";
 import SupraSpaceConversation from "../models/SupraSpaceConversation.model";
@@ -7,35 +8,105 @@ import { getIO as getFeedIO } from "../socket/feedSocket";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import logger from "../utils/logger";
 
-// Cron schedule — override via MILESTONE_CRON_SCHEDULE env var.
+// Cron schedule: override via MILESTONE_CRON_SCHEDULE env var.
 // Default: 8 AM server time.
 // Examples:
-//   "0 8 * * *"  — 8 AM server time
-//   "0 0 * * *"  — midnight UTC (= 8 AM PHT / UTC+8)
-//   "0 15 * * *" — 3 PM UTC (= 8 AM MST / UTC-7, standard time)
+//   "0 8 * * *"  - 8 AM server time
+//   "0 0 * * *"  - midnight UTC (= 8 AM PHT / UTC+8)
+//   "0 15 * * *" - 3 PM UTC (= 8 AM MST / UTC-7, standard time)
 const CRON_SCHEDULE = process.env.MILESTONE_CRON_SCHEDULE || "0 8 * * *";
+const SYSTEM_SENDER_NAME = "Action Auto Team";
+const SYSTEM_SENDER_USERNAME = "action-auto-team";
 
 function isTodayAnniversary(date: Date): boolean {
   const now = new Date();
   return date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
 }
 
-// Returns true if this milestone type was already announced today for this user.
+function formatCelebrantNames(names: string[]): string {
+  const boldNames = names.map((name) => `**${name}**`);
+  if (boldNames.length <= 1) return boldNames[0] || "";
+  if (boldNames.length === 2) return `${boldNames[0]} and ${boldNames[1]}`;
+  return `${boldNames.slice(0, -1).join(", ")}, and ${boldNames[boldNames.length - 1]}`;
+}
+
 async function alreadyPostedToday(
   userId: string,
   organizationId: string,
   authorName: string,
+  content: string,
 ): Promise<boolean> {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
+
   const existing = await Feed.findOne({
     userId,
     organizationId,
     authorName,
+    content,
     createdAt: { $gte: todayStart },
     deletedAt: null,
   });
+
   return !!existing;
+}
+
+async function getActionAutoTeamSender(organizationId: string) {
+  const email = `action-auto-team.${organizationId}@system.actionautoutah.com`;
+  const existing = await CrmUser.findOne({
+    organizationId,
+    isSystem: true,
+    username: SYSTEM_SENDER_USERNAME,
+  });
+
+  if (existing) {
+    let changed = false;
+
+    if (existing.fullName !== SYSTEM_SENDER_NAME) {
+      existing.fullName = SYSTEM_SENDER_NAME;
+      changed = true;
+    }
+
+    if (existing.email !== email) {
+      existing.email = email;
+      changed = true;
+    }
+
+    if (existing.isActive) {
+      existing.isActive = false;
+      changed = true;
+    }
+
+    if (!existing.isOffboarded) {
+      existing.isOffboarded = true;
+      existing.offboardedAt = existing.offboardedAt || new Date();
+      changed = true;
+    }
+
+    if (changed) await existing.save();
+    return existing;
+  }
+
+  try {
+    return await CrmUser.create({
+      organizationId,
+      fullName: SYSTEM_SENDER_NAME,
+      username: SYSTEM_SENDER_USERNAME,
+      email,
+      password: crypto.randomBytes(24).toString("hex"),
+      role: "admin",
+      isActive: false,
+      isOffboarded: true,
+      offboardedAt: new Date(),
+      isSystem: true,
+    });
+  } catch (err: any) {
+    if (err?.code === 11000) {
+      const fallback = await CrmUser.findOne({ email });
+      if (fallback) return fallback;
+    }
+    throw err;
+  }
 }
 
 async function postFeedAnnouncement(
@@ -45,8 +116,8 @@ async function postFeedAnnouncement(
   authorName: string,
   authorAvatar?: string,
 ): Promise<boolean> {
-  if (await alreadyPostedToday(userId, organizationId, authorName)) {
-    logger.info({ userId, authorName }, "[MilestoneScheduler] Skipping duplicate — already posted today");
+  if (await alreadyPostedToday(userId, organizationId, authorName, content)) {
+    logger.info({ userId, authorName }, "[MilestoneScheduler] Skipping duplicate; already posted today");
     return false;
   }
 
@@ -55,7 +126,7 @@ async function postFeedAnnouncement(
     userId,
     authorName,
     authorAvatar: authorAvatar || null,
-    authorRole: "employee",
+    authorRole: "system",
     content,
     isEdited: false,
     deletedAt: null,
@@ -63,20 +134,18 @@ async function postFeedAnnouncement(
 
   const payload = { post: post.toObject() };
 
-  // Emit via main socket (main-app users)
   try {
     const io = getFeedIO();
     io.to(`org:${organizationId}`).emit("feed:new", payload);
   } catch {
-    // Socket not initialized — non-critical
+    // Socket not initialized; non-critical.
   }
 
-  // Emit via SupraSpace socket (CRM users — they join org:{orgId} rooms)
   try {
     const ssIO = getSupraSpaceIO();
     ssIO.to(`org:${organizationId}`).emit("feed:new", payload);
   } catch {
-    // SupraSpace socket not initialized — non-critical
+    // SupraSpace socket not initialized; non-critical.
   }
 
   return true;
@@ -84,7 +153,6 @@ async function postFeedAnnouncement(
 
 async function postSupraSpaceAnnouncement(
   organizationId: string,
-  senderId: string,
   content: string,
 ): Promise<void> {
   const orgMembers = await CrmUser.find({
@@ -95,7 +163,6 @@ async function postSupraSpaceAnnouncement(
   const memberIds = orgMembers.map((m) => m._id);
   if (memberIds.length === 0) return;
 
-  // Prefer a conversation named "General" (case-insensitive); fall back to most recently active group
   const conv =
     (await SupraSpaceConversation.findOne({
       type: "group",
@@ -113,12 +180,14 @@ async function postSupraSpaceAnnouncement(
 
   if (!conv) return;
 
+  const sender = await getActionAutoTeamSender(organizationId);
   const msg = await SupraSpaceMessage.create({
     conversationId: conv._id,
-    sender: senderId,
+    sender: sender._id,
     content,
     type: "system",
   });
+  await msg.populate("sender", "fullName username avatar");
 
   conv.lastMessage = msg._id as typeof conv.lastMessage;
   conv.lastMessageAt = new Date();
@@ -131,7 +200,7 @@ async function postSupraSpaceAnnouncement(
       conversationId: conv._id,
     });
   } catch {
-    // SupraSpace socket not initialized — non-critical
+    // SupraSpace socket not initialized; non-critical.
   }
 }
 
@@ -150,31 +219,45 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
 
   let announcementsSent = 0;
 
+  const birthdayUsers = users.filter((user) => user.organizationId && user.birthday && isTodayAnniversary(user.birthday));
+  const birthdayOrgIds = [...new Set(birthdayUsers.map((user) => user.organizationId!.toString()))];
+
+  for (const orgId of birthdayOrgIds) {
+    const celebrants = birthdayUsers.filter((user) => user.organizationId!.toString() === orgId);
+    const names = celebrants.map((user) => user.fullName).filter(Boolean);
+    if (!names.length) continue;
+
+    const systemSender = await getActionAutoTeamSender(orgId);
+    const content = names.length === 1
+      ? `🎂 Happy Birthday to ${formatCelebrantNames(names)}! Wishing you a wonderful day filled with joy and good vibes. 🥳\n\nGreetings from Action Auto Team ✨`
+      : `🎂 Happy Birthday to these wonderful people: ${formatCelebrantNames(names)}! Wishing you all a day full of joy, laughter, and good vibes. 🥳🎉\n\nGreetings from Action Auto Team ✨`;
+    const posted = await postFeedAnnouncement(systemSender._id.toString(), orgId, content, SYSTEM_SENDER_NAME);
+
+    if (posted) {
+      await postSupraSpaceAnnouncement(orgId, content);
+      announcementsSent++;
+      logger.info(
+        { orgId, celebrantCount: celebrants.length, fullNames: names },
+        "[MilestoneScheduler] Birthday announcement posted",
+      );
+    }
+  }
+
   for (const user of users) {
     if (!user.organizationId) continue;
 
     const orgId = user.organizationId.toString();
     const userId = user._id.toString();
 
-    if (user.birthday && isTodayAnniversary(user.birthday)) {
-      const authorName = "🎂 Action Auto CRM";
-      const content = `🎂 Happy Birthday to **${user.fullName}**! Wishing you a wonderful day! 🎉`;
-      const posted = await postFeedAnnouncement(userId, orgId, content, authorName, user.avatar ?? undefined);
-      if (posted) {
-        await postSupraSpaceAnnouncement(orgId, userId, content);
-        announcementsSent++;
-        logger.info({ userId, fullName: user.fullName }, "[MilestoneScheduler] Birthday announcement posted");
-      }
-    }
-
     if (user.hireDate && isTodayAnniversary(user.hireDate)) {
       const years = new Date().getFullYear() - user.hireDate.getFullYear();
+
       if (years > 0) {
-        const authorName = "🎉 Action Auto CRM";
-        const content = `🎉 Congratulations to **${user.fullName}** on their **${years}-year work anniversary**! Thank you for your continued dedication! 💪`;
-        const posted = await postFeedAnnouncement(userId, orgId, content, authorName, user.avatar ?? undefined);
+        const content = `🎉 Happy ${years}-year work anniversary to **${user.fullName}**! Thank you for your continued dedication. 🥳\n\nGreetings from Action Auto Team ✨`;
+        const posted = await postFeedAnnouncement(userId, orgId, content, SYSTEM_SENDER_NAME);
+
         if (posted) {
-          await postSupraSpaceAnnouncement(orgId, userId, content);
+          await postSupraSpaceAnnouncement(orgId, content);
           announcementsSent++;
           logger.info({ userId, fullName: user.fullName, years }, "[MilestoneScheduler] Work anniversary announcement posted");
         }
@@ -189,8 +272,6 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
 export { runMilestoneCheck };
 
 export function initMilestoneScheduler(): void {
-  // Run once at startup to catch any milestones missed today
-  // (deduplication inside runMilestoneCheck prevents double-posting)
   runMilestoneCheck().catch((err) =>
     logger.error(err, "[MilestoneScheduler] Startup check error"),
   );
@@ -204,5 +285,5 @@ export function initMilestoneScheduler(): void {
     }
   });
 
-  logger.info(`[MilestoneScheduler] Initialized — schedule: ${CRON_SCHEDULE}`);
+  logger.info(`[MilestoneScheduler] Initialized; schedule: ${CRON_SCHEDULE}`);
 }

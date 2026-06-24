@@ -28,6 +28,7 @@ export interface ICrmUser extends Document {
   gender?: 'male' | 'female';
   isOffboarded: boolean;
   offboardedAt?: Date;
+  isSystem: boolean;
   pushSubscriptions: ICrmPushSubscription[];
   googleCalendar?: {
     calendarConnected: boolean;
@@ -121,6 +122,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
     offboardedAt: {
       type: Date,
       default: null,
+    },
+    isSystem: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     pushSubscriptions: [
       {
