@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -443,6 +444,11 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
 
+    if (!process.env.GROQ_API_KEY) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming requires GROQ configuration' })}\n\n`);
+      res.end();
+      return;
+    }
     let fullResponse = '';
     try {
       const streamResponse = await groq.chat.completions.create({
@@ -478,7 +484,6 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
       messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
       stream: false,
     });
-
     const assistantText = response.choices[0]?.message?.content || '';
     chatDoc.messages.push({ role: 'user', content: message.trim(), module: module as any, context: mergedContext, createdAt: new Date() });
     chatDoc.messages.push({ role: 'assistant', content: assistantText, module: module as any, createdAt: new Date() });
@@ -533,23 +538,16 @@ export const summarizeConversation = asyncHandler(async (req: Request, res: Resp
     ? `from ${from ? new Date(from).toLocaleDateString() : 'the beginning'} to ${to ? new Date(to).toLocaleDateString() : 'now'}`
     : 'recently';
 
-  const response = await groq.chat.completions.create({
+  const sumResponse = await groq.chat.completions.create({
     model: GROQ_MODEL,
     max_tokens: 900,
     messages: [
-      {
-        role: 'system',
-        content: `You are Suprah Autrix, summarizing an internal team conversation in Suprah Space. Produce a concise, well-structured summary using markdown. Include: key discussion points, decisions made, open questions, and any action items (with the responsible person if mentioned). Be factual and do not invent details.`,
-      },
-      {
-        role: 'user',
-        content: `Summarize the conversation "${convName}" ${rangeLabel}. Here is the transcript (${messages.length} messages):\n\n${transcript.slice(0, 12000)}`,
-      },
+      { role: 'system', content: `You are Suprah Autrix, summarizing an internal team conversation in Suprah Space. Produce a concise, well-structured summary using markdown. Include: key discussion points, decisions made, open questions, and any action items (with the responsible person if mentioned). Be factual and do not invent details.` },
+      { role: 'user', content: `Summarize the conversation "${convName}" ${rangeLabel}. Here is the transcript (${messages.length} messages):\n\n${transcript.slice(0, 12000)}` },
     ],
     stream: false,
   });
-
-  const summary = response.choices[0]?.message?.content || 'Unable to generate a summary.';
+  const summary = sumResponse.choices[0]?.message?.content || 'Unable to generate a summary.';
   res.json(new ApiResponse(200, {
     summary,
     conversationId,
@@ -585,21 +583,41 @@ export const draftReply = asyncHandler(async (req: Request, res: Response) => {
   const transcript = buildTranscript(recent.reverse());
   const convName = conversation.type === 'group' ? (conversation.name || 'this channel') : 'this direct conversation';
 
-  const response = await groq.chat.completions.create({
+  const draftResponse = await groq.chat.completions.create({
     model: GROQ_MODEL,
     max_tokens: 400,
     messages: [
-      {
-        role: 'system',
-        content: `You are Suprah Autrix helping ${user.fullName} reply in the internal team chat "${convName}". Based on the latest messages, write a single, ready-to-send reply in their voice. Return ONLY the reply text — no preamble, no quotes, no explanation.${instruction ? ` Additional instruction: ${instruction}` : ''}`,
-      },
+      { role: 'system', content: `You are Suprah Autrix helping ${user.fullName} reply in the internal team chat "${convName}". Based on the latest messages, write a single, ready-to-send reply in their voice. Return ONLY the reply text — no preamble, no quotes, no explanation.${instruction ? ` Additional instruction: ${instruction}` : ''}` },
       { role: 'user', content: `Latest messages:\n${transcript || '(no messages yet)'}\n\nWrite the best next reply.` },
     ],
     stream: false,
   });
-
-  const draft = (response.choices[0]?.message?.content || '').trim();
+  const draft = (draftResponse.choices[0]?.message?.content || '').trim();
   res.json(new ApiResponse(200, { draft, conversationId }, 'Draft generated'));
+});
+
+/**
+ * POST /api/supraleo/refine
+ * Refine / rewrite a SupraSpace message draft using Gemini (free tier).
+ * Body: { text }
+ */
+export const refineMessage = asyncHandler(async (req: Request, res: Response) => {
+  const { text } = req.body;
+  if (!text?.trim()) throw new ApiError(400, 'text is required');
+  if (!process.env.ANTHROPIC_API_KEY) throw new ApiError(500, 'AI service not configured');
+
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const response = await anthropic.messages.create({
+    model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    messages: [{
+      role: 'user',
+      content: `You are a professional writing assistant. Improve the clarity, tone, and grammar of the message. Keep the original meaning and language (Filipino or English). Return ONLY the improved message — no preamble, no explanation, no quotes.\n\n${text.trim()}`,
+    }],
+  });
+
+  const refined = response.content[0]?.type === 'text' ? response.content[0].text : '';
+  res.json(new ApiResponse(200, { refined }, 'Message refined'));
 });
 
 /** GET /api/supraleo/chat/history */
@@ -733,6 +751,7 @@ export default {
   chat,
   summarizeConversation,
   draftReply,
+  refineMessage,
   getChatHistory,
   clearChatHistory,
   getReminders,

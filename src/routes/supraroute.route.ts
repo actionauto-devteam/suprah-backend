@@ -15,9 +15,10 @@ router.post('/chat', supraLeoController.chat);
 router.get('/chat/history', supraLeoController.getChatHistory);
 router.delete('/chat/history', supraLeoController.clearChatHistory);
 
-// ── Suprah Space AI (summarize + draft reply) ─────────────────────────────────
+// ── Suprah Space AI (summarize + draft reply + refine) ────────────────────────
 router.post('/summarize', supraLeoController.summarizeConversation);
 router.post('/draft', supraLeoController.draftReply);
+router.post('/refine', supraLeoController.refineMessage);
 
 // ── Reminders & Context ───────────────────────────────────────────────────────
 router.get('/reminders/:module', supraLeoController.getReminders);

@@ -87,6 +87,7 @@ router.get('/active', supraSpaceController.getActiveUsers);
 // ─── Global message search ───────────────────────────────────────────────────
 
 router.get('/search', supraSpaceController.searchMessages);
+router.post('/daypulse-report', supraSpaceController.postDayPulseReport);
 
 // ─── Conversations ────────────────────────────────────────────────────────────
 
@@ -127,6 +128,10 @@ router.patch('/conversations/:id/space',           supraSpaceController.moveConv
 // ─── Video conferencing ───────────────────────────────────────────────────────
 
 router.post('/conversations/:id/video-token', supraSpaceController.generateVideoToken);
+
+// ─── Voice message audio stream ──────────────────────────────────────────────
+
+router.get('/conversations/:id/messages/:msgId/voice', supraSpaceController.streamVoiceMessage);
 
 // ─── File / voice uploads ─────────────────────────────────────────────────────
 

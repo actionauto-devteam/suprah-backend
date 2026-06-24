@@ -27,6 +27,7 @@ export interface ISupraSpaceConversationMetadata {
 export interface ISupraSpaceConversation extends Document {
   type: 'direct' | 'group';
   name?: string;                         // group name (optional for DMs)
+  emoji?: string | null;                 // optional channel label icon
   avatar?: string;                       // group avatar URL
   avatarKey?: string;                    // R2 key for the avatar
   members: mongoose.Types.ObjectId[];
@@ -84,6 +85,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
       default: 'direct',
     },
     name:       { type: String, trim: true, default: null },
+    emoji:      { type: String, trim: true, default: null },
     avatar:     { type: String, default: null },
     avatarKey:  { type: String, default: null },
     members:    [{ type: Schema.Types.ObjectId, ref: 'CrmUser', required: true }],

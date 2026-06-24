@@ -29,6 +29,7 @@
     "@aws-sdk/lib-storage": "^3.1027.0",
     "@aws-sdk/s3-request-presigner": "^3.1026.0",
     "@clerk/clerk-sdk-node": "^4.13.23",
+    "@google/generative-ai": "^0.24.1",
     "@simplewebauthn/server": "^9.0.3",
     "@tanstack/react-query": "^5.90.20",
     "@types/json2csv": "^5.0.7",

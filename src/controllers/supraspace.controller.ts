@@ -20,6 +20,8 @@ import notificationService from '../services/notification.service';
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
+const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
 
 function emitToConversation(conv: any, event: string, payload: any) {
   try {
@@ -31,6 +33,51 @@ function emitToConversation(conv: any, event: string, payload: any) {
   } catch (err) {
     console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
   }
+}
+
+function isDayPulseReportConversation(conversation: { name?: string | null }): boolean {
+  return DAYPULSE_REPORT_CHANNEL_NAME_REGEX.test(conversation.name || '');
+}
+
+async function getOrCreateDayPulseReportConversation(organizationId: string, creatorId: any) {
+  const orgMembers = await CrmUser.find({ organizationId, isActive: true }).select('_id').lean();
+  const memberIds = orgMembers.map((m) => m._id);
+  if (!memberIds.length) throw new ApiError(400, 'No active CRM users found for this organization');
+
+  const candidates = await SupraSpaceConversation.find({
+    type: 'group',
+    isActive: true,
+    name: { $regex: DAYPULSE_REPORT_CHANNEL_NAME_REGEX },
+    members: { $in: memberIds },
+  }).sort({ createdAt: 1 });
+
+  let canonical = candidates[0];
+
+  if (!canonical) {
+    canonical = await SupraSpaceConversation.create({
+      type: 'group',
+      name: DAYPULSE_REPORT_CHANNEL_NAME,
+      members: memberIds,
+      admins: [creatorId],
+      createdBy: creatorId,
+    });
+  }
+
+  canonical.name = DAYPULSE_REPORT_CHANNEL_NAME;
+  canonical.members = memberIds as any;
+  canonical.deletedFor = [];
+  canonical.isActive = true;
+  await canonical.save({ validateModifiedOnly: true });
+
+  const duplicates = candidates.filter((conversation) => conversation._id.toString() !== canonical._id.toString());
+  for (const duplicate of duplicates) {
+    duplicate.isActive = false;
+    duplicate.deletedAt = new Date();
+    await duplicate.save({ validateModifiedOnly: true });
+    emitToConversation(duplicate, 'conversation:deleted', { conversationId: duplicate._id.toString() });
+  }
+
+  return canonical;
 }
 
 async function signAttachments(message: any) {
@@ -168,7 +215,7 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
 /** POST /api/supraspace/conversations/group */
 const createGroup = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
-  const { name, memberIds } = req.body;
+  const { name, emoji, memberIds } = req.body;
 
   if (!name?.trim()) throw new ApiError(400, 'Group name is required');
   if (!Array.isArray(memberIds) || memberIds.length < 1) {
@@ -180,6 +227,7 @@ const createGroup = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.create({
     type: 'group',
     name: name.trim(),
+    emoji: emoji?.trim?.() || null,
     members: uniqueMembers,
     admins: [userId],
     createdBy: userId,
@@ -195,7 +243,7 @@ const createGroup = asyncHandler(async (req: Request, res: Response) => {
 const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { name, addMembers, removeMembers } = req.body;
+  const { name, emoji, addMembers, removeMembers } = req.body;
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
@@ -207,6 +255,11 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   if (name !== undefined) {
     if (!isAdmin) throw new ApiError(403, 'Only admins can rename the group');
     conversation.name = (name || '').trim();
+  }
+
+  if (emoji !== undefined) {
+    if (!isAdmin) throw new ApiError(403, 'Only admins can update the group emoji');
+    conversation.emoji = (emoji || '').trim() || null;
   }
 
   // Any member can add new members; only admin (or self) may remove
@@ -493,6 +546,9 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (isDayPulseReportConversation(conversation)) {
+    throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
 
   let msgType: any = 'text';
   if (hasGif) msgType = 'gif';
@@ -596,6 +652,49 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /** POST /api/supraspace/conversations/:id/upload  — files & voice notes */
+const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const orgId = (req.crmUser!.organizationId as any)?.toString();
+  const { content, attachments } = req.body;
+
+  if (!orgId) throw new ApiError(403, 'Your account is not linked to an organization');
+  if (!content?.trim()) throw new ApiError(400, 'Report content is required');
+
+  const conversation = await getOrCreateDayPulseReportConversation(orgId, userId);
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const hasImage = normalizedAttachments.some((a: any) => a.mimeType?.startsWith('image/'));
+  const msgType: any = normalizedAttachments.length
+    ? hasImage && normalizedAttachments.length === 1 ? 'image' : 'file'
+    : 'system';
+
+  const message = await SupraSpaceMessage.create({
+    conversationId: conversation._id,
+    sender: userId,
+    content: content.trim(),
+    type: msgType,
+    attachments: normalizedAttachments,
+    readBy: [userId],
+  });
+
+  await message.populate('sender', 'fullName username avatar');
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  conversation.deletedFor = [];
+  await conversation.save({ validateModifiedOnly: true });
+
+  const messageForClient = await signAttachments(message.toObject() as any);
+  emitToConversation(conversation, 'conversation:updated', {
+    _id: conversation._id.toString(),
+    name: DAYPULSE_REPORT_CHANNEL_NAME,
+  });
+  emitToConversation(conversation, 'message:new', {
+    conversationId: conversation._id.toString(),
+    message: messageForClient,
+  });
+
+  res.status(201).json(new ApiResponse(201, { conversationId: conversation._id, message: messageForClient }, 'DayPulse report posted'));
+});
+
 const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -604,6 +703,9 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (isDayPulseReportConversation(conversation)) {
+    throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
 
   const files = req.files as Express.Multer.File[];
   if (!files || files.length === 0) throw new ApiError(400, 'No files uploaded');
@@ -791,6 +893,9 @@ const createPoll = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (isDayPulseReportConversation(conversation)) {
+    throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
 
   const message = await SupraSpaceMessage.create({
     conversationId: id,
@@ -861,6 +966,9 @@ const createEvent = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (isDayPulseReportConversation(conversation)) {
+    throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
 
   const message = await SupraSpaceMessage.create({
     conversationId: id,
@@ -1104,6 +1212,46 @@ const moveConversationToSpace = asyncHandler(async (req: Request, res: Response)
   res.json(new ApiResponse(200, { conversationId: id, spaceId: spaceId || null }, 'Conversation moved'));
 });
 
+/** GET /api/supraspace/conversations/:id/messages/:msgId/voice — proxy-streams private audio */
+const streamVoiceMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id, msgId } = req.params;
+
+  const conversation = await SupraSpaceConversation.findById(id).lean();
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member');
+
+  const message = await SupraSpaceMessage.findOne({ _id: msgId, conversationId: id }).lean();
+  if (!message || message.type !== 'voice') throw new ApiError(404, 'Voice message not found');
+
+  const att = (message.attachments || []).find((a: any) => a.mimeType?.startsWith('audio/'));
+  if (!att) throw new ApiError(404, 'No audio attachment');
+
+  const key: string = att.fileKey || att.url;
+
+  // Full http URL → redirect to it (presigned URL or public URL)
+  if (key.startsWith('http')) {
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    return res.redirect(302, key);
+  }
+
+  // R2 key or local path → generate fresh signed URL and redirect
+  const signed = await storageService.getSignedUrl(key, 3600);
+  if (signed) {
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    return res.redirect(302, signed);
+  }
+
+  // Last resort: stream directly from local storage
+  const result = await storageService.streamPrivateFile(key);
+  if (!result) throw new ApiError(404, 'Audio file not found in storage');
+
+  res.setHeader('Content-Type', att.mimeType || 'audio/webm');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  result.stream.pipe(res);
+});
+
 const supraSpaceController = {
   getSessionToken,
   getConversations,
@@ -1119,6 +1267,7 @@ const supraSpaceController = {
   searchInConversation,
   searchMessages,
   sendMessage,
+  postDayPulseReport,
   uploadAttachment,
   reactToMessage,
   editMessage,
@@ -1135,6 +1284,7 @@ const supraSpaceController = {
   updateSpace,
   deleteSpace,
   moveConversationToSpace,
+  streamVoiceMessage,
 };
 
 export default supraSpaceController;

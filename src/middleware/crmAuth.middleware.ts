@@ -41,13 +41,15 @@ export const generateCrmToken = (
  */
 const crmAuth = () => async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // ── 1. Try CRM token (cookie first, then header) ────────────────────────
+    // ── 1. Try CRM token (cookie → header → ?t= query param) ────────────────
     let crmToken = req.cookies?.[CRM_TOKEN_COOKIE];
     if (!crmToken) {
+      // Support ?t= query param so <audio>/<video> elements (which can't set
+      // Authorization headers) can still authenticate via the backend proxy.
+      const queryToken = req.query.t as string | undefined;
       const authHeader = req.headers.authorization;
-      if (authHeader?.startsWith('Bearer ')) {
-        const candidate = authHeader.split(' ')[1];
-        // Peek at the payload to decide which type this token is
+      const candidate = queryToken || (authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined);
+      if (candidate) {
         try {
           const peeked = jwt.decode(candidate) as { type?: string } | null;
           if (peeked?.type === 'crm') crmToken = candidate;
