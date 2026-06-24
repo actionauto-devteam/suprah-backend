@@ -96,7 +96,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
         throw new ApiError(401, 'Account not found or inactive');
       }
 
-      const linkedCrmUser = await CrmUser.findOne({ email: mainUser.email });
+      const linkedCrmUser = await CrmUser.findOne({ email: mainUser.email.toLowerCase() });
       if (linkedCrmUser) {
         if (!linkedCrmUser.isActive) throw new ApiError(403, 'CRM account has been deactivated');
         req.crmUser = linkedCrmUser;
