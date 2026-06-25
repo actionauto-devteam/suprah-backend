@@ -127,24 +127,47 @@ const createNotification = async (params: CreateNotificationParams) => {
       proof_of_delivery: '/driver-tracker',
       shipment_arrived_at_pickup: '/driver-tracker',
       shipment_arrived_at_delivery: '/driver-tracker',
+      appointment_created: '/crm/appointments',
+      appointment_updated: '/crm/appointments',
+      appointment_cancelled: '/crm/appointments',
+      appointment_reminder: '/crm/appointments',
+      guest_response: '/crm/appointments',
       new_lead: '/crm/dashboard',
+      lead_assigned: '/crm/dashboard',
+      lead_status_changed: '/crm/dashboard',
       crm_message: metadata?.route || '/crm/supra-space',
+      crm_task_assigned: metadata?.route || '/crm/leads',
       crm_task_due: metadata?.route || '/crm/leads',
+      crm_biometric: metadata?.route || '/crm/biometrics',
+      crm_timeproof: metadata?.route || '/crm/biometrics',
       reminder: metadata?.route || '/crm/leads',
       driver_request: '/driver-tracker',
       driver_request_approved: '/driver/loads',
-      driver_request_rejected: '/notifications',
+      driver_request_rejected: '/driver/loads',
+      driver_assigned: '/driver/loads',
+      driver_payout: '/driver/earnings',
+      payment_request: metadata?.route || '/customer/payments',
+      payment_received: metadata?.route || '/billing',
+      payment_pending: metadata?.route || '/billing',
+      payment_failed: metadata?.route || '/billing',
+      payout_processed: metadata?.route || '/billing',
+      referral_joined: metadata?.route || '/customer/refer',
+      referral_rewarded: metadata?.route || '/customer/refer',
+      system_announcement: metadata?.route || '/notifications',
+      general: metadata?.route || '/notifications',
       // ── Aftermarket ──
       aftermarket_inquiry: metadata?.route || '/crm/support-center?tab=aftermarket',
       aftermarket_invoice: metadata?.route || '/customer/payments',
       aftermarket_order: metadata?.route || '/crm/aftermarket',
     };
 
+    const targetUrl = metadata?.route || urlMap[type] || '/notifications';
+
     const pushPayload: any = {
       title,
       body: message,
       tag: preferenceKey || 'general',
-      data: { url: urlMap[type] || '/notifications', notificationId: notification._id },
+      data: { url: targetUrl, notificationId: notification._id },
     };
 
     if (type === 'driver_request') {

@@ -39,6 +39,74 @@ function isDayPulseReportConversation(conversation: { name?: string | null }): b
   return DAYPULSE_REPORT_CHANNEL_NAME_REGEX.test(conversation.name || '');
 }
 
+function mentionBoundaryRegex(alias: string): RegExp | null {
+  const normalized = alias.trim().replace(/\s+/g, ' ');
+  if (!normalized) return null;
+  return new RegExp(`(^|\\s)@${escapeRegex(normalized)}(?=$|[\\s.,!?;:)\\]])`, 'i');
+}
+
+function mentionAliasesForName(fullName: string): string[] {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  const aliases = new Set<string>();
+  if (parts.length) aliases.add(parts[0]);
+  if (parts.length >= 2) aliases.add(`${parts[0]} ${parts[parts.length - 1]}`);
+  if (fullName.trim()) aliases.add(fullName.trim());
+  return [...aliases];
+}
+
+async function notifyMentionedMembers(params: {
+  text: string;
+  conversation: any;
+  senderId: any;
+  organizationId: string;
+  messageId: string;
+  route?: string;
+}) {
+  try {
+    const text = params.text.trim();
+    if (!text) return;
+
+    const hasAll = /(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(text);
+    const memberIds = (params.conversation.members as any[])
+      .map((x: any) => x.toString())
+      .filter((x: string) => x !== params.senderId.toString());
+    if (!memberIds.length) return;
+
+    const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName').lean();
+    const toNotify = hasAll
+      ? members.map((x: any) => x._id.toString())
+      : members
+          .filter((member: any) =>
+            mentionAliasesForName(member.fullName || '').some((alias) => mentionBoundaryRegex(alias)?.test(text)),
+          )
+          .map((x: any) => x._id.toString());
+
+    const uniqueRecipients = [...new Set(toNotify)];
+    if (!uniqueRecipients.length) return;
+
+    const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
+    const senderName = (senderDoc as any)?.fullName || 'Someone';
+    const preview = text.length > 100 ? `${text.slice(0, 100)}...` : text;
+
+    await Promise.allSettled(uniqueRecipients.map((memberId: string) =>
+      notificationService.createNotification({
+        userId: memberId,
+        organizationId: params.organizationId,
+        type: 'crm_message',
+        title: `${senderName} mentioned you`,
+        message: `"${preview}"`,
+        metadata: {
+          conversationId: params.conversation._id.toString(),
+          messageId: params.messageId,
+          route: params.route || '/crm/supra-space',
+        },
+      })
+    ));
+  } catch {
+    // Mention notifications are best-effort and should not block sending.
+  }
+}
+
 async function getOrCreateDayPulseReportConversation(organizationId: string, creatorId: any) {
   const orgMembers = await CrmUser.find({ organizationId, isActive: true }).select('_id').lean();
   const memberIds = orgMembers.map((m) => m._id);
@@ -606,47 +674,13 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // ── @mention notifications (fire-and-forget) ───────────────────────────
-  (async () => {
-    try {
-      const text = content?.trim() || '';
-      if (!text) return;
-      const mentionedNames = new Set<string>();
-      let hasAll = false;
-      const pattern = /@(\w+)/g;
-      let m: RegExpExecArray | null;
-      while ((m = pattern.exec(text)) !== null) {
-        const name = m[1].toLowerCase();
-        if (name === 'all') hasAll = true;
-        else mentionedNames.add(name);
-      }
-      if (!hasAll && mentionedNames.size === 0) return;
-
-      const memberIds = (conversation.members as any[]).map((x: any) => x.toString()).filter((x: string) => x !== userId.toString());
-      const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName').lean();
-
-      const toNotify = hasAll
-        ? members.map((x: any) => x._id.toString())
-        : members.filter((x: any) => mentionedNames.has(x.fullName.split(' ')[0].toLowerCase())).map((x: any) => x._id.toString());
-
-      if (toNotify.length === 0) return;
-
-      const senderDoc = await CrmUser.findById(userId).select('fullName').lean();
-      const senderName = (senderDoc as any)?.fullName || 'Someone';
-      const orgId = (req.crmUser!.organizationId as any).toString();
-      const preview = text.length > 100 ? text.slice(0, 100) + '…' : text;
-
-      await Promise.allSettled(toNotify.map((memberId: string) =>
-        notificationService.createNotification({
-          userId: memberId,
-          organizationId: orgId,
-          type: 'crm_message',
-          title: `${senderName} mentioned you`,
-          message: `"${preview}"`,
-          metadata: { conversationId: id, messageId: message._id.toString(), route: '/crm/supra-space' },
-        })
-      ));
-    } catch { /* best-effort */ }
-  })();
+  notifyMentionedMembers({
+    text: content?.trim() || '',
+    conversation,
+    senderId: userId,
+    organizationId: (req.crmUser!.organizationId as any).toString(),
+    messageId: message._id.toString(),
+  });
 
   res.status(201).json(new ApiResponse(201, messageForClient, 'Message sent'));
 });
@@ -782,6 +816,14 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
       }
     } catch { /* non-critical */ }
   }
+
+  notifyMentionedMembers({
+    text: content?.trim() || '',
+    conversation,
+    senderId: userId,
+    organizationId: (req.crmUser!.organizationId as any).toString(),
+    messageId: message._id.toString(),
+  });
 
   res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
