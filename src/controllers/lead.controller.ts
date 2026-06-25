@@ -161,6 +161,64 @@ async function getCentralOAuth2Client(orgId: string) {
   return oauth2Client;
 }
 
+/**
+ * Sends a plain-text reply to a lead via the org's centralized Gmail account,
+ * threading it onto the original inquiry when possible. Shared by single-reply
+ * and bulk-reply flows so the MIME/threading logic only lives in one place.
+ */
+async function sendLeadReplyEmail(lead: any, message: string, userId: any, orgId: string) {
+  const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true });
+  const oauth2Client = await getCentralOAuth2Client(orgId);
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const replyingUser = await User.findById(userId);
+  const senderDisplay = replyingUser?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
+
+  const recipientEmail = lead.senderEmail || lead.email;
+  const emailHeaders = [
+    `From: ${senderDisplay}`,
+    `To: ${recipientEmail}`,
+    `Subject: Re: ${lead.subject || 'Inquiry Response'}`,
+    ...(lead.messageId ? [`In-Reply-To: ${lead.messageId}`] : []),
+    ...(lead.threadId ? [`References: ${lead.threadId}`] : []),
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+  ].join('\n');
+
+  const emailBody = [emailHeaders, '', message].join('\n');
+  const encodedMessage = Buffer.from(emailBody)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: {
+      raw: encodedMessage,
+      threadId: lead.threadId,
+    },
+  });
+  console.log(`[REPLY] Email sent to ${recipientEmail} via centralized account`);
+}
+
+/**
+ * Records a status transition on a lead's audit trail. Caller is responsible
+ * for saving the document afterwards (or this can be combined with other
+ * field updates in the same .save()).
+ */
+function pushStatusHistory(lead: any, from: string, to: string, userId: any, reason?: string) {
+  if (from === to) return;
+  lead.statusHistory = lead.statusHistory || [];
+  lead.statusHistory.push({
+    from,
+    to,
+    changedAt: new Date(),
+    changedBy: userId,
+    reason: reason || undefined,
+  });
+}
+
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 1000): Promise<T> {
   let lastError: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -386,7 +444,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp'
+        'centralIngestion labels followUp statusHistory'
       )
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -415,7 +473,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp'
+        'centralIngestion labels followUp statusHistory'
       )
       .lean();
 
@@ -555,63 +613,75 @@ export const runUnansweredInquiryReminderCheck = async (req: Request, res: Respo
 export const updateLead = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, reason } = req.body;
     const user = req.user || req.crmUser;
     if (!user) throw new ApiError(401, 'Please authenticate');
     const userId = user._id;
     const orgId = req.orgId;
 
-    const leadUpdate: any = { status };
-    if (['Contacted', 'Appointment Set', 'Closed'].includes(status)) {
-      leadUpdate.isPending = false;
-      leadUpdate['followUp.lastRepResponseAt'] = new Date();
-    }
-
-    const lead = await Lead.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      leadUpdate,
-      { new: true }
-    );
-
-    if (lead) {
-      const { title, message } = notificationTemplates.lead_status_changed({
-        customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
-        status,
-      });
-
-      await safeCreateNotification({
-        userId: userId.toString(),
-        organizationId: (req as any).orgId || 'global',
-        type: 'lead_status_changed',
-        title,
-        message,
-        metadata: {
-          leadId: lead._id.toString(),
-          customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
-          newStatus: status,
-        },
-      });
-
-      await activityService.createActivity({
-        userId: userId.toString(),
-        organizationId: orgId || 'global',
-        type: 'other',
-        title: 'Lead Status Updated',
-        description: `Lead ${lead.firstName} status changed to ${status}`,
-        metadata: { leadId: lead._id.toString(), status }
-      });
-
-      logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
-
-      const io = getSocketIO();
-      if (io) {
-        io.to(`org:${orgId}`).emit('lead:update', lead);
-      }
-    }
-
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
+
+    const fromStatus = lead.status;
+    const isClosing = status === 'Closed' && fromStatus !== 'Closed';
+    const isReopening = fromStatus === 'Closed' && status !== 'Closed';
+    if ((isClosing || isReopening) && !(reason && String(reason).trim())) {
+      return res.status(400).json({ message: 'A reason is required to close or reopen this ticket.' });
+    }
+
+    lead.status = status;
+    if (['Contacted', 'Appointment Set', 'Closed'].includes(status)) {
+      lead.isPending = false;
+      lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
+    }
+    pushStatusHistory(lead, fromStatus, status, userId, reason);
+    await lead.save();
+
+    const { title, message } = notificationTemplates.lead_status_changed({
+      customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+      status,
+    });
+
+    await safeCreateNotification({
+      userId: userId.toString(),
+      organizationId: (req as any).orgId || 'global',
+      type: 'lead_status_changed',
+      title,
+      message,
+      metadata: {
+        leadId: lead._id.toString(),
+        customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        newStatus: status,
+      },
+    });
+
+    await activityService.createActivity({
+      userId: userId.toString(),
+      organizationId: orgId || 'global',
+      type: 'other',
+      title: 'Lead Status Updated',
+      description: `Lead ${lead.firstName} status changed to ${status}`,
+      metadata: { leadId: lead._id.toString(), status, reason }
+    });
+
+    logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
+
+    if (isClosing) {
+      try {
+        const closingMessage = `Hi ${lead.firstName || 'there'},\n\nWe've marked your inquiry as resolved. If you have any more questions, feel free to reply to this email anytime.\n\nThanks!`;
+        await sendLeadReplyEmail(lead, closingMessage, userId, orgId as string);
+      } catch (emailError) {
+        console.error('[STATUS] Failed to send closed-ticket email to customer:', emailError);
+      }
+    }
+
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
     res.json(lead);
   } catch (error) {
     res.status(500).json({ message: 'Error updating lead' });
@@ -753,12 +823,15 @@ export const markAsPending = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const orgId = req.orgId;
-    const lead = await Lead.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      { isPending: true, status: 'Pending' },
-      { new: true }
-    );
+    const user = req.user || req.crmUser;
+
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
     if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+
+    pushStatusHistory(lead, lead.status, 'Pending', user?._id);
+    lead.isPending = true;
+    lead.status = 'Pending';
+    await lead.save();
 
     const io = getSocketIO();
     if (io) {
@@ -785,15 +858,17 @@ export const replyToInquiry = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Reply message is required' });
     }
 
-    const lead = await Lead.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': new Date() },
-      { new: true }
-    );
-
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
     if (!lead) {
       return res.status(404).json({ message: 'Inquiry not found' });
     }
+
+    pushStatusHistory(lead, lead.status, 'Contacted', userId);
+    lead.status = 'Contacted';
+    lead.isRead = true;
+    lead.isPending = false;
+    lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
+    await lead.save();
 
     await activityService.createActivity({
       userId: userId.toString(),
@@ -807,39 +882,7 @@ export const replyToInquiry = async (req: Request, res: Response) => {
     logger.info({ leadId: lead._id, userId }, 'Staff replied to lead');
 
     try {
-      const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
-      const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
-      const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-      const replyingUser = await User.findById(userId);
-      const senderDisplay = replyingUser?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
-
-      const recipientEmail = lead.senderEmail || lead.email;
-      const emailHeaders = [
-        `From: ${senderDisplay}`,
-        `To: ${recipientEmail}`,
-        `Subject: Re: ${lead.subject || 'Inquiry Response'}`,
-        ...(lead.messageId ? [`In-Reply-To: ${lead.messageId}`] : []),
-        ...(lead.threadId ? [`References: ${lead.threadId}`] : []),
-        'MIME-Version: 1.0',
-        'Content-Type: text/plain; charset="UTF-8"',
-        'Content-Transfer-Encoding: 7bit',
-      ].join('\n');
-
-      const emailBody = [emailHeaders, '', message].join('\n');
-      const encodedMessage = Buffer.from(emailBody)
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=/g, '');
-
-      await gmail.users.messages.send({
-        userId: 'me',
-        requestBody: {
-          raw: encodedMessage,
-          threadId: lead.threadId,
-        },
-      });
-      console.log(`[REPLY] Email sent to ${recipientEmail} via centralized account`);
+      await sendLeadReplyEmail(lead, message, userId, req.orgId as string);
     } catch (gmailError) {
       console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
     }
@@ -854,6 +897,78 @@ export const replyToInquiry = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[ERROR] Error replying to inquiry:', error);
     res.status(500).json({ message: 'Error sending reply' });
+  }
+};
+
+const MAX_BULK_REPLY_LEADS = 50;
+
+export const bulkReplyToInquiries = async (req: Request, res: Response) => {
+  try {
+    const { leadIds, message } = req.body;
+    const user = req.user || req.crmUser;
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    const userId = user._id;
+    const orgId = req.orgId;
+
+    if (!message || typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({ message: 'Reply message is required' });
+    }
+    if (!Array.isArray(leadIds) || leadIds.length === 0) {
+      return res.status(400).json({ message: 'At least one lead must be selected' });
+    }
+    if (leadIds.length > MAX_BULK_REPLY_LEADS) {
+      return res.status(400).json({ message: `You can reply to at most ${MAX_BULK_REPLY_LEADS} leads at once` });
+    }
+
+    const leads = await Lead.find({ _id: { $in: leadIds }, organizationId: orgId });
+
+    const results = await Promise.allSettled(
+      leads.map(async (lead) => {
+        pushStatusHistory(lead, lead.status, 'Contacted', userId);
+        lead.status = 'Contacted';
+        lead.isRead = true;
+        lead.isPending = false;
+        lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
+        await lead.save();
+
+        await sendLeadReplyEmail(lead, message, userId, orgId as string);
+
+        await activityService.createActivity({
+          userId: userId.toString(),
+          organizationId: orgId || 'global',
+          type: 'other',
+          title: 'Lead Replied (Bulk)',
+          description: `Bulk reply sent to lead ${lead.firstName}`,
+          metadata: { leadId: lead._id.toString() }
+        });
+
+        await cacheService.del(`lead:thread:${lead._id}`);
+
+        const io = getSocketIO();
+        if (io) {
+          io.to(`org:${orgId}`).emit('lead:update', lead);
+        }
+
+        return lead._id.toString();
+      })
+    );
+
+    const failed: { leadId: string; error: string }[] = [];
+    let sent = 0;
+    results.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        sent += 1;
+      } else {
+        failed.push({ leadId: leads[idx]?._id?.toString() || leadIds[idx], error: result.reason?.message || 'Failed to send' });
+      }
+    });
+
+    logger.info({ orgId, userId, requested: leadIds.length, sent, failed: failed.length }, 'Bulk reply completed');
+
+    res.json({ success: true, sent, failed });
+  } catch (error) {
+    console.error('[ERROR] Error sending bulk reply:', error);
+    res.status(500).json({ message: 'Error sending bulk reply' });
   }
 };
 
@@ -1186,6 +1301,7 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     appointmentData
   );
 
+  pushStatusHistory(lead, lead.status, 'Appointment Set', userId);
   lead.status = 'Appointment Set';
   lead.appointment = {
     date: new Date(date),
@@ -1293,6 +1409,7 @@ export default {
   markAsRead,
   markAsPending,
   replyToInquiry,
+  bulkReplyToInquiries,
   syncCentralGmail,
   syncGmailInquiries,
   setAppointmentForLead,

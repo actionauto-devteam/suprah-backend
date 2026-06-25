@@ -46,6 +46,7 @@ import scheduleRoute from "./schedule.routes";
 import aftermarketRoute from "./aftermarket.route";
 import crmAftermarketRoute from "./crmAftermarket.route";
 import garageReviewRoute from "./garageReview.route";
+import dealershipReviewRoute from "./dealershipReview.route";
 import customerConcernRoute from "./customerConcern.route";
 import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
@@ -129,6 +130,10 @@ const defaultRoutes = [
   {
     path: "/crm/garage-review",
     route: garageReviewRoute,
+  },
+  {
+    path: "/crm/reviews",
+    route: dealershipReviewRoute,
   },
   {
     path: "/crm/auction-review",

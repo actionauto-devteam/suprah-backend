@@ -118,6 +118,30 @@ export const replyLimiter = rateLimit({
     validate: { default: false }
 });
 /**
+ * Bulk Lead Reply Limiter
+ * 10 requests per 15 minutes per User
+ * Tighter than replyLimiter since each request fans out to many customer emails.
+ */
+export const bulkReplyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'You have sent several bulk replies recently. Please take a short break before sending more.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+/**
  * File Upload Limiter
  * 5 requests per 10 minutes per User/IP
  * Protects against storage flooding and resource exhaustion

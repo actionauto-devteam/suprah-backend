@@ -10,6 +10,7 @@ import {
   markAsRead,
   markAsPending,
   replyToInquiry,
+  bulkReplyToInquiries,
   syncCentralGmail,
   syncGmailInquiries,
   setAppointmentForLead,
@@ -17,7 +18,7 @@ import {
   getCentralSyncStatus,
 } from '../controllers/lead.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
-import { adfLimiter, syncLimiter, replyLimiter } from '../middleware/rate-limit.middleware';
+import { adfLimiter, syncLimiter, replyLimiter, bulkReplyLimiter } from '../middleware/rate-limit.middleware';
 import { validateAdfSignature } from '../middleware/adfValidation.middleware';
  
 const router = Router();
@@ -51,6 +52,9 @@ router.post('/reminders/unanswered/run', runUnansweredInquiryReminderCheck);
 // Base CRUD
 router.get('/', getAllLeads);
 router.post('/', syncLimiter, createInquiry);
+
+// Bulk reply — must stay above the dynamic :id routes below
+router.post('/bulk-reply', bulkReplyLimiter, bulkReplyToInquiries);
  
 // ── Dynamic :id routes ────────────────────────────────────────────────────────
 router.get('/:id', getLeadById);

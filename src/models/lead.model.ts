@@ -70,6 +70,15 @@ export interface ILead extends Document {
   /** Whether this lead was ingested via the centralized account */
   centralIngestion?: boolean;
 
+  /** Audit trail of every status change, including who made it and why */
+  statusHistory?: Array<{
+    from: string;
+    to: string;
+    changedAt: Date;
+    changedBy?: mongoose.Types.ObjectId;
+    reason?: string;
+  }>;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -154,6 +163,14 @@ const LeadSchema: Schema = new Schema({
   },
 
   centralIngestion: { type: Boolean, default: false },
+
+  statusHistory: [{
+    from: String,
+    to: String,
+    changedAt: { type: Date, default: Date.now },
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    reason: String,
+  }],
 }, { timestamps: true });
 
 // Index for efficient per-organization queries (used for pagination)
