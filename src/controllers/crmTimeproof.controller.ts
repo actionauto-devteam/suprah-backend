@@ -1225,6 +1225,7 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   res.json(new ApiResponse(200, { resumable, originalClockIn }, 'Resumable shift checked'));
 });
 
+
 export default {
   getMyTimeproof,
   getAllUsersTimeproof,

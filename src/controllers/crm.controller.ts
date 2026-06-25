@@ -250,7 +250,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Emit real-time event to tray app / CRM and to Live Shift Board
+  // Emit real-time event to tray app and CRM
   try {
     const io = getSocketIO();
     const payload = {
@@ -263,54 +263,14 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       ...(type === "break-out" && { totalBreakSeconds }),
     };
     if (io) {
-      io.to(`user:${user._id.toString()}`).emit(type, payload);
-    }
-    // Also notify the Live Shift Board so admins see instant updates
-    emitToShiftBoard(type, payload);
-
-    // When a user ends shift early with a reason, notify admins immediately
-    if (type === 'time-out' && note) {
-      const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
-      const earlyEndPayload = { userId: user._id, fullName: user.fullName, reason: note, at: new Date() };
-      for (const admin of admins) {
-        emitToUser(admin._id.toString(), 'crm:early-end', earlyEndPayload);
-      }
-      emitToShiftBoard('crm:early-end', earlyEndPayload);
-      // Push notification to all admin devices (desktop, mobile, tablet)
-      CrmPushService.sendToAdmins({
-        title: '🚪 Early End Shift',
-        body: `${user.fullName} ended their shift early.\nReason: ${note}`,
-        icon: '/icon-192x192.png',
-        tag: `crm-early-end-${user._id}`,
-        data: { url: '/crm/timeproof' },
-      }).catch(() => {});
-
-      // Mirror the early-out onto the Team Pulse calendar so HR can see all
-      // out-of-office / early-out records in one place (per HR feedback).
-      // Stored as a pending "other" absence so the HR team can review/approve.
-      try {
-        const existingAbsence = await Absence.findOne({
-          organizationId: user.organizationId,
-          userId: user._id,
-          date: { $gte: today, $lt: tomorrow },
-        });
-        if (!existingAbsence) {
-          await Absence.create({
-            organizationId: user.organizationId,
-            userId: user._id,
-            userName: user.fullName,
-            userAvatar: user.avatar,
-            date: today,
-            type: 'other',
-            title: 'Early Out',
-            note,
-            otherText: 'Early Out',
-            status: 'pending',
-          });
-        }
-      } catch (absErr) {
-        console.error('Failed to record early-out absence:', absErr);
-      }
+      io.to(`user:${user._id.toString()}`).emit(type, {
+        _id: timeLog._id,
+        type: timeLog.type,
+        timestamp: timeLog.timestamp,
+        ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
+        ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
+        ...(type === "break-out" && { totalBreakSeconds }),
+      });
     }
   } catch (error) {
     console.error("Failed to emit time log event:", error);
@@ -948,6 +908,7 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
  * Tray app calls this on startup and whenever it receives a 401.
  */
 const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
+  // crmAuth middleware already validated the token and attached req.crmUser
   const user = req.crmUser!;
   const newToken = generateCrmToken(user._id.toString());
   res.cookie(CRM_TOKEN_COOKIE, newToken, COOKIE_OPTIONS);
