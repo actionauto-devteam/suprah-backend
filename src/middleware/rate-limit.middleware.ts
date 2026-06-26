@@ -156,7 +156,7 @@ export const uploadLimiter = rateLimit({
     },
     message: {
         success: false,
-        message: "You've reached the limit for file uploads. To ensure system stability for all users, please wait 10 minutes before trying again. If you need to upload multiple files, try sending them in a single batch (max 5).",
+        message: "You've reached the limit for file uploads. To ensure system stability for all users, please wait 10 minutes before trying again. If you need to upload multiple files, try sending them in one batch within the allowed attachment limit.",
     },
     handler: (req, res, next, options) => {
         next(new ApiError(429, options.message.message));

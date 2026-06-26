@@ -56,6 +56,8 @@ export interface IDayPulseAttachment {
 
 export interface IDayPulseModel extends Model<IDayPulse> { }
 
+const DAYPULSE_SECTION_MAX_LENGTH = 10000;
+
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 const DayPulseSchema = new Schema<IDayPulse>(
@@ -107,19 +109,19 @@ const DayPulseSchema = new Schema<IDayPulse>(
       type: String,
       required: true,
       trim: true,
-      maxlength: 5000,
+      maxlength: DAYPULSE_SECTION_MAX_LENGTH,
     },
     blockers: {
       type: String,
       required: true,
       trim: true,
-      maxlength: 5000,
+      maxlength: DAYPULSE_SECTION_MAX_LENGTH,
     },
     inProgress: {
       type: String,
       required: true,
       trim: true,
-      maxlength: 5000,
+      maxlength: DAYPULSE_SECTION_MAX_LENGTH,
     },
 
     attachments: {

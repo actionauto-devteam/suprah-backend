@@ -13,6 +13,7 @@ import { BucketType, storageService } from '../services/storage.service';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
+const DAYPULSE_SECTION_MAX_LENGTH = 10000;
 const DAYPULSE_ATTACHMENT_FIELDS: Array<{ field: string; section: DayPulseAttachmentSection }> = [
   { field: 'attachmentsAccomplishment', section: 'accomplishment' },
   { field: 'attachmentsBlockers', section: 'blockers' },
@@ -104,20 +105,20 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
   if (!accomplishment || !accomplishment.trim()) {
     throw new ApiError(400, 'Accomplishment section cannot be empty');
   }
-  if (accomplishment.trim().length > 5000) {
-    throw new ApiError(400, 'Accomplishment cannot exceed 5000 characters');
+  if (accomplishment.trim().length > DAYPULSE_SECTION_MAX_LENGTH) {
+    throw new ApiError(400, `Accomplishment cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
   }
   if (!blockers || !blockers.trim()) {
     throw new ApiError(400, 'Blockers section cannot be empty');
   }
-  if (blockers.trim().length > 5000) {
-    throw new ApiError(400, 'Blockers cannot exceed 5000 characters');
+  if (blockers.trim().length > DAYPULSE_SECTION_MAX_LENGTH) {
+    throw new ApiError(400, `Blockers cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
   }
   if (!inProgress || !inProgress.trim()) {
     throw new ApiError(400, 'In Progress section cannot be empty');
   }
-  if (inProgress.trim().length > 5000) {
-    throw new ApiError(400, 'In Progress cannot exceed 5000 characters');
+  if (inProgress.trim().length > DAYPULSE_SECTION_MAX_LENGTH) {
+    throw new ApiError(400, `In Progress cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
   }
 
   try {
@@ -247,9 +248,9 @@ export const updateReport = asyncHandler(async (req: Request, res: Response) => 
   if (!blockers || !blockers.trim()) throw new ApiError(400, 'Blockers section cannot be empty');
   if (!inProgress || !inProgress.trim()) throw new ApiError(400, 'In Progress section cannot be empty');
 
-  if (accomplishment.trim().length > 5000) throw new ApiError(400, 'Accomplishment cannot exceed 5000 characters');
-  if (blockers.trim().length > 5000) throw new ApiError(400, 'Blockers cannot exceed 5000 characters');
-  if (inProgress.trim().length > 5000) throw new ApiError(400, 'In Progress cannot exceed 5000 characters');
+  if (accomplishment.trim().length > DAYPULSE_SECTION_MAX_LENGTH) throw new ApiError(400, `Accomplishment cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
+  if (blockers.trim().length > DAYPULSE_SECTION_MAX_LENGTH) throw new ApiError(400, `Blockers cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
+  if (inProgress.trim().length > DAYPULSE_SECTION_MAX_LENGTH) throw new ApiError(400, `In Progress cannot exceed ${DAYPULSE_SECTION_MAX_LENGTH} characters`);
 
   const report = await DayPulse.findOne({ _id: id, deletedAt: null });
   if (!report) throw new ApiError(404, 'Report not found');
