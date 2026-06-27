@@ -5,6 +5,7 @@ import { authLimiter, otpLimiter } from '../middleware/rate-limit.middleware';
 import config from '../config';
 import authMiddleware from '../middleware/auth.middleware';
 import { isDbOutageError } from '../utils/dbOutage';
+import { validateInviteLink, registerViaInvite } from '../controllers/customerInvite.controller';
 
 const router = express.Router();
 
@@ -98,5 +99,9 @@ router.get('/google/callback',
 
 router.post('/complete-onboarding', authMiddleware(), authController.completeOnboarding);
 router.get('/crm-sso', authMiddleware(), authController.getCrmSsoToken);
+
+// Customer invite link (public — no auth required)
+router.get('/invite/:shortCode', validateInviteLink);
+router.post('/invite/:shortCode/register', authLimiter, registerViaInvite);
 
 export default router;

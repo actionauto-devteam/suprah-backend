@@ -56,6 +56,7 @@ import callRoute from "./call.route";
 import auctionListingReviewRoute from "./auctionListingReview.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
+import customerInviteRoute from "./customerInvite.routes";
 
 const router = express.Router();
 
@@ -296,6 +297,10 @@ const defaultRoutes = [
   {
     path: "/membership",
     route: membershipRoute,
+  },
+  {
+    path: "/crm/customer-invites",
+    route: customerInviteRoute,
   },
 ];
 
