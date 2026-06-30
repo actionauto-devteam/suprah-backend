@@ -5,16 +5,33 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import DealershipReview from '../models/DealershipReview.model';
 
+const SOURCES = ['google', 'yelp', 'facebook', 'other'] as const;
+
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const normalizeUrl = (url?: string | null): string | null => {
+  const trimmed = url?.trim();
+  if (!trimmed) return null;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+};
+
+const SORTS: Record<string, Record<string, 1 | -1>> = {
+  newest: { createdAt: -1 },
+  oldest: { createdAt: 1 },
+  rating_desc: { rating: -1, createdAt: -1 },
+  rating_asc: { rating: 1, createdAt: -1 },
+};
+
 /**
  * GET /api/crm/reviews
- * Paginated, org-scoped list with optional source/rating filters + an
- * average-rating summary across all visible reviews for the org.
+ * Paginated, org-scoped list with source/rating/search filters + sort,
+ * an average-rating summary, and a per-source count breakdown for the org.
  */
 export const getAllReviews = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, 'Organization context missing');
 
-  const { page = '1', limit = '20', source, rating } = req.query;
+  const { page = '1', limit = '20', source, rating, search, sort } = req.query;
   const pageNum = Math.max(Number(page) || 1, 1);
   const limitNum = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const skip = (pageNum - 1) * limitNum;
@@ -22,24 +39,40 @@ export const getAllReviews = asyncHandler(async (req: Request, res: Response) =>
   const filter: any = { organizationId: orgId };
   if (source && source !== 'all') filter.source = source;
   if (rating) filter.rating = Number(rating);
+  if (search && String(search).trim()) {
+    const rx = { $regex: escapeRegex(String(search).trim()), $options: 'i' };
+    filter.$or = [{ reviewerName: rx }, { reviewText: rx }];
+  }
 
-  const [reviews, total, [stats]] = await Promise.all([
-    DealershipReview.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+  const sortOption = SORTS[String(sort)] || SORTS.newest;
+  const orgObjectId = new mongoose.Types.ObjectId(orgId.toString());
+
+  const [reviews, total, [stats], bySourceAgg] = await Promise.all([
+    DealershipReview.find(filter).sort(sortOption).skip(skip).limit(limitNum).lean(),
     DealershipReview.countDocuments(filter),
     DealershipReview.aggregate([
-      { $match: { organizationId: new mongoose.Types.ObjectId(orgId.toString()), isVisible: true } },
+      { $match: { organizationId: orgObjectId, isVisible: true } },
       { $group: { _id: null, averageRating: { $avg: '$rating' }, totalVisible: { $sum: 1 } } },
     ]),
+    DealershipReview.aggregate([
+      { $match: { organizationId: orgObjectId } },
+      { $group: { _id: '$source', count: { $sum: 1 } } },
+    ]),
   ]);
+
+  const bySource: Record<string, number> = { google: 0, yelp: 0, facebook: 0, other: 0 };
+  for (const row of bySourceAgg) bySource[row._id] = row.count;
 
   res.json(new ApiResponse(200, {
     reviews,
     total,
     page: pageNum,
-    pages: Math.ceil(total / limitNum),
+    pages: Math.max(Math.ceil(total / limitNum), 1),
     summary: {
       averageRating: stats ? Math.round(stats.averageRating * 10) / 10 : 0,
       totalVisible: stats?.totalVisible ?? 0,
+      totalReviews: SOURCES.reduce((sum, s) => sum + bySource[s], 0),
+      bySource,
     },
   }));
 });
@@ -68,8 +101,8 @@ export const createReview = asyncHandler(async (req: Request, res: Response) => 
     reviewerName: reviewerName.trim(),
     rating: Math.round(Number(rating)),
     reviewText: reviewText.trim(),
-    reviewUrl: reviewUrl?.trim() || null,
-    reviewDate: reviewDate ? new Date(reviewDate) : null,
+    reviewUrl: normalizeUrl(reviewUrl),
+    reviewDate: reviewDate ? new Date(reviewDate) : new Date(),
     response: response?.trim() || null,
     createdBy: user._id,
   });
@@ -92,6 +125,7 @@ export const updateReview = asyncHandler(async (req: Request, res: Response) => 
   if (update.rating !== undefined && (Number(update.rating) < 1 || Number(update.rating) > 5)) {
     throw new ApiError(400, 'Rating must be a whole number between 1 and 5');
   }
+  if ('reviewUrl' in update) update.reviewUrl = normalizeUrl(update.reviewUrl);
 
   const review = await DealershipReview.findOneAndUpdate(
     { _id: id, organizationId: orgId },
