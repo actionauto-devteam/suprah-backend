@@ -35,6 +35,9 @@ export interface ICall extends Document {
   allowedDomain: string;
   approvedUsers: mongoose.Types.ObjectId[];
   admissionRequests: ICallAdmissionRequest[];
+  recordingAllowedUsers: mongoose.Types.ObjectId[]; // users granted recording permission by host
+  isRecording: boolean;
+  recordingStartedAt: Date | null;
   startedAt: Date;
   endedAt?: Date | null;
   duration: number;           // seconds, computed server-side at termination
@@ -83,6 +86,9 @@ const CallSchema = new Schema<ICall>(
     allowedDomain: { type: String, default: 'actionautoutah.com' },
     approvedUsers: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     admissionRequests: { type: [AdmissionRequestSchema], default: [] },
+    recordingAllowedUsers: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
+    isRecording: { type: Boolean, default: false },
+    recordingStartedAt: { type: Date, default: null },
     startedAt: { type: Date, default: Date.now },
     endedAt: { type: Date, default: null },
     duration: { type: Number, default: 0 },

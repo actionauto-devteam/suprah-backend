@@ -1,8 +1,14 @@
 import express from 'express';
+import multer from 'multer';
 import crmAuth from '../middleware/crmAuth.middleware';
 import supraLeoController from '../controllers/supraLeo.controller';
 
 const router = express.Router();
+
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
 
 // All routes require CRM authentication
 router.use(crmAuth());
@@ -23,6 +29,10 @@ router.post('/refine', supraLeoController.refineMessage);
 // ── Reminders & Context ───────────────────────────────────────────────────────
 router.get('/reminders/:module', supraLeoController.getReminders);
 router.get('/context/:module', supraLeoController.getModuleContext);
+
+// ── Meeting / call AI chat (transcript-aware) ─────────────────────────────────
+router.post('/meeting-chat', supraLeoController.meetingChat);
+router.post('/transcribe-chunk', audioUpload.single('audio'), supraLeoController.transcribeChunk);
 
 // ── TTS / Speech helpers ──────────────────────────────────────────────────────
 router.get('/prepare-message/:leadId', supraLeoController.prepareMessage);

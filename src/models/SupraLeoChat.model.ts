@@ -33,7 +33,7 @@ const ChatMessageSchema = new Schema<ISupraLeoChatMessage>(
     },
     module: {
       type: String,
-      enum: ['appointments', 'timeproof', 'supraspace', 'biometrics', 'feeds', 'general'],
+      enum: ['appointments', 'timeproof', 'supraspace', 'biometrics', 'feeds', 'general', 'meeting'],
       default: 'general',
     },
     context: {

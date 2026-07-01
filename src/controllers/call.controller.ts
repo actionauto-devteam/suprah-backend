@@ -424,4 +424,179 @@ export const getCallStatus = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, { call, jitsi: buildJitsi(call, crmUser, isMod) }, 'Active call'));
 });
 
-export default { startCall, createMeeting, getMeeting, decideMeetingAdmission, joinCall, endCall, getCallStatus };
+/**
+ * GET /api/calls/my-active-call
+ * Returns the caller's current active call and whether they may record it.
+ * Polled by the tray-app every 10 seconds.
+ */
+export const getMyActiveCall = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const userId = crmUser._id;
+
+  const call = await Call.findOne({
+    isLive: true,
+    $or: [
+      { 'participants.userId': userId },
+      { moderatorUserId: userId },
+    ],
+  }).lean();
+
+  if (!call) {
+    return res.json(new ApiResponse(200, null, 'No active call'));
+  }
+
+  const isHost = call.moderatorUserId.toString() === userId.toString();
+  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId.toString());
+  const canRecord = isHost || isGranted;
+
+  res.json(new ApiResponse(200, {
+    meetingId: call.meetingId,
+    conversationId: call.conversationId.toString(),
+    title: call.title || null,
+    startedAt: call.startedAt,
+    isHost,
+    canRecord,
+    isRecording: call.isRecording ?? false,
+    recordingStartedAt: call.recordingStartedAt ?? null,
+    participantCount: call.participants.filter((p) => !p.leftAt).length,
+  }, 'Active call'));
+});
+
+/**
+ * POST /api/calls/meeting/:meetingId/grant-recording  { userId }
+ * Host grants recording permission to a specific participant.
+ */
+export const grantRecording = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const { meetingId } = req.params;
+  const { userId } = req.body;
+  if (!userId) throw new ApiError(400, 'userId is required');
+
+  const call = await Call.findOne({ meetingId, isLive: true });
+  if (!call) throw new ApiError(404, 'No active call for this meeting');
+  if (call.moderatorUserId.toString() !== crmUser._id.toString()) {
+    throw new ApiError(403, 'Only the host can grant recording permission');
+  }
+
+  const targetId = new (require('mongoose').Types.ObjectId)(userId);
+  if (!call.recordingAllowedUsers.map(String).includes(userId)) {
+    call.recordingAllowedUsers.push(targetId);
+    await call.save();
+  }
+
+  try {
+    getIO().to(`user:${userId}`).emit('call:recording-granted', { meetingId });
+  } catch { /* best-effort */ }
+
+  res.json(new ApiResponse(200, { meetingId, userId }, 'Recording permission granted'));
+});
+
+/**
+ * DELETE /api/calls/meeting/:meetingId/grant-recording  { userId }
+ * Host revokes recording permission from a participant.
+ */
+export const revokeRecording = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const { meetingId } = req.params;
+  const { userId } = req.body;
+  if (!userId) throw new ApiError(400, 'userId is required');
+
+  const call = await Call.findOne({ meetingId, isLive: true });
+  if (!call) throw new ApiError(404, 'No active call for this meeting');
+  if (call.moderatorUserId.toString() !== crmUser._id.toString()) {
+    throw new ApiError(403, 'Only the host can revoke recording permission');
+  }
+
+  call.recordingAllowedUsers = call.recordingAllowedUsers.filter(
+    (id) => id.toString() !== userId
+  );
+  await call.save();
+
+  try {
+    getIO().to(`user:${userId}`).emit('call:recording-revoked', { meetingId });
+  } catch { /* best-effort */ }
+
+  res.json(new ApiResponse(200, { meetingId, userId }, 'Recording permission revoked'));
+});
+
+/**
+ * POST /api/calls/meeting/:meetingId/recording/start
+ * Host (or granted user) starts recording — triggers tray and notifies all participants.
+ */
+export const startCallRecording = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const { meetingId } = req.params;
+
+  const call = await Call.findOne({ meetingId, isLive: true });
+  if (!call) throw new ApiError(404, 'No active call for this meeting');
+
+  const userId = crmUser._id.toString();
+  const isHost = call.moderatorUserId.toString() === userId;
+  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId);
+  if (!isHost && !isGranted) throw new ApiError(403, 'No recording permission');
+
+  if (call.isRecording) {
+    return res.json(new ApiResponse(200, null, 'Already recording'));
+  }
+
+  call.isRecording = true;
+  call.recordingStartedAt = new Date();
+  await call.save();
+
+  const payload = {
+    meetingId,
+    recordingStartedAt: call.recordingStartedAt.toISOString(),
+    startedBy: userId,
+  };
+
+  const io = getIO();
+  // Notify all participants in the conversation (awareness badge)
+  io.to(`conv:${call.conversationId}`).emit('call:recording-started', payload);
+  // Trigger the host's tray to start Electron recording
+  io.to(`user:${call.moderatorUserId}`).emit('tray:start-recording', payload);
+
+  res.json(new ApiResponse(200, payload, 'Recording started'));
+});
+
+/**
+ * POST /api/calls/meeting/:meetingId/recording/stop
+ * Host (or granted user) stops recording.
+ */
+export const stopCallRecording = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const { meetingId } = req.params;
+
+  const call = await Call.findOne({ meetingId, isLive: true });
+  if (!call) throw new ApiError(404, 'No active call for this meeting');
+
+  const userId = crmUser._id.toString();
+  const isHost = call.moderatorUserId.toString() === userId;
+  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId);
+  if (!isHost && !isGranted) throw new ApiError(403, 'No recording permission');
+
+  call.isRecording = false;
+  call.recordingStartedAt = null;
+  await call.save();
+
+  const payload = { meetingId };
+  const io = getIO();
+  io.to(`conv:${call.conversationId}`).emit('call:recording-stopped', payload);
+  io.to(`user:${call.moderatorUserId}`).emit('tray:stop-recording', payload);
+
+  res.json(new ApiResponse(200, payload, 'Recording stopped'));
+});
+
+export default {
+  startCall,
+  createMeeting,
+  getMeeting,
+  decideMeetingAdmission,
+  joinCall,
+  endCall,
+  getCallStatus,
+  getMyActiveCall,
+  grantRecording,
+  revokeRecording,
+  startCallRecording,
+  stopCallRecording,
+};
