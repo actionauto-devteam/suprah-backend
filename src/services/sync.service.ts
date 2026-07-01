@@ -17,6 +17,49 @@ import config from "../config";
 const ACTION_AUTO_ORG_ID =
   process.env.ACTION_AUTO_ORG_ID || "69d6a26499bee4596c1ea94c";
 
+/**
+ * DealersCloud sends single-word CamelCase headers (e.g. "InternetPrice",
+ * "StockNumber", "VehicleimagesURL", "DealershipCity"). Our downstream mapping
+ * in syncVehicle() expects a specific set of lowercased keys. This table maps
+ * DealersCloud's actual header (lowercased) → the key our code reads.
+ *
+ * Confirmed against a real dealerscloud.csv export (30 columns, 718 rows).
+ * Any DC column not listed here is passed through unchanged (already lowercased),
+ * so adding future columns is harmless.
+ */
+const DC_HEADER_MAP: Record<string, string> = {
+  vin: "vin",
+  year: "year",
+  make: "make",
+  model: "model",
+  trim: "trim",
+  mileage: "mileage",
+  internetprice: "price",
+  engine: "engine",
+  bodytype: "vehicletype",
+  drivetype: "drivetype",
+  installedoptions: "installed options",
+  sellercomment: "dealer comments on vehicle",
+  vehicleimagesurl: "picture urls",
+  interiorcolor: "interior color",
+  exteriorcolor: "exterior color",
+  fueltype: "fuel type",
+  doors: "doors",
+  stocknumber: "stock number",
+  dealershipid: "dealer id",
+  dealershipname: "dealer name",
+  dealershipstreet: "dealer street address",
+  dealershipstate: "dealer state",
+  dealershipcity: "dealer city",
+  dealershipzipcode: "dealer zip",
+  dealershipemail: "dealer crm email",
+  dealershipphone: "dealer phone",
+  dealershipwebsite: "dealer website",
+  totalcost: "total cost",
+  // NOTE: DealersCloud's current export has no transmission / certified /
+  // "is new" columns, so those simply stay empty on our side.
+};
+
 export class SyncService {
   private isLocked = false;
 
@@ -92,8 +135,9 @@ export class SyncService {
     };
 
     // Helper for image array.
-    // DealersCloud may separate photo URLs with commas, pipes, semicolons or
-    // spaces — split on any of them so images populate regardless of format.
+    // DealersCloud's VehicleimagesURL is a comma-separated list of URLs; the URLs
+    // themselves contain no commas (query params use ?v=). Split on comma/pipe/
+    // semicolon/whitespace to be safe across formats.
     const parseImages = (val: string) => {
       if (!val) return [];
       return val
@@ -132,6 +176,10 @@ export class SyncService {
       mileage: parseNum(raw.mileage),
       engine: raw.engine?.trim(),
       transmission: raw["transmission type"]?.trim(),
+      driveTrain: (raw as any)["drivetype"]?.trim(),
+      fuelType: (raw as any)["fuel type"]?.trim(),
+      doors: parseNum((raw as any)["doors"]),
+      cost: parseNum((raw as any)["total cost"]),
       options: raw["installed options"]?.trim(),
       comments: raw["dealer comments on vehicle"]?.trim(),
       images: parseImages(raw["picture urls"]),
@@ -274,8 +322,14 @@ export class SyncService {
 
       const parser = stream.pipe(
         parse({
+          // Lowercase every header, then translate DealersCloud's CamelCase
+          // column names into the keys syncVehicle() expects. Unmapped headers
+          // pass through lowercased (harmless).
           columns: (header) =>
-            header.map((h: string) => h.trim().toLowerCase()),
+            header.map((h: string) => {
+              const lower = h.trim().toLowerCase();
+              return DC_HEADER_MAP[lower] || lower;
+            }),
           skip_empty_lines: true,
           trim: true,
           relax_quotes: true,
@@ -309,8 +363,8 @@ export class SyncService {
         try {
           // SAFETY: only run deletions if the feed actually produced vehicles.
           // If parsing yields zero VINs (e.g. a malformed file or wrong
-          // delimiter), skip deletions so we never wipe the whole inventory
-          // off the back of an empty/broken parse.
+          // delimiter/headers), skip deletions so we never wipe the whole
+          // inventory off the back of an empty/broken parse.
           let deletedCount = 0;
           if (csvVins.size > 0) {
             const deletionResult = await this.handleDeletions(csvVins);
@@ -325,6 +379,10 @@ export class SyncService {
           syncLog.vehiclesAdded = added;
           syncLog.vehiclesUpdated = updated;
           syncLog.vehiclesDeleted = deletedCount;
+
+          console.log(
+            `[SyncService] ✅ Parsed feed — processed:${processed} added:${added} updated:${updated} deleted:${deletedCount}`,
+          );
 
           resolve({
             added,
