@@ -29,7 +29,7 @@ const buildSessions = (logs: any[]) => {
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  const sessions: { in: Date; out: Date | null; duration: number; isLive: boolean }[] = [];
+  const sessions: { in: Date; out: Date | null; duration: number; isLive: boolean; isOpen: boolean }[] = [];
   let currentIn: Date | null = null;
 
   for (const log of sorted) {
@@ -42,6 +42,7 @@ const buildSessions = (logs: any[]) => {
         out,
         duration: (out.getTime() - currentIn.getTime()) / 1000,
         isLive: false,
+        isOpen: false,
       });
       currentIn = null;
     }
@@ -60,6 +61,7 @@ const buildSessions = (logs: any[]) => {
       out: null,
       duration: Math.min(elapsedMs, MAX_LIVE_MS) / 1000,
       isLive: !isCapped,
+      isOpen: true,
     });
   }
 
@@ -155,7 +157,7 @@ const getMidnightSegments = (
 };
 
 type CalendarDay = {
-  sessions: Array<{ in: Date; out: Date | null; duration: number; isLive: boolean }>;
+  sessions: Array<{ in: Date; out: Date | null; duration: number; isLive: boolean; isOpen: boolean }>;
   totalSeconds: number;
   breaks: Array<{ in: Date; out: Date | null; duration: number; isActive: boolean }>;
   breakSeconds: number;
@@ -223,6 +225,7 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
         out: s.out && isLast ? s.out : segEnd,
         duration: (segEnd.getTime() - segStart.getTime()) / 1000,
         isLive: s.isLive && isLast,
+        isOpen: s.isOpen,
       });
     }
   }
@@ -381,12 +384,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
 
   const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  // Override EVERY day's calendar entry with the activity-based total when it's
-  // smaller than the session wall-clock. A multi-day unclosed clock-in (e.g. the
-  // user forgot to clock out for two days) otherwise paints the intermediate
-  // days as 24h "work" via the midnight segment splitter — pure ghost time the
-  // user never actually worked. Activity intervals (saved per real active
-  // period) are the authoritative truth, so we prefer them whenever they exist.
   const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
   const allActivityIntervals = await ActivityInterval.find({
     userId: user._id,
@@ -409,12 +406,32 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     : 0;
   activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
 
+  // Override every calendar day's wall-clock total with the ActivityInterval
+  // total when it is smaller. ActivityIntervals (committed by the tray per real
+  // active period) are authoritative: they exclude idle time and ghost hours
+  // from unclosed sessions that inflate the wall-clock (e.g. a multi-day open
+  // shift gives each calendar day an inflated midnight-split slice).
   for (const dateStr of Object.keys(calendar)) {
     const activeForDate = activityByDate[dateStr] ?? 0;
-    // Only override when the activity-based number is SMALLER — i.e. the wall-clock
-    // is inflated. If activity is larger (rare/impossible) we keep the wall-clock.
     if (activeForDate > 0 && activeForDate < calendar[dateStr].totalSeconds) {
       calendar[dateStr].totalSeconds = activeForDate;
+    }
+  }
+
+  // Ghost-hours correction for past days where the tray never ran at all
+  // (activityByDate = 0). If an unclosed session still contributes time via
+  // the wall-clock, strip that ghost portion. Completed sessions on the same
+  // day are kept so CRM-only clock-in/clock-out records remain accurate.
+  for (const dateStr of Object.keys(calendar)) {
+    if (dateStr === todayStr) continue;
+    if ((activityByDate[dateStr] ?? 0) > 0) continue;
+
+    const openSeconds = calendar[dateStr].sessions
+      .filter(s => s.isOpen)
+      .reduce((sum, s) => sum + s.duration, 0);
+
+    if (openSeconds > 0) {
+      calendar[dateStr].totalSeconds = Math.max(0, calendar[dateStr].totalSeconds - openSeconds);
     }
   }
 
@@ -586,11 +603,16 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
 
   const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
 
-  // Override TODAY with activity-based time to avoid ghost hours from stale
-  // unclosed clock-ins (same fix as getMyTimeproof).
   const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
-  const userTodayIntervals = await ActivityInterval.find({ userId, shiftDate: todayStr }).lean();
-  const userTodayIntervalTotal = userTodayIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
+  const allUserIntervals = await ActivityInterval.find({
+    userId,
+    shiftDate: { $in: Object.keys(calendar) },
+  }).lean();
+  const userActivityByDate: Record<string, number> = {};
+  for (const i of allUserIntervals) {
+    userActivityByDate[i.shiftDate] = (userActivityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
+  }
+
   const userTodayHeartbeat = await AgentHeartbeat.findOne({ userId }).lean();
   const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const userHeartbeatFresh = userTodayHeartbeat
@@ -599,9 +621,29 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const userLiveActiveSeconds = userHeartbeatFresh && userTodayHeartbeat?.currentIntervalStartAt
     ? Math.max(0, (Date.now() - new Date(userTodayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
     : 0;
-  const userTodayActiveSeconds = userTodayIntervalTotal + userLiveActiveSeconds;
-  if (calendar[todayStr] && userTodayActiveSeconds < calendar[todayStr].totalSeconds) {
-    calendar[todayStr].totalSeconds = userTodayActiveSeconds;
+  userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
+
+  // Override every calendar day's wall-clock total with the ActivityInterval
+  // total when it is smaller (same logic as getMyTimeproof).
+  for (const dateStr of Object.keys(calendar)) {
+    const activeForDate = userActivityByDate[dateStr] ?? 0;
+    if (activeForDate > 0 && activeForDate < calendar[dateStr].totalSeconds) {
+      calendar[dateStr].totalSeconds = activeForDate;
+    }
+  }
+
+  // Ghost-hours correction for past days where the tray never ran at all.
+  for (const dateStr of Object.keys(calendar)) {
+    if (dateStr === todayStr) continue;
+    if ((userActivityByDate[dateStr] ?? 0) > 0) continue;
+
+    const openSeconds = calendar[dateStr].sessions
+      .filter(s => s.isOpen)
+      .reduce((sum, s) => sum + s.duration, 0);
+
+    if (openSeconds > 0) {
+      calendar[dateStr].totalSeconds = Math.max(0, calendar[dateStr].totalSeconds - openSeconds);
+    }
   }
 
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
@@ -810,9 +852,17 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const fallbackShiftedStart = isOnShift && !isOnBreak && isShiftFromToday && shiftStartedAt
     ? new Date(new Date(shiftStartedAt).getTime() + (totalBreakSeconds * 1000)).toISOString()
     : null;
+  // When the heartbeat is stale AND ActivityIntervals already exist, returning
+  // the fallback start would cause the dashboard to add liveMs (full wall-clock
+  // since shift start) ON TOP of the already-accumulated interval total — i.e.
+  // double-counting. Return null instead so the dashboard freezes at the
+  // accumulated total. Fall back to wall-clock only when no intervals exist
+  // (CRM-only users who never ran the tray).
   const currentIntervalStartAt = heartbeatFresh
     ? rawIntervalStart
-    : fallbackShiftedStart;
+    : activityIntervalTotal > 0
+      ? null
+      : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
     isOnShift,

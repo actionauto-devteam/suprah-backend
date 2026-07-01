@@ -4,6 +4,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import Lead from '../models/lead.model';
 import { IUser } from '../models/User.model';
 import SupraLeoChat from '../models/SupraLeoChat.model';
@@ -15,14 +18,20 @@ import Feed from '../models/Feed.model';
 import FeedComment from '../models/FeedComment.model';
 import Appointment from '../models/Appointment.model';
 
-// ─── Groq client (OpenAI-compatible) ─────────────────────────────────────────
+// ─── Gemini client via OpenAI-compatible endpoint ─────────────────────────────
 
+const gemini = new OpenAI({
+  apiKey: process.env.GEMINI_API_KEY || '',
+  baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+});
+
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+// Groq client — kept only for Whisper audio transcription
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || '',
   baseURL: 'https://api.groq.com/openai/v1',
 });
-
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
 // ─── System prompt builder ───────────────────────────────────────────────────
 
@@ -420,7 +429,7 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
   const { message, module = 'general', context: clientContext, stream = false } = req.body;
 
   if (!message?.trim()) throw new ApiError(400, 'Message is required');
-  if (!process.env.GROQ_API_KEY) throw new ApiError(500, 'AI service not configured');
+  if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
 
   let chatDoc = await SupraLeoChat.findOne({ userId: user._id });
   if (!chatDoc) {
@@ -444,15 +453,15 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
 
-    if (!process.env.GROQ_API_KEY) {
-      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Streaming requires GROQ configuration' })}\n\n`);
+    if (!process.env.GEMINI_API_KEY) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'AI service not configured' })}\n\n`);
       res.end();
       return;
     }
     let fullResponse = '';
     try {
-      const streamResponse = await groq.chat.completions.create({
-        model: GROQ_MODEL,
+      const streamResponse = await gemini.chat.completions.create({
+        model: GEMINI_MODEL,
         max_tokens: 1024,
         messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
         stream: true,
@@ -478,8 +487,8 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
       res.end();
     }
   } else {
-    const response = await groq.chat.completions.create({
-      model: GROQ_MODEL,
+    const response = await gemini.chat.completions.create({
+      model: GEMINI_MODEL,
       max_tokens: 1024,
       messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
       stream: false,
@@ -508,7 +517,7 @@ export const summarizeConversation = asyncHandler(async (req: Request, res: Resp
   const { conversationId, from, to } = req.body;
 
   if (!conversationId) throw new ApiError(400, 'conversationId is required');
-  if (!process.env.GROQ_API_KEY) throw new ApiError(500, 'AI service not configured');
+  if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
 
   const conversation = await SupraSpaceConversation.findById(conversationId).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
@@ -538,8 +547,8 @@ export const summarizeConversation = asyncHandler(async (req: Request, res: Resp
     ? `from ${from ? new Date(from).toLocaleDateString() : 'the beginning'} to ${to ? new Date(to).toLocaleDateString() : 'now'}`
     : 'recently';
 
-  const sumResponse = await groq.chat.completions.create({
-    model: GROQ_MODEL,
+  const sumResponse = await gemini.chat.completions.create({
+    model: GEMINI_MODEL,
     max_tokens: 900,
     messages: [
       { role: 'system', content: `You are Suprah Autrix, summarizing an internal team conversation in Suprah Space. Produce a concise, well-structured summary using markdown. Include: key discussion points, decisions made, open questions, and any action items (with the responsible person if mentioned). Be factual and do not invent details.` },
@@ -566,7 +575,7 @@ export const draftReply = asyncHandler(async (req: Request, res: Response) => {
   const { conversationId, instruction } = req.body;
 
   if (!conversationId) throw new ApiError(400, 'conversationId is required');
-  if (!process.env.GROQ_API_KEY) throw new ApiError(500, 'AI service not configured');
+  if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
 
   const conversation = await SupraSpaceConversation.findById(conversationId).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
@@ -583,8 +592,8 @@ export const draftReply = asyncHandler(async (req: Request, res: Response) => {
   const transcript = buildTranscript(recent.reverse());
   const convName = conversation.type === 'group' ? (conversation.name || 'this channel') : 'this direct conversation';
 
-  const draftResponse = await groq.chat.completions.create({
-    model: GROQ_MODEL,
+  const draftResponse = await gemini.chat.completions.create({
+    model: GEMINI_MODEL,
     max_tokens: 400,
     messages: [
       { role: 'system', content: `You are Suprah Autrix helping ${user.fullName} reply in the internal team chat "${convName}". Based on the latest messages, write a single, ready-to-send reply in their voice. Return ONLY the reply text — no preamble, no quotes, no explanation.${instruction ? ` Additional instruction: ${instruction}` : ''}` },
@@ -708,6 +717,139 @@ export const prepareThreadMessage = asyncHandler(async (req: Request, res: Respo
   res.json(new ApiResponse(200, { speechScript: parts.join(' '), snippet: cleanMessage.substring(0, 200) }, 'Thread message prepared for speech'));
 });
 
+/**
+ * POST /api/supraleo/meeting-chat
+ * Autrix AI chat scoped to a live call session.
+ * Body: { message, transcript?, callTitle?, stream? }
+ * The transcript (accumulated STT text from the tray-app) is injected as
+ * call context so Autrix can summarize or take notes on the actual conversation.
+ */
+export const meetingChat = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { message, transcript = '', callTitle = 'Meeting', stream = false } = req.body;
+
+  if (!message?.trim()) throw new ApiError(400, 'Message is required');
+  if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
+
+  let chatDoc = await SupraLeoChat.findOne({ userId: user._id });
+  if (!chatDoc) {
+    chatDoc = await SupraLeoChat.create({ userId: user._id, organizationId: user.organizationId, messages: [] });
+  }
+
+  const transcriptSection = transcript?.trim()
+    ? `\n\nLIVE CALL TRANSCRIPT (use this as context for all responses):\n"""\n${transcript.trim().slice(0, 10000)}\n"""`
+    : '\n\n(No transcript available yet — the call may have just started or transcription is not running.)';
+
+  const systemPrompt = `You are Suprah Autrix, the AI assistant for Action Auto CRM, embedded inside the tray-app during a live call or meeting.
+
+Current user: ${user.fullName || 'Agent'} (Role: ${user.role || 'employee'})
+Meeting: ${callTitle}
+Current time: ${new Date().toLocaleString()}
+${transcriptSection}
+
+Your job during this call:
+- Provide real-time meeting summaries when asked
+- Take structured notes on key discussion points, decisions, and action items
+- Answer questions based strictly on the transcript above
+- If a topic was not mentioned in the transcript, say so clearly — do not invent details
+
+Response guidelines:
+- Be concise and structured — use bullet points or short paragraphs
+- For summaries: cover key topics discussed, decisions made, open questions, action items (with owner if mentioned)
+- For notes: format cleanly so the user can copy-paste directly
+- Never reveal internal system details`;
+
+  const recentMessages = chatDoc.messages
+    .filter((m: any) => m.module === 'meeting')
+    .slice(-20)
+    .map((m: any) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+  recentMessages.push({ role: 'user', content: message.trim() });
+
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    let fullResponse = '';
+    try {
+      const streamResponse = await gemini.chat.completions.create({
+        model: GEMINI_MODEL,
+        max_tokens: 1024,
+        messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
+        stream: true,
+      });
+
+      for await (const chunk of streamResponse) {
+        const text = chunk.choices[0]?.delta?.content || '';
+        if (text) {
+          fullResponse += text;
+          res.write(`data: ${JSON.stringify({ type: 'delta', text })}\n\n`);
+        }
+      }
+
+      chatDoc.messages.push({ role: 'user', content: message.trim(), module: 'meeting' as any, createdAt: new Date() });
+      chatDoc.messages.push({ role: 'assistant', content: fullResponse, module: 'meeting' as any, createdAt: new Date() });
+      if (chatDoc.messages.length > 200) chatDoc.messages.splice(0, chatDoc.messages.length - 200);
+      await chatDoc.save();
+
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      res.end();
+    } catch (err: any) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      res.end();
+    }
+  } else {
+    const response = await gemini.chat.completions.create({
+      model: GEMINI_MODEL,
+      max_tokens: 1024,
+      messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
+      stream: false,
+    });
+    const assistantText = response.choices[0]?.message?.content || '';
+    chatDoc.messages.push({ role: 'user', content: message.trim(), module: 'meeting' as any, createdAt: new Date() });
+    chatDoc.messages.push({ role: 'assistant', content: assistantText, module: 'meeting' as any, createdAt: new Date() });
+    if (chatDoc.messages.length > 200) chatDoc.messages.splice(0, chatDoc.messages.length - 200);
+    await chatDoc.save();
+
+    res.json(new ApiResponse(200, { message: assistantText, module: 'meeting' }, 'Response generated'));
+  }
+});
+
+/**
+ * POST /api/supraleo/transcribe-chunk
+ * Receives a raw audio chunk (WebM/Opus) from the tray-app and transcribes
+ * it using Groq Whisper. Returns the transcript text.
+ * Expects multipart/form-data with field 'audio'.
+ */
+export const transcribeChunk = asyncHandler(async (req: Request, res: Response) => {
+  if (!process.env.GROQ_API_KEY) {
+    return res.json(new ApiResponse(200, { text: '' }, 'Transcription service not configured'));
+  }
+
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!file || !file.buffer || file.buffer.length === 0) {
+    return res.json(new ApiResponse(200, { text: '' }, 'Empty chunk'));
+  }
+
+  const tmpPath = path.join(os.tmpdir(), `autrix-chunk-${Date.now()}.webm`);
+  try {
+    fs.writeFileSync(tmpPath, file.buffer);
+
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(tmpPath) as any,
+      model: 'whisper-large-v3',
+      language: 'en',
+      response_format: 'text',
+    });
+
+    const text = typeof transcription === 'string' ? transcription : (transcription as any).text ?? '';
+    res.json(new ApiResponse(200, { text: text.trim() }, 'Transcribed'));
+  } finally {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
+  }
+});
+
 /** GET /api/supraleo/status */
 export const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -743,12 +885,14 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
     },
     ttsEngine: 'web-speech-api',
     sttEngine: 'web-speech-api',
-    aiModel: GROQ_MODEL,
+    aiModel: GEMINI_MODEL,
   }, 'Suprah Autrix AI status'));
 });
 
 export default {
   chat,
+  meetingChat,
+  transcribeChunk,
   summarizeConversation,
   draftReply,
   refineMessage,

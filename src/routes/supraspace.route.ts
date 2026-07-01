@@ -3,14 +3,13 @@ import multer from 'multer';
 import supraSpaceController from '../controllers/supraspace.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
 import mainAuth from '../middleware/auth.middleware';
-import { uploadLimiter } from '../middleware/rate-limit.middleware';
 import { ApiError } from '../utils/ApiError';
 
 const router = express.Router();
 
 const SUPRA_SPACE_MAX_UPLOAD_FILES = 10;
 const SUPRA_SPACE_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
-const SUPRA_SPACE_MAX_VIDEO_FILE_SIZE_BYTES = 40 * 1024 * 1024;
+const SUPRA_SPACE_MAX_VIDEO_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const SUPRA_SPACE_VIDEO_EXTENSIONS = /\.(mp4|mov|webm|m4v|avi|mkv|wmv|flv|3gp|mpeg|mpg|ogv)$/i;
 
 // ─── Multer: general file upload ─────────────────────────────────────────────
@@ -28,7 +27,7 @@ const uploadFiles: RequestHandler = (req, res, next) => {
     if (!err) return next();
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE')
-        return next(new ApiError(400, 'Each attachment must be 40 MB or smaller.'));
+        return next(new ApiError(400, 'Each attachment must be 100 MB or smaller.'));
       if (err.code === 'LIMIT_FILE_COUNT')
         return next(new ApiError(400, `You can attach up to ${SUPRA_SPACE_MAX_UPLOAD_FILES} files.`));
       return next(new ApiError(400, err.message));
@@ -67,7 +66,7 @@ const validateUploadedFiles: RequestHandler = (req, _res, next) => {
       return next(
         new ApiError(
           400,
-          `${file.originalname} exceeds ${isVideo ? '40 MB (video limit)' : '25 MB'}.`
+          `${file.originalname} exceeds ${isVideo ? '100 MB (video limit)' : '25 MB'}.`
         )
       );
     }
@@ -136,7 +135,6 @@ router.get('/conversations/:id/messages/:msgId/voice', supraSpaceController.stre
 // ─── File / voice uploads ─────────────────────────────────────────────────────
 
 const uploadMiddlewareChain = [
-  uploadLimiter,
   uploadFiles,
   validateUploadedFiles,
   supraSpaceController.uploadAttachment,
