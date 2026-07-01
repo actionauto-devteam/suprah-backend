@@ -21,11 +21,10 @@ const ACTION_AUTO_ORG_ID =
  * DealersCloud sends single-word CamelCase headers (e.g. "InternetPrice",
  * "StockNumber", "VehicleimagesURL", "DealershipCity"). Our downstream mapping
  * in syncVehicle() expects a specific set of lowercased keys. This table maps
- * DealersCloud's actual header (lowercased) → the key our code reads.
+ * DealersCloud's actual header (lowercased) -> the key our code reads.
  *
  * Confirmed against a real dealerscloud.csv export (30 columns, 718 rows).
- * Any DC column not listed here is passed through unchanged (already lowercased),
- * so adding future columns is harmless.
+ * Any DC column not listed here is passed through unchanged (already lowercased).
  */
 const DC_HEADER_MAP: Record<string, string> = {
   vin: "vin",
@@ -56,8 +55,6 @@ const DC_HEADER_MAP: Record<string, string> = {
   dealershipphone: "dealer phone",
   dealershipwebsite: "dealer website",
   totalcost: "total cost",
-  // NOTE: DealersCloud's current export has no transmission / certified /
-  // "is new" columns, so those simply stay empty on our side.
 };
 
 export class SyncService {
@@ -65,7 +62,7 @@ export class SyncService {
 
   async syncInventory(): Promise<any> {
     if (this.isLocked) {
-      console.log("[SyncService] ⚠️ Sync already in progress. Skipping...");
+      console.log("[SyncService] Sync already in progress. Skipping...");
       return { message: "Sync already in progress" };
     }
 
@@ -78,23 +75,17 @@ export class SyncService {
 
     this.isLocked = true;
     try {
-      // 1. Fetch from FTP and Pipe to Parser
       const stream = await ftpService.getInventoryStream();
       const result = await this.processStream(stream, syncLog);
 
-      // 2. Performance: Pre-calculate daysOnLot instead of doing it in model hooks
       await this.updateDaysOnLot();
 
-      // 3. Finalize sync log
       syncLog.status = "COMPLETED";
       syncLog.endTime = new Date();
       await syncLog.save();
 
-      // 3. Invalidate vehicle cache
       await cacheService.invalidateByPrefix("veh:");
-      console.log(
-        `[SyncService] ✅ Sync complete — invalidated vehicle cache.`,
-      );
+      console.log(`[SyncService] Sync complete - invalidated vehicle cache.`);
 
       return result;
     } catch (error: any) {
@@ -115,14 +106,12 @@ export class SyncService {
   private async syncVehicle(raw: RawVehicleData) {
     const existingVehicle = await Vehicle.findOne({ vin: raw.vin });
 
-    // Helper for robust number parsing
     const parseNum = (val: string) => {
       if (!val) return undefined;
       const parsed = parseFloat(val.replace(/[^0-9.]/g, ""));
       return isNaN(parsed) ? 0 : parsed;
     };
 
-    // Helper for boolean parsing
     const parseBool = (val: string) => {
       if (!val) return false;
       const normalized = val.toLowerCase().trim();
@@ -134,10 +123,8 @@ export class SyncService {
       );
     };
 
-    // Helper for image array.
-    // DealersCloud's VehicleimagesURL is a comma-separated list of URLs; the URLs
-    // themselves contain no commas (query params use ?v=). Split on comma/pipe/
-    // semicolon/whitespace to be safe across formats.
+    // DealersCloud's VehicleimagesURL is a comma-separated list of URLs; split
+    // on comma/pipe/semicolon/whitespace to be safe across formats.
     const parseImages = (val: string) => {
       if (!val) return [];
       return val
@@ -146,7 +133,7 @@ export class SyncService {
         .filter((url) => url.length > 0);
     };
 
-    // 1. Data Sanitization & Validation
+    // Data Sanitization & Validation
     if (
       !raw.vin ||
       raw.vin.trim().toLowerCase() === "vin" ||
@@ -188,7 +175,7 @@ export class SyncService {
       certified: parseBool(raw.certified),
       isNewVehicle: parseBool(raw["is new"]),
 
-      // ── Dealer info (drives the `location` field shown in the shop) ───
+      // Dealer info (drives the `location` field shown in the shop)
       dealerId: raw["dealer id"]?.trim(),
       dealerName: raw["dealer name"]?.trim(),
       dealerAddress: raw["dealer street address"]?.trim(),
@@ -197,17 +184,15 @@ export class SyncService {
       dealerZip: raw["dealer zip"]?.trim(),
       dealerEmail: raw["dealer crm email"]?.trim(),
 
-      isDeleted: false, // Re-activate if it was deleted
+      isDeleted: false, // Re-activate if it was previously removed
 
-      // ── Multi-tenant binding ─────────────────────────────────────────
+      // Multi-tenant binding
       organizationId: ACTION_AUTO_ORG_ID,
     };
 
     if (!existingVehicle) {
-      // Create New — inventory coming from the DealersCloud feed is
-      // retail-ready, so mark it "Ready for Sale" on insert. (We set this
-      // only on create so manual status changes / recon progress on existing
-      // vehicles aren't overwritten on subsequent syncs.)
+      // New vehicle from the DealersCloud feed is retail-ready -> "Ready for Sale"
+      // on insert only (so manual status changes on existing cars aren't clobbered).
       const newVehicle = await Vehicle.create({
         ...vehicleData,
         status: "Ready for Sale",
@@ -225,9 +210,12 @@ export class SyncService {
       return { type: "added" };
     }
 
-    // Compare and Update (Selective comparison to minimize noise)
+    // A vehicle that reappears in the feed should return to the shop even if a
+    // previous run marked it Sold (because it was briefly absent). Re-activate it.
+    const reactivate =
+      existingVehicle.status === "Sold" && !existingVehicle.manualStatusLock;
+
     const oldData: any = {};
-    // Exclude organizationId from diff — we always enforce it
     const relevantKeys = Object.keys(vehicleData).filter(
       (k) => k !== "isDeleted" && k !== "organizationId",
     );
@@ -243,15 +231,23 @@ export class SyncService {
 
     const changes = diff(oldData, vehicleData);
 
-    if (changes) {
-      await Vehicle.updateOne({ _id: existingVehicle._id }, vehicleData);
+    if (changes || reactivate) {
+      const update: any = { ...vehicleData };
+      if (reactivate) {
+        update.status = "Ready for Sale";
+        update.dateSold = null;
+      }
+
+      await Vehicle.updateOne({ _id: existingVehicle._id }, update);
 
       await AuditLog.create({
         entityType: "Vehicle",
         entityId: existingVehicle._id,
         action: "UPDATE",
-        reason: "Data updated from DealersCloud feed",
-        changes: changes,
+        reason: reactivate
+          ? "Vehicle returned to DealersCloud feed - re-activated"
+          : "Data updated from DealersCloud feed",
+        changes: changes || { status: "Ready for Sale" },
         organizationId: ACTION_AUTO_ORG_ID,
       });
 
@@ -294,7 +290,6 @@ export class SyncService {
 
       const result = await this.processStream(stream, syncLog);
 
-      // Finalize
       syncLog.status = "COMPLETED";
       syncLog.endTime = new Date();
       await syncLog.save();
@@ -335,15 +330,14 @@ export class SyncService {
           relax_quotes: true,
           relax_column_count: true,
           skip_records_with_error: true,
-          // Auto-detect the delimiter: DealersCloud has sent BOTH comma-separated
-          // (.csv) and tab-separated (.txt) files. Passing an array lets csv-parse
-          // pick whichever actually delimits the file, so both formats work.
+          // Auto-detect the delimiter: DealersCloud has sent BOTH comma (.csv)
+          // and tab (.txt). An array lets csv-parse pick whichever fits.
           delimiter: [",", "\t"],
         }),
       );
 
       parser.on("data", async (rawVehicle) => {
-        parser.pause(); // Backpressure: Pause stream while we process DB update
+        parser.pause();
         try {
           const result = await this.syncVehicle(rawVehicle);
           if (result.type === "added") added++;
@@ -362,16 +356,14 @@ export class SyncService {
       parser.on("end", async () => {
         try {
           // SAFETY: only run deletions if the feed actually produced vehicles.
-          // If parsing yields zero VINs (e.g. a malformed file or wrong
-          // delimiter/headers), skip deletions so we never wipe the whole
-          // inventory off the back of an empty/broken parse.
+          // A malformed/empty parse (0 VINs) must never wipe the inventory.
           let deletedCount = 0;
           if (csvVins.size > 0) {
             const deletionResult = await this.handleDeletions(csvVins);
             deletedCount = deletionResult.deletedCount;
           } else {
             console.warn(
-              "[SyncService] ⚠️ Feed produced 0 VINs — skipping deletions to protect existing inventory. Check the file's delimiter/headers.",
+              "[SyncService] Feed produced 0 VINs - skipping deletions to protect existing inventory. Check the file's delimiter/headers.",
             );
           }
 
@@ -381,7 +373,7 @@ export class SyncService {
           syncLog.vehiclesDeleted = deletedCount;
 
           console.log(
-            `[SyncService] ✅ Parsed feed — processed:${processed} added:${added} updated:${updated} deleted:${deletedCount}`,
+            `[SyncService] Parsed feed - processed:${processed} added:${added} updated:${updated} soldOut:${deletedCount}`,
           );
 
           resolve({
@@ -405,20 +397,33 @@ export class SyncService {
    * @deprecated Use processR2File or processStream
    */
   async processLocalFile(filePath: string): Promise<any> {
-    // ... kept as legacy fallback but refactored to use stream
     const fs = require("fs");
     const stream = fs.createReadStream(filePath);
     return this.processStream(stream, { save: () => {} });
   }
 
   /**
-   * Soft-deletes vehicles missing from the current feed.
-   * SCOPED TO ACTION AUTO UTAH ORG ONLY — will never touch other orgs' inventory.
+   * FULL-REPLACE deletion pass.
+   *
+   * DealersCloud is the ONLY inventory source for this org, so any active
+   * vehicle whose VIN is NOT in today's feed is no longer for sale -> mark Sold
+   * (kept in the DB for history, hidden from the shop).
+   *
+   * VINs are normalized (uppercase + trim) on BOTH sides so a formatting
+   * difference can never cause a car to be wrongly kept or wrongly sold.
+   *
+   * manualStatusLock vehicles are left untouched (respects manual overrides).
    */
   private async handleDeletions(csvVins: Set<string>) {
+    // Normalize the feed VINs (defensive — syncVehicle already uppercases,
+    // but this guarantees it regardless of caller).
+    const normalizedFeedVins = Array.from(csvVins).map((v) =>
+      v.trim().toUpperCase(),
+    );
+
     const vehiclesToMarkSold = await Vehicle.find({
-      vin: { $nin: Array.from(csvVins) },
-      organizationId: ACTION_AUTO_ORG_ID, // ← Strict org scope
+      vin: { $nin: normalizedFeedVins },
+      organizationId: ACTION_AUTO_ORG_ID, // Strict org scope
       status: { $ne: "Sold" },
       manualStatusLock: { $ne: true },
       isDeleted: false,
@@ -434,7 +439,7 @@ export class SyncService {
         entityId: vehicle._id,
         action: "UPDATE",
         reason:
-          "Vehicle no longer present in DealersCloud source feed - marking as Sold",
+          "Vehicle no longer present in DealersCloud source feed - marked Sold",
         changes: { status: "Sold" },
         organizationId: ACTION_AUTO_ORG_ID,
       });
@@ -445,7 +450,6 @@ export class SyncService {
 
   /**
    * Bulk updates daysOnLot for all vehicles in the target organization.
-   * This moves expensive date math from Request-Time (read) to Sync-Time (write).
    */
   private async updateDaysOnLot() {
     try {
@@ -473,7 +477,7 @@ export class SyncService {
       if (bulkOps.length > 0) {
         await Vehicle.bulkWrite(bulkOps);
         console.log(
-          `[SyncService] ⚡ Updated daysOnLot for ${bulkOps.length} vehicles.`,
+          `[SyncService] Updated daysOnLot for ${bulkOps.length} vehicles.`,
         );
       }
     } catch (err) {
