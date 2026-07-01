@@ -185,12 +185,19 @@ export class R2FileSystem extends FileSystem {
                     
                     console.log(`[R2FileSystem] ✅ Successfully uploaded: ${key}`);
 
-                    // 3. Trigger inventory sync
-                    if (key.toLowerCase().includes('dealerscloud')) {
+                    // 3. Trigger inventory sync for any inventory file.
+                    //    Trigger on EXTENSION (.txt/.csv) rather than a filename
+                    //    substring — DealersCloud uploads names like "DealerCloud.txt"
+                    //    which do NOT contain the string "dealerscloud", so the old
+                    //    name-match check silently skipped the sync.
+                    const lowerKey = key.toLowerCase();
+                    if (lowerKey.endsWith('.txt') || lowerKey.endsWith('.csv')) {
                         console.log(`[R2FileSystem] 🔄 Triggering Inventory Sync for: ${key}`);
                         syncService.processR2File(key).catch(err => {
                             console.error(`[R2FileSystem] ❌ Sync Error for ${key}:`, err);
                         });
+                    } else {
+                        console.log(`[R2FileSystem] ⏭  Skipping sync (not a .txt/.csv inventory file): ${key}`);
                     }
 
                     // 4. Resolve the FTP command
