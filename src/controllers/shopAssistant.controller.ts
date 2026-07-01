@@ -9,7 +9,7 @@ import ShopAssistantChat, { IShopPreferences } from '../models/ShopAssistantChat
 import membershipService from '../services/membership.service';
 import logger from '../utils/logger';
 
-// ─── Gemini client (same pattern as supraLeo.controller.ts) ───────────────────
+// ─── Gemini client — identical setup to supraLeo.controller.ts ────────────────
 
 const gemini = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY || '',
@@ -19,10 +19,6 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 const FALLBACK_IMAGE =
   'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop';
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const emptyPreferences = (): IShopPreferences => ({
   vehicleTypes: [],
@@ -35,11 +31,7 @@ const emptyPreferences = (): IShopPreferences => ({
 });
 
 function stripJsonFences(text: string): string {
-  return text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
+  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
 }
 
 function getSessionId(req: Request): string {
@@ -49,153 +41,20 @@ function getSessionId(req: Request): string {
   return (fromHeader || fromBody || fromQuery || crypto.randomUUID()) as string;
 }
 
-// ─── Preference extraction (AI call #1) ────────────────────────────────────────
+// ─── Context fetcher — same job as supraLeo's fetchModuleContext(), ───────────
+// ─── but pulling REAL vehicle inventory instead of leads/appointments ─────────
 
-async function extractPreferences(
-  history: { role: 'user' | 'assistant'; content: string }[],
-  currentPrefs: IShopPreferences,
-  latestMessage: string,
-  inventoryBlurb: string
-): Promise<{ preferences: IShopPreferences; clarifyingQuestion: string | null; suggestions: string[] }> {
-  const systemPrompt = `You are the preference-extraction brain behind "Suprah Autrix", a friendly vehicle shopping assistant for a multi-dealer marketplace.
-
-Your job: read the conversation and the latest user message, then output the user's UPDATED shopping preferences as strict JSON. Always carry forward previously known preferences unless the user clearly contradicts them — never drop known info just because it wasn't repeated.
-
-Known inventory snapshot (for realism only, do not invent numbers beyond this):
-${inventoryBlurb}
-
-Current known preferences:
-${JSON.stringify(currentPrefs)}
-
-Respond with ONLY this JSON shape, no markdown fences, no commentary:
-{
-  "preferences": {
-    "vehicleTypes": string[],      // e.g. "SUV", "sedan", "truck", "electric", "coupe"
-    "budgetMin": number | null,
-    "budgetMax": number | null,
-    "brands": string[],
-    "fuelTypes": string[],         // e.g. "Gasoline", "Hybrid", "Electric", "Diesel"
-    "passengers": number | null,
-    "usage": string[]              // e.g. "commuting", "family", "towing", "off-road"
-  },
-  "clarifyingQuestion": string | null,  // set ONLY if you don't yet have enough info (no vehicleType/budget/brand at all) to search; otherwise null
-  "suggestions": string[]         // 3 short tappable follow-up phrases the user might send next, phrased as if the USER is saying them
-}`;
-
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    ...history.slice(-8),
-    { role: 'user' as const, content: latestMessage },
-  ];
-
-  const response = await gemini.chat.completions.create({
-    model: GEMINI_MODEL,
-    max_tokens: 500,
-    messages,
-    stream: false,
-  });
-
-  const raw = response.choices[0]?.message?.content || '{}';
-  try {
-    const parsed = JSON.parse(stripJsonFences(raw));
-    return {
-      preferences: {
-        vehicleTypes: Array.isArray(parsed.preferences?.vehicleTypes) ? parsed.preferences.vehicleTypes : currentPrefs.vehicleTypes,
-        budgetMin: parsed.preferences?.budgetMin ?? currentPrefs.budgetMin ?? null,
-        budgetMax: parsed.preferences?.budgetMax ?? currentPrefs.budgetMax ?? null,
-        brands: Array.isArray(parsed.preferences?.brands) ? parsed.preferences.brands : currentPrefs.brands,
-        fuelTypes: Array.isArray(parsed.preferences?.fuelTypes) ? parsed.preferences.fuelTypes : currentPrefs.fuelTypes,
-        passengers: parsed.preferences?.passengers ?? currentPrefs.passengers ?? null,
-        usage: Array.isArray(parsed.preferences?.usage) ? parsed.preferences.usage : currentPrefs.usage,
-      },
-      clarifyingQuestion: parsed.clarifyingQuestion ?? null,
-      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.slice(0, 4) : [],
-    };
-  } catch (err) {
-    logger.warn({ err, raw }, '[shopAssistant] Failed to parse preference extraction JSON');
-    return { preferences: currentPrefs, clarifyingQuestion: null, suggestions: [] };
-  }
-}
-
-// ─── Candidate scoring (deterministic — no AI, no hallucinated numbers) ───────
-
-function scoreVehicle(v: any, prefs: IShopPreferences) {
-  let score = 55;
-  const reasons: string[] = [];
-  const tradeoffs: string[] = [];
-
-  const bodyStyle = (v.bodyStyle || v.vehicleType || '').toLowerCase();
-  if (prefs.vehicleTypes.length) {
-    const hit = prefs.vehicleTypes.some((t) => bodyStyle.includes(t.toLowerCase()) || t.toLowerCase().includes(bodyStyle));
-    if (hit) { score += 18; reasons.push(`Matches the ${v.bodyStyle || v.vehicleType} body style you're after`); }
-  }
-
-  if (prefs.brands.length) {
-    const hit = prefs.brands.some((b) => b.toLowerCase() === (v.make || '').toLowerCase());
-    if (hit) { score += 15; reasons.push(`${v.make} is one of your preferred brands`); }
-  }
-
-  if (prefs.budgetMax != null) {
-    const min = prefs.budgetMin ?? 0;
-    if (v.price >= min && v.price <= prefs.budgetMax) {
-      score += 15;
-      reasons.push('Fits within your budget');
-    } else if (v.price > prefs.budgetMax) {
-      const over = v.price - prefs.budgetMax;
-      score -= 12;
-      tradeoffs.push(`$${over.toLocaleString()} over your ideal budget`);
-    }
-  }
-
-  if (prefs.fuelTypes.length) {
-    const hit = prefs.fuelTypes.some((f) => f.toLowerCase() === (v.fuelType || '').toLowerCase());
-    if (hit) { score += 10; reasons.push(`Runs on ${v.fuelType} as requested`); }
-  }
-
-  if (typeof v.mileage === 'number') {
-    if (v.mileage > 0 && v.mileage < 25000) { score += 6; reasons.push('Low mileage for the year'); }
-    else if (v.mileage > 90000) { score -= 6; tradeoffs.push('Higher mileage than average'); }
-  }
-
-  score = Math.max(35, Math.min(98, Math.round(score)));
-  return { score, reasons: reasons.slice(0, 3), tradeoffs: tradeoffs.slice(0, 2) };
-}
-
-function toRecommendation(v: any, prefs: IShopPreferences, memberPrice?: number) {
-  const { score, reasons, tradeoffs } = scoreVehicle(v, prefs);
-  const location = v.dealerCity ? `${v.dealerCity}${v.dealerState ? ', ' + v.dealerState : ''}` : undefined;
-  const specs = [v.mileage, v.fuelType, v.transmission, location].filter(Boolean);
-
-  return {
-    id: v._id.toString(),
-    name: `${v.year} ${v.make} ${v.modelName}${v.trim ? ' ' + v.trim : ''}`,
-    image: Array.isArray(v.images) && v.images.length ? v.images[0] : FALLBACK_IMAGE,
-    priceLabel: memberPrice && memberPrice < v.price
-      ? `$${memberPrice.toLocaleString()}`
-      : `$${(v.price || 0).toLocaleString()}`,
-    bodyStyle: v.bodyStyle || v.vehicleType || undefined,
-    matchScore: score,
-    specs,
-    mileage: v.mileage || undefined,
-    fuelType: v.fuelType || undefined,
-    transmission: v.transmission || undefined,
-    location,
-    matchReasons: reasons,
-    tradeoffs,
-  };
-}
-
-async function findCandidates(prefs: IShopPreferences, userId?: string | null) {
+async function fetchVehicleContext(prefs: IShopPreferences) {
   const filter: any = { status: 'Ready for Sale', isDeleted: false };
 
   if (prefs.brands.length) {
-    filter.make = { $in: prefs.brands.map((b) => new RegExp(`^${escapeRegex(b)}$`, 'i')) };
+    filter.make = { $in: prefs.brands.map((b) => new RegExp(`^${b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')) };
   }
   if (prefs.fuelTypes.length) {
-    filter.fuelType = { $in: prefs.fuelTypes.map((f) => new RegExp(`^${escapeRegex(f)}$`, 'i')) };
+    filter.fuelType = { $in: prefs.fuelTypes.map((f) => new RegExp(`^${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')) };
   }
   if (prefs.vehicleTypes.length) {
-    const patterns = prefs.vehicleTypes.map((t) => new RegExp(escapeRegex(t), 'i'));
+    const patterns = prefs.vehicleTypes.map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
     filter.$or = [{ bodyStyle: { $in: patterns } }, { vehicleType: { $in: patterns } }];
   }
   if (prefs.budgetMax != null) {
@@ -203,83 +62,114 @@ async function findCandidates(prefs: IShopPreferences, userId?: string | null) {
     if (prefs.budgetMin != null) filter.price.$gte = Math.round(prefs.budgetMin * 0.85);
   }
 
+  // If nothing scoped yet, just hand the model a representative recent sample —
+  // same idea as fetchModuleContext's "recentLeads" fallback when nothing is filtered.
   const pool = await Vehicle.find(filter)
     .sort({ dateAdded: -1 })
-    .limit(40)
+    .limit(30)
+    .select(
+      'year make modelName trim price mileage fuelType transmission bodyStyle vehicleType dealerCity dealerState images'
+    )
     .lean();
 
-  if (!pool.length) return [];
-
-  let memberDiscountPercent = 0;
-  if (userId) {
-    try {
-      const member = await membershipService.getMemberPricingForUser(userId);
-      memberDiscountPercent = member?.discountPercent ?? 0;
-    } catch {
-      // non-fatal — proceed without member pricing
-    }
-  }
-
-  const scored = pool
-    .map((v: any) => {
-      const memberPrice = memberDiscountPercent > 0
-        ? membershipService.computeMemberPrice(v.price, v.cost, memberDiscountPercent)
-        : undefined;
-      return { v, rec: toRecommendation(v, prefs, memberPrice) };
-    })
-    .sort((a, b) => b.rec.matchScore - a.rec.matchScore)
-    .slice(0, 4)
-    .map((x) => x.rec);
-
-  return scored;
-}
-
-async function buildInventoryBlurb() {
-  const [total, makes, priceStats] = await Promise.all([
+  const [total, makes] = await Promise.all([
     Vehicle.countDocuments({ status: 'Ready for Sale', isDeleted: false }),
     Vehicle.distinct('make', { status: 'Ready for Sale', isDeleted: false }),
-    Vehicle.aggregate([
-      { $match: { status: 'Ready for Sale', isDeleted: false, price: { $gt: 0 } } },
-      { $group: { _id: null, min: { $min: '$price' }, max: { $max: '$price' } } },
-    ]),
   ]);
-  const range = priceStats[0];
-  return `${total} vehicles currently available across our dealer network. Makes on the lot: ${makes.slice(0, 25).join(', ') || 'various'}. Price range: ${range ? `$${range.min.toLocaleString()} - $${range.max.toLocaleString()}` : 'varies'}.`;
+
+  return {
+    totalAvailable: total,
+    allMakesOnLot: makes.slice(0, 30),
+    candidateVehicles: pool.map((v: any) => ({
+      id: v._id.toString(),
+      year: v.year,
+      make: v.make,
+      model: v.modelName,
+      trim: v.trim || '',
+      price: v.price || 0,
+      mileage: v.mileage || 0,
+      fuelType: v.fuelType || 'Gasoline',
+      transmission: v.transmission || 'Automatic',
+      bodyStyle: v.bodyStyle || v.vehicleType || '',
+      location: v.dealerCity ? `${v.dealerCity}${v.dealerState ? ', ' + v.dealerState : ''}` : 'Unknown',
+    })),
+  };
 }
 
-// ─── Reply composition (AI call #2 — only runs when we have real matches) ─────
+// ─── System prompt — same job as supraLeo's buildSystemPrompt() ───────────────
 
-async function composeReply(
-  userMessage: string,
-  recommendations: ReturnType<typeof toRecommendation>[],
-  prefs: IShopPreferences
-): Promise<string> {
-  const vehicleList = recommendations
-    .map((r) => `- ${r.name}, ${r.priceLabel}, ${r.matchScore}% match, ${r.mileage ? r.mileage.toLocaleString() + ' mi, ' : ''}${r.fuelType || ''}`)
-    .join('\n');
+function buildSystemPrompt(contextData: any, prefs: IShopPreferences): string {
+  return `You are Suprah Autrix, the intelligent AI vehicle-shopping assistant embedded in a multi-dealer marketplace. You are warm, confident, and genuinely helpful — never pushy.
 
-  const systemPrompt = `You are Suprah Autrix, a warm and knowledgeable vehicle shopping assistant for a multi-dealer marketplace. You just ran a real inventory search and found these actual matching vehicles — reference them naturally by name, do not invent specs beyond what's given:
+Current time: ${new Date().toLocaleString()}
+Known customer preferences so far: ${JSON.stringify(prefs)}
 
-${vehicleList}
+Live inventory context (this is REAL, currently available stock — you may ONLY recommend vehicles from this list, never invent a vehicle or specs that aren't here):
+Total vehicles available across the network: ${contextData.totalAvailable}
+Makes on the lot: ${contextData.allMakesOnLot.join(', ') || 'various'}
+Candidate vehicles matching the conversation so far:
+${JSON.stringify(contextData.candidateVehicles, null, 2)}
 
-Known preferences so far: ${JSON.stringify(prefs)}
+Your job:
+- Understand what the customer wants (type, budget, brand, fuel, usage, passengers) from the conversation
+- Update and track their preferences as the conversation progresses — carry forward what you already know, only change it if they contradict themselves
+- Recommend up to 4 vehicles STRICTLY from the candidate list above, ranked best-fit first
+- If the candidate list is empty or nothing truly fits, say so honestly and suggest what to adjust (budget, body style) rather than forcing a bad match
+- If you don't have enough info yet (no body style, budget, or brand mentioned at all), ask ONE short clarifying question instead of guessing
 
-Write a short, conversational reply (2-4 sentences) responding to the user's message, pointing them toward these matches. Don't repeat prices/specs verbatim (they're shown as cards below your message) — just set context and highlight what stands out. End on a helpful, low-pressure note. No markdown headers, plain conversational text with **bold** allowed for emphasis.`;
-
-  const response = await gemini.chat.completions.create({
-    model: GEMINI_MODEL,
-    max_tokens: 300,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage },
-    ],
-    stream: false,
-  });
-
-  return response.choices[0]?.message?.content?.trim() || `I found ${recommendations.length} good matches for you below.`;
+Respond with ONLY this JSON — no markdown fences, no commentary outside the JSON:
+{
+  "reply": "2-4 sentence conversational reply, plain text, **bold** allowed for emphasis, no headers",
+  "preferences": {
+    "vehicleTypes": string[],
+    "budgetMin": number | null,
+    "budgetMax": number | null,
+    "brands": string[],
+    "fuelTypes": string[],
+    "passengers": number | null,
+    "usage": string[]
+  },
+  "recommendedVehicleIds": string[],   // "id" values copied EXACTLY from the candidate list, 0-4 items, best match first
+  "matchNotes": { "<vehicleId>": { "reasons": string[], "tradeoffs": string[] } },  // 1-3 short reasons/tradeoffs per recommended id, plain text, no numbers
+  "suggestions": string[]   // 3 short follow-up phrases phrased as if the USER is saying them
+}`;
 }
 
-// ─── Controllers ─────────────────────────────────────────────────────────────
+// ─── Hydration — numbers always come from the DB record, never from the model ─
+
+function hydrateRecommendation(vehicleDoc: any, notes: { reasons?: string[]; tradeoffs?: string[] } | undefined, prefs: IShopPreferences, memberPrice?: number) {
+  const location = vehicleDoc.dealerCity ? `${vehicleDoc.dealerCity}${vehicleDoc.dealerState ? ', ' + vehicleDoc.dealerState : ''}` : undefined;
+  const specs = [vehicleDoc.mileage, vehicleDoc.fuelType, vehicleDoc.transmission, location].filter(Boolean);
+
+  // Lightweight deterministic score purely for the badge — never AI-generated,
+  // so the % shown on the card can't be hallucinated.
+  let score = 60;
+  if (prefs.vehicleTypes.length) {
+    const bs = (vehicleDoc.bodyStyle || vehicleDoc.vehicleType || '').toLowerCase();
+    if (prefs.vehicleTypes.some((t) => bs.includes(t.toLowerCase()))) score += 15;
+  }
+  if (prefs.brands.length && prefs.brands.some((b) => b.toLowerCase() === (vehicleDoc.make || '').toLowerCase())) score += 15;
+  if (prefs.budgetMax != null && vehicleDoc.price <= prefs.budgetMax) score += 10;
+  score = Math.max(40, Math.min(97, score));
+
+  return {
+    id: vehicleDoc._id.toString(),
+    name: `${vehicleDoc.year} ${vehicleDoc.make} ${vehicleDoc.modelName}${vehicleDoc.trim ? ' ' + vehicleDoc.trim : ''}`,
+    image: Array.isArray(vehicleDoc.images) && vehicleDoc.images.length ? vehicleDoc.images[0] : FALLBACK_IMAGE,
+    priceLabel: memberPrice && memberPrice < vehicleDoc.price ? `$${memberPrice.toLocaleString()}` : `$${(vehicleDoc.price || 0).toLocaleString()}`,
+    bodyStyle: vehicleDoc.bodyStyle || vehicleDoc.vehicleType || undefined,
+    matchScore: score,
+    specs,
+    mileage: vehicleDoc.mileage || undefined,
+    fuelType: vehicleDoc.fuelType || undefined,
+    transmission: vehicleDoc.transmission || undefined,
+    location,
+    matchReasons: (notes?.reasons || []).slice(0, 3),
+    tradeoffs: (notes?.tradeoffs || []).slice(0, 2),
+  };
+}
+
+// ─── Controller — same shape as supraLeo's chat() ──────────────────────────────
 
 export const chat = asyncHandler(async (req: Request, res: Response) => {
   const { message } = req.body;
@@ -294,12 +184,6 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     chatDoc = await ShopAssistantChat.create({ sessionId, userId, preferences: emptyPreferences(), messages: [] });
   }
 
-  const history = chatDoc.messages.slice(-12).map((m: any) => ({
-    role: m.role as 'user' | 'assistant',
-    content: m.content,
-  }));
-
-  const inventoryBlurb = await buildInventoryBlurb();
   const currentPrefs: IShopPreferences = {
     vehicleTypes: chatDoc.preferences?.vehicleTypes || [],
     budgetMin: chatDoc.preferences?.budgetMin ?? null,
@@ -310,37 +194,81 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     usage: chatDoc.preferences?.usage || [],
   };
 
-  const { preferences, clarifyingQuestion, suggestions } = await extractPreferences(
-    history,
-    currentPrefs,
-    message.trim(),
-    inventoryBlurb
-  );
+  // 1. Fetch real inventory context — same role as fetchModuleContext()
+  const contextData = await fetchVehicleContext(currentPrefs);
 
-  const hasAnyFilter =
-    preferences.vehicleTypes.length ||
-    preferences.brands.length ||
-    preferences.fuelTypes.length ||
-    preferences.budgetMax != null;
+  // 2. Build system prompt with that context baked in
+  const systemPrompt = buildSystemPrompt(contextData, currentPrefs);
 
-  let recommendations: ReturnType<typeof toRecommendation>[] = [];
-  let replyText: string;
+  // 3. Recent turns + latest message — same as supraLeo
+  const recentMessages = chatDoc.messages.slice(-20).map((m: any) => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }));
+  recentMessages.push({ role: 'user', content: message.trim() });
 
-  if (hasAnyFilter) {
-    recommendations = await findCandidates(preferences, userId);
+  // 4. ONE Gemini call — same as supraLeo's non-streaming branch
+  const response = await gemini.chat.completions.create({
+    model: GEMINI_MODEL,
+    max_tokens: 1024,
+    messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
+    stream: false,
+  });
+
+  const raw = response.choices[0]?.message?.content || '{}';
+  let parsed: any;
+  try {
+    parsed = JSON.parse(stripJsonFences(raw));
+  } catch (err) {
+    logger.warn({ err, raw }, '[shopAssistant] Failed to parse model JSON');
+    parsed = { reply: raw, preferences: currentPrefs, recommendedVehicleIds: [], matchNotes: {}, suggestions: [] };
   }
 
-  if (recommendations.length > 0) {
-    replyText = await composeReply(message.trim(), recommendations, preferences);
-  } else if (clarifyingQuestion) {
-    replyText = clarifyingQuestion;
-  } else if (hasAnyFilter) {
-    replyText = "I couldn't find an exact match for that in our current inventory — want to widen the budget or body style a bit?";
-  } else {
-    replyText = "Tell me a bit more — what type of vehicle, budget, or brand are you thinking about?";
+  const nextPrefs: IShopPreferences = {
+    vehicleTypes: Array.isArray(parsed.preferences?.vehicleTypes) ? parsed.preferences.vehicleTypes : currentPrefs.vehicleTypes,
+    budgetMin: parsed.preferences?.budgetMin ?? currentPrefs.budgetMin ?? null,
+    budgetMax: parsed.preferences?.budgetMax ?? currentPrefs.budgetMax ?? null,
+    brands: Array.isArray(parsed.preferences?.brands) ? parsed.preferences.brands : currentPrefs.brands,
+    fuelTypes: Array.isArray(parsed.preferences?.fuelTypes) ? parsed.preferences.fuelTypes : currentPrefs.fuelTypes,
+    passengers: parsed.preferences?.passengers ?? currentPrefs.passengers ?? null,
+    usage: Array.isArray(parsed.preferences?.usage) ? parsed.preferences.usage : currentPrefs.usage,
+  };
+
+  // 5. Hydrate recommendations — cross-check every id against the ACTUAL candidate
+  //    pool the model was given. Anything hallucinated (id not in our list) is dropped.
+  const candidateIds = new Set(contextData.candidateVehicles.map((v: any) => v.id));
+  const requestedIds: string[] = Array.isArray(parsed.recommendedVehicleIds) ? parsed.recommendedVehicleIds : [];
+  const validIds = requestedIds.filter((id) => candidateIds.has(id)).slice(0, 4);
+
+  let recommendations: ReturnType<typeof hydrateRecommendation>[] = [];
+  if (validIds.length) {
+    const vehicleDocs = await Vehicle.find({ _id: { $in: validIds } }).lean();
+
+    let memberDiscountPercent = 0;
+    if (userId) {
+      try {
+        const member = await membershipService.getMemberPricingForUser(userId);
+        memberDiscountPercent = member?.discountPercent ?? 0;
+      } catch {
+        // non-fatal
+      }
+    }
+
+    const byId = new Map(vehicleDocs.map((v: any) => [v._id.toString(), v]));
+    recommendations = validIds
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((v: any) => {
+        const memberPrice = memberDiscountPercent > 0 ? membershipService.computeMemberPrice(v.price, v.cost, memberDiscountPercent) : undefined;
+        return hydrateRecommendation(v, parsed.matchNotes?.[v._id.toString()], nextPrefs, memberPrice);
+      });
   }
 
-  chatDoc.preferences = preferences as any;
+  const replyText: string = parsed.reply || "Let me know what you're looking for — type, budget, or brand — and I'll check our live inventory.";
+  const suggestions: string[] = Array.isArray(parsed.suggestions) ? parsed.suggestions.slice(0, 4) : [];
+
+  // 6. Persist — same pattern as supraLeo's chatDoc.messages.push(...) + save()
+  chatDoc.preferences = nextPrefs as any;
   chatDoc.messages.push({ role: 'user', content: message.trim(), createdAt: new Date() } as any);
   chatDoc.messages.push({
     role: 'assistant',
@@ -351,45 +279,18 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
   if (chatDoc.messages.length > 100) chatDoc.messages.splice(0, chatDoc.messages.length - 100);
   await chatDoc.save();
 
-  logger.info({ sessionId, recCount: recommendations.length }, '[shopAssistant] chat turn processed');
-
   res.json(
-    new ApiResponse(
-      200,
-      {
-        sessionId,
-        message: replyText,
-        recommendations,
-        preferences,
-        suggestions,
-      },
-      'Response generated'
-    )
+    new ApiResponse(200, { sessionId, message: replyText, recommendations, preferences: nextPrefs, suggestions }, 'Response generated')
   );
 });
 
 export const getSession = asyncHandler(async (req: Request, res: Response) => {
   const sessionId = getSessionId(req);
   const chatDoc = await ShopAssistantChat.findOne({ sessionId }).lean();
-
   if (!chatDoc) {
-    return res.json(
-      new ApiResponse(200, { sessionId, messages: [], preferences: emptyPreferences(), suggestions: [] }, 'New session')
-    );
+    return res.json(new ApiResponse(200, { sessionId, messages: [], preferences: emptyPreferences(), suggestions: [] }, 'New session'));
   }
-
-  res.json(
-    new ApiResponse(
-      200,
-      {
-        sessionId,
-        messages: chatDoc.messages,
-        preferences: chatDoc.preferences,
-        suggestions: [],
-      },
-      'Session fetched'
-    )
-  );
+  res.json(new ApiResponse(200, { sessionId, messages: chatDoc.messages, preferences: chatDoc.preferences, suggestions: [] }, 'Session fetched'));
 });
 
 export const resetSession = asyncHandler(async (req: Request, res: Response) => {
