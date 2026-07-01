@@ -91,11 +91,13 @@ export class SyncService {
       );
     };
 
-    // Helper for image array
+    // Helper for image array.
+    // DealersCloud may separate photo URLs with commas, pipes, semicolons or
+    // spaces — split on any of them so images populate regardless of format.
     const parseImages = (val: string) => {
       if (!val) return [];
       return val
-        .split(",")
+        .split(/[|;,\s]+/)
         .map((url) => url.trim())
         .filter((url) => url.length > 0);
     };
@@ -279,7 +281,10 @@ export class SyncService {
           relax_quotes: true,
           relax_column_count: true,
           skip_records_with_error: true,
-          delimiter: "\t", // DealersCloud TSV format
+          // Auto-detect the delimiter: DealersCloud has sent BOTH comma-separated
+          // (.csv) and tab-separated (.txt) files. Passing an array lets csv-parse
+          // pick whichever actually delimits the file, so both formats work.
+          delimiter: [",", "\t"],
         }),
       );
 
@@ -302,17 +307,29 @@ export class SyncService {
 
       parser.on("end", async () => {
         try {
-          const deletionResult = await this.handleDeletions(csvVins);
+          // SAFETY: only run deletions if the feed actually produced vehicles.
+          // If parsing yields zero VINs (e.g. a malformed file or wrong
+          // delimiter), skip deletions so we never wipe the whole inventory
+          // off the back of an empty/broken parse.
+          let deletedCount = 0;
+          if (csvVins.size > 0) {
+            const deletionResult = await this.handleDeletions(csvVins);
+            deletedCount = deletionResult.deletedCount;
+          } else {
+            console.warn(
+              "[SyncService] ⚠️ Feed produced 0 VINs — skipping deletions to protect existing inventory. Check the file's delimiter/headers.",
+            );
+          }
 
           syncLog.vehiclesProcessed = processed;
           syncLog.vehiclesAdded = added;
           syncLog.vehiclesUpdated = updated;
-          syncLog.vehiclesDeleted = deletionResult.deletedCount;
+          syncLog.vehiclesDeleted = deletedCount;
 
           resolve({
             added,
             updated,
-            deleted: deletionResult.deletedCount,
+            deleted: deletedCount,
             processed,
           });
         } catch (err) {
