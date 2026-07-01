@@ -57,6 +57,7 @@ import auctionListingReviewRoute from "./auctionListingReview.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
 import customerInviteRoute from "./customerInvite.routes";
+import shopAssistantRoute from "./shopAssistant.route";
 
 const router = express.Router();
 
@@ -280,6 +281,10 @@ const defaultRoutes = [
   {
     path: "/customer/saved-vehicles",
     route: savedVehicleRoute,
+  },
+  {
+    path: "/shop-assistant",
+    route: shopAssistantRoute,
   },
   {
     path: "/customer/auction-listings",
