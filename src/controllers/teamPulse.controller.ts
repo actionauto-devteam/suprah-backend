@@ -10,6 +10,7 @@ import Notification from '../models/Notification.model';
 import FeedReaction, { REACTION_TYPES } from '../models/FeedReaction.model';
 import ActivityLog from '../models/ActivityLog.model';
 import PresenceEvent from '../models/PresenceEvent.model';
+import EmployeeLocation from '../models/EmployeeLocation.model';
 import { emitToOrg, emitToUser } from '../utils/socketEmitter';
 import { BucketType, storageService } from '../services/storage.service';
 
@@ -43,15 +44,18 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
         organizationId: orgId,
         role: { $in: ['employee', 'admin', 'super_admin'] },
     })
-        .select('name avatar onlineStatus customStatus lastActive role personalInfo breakStatus')
+        .select('name avatar onlineStatus customStatus statusIsManual lastActive role personalInfo breakStatus employmentLocationType locationConsent')
         .lean();
 
     const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
 
-    const AUTO_STATUSES = ['online', 'idle', 'away'];
+    // Only override the DISPLAYED status for members in automatic mode (statusIsManual === false)
+    // whose heartbeat has gone stale — i.e. their tab/app is no longer reporting in, so whatever
+    // "online"/"away" value is stored is out of date and they should read as offline. A manually
+    // chosen status (including a manually-set "Away" or "Invisible") is never overridden here.
     const adjusted = members.map((m) => {
         const stale = !m.lastActive || new Date(m.lastActive) < cutoff;
-        const effectiveStatus = (AUTO_STATUSES.includes(m.onlineStatus) && stale) ? 'offline' : m.onlineStatus;
+        const effectiveStatus = (!m.statusIsManual && stale) ? 'offline' : m.onlineStatus;
         return { ...m, onlineStatus: effectiveStatus };
     });
 
@@ -61,6 +65,35 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
     });
 
     res.json(new ApiResponse(200, adjusted, 'Team members fetched'));
+});
+
+const setEmploymentLocationType = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser;
+    const orgId = req.orgId as string;
+    const { userId } = req.params;
+    const { employmentLocationType } = req.body as { employmentLocationType: 'onsite' | 'remote' };
+
+    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    if (!isAdmin) throw new ApiError(403, 'Only admins can change an employee\'s location type');
+    if (!['onsite', 'remote'].includes(employmentLocationType)) throw new ApiError(400, 'Invalid employment location type');
+
+    const member = await User.findOne({ _id: userId, organizationId: orgId });
+    if (!member) throw new ApiError(404, 'Team member not found');
+
+    member.employmentLocationType = employmentLocationType;
+    await member.save();
+
+    if (employmentLocationType === 'remote') {
+        await EmployeeLocation.findOneAndUpdate(
+            { userId },
+            { sharingState: 'off_duty', $unset: { currentPlaceId: '' } },
+        );
+        emitToOrg(orgId, 'locator:sharing_state_changed', { userId, sharingState: 'off_duty' });
+    }
+
+    emitToOrg(orgId, 'team-pulse:member_updated', { userId, employmentLocationType });
+
+    res.json(new ApiResponse(200, { userId, employmentLocationType }, 'Employment location type updated'));
 });
 
 // ── Absences ──────────────────────────────────────────────────────────────────
@@ -794,7 +827,7 @@ const endBreak = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export default {
-    getMembers,
+    getMembers, setEmploymentLocationType,
     getAbsences, createAbsence, updateAbsence, deleteAbsence,
     approveAbsence, rejectAbsence, uploadAbsenceProof,
     getBoardNotes, createBoardNote, updateBoardNote, deleteBoardNote, togglePinNote, reorderBoardNotes,

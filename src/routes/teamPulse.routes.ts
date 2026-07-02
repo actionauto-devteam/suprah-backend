@@ -20,6 +20,7 @@ router.use(auth());
 
 // Members
 router.get('/members', teamPulseController.getMembers);
+router.patch('/members/:userId/employment-location', teamPulseController.setEmploymentLocationType);
 
 // Absences
 router.get('/absences',                          teamPulseController.getAbsences);

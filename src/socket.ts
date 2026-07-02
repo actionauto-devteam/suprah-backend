@@ -168,9 +168,14 @@ export const setupSocket = (io: Server) => {
       }
       if (socket.userId) {
         try {
-          const MANUAL_STATUSES = ['away', 'busy', 'do_not_disturb'];
-          const user = await User.findById(socket.userId).select('onlineStatus organizationId name avatar').lean();
-          if (user && !MANUAL_STATUSES.includes(user.onlineStatus)) {
+          // A socket.io room reflects sockets that are STILL connected (this socket has
+          // already left it by the time 'disconnect' fires) — so if the user has another
+          // tab/device open, skip touching presence entirely; that device owns it now.
+          const room = io.sockets.adapter.rooms.get(`user:${socket.userId}`);
+          if (room && room.size > 0) return;
+
+          const user = await User.findById(socket.userId).select('onlineStatus statusIsManual organizationId name avatar').lean();
+          if (user && !user.statusIsManual) {
             await User.findByIdAndUpdate(socket.userId, { onlineStatus: 'offline' });
             const orgId = socket.organizationId || user.organizationId?.toString();
             if (orgId) {

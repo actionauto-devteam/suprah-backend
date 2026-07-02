@@ -54,8 +54,13 @@ export interface IUser extends Document {
   // New profile fields
   onlineStatus: OnlineStatus;
   customStatus?: string;
+  // True once the user has explicitly chosen a status (anything but the automatic "online" state).
+  // While true, presence heartbeats never overwrite onlineStatus — only the user (or statusExpiresAt lapsing) can.
+  statusIsManual: boolean;
   personalInfo?: IPersonalInfo;
   lastActive?: Date;
+  // Last real user interaction (mouse/keyboard/touch) across ANY device — drives the 30-min auto-away timer.
+  lastInteractionAt?: Date;
   lastPasswordChange?: Date;
   breakStatus?: {
     isOnBreak: boolean;
@@ -63,6 +68,12 @@ export interface IUser extends Document {
   };
   statusExpiresAt?: Date;
   onboardingCompleted: boolean;
+  employmentLocationType: "onsite" | "remote";
+  locationConsent?: {
+    granted: boolean;
+    grantedAt?: Date;
+    deviceHint?: string;
+  };
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -195,6 +206,10 @@ const UserSchema = new Schema(
       type: String,
       maxlength: 100,
     },
+    statusIsManual: {
+      type: Boolean,
+      default: false,
+    },
     personalInfo: {
       bio: { type: String, maxlength: 500 },
       phone: { type: String },
@@ -217,6 +232,10 @@ const UserSchema = new Schema(
       type: Date,
       default: Date.now,
     },
+    lastInteractionAt: {
+      type: Date,
+      default: Date.now,
+    },
     breakStatus: {
       isOnBreak: { type: Boolean, default: false },
       startedAt: { type: Date },
@@ -224,6 +243,16 @@ const UserSchema = new Schema(
     statusExpiresAt: {
       type: Date,
       default: null,
+    },
+    employmentLocationType: {
+      type: String,
+      enum: ['onsite', 'remote'],
+      default: 'remote',
+    },
+    locationConsent: {
+      granted: { type: Boolean, default: false },
+      grantedAt: { type: Date },
+      deviceHint: { type: String },
     },
     lastPasswordChange: {
       type: Date,

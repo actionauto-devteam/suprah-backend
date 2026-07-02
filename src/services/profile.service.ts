@@ -208,9 +208,14 @@ const updateProfile = async (userId: string, updateData: {
  * Update online status
  */
 const updateOnlineStatus = async (userId: string, status: OnlineStatus, customStatus?: string, statusExpiresAt?: Date | null) => {
+  const now = new Date();
   const updateData: Record<string, unknown> = {
     onlineStatus: status,
-    lastActive: new Date(),
+    lastActive: now,
+    lastInteractionAt: now,
+    // Any explicit choice other than "online" is a manual override that heartbeats must not clear.
+    // Choosing "online" explicitly returns the user to automatic (heartbeat-driven) presence.
+    statusIsManual: status !== 'online',
   };
 
   if (customStatus !== undefined) updateData.customStatus = customStatus;

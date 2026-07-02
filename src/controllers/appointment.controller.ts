@@ -14,6 +14,7 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
+import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
 
 /**
  * Create a new appointment (with customer booking support)
@@ -307,6 +308,30 @@ const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
           description: `${isTestDrive ? 'Test drive' : 'Service appointment'} completed`,
           metadata: { appointmentId: appointment._id!.toString(), type: appointment.type },
         }).catch((err: unknown) => logger.error({ err }, 'Membership: appointment credit failed'));
+      }
+    }
+
+    const isTestDriveAppointment = (appointment.type || '').toLowerCase().includes('test_drive') || (appointment.type || '').toLowerCase().includes('test drive');
+    if (isTestDriveAppointment && orgId && prevAppointment?.status !== appointment.status) {
+      if (appointment.status === 'confirmed') {
+        const staffIds = [
+          ...(appointment.createdByModel === 'User' ? [appointment.createdBy?.toString()] : []),
+          ...(appointment.participantModel === 'User' ? appointment.participants.map(p => p.toString()) : []),
+        ].filter(Boolean) as string[];
+
+        User.findOne({
+          _id: { $in: staffIds },
+          employmentLocationType: 'onsite',
+          'locationConsent.granted': true,
+        }).select('_id name').lean().then(driver => {
+          if (driver) {
+            startDrivingSessionForAppointment(orgId, appointment._id!.toString(), driver._id.toString(), driver.name, appointment.vehicleId?.toString())
+              .catch((err: unknown) => logger.error({ err }, 'Locator: failed to start driving session'));
+          }
+        }).catch(() => {});
+      } else if (['completed', 'cancelled', 'no-show'].includes(appointment.status)) {
+        endDrivingSessionForAppointment(appointment._id!.toString())
+          .catch((err: unknown) => logger.error({ err }, 'Locator: failed to end driving session'));
       }
     }
 

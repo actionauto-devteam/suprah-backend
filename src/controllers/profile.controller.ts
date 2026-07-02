@@ -46,13 +46,14 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
 /**
  * Update online status
  */
-const PRESENCE_LOG_STATUSES = new Set(['offline', 'away', 'busy', 'do_not_disturb']);
+const PRESENCE_LOG_STATUSES = new Set(['offline', 'away', 'busy', 'do_not_disturb', 'idle']);
 const PRESENCE_DESCS: Record<string, (name: string) => string> = {
   online:           (n) => `${n} is back Online`,
   offline:          (n) => `${n} went Offline`,
   away:             (n) => `${n} is Away`,
   busy:             (n) => `${n} set status to Busy`,
   do_not_disturb:   (n) => `${n} set Do Not Disturb`,
+  idle:             (n) => `${n} set status to Idle`,
 };
 
 const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
@@ -65,12 +66,14 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   const validStatuses = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'];
   if (!validStatuses.includes(status)) throw new ApiError(400, 'Invalid status value');
 
-  const needsPrev = status === 'online';
-  const currentUser = (PRESENCE_LOG_STATUSES.has(status) || needsPrev)
-    ? await User.findById(userId).select('name avatar onlineStatus').lean()
-    : null;
+  // Always fetch the current doc: we need it both to detect a genuine no-op (so we don't
+  // spam the activity feed by re-logging the same status every time this endpoint is hit)
+  // and to compare custom-status text.
+  const currentUser = await User.findById(userId).select('name avatar onlineStatus customStatus').lean();
 
   const prevStatus = currentUser?.onlineStatus;
+  const prevCustom = currentUser?.customStatus ?? '';
+  const nextCustom = customStatus ?? '';
 
   const statusExpiresAt = expiresIn && Number.isFinite(Number(expiresIn)) && Number(expiresIn) > 0
     ? new Date(Date.now() + Number(expiresIn) * 60_000)
@@ -87,9 +90,14 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
       statusExpiresAt: statusExpiresAt?.toISOString() ?? null,
     });
 
+    const statusChanged = status !== prevStatus;
+    const customChanged = nextCustom !== prevCustom;
+    // Only write a new activity-feed entry on an actual transition — never for a
+    // re-submit of the status the user (or a heartbeat) already has in place.
     const shouldLog =
-      PRESENCE_LOG_STATUSES.has(status) ||
-      (status === 'online' && prevStatus && !['online', 'idle'].includes(prevStatus));
+      (statusChanged && PRESENCE_LOG_STATUSES.has(status)) ||
+      (statusChanged && status === 'online' && prevStatus && !['online'].includes(prevStatus)) ||
+      (!statusChanged && customChanged && nextCustom.length > 0);
 
     if (shouldLog && currentUser) {
       const descFn = PRESENCE_DESCS[status];
@@ -271,31 +279,56 @@ const updateTheme = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-const MANUAL_STATUSES_SET = new Set(['away', 'busy', 'do_not_disturb']);
+// A user's presence is "automatic" (statusIsManual === false) until they explicitly pick a
+// status other than Online. In automatic mode, this heartbeat is the ONLY thing that ever
+// moves onlineStatus — it derives online/away from real interaction timestamps that are
+// shared across every device the user is signed into, so no single tab/device can clobber
+// another device's state. Manual statuses (including a manually-chosen "Away" or "Invisible")
+// are frozen and untouched here except for the pre-existing statusExpiresAt auto-clear.
+const AWAY_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes of inactivity
 
 const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const orgId = (req as any).orgId as string | undefined;
+  // Whether the calling device has observed real user interaction (mouse/keyboard/touch)
+  // since its last heartbeat. Defaults to true so a fresh page load counts as activity.
+  const isActive = req.body?.isActive !== false;
 
   const current = await User.findById(userId)
-    .select('onlineStatus customStatus statusExpiresAt name avatar')
+    .select('onlineStatus customStatus statusExpiresAt statusIsManual lastInteractionAt name avatar')
     .lean();
 
   const now = new Date();
   const updateData: any = { lastActive: now };
   let statusExpired = false;
+  let autoTransitionTo: 'online' | 'away' | null = null;
 
   if (current?.statusExpiresAt && current.statusExpiresAt < now) {
     updateData.onlineStatus = 'online';
     updateData.customStatus = '';
     updateData.statusExpiresAt = null;
+    updateData.statusIsManual = false;
+    updateData.lastInteractionAt = now;
     statusExpired = true;
-  } else if (current?.onlineStatus === 'offline') {
-    updateData.onlineStatus = 'online';
+  } else if (!current?.statusIsManual) {
+    if (isActive) {
+      updateData.lastInteractionAt = now;
+      if (current?.onlineStatus !== 'online') {
+        autoTransitionTo = 'online';
+        updateData.onlineStatus = 'online';
+      }
+    } else {
+      const lastInteraction = current?.lastInteractionAt ? new Date(current.lastInteractionAt) : now;
+      const inactiveMs = now.getTime() - lastInteraction.getTime();
+      if (inactiveMs >= AWAY_THRESHOLD_MS && current?.onlineStatus !== 'away') {
+        autoTransitionTo = 'away';
+        updateData.onlineStatus = 'away';
+      }
+    }
   }
 
   const updated = await User.findByIdAndUpdate(userId, updateData, { new: true })
-    .select('onlineStatus customStatus lastActive').lean();
+    .select('onlineStatus customStatus lastActive statusIsManual').lean();
 
   if (orgId && updated) {
     emitToOrg(orgId, 'presence_update', {
@@ -315,10 +348,26 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
         description: `${current.name} status cleared (expired)`,
       });
       emitToOrg(orgId, 'activity:new', event);
+    } else if (autoTransitionTo && current) {
+      const event = await PresenceEvent.create({
+        organizationId: orgId,
+        userId,
+        userName: current.name,
+        userAvatar: current.avatar,
+        type: autoTransitionTo,
+        description: autoTransitionTo === 'away'
+          ? `${current.name} is Away (inactive 30m)`
+          : `${current.name} is back Online`,
+      });
+      emitToOrg(orgId, 'activity:new', event);
     }
   }
 
-  res.json(new ApiResponse(200, { onlineStatus: updated?.onlineStatus ?? 'online' }, 'ok'));
+  res.json(new ApiResponse(
+    200,
+    { onlineStatus: updated?.onlineStatus ?? 'online', statusIsManual: updated?.statusIsManual ?? false },
+    'ok'
+  ));
 });
 
 export default {
