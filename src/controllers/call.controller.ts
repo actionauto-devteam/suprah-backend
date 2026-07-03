@@ -1,17 +1,36 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import Call, { ICall } from '../models/Call.model';
+import CrmUser from '../models/CrmUser.model';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
+import User from '../models/User.model';
+import appointmentService from '../services/appointment.service';
 import { getIO } from '../socket/supraspace.socket';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import config from '../config';
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
 const DEFAULT_MEETING_DOMAIN = 'actionautoutah.com';
+const SUPRA_MEETING_DEPARTMENTS = [
+  'SalesAndFinance',
+  'Accounting',
+  'Recon',
+  'Marketing',
+  'OnlineTeam',
+  'WebDevTeam',
+  'WholesaleTeam',
+  'BuyingTeam',
+  'OperationsTeam',
+  'LotTechTeam',
+  'FundingTeam',
+  'ProspectsTeam',
+  'PriceCheckTeam',
+];
 
 const formatDuration = (sec: number) => {
   const h = Math.floor(sec / 3600);
@@ -145,26 +164,25 @@ export const startCall = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/calls/meeting  { conversationId, title, scheduledAt?, optionalMessage? }
- * Creates a shareable scheduled SupraSpace meeting and posts an invite card to chat.
+ * POST /api/calls/meeting  { conversationId?, title, scheduledAt?, optionalMessage? }
+ * Creates a shareable scheduled SupraSpace meeting. When conversationId is
+ * provided, it also posts an invite card to chat.
  */
 export const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
   const userId = crmUser._id;
   const { conversationId, title, scheduledAt, optionalMessage } = req.body;
-  if (!conversationId) throw new ApiError(400, 'conversationId is required');
   if (!title?.trim()) throw new ApiError(400, 'Meeting title is required');
 
-  const conversation = await assertMember(conversationId, userId);
+  const conversation = conversationId ? await assertMember(conversationId, userId) : null;
   const meetingId = crypto.randomUUID();
   const roomName = `meeting-${meetingId}`;
   const meetingLink = buildMeetingLink(meetingId);
   const scheduledDate = scheduledAt ? new Date(scheduledAt) : new Date();
 
-  const call = await Call.create({
+  const callPayload: any = {
     meetingId,
     roomName,
-    conversationId,
     initiatedBy: userId,
     moderatorUserId: userId,
     participants: [],
@@ -178,7 +196,19 @@ export const createMeeting = asyncHandler(async (req: Request, res: Response) =>
     approvedUsers: [],
     admissionRequests: [],
     startedAt: scheduledDate,
-  });
+  };
+  if (conversationId) {
+    callPayload.conversationId = conversationId;
+  } else {
+    callPayload.conversationId = new mongoose.Types.ObjectId();
+    callPayload.isStandaloneMeeting = true;
+  }
+
+  const call = await Call.create(callPayload);
+
+  if (!conversationId || !conversation) {
+    return res.status(201).json(new ApiResponse(201, { call, meetingLink }, 'Meeting link created'));
+  }
 
   const contentLines = [
     optionalMessage?.trim() || '',
@@ -224,6 +254,106 @@ export const createMeeting = asyncHandler(async (req: Request, res: Response) =>
   res.status(201).json(new ApiResponse(201, { call, message: messageForClient, meetingLink }, 'Meeting created'));
 });
 
+/**
+ * POST /api/calls/meeting/schedule
+ * Body: { title, description?, scheduledAt, endTime?, department }
+ * Creates a standalone meeting link and adds it to the CRM appointment calendar.
+ */
+export const scheduleMeeting = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const userId = crmUser._id.toString();
+  const orgId = crmUser.organizationId?.toString();
+  const { title, description, scheduledAt, endTime, department } = req.body;
+
+  if (!orgId) throw new ApiError(400, 'Organization is required');
+  if (!title?.trim()) throw new ApiError(400, 'Meeting title is required');
+  if (!scheduledAt) throw new ApiError(400, 'Meeting date and time is required');
+
+  const targetDepartment = String(department || 'all');
+  if (targetDepartment !== 'all' && !SUPRA_MEETING_DEPARTMENTS.includes(targetDepartment)) {
+    throw new ApiError(400, 'Invalid department');
+  }
+
+  const start = new Date(scheduledAt);
+  if (Number.isNaN(start.getTime())) throw new ApiError(400, 'Invalid meeting date and time');
+  if (start.getTime() <= Date.now()) throw new ApiError(400, 'Meeting must be scheduled in the future');
+
+  const end = endTime ? new Date(endTime) : new Date(start.getTime() + 30 * 60 * 1000);
+  if (Number.isNaN(end.getTime()) || end <= start) throw new ApiError(400, 'End time must be after start time');
+
+  const meetingId = crypto.randomUUID();
+  const roomName = `meeting-${meetingId}`;
+  const meetingLink = buildMeetingLink(meetingId);
+
+  const call = await Call.create({
+    meetingId,
+    roomName,
+    conversationId: new mongoose.Types.ObjectId(),
+    isStandaloneMeeting: true,
+    initiatedBy: userId,
+    moderatorUserId: userId,
+    participants: [],
+    callStatus: 'scheduled',
+    isLive: false,
+    title: title.trim(),
+    scheduledAt: start,
+    optionalMessage: description?.trim() || '',
+    meetingLink,
+    allowedDomain: DEFAULT_MEETING_DOMAIN,
+    approvedUsers: [],
+    admissionRequests: [],
+    startedAt: start,
+  });
+
+  const crmUsers = await CrmUser.find({
+    organizationId: orgId,
+    isActive: true,
+    isOffboarded: { $ne: true },
+    isSystem: { $ne: true },
+  }).select('_id email').lean();
+
+  let targetCrmUserIds = crmUsers.map((u: any) => u._id.toString());
+  if (targetDepartment !== 'all') {
+    const emails = crmUsers.map((u: any) => String(u.email || '').toLowerCase()).filter(Boolean);
+    const mainUsers = await User.find({
+      email: { $in: emails },
+      'personalInfo.department': targetDepartment,
+    }).select('email').lean();
+    const deptEmails = new Set(mainUsers.map((u: any) => String(u.email || '').toLowerCase()));
+    targetCrmUserIds = crmUsers
+      .filter((u: any) => deptEmails.has(String(u.email || '').toLowerCase()))
+      .map((u: any) => u._id.toString());
+  }
+
+  const participantIds = Array.from(new Set([userId, ...targetCrmUserIds]));
+  const appointmentDescription = [
+    description?.trim(),
+    `Meeting link: ${meetingLink}`,
+    targetDepartment === 'all' ? 'Audience: All departments' : `Department: ${targetDepartment}`,
+  ].filter(Boolean).join('\n\n');
+
+  const appointment = await appointmentService.createAppointment(userId, orgId, {
+    title: title.trim(),
+    description: appointmentDescription,
+    startTime: start,
+    endTime: end,
+    location: 'Suprah Meeting',
+    type: 'video',
+    entryType: 'appointment',
+    participants: participantIds,
+    meetingLink,
+    notes: targetDepartment === 'all' ? 'Scheduled for all departments' : `Scheduled for ${targetDepartment}`,
+  });
+
+  res.status(201).json(new ApiResponse(201, {
+    call,
+    appointment,
+    meetingLink,
+    participantCount: participantIds.length,
+    department: targetDepartment,
+  }, 'Meeting scheduled in Suprah Calendar'));
+});
+
 /** GET /api/calls/meeting/:meetingId */
 export const getMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { meetingId } = req.params;
@@ -257,16 +387,18 @@ export const decideMeetingAdmission = asyncHandler(async (req: Request, res: Res
   }
   await call.save();
 
-  await emitToConversationMembers(call.conversationId, 'meeting:admission-updated', {
-    meetingId,
-    conversationId: call.conversationId.toString(),
-    request: {
-      userId: request.userId?.toString(),
-      name: request.name,
-      email: request.email,
-      status: request.status,
-    },
-  });
+  if (!call.isStandaloneMeeting) {
+    await emitToConversationMembers(call.conversationId, 'meeting:admission-updated', {
+      meetingId,
+      conversationId: String(call.conversationId),
+      request: {
+        userId: request.userId?.toString(),
+        name: request.name,
+        email: request.email,
+        status: request.status,
+      },
+    });
+  }
   try {
     if (request.userId) {
       getIO().to(`user:${request.userId.toString()}`).emit('meeting:admission-updated', {
@@ -289,9 +421,11 @@ export const joinCall = asyncHandler(async (req: Request, res: Response) => {
   const call = await Call.findOne({ meetingId, callStatus: { $ne: 'ended' } });
   if (!call) throw new ApiError(404, 'No active call for this meeting');
 
-  const conv = await SupraSpaceConversation.findById(call.conversationId).select('members');
-  if (!conv) throw new ApiError(404, 'Conversation not found');
-  const isConversationMember = idIn(conv.members as any, userId);
+  const conv = !call.isStandaloneMeeting
+    ? await SupraSpaceConversation.findById(call.conversationId).select('members')
+    : null;
+  if (!call.isStandaloneMeeting && !conv) throw new ApiError(404, 'Conversation not found');
+  const isConversationMember = conv ? idIn(conv.members as any, userId) : false;
   if (!isConversationMember && !isApprovedForMeeting(call, userId, crmUser.email)) {
     const email = String(crmUser.email || crmUser.username || '').toLowerCase();
     const existingRequest = call.admissionRequests.find((r) => (
@@ -309,11 +443,20 @@ export const joinCall = asyncHandler(async (req: Request, res: Response) => {
         decidedBy: null,
       });
       await call.save();
-      await emitToConversationMembers(call.conversationId, 'meeting:join-requested', {
-        meetingId,
-        conversationId: call.conversationId.toString(),
-        requester: { userId: userId.toString(), name: crmUser.fullName, email },
-      });
+      if (!call.isStandaloneMeeting) {
+        await emitToConversationMembers(call.conversationId, 'meeting:join-requested', {
+          meetingId,
+          conversationId: String(call.conversationId),
+          requester: { userId: userId.toString(), name: crmUser.fullName, email },
+        });
+      } else {
+        try {
+          getIO().to(`user:${call.moderatorUserId.toString()}`).emit('meeting:join-requested', {
+            meetingId,
+            requester: { userId: userId.toString(), name: crmUser.fullName, email },
+          });
+        } catch { /* best-effort */ }
+      }
     }
 
     return res.status(202).json(new ApiResponse(202, { status: existingRequest?.status || 'pending', meetingId }, 'Waiting for host approval'));
@@ -327,12 +470,14 @@ export const joinCall = asyncHandler(async (req: Request, res: Response) => {
   if (call.callStatus === 'calling') call.callStatus = 'active';
   await call.save();
 
-  await emitToConversationMembers(call.conversationId, 'call:participant-joined', {
-    meetingId,
-    conversationId: call.conversationId.toString(),
-    userId: userId.toString(),
-    participantCount: call.participants.filter((p) => !p.leftAt).length,
-  });
+  if (!call.isStandaloneMeeting) {
+    await emitToConversationMembers(call.conversationId, 'call:participant-joined', {
+      meetingId,
+      conversationId: String(call.conversationId),
+      userId: userId.toString(),
+      participantCount: call.participants.filter((p) => !p.leftAt).length,
+    });
+  }
 
   res.json(new ApiResponse(200, { call, jitsi: buildJitsi(call, crmUser, isMod) }, 'Joined call'));
 });
@@ -362,6 +507,11 @@ export const endCall = asyncHandler(async (req: Request, res: Response) => {
     call.isLive = false;
     call.endedAt = new Date();
     call.duration = Math.max(0, Math.round((call.endedAt.getTime() - call.startedAt.getTime()) / 1000));
+
+    if (call.isStandaloneMeeting) {
+      await call.save();
+      return res.json(new ApiResponse(200, { call }, 'Call ended'));
+    }
 
     const sysMsg = await SupraSpaceMessage.create({
       conversationId: call.conversationId,
@@ -394,12 +544,14 @@ export const endCall = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await call.save();
-  await emitToConversationMembers(call.conversationId, 'call:participant-left', {
-    meetingId,
-    conversationId: call.conversationId.toString(),
-    userId: userId.toString(),
-    participantCount: remaining.length,
-  });
+  if (!call.isStandaloneMeeting) {
+    await emitToConversationMembers(call.conversationId, 'call:participant-left', {
+      meetingId,
+      conversationId: call.conversationId.toString(),
+      userId: userId.toString(),
+      participantCount: remaining.length,
+    });
+  }
   res.json(new ApiResponse(200, { call }, 'Left call'));
 });
 
@@ -451,7 +603,7 @@ export const getMyActiveCall = asyncHandler(async (req: Request, res: Response) 
 
   res.json(new ApiResponse(200, {
     meetingId: call.meetingId,
-    conversationId: call.conversationId.toString(),
+    conversationId: String(call.conversationId),
     title: call.title || null,
     startedAt: call.startedAt,
     isHost,
@@ -551,7 +703,7 @@ export const startCallRecording = asyncHandler(async (req: Request, res: Respons
 
   const io = getIO();
   // Notify all participants in the conversation (awareness badge)
-  io.to(`conv:${call.conversationId}`).emit('call:recording-started', payload);
+  if (!call.isStandaloneMeeting) io.to(`conv:${call.conversationId}`).emit('call:recording-started', payload);
   // Trigger the host's tray to start Electron recording
   io.to(`user:${call.moderatorUserId}`).emit('tray:start-recording', payload);
 
@@ -580,7 +732,7 @@ export const stopCallRecording = asyncHandler(async (req: Request, res: Response
 
   const payload = { meetingId };
   const io = getIO();
-  io.to(`conv:${call.conversationId}`).emit('call:recording-stopped', payload);
+  if (!call.isStandaloneMeeting) io.to(`conv:${call.conversationId}`).emit('call:recording-stopped', payload);
   io.to(`user:${call.moderatorUserId}`).emit('tray:stop-recording', payload);
 
   res.json(new ApiResponse(200, payload, 'Recording stopped'));
@@ -589,6 +741,7 @@ export const stopCallRecording = asyncHandler(async (req: Request, res: Response
 export default {
   startCall,
   createMeeting,
+  scheduleMeeting,
   getMeeting,
   decideMeetingAdmission,
   joinCall,

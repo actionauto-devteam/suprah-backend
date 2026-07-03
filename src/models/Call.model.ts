@@ -23,6 +23,7 @@ export interface ICall extends Document {
   meetingId: string;          // public id used by clients (uuid)
   roomName: string;           // deterministic Jitsi room: conversation-{convId}-{ts}
   conversationId: mongoose.Types.ObjectId;
+  isStandaloneMeeting: boolean;
   initiatedBy: mongoose.Types.ObjectId;
   moderatorUserId: mongoose.Types.ObjectId;
   participants: ICallParticipant[];
@@ -73,7 +74,8 @@ const CallSchema = new Schema<ICall>(
   {
     meetingId: { type: String, required: true, unique: true },
     roomName: { type: String, required: true },
-    conversationId: { type: Schema.Types.ObjectId, ref: 'SupraSpaceConversation', required: true, index: true },
+    conversationId: { type: Schema.Types.ObjectId, ref: 'SupraSpaceConversation', index: true },
+    isStandaloneMeeting: { type: Boolean, default: false },
     initiatedBy: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
     moderatorUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
     participants: { type: [ParticipantSchema], default: [] },

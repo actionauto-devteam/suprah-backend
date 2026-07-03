@@ -8,8 +8,9 @@ import SupraSpaceSpace from '../models/SupraSpaceSpace.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
-import { getIO } from '../socket/supraspace.socket';
+import { getIO, isUserOnline } from '../socket/supraspace.socket';
 import { storageService, BucketType } from '../services/storage.service';
+import { CrmPushService } from '../services/crmPush.service';
 import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
@@ -32,6 +33,29 @@ function emitToConversation(conv: any, event: string, payload: any) {
     if (conv._id) io.to(`conv:${conv._id.toString()}`).emit(event, payload);
   } catch (err) {
     console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
+  }
+}
+
+// Push Web Push notifications to conversation members who are NOT currently
+// connected via socket (their app is backgrounded or the socket timed out).
+// Fire-and-forget — never lets push errors block the HTTP response.
+async function pushToOfflineMembers(conv: any, senderId: string, title: string, body: string): Promise<void> {
+  try {
+    const offlineIds = (conv.members || [])
+      .map((m: any) => (m.toString ? m.toString() : String(m)))
+      .filter((id: string) => id !== senderId && !isUserOnline(id));
+
+    if (!offlineIds.length) return;
+
+    await CrmPushService.sendToUsers(offlineIds, {
+      title,
+      body,
+      icon: '/icon-192x192.png',
+      tag: conv._id?.toString() ?? 'supraspace',
+      data: { url: '/crm/supra-space' },
+    });
+  } catch (err) {
+    logger.warn({ err }, '[SupraSpace] pushToOfflineMembers failed');
   }
 }
 
@@ -505,7 +529,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const filter: any = { conversationId: id, isDeleted: false };
+  const filter: any = { conversationId: id, isDeleted: false, scheduledStatus: { $ne: 'pending' } };
   const createdAtFilter: any = {};
   if (before) createdAtFilter.$lt = new Date(before as string);
   const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
@@ -563,7 +587,7 @@ const searchInConversation = asyncHandler(async (req: Request, res: Response) =>
   if (!q.trim()) return res.json(new ApiResponse(200, [], 'No query'));
 
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
-  const messages = await SupraSpaceMessage.find({ conversationId: id, isDeleted: false, content: rx })
+  const messages = await SupraSpaceMessage.find({ conversationId: id, isDeleted: false, scheduledStatus: { $ne: 'pending' }, content: rx })
     .populate('sender', 'fullName username avatar')
     .sort({ createdAt: -1 })
     .limit(50)
@@ -590,6 +614,7 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   const messages = await SupraSpaceMessage.find({
     conversationId: { $in: convIds },
     isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
     content: rx,
   })
     .populate('sender', 'fullName username avatar')
@@ -605,7 +630,7 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { content, replyTo, attachments, gif } = req.body;
+  const { content, replyTo, attachments, gif, scheduledAt } = req.body;
 
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   const hasGif = !!gif?.url;
@@ -617,6 +642,11 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
+
+  const scheduledDate = scheduledAt ? new Date(scheduledAt) : null;
+  const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime()) && scheduledDate.getTime() > Date.now() + 30_000;
+  if (scheduledAt && !isScheduled) throw new ApiError(400, 'Schedule time must be at least 30 seconds in the future');
+  if (isScheduled && hasAttachments) throw new ApiError(400, 'Scheduled send currently supports text and GIF messages only');
 
   let msgType: any = 'text';
   if (hasGif) msgType = 'gif';
@@ -634,10 +664,17 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     gif: hasGif ? gif : null,
     replyTo: replyTo || null,
     readBy: [userId],
+    scheduledAt: isScheduled ? scheduledDate : null,
+    scheduledStatus: isScheduled ? 'pending' : null,
+    sentAt: isScheduled ? null : new Date(),
   });
 
   await message.populate('sender', 'fullName username avatar');
   if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
+
+  if (isScheduled) {
+    return res.status(202).json(new ApiResponse(202, message.toObject(), 'Message scheduled'));
+  }
 
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
@@ -656,6 +693,16 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
   const messageForClient = await signAttachments(message.toObject() as any);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  // Web Push to offline members (those whose socket has disconnected, e.g. mobile background)
+  const senderName = (req.crmUser as any)?.fullName || 'Someone';
+  const pushBody = content?.trim()
+    ? content.trim().slice(0, 120)
+    : hasGif ? 'Sent a GIF' : 'Sent an attachment';
+  const convName = (conversation as any).name;
+  const pushTitle = convName ? convName : senderName;
+  const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
+  pushToOfflineMembers(conversation, userId.toString(), pushTitle, pushBodyFinal);
 
   // Notify previously-hidden members so their sidebar shows the conversation
   // without waiting for a manual refresh or page reload.
@@ -803,6 +850,15 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const messageForClient = await signAttachments(message.toObject() as any);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
 
+  const fileSenderName = (req.crmUser as any)?.fullName || 'Someone';
+  const convNameFile = (conversation as any).name;
+  pushToOfflineMembers(
+    conversation,
+    userId.toString(),
+    convNameFile ?? fileSenderName,
+    convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file'
+  );
+
   if (resurrectedFor.length > 0) {
     try {
       const io = getIO();
@@ -891,7 +947,7 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, 'Message deleted'));
 });
 
-/** PATCH /api/supraspace/messages/:messageId  { content }  — edit own text message */
+/** PATCH /api/supraspace/messages/:messageId  { content }  — edit own message text/caption */
 const editMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { messageId } = req.params;
@@ -902,7 +958,9 @@ const editMessage = asyncHandler(async (req: Request, res: Response) => {
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
   if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
-  if (message.type !== 'text') throw new ApiError(400, 'Only text messages can be edited');
+  if (message.type === 'voice' || message.type === 'poll' || message.type === 'event') {
+    throw new ApiError(400, 'This message type cannot be edited');
+  }
 
   message.content = content.trim();
   message.isEdited = true;

@@ -8,6 +8,7 @@ const router = express.Router();
 router.use(crmAuth());
 
 router.get('/my-active-call', callController.getMyActiveCall);
+router.post('/meeting/schedule', callController.scheduleMeeting);
 router.post('/meeting', callController.createMeeting);
 router.get('/meeting/:meetingId', callController.getMeeting);
 router.post('/meeting/:meetingId/admission', callController.decideMeetingAdmission);
