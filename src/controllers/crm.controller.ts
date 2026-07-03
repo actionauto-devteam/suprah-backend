@@ -4,6 +4,7 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
+import User from "../models/User.model";
 import TimeLog from "../models/TimeLog.model";
 import {
   generateCrmToken,
@@ -26,6 +27,30 @@ const COOKIE_OPTIONS = {
 
 // Company operates on Mountain Daylight Time (MDT = UTC-6).
 const COMPANY_TZ_OFFSET_MINUTES = -360;
+
+const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || "";
+
+async function getMainPersonalInfoByEmail(email?: string | null) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return undefined;
+
+  const user = await User.findOne({ email: normalizedEmail })
+    .select("personalInfo")
+    .lean();
+
+  return user?.personalInfo;
+}
+
+async function getMainPersonalInfoMapByEmails(emails: Array<string | undefined | null>) {
+  const normalizedEmails = Array.from(new Set(emails.map(normalizeEmail).filter(Boolean)));
+  if (normalizedEmails.length === 0) return new Map<string, unknown>();
+
+  const users = await User.find({ email: { $in: normalizedEmails } })
+    .select("email personalInfo")
+    .lean();
+
+  return new Map(users.map((user) => [normalizeEmail(user.email), user.personalInfo]));
+}
 
 /**
  * CRM Login
@@ -122,6 +147,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     userId: user._id,
     timestamp: { $gte: today, $lt: tomorrow },
   }).sort({ timestamp: -1 });
+  const personalInfo = await getMainPersonalInfoByEmail(user.email);
 
   const userData = {
     _id: user._id,
@@ -133,6 +159,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isActive: user.isActive,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
+    personalInfo,
     todayTimeLogs: todayLogs,
   };
 
@@ -549,9 +576,15 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
       .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
-      .limit(limitNum),
+      .limit(limitNum)
+      .lean(),
     CrmUser.countDocuments(filter),
   ]);
+  const personalInfoByEmail = await getMainPersonalInfoMapByEmails(users.map((user) => user.email));
+  const enrichedUsers = users.map((user) => ({
+    ...user,
+    personalInfo: personalInfoByEmail.get(normalizeEmail(user.email)),
+  }));
 
   const totalPages = Math.ceil(total / limitNum);
 
@@ -559,7 +592,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     new ApiResponse(
       200,
       {
-        users,
+        users: enrichedUsers,
         total,
         pagination: {
           page: pageNum,

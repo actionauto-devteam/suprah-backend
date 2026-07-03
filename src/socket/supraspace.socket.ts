@@ -189,6 +189,11 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
   return io;
 }
 
+// ── Online-presence check — used by controller to skip push for live sockets ──
+export function isUserOnline(userId: string): boolean {
+  return (onlineUsers.get(userId) ?? 0) > 0;
+}
+
 // ── Singleton getter — used by the controller to emit events ─────────────────
 export function getIO(): IOServer {
   if (!io) {

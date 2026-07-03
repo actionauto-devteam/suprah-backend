@@ -95,6 +95,9 @@ export interface ISupraSpaceMessage extends Document {
   reactions: ISupraSpaceReaction[];
   readBy: mongoose.Types.ObjectId[];
   metadata: ISupraSpaceMessageMetadata;
+  scheduledAt?: Date | null;
+  scheduledStatus?: 'pending' | 'sent' | 'cancelled' | null;
+  sentAt?: Date | null;
   isEdited: boolean;
   isDeleted: boolean;
   deletedAt?: Date;
@@ -213,6 +216,14 @@ const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
     reactions:   [ReactionSchema],
     readBy:      [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     metadata:    { type: MessageMetadataSchema, default: () => ({}) },
+    scheduledAt: { type: Date, default: null, index: true },
+    scheduledStatus: {
+      type: String,
+      enum: ['pending', 'sent', 'cancelled'],
+      default: null,
+      index: true,
+    },
+    sentAt:      { type: Date, default: null },
     isEdited:    { type: Boolean, default: false },
     isDeleted:   { type: Boolean, default: false },
     deletedAt:   { type: Date, default: null },
@@ -223,6 +234,7 @@ const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
 SupraSpaceMessageSchema.index({ conversationId: 1, createdAt: -1 });
+SupraSpaceMessageSchema.index({ scheduledStatus: 1, scheduledAt: 1 });
 // Text index for in-conversation message search
 SupraSpaceMessageSchema.index({ content: 'text' });
 // Customer concern: fast unread count queries
