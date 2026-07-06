@@ -400,6 +400,7 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
 const updateLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
+  
   const loadId = req.params.id;
 
   const load = await Load.findOne({ _id: loadId, organizationId });

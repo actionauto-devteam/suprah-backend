@@ -6,6 +6,7 @@ export interface ICustomerInviteToken extends Document {
   createdBy: mongoose.Types.ObjectId; // CrmUser who generated the link
   expiresAt: Date;
   isUsed: boolean;
+  multiUse: boolean; // if true, link can be used by multiple users until it expires
   usedAt?: Date;
   usedBy?: mongoose.Types.ObjectId; // User who registered via this link
   createdAt: Date;
@@ -35,6 +36,10 @@ const CustomerInviteTokenSchema = new Schema<ICustomerInviteToken>(
       index: { expireAfterSeconds: 0 },
     },
     isUsed: {
+      type: Boolean,
+      default: false,
+    },
+    multiUse: {
       type: Boolean,
       default: false,
     },

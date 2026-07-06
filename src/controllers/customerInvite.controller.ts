@@ -25,8 +25,8 @@ function nameFromEmail(email: string): string {
 
 /**
  * POST /api/crm/customer-invites/generate
- * CRM admin only — generate 1..N one-time invite links.
- * Body: { count?: number }  (defaults to 1, max 50)
+ * CRM admin only — generate 1..N invite links.
+ * Body: { count?: number, multiUse?: boolean }  (defaults to count=1, multiUse=false)
  */
 export const generateInviteLinks = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
@@ -35,6 +35,7 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
   }
 
   const count = Math.min(Math.max(Number(req.body.count) || 1, 1), MAX_BULK);
+  const multiUse = req.body.multiUse === true || req.body.multiUse === 'true';
   const org = await Organization.findById(actor.organizationId).lean();
   if (!org) throw new ApiError(404, 'Organization not found');
 
@@ -42,7 +43,6 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
   const invites = [];
 
   for (let i = 0; i < count; i++) {
-    // Retry on the rare chance of a short-code collision
     let shortCode = generateShortCode();
     let attempts = 0;
     while (await CustomerInviteToken.exists({ shortCode }) && attempts < 5) {
@@ -55,12 +55,14 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
       organizationId: actor.organizationId,
       createdBy: actor._id,
       expiresAt,
+      multiUse,
     });
 
     invites.push({
       shortCode,
       link: `${config.frontendUrl}/join/${shortCode}`,
       expiresAt,
+      multiUse,
     });
   }
 
@@ -166,7 +168,7 @@ export const validateInviteLink = asyncHandler(async (req: Request, res: Respons
   if (!token) {
     return res.json(new ApiResponse(200, { valid: false, reason: 'not_found' }, 'Invalid link'));
   }
-  if (token.isUsed) {
+  if (!token.multiUse && token.isUsed) {
     return res.json(new ApiResponse(200, { valid: false, reason: 'used' }, 'Link already used'));
   }
   if (new Date() > token.expiresAt) {
@@ -203,8 +205,8 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   }
 
   const token = await CustomerInviteToken.findOne({ shortCode });
-  if (!token)         throw new ApiError(404, 'Invite link not found');
-  if (token.isUsed)   throw new ApiError(410, 'This invite link has already been used');
+  if (!token) throw new ApiError(404, 'Invite link not found');
+  if (!token.multiUse && token.isUsed) throw new ApiError(410, 'This invite link has already been used');
   if (new Date() > token.expiresAt) throw new ApiError(410, 'This invite link has expired');
 
   const normalizedEmail = email.trim().toLowerCase();
@@ -225,11 +227,13 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     onboardingCompleted: true,
   });
 
-  // Mark token as used
-  token.isUsed  = true;
-  token.usedAt  = new Date();
-  token.usedBy  = user._id as any;
-  await token.save();
+  // For single-use tokens, mark as used; multi-use tokens stay active until expiry
+  if (!token.multiUse) {
+    token.isUsed = true;
+    token.usedAt = new Date();
+    token.usedBy = user._id as any;
+    await token.save();
+  }
 
   // Send confirmation email
   try {
@@ -256,4 +260,104 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   }
 
   res.status(201).json(new ApiResponse(201, { email: normalizedEmail }, 'Account created successfully'));
+});
+
+/**
+ * GET /api/crm/customer-invites/customers
+ * CRM admin only — list all customer accounts for the org.
+ * Query: { search?, sortBy?, sortOrder?, page?, limit? }
+ */
+export const getCustomers = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser!;
+  if (actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can view the customer list');
+  }
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Account not linked to an organization');
+  }
+
+  const {
+    search,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+    page = '1',
+    limit = '50',
+  } = req.query;
+
+  const pageNum = Math.max(Number(page) || 1, 1);
+  const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const skip = (pageNum - 1) * limitNum;
+
+  const filter: any = {
+    role: 'customer',
+    organizationId: actor.organizationId,
+  };
+
+  const searchValue = typeof search === 'string' ? search.trim() : '';
+  if (searchValue) {
+    const escaped = searchValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    filter.$or = [
+      { name: { $regex: escaped, $options: 'i' } },
+      { email: { $regex: escaped, $options: 'i' } },
+    ];
+  }
+
+  const sortFieldMap: Record<string, string> = {
+    name: 'name',
+    email: 'email',
+    createdAt: 'createdAt',
+    joined: 'createdAt',
+  };
+  const resolvedSortBy =
+    typeof sortBy === 'string' && sortFieldMap[sortBy] ? sortFieldMap[sortBy] : 'createdAt';
+  const resolvedSortOrder = sortOrder === 'asc' ? 1 : -1;
+
+  const [customers, total] = await Promise.all([
+    User.find(filter)
+      .select('name email avatar role isActive createdAt')
+      .sort({ [resolvedSortBy]: resolvedSortOrder })
+      .skip(skip)
+      .limit(limitNum)
+      .lean(),
+    User.countDocuments(filter),
+  ]);
+
+  res.json(
+    new ApiResponse(200, {
+      customers,
+      total,
+      pagination: { page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    }, 'Customers fetched'),
+  );
+});
+
+/**
+ * DELETE /api/crm/customer-invites/customers/:userId
+ * CRM admin only — permanently delete a customer account.
+ * Only works on User records with role='customer' belonging to the org.
+ */
+export const deleteCustomer = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser!;
+  if (actor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can delete customer accounts');
+  }
+  if (!actor.organizationId) {
+    throw new ApiError(403, 'Account not linked to an organization');
+  }
+
+  const { userId } = req.params;
+
+  const customer = await User.findOne({
+    _id: userId,
+    role: 'customer',
+    organizationId: actor.organizationId,
+  });
+
+  if (!customer) {
+    throw new ApiError(404, 'Customer account not found');
+  }
+
+  await User.deleteOne({ _id: customer._id });
+
+  res.json(new ApiResponse(200, { deletedId: userId }, 'Customer account deleted'));
 });
