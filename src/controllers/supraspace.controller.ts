@@ -36,24 +36,37 @@ function emitToConversation(conv: any, event: string, payload: any) {
   }
 }
 
-// Push Web Push notifications to conversation members who are NOT currently
-// connected via socket (their app is backgrounded or the socket timed out).
+// Push Web Push notifications to conversation members. Desktop users who are
+// online already receive the realtime socket event, but mobile/PWA sockets can
+// stay "online" briefly after the app is backgrounded. To keep installed mobile
+// apps reliable, online recipients still get pushes on mobile-like subscriptions.
 // Fire-and-forget — never lets push errors block the HTTP response.
 async function pushToOfflineMembers(conv: any, senderId: string, title: string, body: string): Promise<void> {
   try {
-    const offlineIds = (conv.members || [])
+    const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
-      .filter((id: string) => id !== senderId && !isUserOnline(id));
+      .filter((id: string) => id !== senderId);
 
-    if (!offlineIds.length) return;
+    if (!recipientIds.length) return;
 
-    await CrmPushService.sendToUsers(offlineIds, {
-      title,
-      body,
-      icon: '/icon-192x192.png',
-      tag: conv._id?.toString() ?? 'supraspace',
-      data: { url: '/crm/supra-space' },
-    });
+    await Promise.allSettled(recipientIds.map(async (memberId: string) => {
+      const unreadCount = await SupraSpaceMessage.countDocuments({
+        conversationId: conv._id,
+        sender: { $ne: memberId },
+        readBy: { $ne: memberId },
+        isDeleted: false,
+        scheduledStatus: { $ne: 'pending' },
+      });
+      const isOnline = isUserOnline(memberId);
+
+      await CrmPushService.sendToUsers([memberId], {
+        title,
+        body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
+        icon: '/icon-192x192.png',
+        tag: conv._id?.toString() ?? 'supraspace',
+        data: { url: '/crm/supra-space' },
+      }, isOnline ? { deviceHints: ['mobile', 'ios', 'android', 'iphone', 'ipad', 'pwa'] } : undefined);
+    }));
   } catch (err) {
     logger.warn({ err }, '[SupraSpace] pushToOfflineMembers failed');
   }
@@ -230,17 +243,26 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   // For conversations the user has cleared, hide the old lastMessage so the
   // preview doesn't show stale content. Only null it when no new messages have
   // arrived since the clear (lastMessageAt is still <= clearedAt timestamp).
-  const filtered = signed.map((c: any) => {
+  const filtered = await Promise.all(signed.map(async (c: any) => {
     // Strip null member entries that can appear when a CrmUser is hard-deleted
     // after being added to a conversation. Keeping nulls causes the frontend to
     // crash on member._id access, triggering the "Something went wrong" error page.
     const safeConv = { ...c, members: (c.members || []).filter(Boolean) };
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
-      return { ...safeConv, lastMessage: null, lastMessageAt: null };
+      return { ...safeConv, lastMessage: null, lastMessageAt: null, unreadCount: 0 };
     }
-    return safeConv;
-  });
+    const unreadFilter: any = {
+      conversationId: safeConv._id,
+      sender: { $ne: userId },
+      readBy: { $ne: userId },
+      isDeleted: false,
+      scheduledStatus: { $ne: 'pending' },
+    };
+    if (clearedAt) unreadFilter.createdAt = { $gt: new Date(clearedAt) };
+    const unreadCount = await SupraSpaceMessage.countDocuments(unreadFilter);
+    return { ...safeConv, unreadCount };
+  }));
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
 });
