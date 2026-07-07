@@ -5,6 +5,16 @@ import logger from '../utils/logger';
 
 const LOG_PREFIX = '[CrmPushService]';
 
+type CrmPushSendOptions = {
+  deviceHints?: string[];
+};
+
+function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string[]): boolean {
+  if (!allowedHints?.length) return true;
+  const normalizedHint = (deviceHint || '').toLowerCase();
+  return allowedHints.some((hint) => normalizedHint.includes(hint.toLowerCase()));
+}
+
 webpush.setVapidDetails(
   config.push.vapidSubject,
   config.push.vapidPublicKey,
@@ -14,7 +24,7 @@ webpush.setVapidDetails(
 export class CrmPushService {
   // Send push to a specific list of CRM user IDs (e.g. SupraSpace message recipients).
   // Silently skips users with no push subscriptions. Prunes stale endpoints (410/404).
-  static async sendToUsers(userIds: string[], payload: object): Promise<void> {
+  static async sendToUsers(userIds: string[], payload: object, options: CrmPushSendOptions = {}): Promise<void> {
     if (!userIds.length) return;
     const users = await CrmUser.find({ _id: { $in: userIds }, isActive: true })
       .select('_id pushSubscriptions')
@@ -28,8 +38,13 @@ export class CrmPushService {
 
         const endpointsToPrune: string[] = [];
 
+        const targetSubscriptions = user.pushSubscriptions.filter((sub) =>
+          matchesDeviceHint(sub.deviceHint, options.deviceHints)
+        );
+        if (!targetSubscriptions.length) return;
+
         await Promise.allSettled(
-          user.pushSubscriptions.map(async (sub) => {
+          targetSubscriptions.map(async (sub) => {
             try {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
