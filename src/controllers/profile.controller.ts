@@ -293,6 +293,7 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   // Whether the calling device has observed real user interaction (mouse/keyboard/touch)
   // since its last heartbeat. Defaults to true so a fresh page load counts as activity.
   const isActive = req.body?.isActive !== false;
+  const deviceType = req.body?.deviceType === 'mobile' ? 'mobile' : req.body?.deviceType === 'desktop' ? 'desktop' : undefined;
 
   const current = await User.findById(userId)
     .select('onlineStatus customStatus statusExpiresAt statusIsManual lastInteractionAt name avatar')
@@ -300,6 +301,7 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
 
   const now = new Date();
   const updateData: any = { lastActive: now };
+  if (deviceType) updateData.lastDeviceType = deviceType;
   let statusExpired = false;
   let autoTransitionTo: 'online' | 'away' | null = null;
 
@@ -328,7 +330,7 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const updated = await User.findByIdAndUpdate(userId, updateData, { new: true })
-    .select('onlineStatus customStatus lastActive statusIsManual').lean();
+    .select('onlineStatus customStatus lastActive statusIsManual lastDeviceType').lean();
 
   if (orgId && updated) {
     emitToOrg(orgId, 'presence_update', {
@@ -336,6 +338,7 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
       onlineStatus: updated.onlineStatus,
       customStatus: updated.customStatus ?? null,
       lastActive: updated.lastActive,
+      lastDeviceType: updated.lastDeviceType ?? null,
     });
 
     if (statusExpired && current) {

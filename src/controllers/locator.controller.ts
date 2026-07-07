@@ -19,6 +19,8 @@ const HARSH_BRAKING_DROP_MPH = 15;
 const INCIDENT_PRIOR_SPEED_MPH = 25;
 const INCIDENT_STOP_SPEED_MPH = 3;
 const METERS_TO_MILES = 0.000621371;
+const SPEEDING_THRESHOLD_MPH = 80;
+const STATIONARY_RADIUS_M = 40;
 
 export async function startDrivingSessionForAppointment(
     orgId: string,
@@ -92,6 +94,13 @@ async function updateDrivingTelematics(
 
         if (typeof session.lastSpeedMph === 'number' && session.lastSpeedMph - speedMph >= HARSH_BRAKING_DROP_MPH) {
             session.harshBrakingEvents += 1;
+        }
+
+        // Count crossings into the speeding zone, not every ping spent above it, so one long
+        // stretch of highway speed registers as one event rather than a dozen.
+        const wasSpeeding = typeof session.lastSpeedMph === 'number' && session.lastSpeedMph >= SPEEDING_THRESHOLD_MPH;
+        if (speedMph >= SPEEDING_THRESHOLD_MPH && !wasSpeeding) {
+            session.speedingEvents += 1;
         }
 
         if (
@@ -286,13 +295,31 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
 
 // ── Live ingest ──────────────────────────────────────────────────────────────
 
+// Whitelisted so a client can't stuff arbitrary/oversized strings into a field that gets
+// rendered (even though the frontend also escapes it — this is the second layer, not the only one).
+// `connectionType` is the real physical medium; `effectiveType` is a separate bandwidth-class
+// heuristic ("4g" etc.) that must never be conflated with an actual cellular connectionType —
+// that conflation is exactly what made desktop Wi-Fi/Ethernet users show up mislabeled "4G".
+const KNOWN_CONNECTION_TYPES = new Set(['wifi', 'ethernet', 'cellular', 'bluetooth', 'wimax', 'none']);
+const KNOWN_EFFECTIVE_TYPES = new Set(['4g', '3g', '2g', 'slow-2g']);
+
 const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     const user = req.user as IUser;
     const orgId = req.orgId as string;
-    const { lat, lng, heading, speedMph, accuracyM, batteryLevel, isCharging, connectivity } = req.body as {
+    const {
+        lat, lng, heading, speedMph, accuracyM, batteryLevel, isCharging, connectivity,
+        deviceType, connectionType: rawConnectionType, effectiveType: rawEffectiveType, downlinkMbps,
+    } = req.body as {
         lat: number; lng: number; heading?: number; speedMph?: number; accuracyM?: number;
         batteryLevel?: number; isCharging?: boolean; connectivity?: 'online' | 'offline';
+        deviceType?: 'mobile' | 'desktop'; connectionType?: string; effectiveType?: string; downlinkMbps?: number;
     };
+    const connectionType = typeof rawConnectionType === 'string' && KNOWN_CONNECTION_TYPES.has(rawConnectionType.toLowerCase())
+        ? rawConnectionType.toLowerCase()
+        : undefined;
+    const effectiveType = typeof rawEffectiveType === 'string' && KNOWN_EFFECTIVE_TYPES.has(rawEffectiveType.toLowerCase())
+        ? rawEffectiveType.toLowerCase()
+        : undefined;
 
     if (!user.locationConsent?.granted) {
         throw new ApiError(403, 'Location sharing requires consent');
@@ -304,6 +331,17 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     const previous = await EmployeeLocation.findOne({ userId: user._id }).lean();
     const nextPlace = await findNearestPlace(orgId, lat, lng);
 
+    // A fresh continuous sharing session — used to show "sharing for Xh" instead of just a timestamp.
+    const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
+
+    // "Has this person basically stayed in one spot" — the anchor only resets once a ping lands
+    // outside STATIONARY_RADIUS_M of it, so ordinary GPS jitter (a few meters of noise while
+    // truly standing still) doesn't keep resetting the clock.
+    const prevAnchor = previous?.stationaryAnchor;
+    const isNewAnchor = !prevAnchor || distanceMeters(prevAnchor.lat, prevAnchor.lng, lat, lng) > STATIONARY_RADIUS_M;
+    const stationaryAnchor = isNewAnchor ? { lat, lng } : prevAnchor;
+    const stationarySince = isNewAnchor ? new Date() : (previous?.stationarySince ?? new Date());
+
     const updated = await EmployeeLocation.findOneAndUpdate(
         { userId: user._id },
         {
@@ -311,9 +349,12 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             coords: { lat, lng },
             heading, speedMph, accuracyM, batteryLevel, isCharging,
             connectivity: connectivity === 'offline' ? 'offline' : 'online',
+            deviceType, connectionType, effectiveType, downlinkMbps,
             sharingState: 'sharing',
             currentPlaceId: nextPlace?._id ?? null,
             lastSeenAt: new Date(),
+            stationaryAnchor, stationarySince,
+            ...(isNewSharingSession ? { sharingSince: new Date() } : {}),
         },
         { upsert: true, new: true },
     );
@@ -324,11 +365,18 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         sharingState: updated.sharingState,
         heading: updated.heading,
         speedMph: updated.speedMph,
+        accuracyM: updated.accuracyM,
         batteryLevel: updated.batteryLevel,
         isCharging: updated.isCharging,
         connectivity: updated.connectivity,
+        deviceType: updated.deviceType,
+        connectionType: updated.connectionType,
+        effectiveType: updated.effectiveType,
+        downlinkMbps: updated.downlinkMbps,
         currentPlaceId: updated.currentPlaceId,
         lastSeenAt: updated.lastSeenAt,
+        sharingSince: updated.sharingSince,
+        stationarySince: updated.stationarySince,
     });
 
     handleGeofenceTransition(orgId, user, previous?.currentPlaceId?.toString(), nextPlace).catch(() => {});
@@ -402,7 +450,7 @@ const resumeSharing = asyncHandler(async (req: Request, res: Response) => {
 
     const updated = await EmployeeLocation.findOneAndUpdate(
         { userId: user._id },
-        { organizationId: orgId, sharingState: 'sharing' },
+        { organizationId: orgId, sharingState: 'sharing', sharingSince: new Date() },
         { upsert: true, new: true },
     );
 
@@ -431,7 +479,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
 
     // Visible to everyone in the dealership — the live map is a team-wide tool.
     const locations = await EmployeeLocation.find({ organizationId: orgId })
-        .populate('userId', 'name avatar personalInfo.jobTitle employmentLocationType')
+        .populate('userId', 'name avatar personalInfo.jobTitle personalInfo.department employmentLocationType')
         .lean();
 
     const result = locations
@@ -441,16 +489,25 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
             userName: l.userId.name,
             userAvatar: l.userId.avatar,
             jobTitle: l.userId.personalInfo?.jobTitle,
+            department: l.userId.personalInfo?.department,
             employmentLocationType: l.userId.employmentLocationType,
             coords: l.coords,
             heading: l.heading,
             speedMph: l.speedMph,
+            accuracyM: l.accuracyM,
             sharingState: l.sharingState,
             batteryLevel: l.batteryLevel,
             isCharging: l.isCharging,
             connectivity: l.connectivity,
+            deviceType: l.deviceType,
+            connectionType: l.connectionType,
+            effectiveType: l.effectiveType,
+            downlinkMbps: l.downlinkMbps,
             currentPlaceId: l.currentPlaceId,
+            drivingSessionId: l.drivingSessionId,
             lastSeenAt: l.lastSeenAt,
+            sharingSince: l.sharingSince,
+            stationarySince: l.stationarySince,
         }));
 
     res.json(new ApiResponse(200, result, 'Active employee locations fetched'));
@@ -585,7 +642,11 @@ const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
         if (to) query.recordedAt.$lte = new Date(to);
     }
 
-    const history = await LocationHistory.find(query).sort({ recordedAt: 1 }).limit(2000).lean();
+    // Sort newest-first when capping at 2000 so a long continuous share (e.g. an all-day
+    // drive) keeps its most RECENT points instead of silently truncating them off the end —
+    // then reverse back to chronological order, which the map trail/time-range display expect.
+    const history = await LocationHistory.find(query).sort({ recordedAt: -1 }).limit(2000).lean();
+    history.reverse();
     res.json(new ApiResponse(200, history, 'Location history fetched'));
 });
 

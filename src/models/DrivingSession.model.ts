@@ -10,6 +10,7 @@ export interface IDrivingSession extends Document {
   endedAt?: Date;
   topSpeedMph: number;
   harshBrakingEvents: number;
+  speedingEvents: number;
   distanceMi: number;
   lastSpeedMph?: number;
   possibleIncident?: {
@@ -49,6 +50,7 @@ const DrivingSessionSchema = new Schema<IDrivingSession>(
     endedAt: { type: Date },
     topSpeedMph: { type: Number, default: 0 },
     harshBrakingEvents: { type: Number, default: 0 },
+    speedingEvents: { type: Number, default: 0 },
     distanceMi: { type: Number, default: 0 },
     lastSpeedMph: { type: Number },
     possibleIncident: {

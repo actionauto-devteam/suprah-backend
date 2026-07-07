@@ -44,7 +44,7 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
         organizationId: orgId,
         role: { $in: ['employee', 'admin', 'super_admin'] },
     })
-        .select('name avatar onlineStatus customStatus statusIsManual lastActive role personalInfo breakStatus employmentLocationType locationConsent')
+        .select('name avatar onlineStatus customStatus statusIsManual lastActive lastDeviceType role personalInfo breakStatus employmentLocationType locationConsent')
         .lean();
 
     const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);

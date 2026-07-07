@@ -61,6 +61,9 @@ export interface IUser extends Document {
   lastActive?: Date;
   // Last real user interaction (mouse/keyboard/touch) across ANY device — drives the 30-min auto-away timer.
   lastInteractionAt?: Date;
+  // Device type of whichever tab/device sent the most recent presence heartbeat — used to show
+  // a phone-shaped presence indicator instead of a circle when someone is active from mobile.
+  lastDeviceType?: 'mobile' | 'desktop';
   lastPasswordChange?: Date;
   breakStatus?: {
     isOnBreak: boolean;
@@ -235,6 +238,10 @@ const UserSchema = new Schema(
     lastInteractionAt: {
       type: Date,
       default: Date.now,
+    },
+    lastDeviceType: {
+      type: String,
+      enum: ['mobile', 'desktop'],
     },
     breakStatus: {
       isOnBreak: { type: Boolean, default: false },

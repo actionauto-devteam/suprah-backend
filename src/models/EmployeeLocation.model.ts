@@ -21,9 +21,19 @@ export interface IEmployeeLocation extends Document {
   batteryLevel?: number;
   isCharging?: boolean;
   connectivity: "online" | "offline";
+  deviceType?: "mobile" | "desktop";
+  connectionType?: string;
+  effectiveType?: string;
+  downlinkMbps?: number;
   currentPlaceId?: mongoose.Types.ObjectId;
   drivingSessionId?: mongoose.Types.ObjectId;
   lastSeenAt: Date;
+  sharingSince?: Date;
+  // Anchor point for "has this person basically stayed put" detection — reset whenever a ping
+  // lands farther than STATIONARY_RADIUS_M away from it. Lets the UI explain GPS jitter ("still
+  // at the same spot, the pin wobble is just noise") instead of it reading as erratic movement.
+  stationaryAnchor?: { lat: number; lng: number };
+  stationarySince?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -62,6 +72,22 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
       enum: ["online", "offline"],
       default: "online",
     },
+    deviceType: { type: String, enum: ["mobile", "desktop"] },
+    // Real physical connection type, from the Network Information API's `connection.type` —
+    // reliable when a browser exposes it, but many don't (esp. desktop Chrome), hence the
+    // separate `effectiveType` fallback below rather than conflating the two.
+    connectionType: {
+      type: String,
+      enum: ["wifi", "ethernet", "cellular", "bluetooth", "wimax", "none"],
+    },
+    // Speed-quality tier from `connection.effectiveType` (RTT/downlink heuristic) — its labels
+    // ("4g" etc.) describe bandwidth class, NOT an actual cellular radio, so this must never be
+    // presented as "on 4G" for a device whose connectionType isn't itself cellular.
+    effectiveType: {
+      type: String,
+      enum: ["4g", "3g", "2g", "slow-2g"],
+    },
+    downlinkMbps: { type: Number },
     currentPlaceId: {
       type: Schema.Types.ObjectId,
       ref: "Place",
@@ -74,6 +100,12 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
       type: Date,
       default: Date.now,
     },
+    sharingSince: { type: Date },
+    stationaryAnchor: {
+      lat: { type: Number },
+      lng: { type: Number },
+    },
+    stationarySince: { type: Date },
   },
   {
     timestamps: true,
