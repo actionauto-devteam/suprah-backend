@@ -5,6 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
 import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
@@ -487,6 +488,23 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
 
   const users = await CrmUser.find({ isActive: true }).select('-password').lean();
 
+  // Fallback: look up department from main User system by email for users who haven't set it in CRM
+  const mainDeptByEmail = new Map<string, string>();
+  try {
+    const emails = users.map((u) => u.email).filter(Boolean) as string[];
+    const mainUsers = await User.find({ email: { $in: emails } })
+      .select('email personalInfo')
+      .lean();
+    mainUsers.forEach((mu) => {
+      const dept = (mu.personalInfo as any)?.department;
+      if (mu.email && dept && typeof dept === 'string' && dept.trim()) {
+        mainDeptByEmail.set(mu.email, dept.trim());
+      }
+    });
+  } catch {
+    // non-critical — CRM user's own department field will be used
+  }
+
   const results = await Promise.all(
     users.map(async (u) => {
       const logs = await TimeLog.find({
@@ -548,6 +566,9 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const todayNetSnapshot = todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds);
       const today = formatHours(todayNetSnapshot);
 
+      // CRM user's own department takes priority; main User lookup is fallback only
+      const department = (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined;
+
       return {
         user: {
           _id: u._id,
@@ -555,6 +576,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
           username: u.username,
           avatar: u.avatar,
           role: u.role,
+          department,
         },
         today,
         thisWeek: summary.thisWeek,

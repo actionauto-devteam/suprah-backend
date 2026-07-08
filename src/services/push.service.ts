@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { pushQueue } from '../jobs/push.queue';
 import logger from '../utils/logger';
 import config from '../config';
+import User from '../models/User.model';
 
 const LOG_PREFIX = '[PushService]';
 
@@ -80,6 +81,27 @@ export class PushService {
     } catch (error: any) {
       logger.error(`${LOG_PREFIX} Broadcast queuing failed: ${error.message}`);
       return { success: false, message: 'Broadcast queuing failed.' };
+    }
+  }
+
+  /**
+   * Finds all admin/super_admin User accounts in the org and sends them a push notification.
+   * Used for system-level alerts (e.g. Lot Tech employee events) where the recipient is
+   * the organization's admin, not a specific user.
+   */
+  static async notifyOrgAdmins(
+    orgId: string | mongoose.Types.ObjectId,
+    payload: { title: string; body: string; tag?: string; data?: Record<string, any> },
+  ) {
+    try {
+      const admins = await User.find({
+        organizationId: orgId,
+        role: { $in: ['admin', 'super_admin'] },
+      }).select('_id').lean();
+      if (admins.length === 0) return;
+      await PushService.broadcast(admins.map((a) => a._id), { icon: '/icon-192x192.png', ...payload });
+    } catch (err: any) {
+      logger.error(`${LOG_PREFIX} notifyOrgAdmins failed for org ${orgId}: ${err.message}`);
     }
   }
 }

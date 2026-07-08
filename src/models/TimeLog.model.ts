@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ITimeLog extends Document {
   userId: mongoose.Types.ObjectId;
+  userModel: 'CrmUser' | 'User';
   type: 'time-in' | 'time-out' | 'break-in' | 'break-out';
   timestamp: Date;
   note?: string;
@@ -14,9 +15,13 @@ const TimeLogSchema = new Schema<ITimeLog>(
   {
     userId: {
       type: Schema.Types.ObjectId,
-      ref: 'CrmUser',
       required: true,
       index: true,
+    },
+    userModel: {
+      type: String,
+      enum: ['CrmUser', 'User'],
+      default: 'CrmUser',
     },
     type: {
       type: String,

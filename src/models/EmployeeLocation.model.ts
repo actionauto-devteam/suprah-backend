@@ -9,6 +9,7 @@ export type SharingState =
 
 export interface IEmployeeLocation extends Document {
   userId: mongoose.Types.ObjectId;
+  userModel: "User" | "CrmUser";
   organizationId: mongoose.Types.ObjectId;
   coords: {
     lat: number;
@@ -34,6 +35,10 @@ export interface IEmployeeLocation extends Document {
   // at the same spot, the pin wobble is just noise") instead of it reading as erratic movement.
   stationaryAnchor?: { lat: number; lng: number };
   stationarySince?: Date;
+  // Tracks when the last "stationary too long" notification was sent for this anchor period.
+  // Reset to null whenever stationaryAnchor resets (employee moves), so each new stationary
+  // period starts fresh and won't re-fire until the threshold is crossed again.
+  stationaryNotifiedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -42,10 +47,16 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
   {
     userId: {
       type: Schema.Types.ObjectId,
-      ref: "User",
+      refPath: "userModel",
       required: true,
       unique: true,
       index: true,
+    },
+    userModel: {
+      type: String,
+      enum: ["User", "CrmUser"],
+      default: "User",
+      required: true,
     },
     organizationId: {
       type: Schema.Types.ObjectId,
@@ -106,6 +117,7 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
       lng: { type: Number },
     },
     stationarySince: { type: Date },
+    stationaryNotifiedAt: { type: Date, default: null },
   },
   {
     timestamps: true,

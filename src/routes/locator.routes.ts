@@ -1,10 +1,16 @@
-import { Router } from 'express';
+import { NextFunction, Request, Response, Router } from 'express';
 import auth from '../middleware/auth.middleware';
+import crmAuth from '../middleware/crmAuth.middleware';
 import locatorController from '../controllers/locator.controller';
 
 const router = Router();
 
-router.use(auth());
+router.use((req: Request, res: Response, next: NextFunction) => {
+  auth()(req, res, (authError) => {
+    if (!authError) return next();
+    crmAuth()(req, res, next);
+  });
+});
 
 // Consent & status
 router.get('/my-status', locatorController.getMyLocatorStatus);
@@ -14,6 +20,7 @@ router.post('/consent', locatorController.setLocationConsent);
 router.post('/ping', locatorController.ingestLocation);
 router.post('/pause', locatorController.pauseSharing);
 router.post('/resume', locatorController.resumeSharing);
+router.post('/off-duty', locatorController.stopSharing);
 router.get('/active', locatorController.getActiveEmployeeLocations);
 
 // Places

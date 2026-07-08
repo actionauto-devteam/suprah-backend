@@ -59,6 +59,7 @@ import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
 import customerInviteRoute from "./customerInvite.routes";
 import shopAssistantRoute from "./shopAssistant.route";
+import generalTimeclockRoute from "./generalTimeclock.route";
 
 const router = express.Router();
 
@@ -266,6 +267,10 @@ const defaultRoutes = [
   {
     path: "/locator",
     route: locatorRoute,
+  },
+  {
+    path: "/timeclock",
+    route: generalTimeclockRoute,
   },
   {
     path: "/customer-concern",

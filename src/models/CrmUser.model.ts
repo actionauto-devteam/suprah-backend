@@ -29,7 +29,13 @@ export interface ICrmUser extends Document {
   isOffboarded: boolean;
   offboardedAt?: Date;
   isSystem: boolean;
+  locationConsent?: {
+    granted: boolean;
+    grantedAt?: Date;
+    deviceHint?: string;
+  };
   pushSubscriptions: ICrmPushSubscription[];
+  department?: string;
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -128,6 +134,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: false,
       index: true,
     },
+    locationConsent: {
+      granted: { type: Boolean, default: false },
+      grantedAt: { type: Date },
+      deviceHint: { type: String },
+    },
     pushSubscriptions: [
       {
         endpoint: { type: String, required: true },
@@ -139,6 +150,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
         createdAt: { type: Date, default: Date.now },
       },
     ],
+    department: {
+      type: String,
+      trim: true,
+      default: null,
+    },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },
       gmailAddress: { type: String },
