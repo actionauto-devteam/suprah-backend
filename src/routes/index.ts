@@ -60,6 +60,7 @@ import membershipRoute from "./membership.route";
 import customerInviteRoute from "./customerInvite.routes";
 import shopAssistantRoute from "./shopAssistant.route";
 import generalTimeclockRoute from "./generalTimeclock.route";
+import projectManagementRoute from "./projectManagement.route";
 
 const router = express.Router();
 
@@ -118,6 +119,10 @@ const defaultRoutes = [
   {
     path: "/leads",
     route: leadRoute,
+  },
+  {
+    path: "/crm/projects",
+    route: projectManagementRoute,
   },
   {
     path: "/crm",
