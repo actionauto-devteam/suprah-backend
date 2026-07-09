@@ -20,6 +20,19 @@ const BREAK_LIMIT_SECONDS = 3600; // 3600
 // regardless of where the user's device is physically located.
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 
+// Only replace wall-clock total with ActivityInterval total when ActivityIntervals
+// cover at least this fraction of the wall-clock. Below this threshold the
+// interval data is considered incomplete (e.g. tray only flushed a partial
+// interval) and we fall back to wall-clock so hours aren't dramatically undercounted.
+const MIN_ACTIVITY_COVERAGE = 0.65;
+
+// How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
+// Set to 5 minutes (5× the 60s heartbeat interval) so transient network blips
+// (1–3 missed heartbeats) don't freeze the CRM page timer. The trade-off is that a
+// genuinely crashed tray may over-display by up to 5 minutes — acceptable since
+// ActivityIntervals (committed on idle/clock-out) are the authoritative record.
+const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
+
 /* ──────────────────────────────────────────────────────────────────────────
    Helpers
 ────────────────────────────────────────────────────────────────────────── */
@@ -398,7 +411,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   // For today specifically, also include the currently-running interval (if any)
   // so the displayed total tracks the live timer.
   const todayHeartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
-  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const heartbeatFresh = todayHeartbeat
     ? Date.now() - new Date(todayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
@@ -408,13 +420,17 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
 
   // Override every calendar day's wall-clock total with the ActivityInterval
-  // total when it is smaller. ActivityIntervals (committed by the tray per real
-  // active period) are authoritative: they exclude idle time and ghost hours
-  // from unclosed sessions that inflate the wall-clock (e.g. a multi-day open
-  // shift gives each calendar day an inflated midnight-split slice).
+  // total when it is smaller AND covers at least 65% of the wall-clock.
+  // The 65% floor guards against partially-committed interval data (e.g. the
+  // tray only flushed the final 2h 10m of a 9h shift) being mistaken for the
+  // authoritative active total — if ActivityIntervals cover less than 65% of
+  // wall-clock the data is likely incomplete, so we fall back to wall-clock.
+  // Example that passes (genuine idle filtering): 10h57m / 13h = 84% ✓
+  // Example that fails (incomplete submission): 2h10m / 9h = 24% ✗
   for (const dateStr of Object.keys(calendar)) {
     const activeForDate = activityByDate[dateStr] ?? 0;
-    if (activeForDate > 0 && activeForDate < calendar[dateStr].totalSeconds) {
+    const wallClock = calendar[dateStr].totalSeconds;
+    if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
       calendar[dateStr].totalSeconds = activeForDate;
     }
   }
@@ -636,7 +652,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   }
 
   const userTodayHeartbeat = await AgentHeartbeat.findOne({ userId }).lean();
-  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const userHeartbeatFresh = userTodayHeartbeat
     ? Date.now() - new Date(userTodayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
@@ -646,10 +661,12 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
 
   // Override every calendar day's wall-clock total with the ActivityInterval
-  // total when it is smaller (same logic as getMyTimeproof).
+  // total when it is smaller AND covers at least 65% of wall-clock (same
+  // logic as getMyTimeproof — see that block for rationale).
   for (const dateStr of Object.keys(calendar)) {
     const activeForDate = userActivityByDate[dateStr] ?? 0;
-    if (activeForDate > 0 && activeForDate < calendar[dateStr].totalSeconds) {
+    const wallClock = calendar[dateStr].totalSeconds;
+    if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
       calendar[dateStr].totalSeconds = activeForDate;
     }
   }
@@ -861,13 +878,15 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     : false;
 
   // Decide the live-interval start that the CRM timer counts from.
-  //  • Tray actively reporting (fresh heartbeat): trust its value verbatim — including
-  //    null, which means the user is idle/on-break and the timer must FREEZE. This keeps
-  //    the CRM in lock-step with the tray (same machine clock → no drift).
+  //  • On break: always null — the timer must freeze. TimeLogs are authoritative for
+  //    break state; the tray may have missed a break-in socket event and still be
+  //    heartbeating with a live currentIntervalStartAt. Never trust heartbeat over
+  //    TimeLogs for break state.
+  //  • Tray actively reporting (fresh heartbeat, not on break): trust its value —
+  //    including null (idle), which freezes the timer in lock-step with the tray.
   //  • Tray offline / never ran: fall back to (shiftStartedAt + currentSessionBreaks)
   //    so (now - fallbackStart) excludes break time. Without this shift, a CRM-only
   //    user's live counter over-counts every break they took during the current shift.
-  const HEARTBEAT_FRESH_MS = 2 * 60 * 1000;
   const heartbeatFresh = heartbeat
     ? Date.now() - new Date(heartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
@@ -880,11 +899,13 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   // double-counting. Return null instead so the dashboard freezes at the
   // accumulated total. Fall back to wall-clock only when no intervals exist
   // (CRM-only users who never ran the tray).
-  const currentIntervalStartAt = heartbeatFresh
-    ? rawIntervalStart
-    : activityIntervalTotal > 0
-      ? null
-      : fallbackShiftedStart;
+  const currentIntervalStartAt = isOnBreak
+    ? null
+    : heartbeatFresh
+      ? rawIntervalStart
+      : activityIntervalTotal > 0
+        ? null
+        : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
     isOnShift,

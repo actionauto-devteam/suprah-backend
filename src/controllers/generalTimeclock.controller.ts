@@ -7,11 +7,14 @@ import TimeLog from '../models/TimeLog.model';
 import { PushService } from '../services/push.service';
 import { IUser } from '../models/User.model';
 import { ICrmUser } from '../models/CrmUser.model';
+import AgentHeartbeat from '../models/AgentHeartbeat.model';
+import ActivityInterval from '../models/ActivityInterval.model';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 const LOT_TECH_DEPT = 'LotTechTeam';   // key stored in User.personalInfo.department
+const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
 
 // ── Actor helper ──────────────────────────────────────────────────────────────
 
@@ -479,15 +482,36 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC.getTime())
     .reduce((sum, s) => sum + s.duration, 0);
 
-  // No tray app for general users — wall-clock fallback only
-  const todayTotalActiveSeconds = Math.max(0, todayTotalWorkedSeconds);
+  // Activity-based tracking: sum of completed ActivityIntervals for today
+  const activityIntervals = await ActivityInterval.find({
+    userId: actor.id,
+    shiftDate: todayMDTStr,
+  }).lean();
+  const activityIntervalTotal = activityIntervals.reduce((sum: number, i: any) => sum + i.durationSeconds, 0);
+  const todayTotalActiveSeconds = activityIntervalTotal > 0
+    ? activityIntervalTotal
+    : Math.max(0, todayTotalWorkedSeconds - totalBreakSeconds);
 
   const isShiftFromToday = shiftStartedAt ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC.getTime() : false;
 
-  // Live interval start = shiftStartedAt shifted by break time (wall-clock fallback)
+  // Live interval start — use tray heartbeat if fresh, else wall-clock fallback
+  const heartbeat = await AgentHeartbeat.findOne({ userId: actor.id }).lean();
+  const rawIntervalStart = (heartbeat as any)?.currentIntervalStartAt
+    ? new Date((heartbeat as any).currentIntervalStartAt).toISOString()
+    : null;
+  const heartbeatFresh = heartbeat
+    ? Date.now() - new Date((heartbeat as any).lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
+    : false;
   const fallbackShiftedStart = isOnShift && !isOnBreak && isShiftFromToday && shiftStartedAt
     ? new Date(new Date(shiftStartedAt).getTime() + totalBreakSeconds * 1000).toISOString()
     : null;
+  const currentIntervalStartAt = isOnBreak
+    ? null
+    : heartbeatFresh
+      ? rawIntervalStart
+      : activityIntervalTotal > 0
+        ? null
+        : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
     isOnShift,
@@ -498,7 +522,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     totalBreakSeconds,
     todayTotalWorkedSeconds,
     todayTotalActiveSeconds,
-    currentIntervalStartAt: fallbackShiftedStart,
+    currentIntervalStartAt,
   }, 'Shift state fetched'));
 });
 
@@ -578,4 +602,75 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   res.json(new ApiResponse(200, { resumable, originalClockIn }, 'Resumable shift checked'));
 });
 
-export default { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift };
+/**
+ * POST /api/timeclock/heartbeat
+ * Tray app pings every 60s. Works for both User and CrmUser.
+ */
+export const postHeartbeat = asyncHandler(async (req: Request, res: Response) => {
+  const actor = getActor(req);
+  const {
+    isIdle = false,
+    platform = 'win32',
+    isOnBreak = false,
+    breakDurationSeconds = 0,
+    isOnShift = false,
+    currentIntervalStartAt,
+  } = req.body;
+
+  const existing = await AgentHeartbeat.findOne({ userId: actor.id }).lean();
+  const wasOnBreak = (existing as any)?.isOnBreak ?? false;
+
+  let lastBreakNotifiedAt = (existing as any)?.lastBreakNotifiedAt ?? null;
+  if (!isOnBreak && wasOnBreak) lastBreakNotifiedAt = null;
+
+  await AgentHeartbeat.findOneAndUpdate(
+    { userId: actor.id },
+    {
+      isIdle,
+      isOnBreak,
+      breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? (existing as any)?.breakStartedAt ?? null : null),
+      lastBreakNotifiedAt,
+      platform,
+      lastSeenAt: new Date(),
+      ...(currentIntervalStartAt !== undefined && {
+        currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
+      }),
+    },
+    { upsert: true, new: true }
+  );
+
+  res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
+});
+
+/**
+ * POST /api/timeclock/activity-interval
+ * Tray app posts a completed active period when the user goes idle. Works for both User and CrmUser.
+ */
+export const postActivityInterval = asyncHandler(async (req: Request, res: Response) => {
+  const actor = getActor(req);
+  const { startAt, endAt } = req.body;
+
+  if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const durationSeconds = Math.round((end.getTime() - start.getTime()) / 1000);
+
+  if (durationSeconds < 30) {
+    return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
+  }
+
+  const shiftDate = toLocalDateStr(start, COMPANY_TZ_OFFSET_MINUTES);
+
+  await ActivityInterval.create({
+    userId: actor.id,
+    shiftDate,
+    startAt: start,
+    endAt: end,
+    durationSeconds,
+  });
+
+  res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
+});
+
+export default { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift, postHeartbeat, postActivityInterval };

@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response, Router } from 'express';
 import auth from '../middleware/auth.middleware';
 import crmAuth from '../middleware/crmAuth.middleware';
-import { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift } from '../controllers/generalTimeclock.controller';
+import { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift, postHeartbeat, postActivityInterval } from '../controllers/generalTimeclock.controller';
 
 const router = Router();
 
@@ -18,5 +18,7 @@ router.post('/clock', timeClock);
 router.get('/shift-state', getShiftState);
 router.get('/my', getMyTimeproof);
 router.get('/resumable-shift', getResumableShift);
+router.post('/heartbeat', postHeartbeat);
+router.post('/activity-interval', postActivityInterval);
 
 export default router;

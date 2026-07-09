@@ -975,16 +975,15 @@ const editMessage = asyncHandler(async (req: Request, res: Response) => {
   const { messageId } = req.params;
   const { content } = req.body;
 
-  if (!content?.trim()) throw new ApiError(400, 'Content is required');
-
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
   if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
   if (message.type === 'voice' || message.type === 'poll' || message.type === 'event') {
     throw new ApiError(400, 'This message type cannot be edited');
   }
+  if (!content?.trim() && message.attachments.length === 0) throw new ApiError(400, 'Content is required');
 
-  message.content = content.trim();
+  message.content = content?.trim() || '';
   message.isEdited = true;
   await message.save();
 
@@ -998,6 +997,75 @@ const editMessage = asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json(new ApiResponse(200, { content: message.content, isEdited: true }, 'Message edited'));
+});
+
+/** PATCH /api/supraspace/messages/:messageId/attachments — replace/remove attachments and update caption */
+const replaceMessageAttachments = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+  const files = (req.files || []) as Express.Multer.File[];
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
+  if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
+  if (message.type === 'voice' || message.type === 'poll' || message.type === 'event' || message.type === 'gif') {
+    throw new ApiError(400, 'This message type cannot have its attachments replaced');
+  }
+  if (!content && files.length === 0) throw new ApiError(400, 'A message or attachment is required');
+
+  const oldAttachments = [...(message.attachments || [])];
+  const replacements: any[] = [];
+  try {
+    for (const file of files) {
+      const fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
+      replacements.push({
+        url: fileUrl,
+        fileKey: storageService.getKeyFromUrl(fileUrl) || fileUrl,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        thumbnailUrl: file.mimetype.startsWith('image/') ? fileUrl : undefined,
+      });
+    }
+  } catch (err) {
+    await Promise.all(replacements.map(a => storageService.delete(a.fileKey).catch(() => undefined)));
+    logger.error({ err, messageId }, '[SupraSpace] Attachment replacement failed');
+    throw new ApiError(503, 'Attachment replacement is temporarily unavailable. Please try again.');
+  }
+
+  message.content = content;
+  message.attachments = replacements;
+  message.type = replacements.some(a => a.mimeType.startsWith('image/')) && replacements.length === 1
+    ? 'image'
+    : replacements.length > 0 ? 'file' : 'text';
+  message.isEdited = true;
+
+  try {
+    await message.save();
+  } catch (err) {
+    await Promise.all(replacements.map(a => storageService.delete(a.fileKey).catch(() => undefined)));
+    throw err;
+  }
+
+  await Promise.all(oldAttachments.map(a => {
+    const key = a.fileKey || a.url;
+    return key ? storageService.delete(key).catch(e => logger.warn({ err: e, messageId }, '[SupraSpace] Old attachment cleanup failed')) : Promise.resolve();
+  }));
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  const messageForClient = await signAttachments(message.toObject() as any);
+  if (conversation) {
+    emitToConversation(conversation, 'message:edited', {
+      conversationId: message.conversationId.toString(),
+      messageId,
+      content: message.content,
+      attachments: messageForClient.attachments,
+      type: message.type,
+    });
+  }
+
+  res.json(new ApiResponse(200, messageForClient, files.length ? 'Attachment replaced' : 'Attachment removed'));
 });
 
 // ─── Polls ───────────────────────────────────────────────────────────────────
@@ -1393,6 +1461,7 @@ const supraSpaceController = {
   uploadAttachment,
   reactToMessage,
   editMessage,
+  replaceMessageAttachments,
   deleteMessage,
   createPoll,
   votePoll,
