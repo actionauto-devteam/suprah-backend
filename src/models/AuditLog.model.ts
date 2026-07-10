@@ -1,9 +1,9 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IAuditLog extends Document {
-    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Load' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction';
+    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Load' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction' | 'TimeLog' | 'Screenshot';
     entityId?: mongoose.Types.ObjectId | string;
-    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL';
+    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL' | 'CORRECT_TIME_LOG' | 'EXCLUDE_SCREENSHOT';
     changes?: any;
     reason: string;
     performedBy?: mongoose.Types.ObjectId;
@@ -31,11 +31,13 @@ const InternalAuditLogSchema: Schema = new Schema(
                 'Driver',
                 'Invitation',
                 'Referral',
-                'Transaction'
+                'Transaction',
+                'TimeLog',
+                'Screenshot'
             ]
         },
         entityId: { type: Schema.Types.Mixed },
-        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS', 'APPROVE_REWARD', 'APPROVE_WITHDRAWAL', 'REJECT_WITHDRAWAL'] },
+        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS', 'APPROVE_REWARD', 'APPROVE_WITHDRAWAL', 'REJECT_WITHDRAWAL', 'CORRECT_TIME_LOG', 'EXCLUDE_SCREENSHOT'] },
         changes: { type: Schema.Types.Mixed },
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },

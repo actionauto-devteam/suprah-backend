@@ -12,6 +12,10 @@ import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
 import CrmPushService from '../services/crmPush.service';
+import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
+import AuditLog from '../models/AuditLog.model';
+import { isTimeEditExempt } from '../config/departmentMonitoring';
+import { getCompanyDayRange } from '../utils/companyTimezone';
 
 const BREAK_LIMIT_SECONDS = 3600; // 3600
 
@@ -699,6 +703,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
         username: targetUser.username,
         avatar: targetUser.avatar,
         role: targetUser.role,
+        department: targetUser.department,
       },
       calendar,
       summary,
@@ -1140,10 +1145,15 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
   }
 
   const prefix = `screenshots/${targetId}/${date}/`;
-  const objects = await storageService.list(prefix, BucketType.PRIVATE);
+  const [objects, excludedRows] = await Promise.all([
+    storageService.list(prefix, BucketType.PRIVATE),
+    ExcludedScreenshot.find({ userId: targetId, key: { $regex: `^${prefix}` } }).select('key').lean(),
+  ]);
+  const excludedKeys = new Set(excludedRows.map((r) => r.key));
 
   // Parse each key into structured screenshot data
   const parsed = objects
+    .filter((obj) => !excludedKeys.has(obj.key))
     .map((obj) => {
       // key suffix after prefix is "{capturedAtMs}-{flag}.jpg" — anything else is ignored
       const tail = obj.key.slice(prefix.length).replace(/\.jpg$/i, '');
@@ -1172,6 +1182,134 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
   );
 
   res.json(new ApiResponse(200, { screenshots: withUrls }, 'Screenshots fetched'));
+});
+
+/**
+ * PATCH /api/crm/timeproof/correct-time
+ * Admin/manager-only: corrects an overrun shift (forgotten clock-out) by either
+ * updating the existing time-out log for that day or, if the shift is still
+ * open, inserting a new time-out at the corrected timestamp. Every correction
+ * is written to AuditLog with before/after values — TimeLog is never silently
+ * mutated without a trail. Exempt departments (e.g. Web Dev) cannot be corrected.
+ */
+export const correctTimeLog = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can correct time logs');
+  }
+
+  const { userId, date, correctedTimeOut, reason } = req.body as {
+    userId?: string; date?: string; correctedTimeOut?: string; reason?: string;
+  };
+  if (!userId || !date || !correctedTimeOut || !reason?.trim()) {
+    throw new ApiError(400, 'userId, date, correctedTimeOut and reason are all required');
+  }
+
+  const targetUser = await CrmUser.findById(userId).select('department fullName organizationId').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+  if (isTimeEditExempt(targetUser.department)) {
+    throw new ApiError(403, `${targetUser.fullName}'s time logs are exempt from admin correction`);
+  }
+
+  const { start, end } = getCompanyDayRange(date);
+  const correctedAt = new Date(correctedTimeOut);
+  if (correctedAt < start || correctedAt >= new Date(end.getTime() + 12 * 60 * 60 * 1000)) {
+    throw new ApiError(400, 'correctedTimeOut must fall on or shortly after the given date');
+  }
+
+  const dayLogs = await TimeLog.find({ userId, timestamp: { $gte: start, $lt: end } }).sort({ timestamp: 1 }).lean();
+  const lastTimeIn = [...dayLogs].reverse().find((l) => l.type === 'time-in');
+  if (!lastTimeIn) throw new ApiError(404, 'No time-in found for that date to correct');
+
+  const existingTimeOut = dayLogs.find(
+    (l) => l.type === 'time-out' && new Date(l.timestamp).getTime() >= new Date(lastTimeIn.timestamp).getTime(),
+  );
+
+  let before: Date | null = null;
+  let logId: string;
+
+  if (existingTimeOut) {
+    before = existingTimeOut.timestamp;
+    await TimeLog.updateOne({ _id: existingTimeOut._id }, { timestamp: correctedAt, note: `Corrected by ${requestor.fullName}: ${reason}` });
+    logId = existingTimeOut._id.toString();
+  } else {
+    const created = await TimeLog.create({
+      userId, userModel: 'CrmUser', type: 'time-out',
+      timestamp: correctedAt, note: `Added by ${requestor.fullName} (forgotten clock-out): ${reason}`,
+    });
+    logId = created._id.toString();
+  }
+
+  await AuditLog.create({
+    entityType: 'TimeLog',
+    entityId: logId,
+    action: 'CORRECT_TIME_LOG',
+    changes: { userId, date, before, after: correctedAt },
+    reason,
+    performedBy: requestor._id,
+    organizationId: targetUser.organizationId?.toString(),
+  });
+
+  res.json(new ApiResponse(200, { logId, correctedTimeOut: correctedAt }, 'Time log corrected'));
+});
+
+/**
+ * POST /api/crm/timeproof/screenshots/exclude
+ * Admin/manager-only: archives (does not delete) screenshots captured after a
+ * corrected clock-out so they no longer show in the gallery or count as
+ * proof-of-work, while keeping the underlying files and an audit trail.
+ */
+export const excludeScreenshots = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can exclude screenshots');
+  }
+
+  const { userId, date, after, reason } = req.body as {
+    userId?: string; date?: string; after?: string; reason?: string;
+  };
+  if (!userId || !date || !after || !reason?.trim()) {
+    throw new ApiError(400, 'userId, date, after and reason are all required');
+  }
+
+  const targetUser = await CrmUser.findById(userId).select('department fullName organizationId').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+  if (isTimeEditExempt(targetUser.department)) {
+    throw new ApiError(403, `${targetUser.fullName}'s screenshots are exempt from admin exclusion`);
+  }
+
+  const prefix = `screenshots/${userId}/${date}/`;
+  const objects = await storageService.list(prefix, BucketType.PRIVATE);
+  const afterMs = new Date(after).getTime();
+
+  const toExclude = objects.filter((obj) => {
+    const tail = obj.key.slice(prefix.length).replace(/\.jpg$/i, '');
+    const ms = parseInt(tail.slice(0, tail.lastIndexOf('-')), 10);
+    return Number.isFinite(ms) && ms > afterMs;
+  });
+
+  if (toExclude.length === 0) {
+    return res.json(new ApiResponse(200, { excluded: 0 }, 'No screenshots after that time'));
+  }
+
+  await ExcludedScreenshot.insertMany(
+    toExclude.map((obj) => ({
+      organizationId: targetUser.organizationId,
+      userId, key: obj.key, reason, excludedBy: requestor._id,
+    })),
+    { ordered: false },
+  ).catch(() => {}); // duplicate keys (already excluded) are fine to ignore
+
+  await AuditLog.create({
+    entityType: 'Screenshot',
+    action: 'EXCLUDE_SCREENSHOT',
+    changes: { userId, date, after, keys: toExclude.map((o) => o.key) },
+    reason,
+    performedBy: requestor._id,
+    organizationId: targetUser.organizationId?.toString(),
+  });
+
+  res.json(new ApiResponse(200, { excluded: toExclude.length }, `${toExclude.length} screenshot(s) excluded`));
 });
 
 /**

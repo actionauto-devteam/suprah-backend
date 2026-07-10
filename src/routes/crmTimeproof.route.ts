@@ -17,6 +17,8 @@ import {
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
+  correctTimeLog,
+  excludeScreenshots,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -38,6 +40,10 @@ router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
 router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, role check inside
+router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
+
+// Admin time-log correction (overrun/forgotten clock-out fix)
+router.patch('/correct-time', correctTimeLog); // admin/manager-only, role + department exemption check inside
 
 // Push notification subscription (admin/manager only)
 router.post('/push/subscribe', subscribeCrmPush);
