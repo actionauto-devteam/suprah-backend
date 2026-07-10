@@ -15,6 +15,7 @@ router.use((req: Request, res: Response, next: NextFunction) => {
 // Consent & status
 router.get('/my-status', locatorController.getMyLocatorStatus);
 router.post('/consent', locatorController.setLocationConsent);
+router.post('/sharing-preference', locatorController.setLocationSharingOptOut);
 
 // Live ingest
 router.post('/ping', locatorController.ingestLocation);

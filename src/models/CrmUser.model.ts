@@ -34,6 +34,7 @@ export interface ICrmUser extends Document {
     grantedAt?: Date;
     deviceHint?: string;
   };
+  locationSharingOptOut?: boolean;
   pushSubscriptions: ICrmPushSubscription[];
   department?: string;
   googleCalendar?: {
@@ -138,6 +139,12 @@ const CrmUserSchema = new Schema<ICrmUser>(
       granted: { type: Boolean, default: false },
       grantedAt: { type: Date },
       deviceHint: { type: String },
+    },
+    locationSharingOptOut: {
+      type: Boolean,
+      // Off by default — only mandatory-location departments (Lot Tech) get auto-share forced
+      // on server-side regardless of this flag; see isMandatoryLocationDept.
+      default: true,
     },
     pushSubscriptions: [
       {

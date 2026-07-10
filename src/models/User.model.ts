@@ -77,6 +77,7 @@ export interface IUser extends Document {
     grantedAt?: Date;
     deviceHint?: string;
   };
+  locationSharingOptOut?: boolean;
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -260,6 +261,12 @@ const UserSchema = new Schema(
       granted: { type: Boolean, default: false },
       grantedAt: { type: Date },
       deviceHint: { type: String },
+    },
+    locationSharingOptOut: {
+      type: Boolean,
+      // Off by default — only mandatory-location departments (Lot Tech) get auto-share forced
+      // on server-side regardless of this flag; see isMandatoryLocationDept.
+      default: true,
     },
     lastPasswordChange: {
       type: Date,

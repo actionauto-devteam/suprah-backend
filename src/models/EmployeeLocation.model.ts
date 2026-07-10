@@ -11,6 +11,14 @@ export interface IEmployeeLocation extends Document {
   userId: mongoose.Types.ObjectId;
   userModel: "User" | "CrmUser";
   organizationId: mongoose.Types.ObjectId;
+  // Denormalized snapshot of the user's own profile, refreshed on every sharing-state
+  // write. Display always prefers this over a live populate — decouples "who is this pin"
+  // from refPath/populate timing so a stale/failed populate can never surface as a wrong
+  // or generic name on the live map.
+  userName?: string;
+  userAvatar?: string;
+  jobTitle?: string;
+  department?: string;
   coords: {
     lat: number;
     lng: number;
@@ -58,6 +66,10 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
       default: "User",
       required: true,
     },
+    userName: { type: String },
+    userAvatar: { type: String },
+    jobTitle: { type: String },
+    department: { type: String },
     organizationId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",

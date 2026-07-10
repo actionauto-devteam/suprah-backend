@@ -16,6 +16,8 @@ import { distanceMeters } from '../utils/geofence';
 import { PushService } from '../services/push.service';
 import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
+import { isMandatoryLocationDept } from '../constants/departments';
+import { getShiftStatusForActor } from '../utils/shiftStatus';
 
 const HISTORY_THROTTLE_MS = 30_000;
 const HARSH_BRAKING_DROP_MPH = 15;
@@ -24,10 +26,8 @@ const INCIDENT_STOP_SPEED_MPH = 3;
 const METERS_TO_MILES = 0.000621371;
 const SPEEDING_THRESHOLD_MPH = 80;
 const STATIONARY_RADIUS_M = 40;
-const LOT_TECH_STATIONARY_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
-const LOT_TECH_OFFLINE_THRESHOLD_MS = 10 * 60 * 1000;    // 10 minutes
-// Minimum length of a "stayed in the same spot" block before it's worth showing
-// as its own segment in the daily activity log (shorter gaps are just noise).
+const LOT_TECH_STATIONARY_THRESHOLD_MS = 45 * 60 * 1000;
+const LOT_TECH_OFFLINE_THRESHOLD_MS = 10 * 60 * 1000;
 const STATIONARY_LOG_MIN_MINUTES = 10;
 
 type LocatorActor = {
@@ -39,7 +39,9 @@ type LocatorActor = {
     organizationId?: any;
     role?: string;
     department?: string;
+    jobTitle?: string;
     locationConsent?: { granted?: boolean; grantedAt?: Date; deviceHint?: string };
+    locationSharingOptOut?: boolean;
 };
 
 function getLocatorActor(req: Request): LocatorActor {
@@ -59,7 +61,20 @@ function getLocatorActor(req: Request): LocatorActor {
         organizationId: anyDoc.organizationId,
         role: anyDoc.role,
         department: anyDoc.department ?? anyDoc.personalInfo?.department,
+        jobTitle: anyDoc.personalInfo?.jobTitle,
         locationConsent: anyDoc.locationConsent,
+        locationSharingOptOut: !!anyDoc.locationSharingOptOut,
+    };
+}
+
+/** Snapshot fields written onto every EmployeeLocation mutation so the live map's display
+ * name/avatar never depends on a live populate of the userId ref resolving correctly. */
+function actorSnapshot(actor: LocatorActor) {
+    return {
+        userName: actor.name,
+        userAvatar: actor.avatar,
+        jobTitle: actor.jobTitle,
+        department: actor.department,
     };
 }
 
@@ -146,8 +161,6 @@ async function updateDrivingTelematics(
             session.harshBrakingEvents += 1;
         }
 
-        // Count crossings into the speeding zone, not every ping spent above it, so one long
-        // stretch of highway speed registers as one event rather than a dozen.
         const wasSpeeding = typeof session.lastSpeedMph === 'number' && session.lastSpeedMph >= SPEEDING_THRESHOLD_MPH;
         if (speedMph >= SPEEDING_THRESHOLD_MPH && !wasSpeeding) {
             session.speedingEvents += 1;
@@ -289,12 +302,11 @@ async function handleGeofenceTransition(
     }
 }
 
-// ── Consent & status ────────────────────────────────────────────────────────────
-
 const getMyLocatorStatus = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
 
     const location = await EmployeeLocation.findOne({ userId: actor.id }).lean();
+    const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
 
     res.json(new ApiResponse(200, {
         employmentLocationType: (actor.doc as any).employmentLocationType ?? 'onsite',
@@ -302,6 +314,10 @@ const getMyLocatorStatus = asyncHandler(async (req: Request, res: Response) => {
         sharingState: location?.sharingState ?? 'off_duty',
         coords: location?.coords ?? null,
         lastSeenAt: location?.lastSeenAt ?? null,
+        isMandatoryDept: isMandatoryLocationDept(actor.department),
+        locationSharingOptOut: !!actor.locationSharingOptOut,
+        isOnShift,
+        isOnBreak,
     }, 'Locator status fetched'));
 });
 
@@ -309,6 +325,16 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { granted, deviceHint } = req.body as { granted: boolean; deviceHint?: string };
+
+    if (!granted) {
+        if (isMandatoryLocationDept(actor.department)) {
+            throw new ApiError(403, 'Location sharing is required for your department and cannot be turned off.');
+        }
+        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+        if (isOnShift && !isOnBreak) {
+            throw new ApiError(403, "You can't stop sharing during your shift — end your shift or start a break first.");
+        }
+    }
 
     const alreadySet = !!actor.locationConsent?.granted === !!granted;
 
@@ -320,12 +346,12 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if (!granted) {
-        // Explicit opt-out — drop them off the live map entirely.
         await EmployeeLocation.findOneAndUpdate(
             { userId: actor.id },
             {
                 organizationId: orgId,
                 userModel: actor.model,
+                ...actorSnapshot(actor),
                 sharingState: 'off_duty',
                 $unset: { currentPlaceId: '' },
             },
@@ -350,13 +376,43 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { granted: !!granted }, 'Location consent updated'));
 });
 
-// ── Live ingest ──────────────────────────────────────────────────────────────
+const setLocationSharingOptOut = asyncHandler(async (req: Request, res: Response) => {
+    const actor = getLocatorActor(req);
+    const orgId = req.orgId as string;
+    const { optOut } = req.body as { optOut: boolean };
 
-// Whitelisted so a client can't stuff arbitrary/oversized strings into a field that gets
-// rendered (even though the frontend also escapes it — this is the second layer, not the only one).
-// `connectionType` is the real physical medium; `effectiveType` is a separate bandwidth-class
-// heuristic ("4g" etc.) that must never be conflated with an actual cellular connectionType —
-// that conflation is exactly what made desktop Wi-Fi/Ethernet users show up mislabeled "4G".
+    if (isMandatoryLocationDept(actor.department)) {
+        throw new ApiError(403, 'Location sharing is required for your department and cannot be disabled.');
+    }
+
+    const update = { locationSharingOptOut: !!optOut };
+    if (actor.model === 'CrmUser') {
+        await CrmUser.findByIdAndUpdate(actor.id, update);
+    } else {
+        await User.findByIdAndUpdate(actor.id, update);
+    }
+
+    if (optOut) {
+        await EmployeeLocation.findOneAndUpdate(
+            { userId: actor.id },
+            {
+                organizationId: orgId,
+                userModel: actor.model,
+                ...actorSnapshot(actor),
+                sharingState: 'off_duty',
+                $unset: { currentPlaceId: '' },
+            },
+            { upsert: true },
+        );
+        emitToOrg(orgId, 'locator:sharing_state_changed', {
+            userId: actor.id.toString(),
+            sharingState: 'off_duty',
+        });
+    }
+
+    res.json(new ApiResponse(200, { optOut: !!optOut }, 'Location sharing preference updated'));
+});
+
 const KNOWN_CONNECTION_TYPES = new Set(['wifi', 'ethernet', 'cellular', 'bluetooth', 'wimax', 'none']);
 const KNOWN_EFFECTIVE_TYPES = new Set(['4g', '3g', '2g', 'slow-2g']);
 
@@ -389,12 +445,8 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     const nextPlace = await findNearestPlace(orgId, lat, lng);
     const isLotTech = isMobileMonitoringDept(actor.department);
 
-    // A fresh continuous sharing session — used to show "sharing for Xh" instead of just a timestamp.
     const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
 
-    // "Has this person basically stayed in one spot" — the anchor only resets once a ping lands
-    // outside STATIONARY_RADIUS_M of it, so ordinary GPS jitter (a few meters of noise while
-    // truly standing still) doesn't keep resetting the clock.
     const prevAnchor = previous?.stationaryAnchor;
     const isNewAnchor = !prevAnchor || distanceMeters(prevAnchor.lat, prevAnchor.lng, lat, lng) > STATIONARY_RADIUS_M;
     const stationaryAnchor = isNewAnchor ? { lat, lng } : prevAnchor;
@@ -405,6 +457,7 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         {
             organizationId: orgId,
             userModel: actor.model,
+            ...actorSnapshot(actor),
             coords: { lat, lng },
             heading, speedMph, accuracyM, batteryLevel, isCharging,
             connectivity: connectivity === 'offline' ? 'offline' : 'online',
@@ -414,8 +467,6 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             lastSeenAt: new Date(),
             stationaryAnchor, stationarySince,
             ...(isNewSharingSession ? { sharingSince: new Date() } : {}),
-            // Clear the stationary notification flag whenever the anchor resets (employee moved),
-            // so the next stationary period can fire its own notification fresh.
             ...(isNewAnchor ? { stationaryNotifiedAt: null } : {}),
         },
         { upsert: true, new: true },
@@ -451,12 +502,9 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         isLotTech,
     ).catch(() => {});
 
-    // ── Lot Tech monitoring alerts ───────────────────────────────────────────
     if (isLotTech) {
         const nowMs = Date.now();
 
-        // Offline detection: if the previous ping was > 10 min ago while actively sharing,
-        // the employee just came back online after a gap — notify admin once.
         if (
             previous?.lastSeenAt &&
             previous.sharingState === 'sharing' &&
@@ -471,8 +519,6 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             });
         }
 
-        // Stationary alert: if the employee hasn't moved for 45+ min, notify admin once per
-        // stationary period (stationaryNotifiedAt is cleared whenever the anchor resets).
         const stationaryMs = updated.stationarySince
             ? nowMs - new Date(updated.stationarySince).getTime()
             : 0;
@@ -523,12 +569,19 @@ const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
     const { reason } = req.body as { reason?: 'manual' | 'break' };
     const sharingState = reason === 'break' ? 'paused_break' : 'paused_manual';
 
+    if (reason !== 'break' && isMandatoryLocationDept(actor.department)) {
+        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+        if (isOnShift && !isOnBreak) {
+            throw new ApiError(403, 'Location sharing is mandatory for your department during an active shift — it pauses automatically on break.');
+        }
+    }
+
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === sharingState;
 
     await EmployeeLocation.findOneAndUpdate(
         { userId: actor.id },
-        { organizationId: orgId, userModel: actor.model, sharingState },
+        { organizationId: orgId, userModel: actor.model, ...actorSnapshot(actor), sharingState },
         { upsert: true },
     );
 
@@ -565,7 +618,7 @@ const resumeSharing = asyncHandler(async (req: Request, res: Response) => {
 
     const updated = await EmployeeLocation.findOneAndUpdate(
         { userId: actor.id },
-        { organizationId: orgId, userModel: actor.model, sharingState: 'sharing', sharingSince: new Date() },
+        { organizationId: orgId, userModel: actor.model, ...actorSnapshot(actor), sharingState: 'sharing', sharingSince: new Date() },
         { upsert: true, new: true },
     );
 
@@ -593,6 +646,13 @@ const stopSharing = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
 
+    if (isMandatoryLocationDept(actor.department)) {
+        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+        if (isOnShift && !isOnBreak) {
+            throw new ApiError(403, 'Location sharing is mandatory for your department during an active shift — it pauses automatically on break.');
+        }
+    }
+
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === 'off_duty';
 
@@ -601,6 +661,7 @@ const stopSharing = asyncHandler(async (req: Request, res: Response) => {
         {
             organizationId: orgId,
             userModel: actor.model,
+            ...actorSnapshot(actor),
             sharingState: 'off_duty',
             $unset: { currentPlaceId: '' },
         },
@@ -617,24 +678,48 @@ const stopSharing = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { sharingState: 'off_duty' }, 'Location sharing stopped'));
 });
 
+/** Higher = "more alive" — actively sharing beats paused beats off-duty, and within the same
+ * state the more recently-seen row wins. Used to pick a winner when the same human shows up
+ * twice (see getActiveEmployeeLocations). */
+function locationLiveness(l: any): number {
+    const stateRank = l.sharingState === 'sharing' ? 2 : l.sharingState?.startsWith('paused') ? 1 : 0;
+    return stateRank * 1e13 + new Date(l.lastSeenAt || 0).getTime();
+}
+
 const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
 
-    // Visible to everyone in the dealership — the live map is a team-wide tool.
     const locations = await EmployeeLocation.find({ organizationId: orgId })
-        .populate('userId', 'name fullName avatar department personalInfo.jobTitle personalInfo.department employmentLocationType')
+        .populate('userId', 'name fullName email avatar department personalInfo.jobTitle personalInfo.department employmentLocationType')
         .lean();
 
-    const result = locations
-        .filter((l: any) => l.userId)
+    const withUser = locations.filter((l: any) => l.userId);
+
+    // The same physical person can have both a main-site `User` account (Beacon page login) and
+    // a separate `CrmUser` account (TimeProof clock page login) — two unrelated documents with
+    // no schema link between them (see getLocatorActor). If both ever shared location, each
+    // writes its own EmployeeLocation row, which otherwise renders as two pins for one human.
+    // Email is the only identity signal common to both account types, so use it to collapse
+    // duplicates, keeping whichever row is currently more "alive".
+    const byPerson = new Map<string, any>();
+    for (const l of withUser) {
+        const key = (l.userId as any).email ? String((l.userId as any).email).toLowerCase() : `${l.userModel}:${l.userId._id}`;
+        const existing = byPerson.get(key);
+        if (!existing || locationLiveness(l) > locationLiveness(existing)) byPerson.set(key, l);
+    }
+
+    // The denormalized snapshot (written on every sharing-state change, see actorSnapshot())
+    // is always preferred — it can't go stale/wrong the way a live populate can (deleted
+    // account, refPath/collection mismatch on legacy records, etc.). Populated fields are
+    // only a fallback for records written before the snapshot existed.
+    const result = [...byPerson.values()]
         .map((l: any) => ({
             userId: l.userId._id,
             userModel: l.userModel,
-            userName: l.userId.name || l.userId.fullName || 'Team member',
-            userAvatar: l.userId.avatar,
-            jobTitle: l.userId.personalInfo?.jobTitle,
-            // CrmUser has department as a direct field; User has it nested in personalInfo.
-            department: l.userId.department || l.userId.personalInfo?.department,
+            userName: l.userName || l.userId.name || l.userId.fullName || l.userId.email || 'Team Member',
+            userAvatar: l.userAvatar || l.userId.avatar,
+            jobTitle: l.jobTitle || l.userId.personalInfo?.jobTitle,
+            department: l.department || l.userId.department || l.userId.personalInfo?.department,
             employmentLocationType: l.userId.employmentLocationType,
             coords: l.coords,
             heading: l.heading,
@@ -657,8 +742,6 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
 
     res.json(new ApiResponse(200, result, 'Active employee locations fetched'));
 });
-
-// ── Places (admin-only CRUD) ────────────────────────────────────────────────────
 
 const getPlaces = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
@@ -768,8 +851,6 @@ const manualCheckIn = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(201, visit, 'Checked in'));
 });
 
-// ── History & reporting ──────────────────────────────────────────────────────
-
 const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
@@ -787,9 +868,6 @@ const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
         if (to) query.recordedAt.$lte = new Date(to);
     }
 
-    // Sort newest-first when capping at 2000 so a long continuous share (e.g. an all-day
-    // drive) keeps its most RECENT points instead of silently truncating them off the end —
-    // then reverse back to chronological order, which the map trail/time-range display expect.
     const history = await LocationHistory.find(query).sort({ recordedAt: -1 }).limit(2000).lean();
     history.reverse();
     res.json(new ApiResponse(200, history, 'Location history fetched'));
@@ -830,10 +908,6 @@ const getTimeAtPlaceReport = asyncHandler(async (req: Request, res: Response) =>
     res.json(new ApiResponse(200, Array.from(totals.values()), 'Time-at-place report fetched'));
 });
 
-// ── Daily activity log (mobile-monitoring departments, e.g. Lot Tech) ────────
-// Replaces "screenshots" as the proof-of-work record for departments that use
-// phone-only clock-in: movement/place visits + distance + top speed +
-// stationary blocks, derived from LocationHistory pings for one calendar day.
 const getDailyActivityLog = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
@@ -915,8 +989,6 @@ const getDailyActivityLog = asyncHandler(async (req: Request, res: Response) => 
     }, 'Daily activity log fetched'));
 });
 
-// ── Driving sessions ─────────────────────────────────────────────────────────
-
 const getDrivingSessions = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
@@ -982,8 +1054,6 @@ const respondToIncident = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, session, 'Incident response recorded'));
 });
-
-// ── SOS ───────────────────────────────────────────────────────────────────────
 
 const triggerSos = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
@@ -1058,13 +1128,12 @@ const resolveSos = asyncHandler(async (req: Request, res: Response) => {
 const getActiveSosAlerts = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
 
-    // Active SOS alerts are visible to everyone so the whole team can respond.
     const alerts = await SosAlert.find({ organizationId: orgId, status: 'active' }).sort({ createdAt: -1 }).lean();
     res.json(new ApiResponse(200, alerts, 'Active SOS alerts fetched'));
 });
 
 export default {
-    getMyLocatorStatus, setLocationConsent,
+    getMyLocatorStatus, setLocationConsent, setLocationSharingOptOut,
     ingestLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
     getPlaces, createPlace, updatePlace, deletePlace, manualCheckIn,
     getLocationHistory, getTimeAtPlaceReport, getDailyActivityLog,
