@@ -10,6 +10,7 @@ import { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { isMobileMonitoringDept } from '../config/departmentMonitoring';
+import { getSocketIO } from '../utils/socketEmitter';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -368,6 +369,42 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     note: note || undefined,
     ipAddress: req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown',
   });
+
+  // Emit real-time event so admin monitoring dashboards (e.g. the CRM shift
+  // board) see Lot Tech / main-User clock actions live, same as the CRM path.
+  try {
+    const io = getSocketIO();
+    if (io) {
+      let totalBreakSeconds: number | undefined;
+      if (type === 'break-out') {
+        const todayBreakLogs = await TimeLog.find({
+          userId: actor.id,
+          type: { $in: ['break-in', 'break-out'] },
+          timestamp: { $gte: today, $lt: timeLog.timestamp },
+        }).sort({ timestamp: 1 }).lean();
+        totalBreakSeconds = 0;
+        let currentBreakIn: Date | null = null;
+        for (const log of todayBreakLogs) {
+          if (log.type === 'break-in') currentBreakIn = new Date(log.timestamp);
+          else if (log.type === 'break-out' && currentBreakIn) {
+            totalBreakSeconds += (new Date(log.timestamp).getTime() - currentBreakIn.getTime()) / 1000;
+            currentBreakIn = null;
+          }
+        }
+      }
+
+      io.to(`user:${actor.id.toString()}`).emit(type, {
+        _id: timeLog._id,
+        type: timeLog.type,
+        timestamp: timeLog.timestamp,
+        ...(type === 'time-in' && { shiftStartedAt: timeLog.timestamp }),
+        ...(type === 'break-in' && { breakStartedAt: timeLog.timestamp }),
+        ...(type === 'break-out' && { totalBreakSeconds }),
+      });
+    }
+  } catch (error) {
+    console.error('Failed to emit time log event:', error);
+  }
 
   // Mobile-monitoring department push notifications (main User model, e.g. Lot Tech)
   const isLotTech = actor.model === 'User' && isMobileMonitoringDept(actor.department);
