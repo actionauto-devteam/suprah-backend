@@ -33,6 +33,7 @@ router.post('/places/:id/check-in', locatorController.manualCheckIn);
 // History & reporting
 router.get('/history/:userId', locatorController.getLocationHistory);
 router.get('/reports/time-at-place', locatorController.getTimeAtPlaceReport);
+router.get('/daily-activity', locatorController.getDailyActivityLog);
 
 // Driving sessions
 router.get('/driving-sessions', locatorController.getDrivingSessions);

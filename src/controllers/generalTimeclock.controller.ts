@@ -9,11 +9,11 @@ import { IUser } from '../models/User.model';
 import { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
+import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
-const LOT_TECH_DEPT = 'LotTechTeam';   // key stored in User.personalInfo.department
 const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
 
 // ── Actor helper ──────────────────────────────────────────────────────────────
@@ -369,8 +369,8 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown',
   });
 
-  // Lot Tech push notifications (main User with LotTechTeam department)
-  const isLotTech = actor.model === 'User' && actor.department === LOT_TECH_DEPT;
+  // Mobile-monitoring department push notifications (main User model, e.g. Lot Tech)
+  const isLotTech = actor.model === 'User' && isMobileMonitoringDept(actor.department);
   if (isLotTech && actor.orgId) {
     if (type === 'time-in') {
       PushService.notifyOrgAdmins(actor.orgId, {

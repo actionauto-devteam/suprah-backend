@@ -14,6 +14,8 @@ import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
 import { PushService } from '../services/push.service';
+import { isMobileMonitoringDept } from '../config/departmentMonitoring';
+import { getCompanyDayRange } from '../utils/companyTimezone';
 
 const HISTORY_THROTTLE_MS = 30_000;
 const HARSH_BRAKING_DROP_MPH = 15;
@@ -22,9 +24,11 @@ const INCIDENT_STOP_SPEED_MPH = 3;
 const METERS_TO_MILES = 0.000621371;
 const SPEEDING_THRESHOLD_MPH = 80;
 const STATIONARY_RADIUS_M = 40;
-const LOT_TECH_DEPT = 'LotTechTeam';
 const LOT_TECH_STATIONARY_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
 const LOT_TECH_OFFLINE_THRESHOLD_MS = 10 * 60 * 1000;    // 10 minutes
+// Minimum length of a "stayed in the same spot" block before it's worth showing
+// as its own segment in the daily activity log (shorter gaps are just noise).
+const STATIONARY_LOG_MIN_MINUTES = 10;
 
 type LocatorActor = {
     doc: IUser | ICrmUser;
@@ -274,12 +278,14 @@ async function handleGeofenceTransition(
             userId: user._id.toString(), userName: user.name,
             placeId: nextPlace._id, placeName: nextPlace.name, enteredAt: visit.enteredAt,
         });
-        notifyAdmins(orgId, {
-            title: '📍 Arrival',
-            body: `${user.name} arrived at ${nextPlace.name}`,
-            tag: `locator-arrival-${user._id}`,
-            data: { url: '/team-pulse?tab=activity' },
-        });
+        if (isLotTech) {
+            notifyAdmins(orgId, {
+                title: '📍 Arrival',
+                body: `${user.name} arrived at ${nextPlace.name}`,
+                tag: `locator-arrival-${user._id}`,
+                data: { url: '/team-pulse?tab=activity' },
+            });
+        }
     }
 }
 
@@ -381,7 +387,7 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
 
     const previous = await EmployeeLocation.findOne({ userId: actor.id }).lean();
     const nextPlace = await findNearestPlace(orgId, lat, lng);
-    const isLotTech = actor.department === LOT_TECH_DEPT;
+    const isLotTech = isMobileMonitoringDept(actor.department);
 
     // A fresh continuous sharing session — used to show "sharing for Xh" instead of just a timestamp.
     const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
@@ -824,6 +830,91 @@ const getTimeAtPlaceReport = asyncHandler(async (req: Request, res: Response) =>
     res.json(new ApiResponse(200, Array.from(totals.values()), 'Time-at-place report fetched'));
 });
 
+// ── Daily activity log (mobile-monitoring departments, e.g. Lot Tech) ────────
+// Replaces "screenshots" as the proof-of-work record for departments that use
+// phone-only clock-in: movement/place visits + distance + top speed +
+// stationary blocks, derived from LocationHistory pings for one calendar day.
+const getDailyActivityLog = asyncHandler(async (req: Request, res: Response) => {
+    const actor = getLocatorActor(req);
+    const orgId = req.orgId as string;
+    const { userId, date } = req.query as { userId?: string; date?: string };
+
+    if (!date) throw new ApiError(400, 'date (YYYY-MM-DD) is required');
+    const targetUserId = userId || actor.id.toString();
+    const isAdmin = ['admin', 'super_admin', 'manager'].includes(actor.role || '');
+    if (targetUserId !== actor.id.toString() && !isAdmin) {
+        throw new ApiError(403, 'Not authorized to view this activity log');
+    }
+
+    const { start, end } = getCompanyDayRange(date);
+
+    const [points, visits] = await Promise.all([
+        LocationHistory.find({
+            organizationId: orgId,
+            userId: targetUserId,
+            recordedAt: { $gte: start, $lt: end },
+        }).sort({ recordedAt: 1 }).lean(),
+        PlaceVisit.find({
+            organizationId: orgId,
+            userId: targetUserId,
+            enteredAt: { $lt: end },
+            $or: [{ exitedAt: { $gte: start } }, { exitedAt: { $exists: false } }],
+        }).sort({ enteredAt: 1 }).lean(),
+    ]);
+
+    let distanceMi = 0;
+    let topSpeedMph = 0;
+    const stationarySegments: Array<{ start: Date; end: Date; durationMin: number }> = [];
+    let segAnchor: { lat: number; lng: number } | null = null;
+    let segStart: Date | null = null;
+
+    for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        if (typeof p.speedMph === 'number' && p.speedMph > topSpeedMph) topSpeedMph = p.speedMph;
+
+        if (i > 0) {
+            const prev = points[i - 1];
+            distanceMi += distanceMeters(prev.coords.lat, prev.coords.lng, p.coords.lat, p.coords.lng) * METERS_TO_MILES;
+        }
+
+        const movedPastAnchor = !segAnchor || distanceMeters(segAnchor.lat, segAnchor.lng, p.coords.lat, p.coords.lng) > STATIONARY_RADIUS_M;
+        if (movedPastAnchor) {
+            if (segStart && segAnchor && i > 0) {
+                const durationMin = Math.round((points[i - 1].recordedAt.getTime() - segStart.getTime()) / 60_000);
+                if (durationMin >= STATIONARY_LOG_MIN_MINUTES) {
+                    stationarySegments.push({ start: segStart, end: points[i - 1].recordedAt, durationMin });
+                }
+            }
+            segAnchor = { lat: p.coords.lat, lng: p.coords.lng };
+            segStart = p.recordedAt;
+        }
+    }
+    if (segStart && points.length) {
+        const lastPoint = points[points.length - 1];
+        const durationMin = Math.round((lastPoint.recordedAt.getTime() - segStart.getTime()) / 60_000);
+        if (durationMin >= STATIONARY_LOG_MIN_MINUTES) {
+            stationarySegments.push({ start: segStart, end: lastPoint.recordedAt, durationMin });
+        }
+    }
+
+    const placeVisits = visits.map((v) => ({
+        placeName: v.placeName,
+        enteredAt: v.enteredAt,
+        exitedAt: v.exitedAt ?? null,
+        durationMin: v.durationMin ?? null,
+    }));
+
+    res.json(new ApiResponse(200, {
+        date,
+        distanceMi: Math.round(distanceMi * 10) / 10,
+        topSpeedMph: Math.round(topSpeedMph),
+        stationaryMinutes: stationarySegments.reduce((sum, s) => sum + s.durationMin, 0),
+        stationarySegments,
+        placeVisits,
+        pointCount: points.length,
+    }, 'Daily activity log fetched'));
+});
+
 // ── Driving sessions ─────────────────────────────────────────────────────────
 
 const getDrivingSessions = asyncHandler(async (req: Request, res: Response) => {
@@ -976,7 +1067,7 @@ export default {
     getMyLocatorStatus, setLocationConsent,
     ingestLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
     getPlaces, createPlace, updatePlace, deletePlace, manualCheckIn,
-    getLocationHistory, getTimeAtPlaceReport,
+    getLocationHistory, getTimeAtPlaceReport, getDailyActivityLog,
     getDrivingSessions, getDrivingSessionDetail, respondToIncident,
     triggerSos, resolveSos, getActiveSosAlerts,
 };
