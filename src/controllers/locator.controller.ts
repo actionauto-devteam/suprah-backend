@@ -667,9 +667,9 @@ const getPlaces = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const createPlace = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can create places');
 
     const { name, lat, lng, radiusM, icon, color, address } = req.body as {
@@ -684,7 +684,7 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
         name, coords: { lat, lng },
         radiusM: radiusM || 100,
         icon, color, address,
-        createdBy: user._id,
+        createdBy: actor.id,
     });
 
     emitToOrg(orgId, 'locator:place_created', { place });
@@ -692,10 +692,10 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const updatePlace = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can update places');
 
     const { name, lat, lng, radiusM, icon, color, address, isActive } = req.body as Partial<{
@@ -719,10 +719,10 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const deletePlace = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can delete places');
 
     const place = await Place.findOneAndUpdate({ _id: id, organizationId: orgId }, { isActive: false });
@@ -733,7 +733,7 @@ const deletePlace = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const manualCheckIn = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
 
@@ -742,8 +742,8 @@ const manualCheckIn = asyncHandler(async (req: Request, res: Response) => {
 
     const visit = await PlaceVisit.create({
         organizationId: orgId,
-        userId: user._id,
-        userName: user.name,
+        userId: actor.id,
+        userName: actor.name,
         placeId: place._id,
         placeName: place.name,
         enteredAt: new Date(),
@@ -752,16 +752,16 @@ const manualCheckIn = asyncHandler(async (req: Request, res: Response) => {
 
     const event = await PresenceEvent.create({
         organizationId: orgId,
-        userId: user._id,
-        userName: user.name,
-        userAvatar: user.avatar,
+        userId: actor.id,
+        userName: actor.name,
+        userAvatar: actor.avatar,
         type: 'geofence_enter',
-        description: `${user.name} checked in at ${place.name}`,
+        description: `${actor.name} checked in at ${place.name}`,
         meta: { placeId: place._id, placeName: place.name, method: 'manual_checkin' },
     });
     emitToOrg(orgId, 'activity:new', event);
     emitToOrg(orgId, 'locator:place_entered', {
-        userId: user._id.toString(), userName: user.name,
+        userId: actor.id.toString(), userName: actor.name,
         placeId: place._id, placeName: place.name, enteredAt: visit.enteredAt,
     });
 
@@ -771,13 +771,13 @@ const manualCheckIn = asyncHandler(async (req: Request, res: Response) => {
 // ── History & reporting ──────────────────────────────────────────────────────
 
 const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { userId } = req.params;
     const { from, to } = req.query as { from?: string; to?: string };
 
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
-    const isSelf = user._id.toString() === userId;
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
+    const isSelf = actor.id.toString() === userId;
     if (!isAdmin && !isSelf) throw new ApiError(403, 'Not authorized to view this history');
 
     const query: any = { organizationId: orgId, userId };
@@ -796,11 +796,11 @@ const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getTimeAtPlaceReport = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { from, to, userId, placeId } = req.query as { from?: string; to?: string; userId?: string; placeId?: string };
 
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can view time-at-place reports');
 
     const query: any = { organizationId: orgId, exitedAt: { $exists: true } };
@@ -918,17 +918,17 @@ const getDailyActivityLog = asyncHandler(async (req: Request, res: Response) => 
 // ── Driving sessions ─────────────────────────────────────────────────────────
 
 const getDrivingSessions = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { userId, from, to } = req.query as { userId?: string; from?: string; to?: string };
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
 
     const query: any = { organizationId: orgId };
     if (userId) {
-        if (!isAdmin && userId !== user._id.toString()) throw new ApiError(403, 'Not authorized');
+        if (!isAdmin && userId !== actor.id.toString()) throw new ApiError(403, 'Not authorized');
         query.userId = userId;
     } else if (!isAdmin) {
-        query.userId = user._id;
+        query.userId = actor.id;
     }
     if (from || to) {
         query.startedAt = {};
@@ -941,28 +941,28 @@ const getDrivingSessions = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getDrivingSessionDetail = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
 
     const session = await DrivingSession.findOne({ _id: id, organizationId: orgId }).lean();
     if (!session) throw new ApiError(404, 'Driving session not found');
-    if (!isAdmin && session.userId.toString() !== user._id.toString()) throw new ApiError(403, 'Not authorized');
+    if (!isAdmin && session.userId.toString() !== actor.id.toString()) throw new ApiError(403, 'Not authorized');
 
     const route = await LocationHistory.find({ drivingSessionId: id }).sort({ recordedAt: 1 }).lean();
     res.json(new ApiResponse(200, { session, route }, 'Driving session detail fetched'));
 });
 
 const respondToIncident = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
     const { confirmed } = req.body as { confirmed: boolean };
 
     const session = await DrivingSession.findOne({ _id: id, organizationId: orgId });
     if (!session) throw new ApiError(404, 'Driving session not found');
-    if (session.userId.toString() !== user._id.toString()) throw new ApiError(403, 'Not authorized');
+    if (session.userId.toString() !== actor.id.toString()) throw new ApiError(403, 'Not authorized');
     if (!session.possibleIncident) throw new ApiError(400, 'No incident to respond to');
 
     session.possibleIncident.confirmed = confirmed;
@@ -974,7 +974,7 @@ const respondToIncident = asyncHandler(async (req: Request, res: Response) => {
     if (confirmed) {
         notifyAdmins(orgId, {
             title: '🚨 Incident Confirmed',
-            body: `${user.name} confirmed an incident during a test drive`,
+            body: `${actor.name} confirmed an incident during a test drive`,
             tag: `locator-incident-confirmed-${session._id}`,
             data: { url: '/team-pulse?tab=activity' },
         });
@@ -986,37 +986,37 @@ const respondToIncident = asyncHandler(async (req: Request, res: Response) => {
 // ── SOS ───────────────────────────────────────────────────────────────────────
 
 const triggerSos = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { lat, lng } = req.body as { lat: number; lng: number };
     if (typeof lat !== 'number' || typeof lng !== 'number') throw new ApiError(400, 'lat and lng are required');
 
     const alert = await SosAlert.create({
         organizationId: orgId,
-        userId: user._id,
-        userName: user.name,
+        userId: actor.id,
+        userName: actor.name,
         coords: { lat, lng },
         status: 'active',
     });
 
     const event = await PresenceEvent.create({
         organizationId: orgId,
-        userId: user._id,
-        userName: user.name,
-        userAvatar: user.avatar,
+        userId: actor.id,
+        userName: actor.name,
+        userAvatar: actor.avatar,
         type: 'sos_triggered',
-        description: `${user.name} triggered an SOS alert`,
+        description: `${actor.name} triggered an SOS alert`,
         meta: { sosId: alert._id, coords: alert.coords },
     });
     emitToOrg(orgId, 'activity:new', event);
     emitToOrg(orgId, 'locator:sos_triggered', {
-        sosId: alert._id, userId: user._id.toString(), userName: user.name,
+        sosId: alert._id, userId: actor.id.toString(), userName: actor.name,
         coords: alert.coords, createdAt: alert.createdAt,
     });
 
     notifyAdmins(orgId, {
         title: '🆘 SOS Alert',
-        body: `${user.name} triggered an SOS alert — respond immediately`,
+        body: `${actor.name} triggered an SOS alert — respond immediately`,
         tag: `locator-sos-${alert._id}`,
         data: { url: '/team-pulse?tab=activity' },
     });
@@ -1025,18 +1025,18 @@ const triggerSos = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const resolveSos = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
+    const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { id } = req.params;
     const { status, note } = req.body as { status: 'resolved' | 'false_alarm'; note?: string };
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can resolve SOS alerts');
 
     const alert = await SosAlert.findOne({ _id: id, organizationId: orgId });
     if (!alert) throw new ApiError(404, 'SOS alert not found');
 
     alert.status = status === 'false_alarm' ? 'false_alarm' : 'resolved';
-    alert.resolvedBy = user._id;
+    alert.resolvedBy = actor.id;
     alert.resolvedAt = new Date();
     alert.resolutionNote = note;
     await alert.save();
@@ -1046,11 +1046,11 @@ const resolveSos = asyncHandler(async (req: Request, res: Response) => {
         userId: alert.userId,
         userName: alert.userName,
         type: 'sos_resolved',
-        description: `${alert.userName}'s SOS alert was ${alert.status === 'false_alarm' ? 'marked as a false alarm' : 'resolved'} by ${user.name}`,
+        description: `${alert.userName}'s SOS alert was ${alert.status === 'false_alarm' ? 'marked as a false alarm' : 'resolved'} by ${actor.name}`,
         meta: { sosId: alert._id },
     });
     emitToOrg(orgId, 'activity:new', event);
-    emitToOrg(orgId, 'locator:sos_resolved', { sosId: alert._id, status: alert.status, resolvedBy: user.name });
+    emitToOrg(orgId, 'locator:sos_resolved', { sosId: alert._id, status: alert.status, resolvedBy: actor.name });
 
     res.json(new ApiResponse(200, alert, 'SOS alert resolved'));
 });
