@@ -61,9 +61,8 @@ import customerInviteRoute from "./customerInvite.routes";
 import shopAssistantRoute from "./shopAssistant.route";
 import generalTimeclockRoute from "./generalTimeclock.route";
 import projectManagementRoute from "./projectManagement.route";
-
+import calendarRoutes from "./calendar.routes";
 const router = express.Router();
-
 const defaultRoutes = [
   {
     path: "/vehicles",
@@ -95,7 +94,6 @@ const defaultRoutes = [
     path: "/profile",
     route: profileRoute,
   },
-
   {
     path: "/appointments/dashboard",
     route: appointmentDashboardRoute,
@@ -224,19 +222,16 @@ const defaultRoutes = [
     path: "/customers",
     route: customerRoute,
   },
+  
   {
     path: "/customer/leads",
     route: customerLeadRoute,
   },
   {
-    // More specific first: reactions must be matched before the generic feed router.
     path: "/crm/feeds/reactions",
     route: feedReactionRoute,
   },
   {
-    // Single owner of /crm/feeds. Comment routes (/:postId/comments[...]) are
-    // now merged INTO feed.route.ts, so there is exactly ONE router — and one
-    // multer/crmAuth stack — handling every /crm/feeds request.
     path: "/crm/feeds",
     route: feedRoute,
   },
@@ -259,6 +254,12 @@ const defaultRoutes = [
   {
     path: "/crm/calendar",
     route: crmCalendarRoute,
+  },
+  {
+    // NEW: Suprah Calendar — unified feed (calendar events + appointments),
+    // event/task/reminder/meeting CRUD, My Schedule, Supra-Space meeting links.
+    path: "/calendar",
+    route: calendarRoutes,
   },
   {
     // NEW: unified Wise + PayPal connect / status / sync / transactions / transfer / disconnect
@@ -323,9 +324,7 @@ const defaultRoutes = [
     route: customerInviteRoute,
   },
 ];
-
 defaultRoutes.forEach((route) => {
   router.use(route.path, route.route);
 });
-
 export default router;
