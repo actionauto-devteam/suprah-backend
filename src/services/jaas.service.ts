@@ -51,7 +51,7 @@ export function generateJaasToken(opts: { user: JaasUser; room?: string; expSeco
       },
       features: {
         livestreaming: 'false',
-        recording: 'false',
+        recording: 'true',
         transcription: 'false',
         'outbound-call': 'false',
       },

@@ -33,6 +33,7 @@ router.get("/sync-logs/stats", adminController.getSyncStats);
 router.post("/users/:id/suspend", adminController.suspendUser);
 router.post("/users/:id/activate", adminController.activateUser);
 router.put("/users/:id/role", adminController.updateUserRole);
+router.put("/users/:id/organization", adminController.updateUserOrganization);
 router.delete("/users/:id", adminController.deleteUser);
 
 // --- ORGANIZATION MANAGEMENT ACTIONS ---

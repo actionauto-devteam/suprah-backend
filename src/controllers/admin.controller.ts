@@ -409,6 +409,40 @@ export const updateUserRole = asyncHandler(async (req: Request, res: Response) =
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
 
+export const updateUserOrganization = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { organizationId } = req.body;
+
+  if (!organizationId) throw new ApiError(400, "organizationId is required");
+
+  const org = await Organization.findById(organizationId);
+  if (!org) throw new ApiError(404, "Organization not found");
+
+  const user = await User.findById(id);
+  if (!user) throw new ApiError(404, "User not found");
+
+  const previousOrgId = user.organizationId?.toString();
+  user.organizationId = org._id as any;
+  await user.save();
+
+  const adminUser = req.user as any;
+  await activityService.logAdminAction(
+    adminUser._id.toString(),
+    undefined,
+    'user_organization_changed',
+    user._id.toString(),
+    `Assigned ${user.email} to organization "${org.name}"${previousOrgId ? ` (previously ${previousOrgId})` : ' (previously none)'}`
+  );
+
+  logger.info(
+    { adminId: adminUser._id, targetUserId: user._id, previousOrgId, newOrgId: org._id.toString() },
+    'User organization changed by administrator'
+  );
+
+  const updated = await User.findById(user._id).select("-password").populate("organizationId", "name");
+  res.json(new ApiResponse(200, updated, "User organization updated successfully"));
+});
+
 export const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const adminUser = req.user as any;
@@ -695,6 +729,7 @@ export default {
   suspendUser,
   activateUser,
   updateUserRole,
+  updateUserOrganization,
   deleteUser,
   suspendOrganization,
   activateOrganization,

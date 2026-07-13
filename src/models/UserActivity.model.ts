@@ -40,6 +40,7 @@ export type ActivityType =
   // Admin Actions
   | 'user_suspended'
   | 'user_activated'
+  | 'user_organization_changed'
   | 'org_suspended'
   | 'subscription_changed'
   | 'logs_cleared'
@@ -107,6 +108,7 @@ const UserActivitySchema = new Schema(
         'payment_completed',
         'user_suspended',
         'user_activated',
+        'user_organization_changed',
         'org_suspended',
         'subscription_changed',
         'logs_cleared',
