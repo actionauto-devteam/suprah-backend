@@ -9,28 +9,7 @@ import CustomerShopAiSession, {
   CUSTOMER_SHOP_AI_DEFAULT_PREFERENCES,
 } from "../models/CustomerShopAiSession.model";
 
-/**
- * customerShopAi.controller.ts
- *
- * Suprah Autrix — Customer Shop assistant.
- *
- * A customer-authenticated vehicle recommendation assistant. It is intentionally
- * SEPARATE from the CRM-side Suprah Autrix controller (which authenticates with
- * `req.crmUser`). This surface is for shoppers and reads ONLY the public, retail
- * marketplace inventory ("Ready for Sale", across all dealerships).
- *
- * Design:
- *   1. The LLM extracts/merges structured shopping preferences from each message.
- *   2. A DETERMINISTIC engine scores real inventory against those preferences,
- *      so match scores, prices and specs are never hallucinated.
- *   3. The LLM produces a warm "personal consultant" reply that references the
- *      actual recommended vehicles and asks a focused follow-up.
- *
- * Extension points for the future roadmap (financing, trade-in, comparison,
- * appointment booking, lead-gen) are marked with `ROADMAP:` comments.
- */
 
-// ─── Groq client (OpenAI-compatible) ─────────────────────────────────────────
 
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || "",
@@ -39,9 +18,7 @@ const groq = new OpenAI({
 
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 
-// ─── Domain maps & weights ───────────────────────────────────────────────────
 
-// Canonical vehicle type -> body-style substrings to match in inventory.
 const TYPE_TO_BODYSTYLE: Record<string, string[]> = {
   suv: ["suv", "sport utility", "crossover", "cuv"],
   sedan: ["sedan", "saloon"],
@@ -54,7 +31,6 @@ const TYPE_TO_BODYSTYLE: Record<string, string[]> = {
   wagon: ["wagon", "estate"],
 };
 
-// Usage intent -> body styles that tend to fit it (soft scoring signal only).
 const USAGE_TO_BODYSTYLE: Record<string, string[]> = {
   family: ["suv", "minivan", "van", "sedan", "wagon", "crossover"],
   "off-road": ["suv", "truck", "pickup"],
@@ -69,7 +45,6 @@ const USAGE_TO_BODYSTYLE: Record<string, string[]> = {
   adventure: ["suv", "truck"],
 };
 
-// Relative importance of each criterion the customer can express.
 const WEIGHTS = {
   budget: 30,
   vehicleType: 22,
@@ -81,9 +56,8 @@ const WEIGHTS = {
 
 const CANDIDATE_LIMIT = 120;
 const TOP_N = 6;
-const MAX_HISTORY_TURNS = 24; // messages (not turns) fed back to the model
+const MAX_HISTORY_TURNS = 24;
 
-// ─── Small helpers ───────────────────────────────────────────────────────────
 
 const lc = (s: any) => (typeof s === "string" ? s.toLowerCase().trim() : "");
 const uniqMerge = (a: string[] = [], b: string[] = []) =>
@@ -91,7 +65,6 @@ const uniqMerge = (a: string[] = [], b: string[] = []) =>
 
 function parseJsonObject(raw: string): any {
   if (!raw) return {};
-  // Strip code fences and any leading/trailing prose the model may add.
   const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
@@ -109,8 +82,6 @@ function num(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// Merge a freshly-extracted preference delta into the stored profile.
-// Arrays are additive; "clear" intents reset a field; scalars overwrite when present.
 function mergePreferences(
   current: IShopPreferences,
   delta: any
@@ -156,7 +127,6 @@ function mergePreferences(
   applyScalar("yearMin", delta?.yearMin);
   applyScalar("maxMileage", delta?.maxMileage);
 
-  // Guard against inverted budget ranges.
   if (
     next.budgetMin != null &&
     next.budgetMax != null &&
@@ -185,10 +155,7 @@ function hasAnyPreference(p: IShopPreferences): boolean {
   );
 }
 
-// ─── Inventory querying ──────────────────────────────────────────────────────
 
-// A permissive candidate query — broad enough to surface close alternatives.
-// Real ranking happens in scoreVehicle().
 function buildCandidateFilter(p: IShopPreferences, relaxBudget = false): any {
   const filter: any = { status: "Ready for Sale", isDeleted: false };
 
@@ -222,14 +189,11 @@ async function fetchCandidates(p: IShopPreferences): Promise<any[]> {
     .limit(CANDIDATE_LIMIT)
     .lean();
 
-  // If the strict filter is too tight, relax budget so we can still suggest
-  // the closest available alternatives (requirement: "no exact match" path).
   if (candidates.length < 3) {
     candidates = await Vehicle.find(buildCandidateFilter(p, true))
       .limit(CANDIDATE_LIMIT)
       .lean();
   }
-  // Absolute fallback: any retail-ready inventory.
   if (candidates.length === 0) {
     candidates = await Vehicle.find({
       status: "Ready for Sale",
@@ -241,12 +205,11 @@ async function fetchCandidates(p: IShopPreferences): Promise<any[]> {
   return candidates;
 }
 
-// ─── Deterministic scoring ───────────────────────────────────────────────────
 
 interface ScoreResult {
-  score: number; // 0-100
-  reasons: string[]; // why it matched
-  tradeoffs: string[]; // where it diverges (for alternative explanations)
+  score: number;
+  reasons: string[];
+  tradeoffs: string[];
 }
 
 function fmtMoney(n: number): string {
@@ -264,7 +227,6 @@ function scoreVehicle(v: any, p: IShopPreferences): ScoreResult {
   const fuel = lc(v.fuelType);
   const price = Number(v.price) || 0;
 
-  // Budget ---------------------------------------------------------------------
   if (p.budgetMax != null || p.budgetMin != null) {
     possible += WEIGHTS.budget;
     const min = p.budgetMin ?? 0;
@@ -456,18 +418,18 @@ async function extractPreferences(
 Return ONLY a JSON object (no prose, no markdown) with any of these keys that the customer EXPRESSED or clearly implied in their latest message:
 
 {
-  "vehicleTypes": string[],   // canonical: SUV, Sedan, Truck, Coupe, Hatchback, Van, Minivan, Convertible, Wagon
-  "brands": string[],         // manufacturer names, e.g. Toyota, Ford
-  "fuelTypes": string[],      // canonical: Gasoline, Hybrid, Electric, Diesel
-  "usage": string[],          // canonical: commute, family, off-road, business, luxury, towing, cargo, adventure
-  "features": string[],       // free text desired features (e.g. "sunroof", "AWD", "leather")
-  "budgetMin": number|null,   // USD
-  "budgetMax": number|null,   // USD; "around 40k" => max ~44000; "under 30k" => max 30000
+  "vehicleTypes": string[],
+  "brands": string[],
+  "fuelTypes": string[],
+  "usage": string[],
+  "features": string[],
+  "budgetMin": number|null,
+  "budgetMax": number|null,
   "passengers": number|null,
   "yearMin": number|null,
   "maxMileage": number|null,
-  "clear": string[],          // field names the customer wants to remove/reset
-  "reset": boolean            // true only if they ask to start over
+  "clear": string[],
+  "reset": boolean
 }
 
 Rules:
@@ -578,13 +540,11 @@ Guidelines:
   );
 }
 
-// ─── Session helpers ─────────────────────────────────────────────────────────
 
 function resolveSessionKey(req: Request): {
   key: string;
   customerUserId: string | null;
 } {
-  // Prefer the authenticated customer identity; fall back to a client session id.
   const u: any = (req as any).user || (req as any).customer || null;
   const customerUserId = u?._id?.toString() || u?.id || null;
   const clientSessionId =

@@ -1,11 +1,11 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IAftermarketAttachment {
-  url: string;        // public R2 URL (or /uploads/ local fallback)
-  key?: string;       // R2 key, useful for deletion
-  fileName?: string;  // original filename for display
+  url: string;
+  key?: string;
+  fileName?: string;
   mimeType?: string;
-  size?: number;      // bytes
+  size?: number;
 }
 
 export interface IAftermarketProduct extends Document {
@@ -13,12 +13,10 @@ export interface IAftermarketProduct extends Document {
   name: string;
   price?: number;
   description: string;
-  /** Optional document attachment (brochure, spec sheet, PDF, etc.) */
   file?: IAftermarketAttachment;
-  /** Optional photo OR video attachment */
   media?: IAftermarketAttachment & { mediaType?: 'image' | 'video' };
   isActive: boolean;
-  createdBy: mongoose.Types.ObjectId; // CrmUser who created it
+  createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -94,7 +92,6 @@ const AftermarketProductSchema = new Schema<IAftermarketProduct>(
   { timestamps: true }
 );
 
-// Common query: products for an org, sorted newest first, filtered by active
 AftermarketProductSchema.index({ organizationId: 1, isActive: 1, createdAt: -1 });
 
 const AftermarketProduct: Model<IAftermarketProduct> =

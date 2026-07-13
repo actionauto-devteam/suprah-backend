@@ -2,7 +2,6 @@ import dotenv from 'dotenv';
 import path from 'path';
 import Joi from 'joi';
 
-// Load .env files (local overrides the main .env)
 dotenv.config({ path: path.join(__dirname, '../../.env.local'), override: true });
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
@@ -13,9 +12,15 @@ const envVarsSchema = Joi.object()
     FRONTEND_URL: Joi.string().required().description('Frontend URL'),
 
     FTP_PASV_MAX: Joi.number().default(21010),
-    FTP_SERVER_USER: Joi.string().allow('').default('dealerscloud'),
-    FTP_SERVER_PASSWORD: Joi.string().allow('').default('changeme123'),
-    FTP_FORCE_TLS: Joi.boolean().default(false),
+    FTP_SERVER_USER: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.string().allow('').default('dealerscloud') })
+      .description('FTP server username — must be set explicitly in production, no default'),
+    FTP_SERVER_PASSWORD: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.string().allow('').default('changeme123') })
+      .description('FTP server password — must be set explicitly in production, no default'),
+    FTP_FORCE_TLS: Joi.boolean()
+      .when('NODE_ENV', { is: 'production', then: Joi.boolean().valid(true).required(), otherwise: Joi.boolean().default(false) })
+      .description('FTP must run over TLS in production — no plaintext fallback'),
     FTP_TLS_CERT_PATH: Joi.string().allow('').description('Path to FTPS certificate'),
     FTP_TLS_KEY_PATH: Joi.string().allow('').description('Path to FTPS key'),
     BACKEND_URL: Joi.string().required().description('Backend URL'),
@@ -37,27 +42,22 @@ const envVarsSchema = Joi.object()
     DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
-    // Email Config
     SMTP_HOST: Joi.string().allow('').description('Email server host'),
     SMTP_PORT: Joi.number().allow('').description('Email server port'),
     SMTP_SECURE: Joi.boolean().allow('').description('Email server secure'),
     SMTP_USER: Joi.string().allow('').description('Email server username'),
     SMTP_PASS: Joi.string().allow('').description('Email server password'),
-    // Google
     GOOGLE_CLIENT_ID: Joi.string().allow('').description('Google Client ID'),
     GOOGLE_CLIENT_SECRET: Joi.string().allow('').description('Google Client Secret'),
     GOOGLE_REDIRECT_URI: Joi.string().allow('').description('Google Redirect URI'),
-    // Stripe
     STRIPE_SECRET_KEY: Joi.string().required().description('Stripe Secret Key'),
     STRIPE_PUBLISHABLE_KEY: Joi.string().required().description('Stripe Publishable Key'),
     STRIPE_WEBHOOK_SECRET: Joi.string().allow('').description('Stripe Webhook Secret'),
-    // Redis
     REDIS_ENABLED: Joi.boolean().default(true).description('Redis enabled toggle'),
     REDIS_HOST: Joi.string().default('127.0.0.1').description('Redis host'),
     REDIS_PORT: Joi.number().default(6379).description('Redis port'),
     REDIS_PASSWORD: Joi.string().allow('').default('').description('Redis password'),
 
-    // Cloudflare R2
     R2_ACCESS_KEY_ID: Joi.string()
       .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
       .description('R2 Access Key'),
@@ -72,9 +72,12 @@ const envVarsSchema = Joi.object()
     R2_BUCKET_FTP: Joi.string().default('actionauto-ftp'),
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
 
-    CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
-    MEMBERSHIP_DISCOUNT_SECRET: Joi.string().allow('').description('Membership discount JWT secret'),
-    // Push Notifications
+    CRM_JWT_SECRET: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('CRM JWT Secret — required in production, no fallback to a hardcoded default'),
+    MEMBERSHIP_DISCOUNT_SECRET: Joi.string()
+      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
+      .description('Membership discount JWT secret — required in production, no fallback to a hardcoded default'),
     VAPID_PUBLIC_KEY: Joi.string()
       .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
       .description('VAPID Public Key'),

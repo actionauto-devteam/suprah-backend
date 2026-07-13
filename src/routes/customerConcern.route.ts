@@ -22,7 +22,7 @@ import { ApiError } from '../utils/ApiError';
 const router = express.Router();
 
 const MAX_FILES = 5;
-const MAX_SIZE = 25 * 1024 * 1024; // 25 MB
+const MAX_SIZE = 25 * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),

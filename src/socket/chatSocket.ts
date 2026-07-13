@@ -2,31 +2,6 @@ import { Server as HttpServer } from "http";
 import { Server as SocketIOServer, Socket } from "socket.io";
 import logger from "../utils/logger";
 
-/**
- * Real-time layer for the Appointment Dashboard chat.
- *
- * Architecture:
- *  - REST endpoints (chat.controller) are the source of truth + persistence.
- *  - After each successful REST mutation, the controller calls emitChatEvent()
- *    which broadcasts to every socket joined to that organization's room.
- *  - Clients render the broadcast instantly; if the socket is unavailable they
- *    fall back to REST polling (see the frontend useDashboardChat hook).
- *
- * Wiring (in your server bootstrap, e.g. server.ts / index.ts):
- *
- *   import http from "http";
- *   import app from "./app";
- *   import { initChatSocket } from "./socket/chatSocket";
- *
- *   const server = http.createServer(app);
- *   initChatSocket(server, {
- *     // Reuse your existing token verification. Must return { userId, orgId }
- *     // (and optionally name/role) or throw on invalid tokens.
- *     verifyToken: async (token) => myVerifyCrmToken(token),
- *     corsOrigins: [process.env.CLIENT_URL ?? "*"],
- *   });
- *   server.listen(PORT);   // <-- listen on `server`, NOT app.listen()
- */
 
 export interface SocketIdentity {
   userId: string;

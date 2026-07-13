@@ -17,7 +17,6 @@ import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import notificationService from '../services/notification.service';
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

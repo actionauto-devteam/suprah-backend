@@ -1,9 +1,3 @@
-/**
- * ADF (Auto-lead Data Format) 1.0 Generator Utility
- * 
- * Generates industry-standard XML leads for dealership DMS/CRM ingestion.
- * Follows the ADF 1.0 specification.
- */
 
 export interface ADFLeadData {
   prospect: {
@@ -56,9 +50,6 @@ export interface ADFLeadData {
   };
 }
 
-/**
- * Escapes special characters for XML compliance
- */
 function escapeXml(unsafe: string): string {
   if (!unsafe) return '';
   return unsafe.replace(/[<>&"']/g, (c) => {
@@ -73,10 +64,6 @@ function escapeXml(unsafe: string): string {
   });
 }
 
-/**
- * Developer-friendly wrapper centered on common inquiry fields.
- * Maps a flat structure to the full ADFLeadData spec.
- */
 export function generateInquiryADF(data: {
   firstName: string;
   lastName: string;
@@ -122,14 +109,10 @@ export function generateInquiryADF(data: {
   });
 }
 
-/**
- * Generates an ADF 1.0 XML string from lead data
- */
 export function generateADF(data: ADFLeadData): string {
   const { prospect } = data;
   const requestDate = prospect.requestDate || new Date().toISOString();
 
-  // 1. Header
   let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
   xml += `<?adf version="1.0"?>\n`;
   xml += `<adf>\n`;

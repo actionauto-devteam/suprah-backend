@@ -10,7 +10,7 @@ export interface IServiceLocation extends Document {
     partnerName: string;
     location: {
         type: 'Point';
-        coordinates: [number, number]; // [longitude, latitude]
+        coordinates: [number, number];
     };
     isActive: boolean;
     createdAt: Date;
@@ -63,7 +63,7 @@ const ServiceLocationSchema = new Schema<IServiceLocation>(
             },
             coordinates: {
                 type: [Number],
-                required: false, // Optional if we don't have coordinates initially
+                required: false,
             },
         },
         isActive: {
@@ -76,7 +76,6 @@ const ServiceLocationSchema = new Schema<IServiceLocation>(
     }
 );
 
-// Create a geospatial index for GeoJSON location searches
 ServiceLocationSchema.index({ location: '2dsphere' });
 
 const ServiceLocation = mongoose.model<IServiceLocation>('ServiceLocation', ServiceLocationSchema);

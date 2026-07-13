@@ -8,9 +8,6 @@ import User from '../models/User.model';
 import PresenceEvent from '../models/PresenceEvent.model';
 import { emitToOrg } from '../utils/socketEmitter';
 
-/**
- * Get user profile with extended information
- */
 const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const profile = await profileService.getProfile(userId);
@@ -20,9 +17,6 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Update user profile
- */
 const updateProfile = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
   const { name, avatar, theme, onlineStatus, customStatus, personalInfo } = req.body;
@@ -43,9 +37,6 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Update online status
- */
 const PRESENCE_LOG_STATUSES = new Set(['offline', 'away', 'busy', 'do_not_disturb', 'idle']);
 const PRESENCE_DESCS: Record<string, (name: string) => string> = {
   online:           (n) => `${n} is back Online`,

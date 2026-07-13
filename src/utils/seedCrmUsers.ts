@@ -20,11 +20,6 @@ const CRM_USERS = [
 const TARGET_ORGANIZATION_ID = '69da5ccbbd32e79c9296e750';
 const DEFAULT_PASSWORD = 'superadmin@123!';
 
-/**
- * Auto-seed CRM users on server startup.
- * Call this AFTER mongoose.connect() in your server entry file.
- * Safe to run multiple times — skips users that already exist.
- */
 const seedCrmUsers = async (): Promise<void> => {
   try {
     logger.info('[CRM Seed] Checking CRM users...');
@@ -33,7 +28,6 @@ const seedCrmUsers = async (): Promise<void> => {
     let existing = 0;
 
     for (const userData of CRM_USERS) {
-      // Look for user by email (globally unique) or username within this organization
       const exists = await CrmUser.findOne({
         $or: [
           { email: userData.email },
@@ -42,7 +36,6 @@ const seedCrmUsers = async (): Promise<void> => {
       });
 
       if (exists) {
-        // Optional: Ensure existing user is pointed to the correct org if it's missing
         if (!exists.organizationId) {
           exists.organizationId = TARGET_ORGANIZATION_ID as any;
           await exists.save();
@@ -51,7 +44,6 @@ const seedCrmUsers = async (): Promise<void> => {
         continue;
       }
 
-      // Password is auto-hashed by the pre-save hook in CrmUser model
       await CrmUser.create({
         ...userData,
         organizationId: TARGET_ORGANIZATION_ID,

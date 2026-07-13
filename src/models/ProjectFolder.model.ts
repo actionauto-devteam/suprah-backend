@@ -1,15 +1,11 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-/**
- * Folder Group — third level of the hierarchy. Lives inside a Section and is
- * the direct container for Tasks.
- */
 export interface IProjectFolder extends Document {
   organizationId: mongoose.Types.ObjectId;
-  groupId: mongoose.Types.ObjectId;        // ProjectGroup (denormalised for fast auth checks)
-  sectionId: mongoose.Types.ObjectId;      // ProjectSection
+  groupId: mongoose.Types.ObjectId;
+  sectionId: mongoose.Types.ObjectId;
   name: string;
-  createdBy: mongoose.Types.ObjectId;      // CrmUser
+  createdBy: mongoose.Types.ObjectId;
   order: number;
   deletedAt?: Date | null;
   createdAt: Date;

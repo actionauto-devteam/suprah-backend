@@ -11,24 +11,7 @@ import { emitToUser } from '../utils/socketEmitter';
 import logger from '../utils/logger';
 import jwt from 'jsonwebtoken';
 
-/**
- * Customer Call Center
- * --------------------
- * Mirrors the customer-concern feature but for live Voice / Video calls over
- * JitsiMeet, with a STRICT one-way status channel from staff → customer.
- *
- * Conversations are reused SupraSpace conversations tagged with
- * metadata.type = 'customer_call'. Each carries the requested call mode
- * ('voice' | 'video') and a call status the customer polls / receives live.
- *
- * IMPORTANT — one-way enforcement:
- *   The customer-facing controller exposes ONLY: init, requestCall,
- *   getMessages (read), and getVideoToken. There is no customer "send"
- *   handler here, so customers can never post into the channel. Only staff
- *   (CRM) can post status updates via the crm* handlers below.
- */
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 const idIn = (arr: any[], id: any) =>
   (arr || []).map(String).includes(id.toString());

@@ -11,10 +11,6 @@ import googleCalendarService from '../services/googleCalendar.service';
 import { google } from 'googleapis';
 import { cacheService } from '../services/cache.service';
 
-/**
- * Initiate Google OAuth flow for an organization
- * @route GET /api/org-lead/auth
- */
 const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId;
     if (!orgId) throw new ApiError(400, 'Organization context missing');
@@ -23,12 +19,8 @@ const initiateAuth = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { authUrl }, 'Authorization URL generated'));
 });
 
-/**
- * Handle Google OAuth callback for organization lead sync
- * @route GET /api/org-lead/callback
- */
 const handleCallback = asyncHandler(async (req: Request, res: Response) => {
-    const { code, state } = req.query; // state is the orgId
+    const { code, state } = req.query;
     const orgId = state as string;
 
     if (!code || !orgId) {

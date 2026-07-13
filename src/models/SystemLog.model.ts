@@ -1,9 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-/**
- * SystemLog Interface
- * Structured represention of a Pino log entry for database indexing.
- */
 export interface ISystemLog extends Document {
   timestamp: Date;
   level: string;
@@ -46,17 +42,15 @@ const SystemLogSchema = new Schema<ISystemLog>({
   createdAt: { 
     type: Date, 
     default: Date.now, 
-    expires: 30 * 24 * 60 * 60 // 30-day TTL
+    expires: 30 * 24 * 60 * 60
   }
 }, {
-  timestamps: false, // We use the Pino timestamp
+  timestamps: false,
   versionKey: false
 });
 
-// Compound index for time-based filtering with level
 SystemLogSchema.index({ timestamp: -1, level: 1 });
 
-// Global Unified Search Index (Multi-field text search)
 SystemLogSchema.index({ 
   message: 'text', 
   'req.url': 'text', 
@@ -74,5 +68,4 @@ SystemLogSchema.index({
   }
 });
 
-// Ensure indexes are created
 export const SystemLog = mongoose.models.SystemLog || mongoose.model<ISystemLog>('SystemLog', SystemLogSchema);

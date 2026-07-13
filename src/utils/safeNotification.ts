@@ -18,13 +18,9 @@ interface BroadcastParams {
   title: string;
   message: string;
   metadata?: any;
-  excludeUserId?: string; // Exclude the user who triggered the action
+  excludeUserId?: string;
 }
 
-/**
- * Safely create a notification without throwing errors
- * This prevents notification failures from breaking the main operation
- */
 export async function safeCreateNotification(params: CreateNotificationParams) {
   try {
     if (!params.userId) {

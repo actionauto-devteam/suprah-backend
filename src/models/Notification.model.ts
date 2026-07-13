@@ -1,16 +1,16 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface INotification extends Document {
-  userId?: mongoose.Types.ObjectId;  // Optional: if null, it's a broadcast notification
+  userId?: mongoose.Types.ObjectId;
   organizationId: string;
   orgId?: mongoose.Types.ObjectId;
-  roleTargets?: string[];  // Roles this notification targets: ['dealer', 'driver', 'customer', 'admin']
+  roleTargets?: string[];
   type: string;
   title: string;
   message: string;
   metadata?: any;
   isRead: boolean;
-  isBroadcast: boolean;  // Whether this was broadcasted to multiple users
+  isBroadcast: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -46,14 +46,12 @@ const NotificationSchema = new Schema(
       type: String,
       required: true,
       enum: [
-        // Quotes
         'quote_created',
         'quote_updated',
         'quote_deleted',
         'quote_converted',
         'quote_accepted',
 
-        // Shipments
         'shipment_created',
         'shipment_updated',
         'shipment_deleted',
@@ -65,7 +63,6 @@ const NotificationSchema = new Schema(
         'shipment_arrived_at_pickup',
         'shipment_arrived_at_delivery',
 
-        // Vehicles/Inventory
         'vehicle_added',
         'vehicle_updated',
         'vehicle_sold',
@@ -73,14 +70,12 @@ const NotificationSchema = new Schema(
         'inventory_sync',
         'new_inventory_alert',
 
-        // Appointments
         'appointment_created',
         'appointment_updated',
         'appointment_cancelled',
         'appointment_reminder',
         'guest_response',
 
-        // CRM & Leads
         'new_lead',
         'lead_assigned',
         'lead_status_changed',
@@ -88,7 +83,6 @@ const NotificationSchema = new Schema(
         'crm_task_assigned',
         'crm_task_due',
 
-        // Driver related
         'driver_request',
         'driver_request_approved',
         'driver_request_rejected',
@@ -96,46 +90,38 @@ const NotificationSchema = new Schema(
         'driver_location_update',
         'driver_payout',
 
-        // Payments
         'payment_received',
         'payment_pending',
         'payment_failed',
         'payment_request',
         'payout_processed',
 
-        // Team & Organization
         'team_invite_sent',
         'team_member_joined',
         'team_member_left',
         'role_changed',
 
-        // Account & Security
         'password_changed',
         'email_changed',
         'profile_updated',
         'login_alert',
 
-        // System & General
         'system_announcement',
         'message_received',
         'reminder',
         'general',
 
-        // Referrals
         'referral_joined',
         'referral_rewarded',
 
-        // Team Pulse
         'ping',
         'absence_approved',
         'absence_rejected',
         'board_note_posted',
 
-        // Legacy/Compatibility
         'proof_submitted',
         'delivery_confirmed',
 
-        // Aftermarket
         'aftermarket_inquiry',
         'aftermarket_invoice',
         'aftermarket_order',
@@ -164,11 +150,9 @@ const NotificationSchema = new Schema(
   }
 );
 
-// Add TTL index to automatically delete notifications after 90 days (7,776,000 seconds)
 NotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
 
 
-// Compound indexes for efficient queries
 NotificationSchema.index({ userId: 1, createdAt: -1 });
 NotificationSchema.index({ userId: 1, isRead: 1 });
 NotificationSchema.index({ organizationId: 1, isBroadcast: 1, createdAt: -1 });

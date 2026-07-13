@@ -15,12 +15,10 @@ const migrateCustomerBookingIndexes = async () => {
     await mongoose.connect(databaseUri);
     console.log('Connected to database');
 
-    // Drop old indexes if they exist
     console.log('Checking existing indexes...');
     const existingIndexes = await Appointment.collection.getIndexes();
     console.log('Existing indexes:', Object.keys(existingIndexes));
 
-    // Create new indexes for customer bookings
     console.log('Creating customer booking indexes...');
 
     try {
@@ -57,7 +55,6 @@ const migrateCustomerBookingIndexes = async () => {
       console.log('Compound index on isCustomerBooking already exists');
     }
 
-    // Verify all indexes
     console.log('\nFinal index list for Appointments:');
     const finalAppointmentIndexes = await Appointment.collection.getIndexes();
     Object.keys(finalAppointmentIndexes).forEach(indexName => {

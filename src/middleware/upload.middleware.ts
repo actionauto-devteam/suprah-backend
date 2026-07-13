@@ -3,16 +3,17 @@ import path from 'path';
 import { Request } from 'express';
 import { ApiError } from '../utils/ApiError';
 
-// Use memory storage for Cloudflare R2 streaming
 const storage = multer.memoryStorage();
 
 const imageFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowed = ['.jpg', '.jpeg', '.png', '.img'];
+  const allowedMimeTypes = ['image/jpeg', 'image/png'];
+  const allowedExts = ['.jpg', '.jpeg', '.png', '.img'];
   const ext = path.extname(file.originalname).toLowerCase();
-  if (allowed.includes(ext)) {
+
+  if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new ApiError(400, 'Only image files (jpg, jpeg, png, img) are allowed') as any, false);
+    cb(new ApiError(400, 'Only image files (jpg, jpeg, png) are allowed') as any, false);
   }
 };
 
@@ -28,26 +29,23 @@ const avatarFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.F
   }
 };
 
-// ========================================
-// Exported Middlewares
-// ========================================
 
 export const uploadProofImage = multer({
   storage: storage,
   fileFilter: imageFileFilter,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  limits: { fileSize: 100 * 1024 * 1024 },
 }).single('proof');
 
 export const uploadAvatarImage = multer({
   storage: storage,
   fileFilter: avatarFileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max for avatars
+  limits: { fileSize: 5 * 1024 * 1024 },
 }).single('avatar');
 
 export const uploadVehicleImage = multer({
   storage: storage,
   fileFilter: avatarFileFilter,
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB max for vehicle photos
+  limits: { fileSize: 8 * 1024 * 1024 },
 }).single('image');
 
 export const uploadListingPhoto = multer({
@@ -80,5 +78,5 @@ export const uploadDriverDocument = multer({
 export const uploadScreenshot = multer({
   storage: storage,
   fileFilter: imageFileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 }).single('screenshot');

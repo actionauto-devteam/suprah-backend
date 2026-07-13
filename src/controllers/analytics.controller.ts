@@ -14,10 +14,6 @@ import mongoose from 'mongoose';
 // @ts-ignore
 import { Parser } from 'json2csv';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Guard helper — mirrors the pattern used in crm.controller.ts
-// Throws a clean 403 if the CRM user has no organizationId (legacy records).
-// ─────────────────────────────────────────────────────────────────────────────
 function requireOrgId(actor: ICrmUser): string {
   const orgId = actor.organizationId?.toString();
   if (!orgId) {
@@ -29,22 +25,13 @@ function requireOrgId(actor: ICrmUser): string {
   return orgId;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth helper — throws 401 if no crmUser on request
-// ─────────────────────────────────────────────────────────────────────────────
 function requireCrmUser(req: Request): ICrmUser {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
   return actor;
 }
 
-// ─── Leaderboard ─────────────────────────────────────────────────────────────
 
-/**
- * GET /api/analytics/leaderboard
- * Query: periodType, periodKey, limit
- * Access: admin = all users | manager = all users | employee = self only
- */
 export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor      = requireCrmUser(req);
   const orgId      = requireOrgId(actor);
@@ -56,7 +43,6 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResp
     throw new ApiError(400, 'periodType must be daily, weekly, or monthly');
   }
 
-  // Rebuild ranks on-demand for admins
   if (actor.role === 'admin') {
     await rebuildRanks(orgId, periodType as any, periodKey);
   }
@@ -67,7 +53,6 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResp
     periodKey,
   };
 
-  // RBAC: employees only see their own entry
   if (actor.role === 'employee') {
     query.userId = actor._id;
   }
@@ -77,7 +62,6 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResp
     .limit(limit)
     .lean();
 
-  // Enrich with CrmUser details
   const userIds = [...new Set(docs.map(d => d.userId.toString()))];
   const users   = await CrmUser.find({
     _id:            { $in: userIds },
@@ -88,7 +72,6 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResp
 
   const userMap = Object.fromEntries(users.map(u => [u._id.toString(), u]));
 
-  // Fetch all badges for these users in this org
   const badges = await UserBadge.find({
     organizationId: new mongoose.Types.ObjectId(orgId),
     userId:         { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) },
@@ -117,12 +100,7 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: ExpressResp
   );
 });
 
-// ─── Personal Stats ───────────────────────────────────────────────────────────
 
-/**
- * GET /api/analytics/my-stats
- * Access: all authenticated CRM users (own data only)
- */
 export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor  = requireCrmUser(req);
   const orgId  = requireOrgId(actor);
@@ -143,7 +121,6 @@ export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse
     stats[p] = agg?.kpis || null;
   }
 
-  // Last 20 activity logs for this user
   const recentActivity = await ActivityLog.find({
     organizationId: new mongoose.Types.ObjectId(orgId),
     userId:         new mongoose.Types.ObjectId(userId),
@@ -152,7 +129,6 @@ export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse
     .limit(20)
     .lean();
 
-  // All badges earned by this user in this org
   const myBadges = await UserBadge.find({
     organizationId: new mongoose.Types.ObjectId(orgId),
     userId:         new mongoose.Types.ObjectId(userId),
@@ -170,12 +146,7 @@ export const getMyStats = asyncHandler(async (req: Request, res: ExpressResponse
   );
 });
 
-// ─── Org-Wide Analytics Overview ─────────────────────────────────────────────
 
-/**
- * GET /api/analytics/overview
- * Access: admin, manager only
- */
 export const getAnalyticsOverview = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
@@ -188,7 +159,6 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Expre
   const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
   const { start, end } = getPeriodRange(periodKey, periodType as any);
 
-  // Aggregate KPI totals across all users in the org for the period
   const orgTotals = await AnalyticsAggregate.aggregate([
     {
       $match: {
@@ -215,7 +185,6 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Expre
     },
   ]);
 
-  // 30-day daily trend
   const trendStart = new Date();
   trendStart.setDate(trendStart.getDate() - 30);
 
@@ -236,7 +205,6 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Expre
     { $sort: { _id: 1 } },
   ]);
 
-  // Action breakdown for current period
   const byAction = await ActivityLog.aggregate([
     {
       $match: {
@@ -264,12 +232,7 @@ export const getAnalyticsOverview = asyncHandler(async (req: Request, res: Expre
   );
 });
 
-// ─── Activity Feed (Tracking Board) ──────────────────────────────────────────
 
-/**
- * GET /api/analytics/activity-feed
- * Access: admin/manager = all users in org | employee = own logs only
- */
 export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
@@ -282,11 +245,9 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressRes
     organizationId: new mongoose.Types.ObjectId(orgId),
   };
 
-  // RBAC: employees only see their own activity
   if (actor.role === 'employee') {
     filter.userId = actor._id;
   } else if (req.query.userId) {
-    // Admin/manager can filter by a specific user
     filter.userId = new mongoose.Types.ObjectId(req.query.userId as string);
   }
 
@@ -311,7 +272,6 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressRes
     ActivityLog.countDocuments(filter),
   ]);
 
-  // Enrich logs with CrmUser details
   const userIds = [...new Set(logs.map(l => l.userId.toString()))];
   const users   = await CrmUser.find({
     _id:            { $in: userIds },
@@ -333,12 +293,7 @@ export const getActivityFeed = asyncHandler(async (req: Request, res: ExpressRes
   );
 });
 
-// ─── User Detail Drill-Down ───────────────────────────────────────────────────
 
-/**
- * GET /api/analytics/users/:userId/stats
- * Access: admin, manager only
- */
 export const getUserStats = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
@@ -351,7 +306,6 @@ export const getUserStats = asyncHandler(async (req: Request, res: ExpressRespon
   const periodType   = (req.query.periodType as string) || 'monthly';
   const periodKey    = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
 
-  // Confirm the target user belongs to the same org
   const user = await CrmUser.findOne({
     _id:            userId,
     organizationId: new mongoose.Types.ObjectId(orgId),
@@ -402,12 +356,7 @@ export const getUserStats = asyncHandler(async (req: Request, res: ExpressRespon
   );
 });
 
-// ─── CSV Export ───────────────────────────────────────────────────────────────
 
-/**
- * GET /api/analytics/export
- * Access: admin only
- */
 export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
@@ -461,7 +410,6 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressRes
       period:                periodKey,
     }));
   } else {
-    // Activity log export
     const { start, end } = getPeriodRange(periodKey, periodType as any);
     const logs = await ActivityLog.find({
       organizationId: new mongoose.Types.ObjectId(orgId),
@@ -506,12 +454,7 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressRes
   res.send(csv);
 });
 
-// ─── Admin: Trigger Badge Evaluation ─────────────────────────────────────────
 
-/**
- * POST /api/analytics/evaluate-badges
- * Access: admin only
- */
 export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: ExpressResponse) => {
   const actor = requireCrmUser(req);
   const orgId = requireOrgId(actor);
@@ -524,7 +467,6 @@ export const triggerBadgeEvaluation = asyncHandler(async (req: Request, res: Exp
   const period = (req.body.periodType as 'daily' | 'weekly' | 'monthly') || 'weekly';
   const key    = req.body.periodKey || getPeriodKey(new Date(), period);
 
-  // Confirm target user belongs to same org
   if (req.body.userId) {
     const targetUser = await CrmUser.findOne({
       _id:            req.body.userId,

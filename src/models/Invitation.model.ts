@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IInvitation extends Document {
     email: string;
-    organizationId: mongoose.Types.ObjectId; // Stored as ObjectId
+    organizationId: mongoose.Types.ObjectId;
     inviterId?: mongoose.Types.ObjectId;
     role: 'admin' | 'member';
     token: string;
@@ -28,7 +28,7 @@ const InvitationSchema = new Schema<IInvitation>(
         inviterId: {
             type: Schema.Types.ObjectId,
             ref: 'User',
-            required: false, // Optional to support legacy invites
+            required: false,
         },
         role: {
             type: String,
@@ -55,7 +55,6 @@ const InvitationSchema = new Schema<IInvitation>(
     }
 );
 
-// Index for finding pending invites for an email
 InvitationSchema.index({ email: 1, status: 1 });
 
 const Invitation = mongoose.model<IInvitation>('Invitation', InvitationSchema);

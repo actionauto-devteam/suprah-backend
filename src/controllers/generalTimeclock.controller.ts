@@ -12,12 +12,10 @@ import ActivityInterval from '../models/ActivityInterval.model';
 import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getSocketIO } from '../utils/socketEmitter';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
 
-const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
+const COMPANY_TZ_OFFSET_MINUTES = -360;
 const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
 
-// ── Actor helper ──────────────────────────────────────────────────────────────
 
 interface TimeclockActor {
   id: mongoose.Types.ObjectId;
@@ -65,7 +63,6 @@ function getActor(req: Request): TimeclockActor {
   throw new ApiError(401, 'Not authenticated');
 }
 
-// ── Calendar helpers (mirrors crmTimeproof.controller.ts) ─────────────────────
 
 const toDateStr = (date: Date) => date.toISOString().split('T')[0];
 
@@ -284,7 +281,6 @@ const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>, tzOffse
   return { today: formatHours(todaySeconds), thisWeek: formatHours(weekSeconds), thisMonth: formatHours(monthSeconds) };
 };
 
-// ── Helper: get today's MDT window ────────────────────────────────────────────
 
 function getTodayMDTWindow() {
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
@@ -293,12 +289,7 @@ function getTodayMDTWindow() {
   return { todayMDTStr, today: new Date(todayMDTStartUTC), tomorrow: new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000) };
 }
 
-// ── Controllers ───────────────────────────────────────────────────────────────
 
-/**
- * GET /api/timeclock/me
- * Returns current user info + today's time logs. Works for both User and CrmUser.
- */
 export const getMe = asyncHandler(async (req: Request, res: Response) => {
   const actor = getActor(req);
   const { today, tomorrow } = getTodayMDTWindow();
@@ -321,10 +312,6 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
   }, 'User fetched'));
 });
 
-/**
- * POST /api/timeclock/clock
- * Clock-in / clock-out / break-in / break-out for both User and CrmUser.
- */
 export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const actor = getActor(req);
   const { type, note } = req.body;
@@ -370,8 +357,6 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown',
   });
 
-  // Emit real-time event so admin monitoring dashboards (e.g. the CRM shift
-  // board) see Lot Tech / main-User clock actions live, same as the CRM path.
   try {
     const io = getSocketIO();
     if (io) {

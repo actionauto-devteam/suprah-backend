@@ -16,7 +16,6 @@ import { emitToUser } from "../utils/socketEmitter";
 import notificationService from "../services/notification.service";
 import logger from "../utils/logger";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
   if (req.orgId) return req.orgId;
@@ -292,7 +291,6 @@ export const adminListInquiries = asyncHandler(async (req: Request, res: Respons
     AftermarketInquiry.countDocuments({ organizationId: actor.organizationId, status: "open" }),
   ]);
 
-  // Attach whether each inquiry already has an invoice, for quick badges.
   const inquiryIds = inquiries.map((i: any) => i._id);
   const invoices = await Payment.find({ inquiryId: { $in: inquiryIds } })
     .select("inquiryId status amount invoiceNumber")
@@ -318,7 +316,6 @@ export const adminListInquiries = asyncHandler(async (req: Request, res: Respons
   );
 });
 
-// ─── Admin (CRM): unread / open inquiry count (for tab badge) ─────────────────
 
 export const adminInquiriesUnreadCount = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
@@ -330,10 +327,6 @@ export const adminInquiriesUnreadCount = asyncHandler(async (req: Request, res: 
   res.json(new ApiResponse(200, { openCount }, "Open inquiry count"));
 });
 
-// ─── Admin (CRM): full inquiry detail ─────────────────────────────────────────
-// Returns the inquiry, the product (incl. photo/media), customer profile,
-// this customer's full inquiry history, the linked support conversation, and
-// any invoice already raised for it.
 
 export const adminGetInquiryDetail = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
@@ -376,14 +369,6 @@ export const adminGetInquiryDetail = asyncHandler(async (req: Request, res: Resp
   );
 });
 
-// ─── Admin (CRM): create an invoice from an inquiry ───────────────────────────
-//
-// POST /api/crm/aftermarket/inquiries/:inquiryId/invoice
-// Body: { lineItems: [{ label, kind, quantity, unitPrice }], taxRate?, dueDate?, notes? }
-//
-// Creates a Payment (source: 'aftermarket') against the inquiring customer's
-// email so it surfaces on the customer Payments page, links it back to the
-// product + inquiry, flips the inquiry to "answered", and notifies the customer.
 
 export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
@@ -409,7 +394,6 @@ export const adminCreateInvoiceForInquiry = asyncHandler(async (req: Request, re
   });
   if (!inquiry) throw new ApiError(404, "Inquiry not found");
 
-  // Guard against duplicate invoices for the same inquiry.
   const existing = await Payment.findOne({
     inquiryId: inquiry._id,
     status: { $nin: ["cancelled", "failed"] },

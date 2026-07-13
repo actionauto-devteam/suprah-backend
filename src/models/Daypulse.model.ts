@@ -1,6 +1,5 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-// ─── Department Hashtags ───────────────────────────────────────────────────────
 
 export const DAYPULSE_DEPARTMENTS = [
   'SalesAndFinance',
@@ -22,9 +21,6 @@ export type DayPulseDepartment = typeof DAYPULSE_DEPARTMENTS[number];
 
 export type DayPulseAttachmentSection = 'accomplishment' | 'blockers' | 'inProgress';
 
-// ─── Interface ────────────────────────────────────────────────────────────────
-// A DayPulse post is a structured daily report with three required sections.
-// Each post is scoped to one department (hashtag) and one report date.
 
 export interface IDayPulse extends Document {
   organizationId: mongoose.Types.ObjectId;
@@ -32,11 +28,11 @@ export interface IDayPulse extends Document {
   authorName: string;
   authorAvatar?: string | null;
   authorRole: string;
-  department: DayPulseDepartment;   // Which hashtag/team this report belongs to
-  reportDate: Date;                 // The calendar date this report covers (not createdAt)
-  accomplishment: string;               // Section 1: What was accomplished
-  blockers: string;               // Section 2: What is blocking progress
-  inProgress: string;               // Section 3: What is currently in progress
+  department: DayPulseDepartment;
+  reportDate: Date;
+  accomplishment: string;
+  blockers: string;
+  inProgress: string;
   attachments: IDayPulseAttachment[];
   isEdited: boolean;
   deletedAt?: Date | null;
@@ -58,7 +54,6 @@ export interface IDayPulseModel extends Model<IDayPulse> { }
 
 const DAYPULSE_SECTION_MAX_LENGTH = 10000;
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
 
 const DayPulseSchema = new Schema<IDayPulse>(
   {
@@ -88,7 +83,6 @@ const DayPulseSchema = new Schema<IDayPulse>(
       default: 'employee',
     },
 
-    // The department this report is filed under — maps to a hashtag tab in the UI.
     department: {
       type: String,
       enum: DAYPULSE_DEPARTMENTS,
@@ -96,15 +90,12 @@ const DayPulseSchema = new Schema<IDayPulse>(
       index: true,
     },
 
-    // The date the report covers, stored as midnight UTC of that day.
-    // Separated from createdAt so a user can file a report for yesterday, etc.
     reportDate: {
       type: Date,
       required: true,
       index: true,
     },
 
-    // ── Structured report sections (all required) ──
     accomplishment: {
       type: String,
       required: true,
@@ -158,18 +149,13 @@ const DayPulseSchema = new Schema<IDayPulse>(
   { timestamps: true }
 );
 
-// ─── Indexes ──────────────────────────────────────────────────────────────────
 
-// Most common query: "all live reports for org X in department Y on date Z"
 DayPulseSchema.index({ organizationId: 1, department: 1, reportDate: -1 });
 
-// Org-wide date filter (for cross-department report views)
 DayPulseSchema.index({ organizationId: 1, reportDate: -1 });
 
-// Soft-delete filter
 DayPulseSchema.index({ deletedAt: 1 });
 
-// ─── Model ────────────────────────────────────────────────────────────────────
 
 const DayPulse = mongoose.model<IDayPulse, IDayPulseModel>('DayPulse', DayPulseSchema);
 

@@ -10,7 +10,6 @@ import Deal, { DealStage } from '../models/Deal.model';
 import User from '../models/User.model';
 import Organization from '../models/Organization.model';
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

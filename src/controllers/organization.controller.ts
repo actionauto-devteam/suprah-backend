@@ -9,12 +9,6 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
 
-/**
- * Public list of dealerships for the customer signup dropdown.
- * No auth — runs before the auth middleware so prospective customers can
- * pick the dealership they belong to during registration.
- * @route GET /api/organizations/public
- */
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
     const organizations = await Organization.find({ status: { $ne: 'suspended' } })
         .select('name slug logoUrl')
@@ -28,13 +22,12 @@ export const listPublicOrganizations = asyncHandler(async (_req: Request, res: R
 
 export const createOrganization = asyncHandler(async (req: Request, res: Response) => {
     const { name, slug } = req.body;
-    const user = req.user; // Local user
+    const user = req.user;
 
     if (!user) {
         throw new ApiError(401, 'Unauthorized');
     }
 
-    // Check if slug exists
     const existingOrg = await Organization.findOne({ slug });
     if (existingOrg) {
         res.status(400).json({
@@ -251,9 +244,9 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
         return;
     }
 
-    // Only admin/owner can remove
+    // Only admin/owner of THIS org (or a platform super admin) can remove
     const isOwner = req.user?._id && org.ownerId.toString() === req.user._id.toString();
-    const isAdmin = req.orgRole === 'admin'; // Proxy aware
+    const isAdmin = req.orgRole === 'admin' && req.orgId === id;
     const isSuperAdmin = req.user?.role === 'super_admin';
 
     if (!isOwner && !isAdmin && !isSuperAdmin) {
@@ -269,6 +262,17 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
         res.status(400).json({
             success: false,
             message: 'Cannot remove the owner of the organization',
+        });
+        return;
+    }
+
+    // Target must actually belong to this org — otherwise an admin of org A could
+    // de-org an arbitrary user from org B just by passing their id here.
+    const targetBelongsToOrg = await User.exists({ _id: userId, organizationId: id });
+    if (!targetBelongsToOrg) {
+        res.status(404).json({
+            success: false,
+            message: 'User is not a member of this organization',
         });
         return;
     }

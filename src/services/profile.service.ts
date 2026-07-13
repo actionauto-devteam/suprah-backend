@@ -9,20 +9,14 @@ import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import CrmUser from '../models/CrmUser.model';
 import { getIO as getSupraSpaceIO } from '../socket/supraspace.socket';
 
-/**
- * Update avatar/profile picture
- * Uploads to Cloudflare R2 and updates DB. Deletes old avatar if it exists.
- */
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
   const existingUser = await User.findById(userId).select('avatar email');
   if (!existingUser) {
     throw new ApiError(404, 'User not found');
   }
 
-  // Upload new avatar to R2
   const avatarUrl = await storageService.upload(file, 'avatars');
 
-  // Delete old avatar (StorageService handles both R2 URLs and legacy local paths)
   if (existingUser.avatar) {
     await storageService.delete(existingUser.avatar);
   }
@@ -37,7 +31,6 @@ const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: s
     throw new ApiError(404, 'User not found');
   }
 
-  // Sync avatar to the linked CrmUser so SupraSpace shows the updated photo
   if (existingUser.email) {
     const crmUser = await CrmUser.findOneAndUpdate(
       { email: existingUser.email },
@@ -54,12 +47,10 @@ const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: s
           fullName: (crmUser as any).fullName,
         });
       } catch {
-        // Socket may not be initialised in non-web contexts — best effort
       }
     }
   }
 
-  // Log activity
   await activityService.logAvatarUpdate(userId, orgId);
 
   return user;
@@ -71,10 +62,8 @@ const getProfile = async (userId: string) => {
     throw new ApiError(404, 'User not found');
   }
 
-  // Get recent activities
   const recentActivities = await activityService.getRecentActivities(userId, 10);
 
-  // Calculate account stats
   const Quote = (await import('../models/Quote.model')).default;
   const Load = (await import('../models/Load.model')).default;
   const Appointment = (await import('../models/Appointment.model')).default;
@@ -87,16 +76,14 @@ const getProfile = async (userId: string) => {
     Appointment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
   ]);
 
-  // Build security status
   const securityStatus = {
     emailVerified: user.emailVerified,
     hasPassword: !!user.password,
-    twoFactorEnabled: false, // For future implementation
+    twoFactorEnabled: false,
     lastPasswordChange: user.lastPasswordChange,
     lastLogin: user.lastActive,
   };
 
-  // Build account status
   const accountStatus = {
     isActive: user.isActive,
     isVerified: user.emailVerified,
@@ -110,11 +97,10 @@ const getProfile = async (userId: string) => {
     totalAppointments,
   };
 
-  // Build Google Calendar status from Organization config
   const orgConfig = orgId ? await OrgLeadConfig.findOne({ organizationId: orgId }) : null;
   const googleCalendar = {
     connected: orgConfig?.calendarConnected || false,
-    connectedAt: orgConfig?.updatedAt, // Using updatedAt as proxy for connection time
+    connectedAt: orgConfig?.updatedAt,
   };
 
   return {
@@ -126,9 +112,6 @@ const getProfile = async (userId: string) => {
   };
 };
 
-/**
- * Update user profile
- */
 const updateProfile = async (userId: string, updateData: {
   name?: string;
   avatar?: string;
@@ -161,7 +144,6 @@ const updateProfile = async (userId: string, updateData: {
     updatedFieldNames.push('customStatus');
   }
 
-  // Handle personal info updates
   if (updateData.personalInfo) {
     for (const [key, value] of Object.entries(updateData.personalInfo)) {
       if (value !== undefined) {

@@ -5,10 +5,6 @@ export interface ShiftStatus {
     isOnBreak: boolean;
 }
 
-/** Walks the last 2 days of TimeLog entries chronologically to derive current
- * shift/break state — same walk `generalTimeclock.controller.ts`'s getShiftState
- * uses, extracted here so the locator controller can enforce shift-aware rules
- * (e.g. mandatory-department pause locking) without re-deriving it. */
 export async function getShiftStatusForActor(userId: any): Promise<ShiftStatus> {
     const lookbackStart = new Date();
     lookbackStart.setDate(lookbackStart.getDate() - 2);

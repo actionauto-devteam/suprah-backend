@@ -1,9 +1,5 @@
 import multer from 'multer';
 
-/**
- * In-memory storage so we can hand the buffer straight to storageService.upload()
- * (which expects { buffer, originalname, mimetype } and pushes to Cloudflare R2).
- */
 const storage = multer.memoryStorage();
 
 const ALLOWED_FILE = new Set([

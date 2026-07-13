@@ -16,23 +16,14 @@ interface DuplicateCheckResult {
 }
 
 class CustomerBookingService {
-  /**
-   * Normalize phone number for comparison
-   */
   private normalizePhone(phone: string): string {
     return phone.replace(/[\s\-\(\)]/g, '');
   }
 
-  /**
-   * Normalize name for comparison
-   */
   private normalizeName(name: string): string {
     return name.toLowerCase().trim();
   }
 
-  /**
-   * Check if customer booking is duplicate
-   */
   async checkDuplicateBooking(
     customerData: CustomerBookingData,
     requestedStartTime: Date,
@@ -43,22 +34,19 @@ class CustomerBookingService {
     const normalizedEmail = customerData.email.toLowerCase().trim();
     const normalizedPhone = this.normalizePhone(customerData.phone);
 
-    // Find all active bookings for this customer within this organization
     const query: any = {
-      organizationId: customerData.organizationId, // Required field
+      organizationId: customerData.organizationId,
       'customerBooking.isCustomerBooking': true,
       status: { $in: ['scheduled', 'confirmed'] },
-      startTime: { $gte: new Date() }, // Only check future bookings
+      startTime: { $gte: new Date() },
     };
 
     if (excludeAppointmentId) {
       query._id = { $ne: excludeAppointmentId };
     }
 
-    // Build OR conditions for duplicate detection
     const orConditions = [];
 
-    // Condition 1: Same name + same email
     orConditions.push({
       'customerBooking.email': normalizedEmail,
       $expr: {
@@ -69,7 +57,6 @@ class CustomerBookingService {
       }
     });
 
-    // Condition 2: Same name + same phone
     orConditions.push({
       $expr: {
         $and: [
@@ -85,7 +72,6 @@ class CustomerBookingService {
       }
     });
 
-    // Condition 3: Same name + same phone + same email
     orConditions.push({
       'customerBooking.email': normalizedEmail,
       $expr: {

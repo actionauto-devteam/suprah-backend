@@ -3,7 +3,6 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import path from 'path';
 
-// Load env from backend root
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const BACKEND_URL = 'http://localhost:5000/api';
@@ -16,7 +15,6 @@ async function runSecurityTest() {
     let token: string | null = null;
 
     try {
-        // 1. Register a fresh unverified user
         const testEmail = `sec_test_${Date.now()}@example.com`;
         console.log(`\n1. Registering unverified user: ${testEmail}`);
 

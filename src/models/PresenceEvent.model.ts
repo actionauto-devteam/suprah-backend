@@ -34,6 +34,7 @@ const PresenceEventSchema = new Schema<IPresenceEvent>(
 );
 
 PresenceEventSchema.index({ organizationId: 1, createdAt: -1 });
-PresenceEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+PresenceEventSchema.index({ organizationId: 1, userId: 1, createdAt: -1 });
+PresenceEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
 
 export default mongoose.model<IPresenceEvent>('PresenceEvent', PresenceEventSchema);

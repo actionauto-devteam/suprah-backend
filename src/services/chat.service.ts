@@ -10,14 +10,9 @@ export interface ChatAuthor {
 
 interface ListOptions {
   limit?: number;
-  // Cursor pagination: fetch messages strictly older than this id (for "load more").
   before?: string;
 }
 
-/**
- * Shape we return to the client. `replyTo` is hydrated to a lightweight preview
- * so the UI can render the quoted message without an extra round-trip.
- */
 const REPLY_PREVIEW_LEN = 140;
 
 function toReplyPreview(msg: any) {
@@ -50,10 +45,6 @@ function serialize(msg: any) {
 }
 
 class ChatService {
-  /**
-   * Newest-first page of messages for an organization.
-   * The client reverses to render oldest→newest.
-   */
   async listMessages(organizationId: string, options: ListOptions = {}) {
     const limit = Math.min(options.limit ?? 50, 100);
 
@@ -147,7 +138,6 @@ class ChatService {
         statusCode: 400,
       });
     }
-    // Only the author can edit their own message.
     if (message.createdBy.toString() !== userId) {
       throw Object.assign(new Error("You can only edit your own messages"), {
         statusCode: 403,
@@ -166,9 +156,6 @@ class ChatService {
     return serialize(populated);
   }
 
-  /**
-   * Soft delete. Authors can delete their own message; admins can delete any.
-   */
   async deleteMessage(
     messageId: string,
     organizationId: string,

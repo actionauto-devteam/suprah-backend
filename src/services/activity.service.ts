@@ -16,9 +16,6 @@ interface CreateActivityParams {
   userAgent?: string;
 }
 
-/**
- * Create a new user activity log
- */
 const createActivity = async (
   params: CreateActivityParams,
 ): Promise<IUserActivity> => {
@@ -35,7 +32,6 @@ const createActivity = async (
     userAgent: params.userAgent,
   });
 
-  // Emit real-time event
   try {
     const io = getSocketIO();
     if (io && params.userId) {

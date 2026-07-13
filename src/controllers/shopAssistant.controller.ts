@@ -9,7 +9,6 @@ import ShopAssistantChat, { IShopPreferences } from '../models/ShopAssistantChat
 import membershipService from '../services/membership.service';
 import logger from '../utils/logger';
 
-// ─── Gemini client — identical setup to supraLeo.controller.ts ────────────────
 
 const gemini = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY || '',
@@ -41,8 +40,6 @@ function getSessionId(req: Request): string {
   return (fromHeader || fromBody || fromQuery || crypto.randomUUID()) as string;
 }
 
-// ─── Context fetcher — same job as supraLeo's fetchModuleContext(), ───────────
-// ─── but pulling REAL vehicle inventory instead of leads/appointments ─────────
 
 async function fetchVehicleContext(prefs: IShopPreferences) {
   const filter: any = { status: 'Ready for Sale', isDeleted: false };
@@ -62,8 +59,6 @@ async function fetchVehicleContext(prefs: IShopPreferences) {
     if (prefs.budgetMin != null) filter.price.$gte = Math.round(prefs.budgetMin * 0.85);
   }
 
-  // If nothing scoped yet, just hand the model a representative recent sample —
-  // same idea as fetchModuleContext's "recentLeads" fallback when nothing is filtered.
   const pool = await Vehicle.find(filter)
     .sort({ dateAdded: -1 })
     .limit(30)
@@ -129,9 +124,9 @@ Respond with ONLY this JSON — no markdown fences, no commentary outside the JS
     "passengers": number | null,
     "usage": string[]
   },
-  "recommendedVehicleIds": string[],   // "id" values copied EXACTLY from the candidate list, 0-4 items, best match first
-  "matchNotes": { "<vehicleId>": { "reasons": string[], "tradeoffs": string[] } },  // 1-3 short reasons/tradeoffs per recommended id, plain text, no numbers
-  "suggestions": string[]   // 3 short follow-up phrases phrased as if the USER is saying them
+  "recommendedVehicleIds": string[],
+  "matchNotes": { "<vehicleId>": { "reasons": string[], "tradeoffs": string[] } },
+  "suggestions": string[]
 }`;
 }
 

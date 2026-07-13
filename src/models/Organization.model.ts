@@ -3,8 +3,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IOrganization extends Document {
     name: string;
     slug: string;
-    ownerId: mongoose.Types.ObjectId; // Reference to User (ObjectId)
-    members?: mongoose.Types.ObjectId[]; // Array of User ObjectIds
+    ownerId: mongoose.Types.ObjectId;
+    members?: mongoose.Types.ObjectId[];
     logoUrl?: string;
     metadata?: any;
     status: 'active' | 'suspended' | 'archived';
@@ -17,7 +17,7 @@ const OrganizationSchema = new Schema<IOrganization>(
         ownerId: {
             type: Schema.Types.ObjectId,
             ref: 'User',
-            required: false, // Optional during migration
+            required: false,
         },
         members: [{
             type: Schema.Types.ObjectId,

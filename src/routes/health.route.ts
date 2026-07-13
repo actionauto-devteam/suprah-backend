@@ -6,10 +6,6 @@ import logger from '../utils/logger';
 
 const router = Router();
 
-/**
- * @route   GET /healthz
- * @desc    Liveness probe - is the process running?
- */
 router.get('/healthz', (req: Request, res: Response) => {
   res.status(200).json({
     status: 'ok',
@@ -18,10 +14,6 @@ router.get('/healthz', (req: Request, res: Response) => {
   });
 });
 
-/**
- * @route   GET /readyz
- * @desc    Readiness probe - are dependencies connected?
- */
 router.get('/readyz', async (req: Request, res: Response) => {
   const health: any = {
     status: 'ok',
@@ -34,9 +26,7 @@ router.get('/readyz', async (req: Request, res: Response) => {
 
   let isReady = true;
 
-  // 1. Check MongoDB Connection
   try {
-    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
     const state = mongoose.connection.readyState;
     if (state === 1) {
       health.services.mongodb = 'connected';
@@ -50,7 +40,6 @@ router.get('/readyz', async (req: Request, res: Response) => {
     isReady = false;
   }
 
-  // 2. Check Redis Connection (if enabled)
   if (config.redis.enabled) {
     try {
       const redis = new Redis({
@@ -77,7 +66,6 @@ router.get('/readyz', async (req: Request, res: Response) => {
   if (isReady) {
     res.status(200).json(health);
   } else {
-    // 503 Service Unavailable tells Load Balancers/Docker this node is not ready
     res.status(503).json(health);
   }
 });

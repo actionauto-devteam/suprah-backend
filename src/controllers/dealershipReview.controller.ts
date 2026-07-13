@@ -22,11 +22,6 @@ const SORTS: Record<string, Record<string, 1 | -1>> = {
   rating_asc: { rating: 1, createdAt: -1 },
 };
 
-/**
- * GET /api/crm/reviews
- * Paginated, org-scoped list with source/rating/search filters + sort,
- * an average-rating summary, and a per-source count breakdown for the org.
- */
 export const getAllReviews = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, 'Organization context missing');
@@ -77,10 +72,6 @@ export const getAllReviews = asyncHandler(async (req: Request, res: Response) =>
   }));
 });
 
-/**
- * POST /api/crm/reviews
- * Body: { source, reviewerName, rating, reviewText, reviewUrl?, reviewDate?, response? }
- */
 export const createReview = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, 'Organization context missing');
@@ -110,10 +101,6 @@ export const createReview = asyncHandler(async (req: Request, res: Response) => 
   res.status(201).json(new ApiResponse(201, review, 'Review added'));
 });
 
-/**
- * PATCH /api/crm/reviews/:id
- * Body: any of { reviewText, response, isVisible, rating, reviewerName, reviewUrl, reviewDate, source }
- */
 export const updateReview = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   const { id } = req.params;
@@ -137,9 +124,6 @@ export const updateReview = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, review, 'Review updated'));
 });
 
-/**
- * DELETE /api/crm/reviews/:id
- */
 export const deleteReview = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   const { id } = req.params;

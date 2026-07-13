@@ -1,7 +1,6 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IQuote extends Document {
-    // Customer Information
     firstName: string;
     lastName: string;
     email: string;
@@ -9,7 +8,6 @@ export interface IQuote extends Document {
     organizationId: string;
     createdBy?: mongoose.Types.ObjectId;
 
-    // Vehicle Information (populated from Vehicle model or manually entered)
     vehicleId?: mongoose.Types.ObjectId;
     vehicleName?: string;
     vehicleImage?: string;
@@ -21,7 +19,6 @@ export interface IQuote extends Document {
     vehicleStatus?: string;
     daysOnLot?: number;
 
-    // Shipping Information
     fromZip: string;
     toZip: string;
     fromAddress: string;
@@ -30,7 +27,6 @@ export interface IQuote extends Document {
     enclosedTrailer: boolean;
     vehicleInoperable: boolean;
 
-    // Calculated Fields
     miles: number;
     rate: number;
     eta: {
@@ -38,17 +34,14 @@ export interface IQuote extends Document {
         max: number;
     };
 
-    // Status
     status: 'pending' | 'accepted' | 'rejected' | 'booked';
 
-    // Timestamps
     createdAt: Date;
     updatedAt: Date;
 }
 
 const QuoteSchema: Schema<IQuote> = new Schema(
     {
-        // Customer Information
         firstName: { type: String, required: true, trim: true },
         lastName: { type: String, required: true, trim: true },
         email: { type: String, required: true, trim: true, lowercase: true },
@@ -60,7 +53,6 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         },
         createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
 
-        // Vehicle Information
         vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle' },
         vehicleName: { type: String, trim: true },
         vehicleImage: { type: String, trim: true },
@@ -72,7 +64,6 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         vehicleStatus: { type: String, trim: true },
         daysOnLot: { type: Number },
 
-        // Shipping Information
         fromZip: { type: String, required: true, trim: true },
         toZip: { type: String, required: true, trim: true },
         fromAddress: { type: String, required: true, trim: true },
@@ -81,7 +72,6 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         enclosedTrailer: { type: Boolean, default: false },
         vehicleInoperable: { type: Boolean, default: false },
 
-        // Calculated Fields
         miles: { type: Number, required: true },
         rate: { type: Number, required: true },
         eta: {
@@ -89,7 +79,6 @@ const QuoteSchema: Schema<IQuote> = new Schema(
             max: { type: Number, required: true }
         },
 
-        // Status
         status: {
             type: String,
             enum: ['pending', 'accepted', 'rejected', 'booked'],

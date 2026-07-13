@@ -6,13 +6,10 @@ import { marketplaceLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
-// Public showcase route (no auth required)
 router.get('/public/:id', vehicleController.getPublicVehicleById);
 
-// Apply authentication middleware to all other routes
 router.use(auth());
 
-// Middleware to protect non-GET routes with organization context
 const requireOrgForMutation = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (req.method !== 'GET') {
         return requireOrg(req, res, next);
@@ -22,29 +19,18 @@ const requireOrgForMutation = (req: express.Request, res: express.Response, next
 
 router.use(requireOrgForMutation);
 
-/**
- * MARKETPLACE ROUTES
- * Any authenticated user may browse the public inventory (only "Ready for Sale"
- * vehicles are returned by the controller). Role-gating was removed because the
- * controller already hard-filters to public-safe data, and excluding roles like
- * 'employee' or 'driver' caused spurious 403 errors for valid sessions.
- */
 router.get('/marketplace', marketplaceLimiter, vehicleController.getMarketplaceVehicles);
 router.get('/marketplace/filters', vehicleController.getMarketplaceFilters);
 
-// Filter and statistics routes (must be before /:id routes)
 router.get('/filters', vehicleController.getFilters);
 router.get('/stats', vehicleController.getStats);
 router.get('/dashboard/graphs', vehicleController.getDashboardGraphs);
 
-// Phase 2: Status management and export
 router.get('/dashboard', vehicleController.getDashboard);
 router.get('/export', vehicleController.exportVehicles);
 
-// Phase 3: Autocomplete and availability
 router.get('/search/autocomplete', vehicleController.autocomplete);
 
-// Vehicle CRUD routes
 router
     .route('/')
     .post(vehicleController.createVehicle)

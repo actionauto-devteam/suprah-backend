@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-// ─── Location Block ───────────────────────────────────────────────────────────
 
 const LOCATION_TYPES = [
   "Business", "Residence", "Auction", "Port",
@@ -33,7 +32,6 @@ export const locationBlockSchema = z.object({
   notes: z.string().trim().max(500).optional(),
 });
 
-// ─── Vehicle ──────────────────────────────────────────────────────────────────
 
 const TRAILER_TYPES = [
   "open_3car_wedge", "open_2car", "5car_open", "9car_stinger", "7car_stinger",
@@ -57,7 +55,6 @@ export const loadVehicleSchema = z.object({
   carrierNotes: z.string().trim().max(500).optional(),
 });
 
-// ─── Dates ────────────────────────────────────────────────────────────────────
 
 export const loadDatesSchema = z.object({
   firstAvailable: z.coerce.date().optional(),
@@ -83,7 +80,6 @@ export const loadDatesSchema = z.object({
   { message: "Expiration date must be on or after first available date" }
 );
 
-// ─── Additional Info ──────────────────────────────────────────────────────────
 
 export const loadAdditionalInfoSchema = z.object({
   notes: z.string().trim().max(4000).optional(),
@@ -95,7 +91,6 @@ export const loadAdditionalInfoSchema = z.object({
   loadSpecificTerms: z.string().trim().max(500).optional(),
 });
 
-// ─── Contract ─────────────────────────────────────────────────────────────────
 
 export const loadContractSchema = z.object({
   agreedToTerms: z.boolean(),
@@ -106,7 +101,6 @@ export const loadContractSchema = z.object({
   { message: "Signature name is required when terms are agreed", path: ["signatureName"] }
 );
 
-// ─── Create Load ──────────────────────────────────────────────────────────────
 
 export const createLoadSchema = z.object({
   postType: z.enum(["load-board", "assign-carrier"]).default("load-board"),
@@ -117,7 +111,6 @@ export const createLoadSchema = z.object({
   dates: loadDatesSchema.optional(),
   additionalInfo: loadAdditionalInfoSchema.optional(),
   contract: loadContractSchema.optional(),
-  // pricing.carrierPayAmount + copCodAmount accepted from client; miles/estimatedRate are server-computed
   pricing: z.object({
     carrierPayAmount: z.number().min(0).optional(),
     copCodAmount: z.number().min(0).default(0),
@@ -126,7 +119,6 @@ export const createLoadSchema = z.object({
 
 export type CreateLoadInput = z.infer<typeof createLoadSchema>;
 
-// ─── Calculate Rate (standalone endpoint) ─────────────────────────────────────
 
 export const calculateRateSchema = z.object({
   pickupZip: z.string().trim().min(5).max(10),

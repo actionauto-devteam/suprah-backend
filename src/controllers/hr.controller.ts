@@ -14,10 +14,6 @@ function daysUntilNextOccurrence(month: number, day: number): number {
   return Math.round((next.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
-/**
- * Get upcoming milestones (birthdays + work anniversaries)
- * GET /api/crm/hr/milestones?window=30
- */
 const getMilestones = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -101,10 +97,6 @@ const getMilestones = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Get offboarded employees
- * GET /api/crm/hr/offboarded
- */
 const getOffboarded = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -124,10 +116,6 @@ const getOffboarded = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { users }, "Offboarded users fetched successfully"));
 });
 
-/**
- * Manually trigger the milestone check (admin only)
- * POST /api/crm/hr/milestones/trigger
- */
 const triggerMilestones = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, "Not authenticated");

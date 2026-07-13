@@ -3,7 +3,6 @@ import Lead from '../models/lead.model';
 import mongoose from 'mongoose';
 import logger from '../utils/logger';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface CreateCustomerInput {
   organizationId: string;
@@ -74,7 +73,6 @@ export interface DuplicateCheckResult {
   confidence?: number;
 }
 
-// ─── Normalisation Helpers ────────────────────────────────────────────────────
 
 function normalisePhone(phone: string): string {
   return (phone || '').replace(/\D/g, '');
@@ -84,12 +82,7 @@ function normaliseEmail(email: string): string {
   return (email || '').toLowerCase().trim();
 }
 
-// ─── Duplicate Detection ──────────────────────────────────────────────────────
 
-/**
- * Efficient duplicate detection using indexed DB queries only.
- * No in-memory full-table scans.
- */
 async function checkDuplicate(
   orgId: string,
   email: string,
@@ -104,7 +97,6 @@ async function checkDuplicate(
     baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
   }
 
-  // 1. Email match (covers email_and_phone and email_only — email is unique index per org)
   if (normEmail) {
     const emailMatch = await Customer.findOne({
       ...baseQuery,
@@ -131,17 +123,13 @@ async function checkDuplicate(
     }
   }
 
-  // 2. Phone-only match — use regex on indexed phone field (avoids full table scan)
   if (normPhone.length >= 7) {
-    // Fetch only the customers whose stored phone digits contain or equal the normalised phone.
-    // We store raw phone strings so we query broadly and refine in-memory on a small set.
     const candidates = await Customer.find({
       ...baseQuery,
-      // Broad filter: at least shares last 7 digits suffix pattern
       phone: { $exists: true, $ne: '' },
     })
       .select('_id phone firstName lastName email source isActive')
-      .limit(500) // safety cap — real orgs rarely exceed this
+      .limit(500)
       .lean();
 
     const phoneMatch = candidates.find(
@@ -165,11 +153,7 @@ async function checkDuplicate(
   return { isDuplicate: false, confidence: 0 };
 }
 
-// ─── Service Methods ──────────────────────────────────────────────────────────
 
-/**
- * Creates a new customer with duplicate prevention.
- */
 async function createCustomer(
   input: CreateCustomerInput,
 ): Promise<{ customer: ICustomer; isNew: boolean; duplicateType?: string }> {
@@ -216,14 +200,6 @@ async function createCustomer(
   return { customer, isNew: true };
 }
 
-/**
- * Upserts a customer record from a lead.
- * - Duplicate found   → enrich & link lead transaction, never create a second record
- * - No duplicate      → create new customer
- *
- * Uses findOneAndUpdate with $setOnInsert for atomic upsert to avoid race conditions
- * when the same lead email is processed concurrently (e.g., during bulk backfill).
- */
 async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
   const {
     organizationId, createdBy, leadId,

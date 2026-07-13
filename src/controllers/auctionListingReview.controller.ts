@@ -76,10 +76,6 @@ export const approveListing = asyncHandler(
             throw new ApiError(400, "Only listings under review can be approved");
         }
 
-        // Defensive re-validation: this is about to become a permanent inventory
-        // record, so never trust that submit-time validation still holds — the
-        // listing may have been edited/migrated since, and a bad record here
-        // would silently corrupt the dealership's inventory.
         const vin = listing.vin?.toUpperCase().trim();
         const year = Number(listing.year);
         const maxYear = new Date().getFullYear() + 1;

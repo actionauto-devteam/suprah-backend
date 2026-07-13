@@ -6,26 +6,10 @@ import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
 import cacheService from "../services/cache.service";
 
-/**
- * DealersCloud inventory feed sync.
- *
- * Flow: lookup FeedConfig by feedId -> fetch file (FTP pull, or read a pushed
- * file) -> parse rows -> upsert into Vehicle scoped to the feed's organization.
- *
- * The parser is header-driven: it reads the first line as column headers and
- * maps each one to a Vehicle field using ALIASES below (plus any per-feed
- * columnMap override). This means you do NOT need to know the exact column
- * order of DealerCloud.txt in advance — and unknown columns are ignored
- * safely. If DealersCloud sends a HEADERLESS file, set an explicit columnMap
- * with positional headers, or ask me to switch to a positional parser.
- */
 
-// Normalize a header so "Stock Number", "stock_number", "StockNumber" all match.
 const normKey = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
-// Raw-header (normalized) -> Vehicle field name.
-// Extend this freely; the per-feed columnMap overrides anything here.
 const ALIASES: Record<string, string> = {
   vin: "vin",
   year: "year",
@@ -123,7 +107,6 @@ const splitImages = (v: string): string[] =>
     .map((s) => s.trim())
     .filter((s) => /^https?:\/\//i.test(s));
 
-// "new"/"used"/"N"/"U" -> isNewVehicle boolean
 const toIsNew = (v: string): boolean => /^(new|n|true|1)$/i.test(String(v).trim());
 
 const detectDelimiter = (headerLine: string): string => {
@@ -139,7 +122,6 @@ export interface ParsedVehicle {
   [key: string]: any;
 }
 
-/** Parse raw feed text into normalized vehicle records. */
 export const parseFeed = (
   contents: string,
   config: Pick<IFeedConfig, "delimiter" | "columnMap" | "defaultStatus">,
@@ -158,7 +140,6 @@ export const parseFeed = (
   const rawHeaders = lines[0].split(delimiter).map((h) => h.trim());
   const override = config.columnMap || {};
 
-  // Resolve each column index to a Vehicle field (or null to skip).
   const fieldForIndex: (string | null)[] = rawHeaders.map((h) => {
     if (override[h]) return override[h];
     return ALIASES[normKey(h)] ?? null;
@@ -184,7 +165,6 @@ export const parseFeed = (
       } else rec[field] = raw;
     });
 
-    // VIN is the upsert key — skip rows without one.
     if (!rec.vin) continue;
     rec.vin = String(rec.vin).toUpperCase().trim();
 
@@ -195,7 +175,6 @@ export const parseFeed = (
   return records;
 };
 
-/** Download the feed file over FTP and return its contents as a string. */
 export const fetchFeedFile = async (config: IFeedConfig): Promise<string> => {
   const host = config.ftpHost || process.env.DEALERSCLOUD_FTP_HOST;
   const user = config.ftpUser || process.env.DEALERSCLOUD_FTP_USER;
@@ -245,16 +224,9 @@ export interface SyncResult {
   missing: number;
 }
 
-/**
- * Run a full sync for one feed.
- *
- * Note on VIN: Vehicle.vin is globally unique in your schema, so we upsert by
- * VIN and stamp organizationId. Real VINs are unique per vehicle, so this is
- * safe; just be aware a VIN can only live under one org at a time.
- */
 export const syncFeed = async (
   feedId: string,
-  rawContentsOverride?: string, // for the "push" mode: pass file you already have
+  rawContentsOverride?: string,
 ): Promise<SyncResult> => {
   const config = await FeedConfig.findOne({ feedId, active: true });
   if (!config) {
@@ -288,7 +260,6 @@ export const syncFeed = async (
     const inserted = result.upsertedCount || 0;
     const updated = result.modifiedCount || 0;
 
-    // Handle vehicles in this org that were NOT in the feed.
     let missing = 0;
     if (config.missingStrategy !== "ignore") {
       const missingFilter = {
@@ -330,7 +301,6 @@ export const syncFeed = async (
   }
 };
 
-/** Sync every active feed — call this from a scheduler. */
 export const syncAllFeeds = async (): Promise<SyncResult[]> => {
   const feeds = await FeedConfig.find({ active: true }).select("feedId");
   const results: SyncResult[] = [];
@@ -338,7 +308,6 @@ export const syncAllFeeds = async (): Promise<SyncResult[]> => {
     try {
       results.push(await syncFeed(f.feedId));
     } catch {
-      // already logged + recorded on the config; keep going
     }
   }
   return results;

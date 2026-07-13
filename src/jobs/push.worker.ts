@@ -8,17 +8,12 @@ import { bullConnection } from './push.queue';
 
 const LOG_PREFIX = '[PushWorker]';
 
-// Initialize web-push with VAPID credentials from config
 webpush.setVapidDetails(
   config.push.vapidSubject,
   config.push.vapidPublicKey,
   config.push.vapidPrivateKey
 );
 
-/**
- * Worker to process push notification jobs.
- * This worker runs in the background and handles the actual HTTP delivery to push vendors.
- */
 export let pushWorker: Worker | null = null;
 
 if (config.redis.enabled) {

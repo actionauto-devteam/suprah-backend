@@ -31,11 +31,10 @@ class AuthService {
         let roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
         let orgId: mongoose.Types.ObjectId | undefined = undefined;
         let orgRole = undefined;
-        let onboardingCompleted = false; // Always false on register — completed via onboarding flow
+        let onboardingCompleted = false;
         let isApproved = true;
 
         try {
-            // If registering via invitation
             if (inviteToken) {
                 const InvitationModel = mongoose.model('Invitation');
                 const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
@@ -44,7 +43,7 @@ class AuthService {
                     roleToAssign = invite.role;
                     orgId = invite.organizationId;
                     orgRole = invite.role;
-                    onboardingCompleted = true; // Invited users skip onboarding
+                    onboardingCompleted = true;
                     isApproved = true;
 
                     invite.status = 'accepted';
@@ -58,18 +57,12 @@ class AuthService {
                 isApproved = false;
             }
 
-            // Map internal roles correctly for DB
             let finalGlobalRole = roleToAssign;
             if (roleToAssign === 'member') {
                 finalGlobalRole = 'employee';
             }
 
-            // Invited users or non-customers can still get org resolved here.
-            // Regular customers now pick their org explicitly in the onboarding
-            // org-select step, so we skip the auto-resolve for them.
             if (!orgId && finalGlobalRole !== 'customer') {
-                // Non-customer roles (employee, admin, driver via invite etc.)
-                // still benefit from the existing slug/id resolution.
                 orgId = await this.resolveCustomerOrgId({ organizationId, dealershipSlug });
             }
 
@@ -89,8 +82,7 @@ class AuthService {
                 await this.ensureDriverRequest(user as any);
             }
 
-            // Generate and send OTP for email verification
-            const otp = Math.floor(100000 + Math.random() * 900000).toString();
+            const otp = crypto.randomInt(100000, 1000000).toString();
             user.otpCode = otp;
             user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
             await user.save();
@@ -119,7 +111,7 @@ class AuthService {
      * Verify email with OTP
      */
     async verifyEmail(email: string, otp: string) {
-        const user = await User.findOne({ email: email.toLowerCase() });
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+otpCode +otpExpiresAt');
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
             throw new ApiError(400, 'Invalid or expired verification code');
         }
@@ -146,7 +138,7 @@ class AuthService {
             throw new ApiError(400, 'Email is already verified');
         }
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = crypto.randomInt(100000, 1000000).toString();
         user.otpCode = otp;
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
@@ -207,7 +199,7 @@ class AuthService {
             user.organizationId = organization._id as any;
             user.organizationRole = 'owner';
 
-            const otp = Math.floor(100000 + Math.random() * 900000).toString();
+            const otp = crypto.randomInt(100000, 1000000).toString();
             user.otpCode = otp;
             user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
             await user.save({ session });
@@ -278,7 +270,7 @@ class AuthService {
             throw new ApiError(404, 'User not found or not a legacy user');
         }
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = crypto.randomInt(100000, 1000000).toString();
         user.otpCode = otp;
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
@@ -297,7 +289,7 @@ class AuthService {
      * Upgrade legacy user with OTP and new password
      */
     async upgradeLegacyUser(email: string, otp: string, newPassword: string) {
-        const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+password +otpCode +otpExpiresAt');
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
             throw new ApiError(400, 'Invalid or expired OTP');
         }
@@ -350,7 +342,7 @@ class AuthService {
             return { message: 'If an account exists, a reset code has been sent' };
         }
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = crypto.randomInt(100000, 1000000).toString();
         user.otpCode = otp;
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
@@ -369,7 +361,7 @@ class AuthService {
      * Reset password with OTP
      */
     async resetPassword(email: string, otp: string, newPassword: string) {
-        const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+password +otpCode +otpExpiresAt');
 
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
             throw new ApiError(400, 'Invalid or expired reset code');

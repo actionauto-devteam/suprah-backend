@@ -7,27 +7,12 @@ import LinkedAccount, {
 import User from "../models/User.model";
 import { wiseClient } from "../lib/wise-client";
 
-/**
- * LINKED ACCOUNTS — WISE ONLY
- * ---------------------------
- * We connect a user's Wise account so its real balance can REPLACE the SuprahPay
- * wallet balance (Wise exposes a true balance API). PayPal was removed: there is
- * no API to read a connected PayPal account's balance, so it could never mirror
- * money into the wallet. If another balance-capable provider is added later,
- * reintroduce the `provider` branches here.
- */
 
 const STATE_SECRET =
   process.env.LINKED_ACCOUNT_STATE_SECRET || "dev-insecure-state-secret-change-me";
-const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const STATE_TTL_MS = 10 * 60 * 1000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
-/* ─────────────────────────── Signed OAuth state ─────────────────────────── */
-/**
- * The OAuth callback is a third-party browser redirect with NO Authorization
- * header, so we cannot use the normal auth middleware to know who the user is.
- * Instead we embed a signed, expiring `state` (HMAC) generated at initiate time.
- */
 export function signState(userId: string, provider: LinkedProvider): string {
   const payload = JSON.stringify({
     u: userId,

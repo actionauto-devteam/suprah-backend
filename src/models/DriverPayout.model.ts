@@ -101,7 +101,6 @@ const DriverPayoutSchema: Schema<IDriverPayout> = new Schema(
   }
 );
 
-// Auto-generate payout number before save
 DriverPayoutSchema.pre('save', async function (next) {
   if (!this.payoutNumber) {
     const date = new Date();

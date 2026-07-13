@@ -1,15 +1,13 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-// ─── Theme ───────────────────────────────────────────────────────────────────
 
 export interface ISupraSpaceTheme {
-  accent?: string | null;     // primary accent / own-bubble color
-  bubble?: string | null;     // own bubble color override
-  wallpaper?: string | null;  // CSS background (gradient or url)
-  emoji?: string | null;      // quick-reaction default emoji
+  accent?: string | null;
+  bubble?: string | null;
+  wallpaper?: string | null;
+  emoji?: string | null;
 }
 
-// ─── Concern metadata ─────────────────────────────────────────────────────────
 
 export interface ISupraSpaceConversationMetadata {
   type?: 'customer_concern' | 'customer_call' | null;
@@ -22,7 +20,6 @@ export interface ISupraSpaceConversationMetadata {
   caseNumber?: number | null;
 }
 
-// ─── Main interface ───────────────────────────────────────────────────────────
 
 export interface ISupraSpaceNotificationPreference {
   type: 'all' | 'main' | 'foryou' | 'none';
@@ -31,30 +28,29 @@ export interface ISupraSpaceNotificationPreference {
 
 export interface ISupraSpaceConversation extends Document {
   type: 'direct' | 'group';
-  name?: string;                         // group name (optional for DMs)
-  emoji?: string | null;                 // optional channel label icon
-  avatar?: string;                       // group avatar URL
-  avatarKey?: string;                    // R2 key for the avatar
+  name?: string;
+  emoji?: string | null;
+  avatar?: string;
+  avatarKey?: string;
   members: mongoose.Types.ObjectId[];
-  admins: mongoose.Types.ObjectId[];     // group admins
-  pinnedBy: mongoose.Types.ObjectId[];   // users who pinned this conversation
-  archivedBy: mongoose.Types.ObjectId[]; // users who archived this conversation
-  deletedFor: mongoose.Types.ObjectId[]; // users who deleted (hid) this conversation
-  clearedAt: Record<string, Date>;       // per-user timestamp of last deletion — messages before this are hidden for that user
-  spaceId?: mongoose.Types.ObjectId | null; // Space this conversation belongs to (groups only)
+  admins: mongoose.Types.ObjectId[];
+  pinnedBy: mongoose.Types.ObjectId[];
+  archivedBy: mongoose.Types.ObjectId[];
+  deletedFor: mongoose.Types.ObjectId[];
+  clearedAt: Record<string, Date>;
+  spaceId?: mongoose.Types.ObjectId | null;
   theme: ISupraSpaceTheme;
-  metadata: ISupraSpaceConversationMetadata; // concern / feature metadata
+  metadata: ISupraSpaceConversationMetadata;
   notificationPrefs: Record<string, ISupraSpaceNotificationPreference>;
   lastMessage?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
   createdBy: mongoose.Types.ObjectId;
   isActive: boolean;
-  deletedAt?: Date | null;               // hard-delete timestamp (channel removed)
+  deletedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// ─── Sub-schemas ──────────────────────────────────────────────────────────────
 
 const ThemeSchema = new Schema<ISupraSpaceTheme>(
   {
@@ -80,7 +76,6 @@ const MetadataSchema = new Schema<ISupraSpaceConversationMetadata>(
   { _id: false }
 );
 
-// ─── Main schema ──────────────────────────────────────────────────────────────
 
 const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
   {
@@ -113,16 +108,13 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
   { timestamps: true }
 );
 
-// ─── Indexes ──────────────────────────────────────────────────────────────────
 
 SupraSpaceConversationSchema.index({ members: 1 });
 SupraSpaceConversationSchema.index({ lastMessageAt: -1 });
 
-// Customer concern lookups
 SupraSpaceConversationSchema.index({ 'metadata.type': 1, 'metadata.customerUserId': 1, lastMessageAt: -1 });
 SupraSpaceConversationSchema.index({ 'metadata.resolved': 1, lastMessageAt: -1 });
 
-// ─── Model ────────────────────────────────────────────────────────────────────
 
 const SupraSpaceConversation = mongoose.model<ISupraSpaceConversation>(
   'SupraSpaceConversation',

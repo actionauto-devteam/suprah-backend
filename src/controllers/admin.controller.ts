@@ -16,9 +16,6 @@ import { SystemLog } from '../models/SystemLog.model';
 
 import { metrics, getPercentile } from '../utils/metrics';
 
-/**
- * Get all organizations with pagination and search
- */
 export const getAllOrganizations = asyncHandler(
   async (req: Request, res: Response) => {
     const { page = 1, limit = 10, search } = req.query;
@@ -60,9 +57,6 @@ export const getAllOrganizations = asyncHandler(
   },
 );
 
-/**
- * Get all users with pagination and search
- */
 export const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
   const { page = 1, limit = 10, search } = req.query;
   const pageNum = Number(page);
@@ -106,9 +100,6 @@ export const getAllUsers = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Get system-wide statistics (DB counts)
- */
 export const getSystemStats = asyncHandler(async (req: Request, res: Response) => {
   const [orgCount, userCount] = await Promise.all([
     Organization.countDocuments(),
@@ -127,20 +118,16 @@ export const getSystemStats = asyncHandler(async (req: Request, res: Response) =
   );
 });
 
-// --- REAL-TIME MONITORING ---
 
-/**
- * Get real-time process performance stats (CPU, RAM)
- */
 export const getProcessStats = asyncHandler(async (req: Request, res: Response) => {
   const stats = await pidusage(process.pid);
 
   const formattedStats = {
     performance: {
       cpu: Math.round(stats.cpu * 100) / 100,
-      memory: Math.round((stats.memory / 1024 / 1024) * 100) / 100, // MB
-      memoryTotal: Math.round((os.totalmem() / 1024 / 1024) * 100) / 100, // MB
-      uptime: Math.round(stats.elapsed / 1000), // seconds
+      memory: Math.round((stats.memory / 1024 / 1024) * 100) / 100,
+      memoryTotal: Math.round((os.totalmem() / 1024 / 1024) * 100) / 100,
+      uptime: Math.round(stats.elapsed / 1000),
     },
     goldenSignals: {
       traffic: {
@@ -169,12 +156,6 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
   );
 });
 
-/**
- * Retrieves the last X lines of the application log file safely using a memory-efficient buffer.
- */
-/**
- * Retrieves system logs from the indexed database with advanced filtering.
- */
 export const getSystemLogs = asyncHandler(async (req: Request, res: Response) => {
   const {
     level,
@@ -194,24 +175,20 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
 
   const filter: any = {};
 
-  // Level filter (supports csv: info,error,warn)
   if (level) {
     const levels = (level as string).split(',').map(l => l.trim().toUpperCase());
     filter.level = levels.length > 1 ? { $in: levels } : levels[0];
   }
 
-  // Time range filter
   if (from || to) {
     filter.timestamp = {};
     if (from) filter.timestamp.$gte = new Date(from as string);
     if (to) filter.timestamp.$lte = new Date(to as string);
   }
 
-  // Search filter (High-performance Unified Text Search)
   if (search) {
     const searchTerm = search as string;
 
-    // If it looks like a specific ID (Request ID, User ID), we use prioritized match
     if (searchTerm.includes('_') || searchTerm.length > 20) {
       filter.$or = [
         { 'req.id': searchTerm },
@@ -219,12 +196,10 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
         { message: { $regex: searchTerm, $options: 'i' } }
       ];
     } else {
-      // Use the Compound Text Index for general keyword searches
       filter.$text = { $search: searchTerm };
     }
   }
 
-  // Context filters
   if (requestId) filter['req.id'] = requestId;
   if (userId) filter['req.userId'] = userId;
   if (organizationId) filter['req.organizationId'] = organizationId;
@@ -252,16 +227,12 @@ export const getSystemLogs = asyncHandler(async (req: Request, res: Response) =>
   );
 });
 
-/**
- * Get log frequency statistics for the visual histogram.
- */
 export const getLogStats = asyncHandler(async (req: Request, res: Response) => {
   const { from, to, interval = 'hour' } = req.query;
 
   const startTime = from ? new Date(from as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
   const endTime = to ? new Date(to as string) : new Date();
 
-  // Create a time-series aggregation for logs
   const stats = await SystemLog.aggregate([
     {
       $match: {
@@ -293,9 +264,6 @@ export const getLogStats = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Clear application logs
- */
 export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) => {
   const { confirm } = req.body;
 
@@ -303,7 +271,6 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
     throw new ApiError(400, "Deletion aborted. You must provide {'confirm': true} in the request body to clear logs.");
   }
 
-  // --- DATABASE SECURITY GATEKEEPER ---
   const MONGODB_URI = process.env.MONGODB_URI || '';
   const isAtlas = MONGODB_URI.includes('mongodb+srv') || MONGODB_URI.includes('mongodb.net');
 
@@ -311,7 +278,6 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
     logger.error('Attempted to clear system logs on a Cloud Atlas instance without ALLOW_WIPE=true');
     throw new ApiError(403, "Database Protection: Bulk log deletion is blocked on live clusters. Set ALLOW_WIPE=true to override.");
   }
-  // ------------------------------------
 
   const logPath = path.join(process.cwd(), 'logs', 'app.log');
 
@@ -319,10 +285,8 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
     fs.writeFileSync(logPath, '');
   }
 
-  // Also purge the database indexed logs
   await SystemLog.deleteMany({});
 
-  // Log activity
   const adminUser = req.user as any;
   if (adminUser) {
     await activityService.logAdminAction(
@@ -341,7 +305,6 @@ export const clearSystemLogs = asyncHandler(async (req: Request, res: Response) 
   );
 });
 
-// --- USER MANAGEMENT ---
 
 export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -352,7 +315,6 @@ export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
   );
   if (!user) throw new ApiError(404, "User not found");
 
-  // Log activity
   const adminUser = req.user as any;
   await activityService.logAdminAction(
     adminUser._id.toString(),
@@ -463,7 +425,6 @@ export const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "User deleted successfully"));
 });
 
-// --- ORGANIZATION MANAGEMENT ---
 
 export const suspendOrganization = asyncHandler(
   async (req: Request, res: Response) => {
@@ -475,7 +436,6 @@ export const suspendOrganization = asyncHandler(
     );
     if (!org) throw new ApiError(404, "Organization not found");
 
-    // Log activity
     const adminUser = req.user as any;
     await activityService.logAdminAction(
       adminUser._id.toString(),

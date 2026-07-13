@@ -1,4 +1,3 @@
-// repush
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -17,31 +16,15 @@ import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 
-const BREAK_LIMIT_SECONDS = 3600; // 3600
+const BREAK_LIMIT_SECONDS = 3600;
 
-// Company operates on Mountain Daylight Time (MDT = UTC-6).
-// All timeproof calendar dates are computed in this fixed offset
-// regardless of where the user's device is physically located.
-const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
+const COMPANY_TZ_OFFSET_MINUTES = -360;
 
-// Only replace wall-clock total with ActivityInterval total when ActivityIntervals
-// cover at least this fraction of the wall-clock. Below this threshold the
-// interval data is considered incomplete (e.g. tray only flushed a partial
-// interval) and we fall back to wall-clock so hours aren't dramatically undercounted.
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
-// How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
-// Set to 5 minutes (5× the 60s heartbeat interval) so transient network blips
-// (1–3 missed heartbeats) don't freeze the CRM page timer. The trade-off is that a
-// genuinely crashed tray may over-display by up to 5 minutes — acceptable since
-// ActivityIntervals (committed on idle/clock-out) are the authoritative record.
 const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Helpers
-────────────────────────────────────────────────────────────────────────── */
 
-/** Pair time-in / time-out logs into complete sessions */
 const buildSessions = (logs: any[]) => {
   const sorted = [...logs].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -66,9 +49,6 @@ const buildSessions = (logs: any[]) => {
     }
   }
 
-  // Currently clocked in (no matching time-out).
-  // Cap at 12 hours so a single forgotten clock-out cannot inflate every subsequent
-  // calendar day with 24:00 entries (one unclosed session → one live slice per day).
   if (currentIn) {
     const now = new Date();
     const MAX_LIVE_MS = 12 * 60 * 60 * 1000;
@@ -86,16 +66,13 @@ const buildSessions = (logs: any[]) => {
   return sessions;
 };
 
-/** Date → "YYYY-MM-DD" (UTC) */
 const toDateStr = (date: Date) => date.toISOString().split('T')[0];
 
-/** Date → "YYYY-MM-DD" in the user's local timezone (tzOffsetMinutes = minutes east of UTC, e.g. +480 for UTC+8) */
 const toLocalDateStr = (date: Date, tzOffsetMinutes: number): string => {
   const local = new Date(date.getTime() + tzOffsetMinutes * 60_000);
   return local.toISOString().split('T')[0];
 };
 
-/** Start of ISO week (Monday 00:00:00) */
 const getWeekStart = (date: Date) => {
   const d = new Date(date);
   const day = d.getDay();
@@ -105,7 +82,6 @@ const getWeekStart = (date: Date) => {
   return d;
 };
 
-/** Pair break-in / break-out logs into break sessions */
 const buildBreakSessions = (logs: any[]) => {
   const sorted = [...logs]
     .filter((l) => l.type === 'break-in' || l.type === 'break-out')
@@ -142,11 +118,6 @@ const buildBreakSessions = (logs: any[]) => {
   return breaks;
 };
 
-/**
- * Splits a time range into calendar-day segments using LOCAL midnight boundaries.
- * tzOffsetMinutes: minutes east of UTC (e.g. +480 for UTC+8 Philippines).
- * Each segment belongs to exactly one local calendar day.
- */
 const getMidnightSegments = (
   startTime: Date,
   endTime: Date,
@@ -157,8 +128,6 @@ const getMidnightSegments = (
 
   while (true) {
     const segDateStr = toLocalDateStr(segStart, tzOffsetMinutes);
-    // Compute the next local midnight as a UTC timestamp:
-    // Local midnight of (segDate + 1 day) = segDate "T00:00:00Z" + 24h - tzOffset
     const localDayStartUTC = new Date(segDateStr + 'T00:00:00.000Z').getTime();
     const nextLocalMidnightUTC = new Date(localDayStartUTC + 24 * 60 * 60 * 1000 - tzOffsetMinutes * 60_000);
 
@@ -182,21 +151,13 @@ type CalendarDay = {
   weekTotalSeconds?: number;
 };
 
-/**
- * Attach weekTotalSeconds to the Saturday of each Sun–Sat week.
- * If the user has worked days in a week, the total is placed on that week's Saturday.
- * A skeleton CalendarDay is created for Saturday if no logs exist on that day,
- * so the frontend can still render the green badge.
- * Break time is excluded from the week total.
- */
 const attachWeekTotals = (calendar: Record<string, CalendarDay>) => {
-  // Group worked dates by their week's Saturday
   const weekMap: Record<string, string[]> = {};
 
   for (const dateStr of Object.keys(calendar)) {
     if (calendar[dateStr].totalSeconds === 0) continue;
     const d = new Date(dateStr + 'T12:00:00Z');
-    const dayOfWeek = d.getUTCDay(); // 0=Sun … 6=Sat
+    const dayOfWeek = d.getUTCDay();
     const daysToSaturday = dayOfWeek === 0 ? 6 : 6 - dayOfWeek;
     const saturday = new Date(d);
     saturday.setUTCDate(d.getUTCDate() + daysToSaturday);
@@ -207,7 +168,6 @@ const attachWeekTotals = (calendar: Record<string, CalendarDay>) => {
   for (const [saturdayStr, dates] of Object.entries(weekMap)) {
     const weekTotal = dates.reduce((sum, d) => sum + calendar[d].totalSeconds, 0);
 
-    // Ensure Saturday entry exists even if no logs that day
     if (!calendar[saturdayStr]) {
       calendar[saturdayStr] = { sessions: [], totalSeconds: 0, breaks: [], breakSeconds: 0 };
     }
@@ -215,9 +175,7 @@ const attachWeekTotals = (calendar: Record<string, CalendarDay>) => {
   }
 };
 
-/** Build per-day calendar map from raw log array with local-midnight-split support */
 const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
-  // Build sessions and breaks globally so cross-midnight pairs are handled
   const allSessions = buildSessions(logs);
   const allBreaks = buildBreakSessions(logs);
 
@@ -231,8 +189,6 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
   };
 
   for (const s of allSessions) {
-    // For capped sessions (out=null, isLive=false), reconstruct effective end from duration
-    // so getMidnightSegments doesn't spread the session to "now" across all subsequent days.
     const endTime = s.out ?? (s.isLive ? new Date() : new Date(s.in.getTime() + s.duration * 1000));
     const segments = getMidnightSegments(s.in, endTime, tzOffsetMinutes);
     for (const { date, segStart, segEnd } of segments) {
@@ -267,8 +223,6 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
   for (const [date, data] of Object.entries(byDate)) {
     const grossSessionSeconds = data.sessions.reduce((sum, s) => sum + s.duration, 0);
     const breakSeconds = data.breaks.reduce((sum, b) => sum + b.duration, 0);
-    // totalSeconds is the NET work time (excludes breaks). Both the time clock
-    // and this calendar use net work for consistency.
     calendar[date] = {
       sessions: data.sessions,
       totalSeconds: Math.max(0, grossSessionSeconds - breakSeconds),
@@ -282,16 +236,14 @@ const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
   return calendar;
 };
 
-/** Compute consecutive working-day streak using local calendar dates */
 const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
   const now = new Date();
   const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
   const todayStr = localNow.toISOString().split('T')[0];
 
   let streak = 0;
-  // Walk backwards one UTC-day at a time (date strings are local, so stepping by 1 day is fine)
   const check = new Date(localNow);
-  check.setUTCHours(12, 0, 0, 0); // pin to noon to avoid DST edge cases
+  check.setUTCHours(12, 0, 0, 0);
 
   while (true) {
     const dateStr = check.toISOString().split('T')[0];
@@ -301,14 +253,12 @@ const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMi
       streak++;
       check.setUTCDate(check.getUTCDate() - 1);
     } else if (dateStr === todayStr) {
-      // Today hasn't been worked yet — look back from yesterday
       check.setUTCDate(check.getUTCDate() - 1);
     } else {
       break;
     }
   }
 
-  // Longest ever streak
   const sorted = Object.keys(calendar).sort();
   let longest = 0;
   let temp = 0;
@@ -324,7 +274,6 @@ const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMi
   return { streak, longestStreak: longest };
 };
 
-/** Build 24-element array: how many clock-ins per hour-of-day (in user's local time) */
 const buildHourPattern = (logs: any[], tzOffsetMinutes = 0) => {
   const pattern = new Array(24).fill(0);
   for (const log of logs) {
@@ -344,20 +293,16 @@ const formatHours = (seconds: number) => ({
   decimal: parseFloat((seconds / 3600).toFixed(2)),
 });
 
-/** Aggregate per-day data into week/month buckets using local calendar dates */
 const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
   const now = new Date();
-  // Shift "now" into the user's local timezone for date-string comparisons
   const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
   const todayStr = localNow.toISOString().split('T')[0];
 
-  // Local week start (Monday) as a date string
-  const localDay = localNow.getUTCDay(); // 0=Sun … 6=Sat
+  const localDay = localNow.getUTCDay();
   const daysFromMonday = localDay === 0 ? 6 : localDay - 1;
   const localWeekStartMs = localNow.getTime() - daysFromMonday * 86_400_000;
   const weekStartStr = new Date(localWeekStartMs).toISOString().split('T')[0];
 
-  // Local month start as a date string  ("YYYY-MM-01")
   const monthStartStr = todayStr.slice(0, 7) + '-01';
 
   let todaySeconds = 0;
@@ -377,14 +322,7 @@ const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>, tzOffse
   };
 };
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Controllers
-────────────────────────────────────────────────────────────────────────── */
 
-/**
- * GET /api/crm/timeproof/my?range=90
- * Returns the current user's full timeproof dataset.
- */
 export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { range = '90' } = req.query;
@@ -412,8 +350,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     activityByDate[i.shiftDate] = (activityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
   }
 
-  // For today specifically, also include the currently-running interval (if any)
-  // so the displayed total tracks the live timer.
   const todayHeartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const heartbeatFresh = todayHeartbeat
     ? Date.now() - new Date(todayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
@@ -423,14 +359,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     : 0;
   activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
 
-  // Override every calendar day's wall-clock total with the ActivityInterval
-  // total when it is smaller AND covers at least 65% of the wall-clock.
-  // The 65% floor guards against partially-committed interval data (e.g. the
-  // tray only flushed the final 2h 10m of a 9h shift) being mistaken for the
-  // authoritative active total — if ActivityIntervals cover less than 65% of
-  // wall-clock the data is likely incomplete, so we fall back to wall-clock.
-  // Example that passes (genuine idle filtering): 10h57m / 13h = 84% ✓
-  // Example that fails (incomplete submission): 2h10m / 9h = 24% ✗
   for (const dateStr of Object.keys(calendar)) {
     const activeForDate = activityByDate[dateStr] ?? 0;
     const wallClock = calendar[dateStr].totalSeconds;
@@ -439,10 +367,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     }
   }
 
-  // Ghost-hours correction for past days where the tray never ran at all
-  // (activityByDate = 0). If an unclosed session still contributes time via
-  // the wall-clock, strip that ghost portion. Completed sessions on the same
-  // day are kept so CRM-only clock-in/clock-out records remain accurate.
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
     if ((activityByDate[dateStr] ?? 0) > 0) continue;
@@ -482,10 +406,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   );
 });
 
-/**
- * GET /api/crm/timeproof/users
- * Admin/Manager: leaderboard-style summary for all active users.
- */
 export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
@@ -495,7 +415,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  // Use MDT window for today so shift-state matches getShiftState
   const nowMDT = new Date(now.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
   const todayMDTStr = nowMDT.toISOString().split('T')[0];
   const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
@@ -506,9 +425,8 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   const weekStart = getWeekStart(now);
   const todayStr = todayMDTStr;
 
-  const users = await CrmUser.find({ isActive: true }).select('-password').lean();
+  const users = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
 
-  // Fallback: look up department from main User system by email for users who haven't set it in CRM
   const mainDeptByEmail = new Map<string, string>();
   try {
     const emails = users.map((u) => u.email).filter(Boolean) as string[];
@@ -522,7 +440,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       }
     });
   } catch {
-    // non-critical — CRM user's own department field will be used
   }
 
   const results = await Promise.all(
@@ -537,8 +454,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const { streak } = computeStreak(calendar);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
-      // ── Timer state: exact same logic as getShiftState so admin board ──────
-      // and tray always compute from the same source.
       const todayLogs = logs.filter(l => {
         const ts = new Date(l.timestamp);
         return ts >= todayStart && ts < tomorrow;
@@ -551,13 +466,11 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
         ? new Date(timeIns.at(-1)!.timestamp).toISOString()
         : null;
 
-      // Completed session wall-times (same as tray's todayTotalWorkedSeconds)
       const allTodaySessions = buildSessions(todayLogs);
       const todayTotalWorkedSeconds = allTodaySessions
         .filter(s => !s.isLive)
         .reduce((sum, s) => sum + s.duration, 0);
 
-      // Completed break seconds in current session only (same as tray's totalBreakSeconds)
       const currentSessionStart = isOnShift && shiftStartedAt
         ? new Date(shiftStartedAt)
         : null;
@@ -579,14 +492,12 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
         }
       }
 
-      // Snapshot for the non-live fallback (frozen display when offline/off-shift)
       const liveWallSec = isOnShift && shiftStartedAt
         ? (now.getTime() - new Date(shiftStartedAt).getTime()) / 1000
         : 0;
       const todayNetSnapshot = todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds);
       const today = formatHours(todayNetSnapshot);
 
-      // CRM user's own department takes priority; main User lookup is fallback only
       const department = (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined;
 
       return {
@@ -610,16 +521,11 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     })
   );
 
-  // Sort by this month hours descending
   results.sort((a, b) => b.thisMonth.totalSeconds - a.thisMonth.totalSeconds);
 
   res.json(new ApiResponse(200, { users: results }, 'Team timeproof fetched'));
 });
 
-/**
- * GET /api/crm/timeproof/user/:userId?range=90
- * Admin/Manager: full dataset for a specific user.
- */
 export const getUserTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
@@ -629,7 +535,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const { userId } = req.params;
   const { range = '90' } = req.query;
 
-  const targetUser = await CrmUser.findById(userId).select('-password');
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password');
   if (!targetUser) throw new ApiError(404, 'User not found');
 
   const startDate = new Date();
@@ -664,9 +570,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     : 0;
   userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
 
-  // Override every calendar day's wall-clock total with the ActivityInterval
-  // total when it is smaller AND covers at least 65% of wall-clock (same
-  // logic as getMyTimeproof — see that block for rationale).
   for (const dateStr of Object.keys(calendar)) {
     const activeForDate = userActivityByDate[dateStr] ?? 0;
     const wallClock = calendar[dateStr].totalSeconds;
@@ -675,7 +578,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     }
   }
 
-  // Ghost-hours correction for past days where the tray never ran at all.
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
     if ((userActivityByDate[dateStr] ?? 0) > 0) continue;
@@ -716,15 +618,10 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   );
 });
 
-/**
- * GET /api/crm/timeproof/export?userId=...&range=90
- * Returns a CSV-compatible string for download.
- */
 export const exportTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   const { userId, range = '30' } = req.query;
 
-  // Only admins can export others; employees export their own
   const targetId =
     userId && ['admin', 'manager'].includes(requestor.role)
       ? (userId as string)
@@ -1051,7 +948,7 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
   const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
   const now = new Date();
 
-  const users = await CrmUser.find({ isActive: true }).select('-password').lean();
+  const users = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
   const heartbeats = await AgentHeartbeat.find({
     userId: { $in: users.map(u => u._id) },
   }).lean();
@@ -1144,6 +1041,11 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, 'Access denied');
   }
 
+  if (targetId !== requestor._id.toString()) {
+    const targetUser = await CrmUser.findOne({ _id: targetId, organizationId: requestor.organizationId }).select('_id').lean();
+    if (!targetUser) throw new ApiError(404, 'User not found');
+  }
+
   const prefix = `screenshots/${targetId}/${date}/`;
   const [objects, excludedRows] = await Promise.all([
     storageService.list(prefix, BucketType.PRIVATE),
@@ -1205,7 +1107,7 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'userId, date, correctedTimeOut and reason are all required');
   }
 
-  const targetUser = await CrmUser.findById(userId).select('department fullName organizationId').lean();
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
   if (isTimeEditExempt(targetUser.department)) {
     throw new ApiError(403, `${targetUser.fullName}'s time logs are exempt from admin correction`);
@@ -1272,7 +1174,7 @@ export const excludeScreenshots = asyncHandler(async (req: Request, res: Respons
     throw new ApiError(400, 'userId, date, after and reason are all required');
   }
 
-  const targetUser = await CrmUser.findById(userId).select('department fullName organizationId').lean();
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
   if (isTimeEditExempt(targetUser.department)) {
     throw new ApiError(403, `${targetUser.fullName}'s screenshots are exempt from admin exclusion`);
@@ -1423,8 +1325,10 @@ export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: 
   if (requestor.role !== 'admin') {
     throw new ApiError(403, 'Only admins can wipe all screenshots');
   }
+  const orgUsers = await CrmUser.find({ organizationId: requestor.organizationId }).select('_id').lean();
+  const allowedUserIds = new Set(orgUsers.map((u) => u._id.toString()));
   const { wipeAllScreenshots } = await import('../schedulers/screenshotRetention.scheduler');
-  const result = await wipeAllScreenshots();
+  const result = await wipeAllScreenshots(allowedUserIds);
   res.json(new ApiResponse(200, result, `Wiped ${result.deleted} screenshot record(s)`));
 });
 

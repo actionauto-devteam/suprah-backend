@@ -12,7 +12,6 @@ import { emitToOrg } from '../utils/socketEmitter';
 import config from '../config';
 import emailService from '../services/email.service';
 
-// ─── JaaS JWT helper ──────────────────────────────────────────────────────────
 const JAAS_APP_ID      = process.env.JAAS_APP_ID      || '';
 const JAAS_KID         = process.env.JAAS_KID         || '';
 const JAAS_PRIVATE_KEY = (process.env.JAAS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
@@ -50,8 +49,6 @@ function referralJitsiToken(opts: {
   });
 }
 
-// ─── PUBLIC: Validate code & return referrer first name ───────────────────────
-// GET /api/referral-leads/info/:code
 export const getPublicReferralInfo = asyncHandler(async (req: Request, res: Response) => {
   const { code } = req.params;
   if (!code) throw new ApiError(400, 'Referral code is required');
@@ -74,8 +71,6 @@ export const getPublicReferralInfo = asyncHandler(async (req: Request, res: Resp
   );
 });
 
-// ─── PUBLIC: Submit call request ──────────────────────────────────────────────
-// POST /api/referral-leads/request
 export const submitReferralRequest = asyncHandler(async (req: Request, res: Response) => {
   const { name, phone, email, requestType, referralCode } = req.body;
 
@@ -93,7 +88,6 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
   if (!referrer) throw new ApiError(404, 'Invalid referral code');
   if (!referrer.organizationId) throw new ApiError(400, 'Referrer is not linked to a dealership');
 
-  // Block if this email already belongs to a customer account in this org
   const existingAccount = await User.findOne({
     email:          email.trim().toLowerCase(),
     organizationId: referrer.organizationId,
@@ -104,7 +98,6 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
     throw new ApiError(409, 'An account with this email already exists at this dealership. Please log in or contact our team for assistance.');
   }
 
-  // Duplicate check — block if phone OR email already has an active lead in this org
   const [dupPhone, dupEmail] = await Promise.all([
     ReferralLead.findOne({
       phone:          phone.trim(),
@@ -133,7 +126,6 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
     status:         'pending',
   });
 
-  // Emit real-time event so the CRM referrals page updates without a refresh
   try {
     const referrerInfo = await User.findById(referrer._id)
       .select('name email referralCode')
@@ -150,14 +142,11 @@ export const submitReferralRequest = asyncHandler(async (req: Request, res: Resp
       referrerId:   referrerInfo ?? { _id: referrer._id },
     });
   } catch {
-    // Non-fatal — REST response still goes through
   }
 
   res.status(201).json(new ApiResponse(201, { _id: lead._id }, 'Call request submitted'));
 });
 
-// ─── CRM: List all referral leads for this org ────────────────────────────────
-// GET /api/referral-leads/crm-leads
 export const getReferralLeads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(403, 'Not linked to an organization');
@@ -177,8 +166,6 @@ export const getReferralLeads = asyncHandler(async (req: Request, res: Response)
   res.json(new ApiResponse(200, leads, 'Referral leads fetched'));
 });
 
-// ─── CRM: Update lead status / notes ─────────────────────────────────────────
-// PATCH /api/referral-leads/crm-leads/:id/status
 export const updateLeadStatus = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(403, 'Not linked to an organization');

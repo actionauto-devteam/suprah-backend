@@ -1,19 +1,5 @@
 import mongoose, { Schema, Document, Types } from "mongoose";
 
-/**
- * LinkedAccount
- * -------------
- * One document per (user, provider) connection. The `isPrimary` account is the
- * one whose balance drives the SuprahPay wallet (balance REPLACE model — see
- * linkedAccount.service.syncBalances).
- *
- * Currently Wise-only: Wise exposes a real balance API, so its balance can
- * mirror into the wallet. The `provider` field is kept as an enum so another
- * balance-capable provider can be added later without a schema rewrite.
- *
- * Tokens are stored with `select: false` so they never leak through a normal
- * query; fetch them explicitly with `.select("+accessToken +refreshToken")`.
- */
 
 export type LinkedProvider = "wise";
 
@@ -28,20 +14,18 @@ export interface ILinkedAccount extends Document {
   userId: Types.ObjectId;
   provider: LinkedProvider;
 
-  // Provider profile
   profileId: string;
   profileType: "personal" | "business";
   fullName: string;
   email: string;
 
-  // OAuth tokens (never returned by default)
   accessToken: string;
   refreshToken: string;
   tokenExpiry: Date;
 
   balances: ILinkedBalance[];
   isActive: boolean;
-  isPrimary: boolean; // drives the wallet balance
+  isPrimary: boolean;
   lastSyncedAt?: Date;
 
   createdAt: Date;
@@ -89,7 +73,6 @@ const LinkedAccountSchema = new Schema<ILinkedAccount>(
   { timestamps: true }
 );
 
-// A user can only have one connection per provider.
 LinkedAccountSchema.index({ userId: 1, provider: 1 }, { unique: true });
 
 export default mongoose.model<ILinkedAccount>(

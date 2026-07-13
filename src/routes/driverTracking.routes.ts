@@ -7,7 +7,6 @@ const router = express.Router();
 
 router.use(auth());
 
-// Driver routes — no org required (drivers are not in Clerk orgs)
 router.post("/location", driverTrackingController.updateLocation);
 router.get("/my-loads", driverTrackingController.getMyLoads);
 router.post("/accept-load", driverTrackingController.acceptLoad);

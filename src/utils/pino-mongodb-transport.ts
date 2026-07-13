@@ -4,8 +4,6 @@ import { SystemLog } from '../models/SystemLog.model';
 
 const build = async (options: any) => {
 
-  // Handle cross-thread Mongoose connection 
-  // Pino transports run in a separate worker thread and don't share the main process connection.
   const connect = async () => {
     if (mongoose.connection.readyState === 1) return;
     
@@ -29,16 +27,13 @@ const build = async (options: any) => {
     write(chunk, encoding, callback) {
       const saveLog = async () => {
         try {
-          // Parse the incoming chunk (it arrives as a string/buffer in transports)
           let logData;
           try {
             logData = typeof chunk === 'string' ? JSON.parse(chunk) : JSON.parse(chunk.toString());
           } catch (e) {
-            // If it's not valid JSON, skip it rather than crashing the worker
             return callback();
           }
 
-          // Attempt to reconnect if connection dropped
           if (mongoose.connection.readyState !== 1) {
             await connect();
           }
@@ -50,8 +45,6 @@ const build = async (options: any) => {
             return callback();
           }
 
-          // Map Pino log fields to our SystemLog schema
-          // Ensure 'message' is never empty to pass Mongoose validation
           await SystemLog.create({
             timestamp: new Date(logData.time || Date.now()),
             level: logData.level || 'INFO',

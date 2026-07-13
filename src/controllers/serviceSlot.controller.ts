@@ -6,7 +6,6 @@ import ServiceSlot from '../models/ServiceSlot.model';
 import Appointment from '../models/Appointment.model';
 import { emitToOrg } from '../utils/socketEmitter';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function toMidnightUTC(dateStr: string): Date {
   const [y, m, d] = dateStr.split('-').map(Number);

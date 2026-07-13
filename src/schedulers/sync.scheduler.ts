@@ -4,11 +4,7 @@ import syncService from '../services/sync.service';
 import orgGmailService from '../services/orgGmail.service';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 
-/**
- * Initializes scheduled tasks
- */
 export const initSyncScheduler = () => {
-    // 1. Inventory Sync (Daily)
     const inventorySchedule = config.sync.schedule || '0 0 * * *';
     console.log(`[Scheduler] Inventory Sync: ${inventorySchedule}`);
 

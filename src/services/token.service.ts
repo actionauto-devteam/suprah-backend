@@ -20,16 +20,12 @@ class TokenService {
     private readonly refreshExpires: string;
 
     constructor() {
-        // Map to existing config properties
         this.accessSecret = (config.jwt.accessSecret as Secret) || 'access-secret-change-me';
         this.refreshSecret = (config.jwt.refreshSecret as Secret) || 'refresh-secret-change-me';
         this.accessExpires = config.jwt.accessExpiration || '15m';
         this.refreshExpires = config.jwt.refreshExpiration || '7d';
     }
 
-    /**
-     * Generate Access Token (Short-lived)
-     */
     generateAccessToken(user: { _id: mongoose.Types.ObjectId; email: string; role: string; organizationId?: mongoose.Types.ObjectId }): string {
         const payload: TokenPayload = {
             sub: user._id.toString(),
@@ -41,22 +37,16 @@ class TokenService {
         return jwt.sign(payload, this.accessSecret, { expiresIn: this.accessExpires as any });
     }
 
-    /**
-     * Generate Refresh Token (Long-lived)
-     */
     generateRefreshToken(user: { _id: mongoose.Types.ObjectId }): string {
         const payload = {
             sub: user._id.toString(),
             type: 'refresh',
-            jti: crypto.randomBytes(16).toString('hex'), // Unique ID for each token
+            jti: crypto.randomBytes(16).toString('hex'),
         };
 
         return jwt.sign(payload, this.refreshSecret, { expiresIn: this.refreshExpires as any });
     }
 
-    /**
-     * Verify Access Token
-     */
     verifyAccessToken(token: string): TokenPayload {
         try {
             return jwt.verify(token, this.accessSecret) as TokenPayload;
@@ -70,9 +60,6 @@ class TokenService {
         }
     }
 
-    /**
-     * Verify Refresh Token
-     */
     verifyRefreshToken(token: string): any {
         try {
             return jwt.verify(token, this.refreshSecret);

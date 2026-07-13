@@ -7,7 +7,7 @@ export interface IAgentHeartbeat extends Document {
   breakStartedAt: Date | null;
   lastBreakNotifiedAt: Date | null;
   currentIntervalStartAt: Date | null;
-  platform: string;   // e.g. 'win32', 'darwin', 'linux'
+  platform: string;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -19,7 +19,7 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
       type: Schema.Types.ObjectId,
       ref: 'CrmUser',
       required: true,
-      unique: true,   // one heartbeat doc per user, upserted every 60s
+      unique: true,
       index: true,
     },
     isIdle: {

@@ -4,8 +4,6 @@ import logger from '../utils/logger';
 
 const LOG_PREFIX = '[CacheService]';
 
-// ── Redis Client ─────────────────────────────────────────────────────────────
-// Lazily created once and reused across the entire process.
 let redisClient: Redis | null = null;
 
 function getRedisClient(): Redis | null {
@@ -16,7 +14,6 @@ function getRedisClient(): Redis | null {
         host: config.redis.host,
         port: config.redis.port,
         password: config.redis.password,
-        // Reconnect automatically with exponential backoff
         retryStrategy: (times) => {
             const delay = Math.min(times * 100, 3000);
             logger.warn(`${LOG_PREFIX} Reconnecting to Redis (attempt ${times})...`);

@@ -9,7 +9,6 @@ import FeedReaction from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
 import { BucketType, storageService } from '../services/storage.service';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -20,26 +19,18 @@ const DAYPULSE_ATTACHMENT_FIELDS: Array<{ field: string; section: DayPulseAttach
   { field: 'attachmentsInProgress', section: 'inProgress' },
 ];
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
 
 function parsePositiveInt(val: unknown, fallback: number): number {
   const n = parseInt(val as string, 10);
   return isNaN(n) || n < 1 ? fallback : n;
 }
 
-/**
- * Normalises a date string to midnight UTC of that calendar day.
- * e.g. "2024-07-15" → 2024-07-15T00:00:00.000Z
- */
 function toMidnightUTC(dateStr: string): Date {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) throw new Error('Invalid date');
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 }
 
-/**
- * Returns a { $gte, $lt } range that covers the entire calendar day in UTC.
- */
 function dayRange(date: Date): { $gte: Date; $lt: Date } {
   const start = new Date(date);
   const end = new Date(date);
@@ -65,15 +56,7 @@ async function signAttachments<T extends { attachments?: IDayPulseAttachment[] }
   return report;
 }
 
-// ─── Create DayPulse Report ───────────────────────────────────────────────────
 
-/**
- * POST /api/crm/daypulse
- *
- * Creates a structured daily report with three required sections.
- * The report is scoped to a department (hashtag) and a reportDate.
- * Emits `daypulse:new` to the org room for real-time feed updates.
- */
 export const createReport = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
@@ -84,7 +67,6 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
   const attachments: IDayPulseAttachment[] = [];
   const uploadedKeys: string[] = [];
 
-  // ── Validate department ──
   if (!department || !DAYPULSE_DEPARTMENTS.includes(department as DayPulseDepartment)) {
     throw new ApiError(
       400,

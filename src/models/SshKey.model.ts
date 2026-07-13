@@ -1,22 +1,17 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import crypto from 'crypto';
 
-/**
- * SSH Key Model
- * Manages SSH public keys linked to CRM users for secure server access.
- * Supports key rotation, expiry, and audit logging.
- */
 
 export interface ISshKey extends Document {
   userId: mongoose.Types.ObjectId;
-  title: string;                   // User-friendly label
-  publicKey: string;               // Full SSH public key (e.g. ssh-ed25519 AAAA...)
-  fingerprint: string;             // SHA-256 fingerprint for quick lookup
+  title: string;
+  publicKey: string;
+  fingerprint: string;
   keyType: 'ssh-rsa' | 'ssh-ed25519' | 'ecdsa-sha2-nistp256' | 'ecdsa-sha2-nistp384';
   keySize?: number;
   expiresAt?: Date;
   lastUsedAt?: Date;
-  allowedIPs?: string[];           // IP whitelist (empty = all)
+  allowedIPs?: string[];
   isActive: boolean;
   revokedAt?: Date;
   revokedBy?: mongoose.Types.ObjectId;
@@ -88,9 +83,6 @@ const SshKeySchema = new Schema<ISshKey>(
   }
 );
 
-/**
- * Compute SHA-256 fingerprint from an SSH public key string.
- */
 SshKeySchema.statics.computeFingerprint = function (publicKey: string): string {
   const parts = publicKey.trim().split(/\s+/);
   const keyData = parts.length >= 2 ? parts[1] : parts[0];

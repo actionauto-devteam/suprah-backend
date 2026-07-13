@@ -6,18 +6,7 @@ import User from '../models/User.model';
 
 const LOG_PREFIX = '[PushService]';
 
-/**
- * Service for managing Web Push notifications.
- * Refactored to use BullMQ for background processing.
- */
 export class PushService {
-  /**
-   * Queues a push notification for a specific user.
-   * This is a non-blocking operation that returns immediately.
-   * 
-   * @param userId The ID of the user to notify
-   * @param payload The notification payload
-   */
   static async send(userId: string | mongoose.Types.ObjectId, payload: any) {
     if (!config.redis.enabled || !pushQueue) {
       logger.debug(`${LOG_PREFIX} Skipping push (Redis is disabled).`);

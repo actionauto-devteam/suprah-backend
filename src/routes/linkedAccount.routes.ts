@@ -6,7 +6,6 @@ const router = express.Router();
 
 router.get("/:provider/callback", linkedAccountController.handleCallback);
 
-// Everything below requires a logged-in user.
 router.use(auth());
 
 router.get("/:provider/connect", linkedAccountController.initiateConnect);

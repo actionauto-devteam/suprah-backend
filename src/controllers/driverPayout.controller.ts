@@ -22,10 +22,6 @@ const getUserId = (req: Request): string => {
   return userId;
 };
 
-/**
- * GET /driver-payouts/deliverable
- * Returns Delivered loads, annotated with payout info.
- */
 const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
@@ -169,10 +165,14 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   const load = await Load.findOne({ _id: loadId, organizationId: orgId, status: 'Delivered' });
   if (!load) throw new ApiError(404, 'Load not found or not delivered');
 
+  if (!load.assignedDriverId || load.assignedDriverId.toString() !== driverId) {
+    throw new ApiError(400, 'driverId must be the driver assigned to this load');
+  }
+
   const duplicate = await DriverPayout.findOne({ organizationId: orgId, loadId, status: { $in: ['paid', 'processing'] } });
   if (duplicate) throw new ApiError(400, 'Payout already processing or paid for this load');
 
-  const driver = await User.findOne({ _id: driverId, role: 'driver' });
+  const driver = await User.findOne({ _id: driverId, role: 'driver', organizationId: orgId });
   if (!driver) throw new ApiError(404, 'Driver not found');
   if (!driver.stripeConnectAccountId) throw new ApiError(400, 'Driver has no Stripe Connect account');
 

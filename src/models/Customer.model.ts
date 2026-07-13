@@ -1,6 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-// ─── Interfaces ───────────────────────────────────────────────────────────────
 
 export interface ICustomerTransaction {
   _id?: mongoose.Types.ObjectId;
@@ -10,8 +9,8 @@ export interface ICustomerTransaction {
   description?: string;
   amount?: number;
   currency?: string;
-  referenceId?: string;       // leadId, appointmentId, quoteId, etc.
-  referenceModel?: string;    // 'Lead', 'Appointment', 'Quote', etc.
+  referenceId?: string;
+  referenceModel?: string;
   metadata?: Record<string, any>;
   occurredAt: Date;
   createdAt?: Date;
@@ -26,7 +25,7 @@ export interface ICustomerConversation {
   senderName?: string;
   content: string;
   subject?: string;
-  referenceId?: string;       // leadId or threadId
+  referenceId?: string;
   referenceModel?: string;
   metadata?: Record<string, any>;
   sentAt: Date;
@@ -38,15 +37,13 @@ export interface ICustomer extends Document {
   createdBy: mongoose.Types.ObjectId;
   updatedBy?: mongoose.Types.ObjectId;
 
-  // Identity
   firstName: string;
   lastName: string;
   email: string;
   phone: string;
   alternatePhone?: string;
-  avatarInitials?: string;    // Derived, not stored (computed on read)
+  avatarInitials?: string;
 
-  // Demographics / extended profile
   dateOfBirth?: Date;
   address?: {
     street?: string;
@@ -59,12 +56,10 @@ export interface ICustomer extends Document {
   tags?: string[];
   preferredContactMethod?: 'email' | 'phone' | 'sms';
 
-  // Source tracking
   source: 'lead' | 'manual' | 'import' | 'booking';
-  sourceLeadId?: mongoose.Types.ObjectId;  // Original lead that created this customer
+  sourceLeadId?: mongoose.Types.ObjectId;
   isActive: boolean;
 
-  // Vehicle interest (from leads / dealership context)
   vehicleInterest?: {
     year?: string;
     make?: string;
@@ -75,11 +70,9 @@ export interface ICustomer extends Document {
     condition?: 'new' | 'used' | 'certified';
   };
 
-  // Embedded collections (kept small; heavy history = separate docs)
   transactions: ICustomerTransaction[];
   conversations: ICustomerConversation[];
 
-  // Aggregates (kept in sync by service layer)
   stats: {
     totalTransactions: number;
     totalConversations: number;
@@ -93,7 +86,6 @@ export interface ICustomer extends Document {
   updatedAt: Date;
 }
 
-// ─── Sub-schemas ─────────────────────────────────────────────────────────────
 
 const TransactionSchema = new Schema<ICustomerTransaction>(
   {
@@ -143,7 +135,6 @@ const ConversationSchema = new Schema<ICustomerConversation>(
   { timestamps: true }
 );
 
-// ─── Main Schema ──────────────────────────────────────────────────────────────
 
 const CustomerSchema = new Schema<ICustomer>(
   {
@@ -212,9 +203,7 @@ const CustomerSchema = new Schema<ICustomer>(
   { timestamps: true }
 );
 
-// ─── Indexes ──────────────────────────────────────────────────────────────────
 
-// Unique per org — no two customers with same email in the same org
 CustomerSchema.index({ organizationId: 1, email: 1 }, { unique: true });
 CustomerSchema.index({ organizationId: 1, phone: 1 });
 CustomerSchema.index({ organizationId: 1, createdAt: -1 });
@@ -225,7 +214,6 @@ CustomerSchema.index(
   { name: 'customer_text_search' }
 );
 
-// ─── Virtual: full name ───────────────────────────────────────────────────────
 
 CustomerSchema.virtual('fullName').get(function (this: ICustomer) {
   return `${this.firstName} ${this.lastName}`.trim();

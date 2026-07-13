@@ -1,16 +1,6 @@
 import mongoose from "mongoose";
 import Appointment from "../models/Appointment.model";
 
-/**
- * Vehicle History service.
- *
- * ── TUNE THESE IF NEEDED ─────────────────────────────────────────────────────
- *  - VEHICLE_MODEL_NAMES / VEHICLE_FIELD_MAP: match your Vehicle schema.
- *  - DEFAULT_LOOKBACK_MONTHS: when no date range is passed, appointment activity
- *    is scoped to this window so the query stays fast on large collections.
- *    Requires an index on { organizationId: 1, startTime: 1 } (the dashboard
- *    list already queries by startTime, so this usually exists).
- */
 const VEHICLE_MODEL_NAMES = ["Vehicle", "Vehicles", "OwnedVehicle", "CrmVehicle"];
 
 const VEHICLE_FIELD_MAP = {
@@ -31,7 +21,6 @@ function resolveVehicleModel(): mongoose.Model<any> | null {
     try {
       return mongoose.model(name);
     } catch {
-      // not registered under this name; try the next
     }
   }
   return null;
@@ -68,7 +57,6 @@ class VehicleHistoryService {
 
     const orgField = VEHICLE_FIELD_MAP.orgField;
 
-    // Bound the appointment scan by a date window (explicit, or default lookback).
     const start =
       options.startDate ??
       new Date(
@@ -79,7 +67,6 @@ class VehicleHistoryService {
     const startTimeMatch: Record<string, Date> = { $gte: start };
     if (end) startTimeMatch.$lte = end;
 
-    // 1. Vehicles for the org (projected + bounded).
     const vehicles = await VehicleModel.find({ [orgField]: organizationId })
       .select(
         [
@@ -98,8 +85,6 @@ class VehicleHistoryService {
       .maxTimeMS(QUERY_TIMEOUT_MS)
       .lean();
 
-    // 2. Aggregate appointment activity per vehicle on the DB server
-    //    (avoids transferring/hydrating thousands of documents into Node).
     const agg = await Appointment.aggregate([
       {
         $match: {
@@ -152,7 +137,6 @@ class VehicleHistoryService {
     const activityByVehicle = new Map<string, any>();
     for (const a of agg) activityByVehicle.set(a._id?.toString(), a);
 
-    // 3. Build per-vehicle records.
     let records = vehicles.map((v: any) => {
       const key = v._id.toString();
       const activity = activityByVehicle.get(key);
@@ -182,12 +166,10 @@ class VehicleHistoryService {
       };
     });
 
-    // 4. Optional status filter.
     if (options.status && options.status !== "all") {
       records = records.filter((r) => r.status === options.status);
     }
 
-    // 5. Sort: most recently active first.
     records.sort((a, b) => {
       const at = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
       const bt = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;

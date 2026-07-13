@@ -10,7 +10,6 @@ import Payment from '../models/Payment.model';
 import { safeCreateNotification } from '../utils/safeNotification';
 import mongoose from 'mongoose';
 
-// 1. Issue a Manual Reward to a Referrer
 const issueReward = asyncHandler(async (req: Request, res: Response) => {
     const { referralId } = req.params;
     const { amount = 200 } = req.body;
@@ -31,9 +30,7 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
         return res.status(404).json(new ApiResponse(404, null, 'Referrer account no longer exists'));
     }
 
-    // Use a transaction session for financial consistency if replica set allows, but we'll do standard serial here for simplicity in this env
 
-    // A. Create the completed deposit transaction
     const deposit = await Transaction.create({
         userId: referrer._id,
         type: 'deposit',
@@ -43,7 +40,6 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
         referralId: referral._id
     });
 
-    // B. Increment the wallet exactly by the deposit amount
     const updatedUser = await User.findByIdAndUpdate(
         referrer._id,
         {
@@ -55,7 +51,6 @@ const issueReward = asyncHandler(async (req: Request, res: Response) => {
         { new: true }
     );
 
-    // C. Write to Audit Log
     await AuditLog.create({
         entityType: 'Referral',
         entityId: referral._id,

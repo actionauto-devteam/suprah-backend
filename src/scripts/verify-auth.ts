@@ -6,7 +6,6 @@ async function verifyAuth() {
     console.log('🚀 Starting Auth API Verification...');
 
     try {
-        // 1. Test Registration
         const testEmail = `test_${Date.now()}@example.com`;
         console.log(`\n1. Testing Registration for: ${testEmail}`);
         const regRes = await axios.post(`${BACKEND_URL}/auth/register`, {

@@ -6,18 +6,15 @@ const migrateUserCalendarFields = async () => {
   try {
     console.log('🔄 Starting user calendar fields migration...');
     
-    // FIXED: Use correct config property name
     const databaseUri = config.mongoose?.url || process.env.MONGODB_URI || '';
     
     if (!databaseUri) {
       throw new Error('Database URI not found in config or environment variables');
     }
     
-    // Connect to database
     await mongoose.connect(databaseUri);
     console.log('Connected to database');
     
-    // Update all users who have Google Calendar connected
     const result = await User.updateMany(
       { 'googleCalendar.connected': true },
       {

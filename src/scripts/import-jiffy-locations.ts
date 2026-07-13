@@ -12,8 +12,6 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function geocodeAddress(addressStr: string): Promise<[number, number]> {
     try {
-        // Using Nominatim (OpenStreetMap) for free geocoding. 
-        // We add a User-Agent as required by their terms of service.
         const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressStr)}`;
         const response = await fetch(url, {
             headers: {

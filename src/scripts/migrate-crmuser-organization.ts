@@ -1,14 +1,3 @@
-/**
- * Migration: Assign correct organizationId to existing CrmUser records
- *
- * How it works:
- *   For each CrmUser without an organizationId, it finds the matching main
- *   User account by email and copies that User's organizationId over.
- *   This ensures each CRM user is linked to their own correct organization.
- *
- * Usage:
- *   npx ts-node src/scripts/migrate-crmuser-organization.ts
- */
 
 import mongoose from 'mongoose';
 import config from '../config';
@@ -25,7 +14,6 @@ const run = async () => {
   await mongoose.connect(databaseUri);
   console.log('Connected to database.');
 
-  // Step 0: Drop the old global unique index on username (replaced by compound index)
   try {
     await mongoose.connection.collection('crmusers').dropIndex('username_1');
     console.log('Dropped old username_1 unique index.');
@@ -33,7 +21,6 @@ const run = async () => {
     console.log('username_1 index not found — already removed or never existed, skipping.');
   }
 
-  // Step 1: Reset any wrongly bulk-assigned organizationIds so we start clean
   const resetResult = await CrmUser.updateMany(
     {},
     { $unset: { organizationId: '' } }

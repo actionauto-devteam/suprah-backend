@@ -13,8 +13,8 @@ interface EmailOptions {
     subject: string;
     text: string;
     html?: string;
-    icalEvent?: any; // ICS attachment
-    organizationId?: string; // Multi-tenant support
+    icalEvent?: any;
+    organizationId?: string;
 }
 
 interface IEmailOrganizer {
@@ -26,7 +26,6 @@ class EmailService {
     private transporter: nodemailer.Transporter;
 
     constructor() {
-        // Initialize transporter using existing config (Fallback)
         this.transporter = nodemailer.createTransport({
             host: config.email.host,
             port: config.email.port,
@@ -54,23 +53,17 @@ class EmailService {
             refresh_token: decrypt(orgConfig.refreshToken),
         });
 
-        // Update tokens in DB on refresh
         oauth2Client.on('tokens', async (tokens) => {
             if (tokens.refresh_token) {
-                // This shouldn't happen often but let's be safe
             }
         });
 
         return oauth2Client;
     }
 
-    /**
-     * Internal method to send email via Gmail API (OAuth2)
-     */
     private async sendEmailViaGmailApi(oauth2Client: any, options: EmailOptions): Promise<void> {
         const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
         
-        // Construct standard RFC 2822 email
         const boundary = "__action_auto_boundary__";
         const parts = [
             `To: ${options.to}`,

@@ -3,14 +3,14 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 export interface IAftermarketReview extends Document {
   productId: mongoose.Types.ObjectId;
   organizationId: mongoose.Types.ObjectId;
-  customerId: mongoose.Types.ObjectId;   // User._id
-  customerName: string;                  // snapshot so it survives account changes
+  customerId: mongoose.Types.ObjectId;
+  customerName: string;
   customerAvatar?: string;
-  rating: number;                        // 1–5
-  title?: string;                        // optional short headline
-  body: string;                          // required written review
-  isVerifiedPurchase: boolean;           // true if customerId has a paid/fulfilled order for this product
-  isVisible: boolean;                    // admin can hide without deleting
+  rating: number;
+  title?: string;
+  body: string;
+  isVerifiedPurchase: boolean;
+  isVisible: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -56,9 +56,7 @@ const AftermarketReviewSchema = new Schema<IAftermarketReview>(
   { timestamps: true }
 );
 
-// One review per customer per product
 AftermarketReviewSchema.index({ productId: 1, customerId: 1 }, { unique: true });
-// Fast aggregate: average rating for a product
 AftermarketReviewSchema.index({ productId: 1, isVisible: 1, rating: 1 });
 
 const AftermarketReview: Model<IAftermarketReview> =

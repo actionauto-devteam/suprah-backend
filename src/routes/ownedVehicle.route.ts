@@ -13,7 +13,6 @@ import {
 
 const router = Router();
 
-// All customer vehicle routes are protected
 router.use(auth());
 
 router.post('/', addOwnedVehicle);

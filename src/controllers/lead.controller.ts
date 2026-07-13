@@ -25,9 +25,6 @@ import customerService from '../services/customer.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 
-/**
- * STRICT SOURCE FILTER — only leads from this address are ingested.
- */
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
 const UNANSWERED_LEAD_STATUSES = ['New', 'Pending'];

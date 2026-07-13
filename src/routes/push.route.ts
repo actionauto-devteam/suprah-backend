@@ -4,7 +4,6 @@ import auth from '../middleware/auth.middleware';
 
 const router = express.Router();
 
-// All push routes require authentication
 router.use(auth());
 
 router.post('/subscribe', PushController.subscribe);

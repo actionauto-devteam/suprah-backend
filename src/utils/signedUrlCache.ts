@@ -1,8 +1,8 @@
 import { cacheService } from "../services/cache.service";
 import { storageService } from "../services/storage.service";
 
-const URL_TTL = 3600;       // signed URL valid for 1 hour
-const CACHE_TTL = 3300;     // cache for 55 min — evict before URL expires
+const URL_TTL = 3600;
+const CACHE_TTL = 3300;
 
 export async function getSignedProofUrl(key: string): Promise<string | null> {
   if (!key || key.startsWith("http")) return key || null;

@@ -12,15 +12,10 @@ import { getIO } from '../socket/supraspace.socket';
 import { emitToUser } from '../utils/socketEmitter';
 import logger from '../utils/logger';
 
-// ─── Helpers (mirrored from aftermarket.controller.ts) ──────────────────────
 
 const idIn = (arr: any[], id: any) =>
   (arr || []).map(String).includes(id.toString());
 
-/**
- * Resolve the org a customer request should be scoped to.
- * Identical logic to aftermarket.controller.ts resolveCustomerOrg.
- */
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
   if (req.orgId) return req.orgId;
 
@@ -487,8 +482,6 @@ export const crmListConcernConversations = asyncHandler(
       .sort({ lastMessageAt: -1, createdAt: -1 })
       .lean();
 
-    // Fallback case numbers for older conversations missing metadata.caseNumber,
-    // numbered per-customer in creation order.
     const byCustomerAsc = new Map<string, any[]>();
     for (const c of conversations) {
       const key = c.metadata?.customerUserId || '';
@@ -525,9 +518,6 @@ export const crmListConcernConversations = asyncHandler(
   }
 );
 
-/**
- * GET /api/customer-concern/crm/conversations/:conversationId/messages
- */
 export const crmGetConcernMessages = asyncHandler(
   async (req: Request, res: Response) => {
     const { conversationId } = req.params;
@@ -550,7 +540,6 @@ export const crmGetConcernMessages = asyncHandler(
       .limit(parseInt(limit as string))
       .lean();
 
-    // Mark customer messages as read by this CRM user
     await SupraSpaceMessage.updateMany(
       { conversationId, 'metadata.isCustomerMessage': true, readBy: { $ne: crmUserId } },
       { $addToSet: { readBy: crmUserId } }
@@ -573,9 +562,6 @@ export const crmGetConcernMessages = asyncHandler(
   }
 );
 
-/**
- * POST /api/customer-concern/crm/conversations/:conversationId/reply
- */
 export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = (req as any).crmUser!;
   const { conversationId } = req.params;
@@ -590,7 +576,6 @@ export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) 
   });
   if (!conversation) throw new ApiError(404, 'Concern conversation not found');
 
-  // Auto-add this CRM user as a member if they aren't already
   if (!idIn(conversation.members as any, crmUser._id)) {
     conversation.members.push(crmUser._id as any);
     await conversation.save();
@@ -621,7 +606,6 @@ export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) 
 
   emitToConversation(conversation, 'message:new', { conversationId, message: msgObj });
 
-  // Notify the customer in real time (customers connect to the main socket, not SupraSpace)
   const customerUserId = (conversation as any).metadata?.customerUserId;
   if (customerUserId) {
     emitToUser(customerUserId, 'concern:reply', { conversationId, message: msgObj });
@@ -630,10 +614,6 @@ export const crmReplyConcern = asyncHandler(async (req: Request, res: Response) 
   res.status(201).json(new ApiResponse(201, msgObj, 'Reply sent'));
 });
 
-/**
- * POST /api/customer-concern/crm/conversations/:conversationId/reply-upload
- * Staff reply with file/image attachments.
- */
 export const crmReplyConcernWithFiles = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = (req as any).crmUser!;
   const { conversationId } = req.params;
@@ -710,9 +690,6 @@ export const crmReplyConcernWithFiles = asyncHandler(async (req: Request, res: R
   res.status(201).json(new ApiResponse(201, msgObj, 'Reply sent'));
 });
 
-/**
- * PATCH /api/customer-concern/crm/conversations/:conversationId/resolve
- */
 export const crmResolveConcern = asyncHandler(async (req: Request, res: Response) => {
   const { conversationId } = req.params;
   const { resolved } = req.body;
@@ -740,10 +717,6 @@ export const crmResolveConcern = asyncHandler(async (req: Request, res: Response
   );
 });
 
-/**
- * GET /api/customer-concern/crm/conversations/:conversationId/related
- * Other cases (open or resolved) for the same customer, for the "history" view.
- */
 export const crmGetRelatedCases = asyncHandler(async (req: Request, res: Response) => {
   const { conversationId } = req.params;
 

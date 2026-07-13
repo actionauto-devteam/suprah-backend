@@ -5,21 +5,16 @@ export interface IAftermarketInquiry extends Document {
   organizationId: mongoose.Types.ObjectId;
   customerId: mongoose.Types.ObjectId;
 
-  // Product snapshot so the CRM side always knows what was being asked about
   productName: string;
   productPrice?: number;
 
-  // Customer identity snapshot
   customerName: string;
   customerEmail: string;
 
-  // The question / message body
   question: string;
 
-  // Link to the SupraSpace concern conversation created for this inquiry
   conversationId?: mongoose.Types.ObjectId;
 
-  // Link to the specific SupraSpace message that carries the product context
   messageId?: mongoose.Types.ObjectId;
 
   status: 'open' | 'answered' | 'closed';
@@ -70,7 +65,6 @@ const AftermarketInquirySchema = new Schema<IAftermarketInquiry>(
   { timestamps: true }
 );
 
-// Fast lookup: all open inquiries for a product / org
 AftermarketInquirySchema.index({ organizationId: 1, status: 1, createdAt: -1 });
 
 const AftermarketInquiry: Model<IAftermarketInquiry> =

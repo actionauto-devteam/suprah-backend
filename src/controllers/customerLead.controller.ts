@@ -5,14 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 
-/**
- * Controller for handling customer-facing lead submissions
- */
 class CustomerLeadController {
-  /**
-   * Handle Vehicle Inquiry Submission
-   * POST /api/leads/customer/inquiry
-   */
   submitInquiry = asyncHandler(async (req: Request, res: Response) => {
     const { comments, firstName, lastName, email, phone } = req.body;
     const user = req.user!;
@@ -36,10 +29,6 @@ class CustomerLeadController {
     );
   });
 
-  /**
-   * Handle Finance Application Submission
-   * POST /api/leads/customer/finance
-   */
   submitFinanceApp = asyncHandler(async (req: Request, res: Response) => {
     const { personalInfo, employmentInfo } = req.body;
     const user = req.user!;

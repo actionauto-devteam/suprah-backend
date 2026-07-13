@@ -1,16 +1,11 @@
 import rateLimit from 'express-rate-limit';
 import { ApiError } from '../utils/ApiError';
 
-/**
- * General Auth Rate Limiter
- * 5 requests per 15 minutes per IP/Email
- */
 export const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 5,
     skip: () => process.env.SKIP_RATE_LIMIT === 'true',
     keyGenerator: (req: any) => {
-        // Identity-Based Throttling (Senior Engineer requirement)
         return req.body?.email || req.ip;
     },
     message: {
@@ -25,10 +20,6 @@ export const authLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * OTP Flood Guard
- * 3 requests per 3 minutes per IP/Email
- */
 export const otpLimiter = rateLimit({
     windowMs: 3 * 60 * 1000,
     max: 3,
@@ -48,11 +39,6 @@ export const otpLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * ADF Webhook Limiter
- * 60 requests per 15 minutes per Organization
- * Uses orgId instead of IP to avoid blocking shared vendor IPs (Cars.com, etc.)
- */
 export const adfLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,
@@ -72,13 +58,9 @@ export const adfLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * Lead Sync Limiter
- * 5 requests per 15 minutes per User
- */
 export const syncLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 60, // Increased from 5 to 60 to allow 30s auto-sync interval
+    max: 60,
     skip: () => process.env.SKIP_RATE_LIMIT === 'true',
     keyGenerator: (req: any) => {
         return req.user?._id?.toString() || req.ip;
@@ -95,10 +77,6 @@ export const syncLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * Lead Reply Limiter
- * 30 requests per 15 minutes per User
- */
 export const replyLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 30,
@@ -117,11 +95,6 @@ export const replyLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
-/**
- * Bulk Lead Reply Limiter
- * 10 requests per 15 minutes per User
- * Tighter than replyLimiter since each request fans out to many customer emails.
- */
 export const bulkReplyLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
@@ -141,17 +114,11 @@ export const bulkReplyLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * File Upload Limiter
- * 5 requests per 10 minutes per User/IP
- * Protects against storage flooding and resource exhaustion
- */
 export const uploadLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
     max: 5,
     skip: () => process.env.SKIP_RATE_LIMIT === 'true',
     keyGenerator: (req: any) => {
-        // Track by User ID (Standard Auth or CRM Auth) or IP
         return (req.user?._id || req.crmUser?._id || req.ip).toString();
     },
     message: {
@@ -165,17 +132,11 @@ export const uploadLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
-/**
- * Global Rate Limiter
- * 200 requests per 15 minutes per IP
- * Standard protection for all routes to prevent resource exhaustion
- */
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1000,
 
     skip: (req: any) => {
-        // Skip rate limit for internal health checks or if explicitly disabled
         return process.env.SKIP_RATE_LIMIT === 'true' || req.path === '/health';
     },
     message: {
@@ -187,11 +148,6 @@ export const globalLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * Heavy Inventory Sync Limiter
- * 2 requests per 5 minutes per user
- * Prevents multiple manual syncs from overlapping and locking the DB
- */
 export const inventorySyncLimiter = rateLimit({
     windowMs: 5 * 60 * 1000,
     max: 2,
@@ -211,13 +167,8 @@ export const inventorySyncLimiter = rateLimit({
     validate: { default: false }
 });
 
-/**
- * Marketplace Search Limiter
- * 100 requests per 15 minutes per IP/User
- * Prevents aggressive inventory scraping
- */
 export const marketplaceLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000,
     max: 100, 
     skip: () => process.env.SKIP_RATE_LIMIT === 'true',
     keyGenerator: (req: any) => {

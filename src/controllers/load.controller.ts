@@ -23,13 +23,9 @@ import activityService from "../services/activity.service";
 import emailService from "../services/email.service";
 import Quote from "../models/Quote.model";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const getUser = (req: Request) => req.user as IUser;
 
-// ─── VIN Lookup ───────────────────────────────────────────────────────────────
-// GET /api/loads/vin/:vin
-// Checks org inventory — if found, returns vehicle details for auto-fill
 
 const lookupVin = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
@@ -56,9 +52,6 @@ const lookupVin = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-// ─── Calculate Rate ───────────────────────────────────────────────────────────
-// POST /api/loads/calculate-rate
-// Accepts pickup/delivery ZIPs + vehicles, returns computed miles + estimated rate
 
 const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
   const parsed = calculateRateSchema.safeParse(req.body);

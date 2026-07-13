@@ -6,9 +6,6 @@ import { LinkedProvider } from "../models/LinkedAccount";
 import linkedAccountService from "../services/linkedAccount.service";
 import logger from "../utils/logger";
 
-// Wise-only. PayPal was removed (no API to read a connected account's balance,
-// so it could never mirror money into the wallet). Any other provider value
-// now resolves to null → 400 "Unsupported provider".
 const SUPPORTED: LinkedProvider[] = ["wise"];
 
 function parseProvider(value: unknown): LinkedProvider | null {
@@ -17,11 +14,6 @@ function parseProvider(value: unknown): LinkedProvider | null {
     : null;
 }
 
-/**
- * GET /:provider/connect  (authenticated)
- * Returns the provider authorize URL. We sign a state token embedding the
- * userId so the (unauthenticated) callback can identify the user.
- */
 const initiateConnect = asyncHandler(async (req: Request, res: Response) => {
   const provider = parseProvider(req.params.provider);
   if (!provider) {
@@ -35,11 +27,6 @@ const initiateConnect = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { authUrl, state }, "Authorize URL created"));
 });
 
-/**
- * GET /:provider/callback  (PUBLIC — third-party redirect, no Bearer token)
- * Validates the signed state, exchanges the code, persists the account, then
- * redirects the browser back to the billing page.
- */
 const handleCallback = asyncHandler(async (req: Request, res: Response) => {
   const provider = parseProvider(req.params.provider);
   const { code, state } = req.query as { code?: string; state?: string };

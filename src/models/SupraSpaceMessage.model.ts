@@ -1,25 +1,22 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-// ─── Attachment ───────────────────────────────────────────────────────────────
 
 export interface ISupraSpaceAttachment {
   url: string;
   fileKey: string;
   originalName: string;
   mimeType: string;
-  size: number;           // bytes
+  size: number;
   thumbnailUrl?: string;
-  duration?: number;      // seconds (voice notes)
+  duration?: number;
 }
 
-// ─── Reaction ─────────────────────────────────────────────────────────────────
 
 export interface ISupraSpaceReaction {
   emoji: string;
   users: mongoose.Types.ObjectId[];
 }
 
-// ─── GIF ──────────────────────────────────────────────────────────────────────
 
 export interface ISupraSpaceGif {
   url: string;
@@ -28,7 +25,6 @@ export interface ISupraSpaceGif {
   title?: string;
 }
 
-// ─── Poll ─────────────────────────────────────────────────────────────────────
 
 export interface ISupraSpacePollOption {
   id: string;
@@ -43,7 +39,6 @@ export interface ISupraSpacePoll {
   closed: boolean;
 }
 
-// ─── Event ────────────────────────────────────────────────────────────────────
 
 export interface ISupraSpaceEvent {
   title: string;
@@ -56,7 +51,6 @@ export interface ISupraSpaceEvent {
   declined: mongoose.Types.ObjectId[];
 }
 
-// ─── Message metadata (customer concern) ─────────────────────────────────────
 
 export interface ISupraSpaceMessageMetadata {
   isCustomerMessage?: boolean;
@@ -75,12 +69,10 @@ export interface ISupraSpaceMessageMetadata {
   } | null;
 }
 
-// ─── Message type ─────────────────────────────────────────────────────────────
 
 export type SupraSpaceMessageType =
   | 'text' | 'image' | 'file' | 'system' | 'voice' | 'gif' | 'poll' | 'event';
 
-// ─── Main interface ───────────────────────────────────────────────────────────
 
 export interface ISupraSpaceMessage extends Document {
   conversationId: mongoose.Types.ObjectId;
@@ -105,7 +97,6 @@ export interface ISupraSpaceMessage extends Document {
   updatedAt: Date;
 }
 
-// ─── Sub-schemas ──────────────────────────────────────────────────────────────
 
 const AttachmentSchema = new Schema<ISupraSpaceAttachment>(
   {
@@ -191,7 +182,6 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
   { _id: false }
 );
 
-// ─── Main schema ──────────────────────────────────────────────────────────────
 
 const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
   {
@@ -231,16 +221,12 @@ const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
   { timestamps: true }
 );
 
-// ─── Indexes ──────────────────────────────────────────────────────────────────
 
 SupraSpaceMessageSchema.index({ conversationId: 1, createdAt: -1 });
 SupraSpaceMessageSchema.index({ scheduledStatus: 1, scheduledAt: 1 });
-// Text index for in-conversation message search
 SupraSpaceMessageSchema.index({ content: 'text' });
-// Customer concern: fast unread count queries
 SupraSpaceMessageSchema.index({ conversationId: 1, 'metadata.isCustomerMessage': 1 });
 
-// ─── Model ────────────────────────────────────────────────────────────────────
 
 const SupraSpaceMessage = mongoose.model<ISupraSpaceMessage>(
   'SupraSpaceMessage',

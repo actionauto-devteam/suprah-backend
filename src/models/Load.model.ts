@@ -1,8 +1,6 @@
-// Load.model.ts — Central Dispatch-style TMS load
 
 import mongoose, { Document, Schema } from "mongoose";
 
-// ─── Location Block ───────────────────────────────────────────────────────────
 
 export interface ILocationBlock {
   locationType?: string;
@@ -43,7 +41,6 @@ const LocationBlockSchema = new Schema<ILocationBlock>(
   { _id: false },
 );
 
-// ─── Load Vehicle ─────────────────────────────────────────────────────────────
 
 export interface ILoadVehicle {
   vehicleId?: mongoose.Types.ObjectId;
@@ -86,7 +83,6 @@ const LoadVehicleSchema = new Schema<ILoadVehicle>(
   { _id: false },
 );
 
-// ─── Load Dates ───────────────────────────────────────────────────────────────
 
 export interface ILoadDates {
   firstAvailable?: Date;
@@ -107,10 +103,6 @@ const LoadDatesSchema = new Schema<ILoadDates>(
   { _id: false },
 );
 
-// ─── Load Pricing ─────────────────────────────────────────────────────────────
-// miles + estimatedRate are server-computed.
-// carrierPayAmount is entered by dispatcher; copCodAmount is optional cash collected by driver.
-// balanceAmount = carrierPayAmount - copCodAmount (computed on save).
 
 export interface ILoadPricing {
   miles?: number;
@@ -131,7 +123,6 @@ const LoadPricingSchema = new Schema<ILoadPricing>(
   { _id: false },
 );
 
-// ─── Additional Info ──────────────────────────────────────────────────────────
 
 export interface ILoadAdditionalInfo {
   notes?: string;
@@ -160,7 +151,6 @@ const LoadAdditionalInfoSchema = new Schema<ILoadAdditionalInfo>(
   { _id: false },
 );
 
-// ─── Contract ─────────────────────────────────────────────────────────────────
 
 export interface ILoadContract {
   agreedToTerms: boolean;
@@ -177,7 +167,6 @@ const LoadContractSchema = new Schema<ILoadContract>(
   { _id: false },
 );
 
-// ─── Load ─────────────────────────────────────────────────────────────────────
 
 export type LoadStatus =
   | "Draft"
@@ -195,9 +184,7 @@ export interface ILoad extends Document {
   orgId?: mongoose.Types.ObjectId;
   createdBy: mongoose.Types.ObjectId;
 
-  // Optional link to the Quote this load was created from
   quoteId?: mongoose.Types.ObjectId;
-  // True for records migrated from the legacy Shipment collection
   migratedFromShipment?: boolean;
 
   loadNumber: string;
@@ -335,8 +322,6 @@ const LoadSchema = new Schema<ILoad>(
   { timestamps: true },
 );
 
-// ─── Load Number Counter ──────────────────────────────────────────────────────
-// Atomic counter keyed by YYYYMMDD — same pattern as InvoiceCounter in Payment.model.ts
 
 const LoadCounterSchema = new Schema(
   { _id: { type: String, required: true }, seq: { type: Number, default: 0 } },
@@ -346,9 +331,7 @@ const LoadCounter =
   mongoose.models.LoadCounter ||
   mongoose.model("LoadCounter", LoadCounterSchema);
 
-// Auto-generate loadNumber and compute balanceAmount before save
 LoadSchema.pre("save", async function (next) {
-  // 1. Generate sequential loadNumber if not already set
   if (!this.loadNumber) {
     const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     const counter = await LoadCounter.findOneAndUpdate(

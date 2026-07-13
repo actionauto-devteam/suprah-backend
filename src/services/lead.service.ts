@@ -47,23 +47,14 @@ export interface FinanceAppDTO {
 }
 
 class LeadService {
-  /**
-   * Process a Vehicle Inquiry (Lead)
-   * 1. Fetches Org Lead Config
-   * 2. Generates ADF XML
-   * 3. Sends email via OrgGmailService (Automatic Token Refresh handled there)
-   * 4. Returns success (Existing sync jobs will create the Lead record later)
-   */
   async processInquiry(dto: InquiryDTO): Promise<void> {
     const { organizationId, vehicleId } = dto;
 
-    // 1. Get Org Config
     const config = await OrgLeadConfig.findOne({ organizationId, isActive: true });
     if (!config || !config.gmailConnected) {
       throw new ApiError(400, 'This dealership has not configured their lead ingestion system.');
     }
 
-    // 2. Get Vehicle & Org Details
     const [vehicle, org] = await Promise.all([
       Vehicle.findById(vehicleId),
       Organization.findById(organizationId)
@@ -76,7 +67,6 @@ class LeadService {
       throw new ApiError(404, 'Organization not found');
     }
 
-    // 3. Prepare ADF Data
     const adfData: ADFLeadData = {
       prospect: {
         customer: {
@@ -122,11 +112,8 @@ class LeadService {
       },
     };
 
-    // 4. Generate XML
     const adfXml = generateADF(adfData);
 
-    // 5. Build Industry Standard Subject Line
-    // Format: vehicle lead for Action Auto Sales and Finance LLC-2023 HYUNDAI IONIQ 5 (www.actionautoutah.com)
     const vehicleFull = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
     const subject = `vehicle lead for ${org.name}-${vehicleFull} (www.actionautoutah.com)`;
 

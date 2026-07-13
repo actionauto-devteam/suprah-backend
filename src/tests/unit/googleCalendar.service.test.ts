@@ -3,7 +3,6 @@ import CrmUser from '../../models/CrmUser.model';
 import OrgLeadConfig from '../../models/OrgLeadConfig.model';
 import mongoose from 'mongoose';
 
-// Mocking dependencies
 jest.mock('../../models/CrmUser.model');
 jest.mock('../../models/OrgLeadConfig.model');
 jest.mock('../../utils/crypto', () => ({

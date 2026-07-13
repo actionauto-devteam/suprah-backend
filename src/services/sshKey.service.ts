@@ -2,18 +2,7 @@ import crypto from 'crypto';
 import SshKey from '../models/SshKey.model';
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
 
-/**
- * SSH Key Service
- *
- * Manages SSH public keys for CRM users:
- *  - Key registration with validation
- *  - Fingerprint computation
- *  - Key revocation with audit trail
- *  - authorized_keys file generation for server integration
- *  - Key expiry enforcement
- */
 
-// ── Key Validation ───────────────────────────────────────────────────────────
 
 const VALID_KEY_PREFIXES = [
   'ssh-rsa',

@@ -34,7 +34,6 @@ const VALID_NOTIFICATION_TYPES = [
   'system_announcement', 'message_received', 'reminder', 'general',
   'referral_joined', 'referral_rewarded',
   'delivery_confirmed', 'proof_submitted',
-  // ── Aftermarket ──
   'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
 ] as const;
 
@@ -82,7 +81,6 @@ const PREFERENCE_MAP: Record<string, string> = {
   team_member_left: 'crmActivity',
   referral_joined: 'referral_joined',
   referral_rewarded: 'referral_rewarded',
-  // Aftermarket inquiries are CRM activity; invoices go to the customer directly.
   aftermarket_inquiry: 'crmActivity',
   aftermarket_order: 'crmActivity',
 };

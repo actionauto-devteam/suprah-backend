@@ -9,7 +9,6 @@ export const JAAS_DOMAIN = process.env.JITSI_DOMAIN || '8x8.vc';
 export const jaasConfigured = (): boolean => Boolean(APP_ID && KID && PRIVATE_KEY);
 export const getJaasAppId = (): string => APP_ID;
 
-/** JaaS requires rooms to be tenant-prefixed: `{AppID}/{room}` */
 export const jaasRoomName = (room: string): string => (APP_ID ? `${APP_ID}/${room}` : room);
 
 export interface JaasUser {

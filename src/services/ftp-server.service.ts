@@ -13,12 +13,8 @@ const log = logger.child({ module: 'ftp-server' });
 export class ActionFtpServer {
     private ftpServer: FtpSrv | null = null;
 
-    /**
-     * Initialize and start the FTP server
-     */
     async start(): Promise<void> {
         try {
-            // Prepare TLS options if provided
             console.log('🔍 DEBUG: FTP Initialization started');
             console.log('🔍 DEBUG: certPath:', config.ftpServer.tlsCertPath);
             console.log('🔍 DEBUG: keyPath:', config.ftpServer.tlsKeyPath);
@@ -27,9 +23,6 @@ export class ActionFtpServer {
 
             let tls: any = false;
 
-            // TLS is controlled by FTP_FORCE_TLS. When it's false we run plaintext
-            // FTP (no SSL/TLS) regardless of whether cert files are present —
-            // required by some uploaders, e.g. DealersCloud.
             if (config.ftpServer.forceTls) {
                 if (config.ftpServer.tlsCertPath && config.ftpServer.tlsKeyPath) {
                     try {

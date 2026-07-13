@@ -9,12 +9,7 @@ import FeedComment from '../models/FeedComment.model';
 import FeedReaction, { REACTION_TYPES, ReactionType } from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Builds a reaction summary map from a list of reactions.
- * Shape: { like: { count: 3, users: ['Alice', 'Bob', 'Carol'] }, ... }
- */
 function buildSummary(reactions: Array<{ reaction: string; authorName: string }>) {
   const summary: Record<string, { count: number; users: string[] }> = {};
   for (const r of reactions) {
@@ -25,22 +20,12 @@ function buildSummary(reactions: Array<{ reaction: string; authorName: string }>
   return summary;
 }
 
-/**
- * Resolves the organisation ID for a reaction target.
- *
- * targetType "post"    → checks Feed first, falls back to DayPulse
- * targetType "comment" → checks FeedComment
- *
- * Throws 404 if the document doesn't exist, 403 if it belongs to a
- * different organisation than the requesting user.
- */
 async function resolveTargetOrgId(
   targetType: 'post' | 'comment',
   targetId: string,
   actorOrgId: mongoose.Types.ObjectId,
 ): Promise<mongoose.Types.ObjectId> {
   if (targetType === 'post') {
-    // ── Try Feed first ──
     const post = await Feed.findOne({ _id: targetId, deletedAt: null }).lean();
     if (post) {
       if (post.organizationId.toString() !== actorOrgId.toString()) {
@@ -49,7 +34,6 @@ async function resolveTargetOrgId(
       return post.organizationId;
     }
 
-    // ── Fall back to DayPulse ──
     const report = await DayPulse.findOne({ _id: targetId, deletedAt: null }).lean();
     if (report) {
       if (report.organizationId.toString() !== actorOrgId.toString()) {
@@ -61,7 +45,6 @@ async function resolveTargetOrgId(
     throw new ApiError(404, 'Post not found');
   }
 
-  // ── Comment ──
   const comment = await FeedComment.findOne({ _id: targetId, deletedAt: null }).lean();
   if (!comment) throw new ApiError(404, 'Comment not found');
   if (comment.organizationId.toString() !== actorOrgId.toString()) {
@@ -70,21 +53,7 @@ async function resolveTargetOrgId(
   return comment.organizationId;
 }
 
-// ─── Toggle Reaction ──────────────────────────────────────────────────────────
 
-/**
- * POST /api/crm/feeds/reactions
- *
- * Upserts a reaction for the authenticated user on a post, DayPulse report,
- * or comment.
- * Rules:
- *  - If the user has NO reaction → insert it (add).
- *  - If the user reacts with the SAME type → remove it (toggle off).
- *  - If the user reacts with a DIFFERENT type → replace it (switch).
- *
- * Emits `feed:reactions_updated` with the new summary so all clients
- * can re-render reaction counts in real time without a round-trip.
- */
 export const toggleReaction = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
@@ -92,7 +61,6 @@ export const toggleReaction = asyncHandler(async (req: Request, res: Response) =
 
   const { targetType, targetId, reaction } = req.body;
 
-  // ── Validate inputs ──
   if (!['post', 'comment'].includes(targetType)) {
     throw new ApiError(400, 'targetType must be "post" or "comment"');
   }

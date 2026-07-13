@@ -4,11 +4,8 @@ import { DashboardService } from '../services/dashboard.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import cacheService from '../services/cache.service';
 
-const CACHE_TTL_SECONDS = 60 * 10; // 10 minutes
+const CACHE_TTL_SECONDS = 60 * 10;
 
-/**
- * Get unified dashboard metrics with Redis caching
- */
 const getDashboardMetrics = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const { period, month } = req.query;

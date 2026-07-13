@@ -1,4 +1,3 @@
-// repush
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
@@ -58,13 +57,6 @@ class StorageService {
         }
     }
 
-    /**
-     * Uploads a file to Cloudflare R2
-     * @param file The Multer file object or Buffer
-     * @param folder The target folder (e.g., 'avatars', 'proofs')
-     * @param type The bucket type (public, private, or ftp)
-     * @returns The public URL (for public) or the key (for private/ftp)
-     */
     async upload(
         file: Express.Multer.File | { buffer: Buffer; originalname: string; mimetype: string },
         folder: string,

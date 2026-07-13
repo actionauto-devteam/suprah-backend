@@ -2,9 +2,9 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IServiceSlot extends Document {
   organizationId: string;
-  date: Date;           // midnight UTC — represents a calendar day
-  time: string;         // "08:00", "10:00", etc.
-  label: string;        // "8:00 AM"
+  date: Date;
+  time: string;
+  label: string;
   maxBookings: number;
   currentBookings: number;
   isBlocked: boolean;

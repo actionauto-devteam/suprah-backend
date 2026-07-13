@@ -8,7 +8,7 @@ export interface KpiWeights {
   callsMade: number;
   messagesSent: number;
   followUpsSent: number;
-  avgResponseTimeMin: number; // negative weight — lower is better
+  avgResponseTimeMin: number;
   transactionsCompleted: number;
   onboardingsCompleted: number;
 }
@@ -17,13 +17,13 @@ export const DEFAULT_KPI_WEIGHTS: KpiWeights = {
   leadsCreated: 2,
   leadsContacted: 3,
   leadsConverted: 15,
-  conversionRate: 0.5,        // per % point
+  conversionRate: 0.5,
   appointmentsCompleted: 8,
-  appointmentShowRate: 0.3,   // per % point
+  appointmentShowRate: 0.3,
   callsMade: 1,
   messagesSent: 0.5,
   followUpsSent: 2,
-  avgResponseTimeMin: -0.5,   // penalty per minute
+  avgResponseTimeMin: -0.5,
   transactionsCompleted: 25,
   onboardingsCompleted: 20,
 };
@@ -35,7 +35,6 @@ export function computeScore(kpis: Partial<Record<keyof KpiWeights, number>>, we
     const value = kpis[key as keyof KpiWeights] ?? 0;
 
     if (key === 'avgResponseTimeMin') {
-      // Penalty: only applied when response time > 0, cap penalty at -50
       if (value > 0) {
         score += Math.max(weight * value, -50);
       }
@@ -47,18 +46,17 @@ export function computeScore(kpis: Partial<Record<keyof KpiWeights, number>>, we
   return Math.max(0, Math.round(score * 100) / 100);
 }
 
-// Period key helpers
 export function getPeriodKey(date: Date, type: 'daily' | 'weekly' | 'monthly'): string {
   const d = new Date(date);
 
   if (type === 'daily') {
-    return d.toISOString().slice(0, 10); // YYYY-MM-DD
+    return d.toISOString().slice(0, 10);
   }
 
   if (type === 'weekly') {
-    const dayOfWeek = d.getDay(); // 0 = Sunday
+    const dayOfWeek = d.getDay();
     const monday = new Date(d);
-    monday.setDate(d.getDate() - ((dayOfWeek + 6) % 7)); // ISO Monday
+    monday.setDate(d.getDate() - ((dayOfWeek + 6) % 7));
     const week = Math.ceil((((monday.getTime() - new Date(monday.getFullYear(), 0, 1).getTime()) / 86400000) + 1) / 7);
     return `${monday.getFullYear()}-W${String(week).padStart(2, '0')}`;
   }

@@ -8,19 +8,7 @@ import CrmUser from '../models/CrmUser.model';
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 
-/**
- * SSH Challenge-Sign Authentication
- *
- * Flow:
- *  1. Client sends username → server generates random challenge + storeKey
- *  2. User signs the challenge locally: echo "CHALLENGE" | ssh-keygen -Y sign -f KEY -n crm-login
- *  3. Client sends { username, storeKey, signature } → server verifies using ssh-keygen -Y verify
- *  4. On success → issue CRM JWT
- *
- * Requires: openssh-client (ssh-keygen) on the server.
- */
 
-// ── In-memory challenge store ────────────────────────────────────────────────
 
 interface SshChallenge {
   challenge: string;
@@ -30,7 +18,6 @@ interface SshChallenge {
 
 const sshChallengeStore = new Map<string, SshChallenge>();
 
-// Cleanup every 60s
 if (process.env.NODE_ENV !== 'test') {
   setInterval(() => {
     const now = Date.now();
@@ -40,18 +27,13 @@ if (process.env.NODE_ENV !== 'test') {
   }, 60_000);
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Generate an SSH challenge for a given username.
- */
 export async function generateSshChallenge(username: string) {
   const user = await CrmUser.findOne({ username: username.trim(), isActive: true });
   if (!user) {
     throw new Error('Employee ID not found or account is inactive.');
   }
 
-  // Check user has at least one active SSH key
   const keyCount = await SshKey.countDocuments({ userId: user._id, isActive: true });
   if (keyCount === 0) {
     throw new Error('No SSH keys registered for this account. Add one in Biometric Security settings.');

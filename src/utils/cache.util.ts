@@ -12,7 +12,6 @@ export class SimpleCache<T> {
     ) {}
 
     set(key: string, data: T): void {
-        // Simple FIFO eviction if limit reached
         if (this.cache.size >= this.maxSize) {
             const oldestKey = this.cache.keys().next().value;
             if (oldestKey !== undefined) {
@@ -26,7 +25,6 @@ export class SimpleCache<T> {
         const entry = this.cache.get(key);
         if (!entry) return undefined;
 
-        // Check if expired
         if (Date.now() - entry.timestamp > this.ttlMs) {
             this.cache.delete(key);
             return undefined;
@@ -44,26 +42,13 @@ export class SimpleCache<T> {
     }
 }
 
-// Global instances for auth
-export const userAuthCache = new SimpleCache<any>(5000, 60000); // 1 min TTL, max 5000 users
-export const orgStatusCache = new SimpleCache<{ status: string }>(1000, 60000); // 1 min TTL, max 1000 orgs
+export const userAuthCache = new SimpleCache<any>(5000, 60000);
+export const orgStatusCache = new SimpleCache<{ status: string }>(1000, 60000);
 
-/**
- * Invalidate the cached user when they change organization.
- * Call this after updating user.organizationId.
- * 
- * This ensures the next request fetches fresh user data from the database
- * rather than serving stale cache with the old organizationId.
- */
 export const invalidateUserCache = (userId: string) => {
     userAuthCache.delete(userId);
 };
 
-/**
- * Invalidate org status cache when org state changes.
- * 
- * Use this when organization status is updated (suspended, active, etc.)
- */
 export const invalidateOrgCache = (orgId: string) => {
     orgStatusCache.delete(orgId);
 };

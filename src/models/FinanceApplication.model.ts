@@ -6,14 +6,13 @@ export interface IFinanceApplication extends Document {
   customerId: mongoose.Types.ObjectId;
   vehicleId: mongoose.Types.ObjectId;
 
-  // Personal Info (Encrypted)
   personalInfo: {
     firstName: string;
     lastName: string;
     email: string;
     phone: string;
     dob: string;
-    ssn: string; // Encrypted
+    ssn: string;
     address: {
       street: string;
       city: string;
@@ -22,22 +21,19 @@ export interface IFinanceApplication extends Document {
     };
   };
 
-  // Employment & Income (Encrypted)
   employmentInfo: {
     employer: string;
     jobTitle: string;
-    income: string; // Encrypted
+    income: string;
     incomeFrequency: 'Yearly' | 'Monthly' | 'Weekly';
     yearsAtJob: string;
   };
 
-  // Metadata
   status: 'New' | 'Reviewing' | 'Approved' | 'Rejected' | 'Withdrawn';
   notes?: string;
   appliedAt: Date;
   updatedAt: Date;
 
-  // Helpers
   getDecryptedSsn(): string;
   getDecryptedIncome(): string;
 }
@@ -68,7 +64,7 @@ const FinanceApplicationSchema: Schema = new Schema(
       email: { type: String, required: true },
       phone: { type: String, required: true },
       dob: { type: String, required: true },
-      ssn: { type: String, required: true }, // Store encrypted
+      ssn: { type: String, required: true },
       address: {
         street: String,
         city: String,
@@ -79,7 +75,7 @@ const FinanceApplicationSchema: Schema = new Schema(
     employmentInfo: {
       employer: String,
       jobTitle: String,
-      income: String, // Store encrypted
+      income: String,
       incomeFrequency: {
         type: String,
         enum: ['Yearly', 'Monthly', 'Weekly'],
@@ -105,13 +101,11 @@ const FinanceApplicationSchema: Schema = new Schema(
   }
 );
 
-// Pre-save hook to ensure fields are encrypted if they are modified
 FinanceApplicationSchema.pre('save', function (next) {
   const doc = this as any;
   
   if (doc.isModified('personalInfo.ssn')) {
     try {
-      // Only encrypt if it's not already in the 'iv:authTag:content' format
       if (!doc.personalInfo.ssn.includes(':')) {
         doc.personalInfo.ssn = encrypt(doc.personalInfo.ssn);
       }
@@ -133,7 +127,6 @@ FinanceApplicationSchema.pre('save', function (next) {
   next();
 });
 
-// Methods for decryption
 FinanceApplicationSchema.methods.getDecryptedSsn = function () {
   return decrypt(this.personalInfo.ssn);
 };
@@ -142,7 +135,6 @@ FinanceApplicationSchema.methods.getDecryptedIncome = function () {
   return decrypt(this.employmentInfo.income);
 };
 
-// Compound index for staff to find apps by org and date
 FinanceApplicationSchema.index({ organizationId: 1, appliedAt: -1 });
 
 export default mongoose.model<IFinanceApplication>('FinanceApplication', FinanceApplicationSchema);

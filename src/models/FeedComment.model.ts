@@ -1,9 +1,5 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-// ─── Interface ────────────────────────────────────────────────────────────────
-// A FeedComment belongs to exactly one Feed post and one CrmUser.
-// Author fields are denormalised (copied at comment time) so comments remain
-// readable even if the author's profile changes later.
 
 export interface IFeedCommentAttachment {
   url: string;
@@ -15,22 +11,21 @@ export interface IFeedCommentAttachment {
 }
 
 export interface IFeedComment extends Document {
-  postId: mongoose.Types.ObjectId;         // The Feed post this comment belongs to
-  organizationId: mongoose.Types.ObjectId; // Mirrors the post's org for fast scoped queries
-  userId: mongoose.Types.ObjectId;         // The commenter (CrmUser)
-  authorName: string;                      // Snapshot of commenter's name
-  authorAvatar?: string;                   // Snapshot of commenter's avatar
-  authorRole: string;                      // Snapshot of commenter's role
-  content: string;                         // Comment body (max 1 000 chars)
-  attachments: IFeedCommentAttachment[];   // Files attached via R2 storage
-  deletedAt?: Date | null;                 // Soft-delete timestamp
+  postId: mongoose.Types.ObjectId;
+  organizationId: mongoose.Types.ObjectId;
+  userId: mongoose.Types.ObjectId;
+  authorName: string;
+  authorAvatar?: string;
+  authorRole: string;
+  content: string;
+  attachments: IFeedCommentAttachment[];
+  deletedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export interface IFeedCommentModel extends Model<IFeedComment> {}
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
 
 const FeedCommentSchema = new Schema<IFeedComment>(
   {
@@ -38,7 +33,7 @@ const FeedCommentSchema = new Schema<IFeedComment>(
       type: Schema.Types.ObjectId,
       ref: 'Feed',
       required: true,
-      index: true, // Most queries start with "all comments for post X"
+      index: true,
     },
     organizationId: {
       type: Schema.Types.ObjectId,
@@ -94,8 +89,6 @@ const FeedCommentSchema = new Schema<IFeedComment>(
   { timestamps: true }
 );
 
-// Compound index: "all live comments for post X ordered oldest-first"
-// — the most common query pattern for rendering a comment thread
 FeedCommentSchema.index({ postId: 1, createdAt: 1 });
 
 const FeedComment = mongoose.model<IFeedComment, IFeedCommentModel>('FeedComment', FeedCommentSchema);

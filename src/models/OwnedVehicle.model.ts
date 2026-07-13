@@ -34,9 +34,6 @@ const OwnedVehicleSchema: Schema = new Schema(
         purchaseDate: { type: Date },
         status: { type: String, enum: ['ACTIVE', 'SOLD', 'TRADED_IN'], default: 'ACTIVE' },
         images: [{ type: String }],
-        // Provenance — set when the Finance team transfers an inventory vehicle
-        // into this garage from the CRM "Garage Review" screen. Manual adds keep
-        // the MANUAL default, so existing behaviour is unchanged.
         source: { type: String, enum: ['MANUAL', 'DEALERSHIP_TRANSFER'], default: 'MANUAL' },
         dealershipName: { type: String },
         transferredAt: { type: Date },
@@ -46,7 +43,6 @@ const OwnedVehicleSchema: Schema = new Schema(
     }
 );
 
-// Ensure a user doesn't add the same VIN multiple times
 OwnedVehicleSchema.index({ userId: 1, vin: 1 }, { unique: true });
 
 export const OwnedVehicle = mongoose.models.OwnedVehicle || mongoose.model<IOwnedVehicle>('OwnedVehicle', OwnedVehicleSchema);

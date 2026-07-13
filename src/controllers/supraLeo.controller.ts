@@ -18,7 +18,6 @@ import Feed from '../models/Feed.model';
 import FeedComment from '../models/FeedComment.model';
 import Appointment from '../models/Appointment.model';
 
-// ─── Gemini client via OpenAI-compatible endpoint ─────────────────────────────
 
 const gemini = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY || '',
@@ -27,13 +26,11 @@ const gemini = new OpenAI({
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
-// Groq client — kept only for Whisper audio transcription
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || '',
   baseURL: 'https://api.groq.com/openai/v1',
 });
 
-// ─── System prompt builder ───────────────────────────────────────────────────
 
 function buildSystemPrompt(module: string, contextData: any, user: any): string {
   const baseIdentity = `You are Suprah Autrix, the intelligent AI assistant embedded in the Action Auto CRM system. You are sharp, warm, confident, and deeply knowledgeable about automotive sales, lead management, and CRM workflows. You always address the user respectfully and helpfully.

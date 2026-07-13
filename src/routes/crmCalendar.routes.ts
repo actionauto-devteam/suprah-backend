@@ -4,10 +4,8 @@ import crmAuth from '../middleware/crmAuth.middleware';
 
 const router = express.Router();
 
-// Public callback (Google redirects here)
 router.get('/callback', crmCalendarController.callback);
 
-// Protected routes (Requires CRM Auth)
 router.use(crmAuth());
 
 router.get('/auth', crmCalendarController.connect);

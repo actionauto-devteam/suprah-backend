@@ -29,7 +29,6 @@ declare global {
 
 const auth = () => async (req: Request, res: Response, next: NextFunction) => {
     try {
-        // 1. Extract token
         const authHeader = req.headers.authorization;
         const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
@@ -37,7 +36,6 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'Please authenticate');
         }
 
-        // 2. Verify token
         const payload = tokenService.verifyAccessToken(token);
         const userId = payload.sub;
 
@@ -45,7 +43,6 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'Invalid token payload');
         }
 
-        // 3. Resolve user (cache-first)
         let user: IUser | undefined | null;
         const cachedUser = userAuthCache.get(userId);
         if (cachedUser) {
@@ -59,11 +56,9 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'User not found');
         }
 
-        // 4. Resolve org context
         let orgId = user.organizationId?.toString();
         let orgRole = (user as any).organizationRole;
 
-        // Super-admin impersonation
         if (user.role === 'super_admin') {
             const impersonateId = req.headers['x-impersonate-org-id'] as string;
             if (impersonateId) {
@@ -88,7 +83,6 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             }
         }
 
-        // Boost global admins (not super_admins — they use impersonation instead)
         let finalOrgRole = orgRole;
         if (user.role === 'admin') {
             finalOrgRole = 'admin';
@@ -106,16 +100,10 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             getToken: async () => token,
         };
 
-        // 5. Account active check
         if (!user.isActive) {
             throw new ApiError(403, 'Account Suspended');
         }
 
-        // 6. Whitelist check
-        //
-        // Routes in this list bypass the email-verification, onboarding, and
-        // driver-approval gates below. Add a route here when it must be
-        // reachable before the user has finished setting up their account.
         const url = req.originalUrl;
 
         const isAftermarketRequest  = url.includes('/api/aftermarket');
@@ -123,12 +111,9 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         const isAftermarketBrowse   = isAftermarketRequest && !isAftermarketCheckout;
 
         const isWhitelisted =
-            // Onboarding flow — both steps must be reachable before onboarding is done
             url.includes('/api/auth/complete-onboarding') ||
             url.includes('/api/auth/select-onboarding-org') ||
-            // Org list needed so the customer can pick a dealership in step 2
             url.includes('/api/organizations/public') ||
-            // Standard always-open routes
             url.includes('/api/users/me') ||
             url.includes('/api/notifications') ||
             isAftermarketBrowse ||
@@ -136,22 +121,18 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             url.includes('/api/push/subscribe') ||
             url.includes('/api/driver-requests/my-status');
 
-        // 7. Onboarding gate
         if (!user.onboardingCompleted && !isWhitelisted) {
             throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');
         }
 
-        // 8. Email verification gate
         if (!user.emailVerified && !isWhitelisted) {
             throw new ApiError(403, 'Email not verified. Please verify your email to access this feature.');
         }
 
-        // 9. Driver approval gate
         if (user.role === 'driver' && !user.isApproved && !isWhitelisted) {
             throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
         }
 
-        // 10. Organization suspension check (cache-first)
         if (req.orgId) {
             let status: string | undefined;
             const cachedOrg = orgStatusCache.get(req.orgId);

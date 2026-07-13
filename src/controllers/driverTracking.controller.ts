@@ -255,7 +255,6 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, "Driver does not belong to your organization");
   }
 
-  // Prevent double-assignment: reject if already assigned and not in an unassigned state
   const load = await Load.findOne({ _id: targetLoadId, organizationId: orgId });
   if (load) {
     const alreadyAssigned = load.assignedDriverId;
@@ -990,18 +989,14 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(404, "Load not found");
   }
 
+  const loadOrgId = load.organizationId?.toString();
+  const userOrgId = user.organizationId?.toString();
+  if (loadOrgId !== userOrgId) {
+    throw new ApiError(403, "You do not have access to this load");
+  }
+
   const isDriver = user.role === "driver";
   if (isDriver) {
-    // 1. Check organization access
-    const loadOrgId = load.organizationId?.toString();
-    const userOrgId = user.organizationId?.toString();
-
-    if (loadOrgId !== userOrgId) {
-      throw new ApiError(403, "You do not have access to this load");
-    }
-
-    // 2. Check assignment access
-    // Drivers can only see full details of loads assigned to them OR loads that are available ("Posted")
     const isAssignedToMe = load.assignedDriverId && (load.assignedDriverId as any)._id?.toString() === userId;
     const isPosted = load.status === "Posted";
     const hasRequested = load.pendingDriverRequests?.some(
@@ -1013,12 +1008,10 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Apply masking for drivers
   const processedLoad = isDriver
     ? maskLoadForDriver(load as unknown as Record<string, unknown>)
     : load;
 
-  // Sign proof of delivery URL if exists
   const loadObj = processedLoad as any;
   if (loadObj.proofOfDelivery?.imageUrl) {
     const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
@@ -1027,7 +1020,6 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Normalize for driver view (consistent with original implementation)
   const myRequest = load.pendingDriverRequests?.find(
     (r: any) => r.driverId.toString() === userId,
   );
@@ -1078,7 +1070,6 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
 
   const now = new Date();
 
-  // Step 1 — Atomic approve: assert the target request is still pending to prevent double-approval
   const load = await Load.findOneAndUpdate(
     {
       _id: loadId,
@@ -1107,7 +1098,6 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  // Step 2 — Bulk-reject all other pending requests atomically
   await Load.updateOne(
     { _id: loadId },
     {
@@ -1129,7 +1119,6 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
     },
   );
 
-  // Fetch the load again to get the updated rejected list for notifications
   const finalLoad = await Load.findById(loadId).lean();
   const rejectedDriverIds = (finalLoad?.pendingDriverRequests || [])
     .filter(
@@ -1143,7 +1132,6 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
     { $addToSet: { shipmentIds: load._id } },
   );
 
-  // Notify approved driver and all auto-rejected drivers in parallel
   await Promise.allSettled([
     safeCreateNotification({
       userId: driverId,
@@ -1367,7 +1355,6 @@ const getDriverDashboardStats = asyncHandler(
   });
 
 
-// POST /mark-picked-up — driver marks vehicle picked up at origin (Accepted → Picked Up)
 const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?._id) throw new ApiError(401, "User not authenticated");

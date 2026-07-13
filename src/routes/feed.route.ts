@@ -19,21 +19,6 @@ const upload = multer({
   },
 });
 
-/**
- * Parses multipart bodies for feed posts AND comments.
- *
- * - Runs multer only for multipart requests; JSON/text-only posts skip it and
- *   are parsed by the global express.json().
- * - Uses `upload.any()` rather than `upload.array('files')` so a file under an
- *   unexpected field name can't trigger LIMIT_UNEXPECTED_FILE and silently
- *   empty req.body. We filter to the "files" field and enforce the cap here.
- *
- * NOTE: This router is now the SINGLE owner of everything under /crm/feeds.
- * The comment routes were merged in from the old feedComment router so that
- * exactly one crmAuth + multer stack ever touches a /crm/feeds request — the
- * previous double-mount on /crm/feeds was draining the multipart stream twice
- * and producing empty-body "Post content cannot be empty" 400s on uploads.
- */
 
 const parseAttachments: RequestHandler = (req, res, next) => {
   console.log("[parseAttachments] LIVE — multipart?", req.is("multipart/form-data"));

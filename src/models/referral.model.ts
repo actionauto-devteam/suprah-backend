@@ -2,9 +2,9 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IReferral extends Document {
     organizationId: mongoose.Types.ObjectId;
-    referrerId: mongoose.Types.ObjectId; // The native _id of the referer
-    referredUserId: mongoose.Types.ObjectId; // The native _id of the new user
-    referralCodeUsed: string; // The code that was intercepted (e.g. AAU-JOHN-555)
+    referrerId: mongoose.Types.ObjectId;
+    referredUserId: mongoose.Types.ObjectId;
+    referralCodeUsed: string;
     createdAt: Date;
     updatedAt: Date;
 }

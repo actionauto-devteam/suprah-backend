@@ -6,6 +6,7 @@ import { setupSocket } from "./socket";
 import { setSocketIO } from "./utils/socketEmitter";
 import cors from "cors";
 import helmet from "helmet";
+import mongoSanitize from "express-mongo-sanitize";
 import cookieParser from "cookie-parser";
 import connectDB from "./config/db";
 import routes from "./routes";
@@ -28,43 +29,30 @@ import logger from "./utils/logger";
 import { correlationIdMiddleware } from "./middleware/correlationId.middleware";
 import { metricsMiddleware } from "./middleware/metrics.middleware";
 import { activityAuditMiddleware } from "./middleware/activityAudit.middleware";
-import "./jobs/push.worker"; // Initialize the Push Notification worker
+import "./jobs/push.worker";
 
 const app: Application = express();
 
-// Enable trust proxy to correctly identify client IP behind Nginx
 app.set("trust proxy", 1);
 
-// 0. Applied Global Rate Limiting first to protect the server
 app.use(globalLimiter);
 
-// 1. Assign unique Request ID (Correlation ID) first
 app.use(correlationIdMiddleware);
 
-// 2. Track Golden Signals (Latency, Traffic, Errors)
 app.use(metricsMiddleware);
 
-// 3. Use structured logging middleware (picks up the Request ID)
 app.use(httpLogger);
 
-// Use Helmet for secure HTTP headers
 app.use(
   helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow cross-origin for images/sockets
-    contentSecurityPolicy: config.env === "production" ? undefined : false, // Disable CSP in dev to avoid blocking Vite/Hot Reload
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: config.env === "production" ? undefined : false,
   }),
 );
 const httpServer = createServer(app);
-// ---
 
-// ========================================
-// Connect to MongoDB
-// ========================================
 connectDB();
 
-// ========================================
-// Body Parsers
-// ========================================
 app.use(
   express.json({
     limit: "512kb",
@@ -76,21 +64,13 @@ app.use(
 
 app.use(express.urlencoded({ extended: true, limit: "512kb" }));
 
-// XML body support (ADF emails)
 app.use(
   express.text({ type: ["application/xml", "text/xml"], limit: "512kb" }),
 );
 
-// ========================================
-// Static file serving (LEGACY - REPLACED BY R2)
-// ========================================
-// app.use('/uploads/supraspace', express.static(path.join(__dirname, '../uploads/supraspace')));
-// app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
-// app.use('/uploads/proof-of-delivery', express.static(path.join(__dirname, '../uploads/proof-of-delivery')));
+app.use(mongoSanitize());
 
-// ========================================
-// CORS CONFIGURATION
-// ========================================
+
 const corsOptions = {
   origin: (
     origin: string | undefined,
@@ -100,7 +80,6 @@ const corsOptions = {
       .split(",")
       .map((o: string) => o.trim());
 
-    // Allow requests without origin (Postman, mobile apps)
     if (!origin) {
       logger.debug("CORS allowed: No Origin");
       return callback(null, true);

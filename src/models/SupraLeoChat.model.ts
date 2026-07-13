@@ -1,7 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 
 export interface ISupraLeoChatMessage {
-  // Remove _id — Mongoose injects it automatically on subdocs with { _id: true }
   role: 'user' | 'assistant';
   content: string;
   module?: string;
@@ -40,13 +39,12 @@ const ChatMessageSchema = new Schema<ISupraLeoChatMessage>(
       type: Schema.Types.Mixed,
       default: null,
     },
-    // ← tokens removed: not in ISupraLeoChatMessage, was causing TS2353
     createdAt: {
       type: Date,
       default: Date.now,
     },
   },
-  { _id: true } // Mongoose will still create _id on each subdoc at runtime
+  { _id: true }
 );
 
 const SupraLeoChatSchema = new Schema<ISupraLeoChat>(

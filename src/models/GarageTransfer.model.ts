@@ -1,23 +1,13 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-/**
- * GarageTransfer
- * ----------------------------------------------------------------------------
- * Audit record created every time the Finance team transfers an inventory
- * vehicle into a customer's My Garage from the CRM "Garage Review" screen.
- *
- * Snapshots (vin, vehicleLabel, customerName, customerEmail, mileage) are stored
- * inline so the history list never needs a populate and stays accurate even if
- * the source Vehicle / OwnedVehicle / User records later change.
- */
 export interface IGarageTransfer extends Document {
   organizationId: mongoose.Types.ObjectId;
-  vehicleId: mongoose.Types.ObjectId;        // inventory Vehicle
-  ownedVehicleId: mongoose.Types.ObjectId;   // OwnedVehicle created in customer garage
-  customerId: mongoose.Types.ObjectId;       // User (customer)
-  dealId?: mongoose.Types.ObjectId | null;   // optional linked Deal
+  vehicleId: mongoose.Types.ObjectId;
+  ownedVehicleId: mongoose.Types.ObjectId;
+  customerId: mongoose.Types.ObjectId;
+  dealId?: mongoose.Types.ObjectId | null;
   vin: string;
-  vehicleLabel: string;                      // "2022 Toyota Camry"
+  vehicleLabel: string;
   customerName: string;
   customerEmail: string;
   mileageAtTransfer: number;

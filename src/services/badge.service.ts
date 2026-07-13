@@ -3,10 +3,6 @@ import { UserBadge } from '../models/Badge.model';
 import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 import mongoose from 'mongoose';
 
-/**
- * Evaluates and awards badges for a user after each aggregate update.
- * Idempotent — duplicate badge+period combos are ignored via unique index.
- */
 export async function evaluateBadges(
   organizationId: string,
   userId: string,
@@ -15,7 +11,6 @@ export async function evaluateBadges(
 ): Promise<string[]> {
   const awarded: string[] = [];
 
-  // Get aggregates for the user
   const query: any = {
     organizationId: new mongoose.Types.ObjectId(organizationId),
     userId:         new mongoose.Types.ObjectId(userId),
@@ -57,7 +52,6 @@ export async function evaluateBadges(
         });
         awarded.push(badge.id);
       } catch (err: any) {
-        // Duplicate key = already awarded; skip silently
         if (err.code !== 11000) console.error('[BADGES] Error awarding badge:', err);
       }
     }

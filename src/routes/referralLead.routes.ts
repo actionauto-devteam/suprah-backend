@@ -12,12 +12,10 @@ import {
 
 const router = express.Router();
 
-// ─── Public (no auth) ─────────────────────────────────────────────────────────
 router.get('/info/:code',             getPublicReferralInfo);
 router.post('/request',               submitReferralRequest);
 router.get('/call/:room/guest-token', getGuestCallToken);
 
-// ─── CRM protected ────────────────────────────────────────────────────────────
 router.get('/crm-leads',              crmAuth(), getReferralLeads);
 router.patch('/crm-leads/:id/status', crmAuth(), updateLeadStatus);
 router.post('/crm-leads/:id/convert', crmAuth(), convertLead);

@@ -9,12 +9,7 @@ import logger from '../utils/logger';
 import Lead from '../models/lead.model';
 import User from '../models/User.model';
 
-// ─── Customers CRUD ───────────────────────────────────────────────────────────
 
-/**
- * POST /api/customers
- * Create a new customer record manually — with duplicate prevention.
- */
 export const createCustomer = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
   const orgId = req.orgId as string;

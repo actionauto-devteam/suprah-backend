@@ -1,30 +1,22 @@
-// services/user.service.ts
 
 import User, { IUser } from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import bcrypt from 'bcryptjs';
 import { Document } from 'mongoose';
 
-// Helper type for lean documents
 type LeanUser = Omit<IUser, keyof Document> & { _id: string };
 
 class UserService {
-    /**
-     * Create a new user
-     */
     async createUser(userData: Partial<IUser>): Promise<IUser> {
         const { email, password, name, role } = userData;
 
-        // Check if user already exists
         const existingUser = await User.findOne({ email: email?.toLowerCase() });
         if (existingUser) {
             throw new ApiError(400, 'Email already registered');
         }
 
-        // Hash password
         const hashedPassword = await bcrypt.hash(password as string, 10);
 
-        // Create user
         const user = await User.create({
             email: email?.toLowerCase(),
             password: hashedPassword,
@@ -35,9 +27,6 @@ class UserService {
         return user;
     }
 
-    /**
-     * Get user by ID
-     */
     async getUserById(userId: string): Promise<IUser> {
         const user = await User.findById(userId).select('-password');
         
@@ -48,18 +37,11 @@ class UserService {
         return user;
     }
 
-    /**
-     * Get user by email
-     */
     async getUserByEmail(email: string): Promise<IUser | null> {
         return await User.findOne({ email: email.toLowerCase() });
     }
 
-    /**
-     * Update user
-     */
     async updateUser(userId: string, updateData: Partial<IUser>): Promise<IUser> {
-        // Don't allow updating sensitive fields through this method
         const { password, email, role, ...safeData } = updateData as any;
 
         const user = await User.findByIdAndUpdate(
@@ -75,9 +57,6 @@ class UserService {
         return user;
     }
 
-    /**
-     * Search users by name or email
-     */
     async searchUsers(
         query: string,
         limit: number = 10,
@@ -92,7 +71,6 @@ class UserService {
             ]
         };
 
-        // Exclude current user if specified
         if (excludeUserId) {
             searchCriteria._id = { $ne: excludeUserId };
         }
@@ -103,7 +81,6 @@ class UserService {
             .lean()
             .exec();
 
-        // Transform to plain objects with proper typing
         return users.map(user => ({
             _id: user._id.toString(),
             name: user.name,
@@ -113,9 +90,6 @@ class UserService {
         }));
     }
 
-    /**
-     * Update user password
-     */
     async updatePassword(userId: string, newPassword: string): Promise<void> {
         const hashedPassword = await bcrypt.hash(newPassword, 10);
 
@@ -124,9 +98,6 @@ class UserService {
         });
     }
 
-    /**
-     * Verify user password
-     */
     async verifyPassword(userId: string, password: string): Promise<boolean> {
         const user = await User.findById(userId).select('+password');
         
@@ -137,9 +108,6 @@ class UserService {
         return await bcrypt.compare(password, user.password);
     }
 
-    /**
-     * Delete user (soft delete by setting isActive to false)
-     */
     async deleteUser(userId: string): Promise<void> {
         const user = await User.findById(userId);
         
@@ -147,14 +115,10 @@ class UserService {
             throw new ApiError(404, 'User not found');
         }
 
-        // Soft delete
         user.isActive = false;
         await user.save();
     }
 
-    /**
-     * Get all users (admin only)
-     */
     async getAllUsers(options: {
         page?: number;
         limit?: number;
@@ -188,7 +152,6 @@ class UserService {
             User.countDocuments(query)
         ]);
 
-        // Transform to plain objects with proper typing
         const users = usersData.map(user => ({
             _id: user._id.toString(),
             name: user.name,

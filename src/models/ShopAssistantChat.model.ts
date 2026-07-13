@@ -13,13 +13,13 @@ export interface IShopPreferences {
 export interface IShopMessage {
   role: 'user' | 'assistant';
   content: string;
-  recommendations?: any[]; // snapshot of Recommendation[] shown at the time
+  recommendations?: any[];
   createdAt: Date;
 }
 
 export interface IShopAssistantChat extends Document {
   sessionId: string;
-  userId?: string | null; // optional customer id if authenticated (kept loose — not a hard ref)
+  userId?: string | null;
   preferences: IShopPreferences;
   messages: Types.DocumentArray<IShopMessage>;
   messageCount: number;

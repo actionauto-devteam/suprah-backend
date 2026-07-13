@@ -20,7 +20,6 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(400, 'You must belong to an organization to invite members');
     }
 
-    // specific check: only admin can invite
     const isAdmin = req.orgRole === 'admin' || req.user?.role === 'admin' || req.user?.role === 'super_admin';
     if (!isAdmin) {
         throw new ApiError(403, 'Only admins can invite members');
@@ -30,13 +29,11 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(401, 'User context missing');
     }
 
-    // Check if user is already a member
     const existingUser = await User.findOne({ email, organizationId });
     if (existingUser) {
         throw new ApiError(400, 'User is already a member of this organization');
     }
 
-    // Check if invitation already exists
     const existingInvite = await Invitation.findOne({
         email,
         organizationId,
@@ -45,21 +42,18 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
 
     let token = '';
     if (existingInvite) {
-        // Resend existing invite
         token = existingInvite.token;
-        // Extend expiration
-        existingInvite.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+        existingInvite.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
         await existingInvite.save();
     } else {
-        // Create new invite
         token = crypto.randomBytes(32).toString('hex');
         await Invitation.create({
             email,
             organizationId,
-            inviterId: req.user._id, // Save inviter
+            inviterId: req.user._id,
             role: role || 'member',
             token,
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             status: 'pending',
         });
 

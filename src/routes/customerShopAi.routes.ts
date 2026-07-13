@@ -4,7 +4,6 @@ import customerShopAi from "../controllers/customerShopAi.controller";
 
 const router = Router();
 
-// router.use(requireCustomerAuth);
 
 router.get("/session", customerShopAi.getSession);
 router.post("/chat", customerShopAi.chat);

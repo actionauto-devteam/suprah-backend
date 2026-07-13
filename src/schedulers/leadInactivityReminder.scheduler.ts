@@ -3,11 +3,11 @@ import Lead from '../models/lead.model';
 import NotificationService from '../services/notification.service';
 import logger from '../utils/logger';
 
-const CRON_SCHEDULE = process.env.LEAD_REMINDER_CRON || '0 */2 * * *'; // Every 2 hours
+const CRON_SCHEDULE = process.env.LEAD_REMINDER_CRON || '0 */2 * * *';
 const INACTIVITY_HOURS = parseInt(process.env.LEAD_INACTIVITY_HOURS || '4');
 const REMINDER_INTERVAL_HOURS = parseInt(process.env.LEAD_REMINDER_INTERVAL_HOURS || '6');
 const MAX_REMINDERS = parseInt(process.env.LEAD_MAX_REMINDERS || '3');
-const BATCH_LIMIT = 200; // Max leads processed per run to prevent memory spikes
+const BATCH_LIMIT = 200;
 
 interface ReminderStats {
   leadsScanned: number;
@@ -22,9 +22,7 @@ async function runLeadInactivityCheck(): Promise<ReminderStats> {
 
   const staleLeads = await Lead.find({
     $and: [
-      // Only active leads (not closed, not appointment set)
       { status: { $in: ['New', 'Contacted', 'Pending'] } },
-      // Customer last active more than INACTIVITY_HOURS ago (fallback: lead createdAt)
       {
         $or: [
           { 'followUp.lastCustomerActivityAt': { $lte: inactivityCutoff } },
@@ -32,21 +30,18 @@ async function runLeadInactivityCheck(): Promise<ReminderStats> {
           { followUp: null, createdAt: { $lte: inactivityCutoff } },
         ],
       },
-      // Rep has not responded since the inactivity cutoff (or never responded)
       {
         $or: [
           { 'followUp.lastRepResponseAt': null },
           { 'followUp.lastRepResponseAt': { $lte: inactivityCutoff } },
         ],
       },
-      // No reminder sent recently (or never sent)
       {
         $or: [
           { 'followUp.lastReminderSentAt': null },
           { 'followUp.lastReminderSentAt': { $lte: reminderIntervalCutoff } },
         ],
       },
-      // Under max reminders cap (null matches $lt in Mongo comparison order)
       {
         $or: [
           { 'followUp.reminderCount': { $lt: MAX_REMINDERS } },

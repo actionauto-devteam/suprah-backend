@@ -13,7 +13,6 @@ import { notifyOrgAdmins } from '../utils/safeNotification';
 import logger from '../utils/logger';
 import { getSocketIO } from '../utils/socketEmitter';
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 type MulterFiles = { [field: string]: Express.Multer.File[] } | undefined;
 
@@ -197,7 +196,6 @@ const getProductsForCrm = asyncHandler(async (req: Request, res: Response) => {
   }, 'Products fetched successfully'));
 });
 
-// ─── Customer (Portal) endpoints ──────────────────────────────────────────────
 
 const getProductsForCustomer = asyncHandler(async (req: Request, res: Response) => {
   const orgId = await resolveCustomerOrg(req);
@@ -236,13 +234,6 @@ const getProductById = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, product, 'Product fetched'));
 });
 
-// ─── Buy Now: direct purchase of a priced product ─────────────────────────────
-//
-// POST /api/aftermarket/:productId/buy-now   Body: { quantity? }
-//
-// Creates a ready-to-pay invoice (source: 'aftermarket') for a product that has
-// a price. The customer is sent straight to the Payments page / Stripe Checkout
-// — no cart, no CRM step. Unpriced products must go through the inquiry flow.
 
 const buyNow = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as any;
@@ -379,11 +370,12 @@ const getMyOrders = asyncHandler(async (req: Request, res: Response) => {
 const updateOrderStatus = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { status } = req.body as { status: string };
+  const orgId = req.crmUser?.organizationId?.toString() || req.orgId;
 
   const allowed = ['pending', 'paid', 'fulfilled', 'cancelled'];
   if (!allowed.includes(status)) throw new ApiError(400, `status must be one of: ${allowed.join(', ')}`);
 
-  const order = await AftermarketOrder.findById(id);
+  const order = await AftermarketOrder.findOne({ _id: id, organizationId: orgId });
   if (!order) throw new ApiError(404, 'Order not found');
 
   const prevStatus = order.status;

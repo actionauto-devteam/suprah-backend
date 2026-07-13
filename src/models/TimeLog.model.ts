@@ -46,7 +46,6 @@ const TimeLogSchema = new Schema<ITimeLog>(
   }
 );
 
-// Compound index for efficient queries
 TimeLogSchema.index({ userId: 1, timestamp: -1 });
 TimeLogSchema.index({ userId: 1, type: 1, timestamp: -1 });
 

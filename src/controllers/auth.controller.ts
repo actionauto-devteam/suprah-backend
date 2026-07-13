@@ -20,9 +20,6 @@ import { generateCrmToken } from '../middleware/crmAuth.middleware';
 
 
 class AuthController {
-    /**
-     * Register a new user
-     */
     register = asyncHandler(async (req: Request, res: Response) => {
         const validatedData = registerSchema.parse(req.body);
         const result = await authService.register(validatedData);
@@ -38,9 +35,6 @@ class AuthController {
         );
     });
 
-    /**
-     * Verify email with OTP
-     */
     verifyEmail = asyncHandler(async (req: Request, res: Response) => {
         const { email, otp } = verifyEmailSchema.parse(req.body);
         const result = await authService.verifyEmail(email, otp);
@@ -65,9 +59,6 @@ class AuthController {
         );
     });
 
-    /**
-     * Login
-     */
     login = asyncHandler(async (req: Request, res: Response) => {
         const { email, password } = loginSchema.parse(req.body);
         const result = await authService.login(email, password);
@@ -95,9 +86,6 @@ class AuthController {
         }, 'Login successful'));
     });
 
-    /**
-     * Register a new dealership
-     */
     registerDealership = asyncHandler(async (req: Request, res: Response) => {
         const validatedData = registerDealershipSchema.parse(req.body);
         const result = await authService.registerDealership(validatedData);
@@ -107,18 +95,12 @@ class AuthController {
         );
     });
 
-    /**
-     * Send OTP to legacy user
-     */
     sendUpgradeOTP = asyncHandler(async (req: Request, res: Response) => {
         const { email } = req.body;
         const result = await authService.sendUpgradeOTP(email);
         res.json(new ApiResponse(200, result, 'Verification code sent'));
     });
 
-    /**
-     * Complete legacy upgrade
-     */
     upgradeLegacyUser = asyncHandler(async (req: Request, res: Response) => {
         const { email, otp, newPassword } = req.body;
         const result = await authService.upgradeLegacyUser(email, otp, newPassword);
@@ -147,9 +129,6 @@ class AuthController {
         }, 'Account upgraded successfully'));
     });
 
-    /**
-     * Refresh Tokens
-     */
     refreshTokens = asyncHandler(async (req: Request, res: Response) => {
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
@@ -172,9 +151,6 @@ class AuthController {
         }, 'Tokens refreshed successfully'));
     });
 
-    /**
-     * Logout
-     */
     logout = asyncHandler(async (req: Request, res: Response) => {
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
         const user = req.user as any;
@@ -199,18 +175,12 @@ class AuthController {
         res.json(new ApiResponse(200, null, 'Logged out successfully'));
     });
 
-    /**
-     * Forgot Password
-     */
     forgotPassword = asyncHandler(async (req: Request, res: Response) => {
         const { email } = forgotPasswordSchema.parse(req.body);
         const result = await authService.sendForgotPasswordOTP(email);
         res.status(200).json(new ApiResponse(200, result, 'Reset code sent if account exists'));
     });
 
-    /**
-     * Reset Password
-     */
     resetPassword = asyncHandler(async (req: Request, res: Response) => {
         const { email, otp, newPassword } = resetPasswordSchema.parse(req.body);
         const result = await authService.resetPassword(email, otp, newPassword) as any;
@@ -229,12 +199,6 @@ class AuthController {
         res.status(200).json(new ApiResponse(200, result, 'Password reset successfully'));
     });
 
-    /**
-     * Handle OAuth Callback (Internal)
-     */
-    /**
-     * Resend verification OTP
-     */
     resendOTP = asyncHandler(async (req: Request, res: Response) => {
         const { email } = req.body;
         if (!email) throw new ApiError(400, 'Email is required');
@@ -247,7 +211,6 @@ class AuthController {
         const { role } = completeOnboardingSchema.parse(req.body);
         const result = await authService.completeOnboarding(req.user._id, role);
 
-        // Invalidate auth cache so the new onboarding status is picked up immediately
         userAuthCache.delete(req.user._id.toString());
 
         res.status(200).json(
@@ -260,13 +223,6 @@ class AuthController {
         return await authService.handleOAuthCallback(user);
     };
 
-    /**
-     * Issue a CRM token for a main-app user (SSO into SupraSpace / CRM).
-     *
-     * Routed through generateCrmToken so the token always carries `type: 'crm'`
-     * and uses the same secret chain as crmAuth + the SupraSpace socket.
-     * (Fixes the "Invalid CRM token type" socket error.)
-     */
     getCrmSsoToken = asyncHandler(async (req: Request, res: Response) => {
         const mainUser = (req as any).user;
         if (!mainUser?.email) throw new ApiError(401, 'Unauthorized');

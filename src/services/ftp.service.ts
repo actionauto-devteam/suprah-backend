@@ -33,13 +33,7 @@ export interface RawVehicleData {
     vdp_vin_url: string;
 }
 
-/**
- * Service to handle FTP operations with DealersCloud
- */
 export class FtpService {
-    /**
-     * Downloads the inventory file from FTP and returns a stream
-     */
     async getInventoryStream(): Promise<Readable> {
         const { host, user, password, file } = config.ftp;
 
@@ -55,10 +49,9 @@ export class FtpService {
                 host,
                 user,
                 password,
-                secure: false, // DealersCloud usually uses plain FTP or explicit TLS
+                secure: false,
             });
 
-            // Stream the file into memory/parser
             const stream = new Readable({
                 read() { },
             });

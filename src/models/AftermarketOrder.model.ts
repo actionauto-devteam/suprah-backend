@@ -2,20 +2,20 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IAftermarketOrderItem {
   productId: mongoose.Types.ObjectId;
-  name: string;        // snapshot at purchase time
-  price: number;       // snapshot at purchase time
+  name: string;
+  price: number;
   quantity: number;
 }
 
 export interface IAftermarketOrder extends Document {
   organizationId: mongoose.Types.ObjectId;
-  customerId: mongoose.Types.ObjectId; // User (customer) who placed it
+  customerId: mongoose.Types.ObjectId;
   items: IAftermarketOrderItem[];
   subtotal: number;
   total: number;
   status: 'pending' | 'paid' | 'fulfilled' | 'cancelled';
-  paymentMethod?: string; // filled in once payment is wired
-  paymentRef?: string;    // gateway reference
+  paymentMethod?: string;
+  paymentRef?: string;
   createdAt: Date;
   updatedAt: Date;
 }

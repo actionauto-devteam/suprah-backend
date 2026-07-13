@@ -20,15 +20,15 @@ export interface ICallAdmissionRequest {
 }
 
 export interface ICall extends Document {
-  meetingId: string;          // public id used by clients (uuid)
-  roomName: string;           // deterministic Jitsi room: conversation-{convId}-{ts}
+  meetingId: string;
+  roomName: string;
   conversationId: mongoose.Types.ObjectId;
   isStandaloneMeeting: boolean;
   initiatedBy: mongoose.Types.ObjectId;
   moderatorUserId: mongoose.Types.ObjectId;
   participants: ICallParticipant[];
-  callStatus: CallStatus;     // calling -> active -> ending -> ended (IDLE = no record)
-  isLive: boolean;            // true while calling/active — drives the unique guard
+  callStatus: CallStatus;
+  isLive: boolean;
   title?: string;
   scheduledAt?: Date | null;
   optionalMessage?: string;
@@ -36,13 +36,13 @@ export interface ICall extends Document {
   allowedDomain: string;
   approvedUsers: mongoose.Types.ObjectId[];
   admissionRequests: ICallAdmissionRequest[];
-  recordingAllowedUsers: mongoose.Types.ObjectId[]; // users granted recording permission by host
+  recordingAllowedUsers: mongoose.Types.ObjectId[];
   isRecording: boolean;
   recordingStartedAt: Date | null;
   startedAt: Date;
   endedAt?: Date | null;
-  duration: number;           // seconds, computed server-side at termination
-  systemMessageId?: mongoose.Types.ObjectId | null; // "Call ended" chat message
+  duration: number;
+  systemMessageId?: mongoose.Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -99,9 +99,6 @@ const CallSchema = new Schema<ICall>(
   { timestamps: true }
 );
 
-// At most one live call per conversation.
-// partialFilterExpression supports equality only, so we guard on the boolean
-// isLive rather than callStatus $in.
 CallSchema.index({ conversationId: 1 }, { unique: true, partialFilterExpression: { isLive: true } });
 
 export default mongoose.model<ICall>('Call', CallSchema);

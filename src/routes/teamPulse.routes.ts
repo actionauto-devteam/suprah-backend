@@ -18,11 +18,9 @@ const upload = multer({
 
 router.use(auth());
 
-// Members
 router.get('/members', teamPulseController.getMembers);
 router.patch('/members/:userId/employment-location', teamPulseController.setEmploymentLocationType);
 
-// Absences
 router.get('/absences',                          teamPulseController.getAbsences);
 router.post('/absences',                         teamPulseController.createAbsence);
 router.patch('/absences/:id',                    teamPulseController.updateAbsence);
@@ -31,7 +29,6 @@ router.patch('/absences/:id/approve',            teamPulseController.approveAbse
 router.patch('/absences/:id/reject',             teamPulseController.rejectAbsence);
 router.post('/absences/:id/proof', upload.array('files', 3), teamPulseController.uploadAbsenceProof);
 
-// Board notes
 router.get('/board',                             teamPulseController.getBoardNotes);
 router.post('/board',                            teamPulseController.createBoardNote);
 router.patch('/board/reorder',                   teamPulseController.reorderBoardNotes);
@@ -43,14 +40,11 @@ router.post('/board/:id/attachments', upload.array('images', 3), teamPulseContro
 router.get('/board/:id/reactions',               teamPulseController.getBoardNoteReactions);
 router.post('/board/:id/reactions',              teamPulseController.toggleBoardNoteReaction);
 
-// Leaderboard / Performance
 router.get('/leaderboard',                       teamPulseController.getLeaderboard);
 router.get('/performance',                       teamPulseController.getPerformanceStats);
 
-// Ping
 router.post('/ping/:userId',                     teamPulseController.pingMember);
 
-// Activity feed & break tracking
 router.get('/activity-feed',                     teamPulseController.getActivityFeed);
 router.post('/break/start',                      teamPulseController.startBreak);
 router.post('/break/end',                        teamPulseController.endBreak);

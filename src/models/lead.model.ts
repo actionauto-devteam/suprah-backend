@@ -1,14 +1,9 @@
-// Mongoose model for Leads (Inquiries)
-// Updated: Centralized ingestion via actionautoutah.dev@gmail.com
-// Added: channel detection (sms/email/adf/phone/web), parsedContent for clean ADF display
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ILead extends Document {
-  // Organization & User
   organizationId: mongoose.Types.ObjectId;
-  createdBy: mongoose.Types.ObjectId;  // User ID who synced/created the lead
+  createdBy: mongoose.Types.ObjectId;
 
-  // Contact Information
   firstName: string;
   lastName: string;
   email: string;
@@ -16,10 +11,8 @@ export interface ILead extends Document {
   senderEmail?: string;
   senderName?: string;
 
-  // Email Fields
   subject?: string;
   body?: string;
-  /** Clean, human-readable content (ADF parsed or cleaned email body) */
   parsedContent?: string;
   threadId?: string;
   messageId?: string;
@@ -27,11 +20,8 @@ export interface ILead extends Document {
   isPending?: boolean;
   labels?: string[];
 
-  // Communication Channel
-  /** Detected communication channel: email, sms, adf, phone, web */
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
 
-  // Lead Information
   source: string;
   status: 'New' | 'Contacted' | 'Pending' | 'Appointment Set' | 'Closed';
   vehicle: {
@@ -67,10 +57,8 @@ export interface ILead extends Document {
     }>;
   };
 
-  /** Whether this lead was ingested via the centralized account */
   centralIngestion?: boolean;
 
-  /** Audit trail of every status change, including who made it and why */
   statusHistory?: Array<{
     from: string;
     to: string;
@@ -84,7 +72,6 @@ export interface ILead extends Document {
 }
 
 const LeadSchema: Schema = new Schema({
-  // Organization & User - CRITICAL for data isolation
   organizationId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Organization',
@@ -96,7 +83,6 @@ const LeadSchema: Schema = new Schema({
     required: true
   },
 
-  // Contact Information
   firstName: { type: String, default: 'Unknown' },
   lastName: { type: String, default: '' },
   email: { type: String },
@@ -104,7 +90,6 @@ const LeadSchema: Schema = new Schema({
   senderEmail: { type: String },
   senderName: { type: String },
 
-  // Email Fields
   subject: { type: String },
   body: { type: String },
   parsedContent: { type: String },
@@ -114,7 +99,6 @@ const LeadSchema: Schema = new Schema({
   isPending: { type: Boolean, default: false },
   labels: [{ type: String }],
 
-  // Communication Channel
   channel: {
     type: String,
     enum: ['email', 'sms', 'adf', 'phone', 'web'],
@@ -122,7 +106,6 @@ const LeadSchema: Schema = new Schema({
     index: true
   },
 
-  // Lead Information
   source: { type: String, default: 'Email' },
   status: {
     type: String,
@@ -173,14 +156,10 @@ const LeadSchema: Schema = new Schema({
   }],
 }, { timestamps: true });
 
-// Index for efficient per-organization queries (used for pagination)
 LeadSchema.index({ organizationId: 1, createdAt: -1 });
 
-// Index for efficient per-user queries
 LeadSchema.index({ createdBy: 1, createdAt: -1 });
-// Index for channel-based filtering
 LeadSchema.index({ createdBy: 1, channel: 1, createdAt: -1 });
-// Index for unanswered inquiry reminder scans
 LeadSchema.index({ organizationId: 1, status: 1, 'followUp.lastCustomerActivityAt': 1 });
 
 export default mongoose.model<ILead>('Lead', LeadSchema);

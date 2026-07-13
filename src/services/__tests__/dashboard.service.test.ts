@@ -4,7 +4,6 @@ import Shipment from '../../models/Shipment.model';
 import DriverProfile from '../../models/DriverProfile.model';
 import AnalyticsAggregate from '../../models/AnalyticsAggregate.model';
 
-// Mock the models
 jest.mock('../../models/Shipment.model');
 jest.mock('../../models/DriverProfile.model');
 jest.mock('../../models/AnalyticsAggregate.model');
@@ -41,11 +40,8 @@ describe('DashboardService Intelligence Metrics', () => {
 
       (Shipment.find as jest.Mock).mockResolvedValue(mockShipments);
 
-      // We'll call a private method or the main metrics method
-      // For now, let's assume we'll implement these as static methods
       const margin = await (DashboardService as any).getLogisticsMargin(orgId);
 
-      // (1500-1200) + (2000-1600) = 300 + 400 = 700
       expect(margin).toBe(700);
     });
   });

@@ -1,10 +1,3 @@
-/**
- * ADF (Auto-lead Data Format) Parser Utility
- * 
- * Parses ADF/XML email content from leads@dealerscloud.com
- * and converts it into clean, structured, UI-readable content.
- * Also detects communication channel (SMS vs Email).
- */
 
 import { parseStringPromise } from 'xml2js';
 import logger from './logger';
@@ -32,17 +25,11 @@ export interface ParsedADFLead {
   provider: string;
   vendor: string;
   requestDate: string;
-  /** Clean, human-readable summary of the lead */
   parsedContent: string;
-  /** Communication channel: 'email' | 'sms' | 'adf' | 'phone' | 'web' */
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
-  /** Raw fields extracted for metadata */
   rawFields: Record<string, string>;
 }
 
-/**
- * Detect the communication channel from email content and metadata
- */
 export function detectChannel(
   subject: string = '',
   body: string = '',
@@ -54,7 +41,6 @@ export function detectChannel(
   const lowerFrom = from.toLowerCase();
   const lowerSource = source.toLowerCase();
 
-  // SMS indicators
   const smsKeywords = [
     'sms', 'text message', 'text lead', 'txt msg',
     'mobile message', 'text inquiry', 'sms lead',
@@ -66,7 +52,6 @@ export function detectChannel(
     return 'sms';
   }
 
-  // Phone/call indicators
   const phoneKeywords = [
     'phone call', 'inbound call', 'missed call', 'voicemail',
     'call lead', 'phone inquiry', 'callback',
@@ -77,7 +62,6 @@ export function detectChannel(
     return 'phone';
   }
 
-  // Web form indicators
   const webKeywords = [
     'web lead', 'website inquiry', 'online form', 'web form',
     'website lead', 'internet lead', 'online inquiry',
@@ -88,7 +72,6 @@ export function detectChannel(
     return 'web';
   }
 
-  // ADF indicators
   if (
     lowerBody.includes('<?adf') || lowerBody.includes('<adf>') ||
     lowerBody.includes('<prospect') || lowerFrom.includes('dealerscloud') ||
@@ -100,10 +83,6 @@ export function detectChannel(
   return 'email';
 }
 
-/**
- * Safely extract a text value from parsed XML nodes.
- * ADF fields can be strings, objects with `_` text, or arrays.
- */
 function extractText(node: any): string {
   if (node === null || node === undefined) return '';
   if (typeof node === 'string') return node.trim();
@@ -113,23 +92,18 @@ function extractText(node: any): string {
   }
 
   if (typeof node === 'object') {
-    // xml2js uses '_' for text nodes with attributes
     if (node._ !== undefined && node._ !== null) return String(node._).trim();
     
-    // Some other parsers or configurations might use '#text'
     if (node['#text'] !== undefined) return String(node['#text']).trim();
 
-    // If it's a simple object with one property that is a string, return that
     const keys = Object.keys(node);
     if (keys.length === 1 && typeof node[keys[0]] === 'string') {
       return node[keys[0]].trim();
     }
     
-    // If it has a 'number' or 'value' field (common for phone/odometer)
     if (node.number !== undefined) return extractText(node.number);
     if (node.value !== undefined) return extractText(node.value);
 
-    // Fallback: search for any string property if it's a small object
     for (const key of keys) {
       if (typeof node[key] === 'string' && !['type', 'time', 'part', 'status'].includes(key)) {
         return node[key].trim();
@@ -141,9 +115,6 @@ function extractText(node: any): string {
   return str === '[object Object]' ? '' : str;
 }
 
-/**
- * Check if a string contains ADF/XML content
- */
 export function isADFContent(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   const trimmed = text.trim();
@@ -156,14 +127,9 @@ export function isADFContent(text: string): boolean {
   );
 }
 
-/**
- * Extract ADF XML from an email body that may contain
- * mixed content (plain text + embedded XML)
- */
 export function extractADFFromBody(body: string): string | null {
   if (!body) return null;
 
-  // Try to find ADF XML block within the body
   const adfPatterns = [
     /(<\?adf[\s\S]*?<\/adf>)/i,
     /(<adf[\s\S]*?<\/adf>)/i,
@@ -174,7 +140,6 @@ export function extractADFFromBody(body: string): string | null {
     const match = body.match(pattern);
     if (match) {
       let xml = match[1];
-      // Ensure it has the ADF wrapper
       if (!xml.includes('<adf')) {
         xml = `<?adf version="1.0"?>\n<adf>\n${xml}\n</adf>`;
       }

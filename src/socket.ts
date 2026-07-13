@@ -14,7 +14,6 @@ interface AuthSocket extends Socket {
 }
 
 export const setupSocket = (io: Server) => {
-  // Authentication middleware
   io.use(async (socket: AuthSocket, next) => {
     try {
       const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.replace('Bearer ', '');
@@ -23,7 +22,6 @@ export const setupSocket = (io: Server) => {
         return next(new Error('Authentication error: No token provided'));
       }
 
-      // Verify token — try main app JWT first, then CRM JWT
       let decoded: any;
       try {
         decoded = jwt.verify(token, config.jwt.accessSecret) as any;
@@ -34,7 +32,7 @@ export const setupSocket = (io: Server) => {
         try {
           const CRM_SECRET = config.jwt.crmJwtSecret || 'crm-secret-key';
           decoded = jwt.verify(token, CRM_SECRET) as any;
-          socket.userId = decoded.id; // CRM tokens use 'id', not 'sub'
+          socket.userId = decoded.id;
           socket.role = 'crm';
         } catch (crmErr: any) {
           if (config.env === 'development') {

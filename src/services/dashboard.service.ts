@@ -12,22 +12,17 @@ import DriverProfile from '../models/DriverProfile.model';
 import AnalyticsAggregate from '../models/AnalyticsAggregate.model';
 
 export class DashboardService {
-    /**
-     * Get main dashboard metrics using $facet for high performance
-     */
     static async getDashboardMetrics(orgId: string, period: string = '1Y') {
-        const orgObjectId = orgId; // organizationId is stored as string in these models
+        const orgObjectId = orgId;
 
-        // Execute multiple aggregations in parallel
         const [stats, trajectory, activeReps, logistics, intelligence] = await Promise.all([
             this.getQuickStats(orgId),
             this.getRevenueTrajectory(orgId, period),
-            this.getActiveReps(orgId), // Lightweight rep list for header
+            this.getActiveReps(orgId),
             this.getLogisticsData(orgId),
             this.getDashboardIntelligence(orgId)
         ]);
 
-        // Get live payments
         const livePayments = await Payment.find({ organizationId: orgId })
             .sort({ createdAt: -1 })
             .limit(10)
@@ -36,16 +31,13 @@ export class DashboardService {
         return {
             stats,
             revenueTrajectory: trajectory,
-            activeReps, // Names & Avatars only
+            activeReps,
             logistics,
             intelligence,
             livePayments
         };
     }
 
-    /**
-     * Aggregate quick counts and sums
-     */
     private static async getQuickStats(orgId: string) {
         const results = await Quote.aggregate([
             {
@@ -85,8 +77,7 @@ export class DashboardService {
             status: { $ne: 'Sold' }
         });
 
-        // Mock average days on lot for now or calculate if possible
-        const avgDaysOnLot = 12; // Placeholder, but better than 0
+        const avgDaysOnLot = 12;
 
         const facet = results[0];
         return {
@@ -97,9 +88,6 @@ export class DashboardService {
         };
     }
 
-    /**
-     * Revenue trajectory based on Payment model
-     */
     private static async getRevenueTrajectory(orgId: string, period: string) {
         const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
         const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -153,7 +141,6 @@ export class DashboardService {
             groupBy = { $week: '$createdAt' };
         } else {
             dateRange.setFullYear(dateRange.getFullYear() - 1);
-            // Group by both year and month for 1Y to be safe and sortable
             groupBy = {
                 year: { $year: '$createdAt' },
                 month: { $month: '$createdAt' }
@@ -183,10 +170,9 @@ export class DashboardService {
             for (let i = 0; i < 7; i++) {
                 const d = new Date();
                 d.setDate(d.getDate() - (6 - i));
-                const dayIndex = d.getDay(); // 0-6
+                const dayIndex = d.getDay();
                 const dayName = dayNames[dayIndex];
 
-                // Find matching data (MongoDB $dayOfWeek is 1-7, Sun=1)
                 const match = data.find(item => item._id === dayIndex + 1);
                 results.push({ name: dayName, revenue: match ? match.revenue : 0 });
             }
@@ -194,7 +180,6 @@ export class DashboardService {
         }
 
         if (period === '1M') {
-            // For 1M, we use $week (0-53). Let's pad last 5 weeks to be safe.
             const results = [];
             const currentWeek = this.getWeekNumber(new Date());
             for (let i = 4; i >= 0; i--) {

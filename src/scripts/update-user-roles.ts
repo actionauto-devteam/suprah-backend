@@ -2,22 +2,12 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import path from 'path';
 
-// Load environment variables early
 dotenv.config({ path: path.join(__dirname, '../../../.env') });
 import config from '../config';
 
 import User from '../models/User.model';
 import Organization from '../models/Organization.model';
 
-/**
- * Migration Script: Update Legacy User Roles
- * 
- * If a user belongs to an Organization (has organizationId):
- * - If their organizationRole is 'admin' or 'owner', update their global role to 'admin'
- * - Otherwise, update their global role to 'employee'
- * 
- * Users without an organization will remain untouched (e.g., 'customer', 'driver').
- */
 async function run() {
     try {
         console.log(`Connecting to MongoDB at: ${config.mongoose.url}`);

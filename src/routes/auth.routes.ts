@@ -9,7 +9,6 @@ import { validateInviteLink, registerViaInvite } from '../controllers/customerIn
 
 const router = express.Router();
 
-// Public Routes with Rate Limiting
 router.post('/register', authLimiter, authController.register);
 router.post('/register-dealership', authLimiter, authController.registerDealership);
 router.post('/login', authLimiter, authController.login);
@@ -18,15 +17,12 @@ router.post('/resend-otp', otpLimiter, authController.resendOTP);
 router.post('/refresh-tokens', authController.refreshTokens);
 router.post('/logout', authController.logout);
 
-// Legacy Upgrade Flow
 router.post('/send-upgrade-otp', authController.sendUpgradeOTP);
 router.post('/upgrade-legacy', authController.upgradeLegacyUser);
 
-// Forgot Password
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);
 
-// Google OAuth
 router.get('/google', (req, res, next) => {
     const role = req.query.role as string;
     const redirect_url = req.query.redirect_url as string;

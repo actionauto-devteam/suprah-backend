@@ -24,7 +24,6 @@ export type ActivityType =
   | 'google_calendar_connected'
   | 'google_calendar_disconnected'
   | 'avatar_updated'
-  // Driver Actions
   | 'load_posted'
   | 'load_assigned'
   | 'load_updated'
@@ -32,12 +31,10 @@ export type ActivityType =
   | 'compliance_uploaded'
   | 'doc_verified'
   | 'payout_received'
-  // Customer Actions
   | 'referral_applied'
   | 'withdrawal_requested'
   | 'wallet_adjustment'
   | 'payment_completed'
-  // Admin Actions
   | 'user_suspended'
   | 'user_activated'
   | 'user_organization_changed'
@@ -139,11 +136,9 @@ const UserActivitySchema = new Schema(
   }
 );
 
-// Index for efficient queries
 UserActivitySchema.index({ userId: 1, createdAt: -1 });
 UserActivitySchema.index({ organizationId: 1, createdAt: -1 });
 
-// Auto-delete activities older than 14 days (Staging optimization)
 UserActivitySchema.index({ createdAt: 1 }, { expireAfterSeconds: 14 * 24 * 60 * 60 });
 
 const UserActivity = mongoose.model<IUserActivity>('UserActivity', UserActivitySchema);

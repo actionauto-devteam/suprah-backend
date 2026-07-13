@@ -1,14 +1,11 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-// ─── Line item ────────────────────────────────────────────────────────────────
-// A single billable row on an invoice. `kind` lets the UI group/colour rows and
-// lets the totals helper know how to treat the amount (discounts subtract).
 export interface IPaymentLineItem {
   label: string;
   kind: 'product' | 'fee' | 'charge' | 'discount';
   quantity: number;
-  unitPrice: number;   // per-unit, in major currency units (e.g. dollars)
-  lineTotal: number;   // quantity * unitPrice (negative for discounts)
+  unitPrice: number;
+  lineTotal: number;
 }
 
 export interface IPayment extends Document {
@@ -20,10 +17,9 @@ export interface IPayment extends Document {
   customerEmail: string;
   customerPhone?: string;
 
-  // Money. `amount` is the grand total that Stripe charges.
   amount: number;
   subtotal?: number;
-  taxRate?: number;     // percentage, e.g. 8.25
+  taxRate?: number;
   taxAmount?: number;
   lineItems?: IPaymentLineItem[];
 
@@ -31,7 +27,6 @@ export interface IPayment extends Document {
   description: string;
   status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'refunded' | 'cancelled';
 
-  // Where this invoice originated. Aftermarket invoices link back to product/inquiry.
   source?: 'manual' | 'aftermarket';
   aftermarketProductId?: mongoose.Types.ObjectId;
   inquiryId?: mongoose.Types.ObjectId;
@@ -58,9 +53,8 @@ export interface IPayment extends Document {
   updatedAt: Date;
 }
 
-// Separate counter collection for atomic invoice numbering
 const InvoiceCounterSchema = new Schema({
-  _id: { type: String, required: true },   // organizationId + year-month key
+  _id: { type: String, required: true },
   seq: { type: Number, default: 0 },
 });
 const InvoiceCounter = mongoose.models.InvoiceCounter || mongoose.model('InvoiceCounter', InvoiceCounterSchema);
@@ -129,11 +123,8 @@ const PaymentSchema: Schema<IPayment> = new Schema(
   { timestamps: true }
 );
 
-// Compound index for common org-level queries
 PaymentSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
-// Customer-portal lookups by email
 PaymentSchema.index({ customerEmail: 1, status: 1, createdAt: -1 });
-// Text index for server-side search
 PaymentSchema.index({
   customerName: 'text',
   customerEmail: 'text',
@@ -141,7 +132,6 @@ PaymentSchema.index({
   description: 'text',
 });
 
-// Atomic invoice numbering using findOneAndUpdate + $inc
 PaymentSchema.pre('save', async function (next) {
   if (this.invoiceNumber) return next();
 

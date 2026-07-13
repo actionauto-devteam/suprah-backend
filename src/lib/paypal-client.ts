@@ -1,8 +1,8 @@
 import axios from "axios";
 
 interface PayPalConfig {
-  apiUrl: string; // e.g. https://api-m.sandbox.paypal.com
-  webUrl: string; // e.g. https://www.sandbox.paypal.com
+  apiUrl: string;
+  webUrl: string;
   clientId: string;
   clientSecret: string;
   redirectUri: string;
@@ -23,7 +23,6 @@ export class PayPalClient {
     this.config = config;
   }
 
-  /** Scopes requested during the Connect-with-PayPal flow. */
   static SCOPES = [
     "openid",
     "email",
@@ -117,7 +116,7 @@ export class PayPalClient {
 
   /**
    * Transaction Search (Reporting API). Scope-gated:
-   * `https://uri.paypal.com/services/reporting/search/read`.
+   * `https:
    * Date window max 31 days per PayPal limits.
    */
   async getTransactions(

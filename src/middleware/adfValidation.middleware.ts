@@ -3,11 +3,6 @@ import crypto from 'crypto';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt } from '../utils/crypto';
 
-/**
- * Validates the HMAC-SHA256 signature of an incoming ADF webhook.
- * Expects the signature in the 'X-ADF-Signature' header.
- * Requires orgId to be present in query params or body.
- */
 export const validateAdfSignature = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const orgId = req.query.orgId || req.body.organizationId;
@@ -26,16 +21,11 @@ export const validateAdfSignature = async (req: Request, res: Response, next: Ne
             return res.status(401).json({ message: 'UNAUTHORIZED: No webhook configuration found for this organization' });
         }
 
-        // Decrypt the secret
         const secret = decrypt(config.webhookSecret);
 
-        // Get raw body
         let rawBody = (req as any).rawBody || req.body;
 
-        // If body-parser already converted string to object but we don't have rawBody, 
-        // we have a gap in our security validation for non-XML payloads.
         if (rawBody && typeof rawBody !== 'string') {
-            // Only try to stringify if it's an object, otherwise it's invalid
             if (typeof rawBody === 'object') {
                 rawBody = JSON.stringify(rawBody);
             } else {
@@ -47,11 +37,9 @@ export const validateAdfSignature = async (req: Request, res: Response, next: Ne
             return res.status(400).json({ message: 'INVALID_BODY: No valid string content found in request body' });
         }
 
-        // Compute expected signature
         const hmac = crypto.createHmac('sha256', secret);
         const expectedSignature = hmac.update(rawBody).digest('hex');
 
-        // Timing safe comparison to prevent timing attacks
         const providedBuffer = Buffer.from(signature as string, 'hex');
         const expectedBuffer = Buffer.from(expectedSignature, 'hex');
 

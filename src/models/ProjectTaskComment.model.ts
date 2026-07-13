@@ -1,16 +1,11 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import { IProjectAttachment, ProjectAttachmentSchema } from './ProjectTask.model';
 
-/**
- * Task comment — the per-task communication thread. Author identity is
- * snapshotted (name/avatar/role) the same way DayPulse does it, so list
- * rendering never needs a populate.
- */
 export interface IProjectTaskComment extends Document {
   organizationId: mongoose.Types.ObjectId;
-  groupId: mongoose.Types.ObjectId;        // denormalised for auth checks
+  groupId: mongoose.Types.ObjectId;
   taskId: mongoose.Types.ObjectId;
-  userId: mongoose.Types.ObjectId;         // CrmUser
+  userId: mongoose.Types.ObjectId;
   authorName: string;
   authorAvatar?: string | null;
   authorRole?: string;

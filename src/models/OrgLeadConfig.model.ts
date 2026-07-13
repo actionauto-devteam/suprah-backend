@@ -4,21 +4,17 @@ export interface IOrgLeadConfig extends Document {
     organizationId: mongoose.Types.ObjectId;
     connectedBy: mongoose.Types.ObjectId;
 
-    // Gmail OAuth Configuration
     gmailAddress: string;
-    accessToken: string;  // AES-256-GCM encrypted
-    refreshToken: string; // AES-256-GCM encrypted
+    accessToken: string;
+    refreshToken: string;
     expiryDate: number;
     gmailConnected: boolean;
     calendarConnected: boolean;
 
-    // Configuration for lead source filtering
-    leadSourceEmail: string; // e.g., 'leads@dealerscloud.com'
+    leadSourceEmail: string;
 
-    // ADF Webhook Security
-    webhookSecret: string; // AES-256-GCM encrypted HMAC secret
+    webhookSecret: string;
 
-    // Runtime / Status
     isActive: boolean;
     lastSyncAt?: Date;
     connectedAt: Date;
@@ -51,6 +47,5 @@ const OrgLeadConfigSchema: Schema = new Schema({
     connectedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
-// OrganizationId unique index is already defined in the field definition above
 
 export default mongoose.model<IOrgLeadConfig>('OrgLeadConfig', OrgLeadConfigSchema);

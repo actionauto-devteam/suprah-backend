@@ -70,7 +70,6 @@ interface ReferralData {
 }
 
 export const notificationTemplates = {
-  // ==================== QUOTES ====================
   quote_created: (data: QuoteData) => ({
     title: 'New Quote Created',
     message: `Quote created for ${data.customerName}${data.vehicleName ? ` - ${data.vehicleName}` : ''}${data.rate ? ` ($${data.rate})` : ''}`,
@@ -96,7 +95,6 @@ export const notificationTemplates = {
     message: `${data.customerName} has accepted the quote${data.vehicleName ? ` for ${data.vehicleName}` : ''}!`,
   }),
 
-  // ==================== SHIPMENTS ====================
   shipment_created: (data: ShipmentData) => ({
     title: 'New Shipment Created',
     message: `Shipment ${data.trackingNumber} created for ${data.customerName}`,
@@ -276,7 +274,6 @@ export const notificationTemplates = {
     message: `Your payout of $${data.amount.toFixed(2)} has been processed${data.trackingNumber ? ` for shipment ${data.trackingNumber}` : ''}`,
   }),
 
-  // ==================== PAYMENTS ====================
   payment_received: (data: PaymentData) => ({
     title: 'Payment Received',
     message: `Payment of $${data.amount.toFixed(2)} received${data.customerName ? ` from ${data.customerName}` : ''}${data.trackingNumber ? ` for ${data.trackingNumber}` : ''}`,
@@ -344,7 +341,6 @@ export const notificationTemplates = {
     message: `New login${data.device ? ` from ${data.device}` : ''}${data.location ? ` in ${data.location}` : ''}`,
   }),
 
-  // ==================== SYSTEM & GENERAL ====================
   system_announcement: (data: { title: string; message: string }) => ({
     title: data.title,
     message: data.message,

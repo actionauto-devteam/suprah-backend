@@ -20,18 +20,12 @@ import {
     calculateETA
 } from '../utils/calculations';
 
-const QUOTE_CACHE_TTL = 60 * 5; // 5 minutes
+const QUOTE_CACHE_TTL = 60 * 5;
 
-/**
- * Helper to safely get user ID from request
- */
 const getUserId = (req: Request): string | undefined => {
     return (req.user as IUser)?._id?.toString();
 };
 
-/**
- * Create a new shipping quote
- */
 const createQuote = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const {

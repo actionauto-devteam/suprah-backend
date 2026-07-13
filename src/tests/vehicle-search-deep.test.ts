@@ -10,10 +10,8 @@ describeIfAtlas('Vehicle Atlas Search Deep Diagnosis', () => {
     beforeAll(async () => {
         await connectDB();
         
-        // Check Collection Name
         console.log('Mongoose Collection Name:', Vehicle.collection.name);
         
-        // Insert a very standard record
         await Vehicle.create({
             vin: 'DIAGVIN' + Date.now(),
             year: 2024,
@@ -39,7 +37,6 @@ describeIfAtlas('Vehicle Atlas Search Deep Diagnosis', () => {
     });
 
     test('DEEP_DIAG: Try empty search with orgId filter in engine', async () => {
-        // If this returns 1, then the index name and OrgId mapping are correct.
         const pipeline = [
             {
                 $search: {

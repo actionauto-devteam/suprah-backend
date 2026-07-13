@@ -8,7 +8,6 @@ const connectDB = async () => {
     await mongoose.connect(config.mongoose.url);
     logger.info('MongoDB Connected successfully');
 
-    // Auto-seed CRM users into database on server start
     if (process.env.NODE_ENV !== 'test') {
       await seedCrmUsers();
     }

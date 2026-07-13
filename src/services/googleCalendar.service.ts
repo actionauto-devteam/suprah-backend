@@ -17,10 +17,9 @@ interface GoogleTokens {
   token_type?: string;
 }
 
-const MAX_PAGES = 5; // 5 × 2500 = 12,500 events — more than enough for a rolling 9-month window
+const MAX_PAGES = 5;
 
 class GoogleCalendarService {
-  // ─── OAuth ─────────────────────────────────────────────────────────────────
 
   private createOAuthClient() {
     return new google.auth.OAuth2(

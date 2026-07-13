@@ -3,7 +3,6 @@ import pinoHttp from 'pino-http';
 import path from 'path';
 import dotenv from 'dotenv';
 
-// Ensure .env is loaded before configuring the logger
 dotenv.config();
 
 const env = process.env.NODE_ENV || 'development';
@@ -14,16 +13,13 @@ const logLevel = (isDev || isTest) ? 'debug' : 'info';
 const logDir = path.join(process.cwd(), 'logs');
 const logFile = path.join(logDir, 'app.log');
 
-// Ensure log directory exists
 const fs = require('fs');
 if (!fs.existsSync(logDir)) {
   fs.mkdirSync(logDir, { recursive: true });
 }
 
-// Define logger variable
 let logger: pino.Logger;
 
-// Custom dev-stream for MongoDB ingestion (uses model directly to avoid worker overhead in dev)
 const mongoDevStream = {
   write: (chunk: string) => {
     try {
@@ -42,12 +38,11 @@ const mongoDevStream = {
           env: logData.env || process.env.NODE_ENV,
         }).catch((e: any) => console.error('[Mongo-Log-Dev] Error:', e));
       }
-    } catch (e) { /* Ignore parsing errors for non-JSON chunks */ }
+    } catch (e) {  }
   }
 };
 
 if (isDev) {
-  // In development, combine formatted terminal output with file logging + MongoDB
   let terminalStream;
   try {
     terminalStream = require('pino-pretty')({
@@ -56,7 +51,6 @@ if (isDev) {
       translateTime: 'SYS:standard',
     });
   } catch (e) {
-    // If pino-pretty is not available (e.g., inside basic Docker container), fallback to stdout
     terminalStream = process.stdout;
   }
   
@@ -87,17 +81,13 @@ if (isDev) {
     ])
   );
 } else if (isTest) {
-  // In test environment, use a silent logger to keep output clean and avoid worker conflicts
   logger = pino({ level: 'silent' });
 } else {
-  // In production, we decouple streams to prevent one (e.g., MongoDB) from blocking the others (e.g., Docker logs)
   const streams = [
-    // 1. Immediate Stdout: Zero worker overhead for instant Docker pulse
     {
       stream: pino.destination({ dest: 1, sync: false }),
       level: 'info',
     },
-    // 2. Rolling File: Asynchronous worker for long-term audit trail
     {
       stream: pino.transport({
         target: 'pino-roll',
@@ -110,7 +100,6 @@ if (isDev) {
       }),
       level: 'info',
     },
-    // 3. MongoDB Cloud Log: Dedicated worker for the Admin Dashboard
     {
       stream: pino.transport({
         target: path.join(__dirname, `pino-mongodb-transport${__filename.endsWith('.ts') ? '.ts' : '.js'}`),

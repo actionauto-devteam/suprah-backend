@@ -6,9 +6,6 @@ export const registerSchema = z.object({
   password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.enum(["customer", "driver", "dealership"]).optional(),
   inviteToken: z.string().optional(),
-  // Dealership the customer is signing up under. Either may be supplied;
-  // the auth service validates/resolves them (id first, then slug, then
-  // falls back to the single org if only one exists).
   organizationId: z
     .string()
     .regex(/^[a-f\d]{24}$/i, "Invalid organization id")

@@ -4,6 +4,7 @@ import * as webauthnService from '../services/webauthn.service';
 import * as sshKeyService from '../services/sshKey.service';
 import * as sshAuthService from '../services/sshAuth.service';
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
+import CrmUser from '../models/CrmUser.model';
 
 function getIp(req: Request): string {
   return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
@@ -13,9 +14,6 @@ function getUserAgent(req: Request): string {
   return (req.headers['user-agent'] as string) || '';
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  WebAuthn – Registration
-// ══════════════════════════════════════════════════════════════════════════════
 
 export async function getRegistrationOptions(req: Request, res: Response, next: NextFunction) {
   try {
@@ -55,9 +53,6 @@ export async function verifyRegistration(req: Request, res: Response, next: Next
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  WebAuthn – Authentication (Public)
-// ══════════════════════════════════════════════════════════════════════════════
 
 export async function getAuthenticationOptions(req: Request, res: Response, next: NextFunction) {
   try {
@@ -107,15 +102,7 @@ export async function verifyAuthentication(req: Request, res: Response, next: Ne
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  SSH Key Login (Public – challenge-sign flow)
-// ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * POST /api/crm/biometric/ssh/challenge
- * Body: { username }
- * Returns: { challenge, storeKey }
- */
 export async function getSshChallenge(req: Request, res: Response, next: NextFunction) {
   try {
     const { username } = req.body;
@@ -131,11 +118,6 @@ export async function getSshChallenge(req: Request, res: Response, next: NextFun
   }
 }
 
-/**
- * POST /api/crm/biometric/ssh/verify
- * Body: { username, storeKey, signature }
- * Returns: { token, user, authMethod }
- */
 export async function verifySshLogin(req: Request, res: Response, next: NextFunction) {
   try {
     const { username, storeKey, signature } = req.body;
@@ -158,9 +140,6 @@ export async function verifySshLogin(req: Request, res: Response, next: NextFunc
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Credential Management
-// ══════════════════════════════════════════════════════════════════════════════
 
 export async function listCredentials(req: Request, res: Response, next: NextFunction) {
   try {
@@ -206,9 +185,6 @@ export async function updateCredential(req: Request, res: Response, next: NextFu
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  SSH Key Management
-// ══════════════════════════════════════════════════════════════════════════════
 
 export async function listSshKeys(req: Request, res: Response, next: NextFunction) {
   try {
@@ -270,9 +246,6 @@ export async function getAuthorizedKeys(req: Request, res: Response, next: NextF
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Audit Logs
-// ══════════════════════════════════════════════════════════════════════════════
 
 export async function getAuditLogs(req: Request, res: Response, next: NextFunction) {
   try {
@@ -284,9 +257,16 @@ export async function getAuditLogs(req: Request, res: Response, next: NextFuncti
     }
 
     const { userId, event, limit = 50, page = 1 } = req.query;
-    const filter: any = {};
-    if (userId) filter.userId = userId;
-    if (event) filter.event = event;
+
+    const orgUsers = await CrmUser.find({ organizationId: user.organizationId }).select('_id').lean();
+    const orgUserIds = orgUsers.map((u) => u._id.toString());
+
+    if (userId && !orgUserIds.includes(String(userId))) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const filter: any = { userId: userId ? String(userId) : { $in: orgUserIds } };
+    if (event && typeof event === 'string') filter.event = event;
 
     const skip = (Number(page) - 1) * Number(limit);
     const [logs, total] = await Promise.all([

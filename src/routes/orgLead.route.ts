@@ -4,14 +4,8 @@ import orgLeadController from '../controllers/orgLead.controller';
 
 const router = express.Router();
 
-/**
- * Public Callback (Google redirects here)
- * Note: auth() is not applied here because Google doesn't send our Bearer token.
- * Identification is handled via the 'state' parameter (orgId).
- */
 router.get('/callback', orgLeadController.handleCallback);
 
-// --- Protected Routes ---
 router.use(auth());
 
 router.get('/auth', orgLeadController.initiateAuth);

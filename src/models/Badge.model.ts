@@ -4,7 +4,7 @@ export interface IBadgeDefinition {
   id: string;
   name: string;
   description: string;
-  icon: string;       // emoji or icon key
+  icon: string;
   tier: 'bronze' | 'silver' | 'gold' | 'platinum';
   condition: {
     metric: string;

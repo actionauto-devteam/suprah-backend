@@ -9,7 +9,6 @@ const EXCLUDED_PATH_PREFIXES = [
   "/api/profile/activities",
 ];
 
-// GET requests are excluded — viewing pages/notifications is not worth logging
 const EXCLUDED_METHODS = new Set(["GET", "OPTIONS", "HEAD"]);
 
 function normalizePath(pathname: string) {

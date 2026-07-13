@@ -12,7 +12,6 @@ const SUPRA_SPACE_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const SUPRA_SPACE_MAX_VIDEO_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const SUPRA_SPACE_VIDEO_EXTENSIONS = /\.(mp4|mov|webm|m4v|avi|mkv|wmv|flv|3gp|mpeg|mpg|ogv)$/i;
 
-// ─── Multer: general file upload ─────────────────────────────────────────────
 
 const upload = multer({
   storage: multer.memoryStorage(),

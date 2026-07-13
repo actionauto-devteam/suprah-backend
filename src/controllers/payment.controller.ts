@@ -19,7 +19,6 @@ const stripe = new Stripe(config.stripe.secretKey, {
   apiVersion: '2026-01-28.clover',
 });
 
-// Base URL the customer portal is served from — used for Stripe Checkout redirects.
 const CUSTOMER_APP_URL =
   process.env.CUSTOMER_APP_URL ||
   process.env.CLIENT_URL ||
@@ -32,12 +31,7 @@ const getUserId = (req: Request): string => {
   return userId;
 };
 
-// ─── Shared success side-effects (sockets + aftermarket sync + loyalty) ───────
-//
-// Called once a payment flips to "succeeded" via any path (Checkout webhook,
-// PaymentIntent webhook, or manual/customer confirm). Best-effort & idempotent.
 async function broadcastPaymentSuccess(payment: any) {
-  // 1) CRM dashboards (org room on the main socket)
   try {
     const io = getSocketIO();
     if (io && payment.organizationId) {

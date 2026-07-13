@@ -9,13 +9,11 @@ export interface IChatMessage extends Document {
   authorName: string;
   authorRole: string;
 
-  // Threaded replies — points at the parent message being replied to.
   replyTo?: mongoose.Types.ObjectId;
 
   isEdited: boolean;
   editedAt?: Date;
 
-  // Soft delete so reply chains stay intact in the UI.
   isDeleted: boolean;
   deletedAt?: Date;
 
@@ -81,7 +79,6 @@ const ChatMessageSchema = new Schema<IChatMessage>(
   },
 );
 
-// Primary feed query: newest messages for an org.
 ChatMessageSchema.index({ organizationId: 1, createdAt: -1 });
 
 const ChatMessage = mongoose.model<IChatMessage>(

@@ -8,12 +8,6 @@ import { getIO as getFeedIO } from "../socket/feedSocket";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import logger from "../utils/logger";
 
-// Cron schedule: override via MILESTONE_CRON_SCHEDULE env var.
-// Default: 8 AM server time.
-// Examples:
-//   "0 8 * * *"  - 8 AM server time
-//   "0 0 * * *"  - midnight UTC (= 8 AM PHT / UTC+8)
-//   "0 15 * * *" - 3 PM UTC (= 8 AM MST / UTC-7, standard time)
 const CRON_SCHEDULE = process.env.MILESTONE_CRON_SCHEDULE || "0 8 * * *";
 const GENERAL_CHAT_GREETINGS_ENABLED = process.env.MILESTONE_GENERAL_GREETINGS_ENABLED === "true";
 const SYSTEM_SENDER_NAME = "Action Auto Team";

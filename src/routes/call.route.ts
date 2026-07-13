@@ -4,7 +4,6 @@ import crmAuth from '../middleware/crmAuth.middleware';
 
 const router = express.Router();
 
-// All call routes require CRM authentication (same gate as SupraSpace).
 router.use(crmAuth());
 
 router.get('/my-active-call', callController.getMyActiveCall);

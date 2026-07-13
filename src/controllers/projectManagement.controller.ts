@@ -17,13 +17,11 @@ import ProjectNotification, { ProjectNotificationType } from '../models/ProjectN
 import { BucketType, storageService } from '../services/storage.service';
 import { getSocketIO } from '../utils/socketEmitter';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const MEMBER_SEARCH_LIMIT = 20;
 const COMMENT_PAGE_LIMIT = 50;
-const R2_FOLDER = 'project-attachments'; // same private R2 bucket flow as DayPulse
+const R2_FOLDER = 'project-attachments';
 
-// ─── Small utilities ──────────────────────────────────────────────────────────
 
 const oid = (id: string) => new mongoose.Types.ObjectId(id);
 
@@ -35,10 +33,6 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Sign private-bucket attachment keys into time-limited URLs before sending
- * to the client. Identical approach to DayPulse.signAttachments.
- */
 async function signAttachments<T extends { attachments?: IProjectAttachment[] }>(doc: T): Promise<T> {
   if (!Array.isArray(doc.attachments) || doc.attachments.length === 0) return doc;
 
@@ -53,10 +47,6 @@ async function signAttachments<T extends { attachments?: IProjectAttachment[] }>
   return doc;
 }
 
-/**
- * Upload multer files to R2 (private bucket) and return the attachment
- * records plus the raw keys (for rollback on failure).
- */
 async function uploadAttachments(
   files: Express.Multer.File[],
   uploadedBy: mongoose.Types.ObjectId,
@@ -91,13 +81,7 @@ async function rollbackUploads(keys: string[]) {
   ));
 }
 
-// ─── Access control ───────────────────────────────────────────────────────────
 
-/**
- * Central gate for the whole module. Loads a live group scoped to the actor's
- * organization AND verifies the actor is a member. Non-members receive a 404
- * (not 403) so that group existence is never leaked to outsiders.
- */
 async function loadGroupForMember(groupId: string, actor: any): Promise<IProjectGroup> {
   assertObjectId(groupId, 'group ID');
   if (!actor.organizationId) {
@@ -114,18 +98,12 @@ async function loadGroupForMember(groupId: string, actor: any): Promise<IProject
 
   const actorId = actor._id.toString();
   const isMember = group.memberIds.some((m) => m.toString() === actorId);
-  if (!isMember) throw new ApiError(404, 'Project group not found'); // deliberate: don't reveal existence
+  if (!isMember) throw new ApiError(404, 'Project group not found');
 
   return group;
 }
 
-// ─── Real-time + notifications ────────────────────────────────────────────────
 
-/**
- * Emit an event to each group member's private socket room (`user:{id}`).
- * Uses per-user rooms (already established by the tray/CRM socket handshake)
- * instead of an org-wide room, so events never reach non-members.
- */
 function emitToMembers(memberIds: mongoose.Types.ObjectId[], event: string, payload: unknown) {
   try {
     const io = getSocketIO();

@@ -9,7 +9,6 @@ export const setupCORS = (app: Application): void => {
 
   const corsOptions: cors.CorsOptions = {
     origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, curl, Postman)
       if (!origin) {
         return callback(null, true);
       }

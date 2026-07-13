@@ -3,12 +3,12 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface ICustomerInviteToken extends Document {
   shortCode: string;
   organizationId: mongoose.Types.ObjectId;
-  createdBy: mongoose.Types.ObjectId; // CrmUser who generated the link
+  createdBy: mongoose.Types.ObjectId;
   expiresAt: Date;
   isUsed: boolean;
-  multiUse: boolean; // if true, link can be used by multiple users until it expires
+  multiUse: boolean;
   usedAt?: Date;
-  usedBy?: mongoose.Types.ObjectId; // User who registered via this link
+  usedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
 }
 

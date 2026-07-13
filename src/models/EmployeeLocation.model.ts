@@ -11,10 +11,6 @@ export interface IEmployeeLocation extends Document {
   userId: mongoose.Types.ObjectId;
   userModel: "User" | "CrmUser";
   organizationId: mongoose.Types.ObjectId;
-  // Denormalized snapshot of the user's own profile, refreshed on every sharing-state
-  // write. Display always prefers this over a live populate — decouples "who is this pin"
-  // from refPath/populate timing so a stale/failed populate can never surface as a wrong
-  // or generic name on the live map.
   userName?: string;
   userAvatar?: string;
   jobTitle?: string;
@@ -38,14 +34,8 @@ export interface IEmployeeLocation extends Document {
   drivingSessionId?: mongoose.Types.ObjectId;
   lastSeenAt: Date;
   sharingSince?: Date;
-  // Anchor point for "has this person basically stayed put" detection — reset whenever a ping
-  // lands farther than STATIONARY_RADIUS_M away from it. Lets the UI explain GPS jitter ("still
-  // at the same spot, the pin wobble is just noise") instead of it reading as erratic movement.
   stationaryAnchor?: { lat: number; lng: number };
   stationarySince?: Date;
-  // Tracks when the last "stationary too long" notification was sent for this anchor period.
-  // Reset to null whenever stationaryAnchor resets (employee moves), so each new stationary
-  // period starts fresh and won't re-fire until the threshold is crossed again.
   stationaryNotifiedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -96,16 +86,10 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
       default: "online",
     },
     deviceType: { type: String, enum: ["mobile", "desktop"] },
-    // Real physical connection type, from the Network Information API's `connection.type` —
-    // reliable when a browser exposes it, but many don't (esp. desktop Chrome), hence the
-    // separate `effectiveType` fallback below rather than conflating the two.
     connectionType: {
       type: String,
       enum: ["wifi", "ethernet", "cellular", "bluetooth", "wimax", "none"],
     },
-    // Speed-quality tier from `connection.effectiveType` (RTT/downlink heuristic) — its labels
-    // ("4g" etc.) describe bandwidth class, NOT an actual cellular radio, so this must never be
-    // presented as "on 4G" for a device whose connectionType isn't itself cellular.
     effectiveType: {
       type: String,
       enum: ["4g", "3g", "2g", "slow-2g"],

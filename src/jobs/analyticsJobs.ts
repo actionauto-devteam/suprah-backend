@@ -4,9 +4,6 @@ import { rebuildRanks } from '../services/activityLogger.service';
 import { evaluateBadges } from '../services/badge.service';
 import { getPeriodKey } from '../services/kpiEngine.service';
 
-/**
- * Rebuild daily ranks — runs every hour at :05
- */
 export const dailyRankJob = cron.schedule('5 * * * *', async () => {
   console.log('[CRON] Rebuilding daily ranks...');
   try {

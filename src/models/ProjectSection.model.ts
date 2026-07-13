@@ -1,18 +1,10 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-/**
- * Section — second level of the hierarchy. Lives inside a Project Group and
- * contains Folder Groups. Sections typically represent departments, phases,
- * or work categories.
- *
- * `order` exists so future Kanban / drag-to-reorder views can persist manual
- * ordering without a schema change.
- */
 export interface IProjectSection extends Document {
   organizationId: mongoose.Types.ObjectId;
-  groupId: mongoose.Types.ObjectId;        // ProjectGroup
+  groupId: mongoose.Types.ObjectId;
   name: string;
-  createdBy: mongoose.Types.ObjectId;      // CrmUser
+  createdBy: mongoose.Types.ObjectId;
   order: number;
   deletedAt?: Date | null;
   createdAt: Date;

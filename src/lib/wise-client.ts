@@ -21,9 +21,6 @@ export class WiseClient {
     });
   }
 
-  /**
-   * Exchange authorization code for access token
-   */
   async exchangeCode(code: string) {
     const response = await axios.post(
       `${this.config.apiUrl}/oauth/token`,

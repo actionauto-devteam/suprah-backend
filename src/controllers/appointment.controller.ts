@@ -16,9 +16,6 @@ import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
 import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
 
-/**
- * Create a new appointment (with customer booking support)
- */
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
@@ -37,7 +34,6 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    // Atomically consume the slot if the customer selected one
     let slotConsumed = false;
     if (req.body.slotId) {
         const slot = await ServiceSlot.findOneAndUpdate(
@@ -68,7 +64,6 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if (orgId) {
-        // Real-time push: new booking appears in CRM without reload
         emitToOrg(orgId, 'appointment:new', {
             _id: appointment._id?.toString(),
             title: appointment.title,
@@ -76,7 +71,6 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
             status: appointment.status,
             slotId: req.body.slotId,
         });
-        // If a slot was consumed, push updated availability to all listeners
         if (slotConsumed && req.body.slotId) {
             const updatedSlot = await ServiceSlot.findById(req.body.slotId).lean();
             if (updatedSlot) {
@@ -116,9 +110,6 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
-/**
- * Get all appointments for the logged-in user
- */
 const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { status, entryType, startDate, endDate, limit, skip, includeCustomerBookings } = req.query;
@@ -140,9 +131,6 @@ const getAppointments = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
-/**
- * Get customer bookings only
- */
 const getCustomerBookings = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
@@ -163,9 +151,6 @@ const getCustomerBookings = asyncHandler(async (req: Request, res: Response) => 
     );
 });
 
-/**
- * Get customer booking history
- */
 const getCustomerHistory = asyncHandler(async (req: Request, res: Response) => {
     const { email, phone, firstName, lastName } = req.query;
 
@@ -183,9 +168,6 @@ const getCustomerHistory = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
-/**
- * Get booking statistics for a specific date
- */
 const getDateStatistics = asyncHandler(async (req: Request, res: Response) => {
     const { date } = req.query;
     const orgId = req.orgId as string;
@@ -206,9 +188,6 @@ const getDateStatistics = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
-/**
- * Sync with Google Calendar
- */
 const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const orgId = req.orgId as string;
@@ -222,9 +201,6 @@ const syncWithGoogleCalendar = asyncHandler(async (req: Request, res: Response) 
     logger.info({ userId, orgId }, 'Google Calendar sync completed');
 });
 
-/**
- * Get a specific appointment by ID (Modified to populate multi-vehicle array)
- */
 const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const orgId = req.orgId as string;
@@ -257,9 +233,6 @@ const getAppointmentById = asyncHandler(async (req: Request, res: Response) => {
     );
 });
 
-/**
- * Update an appointment
- */
 const updateAppointment = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id.toString();
     const { id } = req.params;

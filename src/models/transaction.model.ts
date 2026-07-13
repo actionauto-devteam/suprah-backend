@@ -8,16 +8,15 @@ export interface ITransaction extends Document {
     amount: number;
     note: string;
 
-    // Withdrawal-specific fields
     withdrawalMethod?: {
         type: 'venmo' | 'paypal' | 'bank_transfer' | 'check';
-        details: string; // The handle, routing number, etc.
+        details: string;
     };
 
-    referralId?: mongoose.Types.ObjectId; // Link back to the generating referral if applicable
+    referralId?: mongoose.Types.ObjectId;
     quoteId?: mongoose.Types.ObjectId;
     loadId?: mongoose.Types.ObjectId;
-    paymentId?: mongoose.Types.ObjectId; // Link to the specific payment that triggered this
+    paymentId?: mongoose.Types.ObjectId;
     createdAt: Date;
     updatedAt: Date;
 }

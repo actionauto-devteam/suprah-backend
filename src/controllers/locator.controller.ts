@@ -67,8 +67,6 @@ function getLocatorActor(req: Request): LocatorActor {
     };
 }
 
-/** Snapshot fields written onto every EmployeeLocation mutation so the live map's display
- * name/avatar never depends on a live populate of the userId ref resolving correctly. */
 function actorSnapshot(actor: LocatorActor) {
     return {
         userName: actor.name,
@@ -868,7 +866,7 @@ const getLocationHistory = asyncHandler(async (req: Request, res: Response) => {
         if (to) query.recordedAt.$lte = new Date(to);
     }
 
-    const history = await LocationHistory.find(query).sort({ recordedAt: -1 }).limit(2000).lean();
+    const history = await LocationHistory.find(query).sort({ recordedAt: -1 }).limit(10000).lean();
     history.reverse();
     res.json(new ApiResponse(200, history, 'Location history fetched'));
 });

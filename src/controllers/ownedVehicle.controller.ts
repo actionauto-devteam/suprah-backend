@@ -7,7 +7,6 @@ import axios from "axios";
 import Vehicle from "../models/Vehicle.model";
 import storageService from "../services/storage.service";
 
-// Create vehicle
 export const addOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
@@ -58,7 +57,6 @@ export const addOwnedVehicle = asyncHandler(
   },
 );
 
-// Get all vehicles for user
 export const getOwnedVehicles = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
@@ -81,7 +79,6 @@ export const getOwnedVehicles = asyncHandler(
   },
 );
 
-// Update mileage
 export const updateOwnedVehicleMileage = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
@@ -119,7 +116,6 @@ export const updateOwnedVehicleMileage = asyncHandler(
   },
 );
 
-// Decode VIN via NHTSA API
 export const decodeVin = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user?._id;
   if (!userId) {

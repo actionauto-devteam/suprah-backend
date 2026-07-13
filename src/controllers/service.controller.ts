@@ -5,11 +5,6 @@ import ServiceLocation from '../models/ServiceLocation.model';
 import { ServiceRecord, ServiceStatus } from '../models/ServiceRecord.model';
 import { OwnedVehicle } from '../models/OwnedVehicle.model';
 
-/**
- * @desc    Get all Jiffy Lube locations
- * @route   GET /api/service/locations
- * @access  Private (Authenticated Users)
- */
 export const getJiffyLubeLocations = asyncHandler(async (req: Request, res: Response) => {
     const locations = await ServiceLocation.find({ partnerName: 'Jiffy Lube', isActive: true });
 
@@ -20,13 +15,7 @@ export const getJiffyLubeLocations = asyncHandler(async (req: Request, res: Resp
     });
 });
 
-/**
- * @desc    Get maintenance reminders for a user's vehicles
- * @route   GET /api/service/reminders
- * @access  Private
- */
 export const getMaintenanceReminders = asyncHandler(async (req: Request, res: Response) => {
-    // This will be implemented fully once OwnedVehicle model is ready
     res.status(200).json({
         success: true,
         data: [],
@@ -34,11 +23,6 @@ export const getMaintenanceReminders = asyncHandler(async (req: Request, res: Re
     });
 });
 
-/**
- * @desc    Log a new service event for an owned vehicle
- * @route   POST /api/service/log
- * @access  Private
- */
 export const logServiceEvent = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, 'Unauthorized');
@@ -49,14 +33,12 @@ export const logServiceEvent = asyncHandler(async (req: Request, res: Response) 
         throw new ApiError(400, 'vehicleId, serviceType, mileageAtService, and locationName are required');
     }
 
-    // 1. Verify the user actually owns this vehicle
     const vehicle = await OwnedVehicle.findOne({ _id: vehicleId, userId });
 
     if (!vehicle) {
         throw new ApiError(403, 'You do not have permission to log service for this vehicle');
     }
 
-    // 2. Create the service record
     const record = await ServiceRecord.create({
         vehicleId,
         serviceType,
@@ -67,7 +49,6 @@ export const logServiceEvent = asyncHandler(async (req: Request, res: Response) 
         notes
     });
 
-    // 3. Automatically upgrade the vehicle's master mileage if this service is the newest known reading
     if (mileageAtService > vehicle.currentMileage) {
         vehicle.currentMileage = mileageAtService;
         await vehicle.save();
@@ -79,11 +60,6 @@ export const logServiceEvent = asyncHandler(async (req: Request, res: Response) 
     });
 });
 
-/**
- * @desc    Get the service history (digital logbook) for a specific vehicle
- * @route   GET /api/service/history/:vehicleId
- * @access  Private
- */
 export const getVehicleServiceHistory = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, 'Unauthorized');
@@ -102,11 +78,6 @@ export const getVehicleServiceHistory = asyncHandler(async (req: Request, res: R
     });
 });
 
-/**
- * @desc    Get the active (in-progress) service record for a vehicle — customer polling
- * @route   GET /api/service/active/:vehicleId
- * @access  Private
- */
 export const getActiveServiceStatus = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, 'Unauthorized');
@@ -129,11 +100,6 @@ export const getActiveServiceStatus = asyncHandler(async (req: Request, res: Res
 
 const VALID_STATUSES: ServiceStatus[] = ['received', 'in_service', 'quality_check', 'ready', 'completed'];
 
-/**
- * @desc    Update service status — staff only (admin / employee)
- * @route   PATCH /api/service/status/:serviceId
- * @access  Private (admin / employee)
- */
 export const updateServiceStatus = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id?.toString();
     if (!userId) throw new ApiError(401, 'Unauthorized');

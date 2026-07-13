@@ -8,12 +8,9 @@ const resolveNotificationOrgId = (req: Request): string => {
   return req.orgId || user?.organizationId?.toString?.() || "global";
 };
 
-/**
- * Get all notifications for the current user
- */
 const getNotifications = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
-  const userRole = (req as any).user.role;  // NEW: Get user's role
+  const userRole = (req as any).user.role;
   const orgId = resolveNotificationOrgId(req);
   const { limit, skip, isRead } = req.query;
 
@@ -24,16 +21,13 @@ const getNotifications = asyncHandler(async (req: Request, res: Response) => {
       limit: limit ? parseInt(limit as string) : undefined,
       skip: skip ? parseInt(skip as string) : undefined,
       isRead: isRead !== undefined ? isRead === "true" : undefined,
-      userRole,  // NEW: Pass role for broadcast filtering
+      userRole,
     },
   );
 
   res.json(new ApiResponse(200, result, "Notifications fetched successfully"));
 });
 
-/**
- * Get unread notification count
- */
 const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
   const userRole = (req as any).user.role;
@@ -54,9 +48,6 @@ const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Mark a notification as read
- */
 const markAsRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
   const orgId = resolveNotificationOrgId(req);
@@ -71,9 +62,6 @@ const markAsRead = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, notification, "Notification marked as read"));
 });
 
-/**
- * Mark all notifications as read
- */
 const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
   const orgId = resolveNotificationOrgId(req);
@@ -86,9 +74,6 @@ const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, result, "All notifications marked as read"));
 });
 
-/**
- * Delete a notification
- */
 const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
   const orgId = resolveNotificationOrgId(req);
@@ -103,9 +88,6 @@ const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "Notification deleted successfully"));
 });
 
-/**
- * Delete all read notifications
- */
 const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user.id || (req as any).user._id;
   const orgId = resolveNotificationOrgId(req);
@@ -118,15 +100,10 @@ const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, result, "All read notifications deleted"));
 });
 
-/**
- * Broadcast notification to users with specific roles
- * Requires admin/super_admin role
- */
 const broadcastNotification = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
   const orgId = resolveNotificationOrgId(req);
 
-  // Only admins and super_admins can broadcast
   if (!['admin', 'super_admin'].includes(user.role)) {
     return res.status(403).json(new ApiResponse(403, null, 'Only administrators can broadcast notifications'));
   }

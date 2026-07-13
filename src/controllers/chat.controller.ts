@@ -6,13 +6,6 @@ import chatService, { ChatAuthor } from "../services/chat.service";
 import { emitChatEvent } from "../socket/chatSocket";
 import logger from "../utils/logger";
 
-/**
- * Resolve the acting author from the authenticated request.
- *
- * This dashboard is CRM-scoped: crmAuth() populates `req.crmUser` (NOT
- * `req.user`). We read that first, falling back to `req.user` only so the
- * controller stays reusable if mounted behind a non-CRM auth layer later.
- */
 function getAuthor(req: Request): ChatAuthor {
   const crm = (req as any).crmUser;
   const u = (crm ?? (req.user as any)) as any;
@@ -25,15 +18,10 @@ function getAuthor(req: Request): ChatAuthor {
   const name =
     u?.fullName || u?.name || u?.username || u?.email || "Unknown User";
   const role = u?.role || "member";
-  // CrmUser docs map to the "CrmUser" model; this dashboard is CRM-scoped.
   const model: "User" | "CrmUser" = crm ? "CrmUser" : "User";
   return { userId, model, name, role };
 }
 
-/**
- * GET /api/appointments/dashboard/chat
- * List messages (newest-first), optional ?before=<id> cursor and ?limit=<n>.
- */
 const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { before, limit } = req.query;
@@ -46,10 +34,6 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, result, "Messages fetched successfully"));
 });
 
-/**
- * POST /api/appointments/dashboard/chat
- * Body: { content: string, replyTo?: string }
- */
 const createMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const author = getAuthor(req);
@@ -62,7 +46,6 @@ const createMessage = asyncHandler(async (req: Request, res: Response) => {
     replyTo,
   );
 
-  // Broadcast to everyone in the org room (no-op if sockets aren't wired yet).
   emitChatEvent(orgId, "chat:new", message);
 
   logger.info(
@@ -73,10 +56,6 @@ const createMessage = asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(new ApiResponse(201, message, "Message sent"));
 });
 
-/**
- * PATCH /api/appointments/dashboard/chat/:id
- * Body: { content: string }
- */
 const updateMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const author = getAuthor(req);
@@ -95,10 +74,6 @@ const updateMessage = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, message, "Message updated"));
 });
 
-/**
- * DELETE /api/appointments/dashboard/chat/:id
- * Author can delete own message; admins can delete any.
- */
 const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const author = getAuthor(req);

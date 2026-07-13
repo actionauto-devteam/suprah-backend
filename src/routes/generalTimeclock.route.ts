@@ -5,7 +5,6 @@ import { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift, pos
 
 const router = Router();
 
-// Dual-auth: try main User JWT first, fall back to CRM JWT
 router.use((req: Request, res: Response, next: NextFunction) => {
   auth()(req, res, (authError) => {
     if (!authError) return next();

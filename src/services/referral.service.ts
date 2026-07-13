@@ -9,16 +9,9 @@ import { notificationTemplates } from '../utils/notificationTemplates';
 import activityService from './activity.service';
 
 export class ReferralService {
-    /**
-     * Process a referral reward for a successful payment.
-     * This logic is automated and includes duplicate prevention.
-     */
     static async processPaymentReward(payment: IPayment, performedBy?: string) {
-        // 1. Basic Validation: Is this a vehicle purchase?
-        // We use quoteId as the primary indicator for a vehicle sale payment
         let quoteId = payment.quoteId;
 
-        // Fallback: If no quoteId, check if it's linked to a load
         const transportId = payment.loadId;
         if (!quoteId && transportId) {
             console.log(`[ReferralService] Payment ${payment._id} missing quoteId. Checking transport record ${transportId}...`);

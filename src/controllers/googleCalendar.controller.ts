@@ -5,33 +5,18 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { IUser } from '../models/User.model';
 
-/**
- * Check Google Calendar connection status
- * @route GET /api/google-calendar/status
- * @access Private
- */
 const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
   const connected = await googleCalendarService.isGoogleCalendarConnected(userId);
   res.json(new ApiResponse(200, { connected }, 'Calendar status fetched'));
 });
 
-/**
- * Disconnect Google Calendar
- * @route POST /api/google-calendar/disconnect
- * @access Private
- */
 const disconnect = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.user as IUser)._id.toString();
   await googleCalendarService.disconnectCalendar(userId);
   res.json(new ApiResponse(200, null, 'Google Calendar disconnected successfully'));
 });
 
-/**
- * Handle Google Calendar webhook notifications
- * @route POST /api/google-calendar/webhook
- * @access Public (validated via middleware)
- */
 const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
   const channelId = req.headers['x-goog-channel-id'] as string;
   const resourceState = req.headers['x-goog-resource-state'] as string;
@@ -45,13 +30,11 @@ const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
     channelExpiration,
   });
 
-  // Acknowledge sync notifications immediately
   if (resourceState === 'sync') {
     console.log('ℹ️ Sync notification received');
     return res.status(200).send('OK');
   }
 
-  // Process in background — don't block Google's delivery timeout
   if (resourceState === 'exists') {
     googleCalendarService
       .processWebhookNotification(channelId, resourceState, resourceId)
@@ -60,15 +43,9 @@ const handleWebhook = asyncHandler(async (req: Request, res: Response) => {
       });
   }
 
-  // Always respond quickly
   res.status(200).send('OK');
 });
 
-/**
- * Manually trigger RSVP sync for an appointment
- * @route POST /api/google-calendar/sync-rsvp/:appointmentId
- * @access Private
- */
 const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   const { appointmentId } = req.params;
@@ -80,11 +57,6 @@ const syncRSVPStatus = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, 'RSVP status synced successfully'));
 });
 
-/**
- * Manually sync ALL events from Google Calendar (full paginated sync).
- * @route POST /api/google-calendar/sync-events
- * @access Private
- */
 const syncEvents = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   const orgId = user.organizationId?.toString();

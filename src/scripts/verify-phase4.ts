@@ -1,16 +1,14 @@
 import axios from 'axios';
 
-const BACKEND_URL = 'http://localhost:5000/api'; // Adjust if different
+const BACKEND_URL = 'http://localhost:5000/api';
 
 async function verifyPhase4() {
     console.log('🧪 Verifying Phase 4: The Logic Swap...');
 
-    // Use the test user from Phase 2
     const testEmail = `test_phase4@example.com`;
     const testPassword = 'Password123!';
 
     try {
-        // 1. Register/Login to get Token
         console.log(`\n1. Attempting Login for ${testEmail}...`);
 
         let accessToken = '';

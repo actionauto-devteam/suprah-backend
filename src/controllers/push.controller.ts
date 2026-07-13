@@ -6,10 +6,6 @@ import User from '../models/User.model';
 import PushService from '../services/push.service';
 
 export class PushController {
-    /**
-     * Upsert a push subscription for the authenticated user.
-     * Path: POST /api/push/subscribe
-     */
     static subscribe = asyncHandler(async (req: Request, res: Response) => {
         const { subscription, deviceHint } = req.body;
         const userId = req.user?._id;
@@ -18,8 +14,6 @@ export class PushController {
             throw new ApiError(400, 'Invalid subscription object. Expected endpoint and keys (p256dh, auth).');
         }
 
-        // ENFORCE SINGLE OWNERSHIP: Remove this specific endpoint from ALL users
-        // (to prevent Account A's notifications from going to Account B's device)
         await User.updateMany(
             { 'pushSubscriptions.endpoint': subscription.endpoint },
             {
@@ -27,8 +21,6 @@ export class PushController {
             }
         );
 
-        // The updateMany above pulled this endpoint from ALL users (including the current user).
-        // It is therefore safe to $push without risking duplicates per user.
         await User.updateOne(
             { _id: userId },
             {
@@ -46,12 +38,8 @@ export class PushController {
         return res.status(200).json(new ApiResponse(200, {}, 'Device subscribed to push notifications successfully.'));
     });
 
-    /**
-     * Remove a specific push subscription for the authenticated user.
-     * Path: DELETE /api/push/subscribe
-     */
     static unsubscribe = asyncHandler(async (req: Request, res: Response) => {
-        const { endpoint } = req.body; // Usually passed in body or as a query param
+        const { endpoint } = req.body;
         const userId = req.user?._id;
 
         if (!endpoint) {
@@ -68,15 +56,9 @@ export class PushController {
         return res.status(200).json(new ApiResponse(200, {}, 'Device unsubscribed from push notifications.'));
     });
 
-    /**
-     * Broadcast a push notification to specific users or an entire role (restricted to admins).
-     * Path: POST /api/push/broadcast
-     * Body: { roleTarget?: string, userIds?: string[], title: string, body: string, url?: string, image?: string, icon?: string }
-     */
     static broadcast = asyncHandler(async (req: Request, res: Response) => {
         const { roleTarget, userIds, title, body, url, image, icon } = req.body;
 
-        // Authorization: Only admin and super_admin can broadcast
         if (req.user?.role !== 'super_admin' && req.user?.role !== 'admin') {
             throw new ApiError(403, 'You do not have permission to broadcast notifications.');
         }
@@ -100,7 +82,6 @@ export class PushController {
                 userQuery.organizationId = req.orgId;
             }
 
-            // Find all users with this role who have at least one valid push subscription
             const users = await User.find(userQuery).select('_id');
             targets = users.map(u => u._id.toString());
         } else if (userIds && Array.isArray(userIds)) {
@@ -114,8 +95,8 @@ export class PushController {
         const payload = {
             title,
             body,
-            image, // Rich marketing image
-            icon,  // Custom campaign icon
+            image,
+            icon,
             data: { url: url || '/' }
         };
 

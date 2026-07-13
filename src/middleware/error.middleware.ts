@@ -18,7 +18,6 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
     }
   }
 
-  // For now, we will not send the stack trace to the client in production
   const response = {
     code: statusCode,
     message,
@@ -36,7 +35,6 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
     query: req.query
   }, 'Unhandled Error');
 
-  // Stream critical errors to monitoring dashboard (Phase 5)
   if (statusCode >= 500) {
     streamLogToAdmins({
       level: 'error',

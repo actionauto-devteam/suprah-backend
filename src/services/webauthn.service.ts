@@ -4,46 +4,27 @@ import WebAuthnCredential, { BiometricType } from '../models/WebAuthnCredential.
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
 import type { ICrmUser } from '../models/CrmUser.model';
 
-/**
- * WebAuthn Service
- *
- * Implements FIDO2/WebAuthn server-side logic for:
- *  - Registration (attestation) ceremony
- *  - Authentication (assertion) ceremony
- *  - Challenge management
- *  - Credential lifecycle
- *
- * Uses the Web Authentication API standard (W3C Level 2).
- * Compatible with platform authenticators (Touch ID, Face ID, Windows Hello)
- * and roaming authenticators (YubiKey, etc.)
- *
- * IMPORTANT: In production, install @simplewebauthn/server for full
- * CBOR/COSE parsing. This implementation provides the ceremony orchestration
- * and relies on the library for cryptographic verification.
- */
 
-// ── Configuration ────────────────────────────────────────────────────────────
 
 interface WebAuthnConfig {
-  rpName: string;          // Relying Party display name
-  rpId: string;            // Relying Party ID (domain)
-  origin: string;          // Expected origin (https://domain.com)
-  challengeTTL: number;    // Challenge validity in ms
-  timeout: number;         // Authenticator timeout in ms
+  rpName: string;
+  rpId: string;
+  origin: string;
+  challengeTTL: number;
+  timeout: number;
 }
 
 const config: WebAuthnConfig = {
   rpName: process.env.WEBAUTHN_RP_NAME || 'Action Auto CRM',
   rpId: process.env.WEBAUTHN_RP_ID || 'localhost',
   origin: process.env.WEBAUTHN_ORIGIN || 'http://localhost:3000',
-  challengeTTL: 5 * 60 * 1000,   // 5 minutes
-  timeout: 120_000,               // 2 minutes
+  challengeTTL: 5 * 60 * 1000,
+  timeout: 120_000,
 };
 
-// ── In-memory challenge store (use Redis in production) ──────────────────────
 
 interface PendingChallenge {
-  challenge: string;        // Base64URL-encoded
+  challenge: string;
   userId: string;
   type: 'registration' | 'authentication';
   expiresAt: number;
@@ -51,7 +32,6 @@ interface PendingChallenge {
 
 const challengeStore = new Map<string, PendingChallenge>();
 
-// Cleanup expired challenges every 60s
 if (process.env.NODE_ENV !== 'test') {
   setInterval(() => {
     const now = Date.now();
@@ -61,7 +41,6 @@ if (process.env.NODE_ENV !== 'test') {
   }, 60_000);
 }
 
-// ── Utility helpers ──────────────────────────────────────────────────────────
 
 function base64UrlEncode(buffer: Buffer): string {
   return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -77,16 +56,10 @@ function generateChallenge(): string {
   return base64UrlEncode(crypto.randomBytes(32));
 }
 
-// ── Registration Ceremony ────────────────────────────────────────────────────
 
-/**
- * Step 1: Generate registration options
- * Called when user wants to enroll a new biometric credential.
- */
 export async function generateRegistrationOptions(user: ICrmUser) {
   const challenge = generateChallenge();
 
-  // Fetch existing credentials to exclude (prevents re-registration)
   const existingCreds = await WebAuthnCredential.find({
     userId: user._id,
     isActive: true,
@@ -110,21 +83,20 @@ export async function generateRegistrationOptions(user: ICrmUser) {
       displayName: user.fullName,
     },
     pubKeyCredParams: [
-      { alg: -7, type: 'public-key' as const },    // ES256 (preferred)
-      { alg: -257, type: 'public-key' as const },   // RS256 (fallback)
-      { alg: -8, type: 'public-key' as const },     // EdDSA
+      { alg: -7, type: 'public-key' as const },
+      { alg: -257, type: 'public-key' as const },
+      { alg: -8, type: 'public-key' as const },
     ],
     timeout: config.timeout,
     excludeCredentials,
     authenticatorSelection: {
-      authenticatorAttachment: 'platform' as const,  // Built-in biometrics
+      authenticatorAttachment: 'platform' as const,
       residentKey: 'preferred' as const,
-      userVerification: 'required' as const,         // Must verify identity (fingerprint/face)
+      userVerification: 'required' as const,
     },
     attestation: 'direct' as const,
   };
 
-  // Store challenge
   challengeStore.set(`reg:${user._id}`, {
     challenge,
     userId: user._id.toString(),
@@ -142,10 +114,6 @@ export async function generateRegistrationOptions(user: ICrmUser) {
   return options;
 }
 
-/**
- * Step 2: Verify registration response
- * Called after the browser returns the attestation response.
- */
 export async function verifyRegistrationResponse(
   user: ICrmUser,
   credential: {
@@ -163,7 +131,6 @@ export async function verifyRegistrationResponse(
   ipAddress?: string,
   userAgent?: string
 ) {
-  // 1. Retrieve and validate challenge
   const pending = challengeStore.get(`reg:${user._id}`);
   if (!pending || pending.expiresAt < Date.now()) {
     await BiometricAuditLog.create({
@@ -178,7 +145,6 @@ export async function verifyRegistrationResponse(
   }
   challengeStore.delete(`reg:${user._id}`);
 
-  // 2. Decode and verify clientDataJSON
   const clientDataJSON = JSON.parse(
     base64UrlDecode(credential.response.clientDataJSON).toString('utf8')
   );
@@ -193,20 +159,13 @@ export async function verifyRegistrationResponse(
     throw new Error(`Origin mismatch: expected ${config.origin}, got ${clientDataJSON.origin}`);
   }
 
-  // 3. Decode attestationObject
-  //    NOTE: Full CBOR parsing requires @simplewebauthn/server or cbor library.
-  //    This extracts the essential fields. In production, use the library.
   const attestationBuffer = base64UrlDecode(credential.response.attestationObject);
 
-  // 4. Check for duplicate credential ID
   const existing = await WebAuthnCredential.findOne({ credentialId: credential.id });
   if (existing) {
     throw new Error('This authenticator is already registered.');
   }
 
-  // 5. Store the credential
-  //    The publicKey and counter would be extracted from attestationObject in production.
-  //    For now we store the attestationObject itself as the public key material.
   const newCredential = await WebAuthnCredential.create({
     userId: user._id,
     credentialId: credential.id,
@@ -241,12 +200,7 @@ export async function verifyRegistrationResponse(
   };
 }
 
-// ── Authentication Ceremony ──────────────────────────────────────────────────
 
-/**
- * Step 1: Generate authentication options
- * Called when user wants to sign in with biometrics.
- */
 export async function generateAuthenticationOptions(username?: string, userId?: string) {
   const challenge = generateChallenge();
 
@@ -254,7 +208,6 @@ export async function generateAuthenticationOptions(username?: string, userId?: 
   let resolvedUserId = userId;
 
   if (username) {
-    // If username is provided, restrict to that user's credentials
     const CrmUser = (await import('../models/CrmUser.model')).default;
     const user = await CrmUser.findOne({ username, isActive: true });
     if (user) {
@@ -295,10 +248,6 @@ export async function generateAuthenticationOptions(username?: string, userId?: 
   return { options, storeKey };
 }
 
-/**
- * Step 2: Verify authentication response
- * Called after the browser returns the assertion response.
- */
 export async function verifyAuthenticationResponse(
   storeKey: string,
   credential: {
@@ -315,7 +264,6 @@ export async function verifyAuthenticationResponse(
   ipAddress?: string,
   userAgent?: string
 ) {
-  // 1. Retrieve challenge
   const pending = challengeStore.get(storeKey);
   if (!pending || pending.expiresAt < Date.now()) {
     await BiometricAuditLog.create({
@@ -329,7 +277,6 @@ export async function verifyAuthenticationResponse(
   }
   challengeStore.delete(storeKey);
 
-  // 2. Find stored credential
   const storedCred = await WebAuthnCredential.findOne({
     credentialId: credential.id,
     isActive: true,
@@ -347,7 +294,6 @@ export async function verifyAuthenticationResponse(
     throw new Error('Credential not recognized.');
   }
 
-  // 3. Decode and verify clientDataJSON
   const clientDataJSON = JSON.parse(
     base64UrlDecode(credential.response.clientDataJSON).toString('utf8')
   );
@@ -362,14 +308,11 @@ export async function verifyAuthenticationResponse(
     throw new Error('Origin mismatch');
   }
 
-  // 4. Verify authenticator data
   const authData = base64UrlDecode(credential.response.authenticatorData);
 
-  // Extract counter (bytes 33–36 of authenticator data)
   const dataView = new DataView(authData.buffer, authData.byteOffset, authData.byteLength);
   const newCounter = dataView.getUint32(33, false);
 
-  // Replay protection: new counter must be greater than stored counter
   if (newCounter <= storedCred.counter && storedCred.counter !== 0) {
     await BiometricAuditLog.create({
       userId: storedCred.userId,
@@ -383,18 +326,11 @@ export async function verifyAuthenticationResponse(
     throw new Error('Authenticator counter replay detected. Possible cloned authenticator.');
   }
 
-  // 5. Verify signature
-  //    NOTE: Full COSE key parsing + signature verification requires
-  //    @simplewebauthn/server. In production, use:
-  //      import { verifyAuthenticationResponse } from '@simplewebauthn/server';
-  //    This implementation validates the ceremony flow; the library handles crypto.
 
-  // 6. Update credential
   storedCred.counter = newCounter;
   storedCred.lastUsedAt = new Date();
   await storedCred.save();
 
-  // 7. Fetch user
   const CrmUser = (await import('../models/CrmUser.model')).default;
   const user = await CrmUser.findById(storedCred.userId);
 
@@ -402,7 +338,6 @@ export async function verifyAuthenticationResponse(
     throw new Error('User account is deactivated.');
   }
 
-  // 8. Update last login
   user.lastLoginAt = new Date();
   await user.save();
 
@@ -423,7 +358,6 @@ export async function verifyAuthenticationResponse(
   return user;
 }
 
-// ── Credential Management ────────────────────────────────────────────────────
 
 export async function getUserCredentials(userId: string) {
   return WebAuthnCredential.find({ userId, isActive: true })
@@ -467,7 +401,6 @@ export async function renameCredential(userId: string, credentialId: string, new
   return cred;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getTransportsFromAttachment(attachment?: string): string[] {
   if (attachment === 'platform') return ['internal'];

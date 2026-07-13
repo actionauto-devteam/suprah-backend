@@ -30,7 +30,6 @@ router.get('/users', getAllUsersTimeproof);
 router.get('/user/:userId', getUserTimeproof);
 router.get('/export', exportTimeproof);
 
-// Agent / tray app endpoints
 router.get('/shift-state', getShiftState);
 router.get('/resumable-shift', getResumableShift);
 router.get('/my-agent', getMyAgentStatus);
@@ -39,13 +38,11 @@ router.post('/activity-interval', postActivityInterval);
 router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
-router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, role check inside
-router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
+router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler);
+router.post('/screenshots/exclude', excludeScreenshots);
 
-// Admin time-log correction (overrun/forgotten clock-out fix)
-router.patch('/correct-time', correctTimeLog); // admin/manager-only, role + department exemption check inside
+router.patch('/correct-time', correctTimeLog);
 
-// Push notification subscription (admin/manager only)
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);
 

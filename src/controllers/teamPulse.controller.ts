@@ -16,7 +16,6 @@ import { BucketType, storageService } from '../services/storage.service';
 
 const PRESENCE_TTL_MS = 2 * 60 * 1000;
 
-// ── Ping rate-limit (in-memory, per sender:recipient pair) ────────────────────
 const pingLog = new Map<string, number[]>();
 const PING_WINDOW_MS = 60 * 60 * 1000;
 const PING_MAX = 3;
@@ -750,9 +749,11 @@ const getActivityFeed = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const limit = Math.min(parseInt(req.query.limit as string) || 80, 200);
     const before = req.query.before ? new Date(req.query.before as string) : undefined;
+    const userId = req.query.userId as string | undefined;
 
     const query: any = { organizationId: orgId };
     if (before) query.createdAt = { $lt: before };
+    if (userId) query.userId = userId;
 
     const events = await PresenceEvent.find(query)
         .sort({ createdAt: -1 })

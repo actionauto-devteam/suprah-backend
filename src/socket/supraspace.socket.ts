@@ -8,22 +8,16 @@ import logger from '../utils/logger';
 
 let io: IOServer;
 
-// Track the number of active socket connections per CRM user so that
-// a user with multiple tabs/sockets (page + context popup) is only
-// marked offline once the LAST connection closes.
 const onlineUsers = new Map<string, number>();
 
-// ── Mirrors crmAuth.middleware.ts secret resolution exactly ──────────────────
 const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
 
-// ── Parse allowed origins from centralized config ────────────────────────────
 function getCorsOrigins(): string | string[] {
   const raw = config.corsOrigin || '*';
   if (raw === '*') return '*';
   return raw.split(',').map((s: string) => s.trim()).filter(Boolean);
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
 
 export function initSupraSpaceSocket(server: HttpServer): IOServer {
   io = new IOServer(server, {
@@ -31,13 +25,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       origin: (origin, callback) => {
         const allowed = getCorsOrigins();
         
-        // Allow requests with no origin (e.g. mobile apps, curl)
         if (!origin) return callback(null, true);
 
-        // Allow any origin in development mode to match server.ts behavior
         if (config.env === 'development') return callback(null, true);
 
-        // Check against allowed list
         if (Array.isArray(allowed)) {
           if (allowed.includes(origin) || allowed.includes('*')) {
             return callback(null, true);
@@ -55,10 +46,8 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     path: '/socket/supraspace',
   });
 
-  // ── Auth middleware ───────────────────────────────────────────────────────
   io.use(async (socket: Socket, next) => {
     try {
-      // Accept token from socket auth object or Authorization header
       const token =
         socket.handshake.auth?.token ||
         (socket.handshake.headers?.authorization as string | undefined)
@@ -68,18 +57,15 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
         return next(new Error('CRM authentication required'));
       }
 
-      // Verify with the exact same secret chain as crmAuth.middleware.ts
       const decoded = jwt.verify(token, CRM_JWT_SECRET) as {
-        id: string;     // ← crmAuth uses 'id', not 'userId'
+        id: string;
         type: string;
       };
 
-      // Enforce crm token type — same check as the middleware
       if (decoded.type !== 'crm') {
         return next(new Error('Invalid CRM token type'));
       }
 
-      // Load user
       const user = await CrmUser.findById(decoded.id).select(
         'fullName username avatar role isActive'
       );
@@ -98,12 +84,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     }
   });
 
-  // ── Connection handler ────────────────────────────────────────────────────
   io.on('connection', (socket: Socket) => {
     const user = (socket as any).crmUser;
     const userId = user._id.toString();
 
-    // Join personal room — used by controller to push targeted events
     socket.join(`user:${userId}`);
 
     // Join org room — used for org-wide broadcasts (feed announcements, milestone alerts)

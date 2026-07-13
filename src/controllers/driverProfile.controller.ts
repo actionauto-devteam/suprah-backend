@@ -30,7 +30,6 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const orgId = user.organizationId?.toString() || "";
   const profile = await getOrCreateProfile(user._id.toString(), orgId);
 
-  // Sign document URLs
   const profileObj = profile.toJSON();
   if (profileObj.documents) {
     for (const doc of profileObj.documents) {

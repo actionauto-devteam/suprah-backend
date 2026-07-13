@@ -3,8 +3,6 @@ import connectDB, { disconnectDB } from '../config/db';
 import Vehicle from '../models/Vehicle.model';
 import { Request, Response } from 'express';
 
-// We skip this test in CI/Local environments that don't have access to the actual Atlas Cluster
-// because Atlas Search ($search) is a cloud-only feature.
 const describeIfAtlas = process.env.MONGODB_URI?.includes('mongodb+srv') ? describe : describe.skip;
 
 describeIfAtlas('Vehicle Atlas Search Integration', () => {
@@ -13,10 +11,8 @@ describeIfAtlas('Vehicle Atlas Search Integration', () => {
     beforeAll(async () => {
         await connectDB();
         
-        // Clean up any leaked data from previous failed runs
         await Vehicle.deleteMany({ organizationId: TEST_ORG_ID });
 
-        // Insert Test Data
         await Vehicle.create([
             {
                 vin: 'TESTVIN001',
@@ -53,7 +49,6 @@ describeIfAtlas('Vehicle Atlas Search Integration', () => {
             }
         ]);
 
-        // IMPORTANT: Atlas Search indexer has a slight delay (usually < 2 seconds)
         console.log('Waiting 10 seconds for Atlas Search indexer to process test data...');
         await new Promise(resolve => setTimeout(resolve, 10000));
     }, 45000);

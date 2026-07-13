@@ -9,21 +9,10 @@ import { ApiError } from "../utils/ApiError";
 import { IUser } from "../models/User.model";
 import logger from "../utils/logger";
 
-/**
- * Resolve the dashboard query window from the request query.
- *
- *  - view=month&month=YYYY-MM  -> full calendar month (UTC)
- *  - date=YYYY-MM-DD | ISO     -> single day (UTC, existing behaviour)
- *
- * The frontend sends `date` in every request for backward compatibility, and
- * additionally sends `view=month&month=YYYY-MM` when the "entire month" filter
- * is active. Ranges are computed in UTC to match the original single-day logic.
- */
 interface DashboardRange {
   start: Date;
   end: Date;
   isMonth: boolean;
-  /** YYYY-MM for a month, YYYY-MM-DD for a single day. */
   label: string;
 }
 
@@ -31,7 +20,6 @@ function resolveDashboardRange(query: any): DashboardRange {
   const isMonth = query.view === "month" || !!query.month;
 
   if (isMonth) {
-    // Prefer explicit month=YYYY-MM, else derive from date=YYYY-MM-DD, else now.
     const monthStr: string =
       (query.month as string) ||
       (query.date ? String(query.date).slice(0, 7) : "") ||
@@ -43,14 +31,12 @@ function resolveDashboardRange(query: any): DashboardRange {
       throw new ApiError(400, "Invalid month format. Use YYYY-MM");
     }
 
-    // First instant of the month .. last instant of the month (UTC).
     const start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
-    const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999)); // day 0 = last day of prev month
+    const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
 
     return { start, end, isMonth: true, label: monthStr };
   }
 
-  // Single-day window (unchanged from the original implementation).
   const dateRaw = query.date;
   if (!dateRaw) {
     throw new ApiError(

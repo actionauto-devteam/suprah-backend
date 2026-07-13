@@ -2,9 +2,6 @@ import { Server } from 'socket.io';
 
 let io: Server | null = null;
 
-// In-memory set of CRM user IDs with an active socket connection.
-// Used by getAgentStatus to show "Online" for users with the CRM open,
-// even if their tray app is not running.
 const crmOnlineUserIds = new Set<string>();
 
 export function setSocketIO(instance: Server) {

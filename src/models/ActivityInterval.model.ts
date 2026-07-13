@@ -2,9 +2,9 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IActivityInterval extends Document {
   userId: mongoose.Types.ObjectId;
-  shiftDate: string;        // MDT date "YYYY-MM-DD"
-  startAt: Date;            // when active period began
-  endAt: Date;              // when user went idle (or session ended)
+  shiftDate: string;
+  startAt: Date;
+  endAt: Date;
   durationSeconds: number;
 }
 

@@ -25,7 +25,6 @@ async function resolveOrgId(
   postId: string,
   actorOrgId: mongoose.Types.ObjectId | undefined,
 ): Promise<mongoose.Types.ObjectId> {
-  // ── Try Feed ──
   const post = await Feed.findOne({ _id: postId, deletedAt: null }).lean();
   if (post) {
     if (post.organizationId.toString() !== actorOrgId?.toString()) {
@@ -34,7 +33,6 @@ async function resolveOrgId(
     return post.organizationId;
   }
 
-  // ── Fall back to DayPulse ──
   const report = await DayPulse.findOne({ _id: postId, deletedAt: null }).lean();
   if (report) {
     if (report.organizationId.toString() !== actorOrgId?.toString()) {
@@ -46,17 +44,7 @@ async function resolveOrgId(
   throw new ApiError(404, 'Post not found');
 }
 
-// ─── Add Comment ──────────────────────────────────────────────────────────────
 
-/**
- * POST /api/crm/feeds/:postId/comments
- *
- * Adds a comment to an existing Feed post OR DayPulse report.
- * Any authenticated user in the same organisation can comment.
- *
- * After saving, emits `feed:comment_added` to the org room so every
- * user's feed updates the comment count / thread in real time.
- */
 export const addComment = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
@@ -70,7 +58,6 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
   if (!content && files.length === 0) throw new ApiError(400, 'Comment cannot be empty');
   if (content.length > 1000) throw new ApiError(400, 'Comment cannot exceed 1000 characters');
 
-  // Resolve parent document — throws 403/404 on failure
   const orgId = await resolveOrgId(postId, actor.organizationId);
 
   const attachments: IFeedCommentAttachment[] = [];
@@ -104,7 +91,6 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
 
     const commentForClient = await signAttachments(comment.toObject());
 
-    // Broadcast to the org room so all open tabs show the new comment instantly
     try {
       getIO()
         .to(`org:${actor.organizationId!.toString()}`)

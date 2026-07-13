@@ -33,12 +33,8 @@ export class R2FileSystem extends FileSystem {
         });
     }
 
-    /**
-     * Helper to resolve path for R2
-     */
     private getR2Key(fileName: string): string {
         const joined = path.posix.join(this.currentPath, fileName);
-        // Remove leading slash for S3 keys
         return joined.startsWith('/') ? joined.slice(1) : joined;
     }
 
@@ -64,7 +60,6 @@ export class R2FileSystem extends FileSystem {
         const response = await this.s3Client.send(command);
         const files: any[] = [];
 
-        // Handle subdirectories (CommonPrefixes)
         if (response.CommonPrefixes) {
             for (const cp of response.CommonPrefixes) {
                 if (cp.Prefix) {
@@ -78,7 +73,6 @@ export class R2FileSystem extends FileSystem {
             }
         }
 
-        // Handle files (Contents)
         if (response.Contents) {
             for (const item of response.Contents) {
                 if (item.Key && item.Key !== prefix) {
@@ -110,7 +104,6 @@ export class R2FileSystem extends FileSystem {
                 mtime: response.LastModified || new Date(),
             };
         } catch (error) {
-            // If it's not a file, it might be a directory
             return {
                 name: path.posix.basename(key),
                 isDirectory: () => true,
@@ -120,9 +113,6 @@ export class R2FileSystem extends FileSystem {
         }
     }
 
-    /**
-     * Handles STOR command
-     */
     write(fileName: string, { append = false } = {}): any {
         if (append) {
             throw new Error('Append is not supported in R2 FileSystem');
@@ -130,15 +120,6 @@ export class R2FileSystem extends FileSystem {
 
         const key = this.getR2Key(fileName);
         
-        /**
-         * The Bridge Architecture (Fixed):
-         * 1. uploadSink: A PassThrough stream that the AWS SDK reads from.
-         * 2. parallelUploads3: The AWS SDK Upload manager.
-         * 3. bridge: A Transform stream we return to the FTP server.
-         * 
-         * We start the upload process IMMEDIATELY (via parallelUploads3.done()) 
-         * so the SDK starts pulling data from the buffer as it arrives from FTP.
-         */
         const uploadSink = new PassThrough();
         
         const parallelUploads3 = new Upload({
@@ -152,10 +133,8 @@ export class R2FileSystem extends FileSystem {
             partSize: 5 * 1024 * 1024,
         });
 
-        // Start the upload loop immediately so it can consume data from the sink
         const uploadPromise = parallelUploads3.done();
 
-        // Monitor progress
         parallelUploads3.on('httpUploadProgress', (progress) => {
             if (progress.loaded) {
                 console.log(`[R2FileSystem] ⏳ Uploading ${key}: ${progress.loaded} bytes sent`);

@@ -51,18 +51,12 @@ export interface IUser extends Document {
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
 
-  // New profile fields
   onlineStatus: OnlineStatus;
   customStatus?: string;
-  // True once the user has explicitly chosen a status (anything but the automatic "online" state).
-  // While true, presence heartbeats never overwrite onlineStatus — only the user (or statusExpiresAt lapsing) can.
   statusIsManual: boolean;
   personalInfo?: IPersonalInfo;
   lastActive?: Date;
-  // Last real user interaction (mouse/keyboard/touch) across ANY device — drives the 30-min auto-away timer.
   lastInteractionAt?: Date;
-  // Device type of whichever tab/device sent the most recent presence heartbeat — used to show
-  // a phone-shaped presence indicator instead of a circle when someone is active from mobile.
   lastDeviceType?: 'mobile' | 'desktop';
   lastPasswordChange?: Date;
   breakStatus?: {
@@ -85,30 +79,24 @@ export interface IUser extends Document {
   updatedAt: Date;
   theme: "light" | "dark";
 
-  // Wallet and Referral Engine
   referralCode?: string;
   walletBalance: number;
   totalEarned: number;
 
   notificationPreferences: {
-    // CRM & Sales
     quoteCreated: boolean;
     quoteUpdated: boolean;
     quoteDeleted: boolean;
-    // Transportation
     shipmentCreated: boolean;
     shipmentUpdated: boolean;
     shipmentDeleted: boolean;
-    // Appointments
     appointmentCreated: boolean;
     appointmentUpdated: boolean;
     appointmentCancelled: boolean;
-    // Account & Security
     passwordChanged: boolean;
     emailChanged: boolean;
     profileUpdated: boolean;
     loginAlerts: boolean;
-    // Team & CRM
     driverRequests: boolean;
     crmActivity: boolean;
   };
@@ -150,19 +138,23 @@ const UserSchema = new Schema(
       type: String,
       required: false,
       private: true,
+      select: false,
     },
     passwordHash: {
       type: String,
       required: false,
       private: true,
+      select: false,
     },
     otpCode: {
       type: String,
       private: true,
+      select: false,
     },
     otpExpiresAt: {
       type: Date,
       private: true,
+      select: false,
     },
     googleId: {
       type: String,
@@ -197,10 +189,9 @@ const UserSchema = new Schema(
     },
     onboardingCompleted: {
       type: Boolean,
-      default: false, // Default false to force new users to onboard properly
+      default: false,
     },
 
-    // New profile fields
     onlineStatus: {
       type: String,
       enum: ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'],
@@ -264,8 +255,6 @@ const UserSchema = new Schema(
     },
     locationSharingOptOut: {
       type: Boolean,
-      // Off by default — only mandatory-location departments (Lot Tech) get auto-share forced
-      // on server-side regardless of this flag; see isMandatoryLocationDept.
       default: true,
     },
     lastPasswordChange: {
@@ -275,10 +264,12 @@ const UserSchema = new Schema(
     passwordResetToken: {
       type: String,
       private: true,
+      select: false,
     },
     passwordResetExpires: {
       type: Date,
       private: true,
+      select: false,
     },
     theme: {
       type: String,
@@ -286,7 +277,6 @@ const UserSchema = new Schema(
       default: 'light',
     },
 
-    // Wallet and Referral Engine
     referralCode: {
       type: String,
       unique: true,
@@ -305,24 +295,19 @@ const UserSchema = new Schema(
     },
 
     notificationPreferences: {
-      // CRM & Sales
       quoteCreated: { type: Boolean, default: true },
       quoteUpdated: { type: Boolean, default: true },
       quoteDeleted: { type: Boolean, default: true },
-      // Transportation
       shipmentCreated: { type: Boolean, default: true },
       shipmentUpdated: { type: Boolean, default: true },
       shipmentDeleted: { type: Boolean, default: true },
-      // Appointments
       appointmentCreated: { type: Boolean, default: true },
       appointmentUpdated: { type: Boolean, default: true },
       appointmentCancelled: { type: Boolean, default: true },
-      // Account & Security
       passwordChanged: { type: Boolean, default: true },
       emailChanged: { type: Boolean, default: true },
       profileUpdated: { type: Boolean, default: true },
       loginAlerts: { type: Boolean, default: true },
-      // Team & CRM
       driverRequests: { type: Boolean, default: true },
       crmActivity: { type: Boolean, default: true },
     },
@@ -371,7 +356,6 @@ const UserSchema = new Schema(
   }
 );
 
-// Static method to check if email is taken
 UserSchema.statics.isEmailTaken = async function (
   email: string,
   excludeUserId?: string
@@ -380,26 +364,21 @@ UserSchema.statics.isEmailTaken = async function (
   return !!user;
 };
 
-// Pre-save hook to hash password and generate referral code
 UserSchema.pre<IUser>('save', async function (next) {
   const user = this;
 
-  // 1. Hash password if modified
   if (user.isModified('password') && user.password) {
     user.password = await bcrypt.hash(user.password, Number(config.bcryptSaltRounds));
   }
 
-  // 2. Auto-generate AAU referral code if new and missing
   if (user.isNew && !user.referralCode) {
-    // Extract first name (or part of email if name is weird)
     let baseName = user.name ? user.name.split(' ')[0].replace(/[^a-zA-Z]/g, '').toUpperCase() : 'USER';
     if (baseName.length < 2) baseName = 'USER';
 
-    // Generate an incredibly aggressive unique generation loop to prevent collision
     let codeUnique = false;
     let attempts = 0;
     while (!codeUnique && attempts < 10) {
-      const random3Digits = Math.floor(100 + Math.random() * 900); // 100-999
+      const random3Digits = Math.floor(100 + Math.random() * 900);
       const candidateCode = `AAU-${baseName}-${random3Digits}`;
 
       const User = this.constructor as mongoose.Model<IUser>;

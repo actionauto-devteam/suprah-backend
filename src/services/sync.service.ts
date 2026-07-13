@@ -10,22 +10,9 @@ import { parse } from "csv-parse";
 import { Readable } from "stream";
 import config from "../config";
 
-/**
- * The internal organization ID for Action Auto Utah.
- * All vehicles synced via FTP are owned by this org.
- */
 const ACTION_AUTO_ORG_ID =
   process.env.ACTION_AUTO_ORG_ID || "69d6a26499bee4596c1ea94c";
 
-/**
- * DealersCloud sends single-word CamelCase headers (e.g. "InternetPrice",
- * "StockNumber", "VehicleimagesURL", "DealershipCity"). Our downstream mapping
- * in syncVehicle() expects a specific set of lowercased keys. This table maps
- * DealersCloud's actual header (lowercased) -> the key our code reads.
- *
- * Confirmed against a real dealerscloud.csv export (30 columns, 718 rows).
- * Any DC column not listed here is passed through unchanged (already lowercased).
- */
 const DC_HEADER_MAP: Record<string, string> = {
   vin: "vin",
   year: "year",
@@ -100,9 +87,6 @@ export class SyncService {
     }
   }
 
-  /**
-   * Syncs a single vehicle record
-   */
   private async syncVehicle(raw: RawVehicleData) {
     const existingVehicle = await Vehicle.findOne({ vin: raw.vin });
 
@@ -123,8 +107,6 @@ export class SyncService {
       );
     };
 
-    // DealersCloud's VehicleimagesURL is a comma-separated list of URLs; split
-    // on comma/pipe/semicolon/whitespace to be safe across formats.
     const parseImages = (val: string) => {
       if (!val) return [];
       return val
@@ -133,13 +115,12 @@ export class SyncService {
         .filter((url) => url.length > 0);
     };
 
-    // Data Sanitization & Validation
     if (
       !raw.vin ||
       raw.vin.trim().toLowerCase() === "vin" ||
       raw.vin.length < 5
     ) {
-      return { type: "none" }; // Skip headers and empty rows
+      return { type: "none" };
     }
 
     const cleanStock = (val: string) => {
@@ -175,7 +156,6 @@ export class SyncService {
       certified: parseBool(raw.certified),
       isNewVehicle: parseBool(raw["is new"]),
 
-      // Dealer info (drives the `location` field shown in the shop)
       dealerId: raw["dealer id"]?.trim(),
       dealerName: raw["dealer name"]?.trim(),
       dealerAddress: raw["dealer street address"]?.trim(),
@@ -184,15 +164,12 @@ export class SyncService {
       dealerZip: raw["dealer zip"]?.trim(),
       dealerEmail: raw["dealer crm email"]?.trim(),
 
-      isDeleted: false, // Re-activate if it was previously removed
+      isDeleted: false,
 
-      // Multi-tenant binding
       organizationId: ACTION_AUTO_ORG_ID,
     };
 
     if (!existingVehicle) {
-      // New vehicle from the DealersCloud feed is retail-ready -> "Ready for Sale"
-      // on insert only (so manual status changes on existing cars aren't clobbered).
       const newVehicle = await Vehicle.create({
         ...vehicleData,
         status: "Ready for Sale",
@@ -210,8 +187,6 @@ export class SyncService {
       return { type: "added" };
     }
 
-    // A vehicle that reappears in the feed should return to the shop even if a
-    // previous run marked it Sold (because it was briefly absent). Re-activate it.
     const reactivate =
       existingVehicle.status === "Sold" && !existingVehicle.manualStatusLock;
 
@@ -220,7 +195,6 @@ export class SyncService {
       (k) => k !== "isDeleted" && k !== "organizationId",
     );
 
-    // Respect Manual Lock for Status
     if (existingVehicle.manualStatusLock) {
       delete (vehicleData as any).status;
     }
@@ -257,9 +231,6 @@ export class SyncService {
     return { type: "none" };
   }
 
-  /**
-   * Process an inventory file directly from R2 (called by FTP server STOR event)
-   */
   async processR2File(key: string): Promise<any> {
     const startTime = new Date();
     const syncLog = await SyncLog.create({

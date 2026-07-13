@@ -13,10 +13,6 @@ interface LogActivityParams {
   metadata?: Record<string, any>;
 }
 
-/**
- * Central activity logger. Call this from any controller/service to record user actions.
- * Automatically computes score contribution and triggers async aggregate update.
- */
 export async function logActivity(params: LogActivityParams): Promise<void> {
   try {
     const kpiMapping = ACTION_KPI_MAP[params.actionType];
@@ -36,20 +32,14 @@ export async function logActivity(params: LogActivityParams): Promise<void> {
       timestamp:      new Date(),
     });
 
-    // Async aggregate update — non-blocking
     updateAggregates(params.organizationId, params.userId, params.actionType, params.metadata)
       .catch(err => console.error('[ANALYTICS] Aggregate update failed:', err));
 
   } catch (err) {
-    // Non-critical — don't break the calling flow
     console.error('[ANALYTICS] logActivity failed:', err);
   }
 }
 
-/**
- * Rebuild aggregates for a user for all period types containing the given date.
- * Called after each activity log — runs async.
- */
 async function updateAggregates(
   organizationId: string,
   userId: string,
@@ -63,7 +53,6 @@ async function updateAggregates(
     const periodKey   = getPeriodKey(now, periodType);
     const { start, end } = getPeriodRange(periodKey, periodType);
 
-    // Aggregate raw logs for this user in this period
     const aggResult = await ActivityLog.aggregate([
       {
         $match: {
@@ -81,7 +70,6 @@ async function updateAggregates(
       }
     ]);
 
-    // Build KPI object from aggregated actions
     const counts: Record<string, number> = {};
     let avgResponseTimeMin = 0;
     let responseTimeCount  = 0;
@@ -144,10 +132,6 @@ async function updateAggregates(
   }
 }
 
-/**
- * Rebuild ranks for the entire org for a given period.
- * Called by the ranking cron job or on-demand.
- */
 export async function rebuildRanks(
   organizationId: string,
   periodType: 'daily' | 'weekly' | 'monthly',

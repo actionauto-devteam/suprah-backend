@@ -43,40 +43,29 @@ const resolveCalendarTarget = async (userId: string, orgId: string) => {
   return { type: 'org' as const, id: orgId };
 };
 
-/**
- * Senior Fix: Resolve organizer identity from either User or CrmUser collections
- */
 const resolveOrganizer = async (userId: string) => {
-  // 1. Try standard User
   const user = await User.findById(userId).select('name fullName email');
   if (user) return { name: user.name || (user as any).fullName, email: user.email };
 
-  // 2. Try CRM User
   const crmUser = await CrmUser.findById(userId).select('fullName email');
   if (crmUser) return { name: crmUser.fullName, email: crmUser.email };
 
   return null;
 };
 
-/**
- * Checks for overlapping appointments for a user
- * logic: (StartA < EndB) and (EndA > StartB)
- */
 const checkUserAvailability = async (userId: string, startTime: Date, endTime: Date, excludeAppointmentId?: string) => {
   const filter: any = {
     participants: new mongoose.Types.ObjectId(userId),
     status: { $ne: 'cancelled' },
-    transparency: { $ne: 'transparent' }, // Ignore "Free" events
+    transparency: { $ne: 'transparent' },
     $and: [
       { startTime: { $lt: endTime } },
       { endTime: { $gt: startTime } }
     ],
-    // SENIOR FIX: All-Day events (spanning 23+ hours) are typically informational markers 
-    // and should not block granular scheduling in the grid.
     $expr: {
       $lt: [
         { $subtract: ["$endTime", "$startTime"] },
-        23 * 60 * 60 * 1000 // 23 hours in milliseconds
+        23 * 60 * 60 * 1000
       ]
     }
   };
@@ -163,14 +152,12 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     console.error('Failed to sync to Google Calendar:', error);
   }
 
-  // Link to lead if provided and update status
   if (data.leadId) {
     await Lead.findByIdAndUpdate(data.leadId, {
       status: 'Appointment Set'
     });
   }
 
-  // Send email invitations to customer bookings
   if (customerBooking) {
     try {
       const token = jwt.sign(

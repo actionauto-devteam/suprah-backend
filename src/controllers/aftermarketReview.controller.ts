@@ -8,7 +8,6 @@ import AftermarketProduct from '../models/AftermarketProduct.model';
 import AftermarketOrder from '../models/AftermarketOrder.model';
 import Organization from '../models/Organization.model';
 
-// ─── Shared helper (same pattern as aftermarket.controller.ts) ───────────────
 
 async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
   if (req.orgId) return req.orgId;
@@ -20,12 +19,7 @@ async function resolveCustomerOrg(req: Request): Promise<string | undefined> {
   return undefined;
 }
 
-// ─── Customer: submit a review ───────────────────────────────────────────────
 
-/**
- * POST /api/aftermarket/:productId/reviews
- * Body: { rating, title?, body }
- */
 export const submitReview = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as any;
   if (!user?._id) throw new ApiError(401, 'Not authenticated');
@@ -50,7 +44,6 @@ export const submitReview = asyncHandler(async (req: Request, res: Response) => 
   });
   if (!product) throw new ApiError(404, 'Product not found');
 
-  // Check if verified purchase (any paid or fulfilled order containing this product)
   const isVerifiedPurchase = !!(await AftermarketOrder.findOne({
     customerId: user._id,
     organizationId: orgId,

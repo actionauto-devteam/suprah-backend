@@ -6,25 +6,25 @@ export interface IKpiSnapshot {
   leadsCreated: number;
   leadsContacted: number;
   leadsConverted: number;
-  conversionRate: number;       // leadsConverted / leadsCreated * 100
+  conversionRate: number;
   appointmentsCreated: number;
   appointmentsCompleted: number;
-  appointmentShowRate: number;  // completed / created * 100
+  appointmentShowRate: number;
   callsMade: number;
   messagesSent: number;
   followUpsSent: number;
   responsesCount: number;
-  avgResponseTimeMin: number;   // minutes
+  avgResponseTimeMin: number;
   transactionsCompleted: number;
   onboardingsCompleted: number;
-  totalScore: number;           // weighted composite score
+  totalScore: number;
 }
 
 export interface IAnalyticsAggregate extends Document {
   organizationId: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
   periodType: PeriodType;
-  periodKey: string;            // e.g. "2025-01-15" | "2025-W03" | "2025-01"
+  periodKey: string;
   periodStart: Date;
   periodEnd: Date;
   kpis: IKpiSnapshot;
@@ -68,7 +68,6 @@ const AnalyticsAggregateSchema = new Schema<IAnalyticsAggregate>(
   { timestamps: true }
 );
 
-// Unique per user per period
 AnalyticsAggregateSchema.index(
   { organizationId: 1, userId: 1, periodType: 1, periodKey: 1 },
   { unique: true }

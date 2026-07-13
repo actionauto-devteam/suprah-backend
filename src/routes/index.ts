@@ -77,8 +77,6 @@ const defaultRoutes = [
     route: syncRoute,
   },
   {
-    // DealersCloud (and other) inventory feed sync:
-    // config CRUD, manual/all sync triggers, and push ingest.
     path: "/sync/feeds",
     route: feedSyncRoute,
   },
@@ -256,13 +254,10 @@ const defaultRoutes = [
     route: crmCalendarRoute,
   },
   {
-    // NEW: Suprah Calendar — unified feed (calendar events + appointments),
-    // event/task/reminder/meeting CRUD, My Schedule, Supra-Space meeting links.
     path: "/calendar",
     route: calendarRoutes,
   },
   {
-    // NEW: unified Wise + PayPal connect / status / sync / transactions / transfer / disconnect
     path: "/linked-accounts",
     route: linkedAccountRoute,
   },
@@ -307,7 +302,6 @@ const defaultRoutes = [
     route: auctionListingRoute,
   },
   {
-    // NEW: SupraSpace calling — start / join / end / status
     path: "/calls",
     route: callRoute,
   },

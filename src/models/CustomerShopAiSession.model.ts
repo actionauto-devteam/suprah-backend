@@ -1,25 +1,12 @@
 import mongoose, { Schema, Document } from "mongoose";
 
-/**
- * CustomerShopAiSession
- *
- * Persists a customer's vehicle-shopping conversation with Suprah Autrix AI,
- * including the accumulated preference profile that powers recommendations.
- *
- * A session is keyed by `sessionKey`:
- *   - For authenticated customers:  "cust:<customerUserId>"
- *   - Fallback (anonymous / token shape unknown): a client-generated UUID.
- *
- * Keeping preferences server-side means recommendation accuracy survives page
- * reloads and the AI keeps full context across the shopping journey.
- */
 
 export interface IShopPreferences {
-  vehicleTypes: string[]; // SUV, Sedan, Truck, Coupe, Hatchback, Van, Convertible, Wagon
-  brands: string[]; // preferred makes
-  fuelTypes: string[]; // Gasoline, Hybrid, Electric, Diesel
-  usage: string[]; // commute, family, off-road, business, luxury, towing, etc.
-  features: string[]; // free-form desired features
+  vehicleTypes: string[];
+  brands: string[];
+  fuelTypes: string[];
+  usage: string[];
+  features: string[];
   budgetMin?: number | null;
   budgetMax?: number | null;
   passengers?: number | null;
@@ -30,7 +17,6 @@ export interface IShopPreferences {
 export interface IShopAiMessage {
   role: "user" | "assistant";
   content: string;
-  // Snapshot of structured recommendations shown alongside an assistant turn.
   recommendations?: any[];
   createdAt: Date;
 }

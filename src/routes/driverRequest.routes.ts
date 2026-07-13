@@ -5,7 +5,6 @@ import driverRequestController from "../controllers/driverRequest.controller";
 
 const router = express.Router();
 
-// Driver endpoints (auth required, any role can apply to be a driver)
 router.post("/", auth(), driverRequestController.createDriverRequest);
 router.get(
   "/my-status",
@@ -13,7 +12,6 @@ router.get(
   driverRequestController.getMyDriverRequestStatus,
 );
 
-// Admin-only endpoints (Strictly super_admin or admin)
 router.get("/", auth(), driverRequestController.getDriverRequests);
 router.patch(
   "/:id/approve",

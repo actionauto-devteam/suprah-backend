@@ -17,12 +17,17 @@ import { ApiError } from '../utils/ApiError';
 
 const router = express.Router();
 
-// ─── Multer: product media / file uploads ─────────────────────────────────────
 
-const PRODUCT_MAX_FILE_SIZE = 40 * 1024 * 1024; // 40 MB
+const PRODUCT_MAX_FILE_SIZE = 40 * 1024 * 1024;
+const ALLOWED_PRODUCT_MIME = new Set([
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+  'video/mp4', 'video/quicktime', 'video/webm',
+  'application/pdf',
+]);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: PRODUCT_MAX_FILE_SIZE, files: 2 },
+  fileFilter: (_req, file, cb) => cb(null, ALLOWED_PRODUCT_MIME.has(file.mimetype)),
 });
 
 const uploadProductFiles = (req: any, res: any, next: any) => {
@@ -38,7 +43,6 @@ const uploadProductFiles = (req: any, res: any, next: any) => {
   });
 };
 
-// ─── Auth gate ────────────────────────────────────────────────────────────────
 
 router.use(crmAuth());
 
@@ -48,14 +52,11 @@ router.get('/inquiries/:inquiryId',            adminGetInquiryDetail);
 router.post('/inquiries/:inquiryId/invoice',   adminCreateInvoiceForInquiry);
 router.patch('/inquiries/:inquiryId',          adminUpdateInquiryStatus);
 
-// ─── Review moderation ────────────────────────────────────────────────────────
 router.get('/:productId/reviews',              adminListReviews);
 router.patch('/reviews/:reviewId',             adminToggleReviewVisibility);
 
-// ─── Order status (legacy cart orders) ────────────────────────────────────────
 router.patch('/orders/:id/status',             aftermarketController.updateOrderStatus);
 
-// ─── Product CRUD ─────────────────────────────────────────────────────────────
 router.get('/',           aftermarketController.getProductsForCrm);
 router.post('/',          uploadProductFiles, aftermarketController.createProduct);
 router.patch('/:id',      uploadProductFiles, aftermarketController.updateProduct);

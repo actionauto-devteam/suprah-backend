@@ -9,17 +9,7 @@ import activityService from '../services/activity.service';
 import linkedAccountService from '../services/linkedAccount.service';
 import logger from '../utils/logger';
 
-/**
- * NOTE ON BALANCE SOURCE
- * ----------------------
- * Per product decision the PRIMARY linked-account balance REPLACES the wallet
- * balance. linkedAccount.service.syncBalances() writes that figure into
- * User.walletBalance, so reading User.walletBalance here is correct and the
- * withdrawal validation below stays meaningful. We attempt a best-effort live
- * sync first so the dashboard reflects the freshest number.
- */
 
-// 1. Get Wallet Dashboard Data
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
     const userId = (req.user as IUser)._id;
     const user = (req.user as IUser);
@@ -28,8 +18,6 @@ const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
         return res.status(401).json(new ApiResponse(401, null, 'User ID not found'));
     }
 
-    // Best-effort live sync of the connected balance into User.walletBalance.
-    // Never fail the dashboard if the provider is briefly unreachable.
     let linkedStatus: any = { connected: false, primary: null, accounts: [] };
     try {
         linkedStatus = await linkedAccountService.getStatus(userId.toString());
@@ -60,11 +48,10 @@ const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
         referralCode: userProfile.referralCode,
         pendingLeads: pendingLeadsCount,
         recentTransactions: transactions,
-        linkedAccount: linkedStatus, // { connected, primary, accounts }
+        linkedAccount: linkedStatus,
     }, 'Wallet dashboard fetched successfully'));
 });
 
-// 2. Link a New Referral (unchanged)
 const linkReferral = asyncHandler(async (req: Request, res: Response) => {
     const { referralCode } = req.body;
     const newUser = (req.user as IUser);

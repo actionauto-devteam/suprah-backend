@@ -31,13 +31,10 @@ describeIfAtlas('Vehicle Atlas Search Diagnosis', () => {
     }, 60000);
 
     afterAll(async () => {
-        // We leave the data for 1 min if we need to check Atlas UI, otherwise delete
-        // await Vehicle.deleteMany({ organizationId: TEST_ORG_ID });
         await disconnectDB();
     });
 
     test('DIAGNOSTIC: Search for Acura (Simple Should)', async () => {
-        // We try a VERY simple search without the "must" filter first to see if indexing works at ALL
         const pipeline = [
             {
                 $search: {

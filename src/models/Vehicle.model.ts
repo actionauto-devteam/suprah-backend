@@ -1,7 +1,6 @@
 import mongoose, { Document, Schema, Model, Query } from 'mongoose';
 
 export interface IVehicle extends Document {
-    // Basic Information
     vin: string;
     year: number;
     make: string;
@@ -13,12 +12,10 @@ export interface IVehicle extends Document {
     vehicleType?: string;
     bodyStyle?: string;
 
-    // Pricing
     price?: number;
     msrp?: number;
     cost?: number;
 
-    // Details
     mileage?: number;
     transmission?: string;
     engine?: string;
@@ -31,7 +28,6 @@ export interface IVehicle extends Document {
     images?: string[];
     vdpUrl?: string;
 
-    // Dealer Info
     dealerId?: string;
     dealerName?: string;
     dealerAddress?: string;
@@ -40,23 +36,19 @@ export interface IVehicle extends Document {
     dealerZip?: string;
     dealerEmail?: string;
 
-    // Status & Logic
     certified?: boolean;
     isNewVehicle?: boolean;
     status: 'In Recon' | 'Ready for Sale' | 'Sold' | 'In Transit';
     currentStep?: 'Inspection' | 'Mechanical' | 'Body / Paint' | 'Detail' | 'Photography' | 'Ready';
 
-    // Dates
     reconStartDate?: Date;
     stepEnteredAt?: Date;
     daysOnLot?: number;
     dateAdded?: Date;
     dateSold?: Date;
 
-    // Assignment
     assignedTo?: mongoose.Types.ObjectId;
 
-    // Notes
     notes: Array<{
         text: string;
         author: mongoose.Types.ObjectId;
@@ -75,7 +67,6 @@ export interface IVehicleModel extends Model<IVehicle> {
 
 const VehicleSchema: Schema<IVehicle> = new Schema(
     {
-        // Basic Information
         vin: { type: String, required: true, unique: true, trim: true },
         year: { type: Number, required: true },
         make: { type: String, required: true, trim: true },
@@ -87,12 +78,10 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         vehicleType: { type: String, trim: true },
         bodyStyle: { type: String, trim: true },
 
-        // Pricing
         price: { type: Number },
         msrp: { type: Number },
         cost: { type: Number },
 
-        // Details
         mileage: { type: Number },
         transmission: { type: String, trim: true },
         engine: { type: String, trim: true },
@@ -105,7 +94,6 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         images: [{ type: String, trim: true }],
         vdpUrl: { type: String, trim: true },
 
-        // Dealer Info
         dealerId: { type: String, trim: true },
         dealerName: { type: String, trim: true },
         dealerAddress: { type: String, trim: true },
@@ -114,7 +102,6 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         dealerZip: { type: String, trim: true },
         dealerEmail: { type: String, trim: true },
 
-        // Status & Logic
         certified: { type: Boolean, default: false },
         isNewVehicle: { type: Boolean, default: false },
         status: {
@@ -128,17 +115,14 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
             default: 'Inspection',
         },
 
-        // Dates
         reconStartDate: { type: Date, default: Date.now },
         stepEnteredAt: { type: Date, default: Date.now },
         daysOnLot: { type: Number, default: 0 },
         dateAdded: { type: Date, default: Date.now },
         dateSold: { type: Date },
 
-        // Assignment
         assignedTo: { type: Schema.Types.ObjectId, ref: 'User' },
 
-        // Notes
         notes: [
             {
                 text: { type: String, required: true },

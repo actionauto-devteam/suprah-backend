@@ -17,11 +17,8 @@ import logger from "../utils/logger";
 import activityService from "../services/activity.service";
 import membershipService from "../services/membership.service";
 
-const VEH_CACHE_TTL = 60 * 60; // 1 hour
+const VEH_CACHE_TTL = 60 * 60;
 
-/**
- * Helper to safely get user ID from request
- */
 const getUserId = (req: Request): string | undefined => {
   return (req.user as IUser)?._id?.toString();
 };

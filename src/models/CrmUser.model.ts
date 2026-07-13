@@ -14,7 +14,7 @@ export interface ICrmPushSubscription {
 export interface ICrmUser extends Document {
   organizationId: mongoose.Types.ObjectId;
   fullName: string;
-  username: string; // Employee ID (e.g., 2026-00001)
+  username: string;
   email: string;
   password: string;
   avatar?: string;
@@ -60,7 +60,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
     organizationId: {
       type: Schema.Types.ObjectId,
       ref: 'Organization',
-      required: false, // optional for existing records; required for all new records going forward
+      required: false,
     },
     fullName: {
       type: String,
@@ -82,7 +82,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
     password: {
       type: String,
       required: true,
-      select: false, // Never return password by default
+      select: false,
     },
     avatar: {
       type: String,
@@ -142,8 +142,6 @@ const CrmUserSchema = new Schema<ICrmUser>(
     },
     locationSharingOptOut: {
       type: Boolean,
-      // Off by default — only mandatory-location departments (Lot Tech) get auto-share forced
-      // on server-side regardless of this flag; see isMandatoryLocationDept.
       default: true,
     },
     pushSubscriptions: [
@@ -177,10 +175,8 @@ const CrmUserSchema = new Schema<ICrmUser>(
   }
 );
 
-// Compound unique: username must be unique per organization
 CrmUserSchema.index({ organizationId: 1, username: 1 }, { unique: true });
 
-// Static: check if username is taken within the same organization
 CrmUserSchema.statics.isUsernameTaken = async function (
   username: string,
   organizationId: string,
@@ -190,7 +186,6 @@ CrmUserSchema.statics.isUsernameTaken = async function (
   return !!user;
 };
 
-// Pre-save: hash password
 CrmUserSchema.pre<ICrmUser>('save', async function (next) {
   if (this.isModified('password')) {
     this.password = await bcrypt.hash(this.password, 12);
@@ -198,7 +193,6 @@ CrmUserSchema.pre<ICrmUser>('save', async function (next) {
   next();
 });
 
-// Instance: compare password
 CrmUserSchema.methods.isPasswordMatch = async function (password: string): Promise<boolean> {
   return bcrypt.compare(password, this.password);
 };

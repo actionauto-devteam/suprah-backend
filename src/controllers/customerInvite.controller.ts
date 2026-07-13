@@ -10,7 +10,7 @@ import User from '../models/User.model';
 import emailService from '../services/email.service';
 import config from '../config';
 
-const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const BULK_TEMP_PASSWORD = 'customersaccount';
 const MAX_BULK = 50;
 
@@ -23,11 +23,6 @@ function nameFromEmail(email: string): string {
   return prefix.charAt(0).toUpperCase() + prefix.slice(1);
 }
 
-/**
- * POST /api/crm/customer-invites/generate
- * CRM admin only — generate 1..N invite links.
- * Body: { count?: number, multiUse?: boolean }  (defaults to count=1, multiUse=false)
- */
 export const generateInviteLinks = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
   if (actor.role !== 'admin') {
@@ -331,11 +326,6 @@ export const getCustomers = asyncHandler(async (req: Request, res: Response) => 
   );
 });
 
-/**
- * DELETE /api/crm/customer-invites/customers/:userId
- * CRM admin only — permanently delete a customer account.
- * Only works on User records with role='customer' belonging to the org.
- */
 export const deleteCustomer = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
   if (actor.role !== 'admin') {

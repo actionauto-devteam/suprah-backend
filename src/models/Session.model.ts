@@ -32,7 +32,7 @@ const SessionSchema = new Schema(
         expiresAt: {
             type: Date,
             required: true,
-            index: { expires: 0 }, // TTL Index: Native MongoDB auto-delete
+            index: { expires: 0 },
         },
     },
     {
@@ -40,7 +40,6 @@ const SessionSchema = new Schema(
     }
 );
 
-// Compound index for finding all sessions for a user (e.g., for global logout/revoke)
 SessionSchema.index({ userId: 1, expiresAt: 1 });
 
 const Session = mongoose.model<ISession>('Session', SessionSchema);

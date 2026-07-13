@@ -1,4 +1,4 @@
-// repush
+import crypto from "crypto";
 import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
@@ -22,10 +22,9 @@ const COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === "production",
   sameSite: "lax" as const,
   path: "/",
-  maxAge: 12 * 60 * 60 * 1000, // 12 hours
+  maxAge: 12 * 60 * 60 * 1000,
 };
 
-// Company operates on Mountain Daylight Time (MDT = UTC-6).
 const COMPANY_TZ_OFFSET_MINUTES = -360;
 
 const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || "";
@@ -52,18 +51,13 @@ async function getMainPersonalInfoMapByEmails(emails: Array<string | undefined |
   return new Map(users.map((user) => [normalizeEmail(user.email), user.personalInfo]));
 }
 
-/**
- * CRM Login
- * POST /api/crm/login
- */
 const login = asyncHandler(async (req: Request, res: Response) => {
   const { username, password } = req.body;
 
-  if (!username || !password) {
+  if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
     throw new ApiError(400, "Employee ID and password are required");
   }
 
-  // Find user by username (Employee ID) - explicitly select password
   const user = await CrmUser.findOne({ username: username.trim() }).select(
     "+password",
   );
@@ -79,24 +73,19 @@ const login = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  // Verify password
   const isMatch = await user.isPasswordMatch(password);
 
   if (!isMatch) {
     throw new ApiError(401, "Invalid Employee ID or password");
   }
 
-  // Update last login
   user.lastLoginAt = new Date();
   await user.save({ validateModifiedOnly: true });
 
-  // Generate token
   const token = generateCrmToken(user._id.toString());
 
-  // Set httpOnly cookie
   res.cookie(CRM_TOKEN_COOKIE, token, COOKIE_OPTIONS);
 
-  // Return user data (without password)
   const userData = {
     _id: user._id,
     fullName: user.fullName,
@@ -109,10 +98,6 @@ const login = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { user: userData, token }, "Login successful"));
 });
 
-/**
- * CRM Logout
- * POST /api/crm/logout
- */
 const logout = asyncHandler(async (req: Request, res: Response) => {
   res.clearCookie(CRM_TOKEN_COOKIE, {
     httpOnly: true,
@@ -124,10 +109,6 @@ const logout = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "Logged out successfully"));
 });
 
-/**
- * Get current CRM user
- * GET /api/crm/me
- */
 const getMe = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser;
 
@@ -135,7 +116,6 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(401, "Not authenticated");
   }
 
-  // Get today's time logs using MDT (UTC-6) day boundaries
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
   const todayMDTStr = nowMDT.toISOString().split('T')[0];
   const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
@@ -157,6 +137,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     avatar: user.avatar,
     role: user.role,
     department: user.department,
+    hireDate: user.hireDate,
     isActive: user.isActive,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
@@ -167,10 +148,6 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
 });
 
-/**
- * Time In / Time Out
- * POST /api/crm/time-clock
- */
 const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser;
 
@@ -185,7 +162,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Type must be "time-in", "time-out", "break-in", or "break-out"');
   }
 
-  // Use MDT (UTC-6) day boundaries so cross-UTC-midnight sessions are scoped correctly
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
   const todayMDTStr = nowMDT.toISOString().split('T')[0];
   const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
@@ -193,11 +169,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
-  // Walk the last 2 days of logs chronologically. The 2-day window matches
-  // getShiftState's lookback so a user with an unclosed clock-in from yesterday
-  // (e.g. a forgotten clock-out) can still cleanly end the shift today. Walking
-  // chronologically is orphan-safe — any stray events naturally cancel out and
-  // the LAST event determines the actual active state.
   const lookbackStart = new Date();
   lookbackStart.setDate(lookbackStart.getDate() - 2);
   lookbackStart.setHours(0, 0, 0, 0);
@@ -231,7 +202,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
   });
 
-  // Compute gross worked seconds for all completed sessions before this time-in
   let todayTotalWorkedSeconds = 0;
   if (type === 'time-in') {
     const prevLogs = await TimeLog.find({
@@ -250,10 +220,8 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Compute total completed break seconds for the CURRENT session on break-out events
   let totalBreakSeconds = 0;
   if (type === 'break-out') {
-    // Find the latest time-in to scope breaks to the current session only
     const latestTimeIn = await TimeLog.findOne({
       userId: user._id,
       type: 'time-in',
@@ -278,7 +246,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  // Emit real-time event to tray app and CRM
   try {
     const io = getSocketIO();
     const payload = {
@@ -304,7 +271,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     console.error("Failed to emit time log event:", error);
   }
 
-  // Return updated today's logs
   const todayLogs = await TimeLog.find({
     userId: user._id,
     timestamp: { $gte: today, $lt: tomorrow },
@@ -320,10 +286,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Get time logs for current user
- * GET /api/crm/time-logs
- */
 const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser;
 
@@ -350,17 +312,11 @@ const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Generate the next available Employee ID for a given organization,
- * based on the current year and the highest existing sequence in that org.
- */
 const resolveNextEmployeeId = async (
   organizationId: string | undefined,
 ): Promise<string> => {
   const year = new Date().getFullYear();
 
-  // Always search globally — employee IDs must be unique across all organizations
-  // so that login-by-username always resolves to exactly one user.
   const lastUser = await CrmUser.findOne(
     { username: new RegExp(`^${year}-`) },
     { username: 1 },
@@ -373,10 +329,6 @@ const resolveNextEmployeeId = async (
   return `${year}-${String(seq + 1).padStart(5, "0")}`;
 };
 
-/**
- * Get next available Employee ID
- * GET /api/crm/next-employee-id
- */
 const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -397,11 +349,6 @@ const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { employeeId }, "Next employee ID fetched"));
 });
 
-/**
- * Create a new CRM user
- * POST /api/crm/users
- * Admin only
- */
 const createUser = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -464,11 +411,6 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Get all CRM users
- * GET /api/crm/users
- * Admin only
- */
 const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -608,11 +550,6 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Update a CRM user (fullName, email, role)
- * PATCH /api/crm/users/:id
- * Admin only
- */
 const updateUser = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -679,11 +616,6 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Toggle active / inactive status of a CRM user
- * PATCH /api/crm/users/:id/status
- * Admin only
- */
 const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -715,11 +647,6 @@ const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Delete a CRM user
- * DELETE /api/crm/users/:id
- * Admin only
- */
 const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -742,10 +669,6 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "User deleted successfully"));
 });
 
-/**
- * Forgot Password — send OTP to email
- * POST /api/crm/forgot-password (public)
- */
 const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
   const { email } = req.body;
 
@@ -757,7 +680,6 @@ const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
     email: email.trim().toLowerCase(),
   }).select("+resetOtp +resetOtpExpiry");
 
-  // Always return 200 to prevent email enumeration
   if (!user) {
     return res.json(
       new ApiResponse(
@@ -768,9 +690,9 @@ const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const otp = String(crypto.randomInt(100000, 1000000));
   user.resetOtp = otp;
-  user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
   await user.save({ validateModifiedOnly: true });
 
   await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp);
@@ -784,10 +706,6 @@ const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/**
- * Confirm Password Reset — verify OTP and set new password
- * POST /api/crm/reset-password (public)
- */
 const confirmResetPassword = asyncHandler(
   async (req: Request, res: Response) => {
     const { email, otp, newPassword } = req.body;
@@ -828,10 +746,6 @@ const confirmResetPassword = asyncHandler(
   },
 );
 
-/**
- * Reset a CRM user's password (admin only)
- * PATCH /api/crm/users/:id/reset-password
- */
 const resetPassword = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -865,11 +779,6 @@ const resetPassword = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "Password reset successfully"));
 });
 
-/**
- * Offboard a CRM user (soft-deactivate, preserve records)
- * POST /api/crm/users/:id/offboard
- * Admin only
- */
 const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
 
@@ -901,25 +810,17 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, null, "User offboarded successfully"));
 });
 
-/**
- * PATCH /api/crm/me/avatar
- * Upload a new avatar for the currently logged-in CRM user.
- * Directly updates CrmUser.avatar and broadcasts the change over SupraSpace socket.
- */
 const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) throw new ApiError(400, "Avatar image file is required");
 
-  // Upload to storage (same bucket as main profile avatars)
   const avatarUrl = await storageService.upload(file, "avatars");
 
-  // Delete old avatar if present
   if (user.avatar) {
     try { await storageService.delete(user.avatar); } catch { /* best-effort */ }
   }
 
-  // Update CrmUser directly
   const updated = await CrmUser.findByIdAndUpdate(
     user._id,
     { $set: { avatar: avatarUrl } },
@@ -928,7 +829,6 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
 
   if (!updated) throw new ApiError(404, "CRM user not found");
 
-  // Broadcast to all SupraSpace clients so avatars update in real-time
   try {
     const io = getSupraSpaceIO();
     io.emit("user:profile:updated", {
@@ -941,13 +841,7 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
 });
 
-/**
- * POST /api/crm/token-refresh
- * Renews the CRM JWT token. Requires a valid (not yet expired) token.
- * Tray app calls this on startup and whenever it receives a 401.
- */
 const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
-  // crmAuth middleware already validated the token and attached req.crmUser
   const user = req.crmUser!;
   const newToken = generateCrmToken(user._id.toString());
   res.cookie(CRM_TOKEN_COOKIE, newToken, COOKIE_OPTIONS);

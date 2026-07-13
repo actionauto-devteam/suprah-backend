@@ -1,11 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-/**
- * WebAuthn Credential Model
- * Stores FIDO2/WebAuthn credentials linked to CRM users.
- *
- * File: models/WebAuthnCredential.model.ts
- */
 
 export type BiometricType = 'fingerprint' | 'face' | 'security_key' | 'platform';
 
