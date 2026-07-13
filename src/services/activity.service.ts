@@ -302,6 +302,7 @@ const logAdminAction = async (
   const titles: Record<string, string> = {
     user_suspended: "User Suspended",
     user_activated: "User Activated",
+    user_organization_changed: "User Organization Changed",
     org_suspended: "Organization Suspended",
     subscription_changed: "Subscription Updated",
     logs_cleared: "System Logs Cleared",

@@ -598,8 +598,10 @@ export const getMyActiveCall = asyncHandler(async (req: Request, res: Response) 
   }
 
   const isHost = call.moderatorUserId.toString() === userId.toString();
-  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId.toString());
-  const canRecord = isHost || isGranted;
+  const isActiveParticipant = call.participants.some((p) => (
+    p.userId.toString() === userId.toString() && !p.leftAt
+  ));
+  const canRecord = isHost || isActiveParticipant;
 
   res.json(new ApiResponse(200, {
     meetingId: call.meetingId,
@@ -684,8 +686,8 @@ export const startCallRecording = asyncHandler(async (req: Request, res: Respons
 
   const userId = crmUser._id.toString();
   const isHost = call.moderatorUserId.toString() === userId;
-  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId);
-  if (!isHost && !isGranted) throw new ApiError(403, 'No recording permission');
+  const isActiveParticipant = call.participants.some((p) => p.userId.toString() === userId && !p.leftAt);
+  if (!isHost && !isActiveParticipant) throw new ApiError(403, 'Only active call participants can record');
 
   if (call.isRecording) {
     return res.json(new ApiResponse(200, null, 'Already recording'));
@@ -704,8 +706,8 @@ export const startCallRecording = asyncHandler(async (req: Request, res: Respons
   const io = getIO();
   // Notify all participants in the conversation (awareness badge)
   if (!call.isStandaloneMeeting) io.to(`conv:${call.conversationId}`).emit('call:recording-started', payload);
-  // Trigger the host's tray to start Electron recording
-  io.to(`user:${call.moderatorUserId}`).emit('tray:start-recording', payload);
+  // Trigger the recorder's tray to start Electron recording.
+  io.to(`user:${userId}`).emit('tray:start-recording', payload);
 
   res.json(new ApiResponse(200, payload, 'Recording started'));
 });
@@ -723,8 +725,8 @@ export const stopCallRecording = asyncHandler(async (req: Request, res: Response
 
   const userId = crmUser._id.toString();
   const isHost = call.moderatorUserId.toString() === userId;
-  const isGranted = (call.recordingAllowedUsers || []).map(String).includes(userId);
-  if (!isHost && !isGranted) throw new ApiError(403, 'No recording permission');
+  const isActiveParticipant = call.participants.some((p) => p.userId.toString() === userId && !p.leftAt);
+  if (!isHost && !isActiveParticipant) throw new ApiError(403, 'Only active call participants can stop recording');
 
   call.isRecording = false;
   call.recordingStartedAt = null;
@@ -733,7 +735,7 @@ export const stopCallRecording = asyncHandler(async (req: Request, res: Response
   const payload = { meetingId };
   const io = getIO();
   if (!call.isStandaloneMeeting) io.to(`conv:${call.conversationId}`).emit('call:recording-stopped', payload);
-  io.to(`user:${call.moderatorUserId}`).emit('tray:stop-recording', payload);
+  io.to(`user:${userId}`).emit('tray:stop-recording', payload);
 
   res.json(new ApiResponse(200, payload, 'Recording stopped'));
 });

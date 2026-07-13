@@ -23,6 +23,9 @@ const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toStri
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
+type SupraSpaceNotifType = 'all' | 'main' | 'foryou' | 'none';
+type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean };
+const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false };
 
 function emitToConversation(conv: any, event: string, payload: any) {
   try {
@@ -41,7 +44,7 @@ function emitToConversation(conv: any, event: string, payload: any) {
 // stay "online" briefly after the app is backgrounded. To keep installed mobile
 // apps reliable, online recipients still get pushes on mobile-like subscriptions.
 // Fire-and-forget — never lets push errors block the HTTP response.
-async function pushToOfflineMembers(conv: any, senderId: string, title: string, body: string): Promise<void> {
+async function pushToOfflineMembers(conv: any, senderId: string, title: string, body: string, textForMention = ''): Promise<void> {
   try {
     const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
@@ -49,7 +52,16 @@ async function pushToOfflineMembers(conv: any, senderId: string, title: string, 
 
     if (!recipientIds.length) return;
 
+    const recipients = await CrmUser.find({ _id: { $in: recipientIds } })
+      .select('_id fullName username')
+      .lean();
+
     await Promise.allSettled(recipientIds.map(async (memberId: string) => {
+      const recipient = recipients.find((user: any) => user._id.toString() === memberId);
+      const pref = getConversationNotificationPref(conv, memberId);
+      const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(textForMention);
+      if (!shouldNotifyForPreference(pref, mentioned)) return;
+
       const unreadCount = await SupraSpaceMessage.countDocuments({
         conversationId: conv._id,
         sender: { $ne: memberId },
@@ -76,6 +88,12 @@ function isDayPulseReportConversation(conversation: { name?: string | null }): b
   return DAYPULSE_REPORT_CHANNEL_NAME_REGEX.test(conversation.name || '');
 }
 
+function getConversationNotificationPref(conv: any, userId: string): SupraSpaceNotifPref {
+  const raw = conv?.notificationPrefs?.[userId];
+  const type = raw?.type === 'main' || raw?.type === 'foryou' || raw?.type === 'none' ? raw.type : 'all';
+  return { type, muted: !!raw?.muted };
+}
+
 function mentionBoundaryRegex(alias: string): RegExp | null {
   const normalized = alias.trim().replace(/\s+/g, ' ');
   if (!normalized) return null;
@@ -89,6 +107,21 @@ function mentionAliasesForName(fullName: string): string[] {
   if (parts.length >= 2) aliases.add(`${parts[0]} ${parts[parts.length - 1]}`);
   if (fullName.trim()) aliases.add(fullName.trim());
   return [...aliases];
+}
+
+function isUserMentioned(text: string, user: { fullName?: string | null; username?: string | null }): boolean {
+  if (/(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(text)) return true;
+  const aliases = [
+    ...(user.username ? [user.username] : []),
+    ...mentionAliasesForName(user.fullName || ''),
+  ];
+  return aliases.some((alias) => mentionBoundaryRegex(alias)?.test(text));
+}
+
+function shouldNotifyForPreference(pref: SupraSpaceNotifPref, isMentioned: boolean): boolean {
+  if (pref.muted || pref.type === 'none') return false;
+  if (pref.type === 'foryou') return isMentioned;
+  return true;
 }
 
 async function notifyMentionedMembers(params: {
@@ -109,7 +142,7 @@ async function notifyMentionedMembers(params: {
       .filter((x: string) => x !== params.senderId.toString());
     if (!memberIds.length) return;
 
-    const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName').lean();
+    const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName username').lean();
     const toNotify = hasAll
       ? members.map((x: any) => x._id.toString())
       : members
@@ -118,7 +151,9 @@ async function notifyMentionedMembers(params: {
           )
           .map((x: any) => x._id.toString());
 
-    const uniqueRecipients = [...new Set(toNotify)];
+    const uniqueRecipients = [...new Set(toNotify)].filter((memberId) =>
+      shouldNotifyForPreference(getConversationNotificationPref(params.conversation, memberId), true)
+    );
     if (!uniqueRecipients.length) return;
 
     const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
@@ -250,7 +285,13 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const safeConv = { ...c, members: (c.members || []).filter(Boolean) };
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
-      return { ...safeConv, lastMessage: null, lastMessageAt: null, unreadCount: 0 };
+      return {
+        ...safeConv,
+        notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
+        lastMessage: null,
+        lastMessageAt: null,
+        unreadCount: 0,
+      };
     }
     const unreadFilter: any = {
       conversationId: safeConv._id,
@@ -261,10 +302,38 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     };
     if (clearedAt) unreadFilter.createdAt = { $gt: new Date(clearedAt) };
     const unreadCount = await SupraSpaceMessage.countDocuments(unreadFilter);
-    return { ...safeConv, unreadCount };
+    return {
+      ...safeConv,
+      notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
+      unreadCount,
+    };
   }));
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
+});
+
+const updateConversationNotifications = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { type, muted } = req.body || {};
+  const validTypes: SupraSpaceNotifType[] = ['all', 'main', 'foryou', 'none'];
+
+  if (!validTypes.includes(type)) throw new ApiError(400, 'Invalid notification type');
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const userKey = userId.toString();
+  const nextPref: SupraSpaceNotifPref = { type, muted: !!muted };
+  conversation.notificationPrefs = {
+    ...((conversation.notificationPrefs as any) || {}),
+    [userKey]: nextPref,
+  };
+  conversation.markModified('notificationPrefs');
+  await conversation.save({ validateModifiedOnly: true });
+
+  res.json(new ApiResponse(200, nextPref, 'Notification settings saved'));
 });
 
 /** POST /api/supraspace/conversations/direct */
@@ -724,7 +793,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
-  pushToOfflineMembers(conversation, userId.toString(), pushTitle, pushBodyFinal);
+  pushToOfflineMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '');
 
   // Notify previously-hidden members so their sidebar shows the conversation
   // without waiting for a manual refresh or page reload.
@@ -878,7 +947,8 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     conversation,
     userId.toString(),
     convNameFile ?? fileSenderName,
-    convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file'
+    convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file',
+    content?.trim() || ''
   );
 
   if (resurrectedFor.length > 0) {
@@ -1452,6 +1522,7 @@ const supraSpaceController = {
   deleteConversation,
   archiveConversation,
   pinConversation,
+  updateConversationNotifications,
   setTheme,
   getMessages,
   searchInConversation,
