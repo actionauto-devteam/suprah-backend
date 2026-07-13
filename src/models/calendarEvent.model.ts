@@ -1,61 +1,50 @@
 import mongoose, { Schema, Document, Types } from "mongoose";
 
 /**
- * CalendarEvent
- * -------------
- * Single source of truth for non-appointment calendar items:
- * events, tasks, reminders, and meetings.
- *
- * Appointments are NOT duplicated here — they remain in the existing
- * Appointment collection and are merged into the calendar feed at
- * read time (see calendar.controller.ts). This guarantees the
- * Appointment Page calendar and Suprah Calendar can never drift.
+ * CalendarEvent — single source of truth for non-appointment calendar items:
+ * events, tasks, reminders, and meetings. Appointments stay in their own
+ * collection and are merged into the feed at read time.
+ * Tenancy is organizationId, matching crmAuth's req.orgId.
  */
 
 export type CalendarItemType = "event" | "task" | "reminder" | "meeting";
 export type CalendarItemStatus = "scheduled" | "completed" | "cancelled";
 
 export interface ICalendarEvent extends Document {
-  dealershipId: Types.ObjectId;
+  organizationId: Types.ObjectId;
   type: CalendarItemType;
   title: string;
   description?: string;
-
-  /** Overall window. For single-day items, start/end are the exact times. */
   start: Date;
   end: Date;
   allDay: boolean;
-
   /**
-   * Multi-day-with-fixed-daily-window support.
-   * When true, the item spans every day from `start` to `end`,
-   * but only occupies dailyStartTime → dailyEndTime each day
-   * (e.g. a 3-day training that runs 09:00–12:00 daily).
-   * Times are "HH:mm" 24h strings in the dealership's local timezone.
+   * Multi-day with a fixed daily window: spans every day from start to end
+   * but only occupies dailyStartTime→dailyEndTime ("HH:mm") each day.
    */
   repeatsDailyWindow: boolean;
   dailyStartTime?: string;
   dailyEndTime?: string;
-
+  /**
+   * Optional subset of days ("YYYY-MM-DD") the daily window runs on.
+   * Empty/absent = every day in the start–end range.
+   */
+  includedDates?: string[];
   createdBy: Types.ObjectId;
   assignees: Types.ObjectId[];
-
-  /** Populated when the user generates a Supra-Space meeting link. */
   meetingLink?: string;
   meetingRoomName?: string;
-
   status: CalendarItemStatus;
   color?: string;
-
   createdAt: Date;
   updatedAt: Date;
 }
 
 const CalendarEventSchema = new Schema<ICalendarEvent>(
   {
-    dealershipId: {
+    organizationId: {
       type: Schema.Types.ObjectId,
-      ref: "Dealership",
+      ref: "Organization",
       required: true,
       index: true,
     },
@@ -67,7 +56,6 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
     },
     title: { type: String, required: true, trim: true, maxlength: 200 },
     description: { type: String, trim: true, maxlength: 5000 },
-
     start: { type: Date, required: true },
     end: {
       type: Date,
@@ -80,7 +68,6 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
       },
     },
     allDay: { type: Boolean, default: false },
-
     repeatsDailyWindow: { type: Boolean, default: false },
     dailyStartTime: {
       type: String,
@@ -96,7 +83,7 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
         return this.repeatsDailyWindow;
       },
     },
-
+    includedDates: [{ type: String, match: /^\d{4}-\d{2}-\d{2}$/ }],
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "CrmUser",
@@ -104,10 +91,8 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
       index: true,
     },
     assignees: [{ type: Schema.Types.ObjectId, ref: "CrmUser", index: true }],
-
     meetingLink: { type: String, trim: true },
     meetingRoomName: { type: String, trim: true },
-
     status: {
       type: String,
       enum: ["scheduled", "completed", "cancelled"],
@@ -119,11 +104,9 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
   { timestamps: true }
 );
 
-/** Range queries: everything overlapping a visible window for a tenant. */
-CalendarEventSchema.index({ dealershipId: 1, start: 1, end: 1 });
-/** My Schedule queries. */
-CalendarEventSchema.index({ dealershipId: 1, assignees: 1, start: 1 });
-CalendarEventSchema.index({ dealershipId: 1, createdBy: 1, start: 1 });
+CalendarEventSchema.index({ organizationId: 1, start: 1, end: 1 });
+CalendarEventSchema.index({ organizationId: 1, assignees: 1, start: 1 });
+CalendarEventSchema.index({ organizationId: 1, createdBy: 1, start: 1 });
 
 export const CalendarEvent = mongoose.model<ICalendarEvent>(
   "CalendarEvent",

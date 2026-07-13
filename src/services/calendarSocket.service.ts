@@ -19,15 +19,28 @@ import type { Server } from "socket.io";
 
 // TODO(integration): import { getIO } from "../sockets/io";
 let ioRef: Server | null = null;
+let warnedOnce = false;
 export const setCalendarIO = (io: Server) => {
   ioRef = io;
 };
-const getIO = (): Server => {
-  if (!ioRef) throw new Error("Socket.io not initialised for calendar module.");
+/**
+ * Fail-soft accessor: broadcasting is an enhancement, never a dependency.
+ * If setCalendarIO(io) hasn't been called yet, mutations still succeed and
+ * a single warning is logged instead of throwing (which would turn every
+ * successful save into a 500).
+ */
+const getIO = (): Server | null => {
+  if (!ioRef && !warnedOnce) {
+    warnedOnce = true;
+    console.warn(
+      "[calendar] Socket.io not initialised — real-time sync inactive. " +
+        "Call setCalendarIO(io) in the socket bootstrap to enable it."
+    );
+  }
   return ioRef;
 };
 
-const tenantRoom = (dealershipId: string) => `dealership:${dealershipId}`;
+const tenantRoom = (orgId: string) => `org:${orgId}`;
 const userRoom = (userId: string) => `user:${userId}`;
 
 export type CalendarSocketEvent =
@@ -42,12 +55,14 @@ export type CalendarSocketEvent =
  */
 export function emitCalendarChange(
   event: CalendarSocketEvent,
-  dealershipId: string,
+  orgId: string,
   payload:
     | { source: "calendarEvent" | "appointment"; item: unknown }
     | { source: "calendarEvent" | "appointment"; id: string }
 ): void {
-  getIO().to(tenantRoom(dealershipId)).emit(event, payload);
+  const io = getIO();
+  if (!io) return;
+  io.to(tenantRoom(orgId)).emit(event, payload);
 }
 
 /** Direct ping to specific users (assignee notifications). */
@@ -57,6 +72,7 @@ export function emitToUsers(
   payload: unknown
 ): void {
   const io = getIO();
+  if (!io) return;
   userIds.forEach((id) => io.to(userRoom(id)).emit(event, payload));
 }
 
@@ -67,8 +83,8 @@ export function emitToUsers(
 export function registerCalendarSocket(io: Server): void {
   setCalendarIO(io);
   io.on("connection", (socket) => {
-    const { dealershipId, userId } = socket.data ?? {};
-    if (dealershipId) socket.join(tenantRoom(String(dealershipId)));
+    const { orgId, userId } = socket.data ?? {};
+    if (orgId) socket.join(tenantRoom(String(orgId)));
     if (userId) socket.join(userRoom(String(userId)));
   });
 }

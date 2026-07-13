@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import { NextFunction, Request, Response } from "express";
 import { Types } from "mongoose";
 import { CalendarEvent } from "../models/calendarEvent.model";
 import {
@@ -7,32 +7,50 @@ import {
 } from "../services/calendarSocket.service";
 
 // ── INTEGRATION ───────────────────────────────────────────────────────────
-// 1. Appointment model: import your existing model so the feed can merge
-//    appointments. Adjust `mapAppointment` to your real field names.
+// 1. Appointment merge: import your Appointment model, uncomment the queries
+//    in getFeed/getMySchedule, and align mapAppointment with its fields.
 // TODO(integration): import { Appointment } from "../models/appointment.model";
 //
-// 2. Notification service: swap `pushNotification` for the same service the
-//    Project Management module uses, so calendar pings land in the shared
-//    notifications inbox.
+// 2. Notifications: swap pushNotification's body for the shared service the
+//    Project Management module uses (it currently emits notification:new
+//    over sockets as a functional fallback).
 // TODO(integration): import { createNotification } from "../services/notification.service";
-//
-// 3. crmAuth: this controller assumes crmAuth attaches a plain object
-//    (post-fix — no Mongoose prototype tricks) shaped like:
-//    req.user = { _id, dealershipId, firstName, lastName, email }
 // ──────────────────────────────────────────────────────────────────────────
 
-type AuthedRequest = Request & {
-  user: {
-    _id: string;
-    dealershipId: string;
-    firstName?: string;
-    lastName?: string;
+/** Route async errors into the Express error pipeline (ApiError-compatible). */
+const asyncHandler =
+  (fn: (req: Request, res: Response) => Promise<void>) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    fn(req, res).catch(next);
   };
-};
+
+/**
+ * crmAuth attaches req.crmUser (ICrmUser or synthetic plain object) and
+ * req.orgId. Both are required for every calendar route.
+ */
+function requireAuth(
+  req: Request,
+  res: Response
+): { userId: string; orgId: string; fullName: string } | null {
+  const crmUser = (req as any).crmUser;
+  const orgId = (req as any).orgId as string | undefined;
+  if (!crmUser?._id || !orgId) {
+    res.status(401).json({
+      message:
+        "Not authenticated — ensure crmAuth() is applied to /calendar routes.",
+    });
+    return null;
+  }
+  return {
+    userId: String(crmUser._id),
+    orgId,
+    fullName: crmUser.fullName ?? crmUser.username ?? crmUser.email ?? "A teammate",
+  };
+}
 
 const POPULATE_USERS = [
-  { path: "createdBy", select: "firstName lastName email avatarUrl" },
-  { path: "assignees", select: "firstName lastName email avatarUrl" },
+  { path: "createdBy", select: "fullName username email" },
+  { path: "assignees", select: "fullName username email" },
 ];
 
 /** Normalised shape both calendars render. */
@@ -48,14 +66,23 @@ interface FeedItem {
   repeatsDailyWindow: boolean;
   dailyStartTime?: string;
   dailyEndTime?: string;
+  includedDates?: string[];
   status: string;
   color?: string;
   meetingLink?: string;
   createdBy?: unknown;
   assignees?: unknown[];
+  /** Viewer-specific: true only when the requester created the item. */
+  canEdit?: boolean;
 }
 
-const mapCalendarEvent = (doc: any): FeedItem => ({
+/** Socket broadcasts go to many viewers — never carry viewer-specific flags. */
+const stripViewerFields = (item: FeedItem): Omit<FeedItem, "canEdit"> => {
+  const { canEdit, ...rest } = item;
+  return rest;
+};
+
+const mapCalendarEvent = (doc: any, viewerId?: string): FeedItem => ({
   id: String(doc._id),
   source: "calendarEvent",
   type: doc.type,
@@ -67,19 +94,23 @@ const mapCalendarEvent = (doc: any): FeedItem => ({
   repeatsDailyWindow: doc.repeatsDailyWindow,
   dailyStartTime: doc.dailyStartTime,
   dailyEndTime: doc.dailyEndTime,
+  includedDates: doc.includedDates,
   status: doc.status,
   color: doc.color,
   meetingLink: doc.meetingLink,
   createdBy: doc.createdBy,
   assignees: doc.assignees,
+  canEdit:
+    viewerId !== undefined
+      ? String(doc.createdBy?._id ?? doc.createdBy) === viewerId
+      : undefined,
 });
 
 /**
- * TODO(integration): adapt to your Appointment schema. The mapping below
- * assumes fields commonly present in the Appointment Page calendar
- * (customerName, scheduledAt, durationMinutes, assignedTo, status).
+ * TODO(integration): align with your real Appointment schema field names.
+ * Exported so the Appointment controller can reuse it in its emit hooks.
  */
-const mapAppointment = (doc: any): FeedItem => {
+export const mapAppointment = (doc: any): FeedItem => {
   const start = doc.scheduledAt ?? doc.start ?? doc.date;
   const durationMs = (doc.durationMinutes ?? 60) * 60_000;
   return {
@@ -99,13 +130,13 @@ const mapAppointment = (doc: any): FeedItem => {
   };
 };
 
-// TODO(integration): replace with your shared notification service call.
+// TODO(integration): replace body with the shared notification service.
 async function pushNotification(opts: {
   userIds: string[];
   title: string;
   body: string;
   link: string;
-  dealershipId: string;
+  orgId: string;
 }): Promise<void> {
   // await createNotification({ ...opts, category: "calendar" });
   emitToUsers(opts.userIds, "notification:new", {
@@ -124,11 +155,12 @@ const overlapQuery = (from: Date, to: Date) => ({
 
 /**
  * GET /api/calendar/feed?from=ISO&to=ISO
- * Unified feed: native calendar items + appointments, merged and sorted.
- * Both the Appointment Page calendar and Suprah Calendar call this.
+ * Unified feed: calendar items + appointments, merged and sorted.
  */
-export async function getFeed(req: Request, res: Response): Promise<void> {
-  const { user } = req as AuthedRequest;
+export const getFeed = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
   const from = new Date(String(req.query.from));
   const to = new Date(String(req.query.to));
   if (isNaN(from.getTime()) || isNaN(to.getTime())) {
@@ -136,63 +168,61 @@ export async function getFeed(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const dealershipId = new Types.ObjectId(user.dealershipId);
+  const organizationId = new Types.ObjectId(auth.orgId);
 
   const [events /*, appointments */] = await Promise.all([
     CalendarEvent.find({
-      dealershipId,
+      organizationId,
       status: { $ne: "cancelled" },
       ...overlapQuery(from, to),
     })
       .populate(POPULATE_USERS)
       .lean(),
-    // TODO(integration): uncomment once Appointment is imported.
-    // Appointment.find({ dealershipId, scheduledAt: { $gte: from, $lt: to } })
-    //   .populate("assignedTo", "firstName lastName email avatarUrl")
-    //   .lean(),
+    // TODO(integration):
+    // Appointment.find({ organizationId, scheduledAt: { $gte: from, $lt: to } }).lean(),
   ]);
 
   const items: FeedItem[] = [
-    ...events.map(mapCalendarEvent),
+    ...events.map((e) => mapCalendarEvent(e, auth.userId)),
     // ...appointments.map(mapAppointment),
   ].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
   res.json({ items });
-}
+});
 
 /**
  * GET /api/calendar/my-schedule?from=ISO&to=ISO
- * Personal dashboard: items the user created or is assigned to,
- * grouped for the My Schedule panel.
+ * Items the user created or is assigned to, grouped for the My Schedule panel.
  */
-export async function getMySchedule(req: Request, res: Response): Promise<void> {
-  const { user } = req as AuthedRequest;
+export const getMySchedule = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
   const now = new Date();
   const from = req.query.from ? new Date(String(req.query.from)) : now;
   const to = req.query.to
     ? new Date(String(req.query.to))
     : new Date(now.getTime() + 30 * 86_400_000);
 
-  const dealershipId = new Types.ObjectId(user.dealershipId);
-  const me = new Types.ObjectId(user._id);
-  const mine = { $or: [{ createdBy: me }, { assignees: me }] };
+  const organizationId = new Types.ObjectId(auth.orgId);
+  const me = new Types.ObjectId(auth.userId);
 
   const [events /*, appointments */] = await Promise.all([
     CalendarEvent.find({
-      dealershipId,
+      organizationId,
       status: { $ne: "cancelled" },
-      ...mine,
+      $or: [{ createdBy: me }, { assignees: me }],
       ...overlapQuery(from, to),
     })
       .populate(POPULATE_USERS)
       .sort({ start: 1 })
       .lean(),
     // TODO(integration):
-    // Appointment.find({ dealershipId, assignedTo: me, scheduledAt: { $gte: from, $lt: to } }).lean(),
+    // Appointment.find({ organizationId, assignedTo: me, scheduledAt: { $gte: from, $lt: to } }).lean(),
   ]);
 
   const items = [
-    ...events.map(mapCalendarEvent),
+    ...events.map((e) => mapCalendarEvent(e, auth.userId)),
     // ...appointments.map(mapAppointment),
   ];
 
@@ -203,11 +233,13 @@ export async function getMySchedule(req: Request, res: Response): Promise<void> 
     ),
     meetings: items.filter((i) => i.type === "meeting"),
   });
-}
+});
 
 /** POST /api/calendar/events */
-export async function createEvent(req: Request, res: Response): Promise<void> {
-  const { user } = req as AuthedRequest;
+export const createEvent = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
   const {
     type,
     title,
@@ -218,13 +250,14 @@ export async function createEvent(req: Request, res: Response): Promise<void> {
     repeatsDailyWindow,
     dailyStartTime,
     dailyEndTime,
+    includedDates,
     assignees = [],
     color,
     generateMeetingLink,
   } = req.body;
 
   const doc = new CalendarEvent({
-    dealershipId: user.dealershipId,
+    organizationId: auth.orgId,
     type,
     title,
     description,
@@ -234,13 +267,14 @@ export async function createEvent(req: Request, res: Response): Promise<void> {
     repeatsDailyWindow: !!repeatsDailyWindow,
     dailyStartTime,
     dailyEndTime,
-    createdBy: user._id,
+    includedDates,
+    createdBy: auth.userId,
     assignees,
     color,
   });
 
   if (type === "meeting" && generateMeetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), user.dealershipId);
+    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
     doc.meetingRoomName = roomName;
     doc.meetingLink = link;
   }
@@ -248,35 +282,41 @@ export async function createEvent(req: Request, res: Response): Promise<void> {
   await doc.save();
   await doc.populate(POPULATE_USERS);
 
-  const item = mapCalendarEvent(doc.toObject());
-  emitCalendarChange("calendar:created", user.dealershipId, {
+  const item = mapCalendarEvent(doc.toObject(), auth.userId);
+  emitCalendarChange("calendar:created", auth.orgId, {
     source: "calendarEvent",
-    item,
+    item: stripViewerFields(item),
   });
 
-  const others = assignees.filter((a: string) => a !== user._id);
+  const others = (assignees as string[]).filter((a) => a !== auth.userId);
   if (others.length) {
     await pushNotification({
       userIds: others,
-      dealershipId: user.dealershipId,
-      title: `You've been added to a ${type}`,
+      orgId: auth.orgId,
+      title: `${auth.fullName} added you to a ${type}`,
       body: `${title} — ${new Date(start).toLocaleString()}`,
-      link: `/suprah-calendar?event=${doc._id}`,
+      link: `/crm/suprah-calendar?event=${doc._id}`,
     });
   }
 
   res.status(201).json({ item });
-}
+});
 
 /** PATCH /api/calendar/events/:id */
-export async function updateEvent(req: Request, res: Response): Promise<void> {
-  const { user } = req as AuthedRequest;
+export const updateEvent = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
   const doc = await CalendarEvent.findOne({
     _id: req.params.id,
-    dealershipId: user.dealershipId,
+    organizationId: auth.orgId,
   });
   if (!doc) {
     res.status(404).json({ message: "Calendar item not found." });
+    return;
+  }
+  if (String(doc.createdBy) !== auth.userId) {
+    res.status(403).json({ message: "Only the creator can edit this item." });
     return;
   }
 
@@ -292,6 +332,7 @@ export async function updateEvent(req: Request, res: Response): Promise<void> {
     "repeatsDailyWindow",
     "dailyStartTime",
     "dailyEndTime",
+    "includedDates",
     "assignees",
     "status",
     "color",
@@ -301,7 +342,7 @@ export async function updateEvent(req: Request, res: Response): Promise<void> {
   }
 
   if (req.body.generateMeetingLink && !doc.meetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), user.dealershipId);
+    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
     doc.meetingRoomName = roomName;
     doc.meetingLink = link;
   }
@@ -309,85 +350,95 @@ export async function updateEvent(req: Request, res: Response): Promise<void> {
   await doc.save();
   await doc.populate(POPULATE_USERS);
 
-  const item = mapCalendarEvent(doc.toObject());
-  emitCalendarChange("calendar:updated", user.dealershipId, {
+  const item = mapCalendarEvent(doc.toObject(), auth.userId);
+  emitCalendarChange("calendar:updated", auth.orgId, {
     source: "calendarEvent",
-    item,
+    item: stripViewerFields(item),
   });
 
   const added = doc.assignees
     .map(String)
-    .filter((id) => !before.has(id) && id !== user._id);
+    .filter((id) => !before.has(id) && id !== auth.userId);
   if (added.length) {
     await pushNotification({
       userIds: added,
-      dealershipId: user.dealershipId,
-      title: `You've been added to a ${doc.type}`,
+      orgId: auth.orgId,
+      title: `${auth.fullName} added you to a ${doc.type}`,
       body: `${doc.title} — ${doc.start.toLocaleString()}`,
-      link: `/suprah-calendar?event=${doc._id}`,
+      link: `/crm/suprah-calendar?event=${doc._id}`,
     });
   }
 
   res.json({ item });
-}
+});
 
 /** DELETE /api/calendar/events/:id */
-export async function deleteEvent(req: Request, res: Response): Promise<void> {
-  const { user } = req as AuthedRequest;
-  const doc = await CalendarEvent.findOneAndDelete({
+export const deleteEvent = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
+  const doc = await CalendarEvent.findOne({
     _id: req.params.id,
-    dealershipId: user.dealershipId,
+    organizationId: auth.orgId,
   });
   if (!doc) {
     res.status(404).json({ message: "Calendar item not found." });
     return;
   }
-  emitCalendarChange("calendar:deleted", user.dealershipId, {
+  if (String(doc.createdBy) !== auth.userId) {
+    res.status(403).json({ message: "Only the creator can delete this item." });
+    return;
+  }
+  await doc.deleteOne();
+  emitCalendarChange("calendar:deleted", auth.orgId, {
     source: "calendarEvent",
     id: String(doc._id),
   });
   res.json({ ok: true });
-}
+});
 
-/** POST /api/calendar/events/:id/meeting-link — generate on an existing item. */
-export async function generateMeetingLink(
-  req: Request,
-  res: Response
-): Promise<void> {
-  const { user } = req as AuthedRequest;
+/** POST /api/calendar/events/:id/meeting-link */
+export const generateMeetingLink = asyncHandler(async (req, res) => {
+  const auth = requireAuth(req, res);
+  if (!auth) return;
+
   const doc = await CalendarEvent.findOne({
     _id: req.params.id,
-    dealershipId: user.dealershipId,
+    organizationId: auth.orgId,
   });
   if (!doc) {
     res.status(404).json({ message: "Calendar item not found." });
     return;
   }
+  if (String(doc.createdBy) !== auth.userId) {
+    res
+      .status(403)
+      .json({ message: "Only the creator can generate the meeting link." });
+    return;
+  }
   if (!doc.meetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), user.dealershipId);
+    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
     doc.meetingRoomName = roomName;
     doc.meetingLink = link;
     await doc.save();
-    emitCalendarChange("calendar:updated", user.dealershipId, {
+    emitCalendarChange("calendar:updated", auth.orgId, {
       source: "calendarEvent",
-      item: mapCalendarEvent(doc.toObject()),
+      item: stripViewerFields(mapCalendarEvent(doc.toObject(), auth.userId)),
     });
   }
   res.json({ meetingLink: doc.meetingLink, roomName: doc.meetingRoomName });
-}
+});
 
 /**
- * TODO(integration): align with SupraSpace's real room/link format.
- * SupraSpace uses JaaS (8x8) — if your CallSession flow expects a JaaS
- * room like `{appId}/{roomName}` plus a signed JWT minted at join time,
- * keep this as a deterministic room name and let CallExperience mint the
- * token when the link is opened, same as your existing call flow.
+ * TODO(integration): align with the SupraSpace/JaaS room + link format used
+ * by the /calls flow. Deterministic room name; CallExperience mints the JWT
+ * at join time, same as the existing calling system.
  */
 function buildSupraSpaceLink(
   eventId: string,
-  dealershipId: string
+  orgId: string
 ): { roomName: string; link: string } {
-  const roomName = `suprah-${dealershipId.slice(-6)}-${eventId.slice(-8)}`;
+  const roomName = `suprah-${orgId.slice(-6)}-${eventId.slice(-8)}`;
   const base = process.env.APP_URL ?? "https://suprah-app.com";
   return { roomName, link: `${base}/supraspace/meet/${roomName}` };
 }
