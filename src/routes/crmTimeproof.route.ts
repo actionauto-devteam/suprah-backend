@@ -15,6 +15,7 @@ import {
   submitScreenshot,
   getScreenshots,
   getBlurredScreenshot,
+  deleteMyScreenshot,
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
@@ -44,6 +45,7 @@ router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
 router.get('/screenshot-blurred', getBlurredScreenshot);
+router.delete('/screenshots', deleteMyScreenshot); // self-service only, ownership check inside
 router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, role check inside
 router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
 

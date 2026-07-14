@@ -12,6 +12,7 @@ import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
 import { PushService } from '../services/push.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
+import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
@@ -104,6 +105,18 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
 
     if (openSeconds > 0) {
       calendar[dateStr].totalSeconds = Math.max(0, calendar[dateStr].totalSeconds - openSeconds);
+    }
+  }
+
+  // Apply self-deleted-screenshot deductions — must run after every other
+  // total-seconds adjustment above so it's the final word on each day's total.
+  const deductions = await ScreenshotDeduction.find({
+    userId: user._id,
+    date: { $in: Object.keys(calendar) },
+  }).select('date deductedSeconds').lean();
+  for (const d of deductions) {
+    if (calendar[d.date]) {
+      calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
     }
   }
 
@@ -211,6 +224,16 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   } catch {
   }
 
+  const allDeductions = await ScreenshotDeduction.find({
+    userId: { $in: users.map((u) => u._id) },
+  }).select('userId date deductedSeconds').lean();
+  const deductionsByUser = new Map<string, Map<string, number>>();
+  for (const d of allDeductions) {
+    const uid = d.userId.toString();
+    if (!deductionsByUser.has(uid)) deductionsByUser.set(uid, new Map());
+    deductionsByUser.get(uid)!.set(d.date, d.deductedSeconds);
+  }
+
   const results = await Promise.all(
     users.map(async (u) => {
       const logs = await TimeLog.find({
@@ -219,6 +242,14 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       }).sort({ timestamp: 1 }).lean();
 
       const calendar = buildCalendarMap(logs);
+      const userDeductions = deductionsByUser.get(u._id.toString());
+      let todayDeduction = 0;
+      if (userDeductions) {
+        for (const [date, seconds] of userDeductions) {
+          if (calendar[date]) calendar[date].totalSeconds = Math.max(0, calendar[date].totalSeconds - seconds);
+          if (date === todayStr) todayDeduction = seconds;
+        }
+      }
       const summary = aggregateSummary(calendar);
       const { streak } = computeStreak(calendar);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
@@ -264,7 +295,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const liveWallSec = isOnShift && shiftStartedAt
         ? (now.getTime() - new Date(shiftStartedAt).getTime()) / 1000
         : 0;
-      const todayNetSnapshot = todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds);
+      const todayNetSnapshot = Math.max(0, todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds) - todayDeduction);
       const today = formatHours(todayNetSnapshot);
 
       const department = (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined;
@@ -357,6 +388,18 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
 
     if (openSeconds > 0) {
       calendar[dateStr].totalSeconds = Math.max(0, calendar[dateStr].totalSeconds - openSeconds);
+    }
+  }
+
+  // Apply self-deleted-screenshot deductions — must run after every other
+  // total-seconds adjustment above so it's the final word on each day's total.
+  const userDeductions = await ScreenshotDeduction.find({
+    userId,
+    date: { $in: Object.keys(calendar) },
+  }).select('date deductedSeconds').lean();
+  for (const d of userDeductions) {
+    if (calendar[d.date]) {
+      calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
     }
   }
 
@@ -952,6 +995,46 @@ export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Respo
   res.send(blurred);
 });
 
+// Each screenshot represents this much of the 10-min capture interval —
+// deleting one deducts this many seconds from that day's rendered hours.
+const SCREENSHOT_DELETE_DEDUCTION_SECONDS = 10 * 60;
+
+/**
+ * DELETE /api/crm/timeproof/screenshots?key=...
+ * A user permanently deletes one of their OWN screenshots (no archive/audit
+ * trail), and the corresponding time is deducted from that day's rendered
+ * hours. TEMPORARY: also allows admin/manager to delete on another user's
+ * behalf (same deduction, applied to the target user) — requested for a
+ * one-off need; remove the admin/manager allowance again once no longer needed.
+ */
+export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  const { key } = req.query;
+
+  if (!key || typeof key !== 'string' || !key.startsWith('screenshots/')) {
+    throw new ApiError(400, 'Valid key query param required');
+  }
+
+  const [, targetUserId, date] = key.split('/');
+  const isSelf = targetUserId === requestor._id.toString();
+  if (!isSelf && !['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'You can only delete your own screenshots');
+  }
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new ApiError(400, 'Invalid screenshot key');
+  }
+
+  await storageService.delete(key, BucketType.PRIVATE);
+
+  await ScreenshotDeduction.updateOne(
+    { userId: targetUserId, date },
+    { $inc: { deductedSeconds: SCREENSHOT_DELETE_DEDUCTION_SECONDS } },
+    { upsert: true }
+  );
+
+  res.json(new ApiResponse(200, { deductedSeconds: SCREENSHOT_DELETE_DEDUCTION_SECONDS }, 'Screenshot deleted'));
+});
+
 /**
  * PATCH /api/crm/timeproof/correct-time
  * Admin/manager-only: corrects an overrun shift (forgotten clock-out) by either
@@ -1239,6 +1322,7 @@ export default {
   submitScreenshot,
   getScreenshots,
   getBlurredScreenshot,
+  deleteMyScreenshot,
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,

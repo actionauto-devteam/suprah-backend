@@ -332,6 +332,15 @@ const updateConversationNotifications = asyncHandler(async (req: Request, res: R
   conversation.markModified('notificationPrefs');
   await conversation.save({ validateModifiedOnly: true });
 
+  try {
+    getIO().to(`user:${userKey}`).emit('conversation:notification-preference', {
+      conversationId: id,
+      preference: nextPref,
+    });
+  } catch {
+    // Realtime preference sync is best-effort; the REST response remains source of truth.
+  }
+
   res.json(new ApiResponse(200, nextPref, 'Notification settings saved'));
 });
 
