@@ -76,6 +76,8 @@ const validateUploadedFiles: RequestHandler = (req, _res, next) => {
 
 // ─── Auth gate (all SupraSpace routes require CRM login) ─────────────────────
 
+router.post('/session-token', mainAuth(), supraSpaceController.getSessionToken);
+
 router.use(crmAuth());
 
 // ─── Users / presence ────────────────────────────────────────────────────────

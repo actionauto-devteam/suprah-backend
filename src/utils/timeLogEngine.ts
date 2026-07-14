@@ -353,3 +353,83 @@ export const aggregateSummary = (
     thisMonth: formatHours(monthSeconds),
   };
 };
+
+export interface ActivityIntervalLike {
+  startAt: Date | string;
+  endAt: Date | string;
+}
+
+export interface IdlePeriod {
+  date: string;
+  idleStart: string;
+  /** null means idle is still ongoing right now (session hasn't clocked out yet) */
+  idleEnd: string | null;
+  durationSeconds: number;
+}
+
+/**
+ * Derives idle periods from the gaps between committed ActivityIntervals
+ * (and breaks) within each clocked-in session. A gap only counts as "idle" if
+ * the tray was actually running that session (at least one ActivityInterval
+ * exists) — otherwise there's simply no tracking data, which is NOT the same
+ * as "idle the whole time" (e.g. CRM-only users who never ran the tray, or
+ * Lot Tech's GPS-based tracking which has no idle concept).
+ */
+export const buildIdleLog = (
+  logs: TimeLogEntry[],
+  activityIntervals: ActivityIntervalLike[],
+  tzOffsetMinutes = 0
+): IdlePeriod[] => {
+  const sessions = buildSessions(logs);
+  const breaks = buildBreakSessions(logs);
+  const result: IdlePeriod[] = [];
+  const MIN_GAP_MS = 60_000;
+
+  for (const session of sessions) {
+    const sessionStart = session.in.getTime();
+    const sessionEnd = session.out ? session.out.getTime() : Date.now();
+
+    const sessionIntervals = activityIntervals
+      .map((ai) => ({ start: new Date(ai.startAt).getTime(), end: new Date(ai.endAt).getTime() }))
+      .filter((ai) => ai.start < sessionEnd && ai.end > sessionStart);
+    if (sessionIntervals.length === 0) continue; // no tray data for this session — skip, not "all idle"
+
+    const sessionBreaks = breaks
+      .map((b) => ({ start: b.in.getTime(), end: b.out ? b.out.getTime() : Date.now() }))
+      .filter((b) => b.start < sessionEnd && b.end > sessionStart);
+
+    const occupied = [...sessionIntervals, ...sessionBreaks]
+      .map(({ start, end }): [number, number] => [Math.max(start, sessionStart), Math.min(end, sessionEnd)])
+      .sort((a, b) => a[0] - b[0]);
+
+    const merged: [number, number][] = [];
+    for (const [s, e] of occupied) {
+      const last = merged[merged.length - 1];
+      if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+      else merged.push([s, e]);
+    }
+
+    let cursor = sessionStart;
+    for (const [s, e] of merged) {
+      if (s > cursor + MIN_GAP_MS) {
+        result.push({
+          date: toLocalDateStr(new Date(cursor), tzOffsetMinutes),
+          idleStart: new Date(cursor).toISOString(),
+          idleEnd: new Date(s).toISOString(),
+          durationSeconds: Math.floor((s - cursor) / 1000),
+        });
+      }
+      cursor = Math.max(cursor, e);
+    }
+    if (sessionEnd > cursor + MIN_GAP_MS) {
+      result.push({
+        date: toLocalDateStr(new Date(cursor), tzOffsetMinutes),
+        idleStart: new Date(cursor).toISOString(),
+        idleEnd: session.out ? new Date(sessionEnd).toISOString() : null,
+        durationSeconds: Math.floor((sessionEnd - cursor) / 1000),
+      });
+    }
+  }
+
+  return result.sort((a, b) => new Date(b.idleStart).getTime() - new Date(a.idleStart).getTime());
+};

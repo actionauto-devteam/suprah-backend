@@ -15,7 +15,8 @@ import { PushService } from '../services/push.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
-import { getCompanyDayRange } from '../utils/companyTimezone';
+import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
+import sharp from 'sharp';
 
 const BREAK_LIMIT_SECONDS = 3600; // 3600
 
@@ -31,10 +32,6 @@ const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
 // How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
-// Set to 5 minutes (5× the 60s heartbeat interval) so transient network blips
-// (1–3 missed heartbeats) don't freeze the CRM page timer. The trade-off is that a
-// genuinely crashed tray may over-display by up to 5 minutes — acceptable since
-// ActivityIntervals (committed on idle/clock-out) are the authoritative record.
 // Tray heartbeats every 60s with no retry on failure (silent best-effort post),
 // so ordinary blips — brief network loss, laptop sleep/wake, a throttled
 // background tab — can easily produce a 2-10 min gap between heartbeats even
@@ -53,7 +50,7 @@ const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
 import {
   buildSessions, buildBreakSessions, buildCalendarMap, computeStreak,
   buildHourPattern, aggregateSummary, getWeekStart, toDateStr, toLocalDateStr,
-  formatHours, type CalendarDay,
+  formatHours, buildIdleLog, type CalendarDay,
 } from '../utils/timeLogEngine';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -163,6 +160,44 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
       range: { startDate, endDate },
     }, 'Timeproof data fetched')
   );
+});
+
+/**
+ * GET /api/crm/timeproof/idle-log?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Read-only report of when the authenticated user went idle (tray-detected
+ * inactivity), derived from the gaps between committed ActivityIntervals
+ * within each clocked-in session. Days the tray never ran are skipped
+ * entirely (no data), not reported as "idle the whole day".
+ */
+export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { startDate: startDateStr, endDate: endDateStr } = req.query;
+  if (!startDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(startDateStr as string)) {
+    throw new ApiError(400, 'startDate is required (YYYY-MM-DD)');
+  }
+  if (!endDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(endDateStr as string)) {
+    throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
+  }
+
+  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
+  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
+  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+
+  const logs = await TimeLog.find({
+    userId: user._id,
+    timestamp: { $gte: startDate, $lte: endDate },
+  }).sort({ timestamp: 1 }).lean();
+
+  const activityIntervals = await ActivityInterval.find({
+    userId: user._id,
+    startAt: { $lte: endDate },
+    endAt: { $gte: startDate },
+  }).select('startAt endAt').lean();
+
+  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+
+  res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
 /**
@@ -397,6 +432,49 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       range: { startDate, endDate },
     }, 'User timeproof fetched')
   );
+});
+
+/**
+ * GET /api/crm/timeproof/user/:userId/idle-log?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Admin/Manager: read-only idle report for a specific user. Same derivation
+ * as getMyIdleLog — see that function's doc comment.
+ */
+export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied — admin or manager role required');
+  }
+  const { userId } = req.params;
+  const { startDate: startDateStr, endDate: endDateStr } = req.query;
+  if (!startDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(startDateStr as string)) {
+    throw new ApiError(400, 'startDate is required (YYYY-MM-DD)');
+  }
+  if (!endDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(endDateStr as string)) {
+    throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
+  }
+
+  const targetUser = await CrmUser.findById(userId).select('_id');
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
+  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
+  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+
+  const logs = await TimeLog.find({
+    userId,
+    timestamp: { $gte: startDate, $lte: endDate },
+  }).sort({ timestamp: 1 }).lean();
+
+  const activityIntervals = await ActivityInterval.find({
+    userId,
+    startAt: { $lte: endDate },
+    endAt: { $gte: startDate },
+  }).select('startAt endAt').lean();
+
+  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+
+  res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
 /**
@@ -831,6 +909,18 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, 'Access denied');
   }
 
+  // If someone OTHER than the account owner is viewing (an admin/manager),
+  // and that account has screenshotBlurUntilPayout set, serve blurred proxy
+  // URLs instead of the real signed URLs, except in the payout window.
+  const isSelf = targetId === requestor._id.toString();
+  let shouldBlur = false;
+  if (!isSelf) {
+    const targetUser = await CrmUser.findById(targetId).select('screenshotBlurUntilPayout').lean();
+    shouldBlur = !!targetUser?.screenshotBlurUntilPayout && !isPayoutUnblurWindow(new Date());
+  }
+  const requestToken = req.cookies?.['crm_token']
+    || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.split(' ')[1] : '');
+
   const prefix = `screenshots/${targetId}/${date}/`;
   const [objects, excludedRows] = await Promise.all([
     storageService.list(prefix, BucketType.PRIVATE),
@@ -864,11 +954,50 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
       _id: s.r2Key, // use the key as the unique identifier
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
-      url: await getSignedProofUrl(s.r2Key),
+      isBlurred: shouldBlur,
+      url: shouldBlur
+        ? `/api/crm/timeproof/screenshot-blurred?key=${encodeURIComponent(s.r2Key)}&t=${encodeURIComponent(requestToken)}`
+        : await getSignedProofUrl(s.r2Key),
     }))
   );
 
   res.json(new ApiResponse(200, { screenshots: withUrls }, 'Screenshots fetched'));
+});
+
+/**
+ * GET /api/crm/timeproof/screenshot-blurred?key=...
+ * Serves a blurred version of a screenshot for accounts with
+ * screenshotBlurUntilPayout set. Re-derives access control from the key path
+ * itself (screenshots/{userId}/{date}/{file}) rather than trusting the caller
+ * — the account owner always gets access; anyone else needs admin/manager.
+ */
+export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  const { key } = req.query;
+
+  if (!key || typeof key !== 'string' || !key.startsWith('screenshots/')) {
+    throw new ApiError(400, 'Valid key query param required');
+  }
+
+  const targetUserId = key.split('/')[1];
+  const isSelf = targetUserId === requestor._id.toString();
+  if (!isSelf && !['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied');
+  }
+
+  const file = await storageService.streamPrivateFile(key);
+  if (!file) throw new ApiError(404, 'Screenshot not found');
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of file.stream) {
+    chunks.push(chunk as Buffer);
+  }
+  const original = Buffer.concat(chunks);
+  const blurred = await sharp(original).resize(480).blur(24).jpeg({ quality: 55 }).toBuffer();
+
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.send(blurred);
 });
 
 /**
@@ -1155,6 +1284,7 @@ export default {
   getResumableShift,
   submitScreenshot,
   getScreenshots,
+  getBlurredScreenshot,
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,

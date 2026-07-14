@@ -14,11 +14,14 @@ import {
   getAgentStatus,
   submitScreenshot,
   getScreenshots,
+  getBlurredScreenshot,
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
   correctTimeLog,
   excludeScreenshots,
+  getMyIdleLog,
+  getUserIdleLog,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -29,6 +32,8 @@ router.get('/my', getMyTimeproof);
 router.get('/users', getAllUsersTimeproof);
 router.get('/user/:userId', getUserTimeproof);
 router.get('/export', exportTimeproof);
+router.get('/idle-log', getMyIdleLog);
+router.get('/user/:userId/idle-log', getUserIdleLog);
 
 // Agent / tray app endpoints
 router.get('/shift-state', getShiftState);
@@ -39,6 +44,7 @@ router.post('/activity-interval', postActivityInterval);
 router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
+router.get('/screenshot-blurred', getBlurredScreenshot);
 router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, role check inside
 router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
 

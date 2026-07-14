@@ -71,7 +71,7 @@ function getActor(req: Request): TimeclockActor {
 // ── Calendar helpers — shared with crmTimeproof.controller.ts and
 //    crm.controller.ts via utils/timeLogEngine.ts, no local copies anymore ────
 import {
-  buildSessions, buildCalendarMap, computeStreak, buildHourPattern, aggregateSummary, toLocalDateStr,
+  buildSessions, buildCalendarMap, computeStreak, buildHourPattern, aggregateSummary, toLocalDateStr, buildIdleLog,
 } from '../utils/timeLogEngine';
 
 // ── Helper: get today's MDT window ────────────────────────────────────────────
@@ -431,6 +431,43 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
 });
 
 /**
+ * GET /api/timeclock/idle-log?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Read-only report of when the authenticated user went idle (tray-detected
+ * inactivity), derived from gaps between committed ActivityIntervals within
+ * each clocked-in session. Days the tray never ran are skipped entirely.
+ */
+export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => {
+  const actor = getActor(req);
+  const { startDate: startDateStr, endDate: endDateStr } = req.query;
+  if (!startDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(startDateStr as string)) {
+    throw new ApiError(400, 'startDate is required (YYYY-MM-DD)');
+  }
+  if (!endDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(endDateStr as string)) {
+    throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
+  }
+
+  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
+  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
+  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+
+  const logs = await TimeLog.find({
+    userId: actor.id,
+    timestamp: { $gte: startDate, $lte: endDate },
+  }).sort({ timestamp: 1 }).lean();
+
+  const activityIntervals = await ActivityInterval.find({
+    userId: actor.id,
+    startAt: { $lte: endDate },
+    endAt: { $gte: startDate },
+  }).select('startAt endAt').lean();
+
+  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+
+  res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
+});
+
+/**
  * GET /api/timeclock/resumable-shift
  * Check if today has a previous clock-out that can be resumed.
  */
@@ -523,4 +560,4 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
 });
 
-export default { getMe, timeClock, getShiftState, getMyTimeproof, getResumableShift, postHeartbeat, postActivityInterval };
+export default { getMe, timeClock, getShiftState, getMyTimeproof, getMyIdleLog, getResumableShift, postHeartbeat, postActivityInterval };
