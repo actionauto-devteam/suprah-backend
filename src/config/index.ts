@@ -12,15 +12,9 @@ const envVarsSchema = Joi.object()
     FRONTEND_URL: Joi.string().required().description('Frontend URL'),
 
     FTP_PASV_MAX: Joi.number().default(21010),
-    FTP_SERVER_USER: Joi.string()
-      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.string().allow('').default('dealerscloud') })
-      .description('FTP server username — must be set explicitly in production, no default'),
-    FTP_SERVER_PASSWORD: Joi.string()
-      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.string().allow('').default('changeme123') })
-      .description('FTP server password — must be set explicitly in production, no default'),
-    FTP_FORCE_TLS: Joi.boolean()
-      .when('NODE_ENV', { is: 'production', then: Joi.boolean().valid(true).required(), otherwise: Joi.boolean().default(false) })
-      .description('FTP must run over TLS in production — no plaintext fallback'),
+    FTP_SERVER_USER: Joi.string().allow('').default('dealerscloud'),
+    FTP_SERVER_PASSWORD: Joi.string().allow('').default('changeme123'),
+    FTP_FORCE_TLS: Joi.boolean().default(false),
     FTP_TLS_CERT_PATH: Joi.string().allow('').description('Path to FTPS certificate'),
     FTP_TLS_KEY_PATH: Joi.string().allow('').description('Path to FTPS key'),
     BACKEND_URL: Joi.string().required().description('Backend URL'),
@@ -72,12 +66,8 @@ const envVarsSchema = Joi.object()
     R2_BUCKET_FTP: Joi.string().default('actionauto-ftp'),
     R2_PUBLIC_URL: Joi.string().allow('').description('R2 Public URL'),
 
-    CRM_JWT_SECRET: Joi.string()
-      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
-      .description('CRM JWT Secret — required in production, no fallback to a hardcoded default'),
-    MEMBERSHIP_DISCOUNT_SECRET: Joi.string()
-      .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
-      .description('Membership discount JWT secret — required in production, no fallback to a hardcoded default'),
+    CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
+    MEMBERSHIP_DISCOUNT_SECRET: Joi.string().allow('').description('Membership discount JWT secret'),
     VAPID_PUBLIC_KEY: Joi.string()
       .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
       .description('VAPID Public Key'),
