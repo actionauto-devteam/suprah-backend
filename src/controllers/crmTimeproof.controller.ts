@@ -10,7 +10,7 @@ import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
-import CrmPushService from '../services/crmPush.service';
+import { PushService } from '../services/push.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
@@ -22,305 +22,31 @@ const COMPANY_TZ_OFFSET_MINUTES = -360;
 
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
-const HEARTBEAT_FRESH_MS = 5 * 60 * 1000;
+// How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
+// Set to 5 minutes (5× the 60s heartbeat interval) so transient network blips
+// (1–3 missed heartbeats) don't freeze the CRM page timer. The trade-off is that a
+// genuinely crashed tray may over-display by up to 5 minutes — acceptable since
+// ActivityIntervals (committed on idle/clock-out) are the authoritative record.
+// Tray heartbeats every 60s with no retry on failure (silent best-effort post),
+// so ordinary blips — brief network loss, laptop sleep/wake, a throttled
+// background tab — can easily produce a 2-10 min gap between heartbeats even
+// though the user never stopped working. A 5 min threshold was flipping the
+// web timer to "stale" during these normal gaps, which (see getShiftState)
+// freezes the timer and shows a false "Paused"/"Resume Shift" state. 15 min
+// gives enough margin to absorb that jitter while still catching a tray that
+// is genuinely offline (laptop closed, app crashed, etc).
+const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
 
-
-const buildSessions = (logs: any[]) => {
-  const sorted = [...logs].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-  );
-
-  const sessions: { in: Date; out: Date | null; duration: number; isLive: boolean; isOpen: boolean }[] = [];
-  let currentIn: Date | null = null;
-
-  for (const log of sorted) {
-    if (log.type === 'time-in') {
-      currentIn = new Date(log.timestamp);
-    } else if (log.type === 'time-out' && currentIn) {
-      const out = new Date(log.timestamp);
-      sessions.push({
-        in: currentIn,
-        out,
-        duration: (out.getTime() - currentIn.getTime()) / 1000,
-        isLive: false,
-        isOpen: false,
-      });
-      currentIn = null;
-    }
-  }
-
-  if (currentIn) {
-    const now = new Date();
-    const MAX_LIVE_MS = 12 * 60 * 60 * 1000;
-    const elapsedMs = now.getTime() - currentIn.getTime();
-    const isCapped = elapsedMs > MAX_LIVE_MS;
-    sessions.push({
-      in: currentIn,
-      out: null,
-      duration: Math.min(elapsedMs, MAX_LIVE_MS) / 1000,
-      isLive: !isCapped,
-      isOpen: true,
-    });
-  }
-
-  return sessions;
-};
-
-const toDateStr = (date: Date) => date.toISOString().split('T')[0];
-
-const toLocalDateStr = (date: Date, tzOffsetMinutes: number): string => {
-  const local = new Date(date.getTime() + tzOffsetMinutes * 60_000);
-  return local.toISOString().split('T')[0];
-};
-
-const getWeekStart = (date: Date) => {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
-
-const buildBreakSessions = (logs: any[]) => {
-  const sorted = [...logs]
-    .filter((l) => l.type === 'break-in' || l.type === 'break-out')
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-  const breaks: { in: Date; out: Date | null; duration: number; isActive: boolean }[] = [];
-  let currentBreakIn: Date | null = null;
-
-  for (const log of sorted) {
-    if (log.type === 'break-in') {
-      currentBreakIn = new Date(log.timestamp);
-    } else if (log.type === 'break-out' && currentBreakIn) {
-      const out = new Date(log.timestamp);
-      breaks.push({
-        in: currentBreakIn,
-        out,
-        duration: (out.getTime() - currentBreakIn.getTime()) / 1000,
-        isActive: false,
-      });
-      currentBreakIn = null;
-    }
-  }
-
-  if (currentBreakIn) {
-    const now = new Date();
-    breaks.push({
-      in: currentBreakIn,
-      out: null,
-      duration: (now.getTime() - currentBreakIn.getTime()) / 1000,
-      isActive: true,
-    });
-  }
-
-  return breaks;
-};
-
-const getMidnightSegments = (
-  startTime: Date,
-  endTime: Date,
-  tzOffsetMinutes: number
-): Array<{ date: string; segStart: Date; segEnd: Date }> => {
-  const result: Array<{ date: string; segStart: Date; segEnd: Date }> = [];
-  let segStart = new Date(startTime);
-
-  while (true) {
-    const segDateStr = toLocalDateStr(segStart, tzOffsetMinutes);
-    const localDayStartUTC = new Date(segDateStr + 'T00:00:00.000Z').getTime();
-    const nextLocalMidnightUTC = new Date(localDayStartUTC + 24 * 60 * 60 * 1000 - tzOffsetMinutes * 60_000);
-
-    if (endTime <= nextLocalMidnightUTC) {
-      result.push({ date: segDateStr, segStart: new Date(segStart), segEnd: new Date(endTime) });
-      break;
-    }
-
-    result.push({ date: segDateStr, segStart: new Date(segStart), segEnd: new Date(nextLocalMidnightUTC) });
-    segStart = new Date(nextLocalMidnightUTC);
-  }
-
-  return result;
-};
-
-type CalendarDay = {
-  sessions: Array<{ in: Date; out: Date | null; duration: number; isLive: boolean; isOpen: boolean }>;
-  totalSeconds: number;
-  breaks: Array<{ in: Date; out: Date | null; duration: number; isActive: boolean }>;
-  breakSeconds: number;
-  weekTotalSeconds?: number;
-};
-
-const attachWeekTotals = (calendar: Record<string, CalendarDay>) => {
-  const weekMap: Record<string, string[]> = {};
-
-  for (const dateStr of Object.keys(calendar)) {
-    if (calendar[dateStr].totalSeconds === 0) continue;
-    const d = new Date(dateStr + 'T12:00:00Z');
-    const dayOfWeek = d.getUTCDay();
-    const daysToSaturday = dayOfWeek === 0 ? 6 : 6 - dayOfWeek;
-    const saturday = new Date(d);
-    saturday.setUTCDate(d.getUTCDate() + daysToSaturday);
-    const saturdayStr = toDateStr(saturday);
-    (weekMap[saturdayStr] ??= []).push(dateStr);
-  }
-
-  for (const [saturdayStr, dates] of Object.entries(weekMap)) {
-    const weekTotal = dates.reduce((sum, d) => sum + calendar[d].totalSeconds, 0);
-
-    if (!calendar[saturdayStr]) {
-      calendar[saturdayStr] = { sessions: [], totalSeconds: 0, breaks: [], breakSeconds: 0 };
-    }
-    calendar[saturdayStr].weekTotalSeconds = weekTotal;
-  }
-};
-
-const buildCalendarMap = (logs: any[], tzOffsetMinutes = 0) => {
-  const allSessions = buildSessions(logs);
-  const allBreaks = buildBreakSessions(logs);
-
-  const byDate: Record<string, {
-    sessions: CalendarDay['sessions'];
-    breaks: CalendarDay['breaks'];
-  }> = {};
-
-  const ensure = (d: string) => {
-    if (!byDate[d]) byDate[d] = { sessions: [], breaks: [] };
-  };
-
-  for (const s of allSessions) {
-    const endTime = s.out ?? (s.isLive ? new Date() : new Date(s.in.getTime() + s.duration * 1000));
-    const segments = getMidnightSegments(s.in, endTime, tzOffsetMinutes);
-    for (const { date, segStart, segEnd } of segments) {
-      ensure(date);
-      const isLast = segEnd.getTime() === endTime.getTime();
-      byDate[date].sessions.push({
-        in: segStart,
-        out: s.out && isLast ? s.out : segEnd,
-        duration: (segEnd.getTime() - segStart.getTime()) / 1000,
-        isLive: s.isLive && isLast,
-        isOpen: s.isOpen,
-      });
-    }
-  }
-
-  for (const b of allBreaks) {
-    const endTime = b.out ?? new Date();
-    const segments = getMidnightSegments(b.in, endTime, tzOffsetMinutes);
-    for (const { date, segStart, segEnd } of segments) {
-      ensure(date);
-      const isLast = segEnd.getTime() === endTime.getTime();
-      byDate[date].breaks.push({
-        in: segStart,
-        out: b.out && isLast ? b.out : segEnd,
-        duration: (segEnd.getTime() - segStart.getTime()) / 1000,
-        isActive: b.isActive && isLast,
-      });
-    }
-  }
-
-  const calendar: Record<string, CalendarDay> = {};
-  for (const [date, data] of Object.entries(byDate)) {
-    const grossSessionSeconds = data.sessions.reduce((sum, s) => sum + s.duration, 0);
-    const breakSeconds = data.breaks.reduce((sum, b) => sum + b.duration, 0);
-    calendar[date] = {
-      sessions: data.sessions,
-      totalSeconds: Math.max(0, grossSessionSeconds - breakSeconds),
-      breaks: data.breaks,
-      breakSeconds,
-    };
-  }
-
-  attachWeekTotals(calendar);
-
-  return calendar;
-};
-
-const computeStreak = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
-  const now = new Date();
-  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
-  const todayStr = localNow.toISOString().split('T')[0];
-
-  let streak = 0;
-  const check = new Date(localNow);
-  check.setUTCHours(12, 0, 0, 0);
-
-  while (true) {
-    const dateStr = check.toISOString().split('T')[0];
-    const hasWork = !!calendar[dateStr] && calendar[dateStr].totalSeconds > 0;
-
-    if (hasWork) {
-      streak++;
-      check.setUTCDate(check.getUTCDate() - 1);
-    } else if (dateStr === todayStr) {
-      check.setUTCDate(check.getUTCDate() - 1);
-    } else {
-      break;
-    }
-  }
-
-  const sorted = Object.keys(calendar).sort();
-  let longest = 0;
-  let temp = 0;
-  for (const d of sorted) {
-    if (calendar[d].totalSeconds > 0) {
-      temp++;
-      longest = Math.max(longest, temp);
-    } else {
-      temp = 0;
-    }
-  }
-
-  return { streak, longestStreak: longest };
-};
-
-const buildHourPattern = (logs: any[], tzOffsetMinutes = 0) => {
-  const pattern = new Array(24).fill(0);
-  for (const log of logs) {
-    if (log.type === 'time-in') {
-      const localTs = new Date(new Date(log.timestamp).getTime() + tzOffsetMinutes * 60_000);
-      const h = localTs.getUTCHours();
-      pattern[h]++;
-    }
-  }
-  return pattern;
-};
-
-const formatHours = (seconds: number) => ({
-  hours: Math.floor(seconds / 3600),
-  minutes: Math.floor((seconds % 3600) / 60),
-  totalSeconds: Math.round(seconds),
-  decimal: parseFloat((seconds / 3600).toFixed(2)),
-});
-
-const aggregateSummary = (calendar: ReturnType<typeof buildCalendarMap>, tzOffsetMinutes = 0) => {
-  const now = new Date();
-  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
-  const todayStr = localNow.toISOString().split('T')[0];
-
-  const localDay = localNow.getUTCDay();
-  const daysFromMonday = localDay === 0 ? 6 : localDay - 1;
-  const localWeekStartMs = localNow.getTime() - daysFromMonday * 86_400_000;
-  const weekStartStr = new Date(localWeekStartMs).toISOString().split('T')[0];
-
-  const monthStartStr = todayStr.slice(0, 7) + '-01';
-
-  let todaySeconds = 0;
-  let weekSeconds = 0;
-  let monthSeconds = 0;
-
-  for (const [dateStr, data] of Object.entries(calendar)) {
-    if (dateStr === todayStr) todaySeconds += data.totalSeconds;
-    if (dateStr >= weekStartStr) weekSeconds += data.totalSeconds;
-    if (dateStr >= monthStartStr) monthSeconds += data.totalSeconds;
-  }
-
-  return {
-    today: formatHours(todaySeconds),
-    thisWeek: formatHours(weekSeconds),
-    thisMonth: formatHours(monthSeconds),
-  };
-};
+/* ──────────────────────────────────────────────────────────────────────────
+   Helpers — core session/calendar math now lives in utils/timeLogEngine.ts,
+   shared with generalTimeclock.controller.ts and crm.controller.ts so the
+   three no longer maintain separate copies of the same pairing logic.
+────────────────────────────────────────────────────────────────────────── */
+import {
+  buildSessions, buildBreakSessions, buildCalendarMap, computeStreak,
+  buildHourPattern, aggregateSummary, getWeekStart, toDateStr, toLocalDateStr,
+  formatHours, type CalendarDay,
+} from '../utils/timeLogEngine';
 
 
 export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) => {
@@ -354,7 +80,11 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   const heartbeatFresh = todayHeartbeat
     ? Date.now() - new Date(todayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
-  const liveActiveSeconds = heartbeatFresh && todayHeartbeat?.currentIntervalStartAt
+  // Never count live time while on break — TimeLogs/heartbeat break state is
+  // authoritative here, same rule as getShiftState. Without this guard a
+  // stale-but-not-yet-refreshed heartbeat keeps ticking through the break and
+  // Rendered Hours ends up including break time.
+  const liveActiveSeconds = !todayHeartbeat?.isOnBreak && heartbeatFresh && todayHeartbeat?.currentIntervalStartAt
     ? Math.max(0, (Date.now() - new Date(todayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
     : 0;
   activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
@@ -565,7 +295,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const userHeartbeatFresh = userTodayHeartbeat
     ? Date.now() - new Date(userTodayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
-  const userLiveActiveSeconds = userHeartbeatFresh && userTodayHeartbeat?.currentIntervalStartAt
+  const userLiveActiveSeconds = !userTodayHeartbeat?.isOnBreak && userHeartbeatFresh && userTodayHeartbeat?.currentIntervalStartAt
     ? Math.max(0, (Date.now() - new Date(userTodayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
     : 0;
   userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
@@ -887,20 +617,23 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
 
   // ── Notify admins: agent went idle ────────────────────────────────────────
   if (!wasIdle && isIdle && isOnShift) {
-    const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    // Org-scoped — an unscoped query here would leak this event to every
+    // other organization's admins too.
+    const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
     const idlePayload = { userId: user._id, fullName: user.fullName, isIdle: true, at: new Date() };
     for (const admin of admins) {
       emitToUser(admin._id.toString(), 'agent:idle', idlePayload);
     }
     emitToShiftBoard('agent:idle', idlePayload);
 
-    // Push notification to admins across all devices
-    CrmPushService.sendToAdmins({
+    // Push notification to admins across all devices — reaches both CrmUser
+    // and main-User admins of this org, not just whichever model this event
+    // originated from.
+    PushService.notifyOrgAdmins(user.organizationId, {
       title: '⚪ Agent Idle',
       body: `${user.fullName} has been idle for 10 minutes.`,
-      icon: '/icon-192x192.png',
       tag: `crm-idle-${user._id}`,
-      data: { url: '/crm/timeproof' },
+      data: { url: '/crm/timeproof/users' },
     }).catch(() => {});
   }
 
@@ -911,22 +644,23 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       { lastBreakNotifiedAt: new Date() }
     );
 
-    const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    const breakExceededPayload = {
+      userId: user._id,
+      fullName: user.fullName,
+      breakDurationSeconds,
+      at: new Date(),
+    };
     for (const admin of admins) {
-      emitToUser(admin._id.toString(), 'agent:break-exceeded', {
-        userId: user._id,
-        fullName: user.fullName,
-        breakDurationSeconds,
-        at: new Date(),
-      });
+      emitToUser(admin._id.toString(), 'agent:break-exceeded', breakExceededPayload);
     }
+    emitToShiftBoard('agent:break-exceeded', breakExceededPayload);
 
-    CrmPushService.sendToAdmins({
+    PushService.notifyOrgAdmins(user.organizationId, {
       title: '☕ Break Exceeded',
       body: `${user.fullName} exceeds break time.`,
-      icon: '/icon-192x192.png',
       tag: `crm-break-${user._id}`,
-      data: { url: '/crm/timeproof' },
+      data: { url: '/crm/timeproof/users' },
     }).catch(() => {});
   }
 

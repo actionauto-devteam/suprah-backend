@@ -69,8 +69,10 @@ export class CrmPushService {
     );
   }
 
-  static async sendToAdmins(payload: object): Promise<void> {
-    const admins = await CrmUser.find({ role: { $in: ['admin', 'manager'] }, isActive: true })
+  // Org-scoped — always prefer this over a global admin fan-out to avoid
+  // leaking one organization's employee events to every other org's admins.
+  static async sendToOrgAdmins(orgId: string | object, payload: object): Promise<void> {
+    const admins = await CrmUser.find({ organizationId: orgId, role: { $in: ['admin', 'manager'] }, isActive: true })
       .select('_id fullName pushSubscriptions')
       .lean();
 

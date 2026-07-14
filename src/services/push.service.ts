@@ -3,6 +3,7 @@ import { pushQueue } from '../jobs/push.queue';
 import logger from '../utils/logger';
 import config from '../config';
 import User from '../models/User.model';
+import CrmPushService from './crmPush.service';
 
 const LOG_PREFIX = '[PushService]';
 
@@ -74,9 +75,11 @@ export class PushService {
   }
 
   /**
-   * Finds all admin/super_admin User accounts in the org and sends them a push notification.
-   * Used for system-level alerts (e.g. Lot Tech employee events) where the recipient is
-   * the organization's admin, not a specific user.
+   * Single entry point for "notify this org's admins" regardless of which
+   * account model (main User or CrmUser) they happen to be signed in with —
+   * an admin who only has a CrmUser account, or only a User account, still
+   * gets the notification either way. Used for system-level alerts (Lot Tech
+   * events, CRM idle/break-exceeded alerts, etc).
    */
   static async notifyOrgAdmins(
     orgId: string | mongoose.Types.ObjectId,
@@ -87,10 +90,17 @@ export class PushService {
         organizationId: orgId,
         role: { $in: ['admin', 'super_admin'] },
       }).select('_id').lean();
-      if (admins.length === 0) return;
-      await PushService.broadcast(admins.map((a) => a._id), { icon: '/icon-192x192.png', ...payload });
+      if (admins.length > 0) {
+        await PushService.broadcast(admins.map((a) => a._id), { icon: '/icon-192x192.png', ...payload });
+      }
     } catch (err: any) {
-      logger.error(`${LOG_PREFIX} notifyOrgAdmins failed for org ${orgId}: ${err.message}`);
+      logger.error(`${LOG_PREFIX} notifyOrgAdmins (User) failed for org ${orgId}: ${err.message}`);
+    }
+
+    try {
+      await CrmPushService.sendToOrgAdmins(orgId as any, { icon: '/icon-192x192.png', ...payload });
+    } catch (err: any) {
+      logger.error(`${LOG_PREFIX} notifyOrgAdmins (CrmUser) failed for org ${orgId}: ${err.message}`);
     }
   }
 }

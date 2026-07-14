@@ -16,6 +16,7 @@ import { storageService } from "../services/storage.service";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
+import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -123,10 +124,33 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
-  const todayLogs = await TimeLog.find({
+  // Look back 2 days so a shift that started "yesterday" (crossed midnight,
+  // e.g. an overnight shift) is still detected as an open time-in today —
+  // same lookback + chronological walk getShiftState uses. Without this, an
+  // open overnight shift's time-in is invisible here, so the web page shows
+  // "Start Shift" while the backend/tray already consider the user clocked in.
+  const lookbackStart = new Date(todayMDTStartUTC - 2 * 24 * 60 * 60 * 1000);
+  const lookbackLogs = await TimeLog.find({
     userId: user._id,
-    timestamp: { $gte: today, $lt: tomorrow },
-  }).sort({ timestamp: -1 });
+    timestamp: { $gte: lookbackStart, $lt: tomorrow },
+  }).sort({ timestamp: 1 });
+
+  let isOnShiftWalk = false;
+  let walkShiftStartedAt: Date | null = null;
+  for (const log of lookbackLogs) {
+    if (log.type === 'time-in') {
+      isOnShiftWalk = true;
+      walkShiftStartedAt = log.timestamp;
+    } else if (log.type === 'time-out') {
+      isOnShiftWalk = false;
+      walkShiftStartedAt = null;
+    }
+  }
+
+  const todayLogs = (isOnShiftWalk && walkShiftStartedAt && walkShiftStartedAt.getTime() < today.getTime()
+    ? lookbackLogs.filter((l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime())
+    : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
+  ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const personalInfo = await getMainPersonalInfoByEmail(user.email);
 
   const userData = {
@@ -202,6 +226,11 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
   });
 
+  // Compute gross worked seconds for all completed sessions before this time-in
+  // (uses the same session-pairing engine as crmTimeproof/generalTimeclock —
+  // prevLogs never contains a trailing open time-in here since the "already
+  // clocked in" check above already blocks that case, so every session
+  // buildSessions() returns is closed and safe to sum).
   let todayTotalWorkedSeconds = 0;
   if (type === 'time-in') {
     const prevLogs = await TimeLog.find({
@@ -209,15 +238,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       type: { $in: ['time-in', 'time-out'] },
       timestamp: { $gte: today, $lt: timeLog.timestamp },
     }).sort({ timestamp: 1 }).lean();
-    let sessionIn: Date | null = null;
-    for (const log of prevLogs) {
-      if (log.type === 'time-in') {
-        sessionIn = new Date(log.timestamp);
-      } else if (log.type === 'time-out' && sessionIn) {
-        todayTotalWorkedSeconds += (new Date(log.timestamp).getTime() - sessionIn.getTime()) / 1000;
-        sessionIn = null;
-      }
-    }
+    todayTotalWorkedSeconds = buildSessions(prevLogs).reduce((sum, s) => sum + (s.out ? s.duration : 0), 0);
   }
 
   let totalBreakSeconds = 0;
@@ -235,15 +256,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       timestamp: { $gte: sessionStart, $lt: tomorrow },
     }).sort({ timestamp: 1 }).lean();
 
-    let currentBreakIn: Date | null = null;
-    for (const log of breakLogs) {
-      if (log.type === 'break-in') {
-        currentBreakIn = new Date(log.timestamp);
-      } else if (log.type === 'break-out' && currentBreakIn) {
-        totalBreakSeconds += (new Date(log.timestamp).getTime() - currentBreakIn.getTime()) / 1000;
-        currentBreakIn = null;
-      }
-    }
+    totalBreakSeconds = buildBreakSessions(breakLogs).reduce((sum, b) => sum + (b.out ? b.duration : 0), 0);
   }
 
   try {
