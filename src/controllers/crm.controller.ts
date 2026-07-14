@@ -161,7 +161,8 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     avatar: user.avatar,
     role: user.role,
     department: user.department,
-    hireDate: user.hireDate,
+    screenshotExempt: user.screenshotExempt,
+    screenshotBlurUntilPayout: user.screenshotBlurUntilPayout,
     isActive: user.isActive,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt,
@@ -530,7 +531,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -571,7 +572,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -611,6 +612,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (department !== undefined) {
     user.department = department?.trim() || undefined;
+  }
+
+  if (screenshotExempt !== undefined) {
+    user.screenshotExempt = !!screenshotExempt;
   }
 
   await user.save({ validateModifiedOnly: true });
@@ -854,6 +859,41 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
 });
 
+// Allowlist exception — intentionally not a general-purpose feature. Only
+// accounts listed here may ever have screenshotBlurUntilPayout set to true.
+// Add more emails here (lowercase) to extend access — no code changes needed
+// beyond this list.
+const SCREENSHOT_PRIVACY_ALLOWED_EMAILS = ["charl@actionautoutah.com"];
+
+/**
+ * PATCH /api/crm/me/screenshot-privacy
+ * Self-service only, and restricted to SCREENSHOT_PRIVACY_ALLOWED_EMAILS —
+ * no one else can see or change this setting for themselves, and there is no
+ * admin-controlled equivalent.
+ */
+const updateMyScreenshotPrivacy = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  if (!SCREENSHOT_PRIVACY_ALLOWED_EMAILS.includes(user.email?.toLowerCase() ?? "")) {
+    throw new ApiError(403, "This setting is not available for your account");
+  }
+
+  const { screenshotBlurUntilPayout } = req.body;
+
+  if (typeof screenshotBlurUntilPayout !== "boolean") {
+    throw new ApiError(400, "screenshotBlurUntilPayout must be a boolean");
+  }
+
+  await CrmUser.updateOne({ _id: user._id }, { $set: { screenshotBlurUntilPayout } });
+
+  res.json(new ApiResponse(200, { screenshotBlurUntilPayout }, "Privacy setting updated"));
+});
+
+/**
+ * POST /api/crm/token-refresh
+ * Renews the CRM JWT token. Requires a valid (not yet expired) token.
+ * Tray app calls this on startup and whenever it receives a 401.
+ */
 const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const newToken = generateCrmToken(user._id.toString());
@@ -879,4 +919,5 @@ export default {
   offboardUser,
   tokenRefresh,
   updateMeAvatar,
+  updateMyScreenshotPrivacy,
 };

@@ -27,6 +27,7 @@ router.use(crmAuth());
 
 router.get('/me',             crmController.getMe);
 router.patch('/me/avatar',    avatarUpload.single('avatar'), crmController.updateMeAvatar);
+router.patch('/me/screenshot-privacy', crmController.updateMyScreenshotPrivacy);
 router.post('/token-refresh', crmController.tokenRefresh);
 router.post('/time-clock',    crmController.timeClock);
 router.get('/time-logs',   crmController.getTimeLogs);

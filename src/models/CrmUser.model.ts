@@ -37,6 +37,8 @@ export interface ICrmUser extends Document {
   locationSharingOptOut?: boolean;
   pushSubscriptions: ICrmPushSubscription[];
   department?: string;
+  screenshotExempt?: boolean;
+  screenshotBlurUntilPayout?: boolean;
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -159,6 +161,22 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: String,
       trim: true,
       default: null,
+    },
+    screenshotExempt: {
+      // Per-account exemption from tray screenshot capture, set by an admin
+      // for an individual user (e.g. a role that shouldn't be screen-monitored)
+      // — distinct from department-level monitoring rules.
+      type: Boolean,
+      default: false,
+    },
+    screenshotBlurUntilPayout: {
+      // Per-account privacy setting: this account's screenshots are still
+      // captured normally, but any OTHER admin/manager viewing them in the
+      // TimeProof calendar sees them blurred except in the 2-day window
+      // before/through each payout date (see isPayoutUnblurWindow). The
+      // account owner always sees their own screenshots unblurred.
+      type: Boolean,
+      default: false,
     },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },
