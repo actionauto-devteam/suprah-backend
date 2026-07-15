@@ -18,6 +18,12 @@ const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 // cadence with no retry means ordinary blips can create a multi-minute gap
 // even though the user never stopped working; 15 min avoids false "Paused".
 const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
+// See crmTimeproof.controller.ts's MIN_ACTIVITY_COVERAGE comment — without this
+// floor, an ActivityInterval total that's far below the wall-clock (long
+// active stretch never checkpointed, tray restart mid-shift, etc.) gets
+// trusted anyway, showing a much smaller "Tracking" total than the Today
+// card/calendar computes for the same day.
+const MIN_ACTIVITY_COVERAGE = 0.65;
 
 
 interface TimeclockActor {
@@ -324,9 +330,13 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     shiftDate: todayMDTStr,
   }).lean();
   const activityIntervalTotal = activityIntervals.reduce((sum: number, i: any) => sum + i.durationSeconds, 0);
-  const todayTotalActiveSeconds = activityIntervalTotal > 0
-    ? activityIntervalTotal
-    : Math.max(0, todayTotalWorkedSeconds - totalBreakSeconds);
+  const wallClockNetSeconds = Math.max(0, todayTotalWorkedSeconds - totalBreakSeconds);
+  const todayTotalActiveSeconds =
+    activityIntervalTotal > 0 &&
+    activityIntervalTotal < wallClockNetSeconds &&
+    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE
+      ? activityIntervalTotal
+      : wallClockNetSeconds;
 
   const isShiftFromToday = shiftStartedAt ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC.getTime() : false;
 
