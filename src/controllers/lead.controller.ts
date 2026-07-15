@@ -163,40 +163,129 @@ async function getCentralOAuth2Client(orgId: string) {
  * threading it onto the original inquiry when possible. Shared by single-reply
  * and bulk-reply flows so the MIME/threading logic only lives in one place.
  */
-async function sendLeadReplyEmail(lead: any, message: string, userId: any, orgId: string) {
-  const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true });
-  const oauth2Client = await getCentralOAuth2Client(orgId);
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-  const replyingUser = await User.findById(userId);
-  const senderDisplay = replyingUser?.email || config?.gmailAddress || 'actionautoutah.dev@gmail.com';
+async function sendLeadReplyEmail(
+  lead: any,
+  message: string,
+  userId: any,
+  orgId: string,
+  attachments: Express.Multer.File[] = [],
+) {
+  const config = await OrgLeadConfig.findOne({
+    organizationId: orgId,
+    isActive: true,
+  });
 
-  const recipientEmail = lead.senderEmail || lead.email;
-  const emailHeaders = [
+  const oauth2Client = await getCentralOAuth2Client(orgId);
+  const gmail = google.gmail({
+    version: 'v1',
+    auth: oauth2Client,
+  });
+
+  const replyingUser = await User.findById(userId);
+
+  const senderDisplay =
+    replyingUser?.email ||
+    config?.gmailAddress ||
+    'actionautoutah.dev@gmail.com';
+
+  const recipientEmail =
+    lead.senderEmail ||
+    lead.email;
+
+  if (!recipientEmail) {
+    throw new Error(
+      'Lead does not have a recipient email address',
+    );
+  }
+
+  const subject =
+    `Re: ${lead.subject || 'Inquiry Response'}`;
+
+  const commonHeaders = [
     `From: ${senderDisplay}`,
     `To: ${recipientEmail}`,
-    `Subject: Re: ${lead.subject || 'Inquiry Response'}`,
-    ...(lead.messageId ? [`In-Reply-To: ${lead.messageId}`] : []),
-    ...(lead.threadId ? [`References: ${lead.threadId}`] : []),
+    `Subject: ${subject}`,
+    ...(lead.messageId
+      ? [`In-Reply-To: ${lead.messageId}`]
+      : []),
+    ...(lead.threadId
+      ? [`References: ${lead.threadId}`]
+      : []),
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset="UTF-8"',
-    'Content-Transfer-Encoding: 7bit',
-  ].join('\n');
+  ];
 
-  const emailBody = [emailHeaders, '', message].join('\n');
-  const encodedMessage = Buffer.from(emailBody)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
+  let rawEmail: string;
+
+  if (attachments.length === 0) {
+    rawEmail = [
+      ...commonHeaders,
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      message,
+    ].join('\r\n');
+  } else {
+    const boundary =
+      `----=_Suprah_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`;
+
+    const mimeParts: string[] = [
+      ...commonHeaders,
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      message || '',
+    ];
+
+    for (const file of attachments) {
+      const safeFileName =
+        file.originalname.replace(
+          /[\r\n"]/g,
+          '_',
+        );
+
+      mimeParts.push(
+        `--${boundary}`,
+        `Content-Type: ${file.mimetype}; name="${safeFileName}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${safeFileName}"`,
+        '',
+        file.buffer.toString('base64'),
+      );
+    }
+
+    mimeParts.push(
+      `--${boundary}--`,
+      '',
+    );
+
+    rawEmail = mimeParts.join('\r\n');
+  }
+
+  const encodedMessage =
+    Buffer.from(rawEmail)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
 
   await gmail.users.messages.send({
     userId: 'me',
     requestBody: {
       raw: encodedMessage,
-      threadId: lead.threadId,
+      ...(lead.threadId
+        ? { threadId: lead.threadId }
+        : {}),
     },
   });
-  console.log(`[REPLY] Email sent to ${recipientEmail} via centralized account`);
+
+  console.log(
+    `[REPLY] Email sent to ${recipientEmail} with ${attachments.length} attachment(s)`,
+  );
 }
 
 /**
@@ -408,17 +497,29 @@ export const receiveADF = async (req: Request, res: Response) => {
 export const getAllLeads = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
+
     if (!orgId) {
-      return res.status(400).json({ message: 'Organization context missing' });
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
     }
 
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const search = req.query.search as string;
     const status = req.query.status as string;
+
+    const sortBy =
+      req.query.sortBy === "oldest" ||
+      req.query.sortBy === "waiting  _longest"
+        ? req.query.sortBy
+        : "newest";
+
     const skip = (page - 1) * limit;
 
-    const query: any = { organizationId: orgId };
+    const query: any = {
+      organizationId: orgId,
+    };
 
     if (search) {
       query.$or = [
@@ -435,28 +536,59 @@ export const getAllLeads = async (req: Request, res: Response) => {
       query.status = status;
     }
 
+    let sort: Record<string, 1 | -1>;
+
+    switch (sortBy) {
+      case "oldest":
+        sort = {
+          createdAt: 1,
+        };
+        break;
+
+      case "waiting_longest":
+        sort = {
+          lastInboundAt: 1,
+          updatedAt: 1,
+          createdAt: 1,
+        };
+        break;
+
+      case "newest":
+      default:
+        sort = {
+          createdAt: -1,
+        };
+        break;
+    }
+
     const totalLeads = await Lead.countDocuments(query);
+
     const leads = await Lead.find(query)
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory'
+        'centralIngestion labels followUp statusHistory notes'
       )
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean();
 
-    res.json(new ApiResponse(200, {
-      leads,
-      total: totalLeads,
-      page,
-      pages: Math.ceil(totalLeads / limit),
-    }));
+    res.json(
+      new ApiResponse(200, {
+        leads,
+        total: totalLeads,
+        page,
+        pages: Math.ceil(totalLeads / limit),
+      })
+    );
   } catch (error) {
     console.error('[ERROR] Error fetching leads:', error);
-    res.status(500).json({ message: 'Error fetching leads' });
+
+    res.status(500).json({
+      message: 'Error fetching leads',
+    });
   }
 };
 
@@ -842,58 +974,273 @@ export const markAsPending = async (req: Request, res: Response) => {
   }
 };
 
-export const replyToInquiry = async (req: Request, res: Response) => {
+export const addLeadNote = async (
+  req: Request,
+  res: Response,
+) => {
   try {
     const { id } = req.params;
-    const { message } = req.body;
+    const { note } = req.body;
+
+    const orgId = req.orgId;
     const user = req.user || req.crmUser;
-    if (!user) throw new ApiError(401, 'Please authenticate');
+
+    if (!user) {
+      throw new ApiError(401, 'Please authenticate');
+    }
+
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
+    }
+
+    if (
+      typeof note !== 'string' ||
+      !note.trim()
+    ) {
+      return res.status(400).json({
+        message: 'Note is required',
+      });
+    }
+
+    const trimmedNote = note.trim();
+
+    if (trimmedNote.length > 5000) {
+      return res.status(400).json({
+        message: 'Note cannot exceed 5000 characters',
+      });
+    }
+
+    const lead = await Lead.findOne({
+      _id: id,
+      organizationId: orgId,
+    });
+
+    if (!lead) {
+      return res.status(404).json({
+        message: 'Lead not found',
+      });
+    }
+
+    lead.notes = lead.notes || [];
+
+    lead.notes.push({
+      text: trimmedNote,
+      createdAt: new Date(),
+      createdBy: user._id,
+    });
+
+    await lead.save();
+
+    await activityService.createActivity({
+      userId: user._id.toString(),
+      organizationId: orgId,
+      type: 'other',
+      title: 'Note added',
+      description: trimmedNote,
+      metadata: {
+        leadId: lead._id.toString(),
+        activityKind: 'lead_note',
+        note: trimmedNote,
+      },
+      ipAddress: req.ip,
+    });
+
+    const io = getSocketIO();
+
+    if (io) {
+      io.to(`org:${orgId}`).emit(
+        'lead:update',
+        lead,
+      );
+    }
+
+    logger.info(
+      {
+        leadId: lead._id,
+        userId: user._id,
+        orgId,
+      },
+      'Internal note added to lead',
+    );
+
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          lead,
+          note: lead.notes[lead.notes.length - 1],
+        },
+        'Note added successfully',
+      ),
+    );
+  } catch (error) {
+    console.error(
+      '[ERROR] Error adding lead note:',
+      error,
+    );
+
+    return res.status(500).json({
+      message: 'Error adding lead note',
+    });
+  }
+};
+
+export const replyToInquiry = async (
+  req: Request,
+  res: Response,
+) => {
+  try {
+    const { id } = req.params;
+
+    const message =
+      typeof req.body?.message === 'string'
+        ? req.body.message.trim()
+        : '';
+
+    const attachments =
+      (req.files as Express.Multer.File[] | undefined) ||
+      [];
+
+    const user =
+      req.user ||
+      req.crmUser;
+
+    if (!user) {
+      throw new ApiError(
+        401,
+        'Please authenticate',
+      );
+    }
+
     const userId = user._id;
     const orgId = req.orgId;
 
-    if (!message) {
-      return res.status(400).json({ message: 'Reply message is required' });
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
     }
 
-    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
+    if (
+      !message &&
+      attachments.length === 0
+    ) {
+      return res.status(400).json({
+        message:
+          'Enter a reply or attach at least one file',
+      });
+    }
+
+    const lead = await Lead.findOne({
+      _id: id,
+      organizationId: orgId,
+    });
+
     if (!lead) {
-      return res.status(404).json({ message: 'Inquiry not found' });
+      return res.status(404).json({
+        message: 'Inquiry not found',
+      });
     }
 
-    pushStatusHistory(lead, lead.status, 'Contacted', userId);
+    try {
+      await sendLeadReplyEmail(
+        lead,
+        message,
+        userId,
+        orgId,
+        attachments,
+      );
+    } catch (gmailError) {
+      console.error(
+        '[REPLY] Failed to send reply via centralized account:',
+        gmailError,
+      );
+
+      return res.status(502).json({
+        message:
+          'The reply could not be sent through Gmail',
+      });
+    }
+
+    const previousStatus = lead.status;
+
+    pushStatusHistory(
+      lead,
+      previousStatus,
+      'Contacted',
+      userId,
+    );
+
     lead.status = 'Contacted';
     lead.isRead = true;
     lead.isPending = false;
-    lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
+    lead.followUp = {
+      ...(lead.followUp as any),
+      lastRepResponseAt: new Date(),
+    };
+
     await lead.save();
 
     await activityService.createActivity({
       userId: userId.toString(),
-      organizationId: orgId || 'global',
+      organizationId: orgId,
       type: 'other',
       title: 'Lead Replied',
-      description: `Reply sent to lead ${lead.firstName}`,
-      metadata: { leadId: lead._id.toString() }
+      description:
+        attachments.length > 0
+          ? `Reply sent to lead ${lead.firstName} with ${attachments.length} attachment(s)`
+          : `Reply sent to lead ${lead.firstName}`,
+      metadata: {
+        leadId: lead._id.toString(),
+        attachmentCount:
+          attachments.length,
+      },
+      ipAddress: req.ip,
     });
 
-    logger.info({ leadId: lead._id, userId }, 'Staff replied to lead');
+    logger.info(
+      {
+        leadId: lead._id,
+        userId,
+        attachmentCount:
+          attachments.length,
+      },
+      'Staff replied to lead',
+    );
 
-    try {
-      await sendLeadReplyEmail(lead, message, userId, req.orgId as string);
-    } catch (gmailError) {
-      console.error('[REPLY] Failed to send reply via centralized account:', gmailError);
-    }
+    await cacheService.del(
+      `lead:thread:${id}`,
+    );
 
-    await cacheService.del(`lead:thread:${id}`);
     const io = getSocketIO();
+
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(`org:${orgId}`).emit(
+        'lead:update',
+        lead,
+      );
     }
 
-    res.json({ success: true, message: 'Reply sent successfully', data: lead });
+    return res.json({
+      success: true,
+      message:
+        'Reply sent successfully',
+      data: lead,
+    });
   } catch (error) {
-    console.error('[ERROR] Error replying to inquiry:', error);
-    res.status(500).json({ message: 'Error sending reply' });
+    console.error(
+      '[ERROR] Error replying to inquiry:',
+      error,
+    );
+
+    return res.status(500).json({
+      message:
+        error instanceof Error
+          ? error.message
+          : 'Error sending reply',
+    });
   }
 };
 
@@ -1405,6 +1752,7 @@ export default {
   createInquiry,
   markAsRead,
   markAsPending,
+  addLeadNote,
   replyToInquiry,
   bulkReplyToInquiries,
   syncCentralGmail,
