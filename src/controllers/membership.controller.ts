@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -10,7 +10,8 @@ import membershipService from '../services/membership.service';
 export const discountTokenLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
-  keyGenerator: (req) => (req.user as IUser)?._id?.toString() ?? req.ip ?? 'unknown',
+  keyGenerator: (req) =>
+    (req.user as IUser)?._id?.toString() ?? ipKeyGenerator(req.ip ?? 'unknown'),
   message: { success: false, message: 'Too many discount token requests, please wait a minute.' },
   standardHeaders: true,
   legacyHeaders: false,

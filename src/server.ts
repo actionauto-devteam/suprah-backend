@@ -1,4 +1,7 @@
+import dns from "dns";
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 import express, { Application } from "express";
+import mongoose from "mongoose";
 import { createServer } from "http";
 import path from "path";
 import { Server } from "socket.io";
@@ -52,7 +55,25 @@ app.use(
 );
 const httpServer = createServer(app);
 
+// Kick off the DB connection early (during middleware setup) so it's ready
+// as soon as possible. We intentionally do NOT block here — schedulers and
+// the HTTP listener wait on `waitForDbConnection()` in the bootstrap below.
 connectDB();
+
+/**
+ * Resolves once Mongoose has an open connection.
+ * Prevents startup queries (e.g. the LeadReminder check) from being issued
+ * against a not-yet-connected DB, which otherwise buffer and hit
+ * `bufferTimeoutMS`, throwing "Operation `leads.find()` buffering timed out".
+ */
+const waitForDbConnection = (): Promise<void> => {
+  if (mongoose.connection.readyState === 1) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    mongoose.connection.once("open", () => resolve());
+    mongoose.connection.once("error", (err) => reject(err));
+  });
+};
 
 app.use(
   express.json({
@@ -153,63 +174,79 @@ app.use(errorHandler);
 // Server Start
 // ========================================
 if (require.main === module) {
-  initSyncScheduler();
-  initCleanupScheduler();
-  initMilestoneScheduler();
-  initScreenshotRetentionScheduler();
-  initLeadInactivityReminderScheduler();
-  initSupraSpaceScheduledMessageScheduler();
-  initStaleShiftAutoClockoutScheduler();
+  const startServer = async () => {
+    // Wait for the DB to be connected BEFORE starting any scheduler.
+    // Several schedulers run an immediate startup query; issuing those before
+    // the connection is open is what caused the buffering timeout.
+    try {
+      await waitForDbConnection();
+      logger.info("✓ Database connected. Starting schedulers...");
+    } catch (err) {
+      logger.fatal({ err }, "Failed to establish DB connection on startup");
+      process.exit(1);
+      return;
+    }
 
-  const server = httpServer.listen(config.port, () => {
-    logger.info(`Server running on port ${config.port}`);
-  });
+    initSyncScheduler();
+    initCleanupScheduler();
+    initMilestoneScheduler();
+    initScreenshotRetentionScheduler();
+    initLeadInactivityReminderScheduler();
+    initSupraSpaceScheduledMessageScheduler();
+    initStaleShiftAutoClockoutScheduler();
 
-  // ─── Graceful Shutdown ──────────────────────────────────────────────────────
-  const shutdown = async (signal: string) => {
-    logger.info(`[${signal}] Received. Starting graceful shutdown...`);
-
-    // 1. Stop accepting new requests
-    server.close(() => {
-      logger.info("HTTP server closed.");
+    const server = httpServer.listen(config.port, () => {
+      logger.info(`Server running on port ${config.port}`);
     });
 
-    // 2. Disconnect from DB and Cache
-    try {
-      const { disconnectDB } = require("./config/db");
-      const { cacheService } = require("./services/cache.service");
-      const { pushWorker } = require("./jobs/push.worker");
+    // ─── Graceful Shutdown ────────────────────────────────────────────────────
+    const shutdown = async (signal: string) => {
+      logger.info(`[${signal}] Received. Starting graceful shutdown...`);
 
-      await Promise.all([
-        disconnectDB(),
-        cacheService.disconnect(),
-        pushWorker ? pushWorker.close() : Promise.resolve(),
-      ]);
+      // 1. Stop accepting new requests
+      server.close(() => {
+        logger.info("HTTP server closed.");
+      });
 
-      logger.info("Graceful shutdown completed. Exiting process.");
-      process.exit(0);
-    } catch (err) {
-      logger.error({ err }, "Error during graceful shutdown");
-      process.exit(1);
-    }
+      // 2. Disconnect from DB and Cache
+      try {
+        const { disconnectDB } = require("./config/db");
+        const { cacheService } = require("./services/cache.service");
+        const { pushWorker } = require("./jobs/push.worker");
+
+        await Promise.all([
+          disconnectDB(),
+          cacheService.disconnect(),
+          pushWorker ? pushWorker.close() : Promise.resolve(),
+        ]);
+
+        logger.info("Graceful shutdown completed. Exiting process.");
+        process.exit(0);
+      } catch (err) {
+        logger.error({ err }, "Error during graceful shutdown");
+        process.exit(1);
+      }
+    };
+
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
+
+    // ─── Global Error Handlers ────────────────────────────────────────────────
+    process.on("unhandledRejection", (reason, promise) => {
+      logger.error({ reason, promise }, "Unhandled Rejection at Promise");
+      // In production, we might want to exit and let Docker restart the container
+      if (config.env === "production") {
+        shutdown("UNHANDLED_REJECTION");
+      }
+    });
+
+    process.on("uncaughtException", (err) => {
+      logger.fatal({ err }, "Uncaught Exception thrown");
+      shutdown("UNCAUGHT_EXCEPTION");
+    });
   };
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
-
-  // ─── Global Error Handlers ──────────────────────────────────────────────────
-  process.on("unhandledRejection", (reason, promise) => {
-    logger.error({ reason, promise }, "Unhandled Rejection at Promise");
-    // In production, we might want to exit and let Docker restart the container
-    if (config.env === "production") {
-      shutdown("UNHANDLED_REJECTION");
-    }
-  });
-
-  process.on("uncaughtException", (err) => {
-    logger.fatal({ err }, "Uncaught Exception thrown");
-    shutdown("UNCAUGHT_EXCEPTION");
-  });
+  startServer();
 }
 
 export default app;
