@@ -511,7 +511,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     const sortBy =
       req.query.sortBy === "oldest" ||
-      req.query.sortBy === "waiting  _longest"
+      req.query.sortBy === "waiting_longest"
         ? req.query.sortBy
         : "newest";
 
