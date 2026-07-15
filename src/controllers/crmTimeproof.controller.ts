@@ -199,11 +199,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
 
   const nowMDT = new Date(now.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
   const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
-  const tomorrowMDTStartUTC = todayMDTStartUTC + 24 * 60 * 60 * 1000;
-  const todayStart = new Date(todayMDTStartUTC);
-  const tomorrow   = new Date(tomorrowMDTStartUTC);
   const weekStart = getWeekStart(now);
   const todayStr = todayMDTStr;
 
@@ -254,49 +249,25 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const { streak } = computeStreak(calendar);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
-      const todayLogs = logs.filter(l => {
-        const ts = new Date(l.timestamp);
-        return ts >= todayStart && ts < tomorrow;
-      });
-
-      const timeIns  = todayLogs.filter(l => l.type === 'time-in');
-      const timeOuts = todayLogs.filter(l => l.type === 'time-out');
-      const isOnShift = timeIns.length > timeOuts.length;
-      const shiftStartedAt = isOnShift
-        ? new Date(timeIns.at(-1)!.timestamp).toISOString()
-        : null;
-
-      const allTodaySessions = buildSessions(todayLogs);
-      const todayTotalWorkedSeconds = allTodaySessions
-        .filter(s => !s.isLive)
-        .reduce((sum, s) => sum + s.duration, 0);
-
-      const currentSessionStart = isOnShift && shiftStartedAt
-        ? new Date(shiftStartedAt)
-        : null;
-      const breakLogs = todayLogs
-        .filter(l =>
-          (l.type === 'break-in' || l.type === 'break-out') &&
-          (!currentSessionStart || new Date(l.timestamp) >= currentSessionStart)
-        )
-        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-      let totalBreakSeconds = 0;
-      let bIn: Date | null = null;
-      for (const log of breakLogs) {
-        if (log.type === 'break-in') {
-          bIn = new Date(log.timestamp);
-        } else if (log.type === 'break-out' && bIn) {
-          totalBreakSeconds += (new Date(log.timestamp).getTime() - bIn.getTime()) / 1000;
-          bIn = null;
-        }
+      // Chronological walk over the FULL fetched range (from monthStart), not
+      // just today's window — a shift that started yesterday (forgotten
+      // clock-out carried into today) has no time-in log inside today's
+      // window at all, so a today-only count would always read "not on
+      // shift" even while the user is actively working right now.
+      let isOnShift = false;
+      let shiftStartedAt: string | null = null;
+      for (const log of logs) {
+        if (log.type === 'time-in') { isOnShift = true; shiftStartedAt = new Date(log.timestamp).toISOString(); }
+        else if (log.type === 'time-out') { isOnShift = false; shiftStartedAt = null; }
       }
 
-      const liveWallSec = isOnShift && shiftStartedAt
-        ? (now.getTime() - new Date(shiftStartedAt).getTime()) / 1000
-        : 0;
-      const todayNetSnapshot = Math.max(0, todayTotalWorkedSeconds + Math.max(0, liveWallSec - totalBreakSeconds) - todayDeduction);
-      const today = formatHours(todayNetSnapshot);
+      // Today's totals come from the same calendar the employee's own page
+      // uses (already midnight-split and break-netted), so a multi-day-old
+      // shift is at least reported consistently everywhere rather than
+      // recomputed a second, different way here.
+      const totalBreakSeconds = calendar[todayStr]?.breakSeconds ?? 0;
+      const todayTotalWorkedSeconds = (calendar[todayStr]?.totalSeconds ?? 0) + totalBreakSeconds;
+      const today = formatHours(Math.max(0, (calendar[todayStr]?.totalSeconds ?? 0) - todayDeduction));
 
       const department = (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined;
 
@@ -628,9 +599,20 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   // When ActivityIntervals are absent (tray not running, save failed, etc.), the
   // fallback uses session wall-clock MINUS today's breaks → net work time. Without
   // the break subtraction the time clock would over-count by the break duration.
-  const todayTotalActiveSeconds = activityIntervalTotal > 0
-    ? activityIntervalTotal
-    : Math.max(0, todayTotalWorkedSeconds - todayBreakTotalSeconds);
+  //
+  // Same 65%-coverage floor as getMyTimeproof's calendar computation — without
+  // it, a long continuous active stretch that never got checkpointed (tray
+  // restarted mid-shift, save failures, etc.) leaves activityIntervalTotal far
+  // below the truth, and this live "Tracking" figure would silently show a
+  // much smaller number than the Today card / calendar (which already guard
+  // against this), confusing the user with two contradicting totals.
+  const wallClockNetSeconds = Math.max(0, todayTotalWorkedSeconds - todayBreakTotalSeconds);
+  const todayTotalActiveSeconds =
+    activityIntervalTotal > 0 &&
+    activityIntervalTotal < wallClockNetSeconds &&
+    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE
+      ? activityIntervalTotal
+      : wallClockNetSeconds;
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
