@@ -62,6 +62,7 @@ import shopAssistantRoute from "./shopAssistant.route";
 import generalTimeclockRoute from "./generalTimeclock.route";
 import projectManagementRoute from "./projectManagement.route";
 import calendarRoutes from "./calendar.routes";
+import whatsNewRoute from "./whatsNew.route";
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -119,6 +120,10 @@ const defaultRoutes = [
   {
     path: "/crm/projects",
     route: projectManagementRoute,
+  },
+  {
+  path: "/crm/whats-new",
+  route: whatsNewRoute,
   },
   {
     path: "/crm",
