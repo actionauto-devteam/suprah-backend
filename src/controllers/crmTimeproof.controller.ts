@@ -90,6 +90,16 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
 
   for (const dateStr of Object.keys(calendar)) {
+    // Skip today — its wall-clock total (via buildCalendarMap/buildSessions)
+    // is already correct and already capped (MAX_LIVE_MS) against runaway
+    // overcounting from a forgotten clock-out, so there's nothing left for
+    // this heartbeat-based figure to safely "verify" it against. Overriding
+    // with liveActiveSeconds here was actively WRONG whenever the tray's
+    // heartbeat/currentIntervalStartAt lagged or reset (the exact fragility
+    // this session's other fixes address) — it would silently replace a now-
+    // correct wall-clock total with a smaller, stale one. Kept for past dates,
+    // where it still guards against older, already-closed-session data issues.
+    if (dateStr === todayStr) continue;
     const activeForDate = activityByDate[dateStr] ?? 0;
     const wallClock = calendar[dateStr].totalSeconds;
     if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
@@ -344,6 +354,11 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
 
   for (const dateStr of Object.keys(calendar)) {
+    // See getMyTimeproof for the full explanation — today's wall-clock total
+    // is already correct and capped, so it must not be overridden by this
+    // heartbeat-based figure, which is exactly the fragile mechanism this
+    // session's other fixes address.
+    if (dateStr === todayStr) continue;
     const activeForDate = userActivityByDate[dateStr] ?? 0;
     const wallClock = calendar[dateStr].totalSeconds;
     if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
