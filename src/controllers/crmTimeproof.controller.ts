@@ -1113,7 +1113,7 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
-  if (isTimeEditExempt(targetUser.department)) {
+  if (await isTimeEditExempt(targetUser.organizationId?.toString(), targetUser.department)) {
     throw new ApiError(403, `${targetUser.fullName}'s time logs are exempt from admin correction`);
   }
 
@@ -1240,7 +1240,7 @@ export const excludeScreenshots = asyncHandler(async (req: Request, res: Respons
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
-  if (isTimeEditExempt(targetUser.department)) {
+  if (await isTimeEditExempt(targetUser.organizationId?.toString(), targetUser.department)) {
     throw new ApiError(403, `${targetUser.fullName}'s screenshots are exempt from admin exclusion`);
   }
 
