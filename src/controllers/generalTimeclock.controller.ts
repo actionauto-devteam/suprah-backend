@@ -324,6 +324,15 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC.getTime())
     .reduce((sum, s) => sum + s.duration, 0);
 
+  // Same wall-clock figure that powers getMyTimeproof's calendar / Today card
+  // (always correct, TimeLog-based, includes the live session) — exposed here
+  // so the frontend/tray can use THIS as their authoritative running total
+  // instead of the fragile ActivityInterval+heartbeat mechanism below.
+  const todayTotalWorkedSecondsIncludingLive = allSessions
+    .filter(s => new Date(s.in).getTime() >= todayMDTStartUTC.getTime())
+    .reduce((sum, s) => sum + s.duration, 0);
+  const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - totalBreakSeconds);
+
   // Activity-based tracking: sum of completed ActivityIntervals for today
   const activityIntervals = await ActivityInterval.find({
     userId: actor.id,
@@ -374,6 +383,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     todayTotalWorkedSeconds,
     todayTotalActiveSeconds,
     currentIntervalStartAt,
+    wallClockRenderedSeconds,
   }, 'Shift state fetched'));
 });
 

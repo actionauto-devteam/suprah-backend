@@ -584,6 +584,17 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, s) => sum + s.duration, 0);
 
+  // Same wall-clock (TimeLog-based) figure that already powers the Today card
+  // and calendar — INCLUDING the live/open session's elapsed time, unlike
+  // todayTotalWorkedSeconds above. This is why Today/calendar never show the
+  // "resets to zero" bug the live ticker is prone to: they never depended on
+  // ActivityInterval commits or tray heartbeat freshness in the first place.
+  // Exposed here so the frontend/tray can display THIS as their authoritative
+  // running total instead of reconstructing their own fragile one.
+  const todayTotalWorkedSecondsIncludingLive = allSessions
+    .filter(s => new Date(s.in).getTime() >= todayMDTStartUTC)
+    .reduce((sum, s) => sum + s.duration, 0);
+
   // Sum of ALL break seconds that fall within today's MDT window (across all
   // sessions today, completed or live). Used to net out break time from the
   // wall-clock fallback so the time clock matches the calendar's net work time.
@@ -591,6 +602,8 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const todayBreakTotalSeconds = allBreakSessions
     .filter(b => new Date(b.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, b) => sum + b.duration, 0);
+
+  const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - todayBreakTotalSeconds);
 
   // Activity-based tracking: sum of completed ActivityIntervals for today
   const activityIntervals = await ActivityInterval.find({
@@ -680,6 +693,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     todayTotalWorkedSeconds,
     todayTotalActiveSeconds,
     currentIntervalStartAt,
+    wallClockRenderedSeconds,
   }, 'Shift state fetched'));
 });
 
