@@ -118,6 +118,18 @@ function isUserMentioned(text: string, user: { fullName?: string | null; usernam
   return aliases.some((alias) => mentionBoundaryRegex(alias)?.test(text));
 }
 
+function mentionContentQueryForUser(user: { fullName?: string | null; username?: string | null }): any[] {
+  const mentionPatterns = [
+    /(^|\s)@all(?=$|[\s.,!?;:)\]])/i,
+    ...(user.username ? [user.username] : []),
+    ...mentionAliasesForName(user.fullName || ''),
+  ]
+    .map((alias: string | RegExp) => (alias instanceof RegExp ? alias : mentionBoundaryRegex(alias)))
+    .filter(Boolean) as RegExp[];
+
+  return mentionPatterns.map((rx) => ({ content: rx }));
+}
+
 function shouldNotifyForPreference(pref: SupraSpaceNotifPref, isMentioned: boolean): boolean {
   if (pref.muted || pref.type === 'none') return false;
   if (pref.type === 'foryou') return isMentioned;
@@ -250,6 +262,7 @@ async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: s
 /** GET /api/supraspace/conversations */
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
+  const mentionContentQuery = mentionContentQueryForUser(req.crmUser as any);
 
   // Hide deprecated auto-generated technical/orphan groups (configurable via env).
   const deprecated = (process.env.DEPRECATED_AUTO_GROUPS || '')
@@ -302,10 +315,17 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     };
     if (clearedAt) unreadFilter.createdAt = { $gt: new Date(clearedAt) };
     const unreadCount = await SupraSpaceMessage.countDocuments(unreadFilter);
+    const unreadMentionCount = mentionContentQuery.length
+      ? await SupraSpaceMessage.countDocuments({
+          ...unreadFilter,
+          $or: mentionContentQuery,
+        })
+      : 0;
     return {
       ...safeConv,
       notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
       unreadCount,
+      unreadMentionCount,
     };
   }));
 
