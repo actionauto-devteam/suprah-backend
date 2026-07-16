@@ -67,6 +67,15 @@ export function emitToShiftBoard(event: string, data: any) {
   io.to('crm:shift-board').emit(event, data);
 }
 
+// Emit an event to every currently-connected tray-app instance, regardless of
+// which user/org they belong to — used to push an instant "check for update
+// now" signal the moment a new tray release is published, instead of every
+// tray waiting for its own next periodic poll.
+export function emitToTrayClients(event: string, data: any) {
+  if (!io) return;
+  io.to('tray-clients').emit(event, data);
+}
+
 export function addCrmOnlineUser(userId: string) {
   crmOnlineUserIds.add(userId);
 }

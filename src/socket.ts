@@ -64,6 +64,13 @@ export const setupSocket = (io: Server) => {
       socket.join(`org:${socket.organizationId}`);
     }
 
+    // Tray-app connections identify themselves via clientType so we can push
+    // an instant "check for update" signal to every running tray at once,
+    // separate from the per-user/per-org rooms above.
+    if (socket.handshake.auth?.clientType === 'tray') {
+      socket.join('tray-clients');
+    }
+
     // CRM presence tracking: mark online + join shift-board room if admin/manager
     if (socket.role === 'crm' && socket.userId) {
       addCrmOnlineUser(socket.userId);

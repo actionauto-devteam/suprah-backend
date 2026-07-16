@@ -63,6 +63,7 @@ import generalTimeclockRoute from "./generalTimeclock.route";
 import projectManagementRoute from "./projectManagement.route";
 import calendarRoutes from "./calendar.routes";
 import whatsNewRoute from "./whatsNew.route";
+import internalTrayRoute from "./internalTray.route";
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -321,6 +322,10 @@ const defaultRoutes = [
   {
     path: "/crm/customer-invites",
     route: customerInviteRoute,
+  },
+  {
+    path: "/internal",
+    route: internalTrayRoute,
   },
 ];
 defaultRoutes.forEach((route) => {
