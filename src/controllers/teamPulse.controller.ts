@@ -13,6 +13,7 @@ import PresenceEvent from '../models/PresenceEvent.model';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { emitToOrg, emitToUser } from '../utils/socketEmitter';
 import { BucketType, storageService } from '../services/storage.service';
+import { invalidateUserCache } from '../utils/cache.util';
 
 const PRESENCE_TTL_MS = 2 * 60 * 1000;
 
@@ -43,7 +44,7 @@ const getMembers = asyncHandler(async (req: Request, res: Response) => {
         organizationId: orgId,
         role: { $in: ['employee', 'admin', 'super_admin'] },
     })
-        .select('name avatar onlineStatus customStatus statusIsManual lastActive lastDeviceType role personalInfo breakStatus employmentLocationType locationConsent')
+        .select('name email avatar onlineStatus customStatus statusIsManual lastActive lastDeviceType role personalInfo breakStatus employmentLocationType locationConsent')
         .lean();
 
     const cutoff = new Date(Date.now() - PRESENCE_TTL_MS);
@@ -81,6 +82,7 @@ const setEmploymentLocationType = asyncHandler(async (req: Request, res: Respons
 
     member.employmentLocationType = employmentLocationType;
     await member.save();
+    invalidateUserCache(userId);
 
     if (employmentLocationType === 'remote') {
         await EmployeeLocation.findOneAndUpdate(
@@ -773,6 +775,7 @@ const startBreak = asyncHandler(async (req: Request, res: Response) => {
         'breakStatus.isOnBreak': true,
         'breakStatus.startedAt': now,
     });
+    invalidateUserCache(userId);
 
     const event = await PresenceEvent.create({
         organizationId: orgId,
@@ -807,6 +810,7 @@ const endBreak = asyncHandler(async (req: Request, res: Response) => {
         'breakStatus.isOnBreak': false,
         $unset: { 'breakStatus.startedAt': '' },
     });
+    invalidateUserCache(userId);
 
     const event = await PresenceEvent.create({
         organizationId: orgId,

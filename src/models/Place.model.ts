@@ -11,6 +11,7 @@ export interface IPlace extends Document {
   icon?: string;
   color?: string;
   address?: string;
+  description?: string;
   isActive: boolean;
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
@@ -34,6 +35,7 @@ const PlaceSchema = new Schema<IPlace>(
     icon: { type: String },
     color: { type: String },
     address: { type: String, trim: true },
+    description: { type: String, trim: true, maxlength: 300 },
     isActive: { type: Boolean, default: true },
     createdBy: {
       type: Schema.Types.ObjectId,

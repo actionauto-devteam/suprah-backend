@@ -18,6 +18,8 @@ import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
+import notificationService from '../services/notification.service';
+import { invalidateUserCache } from '../utils/cache.util';
 
 const HISTORY_THROTTLE_MS = 30_000;
 const HARSH_BRAKING_DROP_MPH = 15;
@@ -29,12 +31,17 @@ const STATIONARY_RADIUS_M = 40;
 const LOT_TECH_STATIONARY_THRESHOLD_MS = 45 * 60 * 1000;
 const LOT_TECH_OFFLINE_THRESHOLD_MS = 10 * 60 * 1000;
 const STATIONARY_LOG_MIN_MINUTES = 10;
+// Sharing loop pings every 30s (see useLocationSharing.ts) — 10 min is generous slack for
+// mobile backgrounding before we treat a "sharing" row as abandoned (app killed/uninstalled)
+// rather than live.
+const SHARING_STALE_MS = 10 * 60 * 1000;
 
 type LocatorActor = {
     doc: IUser | ICrmUser;
     model: 'User' | 'CrmUser';
     id: any;
     name: string;
+    email?: string;
     avatar?: string | null;
     organizationId?: any;
     role?: string;
@@ -57,6 +64,7 @@ function getLocatorActor(req: Request): LocatorActor {
         model: isCrm ? 'CrmUser' : 'User',
         id: anyDoc._id,
         name: anyDoc.name || anyDoc.fullName || anyDoc.email || 'Team member',
+        email: anyDoc.email,
         avatar: anyDoc.avatar,
         organizationId: anyDoc.organizationId,
         role: anyDoc.role,
@@ -76,13 +84,53 @@ function actorSnapshot(actor: LocatorActor) {
     };
 }
 
+// A physical person can have both a main-site `User` account and a separate `CrmUser`
+// account (see getActiveEmployeeLocations' dedup comment) with no persisted link between
+// them — only email in common. Without this, turning sharing on/off on one account leaves
+// the other's `locationConsent` untouched, so the person can appear to be sharing on one
+// surface and not the other. Mirrors the on/off switch (and its EmployeeLocation row) onto
+// whichever linked account matches by email, best-effort — never blocks the primary update.
+async function syncLinkedAccountConsent(actor: LocatorActor, granted: boolean, deviceHint?: string) {
+    if (!actor.email) return;
+    try {
+        const email = actor.email.toLowerCase();
+        const linked = actor.model === 'User'
+            ? await CrmUser.findOne({ email, organizationId: actor.organizationId })
+            : await User.findOne({ email, organizationId: actor.organizationId });
+        if (!linked) return;
+
+        const linkedUpdate = { locationConsent: { granted, grantedAt: new Date(), deviceHint } };
+        if (actor.model === 'User') {
+            await CrmUser.findByIdAndUpdate(linked._id, linkedUpdate);
+        } else {
+            await User.findByIdAndUpdate(linked._id, linkedUpdate);
+            invalidateUserCache((linked._id as any).toString());
+        }
+
+        if (!granted) {
+            await EmployeeLocation.findOneAndUpdate(
+                { userId: linked._id },
+                { sharingState: 'off_duty', $unset: { currentPlaceId: '' } },
+            );
+            emitToOrg(actor.organizationId, 'locator:sharing_state_changed', {
+                userId: (linked._id as any).toString(),
+                sharingState: 'off_duty',
+            });
+        }
+    } catch {
+        // Best-effort — the primary account's own consent update already succeeded.
+    }
+}
+
 async function updateActorLocationConsent(actor: LocatorActor, granted: boolean, deviceHint?: string) {
     const update = { locationConsent: { granted, grantedAt: new Date(), deviceHint } };
     if (actor.model === 'CrmUser') {
         await CrmUser.findByIdAndUpdate(actor.id, update);
     } else {
         await User.findByIdAndUpdate(actor.id, update);
+        invalidateUserCache(actor.id.toString());
     }
+    await syncLinkedAccountConsent(actor, granted, deviceHint);
 }
 
 export async function startDrivingSessionForAppointment(
@@ -324,16 +372,6 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const { granted, deviceHint } = req.body as { granted: boolean; deviceHint?: string };
 
-    if (!granted) {
-        if (isMandatoryLocationDept(actor.department)) {
-            throw new ApiError(403, 'Location sharing is required for your department and cannot be turned off.');
-        }
-        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
-        if (isOnShift && !isOnBreak) {
-            throw new ApiError(403, "You can't stop sharing during your shift — end your shift or start a break first.");
-        }
-    }
-
     const alreadySet = !!actor.locationConsent?.granted === !!granted;
 
     await updateActorLocationConsent(actor, !!granted, deviceHint);
@@ -379,15 +417,12 @@ const setLocationSharingOptOut = asyncHandler(async (req: Request, res: Response
     const orgId = req.orgId as string;
     const { optOut } = req.body as { optOut: boolean };
 
-    if (isMandatoryLocationDept(actor.department)) {
-        throw new ApiError(403, 'Location sharing is required for your department and cannot be disabled.');
-    }
-
     const update = { locationSharingOptOut: !!optOut };
     if (actor.model === 'CrmUser') {
         await CrmUser.findByIdAndUpdate(actor.id, update);
     } else {
         await User.findByIdAndUpdate(actor.id, update);
+        invalidateUserCache(actor.id.toString());
     }
 
     if (optOut) {
@@ -445,7 +480,12 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
 
     const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
 
-    const prevAnchor = previous?.stationaryAnchor;
+    // A brand-new sharing session always restarts the "stayed put" clock — without this, an
+    // anchor set days ago (e.g. someone's usual desk) never resets across separate pause/off
+    // -duty/resume cycles as long as the GPS position keeps landing in the same spot, so the
+    // "stayed put" duration can silently read as days/weeks even though the person was only
+    // actively sharing for a few minutes at a time.
+    const prevAnchor = isNewSharingSession ? undefined : previous?.stationaryAnchor;
     const isNewAnchor = !prevAnchor || distanceMeters(prevAnchor.lat, prevAnchor.lng, lat, lng) > STATIONARY_RADIUS_M;
     const stationaryAnchor = isNewAnchor ? { lat, lng } : prevAnchor;
     const stationarySince = isNewAnchor ? new Date() : (previous?.stationarySince ?? new Date());
@@ -567,13 +607,6 @@ const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
     const { reason } = req.body as { reason?: 'manual' | 'break' };
     const sharingState = reason === 'break' ? 'paused_break' : 'paused_manual';
 
-    if (reason !== 'break' && isMandatoryLocationDept(actor.department)) {
-        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
-        if (isOnShift && !isOnBreak) {
-            throw new ApiError(403, 'Location sharing is mandatory for your department during an active shift — it pauses automatically on break.');
-        }
-    }
-
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === sharingState;
 
@@ -644,13 +677,6 @@ const stopSharing = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
 
-    if (isMandatoryLocationDept(actor.department)) {
-        const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
-        if (isOnShift && !isOnBreak) {
-            throw new ApiError(403, 'Location sharing is mandatory for your department during an active shift — it pauses automatically on break.');
-        }
-    }
-
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === 'off_duty';
 
@@ -706,6 +732,43 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
         if (!existing || locationLiveness(l) > locationLiveness(existing)) byPerson.set(key, l);
     }
 
+    // A device that stops pinging forever (app killed, PWA closed, uninstalled) leaves its last
+    // `sharingState: 'sharing'` row stuck that way indefinitely — nothing ever flips it, since
+    // this feature deliberately has no cron job (see ingestLocation). Demote anything that's
+    // gone quiet past SHARING_STALE_MS to 'off_duty' at read time, and self-heal the row so it
+    // also drops out of "here now" place counts. Fire-and-forget, doesn't block the response.
+    const nowMs = Date.now();
+    const staleIds: any[] = [];
+    for (const l of byPerson.values()) {
+        if (l.sharingState === 'sharing' && nowMs - new Date(l.lastSeenAt).getTime() > SHARING_STALE_MS) {
+            l.sharingState = 'off_duty';
+            staleIds.push(l._id);
+        }
+    }
+    if (staleIds.length > 0) {
+        EmployeeLocation.updateMany({ _id: { $in: staleIds } }, { sharingState: 'off_duty' }).catch(() => {});
+    }
+
+    // Records written before the userName/userAvatar denormalization existed (or whose device
+    // will never ping again to naturally refresh it) permanently fall back to the populated
+    // user doc's name, or 'Team Member' if even that's missing — self-heal the snapshot fields
+    // straight into the row the moment we successfully resolve them here, so the fix sticks
+    // for good on the very next read instead of only masking it in this one response.
+    for (const l of byPerson.values()) {
+        if (l.userName) continue;
+        const resolvedName = l.userId.name || l.userId.fullName || l.userId.email;
+        if (!resolvedName) continue;
+        EmployeeLocation.updateOne(
+            { _id: l._id },
+            {
+                userName: resolvedName,
+                userAvatar: l.userAvatar || l.userId.avatar,
+                jobTitle: l.jobTitle || l.userId.personalInfo?.jobTitle,
+                department: l.department || l.userId.department || l.userId.personalInfo?.department,
+            },
+        ).catch(() => {});
+    }
+
     // The denormalized snapshot (written on every sharing-state change, see actorSnapshot())
     // is always preferred — it can't go stale/wrong the way a live populate can (deleted
     // account, refPath/collection mismatch on legacy records, etc.). Populated fields are
@@ -714,6 +777,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
         .map((l: any) => ({
             userId: l.userId._id,
             userModel: l.userModel,
+            email: l.userId.email,
             userName: l.userName || l.userId.name || l.userId.fullName || l.userId.email || 'Team Member',
             userAvatar: l.userAvatar || l.userId.avatar,
             jobTitle: l.jobTitle || l.userId.personalInfo?.jobTitle,
@@ -741,6 +805,29 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
     res.json(new ApiResponse(200, result, 'Active employee locations fetched'));
 });
 
+const requestLocationShare = asyncHandler(async (req: Request, res: Response) => {
+    const actor = getLocatorActor(req);
+    const orgId = req.orgId as string;
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
+    if (!isAdmin) throw new ApiError(403, 'Only admins can request location sharing');
+
+    const { userId } = req.params;
+    const target = (await User.findOne({ _id: userId, organizationId: orgId }))
+        || (await CrmUser.findOne({ _id: userId, organizationId: orgId }));
+    if (!target) throw new ApiError(404, 'Team member not found');
+
+    await notificationService.createNotification({
+        userId: (target._id as any).toString(),
+        organizationId: orgId,
+        type: 'location_share_requested',
+        title: '📍 Location Requested',
+        message: `${actor.name} asked you to share your location`,
+        metadata: { requestedBy: actor.id, route: '/team-pulse?tab=activity' },
+    });
+
+    res.json(new ApiResponse(200, { requested: true }, 'Location request sent'));
+});
+
 const getPlaces = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const places = await Place.find({ organizationId: orgId, isActive: true }).sort({ name: 1 }).lean();
@@ -753,8 +840,8 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can create places');
 
-    const { name, lat, lng, radiusM, icon, color, address } = req.body as {
-        name: string; lat: number; lng: number; radiusM?: number; icon?: string; color?: string; address?: string;
+    const { name, lat, lng, radiusM, icon, color, address, description } = req.body as {
+        name: string; lat: number; lng: number; radiusM?: number; icon?: string; color?: string; address?: string; description?: string;
     };
     if (!name || typeof lat !== 'number' || typeof lng !== 'number') {
         throw new ApiError(400, 'name, lat and lng are required');
@@ -764,7 +851,7 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
         organizationId: orgId,
         name, coords: { lat, lng },
         radiusM: radiusM || 100,
-        icon, color, address,
+        icon, color, address, description,
         createdBy: actor.id,
     });
 
@@ -779,8 +866,8 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can update places');
 
-    const { name, lat, lng, radiusM, icon, color, address, isActive } = req.body as Partial<{
-        name: string; lat: number; lng: number; radiusM: number; icon: string; color: string; address: string; isActive: boolean;
+    const { name, lat, lng, radiusM, icon, color, address, description, isActive } = req.body as Partial<{
+        name: string; lat: number; lng: number; radiusM: number; icon: string; color: string; address: string; description: string; isActive: boolean;
     }>;
 
     const place = await Place.findOne({ _id: id, organizationId: orgId });
@@ -792,6 +879,7 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     if (icon !== undefined) place.icon = icon;
     if (color !== undefined) place.color = color;
     if (address !== undefined) place.address = address;
+    if (description !== undefined) place.description = description;
     if (isActive !== undefined) place.isActive = isActive;
     await place.save();
 
@@ -1133,6 +1221,7 @@ const getActiveSosAlerts = asyncHandler(async (req: Request, res: Response) => {
 export default {
     getMyLocatorStatus, setLocationConsent, setLocationSharingOptOut,
     ingestLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
+    requestLocationShare,
     getPlaces, createPlace, updatePlace, deletePlace, manualCheckIn,
     getLocationHistory, getTimeAtPlaceReport, getDailyActivityLog,
     getDrivingSessions, getDrivingSessionDetail, respondToIncident,

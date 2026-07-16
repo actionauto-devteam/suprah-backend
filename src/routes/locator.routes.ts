@@ -21,6 +21,7 @@ router.post('/pause', locatorController.pauseSharing);
 router.post('/resume', locatorController.resumeSharing);
 router.post('/off-duty', locatorController.stopSharing);
 router.get('/active', locatorController.getActiveEmployeeLocations);
+router.post('/request/:userId', locatorController.requestLocationShare);
 
 router.get('/places', locatorController.getPlaces);
 router.post('/places', locatorController.createPlace);

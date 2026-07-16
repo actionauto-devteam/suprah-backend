@@ -9,6 +9,7 @@ import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { getIO, isUserOnline } from '../socket/supraspace.socket';
+import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 import { storageService, BucketType } from '../services/storage.service';
 import { CrmPushService } from '../services/crmPush.service';
 import logger from '../utils/logger';
@@ -1298,20 +1299,24 @@ const rsvpEvent = asyncHandler(async (req: Request, res: Response) => {
 const getCrmUsers = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
-    .select('fullName username avatar role')
+    .select('fullName username avatar role email')
     .sort({ fullName: 1 })
     .lean();
-  res.json(new ApiResponse(200, users, 'Users fetched'));
+  const presenceMap = await resolvePresenceForCrmRoster(users);
+  const withPresence = users.map((u: any) => ({ ...u, presence: presenceMap.get(u._id.toString()) }));
+  res.json(new ApiResponse(200, withPresence, 'Users fetched'));
 });
 
-/** GET /api/supraspace/active  — all team users (presence resolved live via socket) */
+/** GET /api/supraspace/active  — all team users, real onlineStatus resolved via presenceBridge */
 const getActiveUsers = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
-    .select('fullName username avatar role')
+    .select('fullName username avatar role email')
     .sort({ fullName: 1 })
     .lean();
-  res.json(new ApiResponse(200, users, 'Team users fetched'));
+  const presenceMap = await resolvePresenceForCrmRoster(users);
+  const withPresence = users.map((u: any) => ({ ...u, presence: presenceMap.get(u._id.toString()) }));
+  res.json(new ApiResponse(200, withPresence, 'Team users fetched'));
 });
 
 // ─── Video Conferencing ────────────────────────────────────────────────────

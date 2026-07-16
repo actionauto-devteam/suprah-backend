@@ -5,6 +5,8 @@ import CrmUser from '../models/CrmUser.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import config from '../config';
 import logger from '../utils/logger';
+import { setSupraSpaceSocketIO } from '../utils/socketEmitter';
+import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 
 let io: IOServer;
 
@@ -67,7 +69,7 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       }
 
       const user = await CrmUser.findById(decoded.id).select(
-        'fullName username avatar role isActive'
+        'fullName username avatar role isActive organizationId email'
       );
 
       if (!user) return next(new Error('CRM user not found'));
@@ -108,6 +110,24 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     // ── Presence sync — send the current online roster to the requesting socket ─
     socket.on('presence:request', () => {
       socket.emit('presence:sync', Array.from(onlineUsers.keys()));
+    });
+
+    // ── Real status sync — full org roster's actual online/away/busy/DND status,
+    // resolved from the linked main-site User account (see utils/presenceBridge.ts).
+    // Distinct from the plain connected/disconnected boolean above.
+    socket.on('presence:status_request', async () => {
+      try {
+        const roster = await CrmUser.find({ organizationId: user.organizationId, isActive: true })
+          .select('_id email')
+          .lean();
+        const presenceMap = await resolvePresenceForCrmRoster(roster);
+        socket.emit(
+          'presence:status_sync',
+          Array.from(presenceMap.entries()).map(([id, p]) => ({ userId: id, ...p })),
+        );
+      } catch (err: any) {
+        logger.error(err, '[SupraSpace] presence:status_request error');
+      }
     });
 
     // ── Join a conversation room ──────────────────────────────────────────
@@ -168,6 +188,8 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       logger.info({ userId, reason }, '[SupraSpace] User disconnected');
     });
   });
+
+  setSupraSpaceSocketIO(io);
 
   logger.info('[SupraSpace] Socket.io initialized on path /socket/supraspace');
   return io;

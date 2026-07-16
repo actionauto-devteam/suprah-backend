@@ -35,6 +35,7 @@ const VALID_NOTIFICATION_TYPES = [
   'referral_joined', 'referral_rewarded',
   'delivery_confirmed', 'proof_submitted',
   'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
+  'location_share_requested',
 ] as const;
 
 const PREFERENCE_MAP: Record<string, string> = {
@@ -83,6 +84,7 @@ const PREFERENCE_MAP: Record<string, string> = {
   referral_rewarded: 'referral_rewarded',
   aftermarket_inquiry: 'crmActivity',
   aftermarket_order: 'crmActivity',
+  location_share_requested: 'crmActivity',
 };
 
 const createNotification = async (params: CreateNotificationParams) => {

@@ -5,7 +5,7 @@ import logger from './utils/logger';
 import User from './models/User.model';
 import PresenceEvent from './models/PresenceEvent.model';
 import CrmUser from './models/CrmUser.model';
-import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard } from './utils/socketEmitter';
+import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard, emitPresenceUpdate } from './utils/socketEmitter';
 
 interface AuthSocket extends Socket {
   userId?: string;
@@ -172,13 +172,14 @@ export const setupSocket = (io: Server) => {
           const room = io.sockets.adapter.rooms.get(`user:${socket.userId}`);
           if (room && room.size > 0) return;
 
-          const user = await User.findById(socket.userId).select('onlineStatus statusIsManual organizationId name avatar').lean();
+          const user = await User.findById(socket.userId).select('onlineStatus statusIsManual organizationId name avatar email').lean();
           if (user && !user.statusIsManual) {
             await User.findByIdAndUpdate(socket.userId, { onlineStatus: 'offline' });
             const orgId = socket.organizationId || user.organizationId?.toString();
             if (orgId) {
-              io.to(`org:${orgId}`).emit('presence_update', {
+              await emitPresenceUpdate(orgId, {
                 userId: socket.userId,
+                email: user.email,
                 onlineStatus: 'offline',
                 lastActive: new Date().toISOString(),
               });

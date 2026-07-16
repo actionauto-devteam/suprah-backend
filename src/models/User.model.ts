@@ -255,7 +255,7 @@ const UserSchema = new Schema(
     },
     locationSharingOptOut: {
       type: Boolean,
-      default: true,
+      default: false,
     },
     lastPasswordChange: {
       type: Date,

@@ -6,7 +6,7 @@ import { ApiError } from '../utils/ApiError';
 import { safeCreateNotification } from '../utils/safeNotification';
 import User from '../models/User.model';
 import PresenceEvent from '../models/PresenceEvent.model';
-import { emitToOrg } from '../utils/socketEmitter';
+import { emitToOrg, emitPresenceUpdate } from '../utils/socketEmitter';
 
 const getProfile = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user._id;
@@ -60,7 +60,7 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   // Always fetch the current doc: we need it both to detect a genuine no-op (so we don't
   // spam the activity feed by re-logging the same status every time this endpoint is hit)
   // and to compare custom-status text.
-  const currentUser = await User.findById(userId).select('name avatar onlineStatus customStatus').lean();
+  const currentUser = await User.findById(userId).select('name avatar email onlineStatus customStatus').lean();
 
   const prevStatus = currentUser?.onlineStatus;
   const prevCustom = currentUser?.customStatus ?? '';
@@ -73,8 +73,9 @@ const updateOnlineStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = await profileService.updateOnlineStatus(userId, status, customStatus, statusExpiresAt);
 
   if (orgId) {
-    emitToOrg(orgId, 'presence_update', {
+    await emitPresenceUpdate(orgId, {
       userId: userId.toString(),
+      email: currentUser?.email,
       onlineStatus: status,
       customStatus: customStatus ?? null,
       lastActive: new Date().toISOString(),
@@ -287,7 +288,7 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const deviceType = req.body?.deviceType === 'mobile' ? 'mobile' : req.body?.deviceType === 'desktop' ? 'desktop' : undefined;
 
   const current = await User.findById(userId)
-    .select('onlineStatus customStatus statusExpiresAt statusIsManual lastInteractionAt name avatar')
+    .select('onlineStatus customStatus statusExpiresAt statusIsManual lastInteractionAt name avatar email')
     .lean();
 
   const now = new Date();
@@ -324,11 +325,12 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
     .select('onlineStatus customStatus lastActive statusIsManual lastDeviceType').lean();
 
   if (orgId && updated) {
-    emitToOrg(orgId, 'presence_update', {
+    await emitPresenceUpdate(orgId, {
       userId: userId.toString(),
+      email: current?.email,
       onlineStatus: updated.onlineStatus,
       customStatus: updated.customStatus ?? null,
-      lastActive: updated.lastActive,
+      lastActive: updated.lastActive?.toISOString(),
       lastDeviceType: updated.lastDeviceType ?? null,
     });
 

@@ -144,7 +144,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
     },
     locationSharingOptOut: {
       type: Boolean,
-      default: true,
+      default: false,
     },
     pushSubscriptions: [
       {
