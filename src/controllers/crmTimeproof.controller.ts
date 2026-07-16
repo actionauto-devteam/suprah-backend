@@ -603,6 +603,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(b => new Date(b.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, b) => sum + b.duration, 0);
 
+  // a
   const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - todayBreakTotalSeconds);
 
   // Activity-based tracking: sum of completed ActivityIntervals for today
