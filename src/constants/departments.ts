@@ -1,4 +1,9 @@
-export const MANDATORY_LOCATION_DEPARTMENTS = ['LotTechTeam'];
+import { findDepartmentEntry } from '../services/department.service';
 
-export const isMandatoryLocationDept = (dept?: string | null): boolean =>
-    !!dept && MANDATORY_LOCATION_DEPARTMENTS.includes(dept);
+export const isMandatoryLocationDept = async (
+  organizationId: string | undefined | null,
+  dept?: string | null
+): Promise<boolean> => {
+  const entry = await findDepartmentEntry(organizationId, dept);
+  return !!entry?.isMandatoryLocationDept;
+};

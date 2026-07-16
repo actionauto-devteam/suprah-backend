@@ -17,6 +17,8 @@ import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
+import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
+import { normalizeDepartmentValue } from "../services/department.service";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -394,6 +396,8 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     actor.organizationId?.toString(),
   );
 
+  const normalizedDepartment = await normalizeDepartmentValue(actor.organizationId?.toString(), department);
+
   const user = await CrmUser.create({
     organizationId: actor.organizationId,
     fullName: fullName.trim(),
@@ -405,8 +409,17 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     birthday: birthday ? new Date(birthday) : undefined,
     hireDate: hireDate ? new Date(hireDate) : undefined,
     gender: gender && ['male', 'female'].includes(gender) ? gender : undefined,
-    department: department?.trim() || undefined,
+    department: normalizedDepartment,
   });
+
+  if (normalizedDepartment) {
+    await cascadeDepartmentToLinkedUser({
+      email: user.email,
+      organizationId: user.organizationId,
+      crmUserId: user._id,
+      department: normalizedDepartment,
+    });
+  }
 
   res.status(201).json(
     new ApiResponse(
@@ -610,8 +623,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     user.gender = gender && ['male', 'female'].includes(gender) ? gender : undefined;
   }
 
+  let normalizedDepartment: string | undefined;
   if (department !== undefined) {
-    user.department = department?.trim() || undefined;
+    normalizedDepartment = await normalizeDepartmentValue(user.organizationId?.toString(), department);
+    user.department = normalizedDepartment;
   }
 
   if (screenshotExempt !== undefined) {
@@ -619,6 +634,15 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await user.save({ validateModifiedOnly: true });
+
+  if (department !== undefined) {
+    await cascadeDepartmentToLinkedUser({
+      email: user.email,
+      organizationId: user.organizationId,
+      crmUserId: user._id,
+      department: normalizedDepartment,
+    });
+  }
 
   res.json(
     new ApiResponse(
