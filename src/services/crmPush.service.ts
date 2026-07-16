@@ -12,6 +12,11 @@ type CrmPushSendOptions = {
 function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string[]): boolean {
   if (!allowedHints?.length) return true;
   const normalizedHint = (deviceHint || '').toLowerCase();
+  // Legacy CRM push subscriptions may not have a deviceHint because the field
+  // was added after users had already installed the PWA. Do not drop those
+  // subscriptions when SupraSpace sends to mobile/PWA devices while the socket
+  // still appears online.
+  if (!normalizedHint || normalizedHint === 'unknown') return true;
   return allowedHints.some((hint) => normalizedHint.includes(hint.toLowerCase()));
 }
 
@@ -39,7 +44,12 @@ export class CrmPushService {
         const targetSubscriptions = user.pushSubscriptions.filter((sub) =>
           matchesDeviceHint(sub.deviceHint, options.deviceHints)
         );
-        if (!targetSubscriptions.length) return;
+        if (!targetSubscriptions.length) {
+          logger.debug(`${LOG_PREFIX} No matching CRM push subscriptions for user ${user._id}. Stored hints: ${
+            user.pushSubscriptions.map((sub) => sub.deviceHint || 'unknown').join(', ')
+          }`);
+          return;
+        }
 
         await Promise.allSettled(
           targetSubscriptions.map(async (sub) => {
