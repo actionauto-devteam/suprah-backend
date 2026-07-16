@@ -212,7 +212,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Mobile-monitoring department push notifications (main User model, e.g. Lot Tech)
-  const isLotTech = actor.model === 'User' && await isMobileMonitoringDept(actor.orgId, actor.department);
+  const isLotTech = actor.model === 'User' && isMobileMonitoringDept(actor.department);
   if (isLotTech && actor.orgId) {
     if (type === 'time-in') {
       PushService.notifyOrgAdmins(actor.orgId, {

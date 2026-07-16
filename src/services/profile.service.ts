@@ -229,7 +229,6 @@ const updatePersonalInfo = async (userId: string, personalInfo: Partial<IPersona
   const updatedFieldNames: string[] = [];
 
   for (const [key, value] of Object.entries(personalInfo)) {
-    if (key === 'department') continue; // admin-managed via Team Engagement, not self-editable
     if (value !== undefined) {
       updateFields[`personalInfo.${key}`] = value;
       updatedFieldNames.push(key);

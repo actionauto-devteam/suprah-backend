@@ -2,10 +2,7 @@ import mongoose from 'mongoose';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import config from '../config';
-
-// Historical one-off migration — inlined rather than importing the now-dynamic department
-// list, so this script keeps reproducing exactly what it did when it was originally run.
-const MANDATORY_LOCATION_DEPARTMENTS = ['LotTechTeam'];
+import { MANDATORY_LOCATION_DEPARTMENTS } from '../constants/departments';
 
 const migrateDefaultLocationShareOn = async () => {
   try {

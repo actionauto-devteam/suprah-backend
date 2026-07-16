@@ -42,7 +42,6 @@ import feedReactionRoute from "./feedReaction.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
 import teamPulseRoute from "./teamPulse.routes";
 import locatorRoute from "./locator.routes";
-import departmentsRoute from "./departments.routes";
 import dealBoardRoute from "./dealBoard.routes";
 import scheduleRoute from "./schedule.routes";
 import aftermarketRoute from "./aftermarket.route";
@@ -275,10 +274,6 @@ const defaultRoutes = [
   {
     path: "/locator",
     route: locatorRoute,
-  },
-  {
-    path: "/departments",
-    route: departmentsRoute,
   },
   {
     path: "/timeclock",

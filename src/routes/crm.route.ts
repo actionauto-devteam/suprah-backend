@@ -2,7 +2,6 @@
 import express from 'express';
 import multer from 'multer';
 import crmController from '../controllers/crm.controller';
-import departmentController from '../controllers/department.controller';
 import hrController from '../controllers/hr.controller';
 import feedController from '../controllers/feed.controller';
 import feedCommentController from '../controllers/feedComment.controller';
@@ -41,11 +40,6 @@ router.patch('/users/:id/status',         crmController.toggleUserStatus);
 router.patch('/users/:id/reset-password', crmController.resetPassword);
 router.post('/users/:id/offboard',        crmController.offboardUser);
 router.delete('/users/:id',               crmController.deleteUser);
-
-router.get('/departments',                departmentController.listAllDepartments);
-router.post('/departments',               departmentController.createDepartment);
-router.patch('/departments/:id',          departmentController.updateDepartment);
-router.delete('/departments/:id',         departmentController.deactivateDepartment);
 
 router.get('/hr/milestones',           hrController.getMilestones);
 router.get('/hr/offboarded',           hrController.getOffboarded);

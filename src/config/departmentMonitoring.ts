@@ -1,31 +1,19 @@
-import { findDepartmentEntry } from '../services/department.service';
+const MOBILE_MONITORING_DEPARTMENTS = ['LotTechTeam'];
 
-export async function isMobileMonitoringDept(
-  organizationId: string | undefined | null,
-  department?: string | null
-): Promise<boolean> {
-  const entry = await findDepartmentEntry(organizationId, department);
-  return !!entry?.isMobileMonitoringDept;
+export function isMobileMonitoringDept(department?: string | null): boolean {
+  return !!department && MOBILE_MONITORING_DEPARTMENTS.includes(department);
 }
 
-export async function requiresScreenshots(
-  organizationId: string | undefined | null,
-  department?: string | null
-): Promise<boolean> {
-  return !(await isMobileMonitoringDept(organizationId, department));
+export function requiresScreenshots(department?: string | null): boolean {
+  return !isMobileMonitoringDept(department);
 }
 
-export async function usesGpsStationaryIdle(
-  organizationId: string | undefined | null,
-  department?: string | null
-): Promise<boolean> {
-  return isMobileMonitoringDept(organizationId, department);
+export function usesGpsStationaryIdle(department?: string | null): boolean {
+  return isMobileMonitoringDept(department);
 }
 
-export async function isTimeEditExempt(
-  organizationId: string | undefined | null,
-  department?: string | null
-): Promise<boolean> {
-  const entry = await findDepartmentEntry(organizationId, department);
-  return !!entry?.isTimeEditExempt;
+const TIME_EDIT_EXEMPT_DEPARTMENTS = ['WebDevTeam'];
+
+export function isTimeEditExempt(department?: string | null): boolean {
+  return !!department && TIME_EDIT_EXEMPT_DEPARTMENTS.includes(department);
 }

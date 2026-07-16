@@ -44,7 +44,6 @@ export class SimpleCache<T> {
 
 export const userAuthCache = new SimpleCache<any>(5000, 60000);
 export const orgStatusCache = new SimpleCache<{ status: string }>(1000, 60000);
-export const departmentListCache = new SimpleCache<any[]>(500, 60000);
 
 export const invalidateUserCache = (userId: string) => {
     userAuthCache.delete(userId);
@@ -52,8 +51,4 @@ export const invalidateUserCache = (userId: string) => {
 
 export const invalidateOrgCache = (orgId: string) => {
     orgStatusCache.delete(orgId);
-};
-
-export const invalidateDepartmentCache = (organizationId?: string | null) => {
-    departmentListCache.delete(organizationId || 'none');
 };

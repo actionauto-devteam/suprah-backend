@@ -360,7 +360,7 @@ const getMyLocatorStatus = asyncHandler(async (req: Request, res: Response) => {
         sharingState: location?.sharingState ?? 'off_duty',
         coords: location?.coords ?? null,
         lastSeenAt: location?.lastSeenAt ?? null,
-        isMandatoryDept: await isMandatoryLocationDept(actor.organizationId, actor.department),
+        isMandatoryDept: isMandatoryLocationDept(actor.department),
         locationSharingOptOut: !!actor.locationSharingOptOut,
         isOnShift,
         isOnBreak,
@@ -476,7 +476,7 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
 
     const previous = await EmployeeLocation.findOne({ userId: actor.id }).lean();
     const nextPlace = await findNearestPlace(orgId, lat, lng);
-    const isLotTech = await isMobileMonitoringDept(actor.organizationId, actor.department);
+    const isLotTech = isMobileMonitoringDept(actor.department);
 
     const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
 
