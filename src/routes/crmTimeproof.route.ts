@@ -23,6 +23,7 @@ import {
   excludeScreenshots,
   getMyIdleLog,
   getUserIdleLog,
+  clockOutUser,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -50,6 +51,7 @@ router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, 
 router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
 
 router.patch('/correct-time', correctTimeLog);
+router.post('/users/:userId/clock-out', clockOutUser); // admin/manager-only, role check inside
 
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);

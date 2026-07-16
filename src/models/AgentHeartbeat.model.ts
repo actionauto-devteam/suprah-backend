@@ -3,6 +3,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IAgentHeartbeat extends Document {
   userId: mongoose.Types.ObjectId;
   isIdle: boolean;
+  idleSince: Date | null;
+  lastIdleEscalationNotifiedAt: Date | null;
   isOnBreak: boolean;
   breakStartedAt: Date | null;
   lastBreakNotifiedAt: Date | null;
@@ -25,6 +27,14 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
     isIdle: {
       type: Boolean,
       default: false,
+    },
+    idleSince: {
+      type: Date,
+      default: null,
+    },
+    lastIdleEscalationNotifiedAt: {
+      type: Date,
+      default: null,
     },
     isOnBreak: {
       type: Boolean,

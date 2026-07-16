@@ -331,12 +331,17 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   }).lean();
   const activityIntervalTotal = activityIntervals.reduce((sum: number, i: any) => sum + i.durationSeconds, 0);
   const wallClockNetSeconds = Math.max(0, todayTotalWorkedSeconds - totalBreakSeconds);
-  const todayTotalActiveSeconds =
+  const trustActivityIntervals =
     activityIntervalTotal > 0 &&
     activityIntervalTotal < wallClockNetSeconds &&
-    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE
-      ? activityIntervalTotal
-      : wallClockNetSeconds;
+    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE;
+  const todayTotalActiveSeconds = trustActivityIntervals ? activityIntervalTotal : wallClockNetSeconds;
+  // See crmTimeproof.controller.ts's getShiftState for the full explanation —
+  // this is the anchor to resume live-ticking from once heartbeat goes stale,
+  // instead of permanently freezing the counter at whatever was last committed.
+  const lastIntervalEndMs = activityIntervals.length
+    ? Math.max(...activityIntervals.map((i: any) => new Date(i.endAt).getTime()))
+    : null;
 
   const isShiftFromToday = shiftStartedAt ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC.getTime() : false;
 
@@ -355,8 +360,8 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     ? null
     : heartbeatFresh
       ? rawIntervalStart
-      : activityIntervalTotal > 0
-        ? null
+      : trustActivityIntervals
+        ? (lastIntervalEndMs !== null ? new Date(lastIntervalEndMs).toISOString() : null)
         : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
