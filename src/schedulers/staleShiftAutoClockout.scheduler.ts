@@ -3,6 +3,9 @@ import logger from '../utils/logger';
 import TimeLog from '../models/TimeLog.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
+import { toCompanyDateStr, getCompanyDayRange } from '../utils/companyTimezone';
+import CrmPushService from '../services/crmPush.service';
+import { PushService } from '../services/push.service';
 
 /**
  * Backend safety net for forgotten clock-outs. The tray app tries to clock a
@@ -124,6 +127,102 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
   return { closed, checked: userIds.length };
 }
 
+/**
+ * No overnight/graveyard shifts exist in this business — every MDT calendar
+ * day is meant to be an independent shift. A user who's still actively
+ * working (not idle, heartbeat fresh) right through MDT midnight would never
+ * be touched by runStaleShiftAutoClockout above (its rules only fire once
+ * idle or once heartbeat goes silent) — their shift just keeps counting as
+ * "open" into the new day. That's what was silently blocking screenshots:
+ * the tray's own 16h "stale shift" check (unrelated to midnight) would
+ * eventually classify the carried-over shift as stale and refuse to
+ * auto-resume activity tracking, even though the user was genuinely active.
+ *
+ * This closes any shift whose start date (MDT) isn't today's MDT date,
+ * regardless of idle/heartbeat state — the sole criterion is the calendar
+ * boundary. Closes at the exact MDT midnight ending the day the shift
+ * started, so that day's rendered hours stay accurate and don't bleed into
+ * the next. The user sees "Not Clocked In" afterward and must Start Shift
+ * again — a fresh, non-stale shift for the new day, which also unblocks the
+ * tray's activity tracking / screenshot capture immediately.
+ */
+export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } = {}): Promise<{ closed: number; checked: number }> {
+  const dryRun = !!opts.dryRun;
+  const userIds: string[] = await TimeLog.distinct('userId') as any;
+  const todayStr = toCompanyDateStr(new Date());
+  let closed = 0;
+
+  for (const userId of userIds) {
+    const logs = await TimeLog.find({ userId }).sort({ timestamp: 1 }).lean();
+    if (!logs.length) continue;
+
+    let isOnShift = false;
+    let shiftStartedAt: Date | null = null;
+    let userModel: 'CrmUser' | 'User' = 'CrmUser';
+    let openBreakStartedAt: Date | null = null;
+    for (const log of logs) {
+      if (log.type === 'time-in') {
+        isOnShift = true;
+        shiftStartedAt = log.timestamp;
+        userModel = (log as any).userModel || 'CrmUser';
+        openBreakStartedAt = null;
+      } else if (log.type === 'time-out') {
+        isOnShift = false;
+        shiftStartedAt = null;
+        openBreakStartedAt = null;
+      } else if (log.type === 'break-in') {
+        openBreakStartedAt = log.timestamp;
+      } else if (log.type === 'break-out') {
+        openBreakStartedAt = null;
+      }
+    }
+    if (!isOnShift || !shiftStartedAt) continue;
+
+    const shiftStartDateStr = toCompanyDateStr(shiftStartedAt);
+    if (shiftStartDateStr === todayStr) continue; // still today's (MDT) shift — leave it alone
+
+    const closeAt = getCompanyDayRange(shiftStartDateStr).end;
+    const closeNote = 'Auto clock-out — new day started (MDT); please Start Shift again';
+
+    logger.info(
+      `[day-boundary-clockout]${dryRun ? ' [dry-run]' : ''} userId=${userId} shiftStartedAt=${shiftStartedAt.toISOString()} ` +
+      `shiftStartDateStr=${shiftStartDateStr} closeAt=${closeAt.toISOString()}`
+    );
+
+    if (!dryRun) {
+      // Guard against a multi-day-forgotten shift where the open break itself
+      // started on a LATER day than the boundary we're closing at — closing
+      // a break before its own break-in would be nonsensical, so just skip
+      // that part in this rare edge case (the shift close below still applies).
+      if (openBreakStartedAt && openBreakStartedAt.getTime() < closeAt.getTime()) {
+        await TimeLog.create({
+          userId, userModel, type: 'break-out', timestamp: closeAt,
+          note: 'Auto clock-out — break closed alongside day-boundary shift close',
+        });
+      }
+      await TimeLog.create({
+        userId, userModel, type: 'time-out', timestamp: closeAt,
+        note: closeNote,
+      });
+
+      const payload = {
+        title: '🕛 Shift auto-ended — new day',
+        body: 'Your shift was automatically closed because a new day started. Please Start Shift again to continue tracking.',
+        tag: `day-boundary-clockout-${userId}`,
+        data: { url: '/crm/timeproof-clock' },
+      };
+      if (userModel === 'CrmUser') {
+        await CrmPushService.sendToUsers([userId], payload).catch(() => {});
+      } else {
+        await PushService.send(userId, payload).catch(() => {});
+      }
+    }
+    closed++;
+  }
+
+  return { closed, checked: userIds.length };
+}
+
 export const initStaleShiftAutoClockoutScheduler = () => {
   cron.schedule('*/15 * * * *', async () => {
     try {
@@ -131,6 +230,13 @@ export const initStaleShiftAutoClockoutScheduler = () => {
       if (closed > 0) logger.info(`[auto-clockout] Closed ${closed} stale shift(s)`);
     } catch (error) {
       logger.error({ error }, 'Stale shift auto-clockout scheduler error');
+    }
+
+    try {
+      const { closed } = await closeShiftsFromPreviousMDTDays();
+      if (closed > 0) logger.info(`[day-boundary-clockout] Closed ${closed} shift(s) carried over from a previous MDT day`);
+    } catch (error) {
+      logger.error({ error }, 'Day-boundary auto-clockout scheduler error');
     }
   });
 
