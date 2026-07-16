@@ -20,6 +20,8 @@ import sharp from 'sharp';
 
 const BREAK_LIMIT_SECONDS = 3600;
 
+const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
+
 const COMPANY_TZ_OFFSET_MINUTES = -360;
 
 const MIN_ACTIVITY_COVERAGE = 0.65;
@@ -607,12 +609,23 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   // much smaller number than the Today card / calendar (which already guard
   // against this), confusing the user with two contradicting totals.
   const wallClockNetSeconds = Math.max(0, todayTotalWorkedSeconds - todayBreakTotalSeconds);
-  const todayTotalActiveSeconds =
+  const trustActivityIntervals =
     activityIntervalTotal > 0 &&
     activityIntervalTotal < wallClockNetSeconds &&
-    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE
-      ? activityIntervalTotal
-      : wallClockNetSeconds;
+    activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE;
+  const todayTotalActiveSeconds = trustActivityIntervals ? activityIntervalTotal : wallClockNetSeconds;
+  // End of the most recently committed interval — the correct anchor to resume
+  // live-ticking from when the heartbeat goes stale (see currentIntervalStartAt
+  // below). Without this, a user with even ONE early checkpoint (e.g. a brief
+  // idle blip at 10am) who then works a long uninterrupted stretch with no
+  // further break/idle would have their live counter permanently FREEZE the
+  // moment the heartbeat goes stale (>15 min gap) — showing only that early
+  // checkpoint's total for the rest of the shift, no matter how much longer
+  // they actually keep working. This was the root cause behind reports like
+  // "worked 8+ hours, TimeProof only shows 3 hours."
+  const lastIntervalEndMs = activityIntervals.length
+    ? Math.max(...activityIntervals.map((i) => new Date(i.endAt).getTime()))
+    : null;
 
   const heartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
   const rawIntervalStart = heartbeat?.currentIntervalStartAt?.toISOString() ?? null;
@@ -636,18 +649,25 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const fallbackShiftedStart = isOnShift && !isOnBreak && isShiftFromToday && shiftStartedAt
     ? new Date(new Date(shiftStartedAt).getTime() + (totalBreakSeconds * 1000)).toISOString()
     : null;
-  // When the heartbeat is stale AND ActivityIntervals already exist, returning
-  // the fallback start would cause the dashboard to add liveMs (full wall-clock
-  // since shift start) ON TOP of the already-accumulated interval total — i.e.
-  // double-counting. Return null instead so the dashboard freezes at the
-  // accumulated total. Fall back to wall-clock only when no intervals exist
-  // (CRM-only users who never ran the tray).
+  // When the heartbeat is stale, the resume anchor MUST match whichever total
+  // todayTotalActiveSeconds actually used above, or we'd either double-count
+  // or lose time:
+  //  • trustActivityIntervals: todayTotalActiveSeconds already = activityIntervalTotal
+  //    (everything up to the last committed checkpoint), so resume the live
+  //    delta from lastIntervalEndMs — NOT shiftStartedAt, which would double-count
+  //    the already-committed portion. Previously this branch returned null
+  //    (froze the timer forever once heartbeat went stale) — see comment above
+  //    lastIntervalEndMs for why that was wrong.
+  //  • !trustActivityIntervals: todayTotalActiveSeconds = wallClockNetSeconds, which
+  //    excludes the current OPEN session entirely (only completed sessions count),
+  //    so the live delta must cover the whole current session from shiftStartedAt —
+  //    that's exactly what fallbackShiftedStart does.
   const currentIntervalStartAt = isOnBreak
     ? null
     : heartbeatFresh
       ? rawIntervalStart
-      : activityIntervalTotal > 0
-        ? null
+      : trustActivityIntervals
+        ? (lastIntervalEndMs !== null ? new Date(lastIntervalEndMs).toISOString() : null)
         : fallbackShiftedStart;
 
   res.json(new ApiResponse(200, {
@@ -710,10 +730,23 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     lastBreakNotifiedAt = null;
   }
 
+  // idleSince marks the start of the CURRENT idle stretch — used to gate the
+  // 15-min admin escalation notification below. lastIdleEscalationNotifiedAt
+  // resets whenever the user comes back from idle, so the next idle stretch
+  // can trigger the escalation again.
+  let idleSince = existing?.idleSince ?? null;
+  if (isIdle && !wasIdle) idleSince = new Date();
+  if (!isIdle) idleSince = null;
+
+  let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
+  if (!isIdle) lastIdleEscalationNotifiedAt = null;
+
   await AgentHeartbeat.findOneAndUpdate(
     { userId: user._id },
     {
       isIdle,
+      idleSince,
+      lastIdleEscalationNotifiedAt,
       isOnBreak,
       breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? existing?.breakStartedAt ?? null : null),
       lastBreakNotifiedAt,
@@ -746,6 +779,31 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       tag: `crm-idle-${user._id}`,
       data: { url: '/crm/timeproof/users' },
     }).catch(() => {});
+  }
+
+  // ── Notify admins: agent has been idle 15+ minutes — actionable alert ────
+  // Deep-links straight to this user's manage page, where an admin/manager
+  // can manually clock them out if they've stepped away without logging off.
+  if (isIdle && isOnShift && idleSince && !lastIdleEscalationNotifiedAt) {
+    const idleDurationSeconds = (Date.now() - idleSince.getTime()) / 1000;
+    if (idleDurationSeconds >= IDLE_ESCALATION_THRESHOLD_SECONDS) {
+      await AgentHeartbeat.updateOne({ userId: user._id }, { lastIdleEscalationNotifiedAt: new Date() });
+
+      const idleMinutes = Math.floor(idleDurationSeconds / 60);
+      const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+      const idleEscalationPayload = { userId: user._id, fullName: user.fullName, idleMinutes, at: new Date() };
+      for (const admin of admins) {
+        emitToUser(admin._id.toString(), 'agent:idle-escalation', idleEscalationPayload);
+      }
+      emitToShiftBoard('agent:idle-escalation', idleEscalationPayload);
+
+      PushService.notifyOrgAdmins(user.organizationId, {
+        title: '🟠 Agent Idle 15+ Minutes',
+        body: `${user.fullName} has been idle for ${idleMinutes} minutes. Tap to review and clock out if needed.`,
+        tag: `crm-idle-escalation-${user._id}`,
+        data: { url: `/crm/timeproof/users/${user._id}` },
+      }).catch(() => {});
+    }
   }
 
   // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
@@ -1084,6 +1142,66 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
   });
 
   res.json(new ApiResponse(200, { logId, correctedTimeOut: correctedAt }, 'Time log corrected'));
+});
+
+/**
+ * POST /api/crm/timeproof/users/:userId/clock-out
+ * Admin/manager-only: immediately ends a user's currently open shift (and any
+ * open break) right now. No rendered-hours gate — this is a deliberate
+ * override for cases like a user stepping away idle without clocking out,
+ * unlike the automatic stale-shift/idle clock-out which only fires past 8h.
+ */
+export const clockOutUser = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can clock out other users');
+  }
+
+  const { userId } = req.params;
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('fullName organizationId').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const logs = await TimeLog.find({ userId }).sort({ timestamp: 1 }).lean();
+  let isOnShift = false;
+  let openBreak = false;
+  for (const log of logs) {
+    if (log.type === 'time-in') { isOnShift = true; openBreak = false; }
+    else if (log.type === 'time-out') { isOnShift = false; openBreak = false; }
+    else if (log.type === 'break-in') { openBreak = true; }
+    else if (log.type === 'break-out') { openBreak = false; }
+  }
+  if (!isOnShift) throw new ApiError(400, `${targetUser.fullName} is not currently clocked in`);
+
+  const now = new Date();
+  let breakOutLogId: string | null = null;
+  if (openBreak) {
+    const created = await TimeLog.create({
+      userId, userModel: 'CrmUser', type: 'break-out', timestamp: now,
+      note: `Break closed alongside manual clock-out by ${requestor.fullName}`,
+    });
+    breakOutLogId = created._id.toString();
+  }
+
+  const timeOutLog = await TimeLog.create({
+    userId, userModel: 'CrmUser', type: 'time-out', timestamp: now,
+    note: `Manually clocked out by ${requestor.fullName} (admin action — agent was idle)`,
+  });
+
+  await AgentHeartbeat.updateOne({ userId }, { isIdle: false, idleSince: null, lastIdleEscalationNotifiedAt: null });
+
+  await AuditLog.create({
+    entityType: 'TimeLog',
+    entityId: timeOutLog._id.toString(),
+    action: 'MANUAL_CLOCK_OUT',
+    changes: { userId, breakOutLogId, clockedOutAt: now },
+    reason: 'Admin/manager manual clock-out from idle alert',
+    performedBy: requestor._id,
+    organizationId: targetUser.organizationId?.toString(),
+  });
+
+  emitToUser(userId, 'timeclock:force-clockout', { at: now, by: requestor.fullName });
+
+  res.json(new ApiResponse(200, { clockedOutAt: now }, `${targetUser.fullName} has been clocked out`));
 });
 
 /**
