@@ -125,6 +125,8 @@ const NotificationSchema = new Schema(
         'aftermarket_inquiry',
         'aftermarket_invoice',
         'aftermarket_order',
+
+        'location_share_requested',
       ],
     },
     title: {
