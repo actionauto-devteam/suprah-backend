@@ -65,6 +65,7 @@ import projectManagementRoute from "./projectManagement.route";
 import calendarRoutes from "./calendar.routes";
 import whatsNewRoute from "./whatsNew.route";
 import internalTrayRoute from "./internalTray.route";
+import mailRoute from "./mail.route";
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -126,6 +127,10 @@ const defaultRoutes = [
   {
   path: "/crm/whats-new",
   route: whatsNewRoute,
+  },
+  {
+    path: "/mail",
+    route: mailRoute,
   },
   {
     path: "/crm",

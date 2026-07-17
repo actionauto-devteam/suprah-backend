@@ -48,6 +48,22 @@ export interface ICrmUser extends Document {
     lastSyncAt?: Date;
     syncToken?: string;
   };
+  /**
+   * Suprah Mail — Gmail account connection. Separate from googleCalendar so
+   * mail scopes can be granted/revoked independently of calendar scopes.
+   * Tokens are select:false and must be explicitly selected by gmail.service.
+   */
+  googleMail?: {
+    connected: boolean;
+    gmailAddress?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    expiryDate?: number;
+    historyId?: string;        // Gmail incremental-sync cursor (users.history.list)
+    lastSyncAt?: Date;
+    lastSyncError?: string;
+    connectedAt?: Date;
+  };
   createdAt: Date;
   updatedAt: Date;
   isPasswordMatch(password: string): Promise<boolean>;
@@ -186,6 +202,17 @@ const CrmUserSchema = new Schema<ICrmUser>(
       expiryDate: { type: Number },
       lastSyncAt: { type: Date },
       syncToken: { type: String },
+    },
+    googleMail: {
+      connected: { type: Boolean, default: false },
+      gmailAddress: { type: String },
+      accessToken: { type: String, select: false },
+      refreshToken: { type: String, select: false },
+      expiryDate: { type: Number, select: false },
+      historyId: { type: String },
+      lastSyncAt: { type: Date },
+      lastSyncError: { type: String },
+      connectedAt: { type: Date },
     },
   },
   {

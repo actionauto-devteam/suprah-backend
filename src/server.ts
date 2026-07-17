@@ -35,6 +35,7 @@ import logger from "./utils/logger";
 import { correlationIdMiddleware } from "./middleware/correlationId.middleware";
 import { metricsMiddleware } from "./middleware/metrics.middleware";
 import { activityAuditMiddleware } from "./middleware/activityAudit.middleware";
+import mailSyncService from './services/mailSync.service';
 import "./jobs/push.worker";
 
 const app: Application = express();
@@ -197,6 +198,12 @@ if (require.main === module) {
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();
 
+    // Suprah Mail — start the Gmail history poll + socket fan-out engine.
+    // Placed after waitForDbConnection() so its first tick never queries a
+    // not-yet-open DB (same guard the schedulers above rely on).
+    mailSyncService.start();
+    logger.info("✓ Suprah Mail sync engine started.");
+
     const server = httpServer.listen(config.port, () => {
       logger.info(`Server running on port ${config.port}`);
     });
@@ -209,6 +216,14 @@ if (require.main === module) {
       server.close(() => {
         logger.info("HTTP server closed.");
       });
+
+      // Stop the mail sync poll timer so no tick fires against a closing DB
+      // connection during the drain window.
+      try {
+        mailSyncService.stop();
+      } catch (err) {
+        logger.error({ err }, "Error stopping mail sync engine");
+      }
 
       // 2. Disconnect from DB and Cache
       try {
