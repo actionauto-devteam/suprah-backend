@@ -11,6 +11,7 @@ import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
 import { PushService } from '../services/push.service';
+import CrmPushService from '../services/crmPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
@@ -996,7 +997,24 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     }))
   );
 
-  res.json(new ApiResponse(200, { screenshots: withUrls }, 'Screenshots fetched'));
+  // Visible record for the account owner (and any admin/manager viewing) when
+  // an admin deleted one of THIS user's screenshots on this date — the push
+  // notification sent at delete-time is easy to miss, so this gives a
+  // persistent, in-app trail. The admin's name is already embedded in
+  // `reason` at write-time (see deleteMyScreenshot) rather than populated,
+  // since performedBy may reference a CrmUser, not the User model this field
+  // is typed against.
+  const deletionNotices = await AuditLog.find({
+    entityType: 'Screenshot',
+    action: 'ADMIN_DELETE_SCREENSHOT',
+    'changes.userId': targetId,
+    'changes.date': date,
+  }).select('reason createdAt').sort({ createdAt: -1 }).lean();
+
+  res.json(new ApiResponse(200, {
+    screenshots: withUrls,
+    deletionNotices: deletionNotices.map((n: any) => ({ reason: n.reason, at: n.createdAt })),
+  }, 'Screenshots fetched'));
 });
 
 /**
@@ -1071,6 +1089,29 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
     { $inc: { deductedSeconds: SCREENSHOT_DELETE_DEDUCTION_SECONDS } },
     { upsert: true }
   );
+
+  // Admin/manager deleting on someone ELSE's behalf must be visible to that
+  // user — unlike a self-delete (intentionally no audit trail, personal use),
+  // silently deleting another person's proof-of-work photo without their
+  // knowledge isn't acceptable. Self-deletes are untouched by this block.
+  if (!isSelf) {
+    await AuditLog.create({
+      entityType: 'Screenshot',
+      entityId: key,
+      action: 'ADMIN_DELETE_SCREENSHOT',
+      changes: { userId: targetUserId, date, deductedSeconds: SCREENSHOT_DELETE_DEDUCTION_SECONDS },
+      reason: `${requestor.fullName} deleted a screenshot on behalf of another user`,
+      performedBy: requestor._id,
+      organizationId: requestor.organizationId?.toString(),
+    });
+
+    CrmPushService.sendToUsers([targetUserId], {
+      title: '🗑️ Screenshot Deleted by Admin',
+      body: `${requestor.fullName} deleted one of your screenshots from ${date}. ${SCREENSHOT_DELETE_DEDUCTION_SECONDS / 60} minutes were deducted from that day's rendered hours.`,
+      tag: `screenshot-deleted-${targetUserId}-${date}`,
+      data: { url: `/crm/timeproof/${date}` },
+    }).catch(() => {});
+  }
 
   res.json(new ApiResponse(200, { deductedSeconds: SCREENSHOT_DELETE_DEDUCTION_SECONDS }, 'Screenshot deleted'));
 });

@@ -8,7 +8,7 @@ import SupraSpaceSpace from '../models/SupraSpaceSpace.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
-import { getIO, isUserOnline } from '../socket/supraspace.socket';
+import { getIO } from '../socket/supraspace.socket';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 import { storageService, BucketType } from '../services/storage.service';
 import { CrmPushService } from '../services/crmPush.service';
@@ -44,7 +44,7 @@ function emitToConversation(conv: any, event: string, payload: any) {
 // stay "online" briefly after the app is backgrounded. To keep installed mobile
 // apps reliable, online recipients still get pushes on mobile-like subscriptions.
 // Fire-and-forget — never lets push errors block the HTTP response.
-async function pushToOfflineMembers(conv: any, senderId: string, title: string, body: string, textForMention = ''): Promise<void> {
+async function pushToConversationMembers(conv: any, senderId: string, title: string, body: string, textForMention = ''): Promise<void> {
   try {
     const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
@@ -69,18 +69,16 @@ async function pushToOfflineMembers(conv: any, senderId: string, title: string, 
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
-      const isOnline = isUserOnline(memberId);
-
       await CrmPushService.sendToUsers([memberId], {
         title,
         body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
         icon: '/icon-192x192.png',
         tag: conv._id?.toString() ?? 'supraspace',
         data: { url: '/crm/supra-space' },
-      }, isOnline ? { deviceHints: ['mobile', 'ios', 'android', 'iphone', 'ipad', 'pwa'] } : undefined);
+      });
     }));
   } catch (err) {
-    logger.warn({ err }, '[SupraSpace] pushToOfflineMembers failed');
+    logger.warn({ err }, '[SupraSpace] pushToConversationMembers failed');
   }
 }
 
@@ -834,7 +832,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
-  pushToOfflineMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '');
+  pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '');
 
   // Notify previously-hidden members so their sidebar shows the conversation
   // without waiting for a manual refresh or page reload.
@@ -984,7 +982,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
 
   const fileSenderName = (req.crmUser as any)?.fullName || 'Someone';
   const convNameFile = (conversation as any).name;
-  pushToOfflineMembers(
+  pushToConversationMembers(
     conversation,
     userId.toString(),
     convNameFile ?? fileSenderName,
