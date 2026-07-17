@@ -186,7 +186,9 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
     const orgId = req.orgId as string;
 
-    const filter: any = {};
+    const filter: any = {
+        organizationId: orgId,
+    };
     if (status && status !== 'all') {
         filter.status = status;
     }
@@ -564,81 +566,222 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
 const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const orgId = req.orgId as string;
-    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
 
-    if (!quote) throw new ApiError(404, 'Quote not found');
-    if (quote.status === 'rejected') throw new ApiError(400, 'Cannot convert a rejected quote');
+    if (!userId) {
+        throw new ApiError(
+            401,
+            'Authenticated user is required to convert a quote to a load'
+        );
+    }
 
-    // Parse city/state from address strings (e.g. "Salt Lake City, UT 84101")
+    const quote = await Quote.findOne({
+        _id: req.params.id,
+        organizationId: orgId,
+    });
+
+    if (!quote) {
+        throw new ApiError(404, 'Quote not found');
+    }
+
+    if (quote.status === 'rejected') {
+        throw new ApiError(400, 'Cannot convert a rejected quote');
+    }
+
+    if (quote.status === 'booked') {
+        const existingLoad = await Load.findOne({
+            quoteId: quote._id,
+            organizationId: orgId,
+        });
+
+        if (existingLoad) {
+            quote.status = 'booked';
+            await quote.save();
+
+            throw new ApiError(
+                409,
+                `This quote has already been converted to load ${existingLoad.loadNumber}`
+            );
+        }
+
+        throw new ApiError(409, 'This quote has already been converted to a load');
+    }
+
+    const existingLoad = await Load.findOne({
+        quoteId: quote._id,
+        organizationId: orgId,
+    });
+
+    if (existingLoad) {
+        quote.status = "booked";
+        await quote.save();
+
+        throw new ApiError(
+            409,
+            `This quote has already been converted to load ${existingLoad.loadNumber}`
+        );
+    }
+
+    // Parse city/state from address strings such as:
+    // "Salt Lake City, UT 84101"
     const parseAddress = (address: string, zip: string) => {
-        const parts = address.split(',').map((p) => p.trim());
-        const city = parts[0] || address;
-        const stateZip = parts[1] || '';
-        const state = stateZip.replace(/\d+/g, '').trim().slice(0, 2).toUpperCase() || 'XX';
-        return { city, state, zip, country: 'US' };
+        const normalizedAddress = (address || '').trim();
+        const normalizedZip = (zip || '').trim();
+        const parts = normalizedAddress
+            .split(',')
+            .map((part) => part.trim())
+            .filter(Boolean);
+
+        const city = parts[0] || normalizedAddress || 'Unknown';
+        const stateAndZip = parts[1] || '';
+
+        const stateMatch = stateAndZip.match(/\b([A-Za-z]{2})\b/);
+        const state = stateMatch?.[1]?.toUpperCase() || 'XX';
+
+        return {
+            city,
+            state,
+            zip: normalizedZip,
+            country: 'US',
+        };
     };
 
-    const pickupLocation = parseAddress(quote.fromAddress, quote.fromZip);
-    const deliveryLocation = parseAddress(quote.toAddress, quote.toZip);
+    const pickupLocation = parseAddress(
+        quote.fromAddress,
+        quote.fromZip
+    );
+
+    const deliveryLocation = parseAddress(
+        quote.toAddress,
+        quote.toZip
+    );
 
     const trailerType = quote.enclosedTrailer ? 'enclosed' : 'open';
 
+    const vehicleNameParts = (quote.vehicleName || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+
+    const possibleYear = Number.parseInt(vehicleNameParts[0] || '', 10);
+    const vehicleYear = Number.isNaN(possibleYear)
+        ? undefined
+        : possibleYear;
+
     const load = await Load.create({
         organizationId: orgId,
-        orgId: (req as any).orgObjectId,
+        orgId: (req as Request & { orgObjectId?: unknown }).orgObjectId,
         createdBy: userId,
         quoteId: quote._id,
+
         postType: 'load-board',
         status: 'Draft',
+
+        // trailerType is required at the top level of the Load schema.
+        trailerType,
+
         pickupLocation,
         deliveryLocation,
-        vehicles: [{
-            vehicleId: quote.vehicleId,
-            vin: quote.vin,
-            vehicleType: 'sedan',
-            trailerType,
-            condition: quote.vehicleInoperable ? 'Inoperable' : 'Operable',
-            ...(quote.vehicleName ? (() => {
-                const parts = quote.vehicleName.split(' ');
-                return {
-                    year: parts[0] ? parseInt(parts[0]) : undefined,
-                    make: parts[1] || undefined,
-                    model: parts.slice(2).join(' ') || undefined,
-                };
-            })() : {}),
-        }],
+
+        vehicles: [
+            {
+                vehicleId: quote.vehicleId,
+                hasVin: Boolean(quote.vin),
+                vin: quote.vin,
+                vehicleType: 'sedan',
+                condition: quote.vehicleInoperable
+                    ? 'Inoperable'
+                    : 'Operable',
+                ...(quote.vehicleName
+                    ? {
+                        year: vehicleYear,
+                        make: vehicleNameParts[1] || undefined,
+                        model:
+                            vehicleNameParts.slice(2).join(' ') ||
+                            undefined,
+                    }
+                    : {}),
+            },
+        ],
+
         pricing: {
             miles: quote.miles,
             estimatedRate: quote.rate,
             carrierPayAmount: quote.rate,
         },
+
         additionalInfo: {
             visibility: 'public',
             notes: `Converted from quote for ${quote.firstName} ${quote.lastName}`,
         },
-        contract: { agreedToTerms: false },
+
+        contract: {
+            agreedToTerms: false,
+        },
     });
 
-    // Mark quote as booked (converted), preserve it for customer history
-    await Quote.findByIdAndUpdate(quote._id, { $set: { status: 'booked' } });
+    // Preserve the quote for history and mark it as converted.
+    quote.status = 'booked';
+    await quote.save();
 
-    const io = getSocketIO();
-    if (io) io.to(`org:${orgId}`).emit('load:change', { action: 'created', loadId: load._id.toString() });
-
+    // Clear cached quote lists so the booked status is reflected.
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
-    res.status(201).json(new ApiResponse(201, load, 'Quote converted to load successfully'));
+    const io = getSocketIO();
+    if (io) {
+        io.to(`org:${orgId}`).emit('load:change', {
+            action: 'created',
+            loadId: load._id.toString(),
+        });
 
-    logger.info({ quoteId: quote._id, loadId: load._id, orgId }, 'Quote converted to load');
+        io.to(`org:${orgId}`).emit('quote:change', {
+            action: 'updated',
+            quoteId: quote._id.toString(),
+        });
+    }
 
-    await activityService.createActivity({
-        userId: userId || 'SYSTEM',
-        organizationId: orgId,
-        type: 'quote_updated',
-        title: 'Quote Converted to Load',
-        description: `Quote for ${quote.firstName} ${quote.lastName} converted to load ${load.loadNumber}`,
-        metadata: { quoteId: quote._id.toString(), loadId: load._id.toString() },
-    });
+    logger.info(
+        {
+            quoteId: quote._id,
+            loadId: load._id,
+            orgId,
+        },
+        'Quote converted to load'
+    );
+
+    // Do not let activity logging prevent a successful conversion response.
+    try {
+        await activityService.createActivity({
+            userId,
+            organizationId: orgId,
+            type: 'quote_updated',
+            title: 'Quote Converted to Load',
+            description: `Quote for ${quote.firstName} ${quote.lastName} converted to load ${load.loadNumber}`,
+            metadata: {
+                quoteId: quote._id.toString(),
+                loadId: load._id.toString(),
+            },
+            ipAddress: req.ip,
+            userAgent: req.get('user-agent'),
+        });
+    } catch (activityError) {
+        logger.error(
+            {
+                err: activityError,
+                quoteId: quote._id,
+                loadId: load._id,
+                orgId,
+            },
+            'Quote was converted, but activity logging failed'
+        );
+    }
+
+    return res.status(201).json(
+        new ApiResponse(
+            201,
+            load,
+            'Quote converted to load successfully'
+        )
+    );
 });
 
 export default {
