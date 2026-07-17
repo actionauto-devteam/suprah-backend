@@ -59,7 +59,7 @@ async function pushToOfflineMembers(conv: any, senderId: string, title: string, 
     await Promise.allSettled(recipientIds.map(async (memberId: string) => {
       const recipient = recipients.find((user: any) => user._id.toString() === memberId);
       const pref = getConversationNotificationPref(conv, memberId);
-      const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(textForMention);
+      const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|[^\w@])@all(?=$|[^\w])/i.test(textForMention);
       if (!shouldNotifyForPreference(pref, mentioned)) return;
 
       const unreadCount = await SupraSpaceMessage.countDocuments({
@@ -97,7 +97,7 @@ function getConversationNotificationPref(conv: any, userId: string): SupraSpaceN
 function mentionBoundaryRegex(alias: string): RegExp | null {
   const normalized = alias.trim().replace(/\s+/g, ' ');
   if (!normalized) return null;
-  return new RegExp(`(^|\\s)@${escapeRegex(normalized)}(?=$|[\\s.,!?;:)\\]])`, 'i');
+  return new RegExp(`(^|[^\\w@])@${escapeRegex(normalized)}(?=$|[^\\w])`, 'i');
 }
 
 function mentionAliasesForName(fullName: string): string[] {
@@ -110,7 +110,7 @@ function mentionAliasesForName(fullName: string): string[] {
 }
 
 function isUserMentioned(text: string, user: { fullName?: string | null; username?: string | null }): boolean {
-  if (/(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(text)) return true;
+  if (/(^|[^\w@])@all(?=$|[^\w])/i.test(text)) return true;
   const aliases = [
     ...(user.username ? [user.username] : []),
     ...mentionAliasesForName(user.fullName || ''),
@@ -120,7 +120,7 @@ function isUserMentioned(text: string, user: { fullName?: string | null; usernam
 
 function mentionContentQueryForUser(user: { fullName?: string | null; username?: string | null }): any[] {
   const mentionPatterns = [
-    /(^|\s)@all(?=$|[\s.,!?;:)\]])/i,
+    /(^|[^\w@])@all(?=$|[^\w])/i,
     ...(user.username ? [user.username] : []),
     ...mentionAliasesForName(user.fullName || ''),
   ]
@@ -148,7 +148,7 @@ async function notifyMentionedMembers(params: {
     const text = params.text.trim();
     if (!text) return;
 
-    const hasAll = /(^|\s)@all(?=$|[\s.,!?;:)\]])/i.test(text);
+    const hasAll = /(^|[^\w@])@all(?=$|[^\w])/i.test(text);
     const memberIds = (params.conversation.members as any[])
       .map((x: any) => x.toString())
       .filter((x: string) => x !== params.senderId.toString());
@@ -158,9 +158,7 @@ async function notifyMentionedMembers(params: {
     const toNotify = hasAll
       ? members.map((x: any) => x._id.toString())
       : members
-          .filter((member: any) =>
-            mentionAliasesForName(member.fullName || '').some((alias) => mentionBoundaryRegex(alias)?.test(text)),
-          )
+          .filter((member: any) => isUserMentioned(text, member))
           .map((x: any) => x._id.toString());
 
     const uniqueRecipients = [...new Set(toNotify)].filter((memberId) =>
@@ -315,6 +313,19 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     };
     if (clearedAt) unreadFilter.createdAt = { $gt: new Date(clearedAt) };
     const unreadCount = await SupraSpaceMessage.countDocuments(unreadFilter);
+    const mentionFilter: any = {
+      conversationId: safeConv._id,
+      sender: { $ne: userId },
+      isDeleted: false,
+      scheduledStatus: { $ne: 'pending' },
+    };
+    if (clearedAt) mentionFilter.createdAt = { $gt: new Date(clearedAt) };
+    const mentionCount = mentionContentQuery.length
+      ? await SupraSpaceMessage.countDocuments({
+          ...mentionFilter,
+          $or: mentionContentQuery,
+        })
+      : 0;
     const unreadMentionCount = mentionContentQuery.length
       ? await SupraSpaceMessage.countDocuments({
           ...unreadFilter,
@@ -325,6 +336,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
       ...safeConv,
       notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
       unreadCount,
+      mentionCount,
       unreadMentionCount,
     };
   }));
