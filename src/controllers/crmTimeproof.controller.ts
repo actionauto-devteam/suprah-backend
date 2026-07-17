@@ -76,36 +76,21 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     activityByDate[i.shiftDate] = (activityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
   }
 
-  const todayHeartbeat = await AgentHeartbeat.findOne({ userId: user._id }).lean();
-  const heartbeatFresh = todayHeartbeat
-    ? Date.now() - new Date(todayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
-    : false;
-  // Never count live time while on break — TimeLogs/heartbeat break state is
-  // authoritative here, same rule as getShiftState. Without this guard a
-  // stale-but-not-yet-refreshed heartbeat keeps ticking through the break and
-  // Rendered Hours ends up including break time.
-  const liveActiveSeconds = !todayHeartbeat?.isOnBreak && heartbeatFresh && todayHeartbeat?.currentIntervalStartAt
-    ? Math.max(0, (Date.now() - new Date(todayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
-    : 0;
-  activityByDate[todayStr] = (activityByDate[todayStr] ?? 0) + liveActiveSeconds;
-
-  for (const dateStr of Object.keys(calendar)) {
-    // Skip today — its wall-clock total (via buildCalendarMap/buildSessions)
-    // is already correct and already capped (MAX_LIVE_MS) against runaway
-    // overcounting from a forgotten clock-out, so there's nothing left for
-    // this heartbeat-based figure to safely "verify" it against. Overriding
-    // with liveActiveSeconds here was actively WRONG whenever the tray's
-    // heartbeat/currentIntervalStartAt lagged or reset (the exact fragility
-    // this session's other fixes address) — it would silently replace a now-
-    // correct wall-clock total with a smaller, stale one. Kept for past dates,
-    // where it still guards against older, already-closed-session data issues.
-    if (dateStr === todayStr) continue;
-    const activeForDate = activityByDate[dateStr] ?? 0;
-    const wallClock = calendar[dateStr].totalSeconds;
-    if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
-      calendar[dateStr].totalSeconds = activeForDate;
-    }
-  }
+  // Calendar totals (today and every past day) are trusted as-is from
+  // buildCalendarMap — pure wall-clock (TimeLog time-in/time-out, minus
+  // breaks), already capped against a forgotten-clock-out inflating a live
+  // session (MAX_LIVE_MS), and already corrected for genuinely-stale opens by
+  // the auto-clockout schedulers, which close at last-known-activity or the
+  // MDT day boundary rather than "now". This used to be "verified" against a
+  // heartbeat/ActivityInterval-derived figure and silently overridden
+  // downward whenever that figure covered 65-99% of the wall-clock total —
+  // but that figure is exactly the fragile mechanism (missed checkpoints,
+  // idle-detection flaps, stale heartbeats) this session's other fixes
+  // address, so the "verification" was actively corrupting correct, already-
+  // closed days after the fact (e.g. a user's Thursday total quietly dropping
+  // from 12h to 8h once Thursday was no longer "today"). Removed entirely —
+  // wall-clock is the authoritative source everywhere now, matching the Time
+  // Clock / tray-app live ticker.
 
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
@@ -344,27 +329,12 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     userActivityByDate[i.shiftDate] = (userActivityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
   }
 
-  const userTodayHeartbeat = await AgentHeartbeat.findOne({ userId }).lean();
-  const userHeartbeatFresh = userTodayHeartbeat
-    ? Date.now() - new Date(userTodayHeartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
-    : false;
-  const userLiveActiveSeconds = !userTodayHeartbeat?.isOnBreak && userHeartbeatFresh && userTodayHeartbeat?.currentIntervalStartAt
-    ? Math.max(0, (Date.now() - new Date(userTodayHeartbeat.currentIntervalStartAt).getTime()) / 1000)
-    : 0;
-  userActivityByDate[todayStr] = (userActivityByDate[todayStr] ?? 0) + userLiveActiveSeconds;
-
-  for (const dateStr of Object.keys(calendar)) {
-    // See getMyTimeproof for the full explanation — today's wall-clock total
-    // is already correct and capped, so it must not be overridden by this
-    // heartbeat-based figure, which is exactly the fragile mechanism this
-    // session's other fixes address.
-    if (dateStr === todayStr) continue;
-    const activeForDate = userActivityByDate[dateStr] ?? 0;
-    const wallClock = calendar[dateStr].totalSeconds;
-    if (activeForDate > 0 && activeForDate < wallClock && activeForDate / wallClock >= MIN_ACTIVITY_COVERAGE) {
-      calendar[dateStr].totalSeconds = activeForDate;
-    }
-  }
+  // See getMyTimeproof for the full explanation — calendar totals (today and
+  // every past day) are trusted as-is from buildCalendarMap now. The
+  // heartbeat-derived "verification" that used to run here was silently
+  // corrupting already-closed days after the fact, since it trusted exactly
+  // the fragile mechanism (missed checkpoints, idle-detection flaps, stale
+  // heartbeats) this session's other fixes address. Removed entirely.
 
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
