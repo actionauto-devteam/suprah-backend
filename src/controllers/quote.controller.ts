@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Load from '../models/Load.model';
@@ -34,6 +35,15 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         email,
         phone,
         vehicleId,
+        vehicleName,
+        vin,
+        stockNumber,
+        vehiclePrice,
+        vehicleMarketPrice,
+        vehicleLocation,
+        vehicleImage,
+        vehicleStatus,
+        daysOnLot,
         fromZip,
         toZip,
         fromAddress,
@@ -57,22 +67,77 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Invalid ZIP code format');
     }
 
-    let vehicleData: any = {};
+    /*
+     * A quote may come from:
+     * 1. Inventory, with a real MongoDB Vehicle ObjectId.
+     * 2. CRM Leads, with only a vehicle snapshot and a stock number.
+     *
+     * Preserve the request snapshot first. If a valid inventory vehicle is
+     * found, replace those values with the authoritative database values.
+     */
+    let vehicleData: any = {
+        ...(vehicleName && { vehicleName: String(vehicleName).trim() }),
+        ...(vin && { vin: String(vin).trim() }),
+        ...(stockNumber && { stockNumber: String(stockNumber).trim() }),
+        ...(vehiclePrice !== undefined && {
+            vehiclePrice: Number(vehiclePrice),
+        }),
+        ...(vehicleMarketPrice !== undefined && {
+            vehicleMarketPrice: Number(vehicleMarketPrice),
+        }),
+        ...(vehicleLocation && {
+            vehicleLocation: String(vehicleLocation).trim(),
+        }),
+        ...(vehicleImage && {
+            vehicleImage: String(vehicleImage).trim(),
+        }),
+        ...(vehicleStatus && {
+            vehicleStatus: String(vehicleStatus).trim(),
+        }),
+        ...(daysOnLot !== undefined && {
+            daysOnLot: Number(daysOnLot),
+        }),
+    };
+
     if (vehicleId) {
-        const vehicle = await Vehicle.findById(vehicleId);
-        if (vehicle) {
-            vehicleData = {
-                vehicleId: vehicle._id,
-                vehicleName: `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`,
-                vin: vehicle.vin,
-                stockNumber: vehicle.stockNumber,
-                vehiclePrice: vehicle.price,
-                vehicleMarketPrice: vehicle.msrp,
-                vehicleLocation: vehicle.dealerCity ? `${vehicle.dealerCity}, ${vehicle.dealerState}` : 'Unknown',
-                vehicleImage: (vehicle.images && vehicle.images.length > 0) ? vehicle.images[0] : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
-                vehicleStatus: vehicle.status,
-                daysOnLot: vehicle.daysOnLot
-            };
+        const normalizedVehicleId = String(vehicleId).trim();
+
+        if (mongoose.Types.ObjectId.isValid(normalizedVehicleId)) {
+            const vehicle = await Vehicle.findById(normalizedVehicleId);
+
+            if (vehicle) {
+                vehicleData = {
+                    ...vehicleData,
+                    vehicleId: vehicle._id,
+                    vehicleName: `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`,
+                    vin: vehicle.vin || vehicleData.vin,
+                    stockNumber: vehicle.stockNumber || vehicleData.stockNumber,
+                    vehiclePrice: vehicle.price ?? vehicleData.vehiclePrice,
+                    vehicleMarketPrice:
+                        vehicle.msrp ?? vehicleData.vehicleMarketPrice,
+                    vehicleLocation: vehicle.dealerCity
+                        ? `${vehicle.dealerCity}, ${vehicle.dealerState}`
+                        : vehicleData.vehicleLocation || 'Unknown',
+                    vehicleImage:
+                        vehicle.images && vehicle.images.length > 0
+                            ? vehicle.images[0]
+                            : vehicleData.vehicleImage ||
+                              'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
+                    vehicleStatus:
+                        vehicle.status || vehicleData.vehicleStatus,
+                    daysOnLot:
+                        vehicle.daysOnLot ?? vehicleData.daysOnLot,
+                };
+            }
+        } else {
+            logger.warn(
+                {
+                    vehicleId: normalizedVehicleId,
+                    stockNumber: vehicleData.stockNumber,
+                    vin: vehicleData.vin,
+                },
+                'Quote received a non-ObjectId vehicle reference; using the CRM vehicle snapshot',
+            );
         }
     }
 
