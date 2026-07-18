@@ -568,60 +568,135 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const orgId = req.orgId as string;
-    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
+    const quoteId = req.params.id;
+
+    /*
+     * Delete in one atomic database operation.
+     *
+     * Production can briefly display an already-deleted quote when a cached
+     * quote list or another browser session is stale. Treating a repeated
+     * DELETE as success makes the endpoint idempotent and prevents the UI from
+     * remaining stuck on "Deleting..." because of a harmless 404.
+     */
+    const quote = await Quote.findOneAndDelete({
+        _id: quoteId,
+        organizationId: orgId,
+    });
+
+    /*
+     * Always invalidate list caches, including when the record was already
+     * deleted. This removes stale quote cards from production immediately.
+     */
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
 
     if (!quote) {
-        throw new ApiError(404, 'Quote not found');
+        logger.info(
+            { quoteId, orgId },
+            'Quote was already deleted or was no longer visible to this organization',
+        );
+
+        return res.json(
+            new ApiResponse(
+                200,
+                null,
+                'Quote is already deleted',
+            ),
+        );
     }
 
     const customerName = `${quote.firstName} ${quote.lastName}`;
     const vehicleName = quote.vehicleName;
 
-    await Quote.findOneAndDelete({ _id: req.params.id, organizationId: orgId });
-
-    // Create notification safely
-    if (userId) {
-        const { title, message } = notificationTemplates.quote_deleted({
-            customerName,
-            vehicleName,
-        });
-
-        await safeCreateNotification({
-            userId,
-            organizationId: orgId,
-            type: 'quote_deleted',
-            title,
-            message,
-            metadata: {
-                customerName,
-                vehicleName,
-            },
+    // Update connected clients immediately.
+    const io = getSocketIO();
+    if (io) {
+        io.to(`org:${orgId}`).emit('quote:change', {
+            action: 'deleted',
+            quoteId,
         });
     }
 
-    notifyOrgAdmins(
-        orgId,
-        'quote_deleted',
-        'Quote Deleted',
-        `Quote for ${customerName} (${vehicleName}) has been deleted.`,
-        { customerName, vehicleName }
+    /*
+     * Return success as soon as the database deletion and cache invalidation
+     * are complete. Notifications and activity logging are non-critical and
+     * should not keep the production Delete button loading.
+     */
+    res.json(
+        new ApiResponse(
+            200,
+            null,
+            'Quote deleted successfully',
+        ),
     );
 
-    res.json(new ApiResponse(200, null, 'Quote deleted successfully'));
+    void (async () => {
+        const backgroundTasks: Promise<unknown>[] = [];
 
-    // Real-time: notify org members
-    const _ioD = getSocketIO();
-    if (_ioD) _ioD.to(`org:${orgId}`).emit('quote:change', { action: 'deleted' });
+        if (userId) {
+            const { title, message } = notificationTemplates.quote_deleted({
+                customerName,
+                vehicleName,
+            });
 
-    await activityService.createActivity({
-        userId: userId || 'SYSTEM',
-        organizationId: orgId,
-        type: 'quote_deleted',
-        title: 'Draft Deleted',
-        description: `Quote for ${customerName} was removed from the system`
-    });
+            backgroundTasks.push(
+                safeCreateNotification({
+                    userId,
+                    organizationId: orgId,
+                    type: 'quote_deleted',
+                    title,
+                    message,
+                    metadata: {
+                        customerName,
+                        vehicleName,
+                    },
+                }),
+            );
+        }
 
-    logger.warn({ quoteId: req.params.id, orgId }, 'Quote deleted');
+        backgroundTasks.push(
+            Promise.resolve(
+                notifyOrgAdmins(
+                    orgId,
+                    'quote_deleted',
+                    'Quote Deleted',
+                    `Quote for ${customerName} (${vehicleName}) has been deleted.`,
+                    { customerName, vehicleName },
+                ),
+            ),
+        );
+
+        backgroundTasks.push(
+            activityService.createActivity({
+                userId: userId || 'SYSTEM',
+                organizationId: orgId,
+                type: 'quote_deleted',
+                title: 'Draft Deleted',
+                description: `Quote for ${customerName} was removed from the system`,
+            }),
+        );
+
+        const results = await Promise.allSettled(backgroundTasks);
+        const failures = results.filter(
+            (result) => result.status === 'rejected',
+        );
+
+        if (failures.length > 0) {
+            logger.error(
+                {
+                    quoteId,
+                    orgId,
+                    failures: failures.map((failure) =>
+                        failure.status === 'rejected'
+                            ? failure.reason
+                            : undefined,
+                    ),
+                },
+                'Quote was deleted, but one or more background tasks failed',
+            );
+        }
+    })();
+
+    logger.warn({ quoteId, orgId }, 'Quote deleted');
 });
 
 /**
