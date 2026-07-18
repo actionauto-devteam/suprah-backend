@@ -44,7 +44,13 @@ function emitToConversation(conv: any, event: string, payload: any) {
 // stay "online" briefly after the app is backgrounded. To keep installed mobile
 // apps reliable, online recipients still get pushes on mobile-like subscriptions.
 // Fire-and-forget — never lets push errors block the HTTP response.
-async function pushToConversationMembers(conv: any, senderId: string, title: string, body: string, textForMention = ''): Promise<void> {
+function supraSpaceMessageUrl(conversationId: string, messageId?: string): string {
+  const params = new URLSearchParams({ conversationId });
+  if (messageId) params.set('messageId', messageId);
+  return `/crm/supra-space?${params.toString()}`;
+}
+
+async function pushToConversationMembers(conv: any, senderId: string, title: string, body: string, textForMention = '', messageId?: string): Promise<void> {
   try {
     const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
@@ -74,7 +80,11 @@ async function pushToConversationMembers(conv: any, senderId: string, title: str
         body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
         icon: '/icon-192x192.png',
         tag: conv._id?.toString() ?? 'supraspace',
-        data: { url: '/crm/supra-space' },
+        data: {
+          url: supraSpaceMessageUrl(conv._id.toString(), messageId),
+          conversationId: conv._id.toString(),
+          messageId,
+        },
       });
     }));
   } catch (err) {
@@ -178,7 +188,7 @@ async function notifyMentionedMembers(params: {
         metadata: {
           conversationId: params.conversation._id.toString(),
           messageId: params.messageId,
-          route: params.route || '/crm/supra-space',
+          route: params.route || supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
         },
       })
     ));
@@ -832,7 +842,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
-  pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '');
+  pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '', message._id.toString());
 
   // Notify previously-hidden members so their sidebar shows the conversation
   // without waiting for a manual refresh or page reload.
@@ -987,7 +997,8 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     userId.toString(),
     convNameFile ?? fileSenderName,
     convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file',
-    content?.trim() || ''
+    content?.trim() || '',
+    message._id.toString()
   );
 
   if (resurrectedFor.length > 0) {

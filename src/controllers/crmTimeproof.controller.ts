@@ -20,6 +20,12 @@ import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezo
 import sharp from 'sharp';
 
 const BREAK_LIMIT_SECONDS = 3600;
+// The admin notification fires 5 minutes AFTER the official 1h limit, not the
+// instant it's crossed — gives the user a short grace window (matches the
+// tray's own user-facing warning at 1h04m, one minute earlier) before
+// escalating to their admin/manager. Also matches the web widget's own
+// "Break over" red-state threshold (65 min), which already used this grace.
+const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 
 const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
 
@@ -808,7 +814,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   }
 
   // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
-  if (isOnBreak && isOnShift && breakDurationSeconds >= BREAK_LIMIT_SECONDS && !lastBreakNotifiedAt) {
+  if (isOnBreak && isOnShift && breakDurationSeconds >= BREAK_ADMIN_NOTIFY_SECONDS && !lastBreakNotifiedAt) {
     await AgentHeartbeat.updateOne(
       { userId: user._id },
       { lastBreakNotifiedAt: new Date() }
