@@ -13,15 +13,18 @@ import ProjectTask, {
   ProjectTaskStatus,
 } from '../models/ProjectTask.model';
 import ProjectTaskComment from '../models/ProjectTaskComment.model';
+import { syncTaskToCalendar, removeTaskCalendarEvent } from '../services/projectCalendarSync.service';
 import ProjectNotification, { ProjectNotificationType } from '../models/ProjectNotification.model';
 import { BucketType, storageService } from '../services/storage.service';
 import { getSocketIO } from '../utils/socketEmitter';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const MEMBER_SEARCH_LIMIT = 20;
 const COMMENT_PAGE_LIMIT = 50;
-const R2_FOLDER = 'project-attachments';
+const R2_FOLDER = 'project-attachments'; // same private R2 bucket flow as DayPulse
 
+// ─── Small utilities ──────────────────────────────────────────────────────────
 
 const oid = (id: string) => new mongoose.Types.ObjectId(id);
 
@@ -33,6 +36,19 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Safe display name for notification text and author snapshots. The synthetic
+ * admin user created by crmAuth for main-app Bearer tokens may not carry a
+ * fullName, and authorName/actorName are required fields.
+ */
+function displayNameOf(user: any): string {
+  return user?.fullName || user?.username || user?.email || 'Team member';
+}
+
+/**
+ * Sign private-bucket attachment keys into time-limited URLs before sending
+ * to the client. Identical approach to DayPulse.signAttachments.
+ */
 async function signAttachments<T extends { attachments?: IProjectAttachment[] }>(doc: T): Promise<T> {
   if (!Array.isArray(doc.attachments) || doc.attachments.length === 0) return doc;
 
@@ -47,6 +63,10 @@ async function signAttachments<T extends { attachments?: IProjectAttachment[] }>
   return doc;
 }
 
+/**
+ * Upload multer files to R2 (private bucket) and return the attachment
+ * records plus the raw keys (for rollback on failure).
+ */
 async function uploadAttachments(
   files: Express.Multer.File[],
   uploadedBy: mongoose.Types.ObjectId,
@@ -81,7 +101,13 @@ async function rollbackUploads(keys: string[]) {
   ));
 }
 
+// ─── Access control ───────────────────────────────────────────────────────────
 
+/**
+ * Central gate for the whole module. Loads a live group scoped to the actor's
+ * organization AND verifies the actor is a member. Non-members receive a 404
+ * (not 403) so that group existence is never leaked to outsiders.
+ */
 async function loadGroupForMember(groupId: string, actor: any): Promise<IProjectGroup> {
   assertObjectId(groupId, 'group ID');
   if (!actor.organizationId) {
@@ -98,12 +124,18 @@ async function loadGroupForMember(groupId: string, actor: any): Promise<IProject
 
   const actorId = actor._id.toString();
   const isMember = group.memberIds.some((m) => m.toString() === actorId);
-  if (!isMember) throw new ApiError(404, 'Project group not found');
+  if (!isMember) throw new ApiError(404, 'Project group not found'); // deliberate: don't reveal existence
 
   return group;
 }
 
+// ─── Real-time + notifications ────────────────────────────────────────────────
 
+/**
+ * Emit an event to each group member's private socket room (`user:{id}`).
+ * Uses per-user rooms (already established by the tray/CRM socket handshake)
+ * instead of an org-wide room, so events never reach non-members.
+ */
 function emitToMembers(memberIds: mongoose.Types.ObjectId[], event: string, payload: unknown) {
   try {
     const io = getSocketIO();
@@ -124,6 +156,7 @@ interface NotifyArgs {
   taskId?: mongoose.Types.ObjectId | null;
   title: string;
   message: string;
+  commentId?: mongoose.Types.ObjectId | null;
 }
 
 /**
@@ -131,7 +164,7 @@ interface NotifyArgs {
  * their own action) and push a `pm:notification` socket event so the sidebar
  * badge updates in real time.
  */
-async function notifyUsers({ recipients, actor, type, groupId, taskId, title, message }: NotifyArgs) {
+async function notifyUsers({ recipients, actor, type, groupId, taskId, commentId, title, message }: NotifyArgs) {
   const actorId = actor._id.toString();
   const uniqueRecipients = Array.from(new Set(
     recipients
@@ -150,8 +183,9 @@ async function notifyUsers({ recipients, actor, type, groupId, taskId, title, me
         type,
         groupId,
         taskId: taskId ?? null,
+        commentId: commentId ?? null,
         actorId: actor._id,
-        actorName: actor.fullName,
+        actorName: displayNameOf(actor),
         title,
         message,
       })),
@@ -168,6 +202,7 @@ async function notifyUsers({ recipients, actor, type, groupId, taskId, title, me
             message: doc.message,
             groupId: doc.groupId,
             taskId: doc.taskId,
+            commentId: (doc as any).commentId ?? null,
             actorName: doc.actorName,
             createdAt: doc.createdAt,
           });
@@ -275,7 +310,7 @@ export const createGroup = asyncHandler(async (req: Request, res: Response) => {
     type: 'group_added',
     groupId: group._id as mongoose.Types.ObjectId,
     title: 'Added to a project group',
-    message: `${actor.fullName} added you to "${group.name}"`,
+    message: `${displayNameOf(actor)} added you to "${group.name}"`,
   });
 
   emitToMembers(finalMemberIds, 'pm:group:new', { group });
@@ -356,7 +391,7 @@ export const updateGroup = asyncHandler(async (req: Request, res: Response) => {
       type: 'group_added',
       groupId: group._id as mongoose.Types.ObjectId,
       title: 'Added to a project group',
-      message: `${actor.fullName} added you to "${group.name}"`,
+      message: `${displayNameOf(actor)} added you to "${group.name}"`,
     });
   }
 
@@ -407,18 +442,28 @@ export const getGroupTree = asyncHandler(async (req: Request, res: Response) => 
     ProjectFolder.find({ groupId: group._id, deletedAt: null })
       .sort({ order: 1, createdAt: 1 }).lean(),
     ProjectTask.find({ groupId: group._id, deletedAt: null })
-      .select('title status assigneeIds createdBy startDate deadline folderId sectionId commentCount attachments order createdAt updatedAt')
+      .select('title status assigneeIds createdBy startDate deadline folderId sectionId commentCount attachments seenBy order createdAt updatedAt')
       .sort({ createdAt: -1 }).lean(), // latest task always first
     CrmUser.find({ _id: { $in: group.memberIds }, organizationId: actor.organizationId })
       .select('fullName username email avatar role').lean(),
   ]);
 
   // Task summaries only need the attachment COUNT — strip keys, don't sign.
-  const taskSummaries = tasks.map((t: any) => ({
-    ...t,
-    attachmentCount: Array.isArray(t.attachments) ? t.attachments.length : 0,
-    attachments: undefined,
-  }));
+  // unseenForMe: the viewer is involved (creator/assignee) and hasn't opened
+  // the task since its last activity — drives the unread highlight.
+  const meId = actor._id.toString();
+  const taskSummaries = tasks.map((t: any) => {
+    const involved = t.createdBy?.toString() === meId
+      || (t.assigneeIds || []).some((a: any) => a.toString() === meId);
+    const seen = (t.seenBy || []).some((u: any) => u.toString() === meId);
+    return {
+      ...t,
+      attachmentCount: Array.isArray(t.attachments) ? t.attachments.length : 0,
+      attachments: undefined,
+      seenBy: undefined,
+      unseenForMe: involved && !seen,
+    };
+  });
 
   res.json(new ApiResponse(200, {
     group,
@@ -695,7 +740,17 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
       attachments,
       order: (last?.order ?? -1) + 1,
       completedAt: taskStatus === 'completed' ? new Date() : null,
+      seenBy: [actor._id], // fresh task is unseen for everyone but its creator
     });
+
+    // Deadline → Suprah Calendar (best-effort; never fails the create).
+    if (task.deadline) {
+      const eventId = await syncTaskToCalendar(task, actor._id);
+      if (eventId) {
+        task.calendarEventId = eventId;
+        await ProjectTask.updateOne({ _id: task._id }, { $set: { calendarEventId: eventId } });
+      }
+    }
 
     if (assigneeIds.length > 0) {
       await notifyUsers({
@@ -705,7 +760,7 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
         groupId: group._id as mongoose.Types.ObjectId,
         taskId: task._id as mongoose.Types.ObjectId,
         title: 'New task assigned to you',
-        message: `${actor.fullName} assigned you "${task.title}" in ${group.name}`,
+        message: `${displayNameOf(actor)} assigned you "${task.title}" in ${group.name}`,
       });
     }
 
@@ -731,6 +786,9 @@ export const getTask = asyncHandler(async (req: Request, res: Response) => {
   if (!task) throw new ApiError(404, 'Task not found');
 
   await loadGroupForMember(task.groupId.toString(), actor); // membership gate
+
+  // Opening the task acknowledges its latest activity for this viewer.
+  await ProjectTask.updateOne({ _id: task._id }, { $addToSet: { seenBy: actor._id } });
 
   const taskForClient = await signAttachments(task.toObject());
 
@@ -793,7 +851,19 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Deadline cannot be before the start date');
   }
 
+  // A moved deadline re-arms the reminder windows.
+  if (task.isModified('deadline')) task.remindersSent = [];
+  // Edits reset seen-tracking: the task is "unseen" again for everyone else.
+  task.seenBy = [actor._id];
+
   await task.save();
+
+  // Keep the linked Suprah Calendar event in lockstep (best-effort).
+  const syncedEventId = await syncTaskToCalendar(task, actor._id);
+  if (syncedEventId !== task.calendarEventId) {
+    task.calendarEventId = syncedEventId;
+    await ProjectTask.updateOne({ _id: task._id }, { $set: { calendarEventId: syncedEventId } });
+  }
 
   if (newlyAssigned.length > 0) {
     await notifyUsers({
@@ -803,7 +873,7 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
       groupId: group._id as mongoose.Types.ObjectId,
       taskId: task._id as mongoose.Types.ObjectId,
       title: 'New task assigned to you',
-      message: `${actor.fullName} assigned you "${task.title}" in ${group.name}`,
+      message: `${displayNameOf(actor)} assigned you "${task.title}" in ${group.name}`,
     });
   }
 
@@ -815,7 +885,7 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
     groupId: group._id as mongoose.Types.ObjectId,
     taskId: task._id as mongoose.Types.ObjectId,
     title: 'Task updated',
-    message: `${actor.fullName} updated "${task.title}"`,
+    message: `${displayNameOf(actor)} updated "${task.title}"`,
   });
 
   const taskForClient = await signAttachments(task.toObject());
@@ -856,7 +926,11 @@ export const updateTaskStatus = asyncHandler(async (req: Request, res: Response)
   const previousStatus = task.status;
   task.status = status as ProjectTaskStatus;
   task.completedAt = status === 'completed' ? new Date() : null;
+  task.seenBy = [actor._id]; // status change is new activity for everyone else
   await task.save();
+
+  // Reflect the status on the linked calendar event (best-effort).
+  await syncTaskToCalendar(task, actor._id);
 
   if (previousStatus !== task.status) {
     await notifyUsers({
@@ -866,7 +940,7 @@ export const updateTaskStatus = asyncHandler(async (req: Request, res: Response)
       groupId: group._id as mongoose.Types.ObjectId,
       taskId: task._id as mongoose.Types.ObjectId,
       title: 'Task status changed',
-      message: `${actor.fullName} moved "${task.title}" to ${task.status}`,
+      message: `${displayNameOf(actor)} moved "${task.title}" to ${task.status}`,
     });
   }
 
@@ -906,6 +980,9 @@ export const deleteTask = asyncHandler(async (req: Request, res: Response) => {
 
   task.deletedAt = new Date();
   await task.save();
+
+  // Remove the linked Suprah Calendar event (best-effort).
+  await removeTaskCalendarEvent(task);
 
   emitToMembers(group.memberIds, 'pm:task:deleted', { groupId: group._id, taskId: task._id });
 
@@ -974,6 +1051,12 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'Comment must contain a message or at least one attachment');
   }
 
+  // @-mentions: ids resolved by the composer's picker. Only group members
+  // count — anything else is silently dropped (same policy as assignees).
+  const memberSet = new Set(group.memberIds.map((m) => m.toString()));
+  const mentionIds = parseAssigneeIds(req.body.mentions, group)
+    .filter((id) => memberSet.has(id.toString()));
+
   const { attachments, uploadedKeys } = await uploadAttachments(files, actor._id);
 
   try {
@@ -982,24 +1065,45 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
       groupId: group._id,
       taskId: task._id,
       userId: actor._id,
-      authorName: actor.fullName,
+      authorName: displayNameOf(actor),
       authorAvatar: actor.avatar || null,
       authorRole: actor.role,
       message,
+      mentions: mentionIds,
       attachments,
     });
 
     task.commentCount += 1;
+    task.seenBy = [actor._id]; // a new comment is fresh activity for everyone else
     await task.save();
 
+    // Mentioned users get the specific, deep-linkable mention notification…
+    if (mentionIds.length > 0) {
+      await notifyUsers({
+        recipients: mentionIds,
+        actor,
+        type: 'task_mention',
+        groupId: group._id as mongoose.Types.ObjectId,
+        taskId: task._id as mongoose.Types.ObjectId,
+        commentId: comment._id as mongoose.Types.ObjectId,
+        title: 'You were mentioned',
+        message: `${displayNameOf(actor)} mentioned you in "${task.title}"`,
+      });
+    }
+
+    // …and everyone else involved gets the generic comment notification
+    // (mentioned users are excluded so nobody is notified twice).
+    const mentionedSet = new Set(mentionIds.map((m) => m.toString()));
     await notifyUsers({
-      recipients: [task.createdBy, ...task.assigneeIds],
+      recipients: [task.createdBy, ...task.assigneeIds]
+        .filter((r) => r && !mentionedSet.has(r.toString())),
       actor,
       type: 'task_comment',
       groupId: group._id as mongoose.Types.ObjectId,
       taskId: task._id as mongoose.Types.ObjectId,
+      commentId: comment._id as mongoose.Types.ObjectId,
       title: 'New comment on your task',
-      message: `${actor.fullName} commented on "${task.title}"`,
+      message: `${displayNameOf(actor)} commented on "${task.title}"`,
     });
 
     const commentForClient = await signAttachments(comment.toObject());
@@ -1053,6 +1157,85 @@ export const deleteComment = asyncHandler(async (req: Request, res: Response) =>
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  MENTIONS INBOX (cross-group, paginated)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/crm/projects/mentions?page=1&limit=15
+ *
+ * Every comment the actor was @-mentioned in, newest first, joined with the
+ * project group name, task title, and author — powers the "Mentions" tab.
+ * Scoped to live groups the actor is still a member of.
+ */
+export const getMentions = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, 'Not authenticated');
+  if (!actor.organizationId) throw new ApiError(403, 'You must belong to an organization');
+
+  const page = Math.max(parseInt(req.query.page as string, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 15, 1), 50);
+  const skip = (page - 1) * limit;
+
+  const memberGroups = await ProjectGroup.find({
+    organizationId: actor.organizationId,
+    memberIds: actor._id,
+    deletedAt: null,
+  }).select('_id name').lean();
+  const groupIds = memberGroups.map((g) => g._id);
+  const groupNames = new Map(memberGroups.map((g) => [g._id.toString(), g.name]));
+
+  const filter = {
+    groupId: { $in: groupIds },
+    mentions: actor._id,
+    deletedAt: null,
+  };
+
+  const [comments, total] = await Promise.all([
+    ProjectTaskComment.find(filter)
+      .select('taskId groupId userId authorName authorAvatar message createdAt')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    ProjectTaskComment.countDocuments(filter),
+  ]);
+
+  // Join task titles (live tasks only — mentions on deleted tasks drop out).
+  const taskIds = Array.from(new Set(comments.map((c: any) => c.taskId.toString())));
+  const tasks = taskIds.length > 0
+    ? await ProjectTask.find({ _id: { $in: taskIds.map(oid) }, deletedAt: null })
+        .select('title status folderId').lean()
+    : [];
+  const taskById = new Map(tasks.map((t: any) => [t._id.toString(), t]));
+
+  const items = comments
+    .filter((c: any) => taskById.has(c.taskId.toString()))
+    .map((c: any) => {
+      const t = taskById.get(c.taskId.toString());
+      return {
+        commentId: c._id,
+        taskId: c.taskId,
+        groupId: c.groupId,
+        groupName: groupNames.get(c.groupId.toString()) || '',
+        taskTitle: t?.title || '',
+        taskStatus: t?.status,
+        mentionedBy: c.authorName,
+        mentionedByAvatar: c.authorAvatar || null,
+        preview: (c.message || '').slice(0, 140),
+        createdAt: c.createdAt,
+      };
+    });
+
+  res.json(new ApiResponse(200, {
+    mentions: items,
+    total,
+    page,
+    limit,
+    totalPages: Math.max(Math.ceil(total / limit), 1),
+  }, 'Mentions fetched'));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  MY TASKS (cross-group, paginated)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1103,7 +1286,7 @@ export const getMyTasks = asyncHandler(async (req: Request, res: Response) => {
 
   const [tasks, total] = await Promise.all([
     ProjectTask.find(filter)
-      .select('title status assigneeIds createdBy startDate deadline groupId sectionId folderId commentCount attachments completedAt createdAt')
+      .select('title status assigneeIds createdBy startDate deadline groupId sectionId folderId commentCount attachments seenBy completedAt createdAt')
       .populate('assigneeIds', 'fullName username avatar')
       .sort({ createdAt: -1 }) // latest task always first
       .skip(skip)
@@ -1121,10 +1304,13 @@ export const getMyTasks = asyncHandler(async (req: Request, res: Response) => {
     : [];
   const folderNames = new Map(folders.map((f: any) => [f._id.toString(), f.name]));
 
+  const meId = actor._id.toString();
   const items = tasks.map((t: any) => ({
     ...t,
     attachmentCount: Array.isArray(t.attachments) ? t.attachments.length : 0,
     attachments: undefined, // counts only — keys are never exposed in lists
+    seenBy: undefined,
+    unseenForMe: !(t.seenBy || []).some((u: any) => u.toString() === meId),
     groupName: groupNames.get(t.groupId.toString()) || '',
     folderName: folderNames.get(t.folderId?.toString()) || '',
   }));
@@ -1215,6 +1401,7 @@ export default {
   addComment,
   deleteComment,
   getMyTasks,
+  getMentions,
   getNotificationCount,
   getNotifications,
   markNotificationsRead,

@@ -8,6 +8,7 @@ import {
   deleteEvent,
   generateMeetingLink,
 } from "../controllers/calendar.controller";
+import { getNotificationsSummary } from "../controllers/calendarNotifications.controller";
 
 const router = Router();
 
@@ -17,6 +18,12 @@ router.use(crmAuth());
 
 router.get("/feed", getFeed);
 router.get("/my-schedule", getMySchedule);
+
+// ── Notification center (sidebar badge + in-calendar bell) ──
+// Today's events, next-24h items, overdue tasks, approaching deadlines,
+// and the computed badgeCount. Static path, declared before /events/:id.
+router.get("/notifications-summary", getNotificationsSummary);
+
 router.post("/events", createEvent);
 router.patch("/events/:id", updateEvent);
 router.delete("/events/:id", deleteEvent);
