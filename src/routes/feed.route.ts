@@ -2,6 +2,7 @@ import express, { RequestHandler } from 'express';
 import multer from 'multer';
 import feedController from '../controllers/feed.controller';
 import { addComment, getComments, deleteComment } from '../controllers/feedComment.controller';
+import feedNotificationController from '../controllers/feedNotification.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
 import { uploadLimiter } from '../middleware/rate-limit.middleware';
 import { ApiError } from '../utils/ApiError';
@@ -51,6 +52,15 @@ const parseAttachments: RequestHandler = (req, res, next) => {
 
 // All feed routes require CRM authentication
 router.use(crmAuth());
+
+// ── Notifications, read-state & mentions (STATIC — must stay before /:id) ──
+router.get('/notifications/unread-count', feedNotificationController.getUnreadCount);
+router.get('/notifications', feedNotificationController.listNotifications);
+router.patch('/notifications/read', feedNotificationController.markNotificationsRead);
+router.get('/read-state', feedNotificationController.getReadState);
+router.post('/read-state', feedNotificationController.advanceReadState);
+router.post('/read-state/posts', feedNotificationController.markPostsRead);
+router.get('/mention-candidates', feedNotificationController.getMentionCandidates);
 
 // ── Posts ──
 router.get('/', feedController.getPosts);

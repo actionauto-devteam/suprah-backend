@@ -61,7 +61,11 @@ const FeedSchema = new Schema<IFeed>(
       type: String,
       required: true,
       trim: true,
-      maxlength: 5000,
+      // Visible-text limit stays 5000 (enforced in the controller against the
+      // mention-stripped content). The raw string carries headroom because
+      // mention tokens `@[Name](24-hex-id)` are longer than the "@Name" the
+      // author actually sees.
+      maxlength: 7000,
     },
 
     attachments: {

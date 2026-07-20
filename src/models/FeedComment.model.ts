@@ -63,7 +63,9 @@ const FeedCommentSchema = new Schema<IFeedComment>(
       type: String,
       required: true,
       trim: true,
-      maxlength: 1000,
+      // Visible-text limit stays 1000 (enforced in the controller against the
+      // mention-stripped content); raw headroom covers mention tokens.
+      maxlength: 2000,
     },
     attachments: {
       type: [

@@ -8,6 +8,8 @@ import DayPulse from '../models/Daypulse.model';
 import FeedComment, { IFeedCommentAttachment } from '../models/FeedComment.model';
 import { getIO } from '../socket/feedSocket';
 import { BucketType, storageService } from '../services/storage.service';
+import { notifyForComment } from '../services/feedNotification.service';
+import { stripMentionTokens } from '../utils/feedMentions';
 
 async function signAttachments<T extends { attachments?: IFeedCommentAttachment[] }>(doc: T): Promise<T> {
   if (!Array.isArray(doc.attachments) || doc.attachments.length === 0) return doc;
@@ -21,16 +23,27 @@ async function signAttachments<T extends { attachments?: IFeedCommentAttachment[
   return doc;
 }
 
-async function resolveOrgId(
+interface ResolvedParent {
+  orgId: mongoose.Types.ObjectId;
+  /** Owner of the parent Feed post / DayPulse report (null if unavailable). */
+  ownerId: string | null;
+}
+
+/**
+ * Validates that the parent (Feed post OR DayPulse report) exists and belongs
+ * to the actor's organisation. Also returns the parent's owner so comment
+ * notifications can reach the post author.
+ */
+async function resolveParent(
   postId: string,
   actorOrgId: mongoose.Types.ObjectId | undefined,
-): Promise<mongoose.Types.ObjectId> {
+): Promise<ResolvedParent> {
   const post = await Feed.findOne({ _id: postId, deletedAt: null }).lean();
   if (post) {
     if (post.organizationId.toString() !== actorOrgId?.toString()) {
       throw new ApiError(403, 'You cannot comment on posts outside your organisation');
     }
-    return post.organizationId;
+    return { orgId: post.organizationId, ownerId: post.userId ? post.userId.toString() : null };
   }
 
   const report = await DayPulse.findOne({ _id: postId, deletedAt: null }).lean();
@@ -38,7 +51,8 @@ async function resolveOrgId(
     if (report.organizationId.toString() !== actorOrgId?.toString()) {
       throw new ApiError(403, 'You cannot comment on posts outside your organisation');
     }
-    return report.organizationId;
+    const reportOwner = (report as any).userId;
+    return { orgId: report.organizationId, ownerId: reportOwner ? reportOwner.toString() : null };
   }
 
   throw new ApiError(404, 'Post not found');
@@ -56,9 +70,12 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
   const files = (req.files || []) as Express.Multer.File[];
 
   if (!content && files.length === 0) throw new ApiError(400, 'Comment cannot be empty');
-  if (content.length > 1000) throw new ApiError(400, 'Comment cannot exceed 1000 characters');
+  // Mention tokens inflate the raw string — validate the *visible* length.
+  if (stripMentionTokens(content).length > 1000) {
+    throw new ApiError(400, 'Comment cannot exceed 1000 characters');
+  }
 
-  const orgId = await resolveOrgId(postId, actor.organizationId);
+  const { orgId, ownerId } = await resolveParent(postId, actor.organizationId);
 
   const attachments: IFeedCommentAttachment[] = [];
   const uploadedKeys: string[] = [];
@@ -97,6 +114,18 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
         .emit('feed:comment_added', { postId, comment: commentForClient });
     } catch { /* Socket.IO not running — swallow */ }
 
+    // Mentions + comment-on-your-post notifications — best-effort.
+    try {
+      await notifyForComment({
+        comment,
+        postId,
+        postOwnerId: ownerId,
+        actor: actor as any,
+      });
+    } catch (err) {
+      console.error('[feed] comment notification fanout failed:', err);
+    }
+
     res.status(201).json(new ApiResponse(201, { comment: commentForClient }, 'Comment added'));
   } catch (error) {
     await Promise.all(uploadedKeys.map((key) => storageService.delete(key, BucketType.PRIVATE).catch(() => undefined)));
@@ -120,7 +149,7 @@ export const getComments = asyncHandler(async (req: Request, res: Response) => {
   if (!mongoose.Types.ObjectId.isValid(postId)) throw new ApiError(400, 'Invalid post ID');
 
   // Validates that the parent exists and belongs to the user's org
-  await resolveOrgId(postId, actor.organizationId);
+  await resolveParent(postId, actor.organizationId);
 
   const comments = await FeedComment.find({ postId, deletedAt: null })
     .sort({ createdAt: 1 }) // Oldest first — natural thread order

@@ -6,6 +6,8 @@ import { ApiError } from '../utils/ApiError';
 import Feed, { IFeedAttachment } from '../models/Feed.model';
 import { getIO } from '../socket/feedSocket';
 import { BucketType, storageService } from '../services/storage.service';
+import { notifyForPost } from '../services/feedNotification.service';
+import { stripMentionTokens } from '../utils/feedMentions';
 
 
 const DEFAULT_LIMIT = 20;
@@ -40,7 +42,9 @@ export const createPost = asyncHandler(async (req: Request, res: Response) => {
   if (!content && files.length === 0) {
     throw new ApiError(400, 'Post content cannot be empty');
   }
-  if (content.length > 5000) {
+  // Mention tokens (`@[Name](id)`) inflate the raw string well beyond what the
+  // author typed, so the 5000-char limit applies to the *visible* text.
+  if (stripMentionTokens(content).length > 5000) {
     throw new ApiError(400, 'Post content cannot exceed 5000 characters');
   }
 
@@ -85,6 +89,13 @@ export const createPost = asyncHandler(async (req: Request, res: Response) => {
         .emit('feed:new', { post: postForClient });
     } catch {
       // Socket.IO not initialised — REST response is still sent below
+    }
+
+    // Mention / @all notification fanout — best-effort, must never fail the post.
+    try {
+      await notifyForPost(post, actor as any);
+    } catch (err) {
+      console.error('[feed] notification fanout failed:', err);
     }
 
     res.status(201).json(new ApiResponse(201, { post: postForClient }, 'Post created successfully'));
@@ -150,6 +161,9 @@ export const getPosts = asyncHandler(async (req: Request, res: Response) => {
  * Emits a `feed:updated` event so other clients refresh the post in place.
  *
  * Permission: post owner only.
+ *
+ * Note: edits deliberately do NOT re-run the notification fanout — this
+ * avoids duplicate mention notifications when an author tweaks wording.
  */
 export const updatePost = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
@@ -162,7 +176,9 @@ export const updatePost = asyncHandler(async (req: Request, res: Response) => {
 
   const { content } = req.body;
   if (!content || !content.trim())         throw new ApiError(400, 'Post content cannot be empty');
-  if (content.trim().length > 5000)        throw new ApiError(400, 'Post content cannot exceed 5000 characters');
+  if (stripMentionTokens(content.trim()).length > 5000) {
+    throw new ApiError(400, 'Post content cannot exceed 5000 characters');
+  }
 
   // Fetch the post (excluding soft-deleted ones)
   const post = await Feed.findOne({ _id: id, deletedAt: null });

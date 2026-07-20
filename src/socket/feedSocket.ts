@@ -1,4 +1,3 @@
-
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HttpServer } from 'http';
 import jwt from 'jsonwebtoken';
@@ -47,11 +46,18 @@ export function initFeedSocket(httpServer: HttpServer): SocketIOServer {
     }
 
     const orgRoom = `org:${user.organizationId.toString()}`;
+    // Per-user room — targeted events like `feed:notify` (mentions, comments
+    // on your posts, @all announcements) are emitted here so only the
+    // intended recipient receives them.
+    const userRoom = `user:${user._id.toString()}`;
+
     socket.join(orgRoom);
+    socket.join(userRoom);
 
     // Clean up when the client disconnects (tab closed, network drop, etc.)
     socket.on('disconnect', () => {
       socket.leave(orgRoom);
+      socket.leave(userRoom);
     });
   });
 
