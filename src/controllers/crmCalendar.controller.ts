@@ -13,7 +13,6 @@ import { emitToOrg, emitToUser } from '../utils/socketEmitter';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/calendar.readonly',
   'openid',
   'email',
 ];
