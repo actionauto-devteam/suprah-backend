@@ -25,11 +25,133 @@ const gemini = new OpenAI({
 });
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const ANTHROPIC_FALLBACK_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
+const AI_RATE_LIMIT_MESSAGE =
+  'Autrix is receiving too many AI requests right now. Please wait a moment, then try again.';
+const AI_CREDIT_MESSAGE =
+  'Low Suprah Autrix credits — contact admin to upgrade.';
 
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || '',
   baseURL: 'https://api.groq.com/openai/v1',
 });
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function isAiRateLimitError(error: any): boolean {
+  const message = String(error?.message || '');
+  return (
+    error?.status === 429 ||
+    error?.code === 429 ||
+    error?.response?.status === 429 ||
+    message.includes('429')
+  );
+}
+
+function isAiCreditError(error: any): boolean {
+  const message = String(error?.message || error?.error?.message || '');
+  const status = error?.status || error?.code || error?.response?.status;
+  return (
+    status === 400 && /credit balance|plans? & billing|billing|upgrade|purchase credits/i.test(message)
+  ) || /credit balance|plans? & billing|billing|upgrade|purchase credits/i.test(message);
+}
+
+function getAiErrorMessage(error: any): string {
+  if (isAiCreditError(error)) {
+    return 'Low Suprah Autrix credits \u2014 contact admin to upgrade.';
+  }
+
+  if (isAiRateLimitError(error)) {
+    return AI_RATE_LIMIT_MESSAGE;
+  }
+
+  return error?.message || 'Autrix could not generate a response. Please try again.';
+}
+
+async function createAnthropicFallbackCompletion(options: any): Promise<any> {
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
+  const sourceMessages = Array.isArray(options.messages) ? options.messages : [];
+  const systemMessage = sourceMessages
+    .filter((message: any) => message.role === 'system')
+    .map((message: any) => message.content)
+    .join('\n\n');
+  const messages = sourceMessages
+    .filter((message: any) => message.role !== 'system')
+    .map((message: any) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: String(message.content || ''),
+    }));
+
+  const response = await anthropic.messages.create({
+    model: ANTHROPIC_FALLBACK_MODEL,
+    max_tokens: options.max_tokens || 1024,
+    system: systemMessage || undefined,
+    messages,
+    stream: false,
+  });
+  const text = response.content
+    .map((item: any) => item?.type === 'text' ? item.text : '')
+    .join('')
+    .trim();
+
+  if (options.stream) {
+    async function* fallbackStream() {
+      yield {
+        choices: [
+          {
+            delta: { content: text },
+            message: { content: text },
+          },
+        ],
+      };
+    }
+
+    return fallbackStream();
+  }
+
+  return {
+    choices: [
+      {
+        message: { content: text },
+      },
+    ],
+  };
+}
+
+async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
+  try {
+    return await gemini.chat.completions.create(options);
+  } catch (error: any) {
+    if (isAiRateLimitError(error) && retries > 0) {
+      await sleep(1200);
+      return createGeminiCompletion(options, retries - 1);
+    }
+
+    if (isAiRateLimitError(error)) {
+      if (process.env.ANTHROPIC_API_KEY) {
+        try {
+          return await createAnthropicFallbackCompletion(options);
+        } catch (fallbackError: any) {
+          if (!process.env.GROQ_API_KEY || isAiCreditError(fallbackError)) {
+            throw fallbackError;
+          }
+        }
+      }
+
+      if (process.env.GROQ_API_KEY) {
+        return groq.chat.completions.create({
+          ...options,
+          model: GROQ_MODEL,
+        });
+      }
+
+      throw new ApiError(429, AI_RATE_LIMIT_MESSAGE);
+    }
+
+    throw error;
+  }
+}
 
 
 function buildSystemPrompt(module: string, contextData: any, user: any): string {
@@ -457,7 +579,7 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
     }
     let fullResponse = '';
     try {
-      const streamResponse = await gemini.chat.completions.create({
+      const streamResponse = await createGeminiCompletion({
         model: GEMINI_MODEL,
         max_tokens: 1024,
         messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
@@ -480,11 +602,11 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
       res.write(`data: ${JSON.stringify({ type: 'done', messageId: chatDoc.messages[chatDoc.messages.length - 1]._id })}\n\n`);
       res.end();
     } catch (err: any) {
-      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: getAiErrorMessage(err), retryable: isAiRateLimitError(err) })}\n\n`);
       res.end();
     }
   } else {
-    const response = await gemini.chat.completions.create({
+    const response = await createGeminiCompletion({
       model: GEMINI_MODEL,
       max_tokens: 1024,
       messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
@@ -544,7 +666,7 @@ export const summarizeConversation = asyncHandler(async (req: Request, res: Resp
     ? `from ${from ? new Date(from).toLocaleDateString() : 'the beginning'} to ${to ? new Date(to).toLocaleDateString() : 'now'}`
     : 'recently';
 
-  const sumResponse = await gemini.chat.completions.create({
+  const sumResponse = await createGeminiCompletion({
     model: GEMINI_MODEL,
     max_tokens: 900,
     messages: [
@@ -589,7 +711,7 @@ export const draftReply = asyncHandler(async (req: Request, res: Response) => {
   const transcript = buildTranscript(recent.reverse());
   const convName = conversation.type === 'group' ? (conversation.name || 'this channel') : 'this direct conversation';
 
-  const draftResponse = await gemini.chat.completions.create({
+  const draftResponse = await createGeminiCompletion({
     model: GEMINI_MODEL,
     max_tokens: 400,
     messages: [
@@ -612,8 +734,9 @@ export const refineMessage = asyncHandler(async (req: Request, res: Response) =>
   if (!text?.trim()) throw new ApiError(400, 'text is required');
   if (!process.env.ANTHROPIC_API_KEY) throw new ApiError(500, 'AI service not configured');
 
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await anthropic.messages.create({
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const response = await anthropic.messages.create({
     model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
     max_tokens: 512,
     messages: [{
@@ -622,8 +745,16 @@ export const refineMessage = asyncHandler(async (req: Request, res: Response) =>
     }],
   });
 
-  const refined = response.content[0]?.type === 'text' ? response.content[0].text : '';
-  res.json(new ApiResponse(200, { refined }, 'Message refined'));
+    const refined = response.content[0]?.type === 'text' ? response.content[0].text : '';
+    res.json(new ApiResponse(200, { refined }, 'Message refined'));
+  } catch (error: any) {
+    console.error('[SupraLeo] Refine request failed:', {
+      status: error?.status || error?.code || error?.response?.status,
+      type: error?.error?.type || error?.type,
+      message: error?.message || error?.error?.message,
+    });
+    throw new ApiError(isAiCreditError(error) ? 402 : 503, getAiErrorMessage(error));
+  }
 });
 
 /** GET /api/supraleo/chat/history */
@@ -770,7 +901,7 @@ Response guidelines:
 
     let fullResponse = '';
     try {
-      const streamResponse = await gemini.chat.completions.create({
+      const streamResponse = await createGeminiCompletion({
         model: GEMINI_MODEL,
         max_tokens: 1024,
         messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
@@ -793,11 +924,11 @@ Response guidelines:
       res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
       res.end();
     } catch (err: any) {
-      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: getAiErrorMessage(err), retryable: isAiRateLimitError(err) })}\n\n`);
       res.end();
     }
   } else {
-    const response = await gemini.chat.completions.create({
+    const response = await createGeminiCompletion({
       model: GEMINI_MODEL,
       max_tokens: 1024,
       messages: [{ role: 'system', content: systemPrompt }, ...recentMessages],
