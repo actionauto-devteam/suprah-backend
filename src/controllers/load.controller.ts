@@ -266,12 +266,13 @@ const LOAD_STATUSES = ["Posted", "Assigned", "Accepted", "Picked Up", "In-Transi
 const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
 
-  // ── Pagination ──────────────────────────────────────────────────────────────
+  const isReportRequest = req.query.report === "true";
+  const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 20);
+  const maxLimit = isReportRequest ? 5000 : 50;
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
+  const limit = Math.min(maxLimit, Math.max(1, requestedLimit));
   const skip = (page - 1) * limit;
 
-  // ── Filters ─────────────────────────────────────────────────────────────────
   const filter: Record<string, unknown> = { organizationId };
 
   const status = req.query.status as string | undefined;
@@ -284,17 +285,25 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     filter.postType = postType;
   }
 
-  // ── Search ──────────────────────────────────────────────────────────────────
   const q = (req.query.q as string | undefined)?.trim();
-  if (q) {
-    (filter as any).$text = { $search: q };
+  if (q) (filter as any).$text = { $search: q };
+
+  // Report period support. Accepts either month/year or date=YYYY-MM.
+  const dateParam = (req.query.date as string | undefined)?.trim();
+  const dateMatch = dateParam?.match(/^(\d{4})-(\d{2})$/);
+  const year = Number(req.query.year ?? dateMatch?.[1]);
+  const month = Number(req.query.month ?? dateMatch?.[2]);
+
+  if (Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
+    const startDate = new Date(Date.UTC(year, month - 1, 1));
+    const endDate = new Date(Date.UTC(year, month, 1));
+    filter.createdAt = { $gte: startDate, $lt: endDate };
   }
 
-  // ── Query ───────────────────────────────────────────────────────────────────
   const user = getUser(req);
   const isDriver = user?.role === "driver";
 
-  const [rawLoads, total] = await Promise.all([
+  const [rawLoads, total, summaryRows] = await Promise.all([
     Load.find(filter)
       .populate("assignedDriverId", "name email phone avatar")
       .sort({ createdAt: -1 })
@@ -302,31 +311,65 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
       .limit(limit)
       .lean(),
     Load.countDocuments(filter),
+    Load.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalLoads: { $sum: 1 },
+          delivered: { $sum: { $cond: [{ $eq: ["$status", "Delivered"] }, 1, 0] } },
+          cancelled: { $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] } },
+          totalRevenue: { $sum: { $ifNull: ["$pricing.estimatedRate", 0] } },
+          totalCarrierPay: { $sum: { $ifNull: ["$pricing.carrierPayAmount", 0] } },
+          totalMiles: { $sum: { $ifNull: ["$pricing.miles", 0] } },
+        },
+      },
+    ]),
   ]);
 
   const loads = isDriver
-    ? rawLoads.map((l) => maskLoadForDriver(l as unknown as Record<string, unknown>))
+    ? rawLoads.map((load) => maskLoadForDriver(load as unknown as Record<string, unknown>))
     : rawLoads;
 
-  const loadsWithSignedProofs = await Promise.all(loads.map(async (l: any) => {
-    if (l.proofOfDelivery?.imageUrl) {
-      const signed = await getSignedProofUrl(l.proofOfDelivery.imageUrl);
-      if (signed) l.proofOfDelivery.imageUrl = signed;
-    }
-    return l;
-  }));
+  const loadsWithSignedProofs = await Promise.all(
+    loads.map(async (load: any) => {
+      if (load.proofOfDelivery?.imageUrl) {
+        const signed = await getSignedProofUrl(load.proofOfDelivery.imageUrl);
+        if (signed) load.proofOfDelivery.imageUrl = signed;
+      }
+      return load;
+    }),
+  );
+
+  const aggregate = summaryRows[0] ?? {};
+  const totalRevenue = aggregate.totalRevenue ?? 0;
+  const totalCarrierPay = aggregate.totalCarrierPay ?? 0;
+  const summary = {
+    totalLoads: aggregate.totalLoads ?? 0,
+    delivered: aggregate.delivered ?? 0,
+    cancelled: aggregate.cancelled ?? 0,
+    totalRevenue,
+    totalCarrierPay,
+    grossProfit: totalRevenue - totalCarrierPay,
+    totalMiles: aggregate.totalMiles ?? 0,
+  };
 
   return res.status(200).json(
-    new ApiResponse(200, {
-      loads: loadsWithSignedProofs,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        hasMore: page * limit < total,
+    new ApiResponse(
+      200,
+      {
+        loads: loadsWithSignedProofs,
+        summary,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasMore: page * limit < total,
+        },
       },
-    }, "Loads fetched successfully")
+      "Loads fetched successfully",
+    ),
   );
 });
 

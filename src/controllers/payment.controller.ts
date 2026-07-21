@@ -182,11 +182,16 @@ const createPayment = asyncHandler(async (req: Request, res: Response) => {
 const getPayments = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const {
-    status, search, limit = '50', skip = '0',
-    minAmount, maxAmount, fromDate, toDate, paymentMethod, source,
+    status, search, skip = '0', minAmount, maxAmount,
+    fromDate, toDate, paymentMethod, source,
   } = req.query;
 
-  const filter: Record<string, unknown> = { organizationId: orgId };
+  const isReportRequest = req.query.report === 'true';
+  const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 50);
+  const limit = Math.min(isReportRequest ? 5000 : 200, Math.max(1, requestedLimit));
+  const parsedSkip = Math.max(0, parseInt(skip as string) || 0);
+
+  const filter: Record<string, any> = { organizationId: orgId };
   if (status && status !== 'all') filter.status = status;
   if (source && source !== 'all') filter.source = source;
 
@@ -201,41 +206,91 @@ const getPayments = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (minAmount || maxAmount) {
-    filter.amount = {} as Record<string, number>;
-    if (minAmount !== undefined && minAmount !== '') (filter.amount as Record<string, number>).$gte = Number(minAmount);
-    if (maxAmount !== undefined && maxAmount !== '') (filter.amount as Record<string, number>).$lte = Number(maxAmount);
+    filter.amount = {};
+    if (minAmount !== undefined && minAmount !== '') filter.amount.$gte = Number(minAmount);
+    if (maxAmount !== undefined && maxAmount !== '') filter.amount.$lte = Number(maxAmount);
   }
 
-  if (fromDate || toDate) {
-    filter.createdAt = {} as Record<string, Date>;
-    if (fromDate) (filter.createdAt as Record<string, Date>).$gte = new Date(fromDate as string);
+  // Existing date range remains supported. Reports may use month/year or date=YYYY-MM.
+  const dateParam = (req.query.date as string | undefined)?.trim();
+  const dateMatch = dateParam?.match(/^(\d{4})-(\d{2})$/);
+  const reportYear = Number(req.query.year ?? dateMatch?.[1]);
+  const reportMonth = Number(req.query.month ?? dateMatch?.[2]);
+
+  if (Number.isInteger(reportYear) && Number.isInteger(reportMonth) && reportMonth >= 1 && reportMonth <= 12) {
+    filter.createdAt = {
+      $gte: new Date(Date.UTC(reportYear, reportMonth - 1, 1)),
+      $lt: new Date(Date.UTC(reportYear, reportMonth, 1)),
+    };
+  } else if (fromDate || toDate) {
+    filter.createdAt = {};
+    if (fromDate) filter.createdAt.$gte = new Date(fromDate as string);
     if (toDate) {
       const endDate = new Date(toDate as string);
       endDate.setHours(23, 59, 59, 999);
-      (filter.createdAt as Record<string, Date>).$lte = endDate;
+      filter.createdAt.$lte = endDate;
     }
   }
 
   if (paymentMethod) filter.paymentMethod = new RegExp(paymentMethod as string, 'i');
 
-  const [payments, total] = await Promise.all([
+  const [payments, total, summaryRows] = await Promise.all([
     Payment.find(filter)
       .populate('quoteId', 'firstName lastName vehicleName')
+      .populate('loadId', 'loadNumber status pickupLocation deliveryLocation')
       .populate('createdBy', 'name email')
       .populate('aftermarketProductId', 'name media')
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit as string))
-      .skip(parseInt(skip as string))
+      .limit(limit)
+      .skip(parsedSkip)
       .lean(),
     Payment.countDocuments(filter),
+    Payment.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalInvoices: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+          totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, '$amount', 0] } },
+          paidInvoices: { $sum: { $cond: [{ $eq: ['$status', 'succeeded'] }, 1, 0] } },
+          pendingAmount: {
+            $sum: {
+              $cond: [{ $in: ['$status', ['pending', 'processing', 'failed']] }, '$amount', 0],
+            },
+          },
+          refundedAmount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, '$amount', 0] } },
+        },
+      },
+    ]),
   ]);
 
+  const aggregate = summaryRows[0] ?? {};
+  const totalInvoices = aggregate.totalInvoices ?? 0;
+  const paidInvoices = aggregate.paidInvoices ?? 0;
+  const summary = {
+    totalInvoices,
+    paidInvoices,
+    totalAmount: aggregate.totalAmount ?? 0,
+    totalRevenue: aggregate.totalRevenue ?? 0,
+    pendingAmount: aggregate.pendingAmount ?? 0,
+    refundedAmount: aggregate.refundedAmount ?? 0,
+    averageInvoice: totalInvoices ? (aggregate.totalAmount ?? 0) / totalInvoices : 0,
+    successRate: totalInvoices ? (paidInvoices / totalInvoices) * 100 : 0,
+  };
+
   res.json(
-    new ApiResponse(200, {
-      payments, total,
-      page: Math.floor(parseInt(skip as string) / Math.max(parseInt(limit as string) || 1, 1)) + 1,
-      limit: parseInt(limit as string),
-    }, 'Payments fetched successfully'),
+    new ApiResponse(
+      200,
+      {
+        payments,
+        total,
+        summary,
+        page: Math.floor(parsedSkip / limit) + 1,
+        limit,
+      },
+      'Payments fetched successfully',
+    ),
   );
 });
 
