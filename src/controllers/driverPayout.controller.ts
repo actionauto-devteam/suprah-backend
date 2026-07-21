@@ -234,21 +234,93 @@ const VALID_PAYOUT_STATUSES = ["pending", "processing", "paid", "failed"] as con
 const getPayouts = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const { status, driverId } = req.query;
+  const isReportRequest = req.query.report === 'true';
 
-  if (status && status !== "all" && !VALID_PAYOUT_STATUSES.includes(status as any)) {
-    throw new ApiError(400, `Invalid status filter. Must be one of: all, ${VALID_PAYOUT_STATUSES.join(", ")}`);
+  if (status && status !== 'all' && !VALID_PAYOUT_STATUSES.includes(status as any)) {
+    throw new ApiError(400, `Invalid status filter. Must be one of: all, ${VALID_PAYOUT_STATUSES.join(', ')}`);
   }
 
-  const filter: any = { organizationId: orgId };
-  if (status && status !== "all") filter.status = status;
+  const filter: Record<string, any> = { organizationId: orgId };
+  if (status && status !== 'all') filter.status = status;
   if (driverId) filter.driverId = driverId;
 
-  const payouts = await DriverPayout.find(filter)
-    .populate('driverId', 'name email avatar')
-    .populate('loadId', 'loadNumber pickupLocation deliveryLocation')
-    .sort({ createdAt: -1 });
+  const dateParam = (req.query.date as string | undefined)?.trim();
+  const dateMatch = dateParam?.match(/^(\d{4})-(\d{2})$/);
+  const year = Number(req.query.year ?? dateMatch?.[1]);
+  const month = Number(req.query.month ?? dateMatch?.[2]);
 
-  res.json(new ApiResponse(200, payouts, 'Payouts fetched successfully'));
+  if (Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
+    filter.createdAt = {
+      $gte: new Date(Date.UTC(year, month - 1, 1)),
+      $lt: new Date(Date.UTC(year, month, 1)),
+    };
+  }
+
+  const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 200);
+  const limit = Math.min(isReportRequest ? 5000 : 500, Math.max(1, requestedLimit));
+  const skip = Math.max(0, parseInt(req.query.skip as string) || 0);
+
+  const [payouts, total, summaryRows] = await Promise.all([
+    DriverPayout.find(filter)
+      .populate('driverId', 'name email avatar phone')
+      .populate(
+        'loadId',
+        'loadNumber status pricing pickupLocation deliveryLocation vehicles deliveredAt createdAt',
+      )
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    DriverPayout.countDocuments(filter),
+    DriverPayout.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalPayouts: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+          totalPaid: { $sum: { $cond: [{ $eq: ['$status', 'paid'] }, '$amount', 0] } },
+          totalPending: {
+            $sum: { $cond: [{ $in: ['$status', ['pending', 'processing']] }, '$amount', 0] },
+          },
+          countPaid: { $sum: { $cond: [{ $eq: ['$status', 'paid'] }, 1, 0] } },
+          countPending: {
+            $sum: { $cond: [{ $in: ['$status', ['pending', 'processing']] }, 1, 0] },
+          },
+          countFailed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+          uniqueDrivers: { $addToSet: '$driverId' },
+        },
+      },
+    ]),
+  ]);
+
+  const aggregate = summaryRows[0] ?? {};
+  const totalPayouts = aggregate.totalPayouts ?? 0;
+  const summary = {
+    totalPayouts,
+    totalDrivers: aggregate.uniqueDrivers?.length ?? 0,
+    totalAmount: aggregate.totalAmount ?? 0,
+    totalPaid: aggregate.totalPaid ?? 0,
+    totalPending: aggregate.totalPending ?? 0,
+    countPaid: aggregate.countPaid ?? 0,
+    countPending: aggregate.countPending ?? 0,
+    countFailed: aggregate.countFailed ?? 0,
+    averagePayout: totalPayouts ? (aggregate.totalAmount ?? 0) / totalPayouts : 0,
+  };
+
+  // Preserve the legacy array response for existing payout screens.
+  // Reports receive a richer paginated object only when report=true.
+  if (!isReportRequest) {
+    return res.json(new ApiResponse(200, payouts, 'Payouts fetched successfully'));
+  }
+
+  return res.json(
+    new ApiResponse(
+      200,
+      { payouts, total, summary, page: Math.floor(skip / limit) + 1, limit },
+      'Report payouts fetched successfully',
+    ),
+  );
 });
 
 const getPayoutStats = asyncHandler(async (req: Request, res: Response) => {
