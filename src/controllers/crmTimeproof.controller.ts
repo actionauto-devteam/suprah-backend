@@ -17,12 +17,13 @@ import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
+import { fireShiftAlert } from '../services/shiftAlerts.service';
 import sharp from 'sharp';
 
 const BREAK_LIMIT_SECONDS = 3600;
 // The admin notification fires 5 minutes AFTER the official 1h limit, not the
 // instant it's crossed — gives the user a short grace window (matches the
-// tray's own user-facing warning at 1h04m, one minute earlier) before
+// tray's own user-facing warning at 1h01m, four minutes earlier) before
 // escalating to their admin/manager. Also matches the web widget's own
 // "Break over" red-state threshold (65 min), which already used this grace.
 const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
@@ -832,11 +833,15 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     }
     emitToShiftBoard('agent:break-exceeded', breakExceededPayload);
 
-    PushService.notifyOrgAdmins(user.organizationId, {
-      title: '☕ Break Exceeded',
-      body: `${user.fullName} exceeds break time.`,
-      tag: `crm-break-${user._id}`,
-      data: { url: '/crm/timeproof/users' },
+    fireShiftAlert({
+      organizationId: user.organizationId.toString(),
+      targetUserId: user._id.toString(),
+      targetUserModel: 'CrmUser',
+      chatMessage: `☕ ${user.fullName} has exceeded their 1-hour break.`,
+      notifyTitle: '☕ Break Exceeded',
+      notifyBody: `${user.fullName} exceeds break time.`,
+      notifyTag: `crm-break-${user._id}`,
+      url: '/crm/timeproof/users',
     }).catch(() => {});
   }
 
