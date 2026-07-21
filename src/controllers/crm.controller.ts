@@ -18,7 +18,7 @@ import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
-import { normalizeDepartmentValue } from "../services/department.service";
+import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -396,7 +396,9 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     actor.organizationId?.toString(),
   );
 
-  const normalizedDepartment = await normalizeDepartmentValue(actor.organizationId?.toString(), department);
+  const normalizedDepartment = department
+    ? await normalizeDepartmentValue(actor.organizationId?.toString(), department)
+    : await getDefaultDepartmentKey(actor.organizationId?.toString());
 
   const user = await CrmUser.create({
     organizationId: actor.organizationId,

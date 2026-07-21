@@ -9,6 +9,7 @@ export interface IDepartment extends Document {
   isTimeEditExempt: boolean;
   isMandatoryLocationDept: boolean;
   isActive: boolean;
+  isDefault: boolean;
   sortOrder: number;
   createdAt: Date;
   updatedAt: Date;

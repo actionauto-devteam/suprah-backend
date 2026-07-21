@@ -10,7 +10,10 @@ export type DepartmentEntry = {
   isTimeEditExempt: boolean;
   isMandatoryLocationDept: boolean;
   isActive: boolean;
+  isDefault: boolean;
   sortOrder: number;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 // Seeded into the database the first time an organization's department list is read (see
@@ -19,19 +22,19 @@ export type DepartmentEntry = {
 // edit/deactivate always has something valid to target and adding one department can never
 // make the others disappear.
 const LEGACY_DEPARTMENTS_SEED = [
-  { key: 'SalesAndFinance', label: 'Sales & Finance', color: 'emerald', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 0 },
-  { key: 'Accounting', label: 'Accounting', color: 'sky', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 1 },
-  { key: 'Recon', label: 'Recon', color: 'amber', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 2 },
-  { key: 'Marketing', label: 'Marketing', color: 'pink', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 3 },
-  { key: 'OnlineTeam', label: 'Online Team', color: 'violet', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 4 },
-  { key: 'WebDevTeam', label: 'Web Dev', color: 'blue', isMobileMonitoringDept: false, isTimeEditExempt: true, isMandatoryLocationDept: false, sortOrder: 5 },
-  { key: 'WholesaleTeam', label: 'Wholesale', color: 'orange', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 6 },
-  { key: 'BuyingTeam', label: 'Buying', color: 'teal', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 7 },
-  { key: 'OperationsTeam', label: 'Operations', color: 'rose', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 8 },
-  { key: 'LotTechTeam', label: 'Lot Tech', color: 'indigo', isMobileMonitoringDept: true, isTimeEditExempt: false, isMandatoryLocationDept: true, sortOrder: 9 },
-  { key: 'FundingTeam', label: 'Funding', color: 'lime', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 10 },
-  { key: 'ProspectsTeam', label: 'Prospects', color: 'cyan', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 11 },
-  { key: 'PriceCheckTeam', label: 'Price Check', color: 'fuchsia', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, sortOrder: 12 },
+  { key: 'SalesAndFinance', label: 'Sales & Finance', color: 'emerald', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 0 },
+  { key: 'Accounting', label: 'Accounting', color: 'sky', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 1 },
+  { key: 'Recon', label: 'Recon', color: 'amber', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 2 },
+  { key: 'Marketing', label: 'Marketing', color: 'pink', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 3 },
+  { key: 'OnlineTeam', label: 'Online Team', color: 'violet', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 4 },
+  { key: 'WebDevTeam', label: 'Web Dev', color: 'blue', isMobileMonitoringDept: false, isTimeEditExempt: true, isMandatoryLocationDept: false, isDefault: false, sortOrder: 5 },
+  { key: 'WholesaleTeam', label: 'Wholesale', color: 'orange', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 6 },
+  { key: 'BuyingTeam', label: 'Buying', color: 'teal', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 7 },
+  { key: 'OperationsTeam', label: 'Operations', color: 'rose', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 8 },
+  { key: 'LotTechTeam', label: 'Lot Tech', color: 'indigo', isMobileMonitoringDept: true, isTimeEditExempt: false, isMandatoryLocationDept: true, isDefault: false, sortOrder: 9 },
+  { key: 'FundingTeam', label: 'Funding', color: 'lime', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 10 },
+  { key: 'ProspectsTeam', label: 'Prospects', color: 'cyan', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 11 },
+  { key: 'PriceCheckTeam', label: 'Price Check', color: 'fuchsia', isMobileMonitoringDept: false, isTimeEditExempt: false, isMandatoryLocationDept: false, isDefault: false, sortOrder: 12 },
 ];
 
 function cacheKeyFor(organizationId?: string | null): string {
@@ -40,7 +43,7 @@ function cacheKeyFor(organizationId?: string | null): string {
 
 type DepartmentLike = Pick<
   IDepartment,
-  'key' | 'label' | 'color' | 'isMobileMonitoringDept' | 'isTimeEditExempt' | 'isMandatoryLocationDept' | 'isActive' | 'sortOrder'
+  'key' | 'label' | 'color' | 'isMobileMonitoringDept' | 'isTimeEditExempt' | 'isMandatoryLocationDept' | 'isActive' | 'isDefault' | 'sortOrder' | 'createdAt' | 'updatedAt'
 > & { _id?: unknown };
 
 function toEntry(doc: DepartmentLike): DepartmentEntry {
@@ -53,7 +56,10 @@ function toEntry(doc: DepartmentLike): DepartmentEntry {
     isTimeEditExempt: doc.isTimeEditExempt,
     isMandatoryLocationDept: doc.isMandatoryLocationDept,
     isActive: doc.isActive,
+    isDefault: !!doc.isDefault,
     sortOrder: doc.sortOrder,
+    createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : undefined,
+    updatedAt: doc.updatedAt ? new Date(doc.updatedAt).toISOString() : undefined,
   };
 }
 
@@ -132,6 +138,14 @@ export async function normalizeDepartmentValue(
   if (!trimmed) return undefined;
   const entry = await findDepartmentEntry(organizationId, trimmed);
   return entry ? entry.key : trimmed;
+}
+
+/** The department newly-created members should land in when no department was explicitly
+ * chosen — whichever active department an admin has flagged isDefault, or undefined if none
+ * has been designated (members then stay unassigned, same as today). */
+export async function getDefaultDepartmentKey(organizationId?: string | null): Promise<string | undefined> {
+  const active = await getActiveOrgDepartments(organizationId);
+  return active.find((d) => d.isDefault)?.key;
 }
 
 export function invalidateOrgDepartmentCache(organizationId?: string | null) {
