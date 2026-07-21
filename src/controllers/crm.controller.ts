@@ -19,6 +19,8 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue } from "../services/department.service";
+import { fireShiftAlert } from "../services/shiftAlerts.service";
+import EmployeeLocation from "../models/EmployeeLocation.model";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -228,6 +230,45 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     note: note || undefined,
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
   });
+
+  // A fresh shift resets the connection-loss "already notified" flag — it's
+  // meant to fire once per outage per shift, not stay suppressed forever
+  // because of an alert from a previous, unrelated shift.
+  if (type === "time-in") {
+    EmployeeLocation.updateOne({ userId: user._id }, { connectionLostNotifiedAt: null }).catch(() => {});
+  }
+
+  // Shift Alerts: started a shift without location sharing on — fire-and-forget,
+  // must not delay the clock-in response.
+  if (type === "time-in" && !user.locationConsent?.granted && user.organizationId) {
+    fireShiftAlert({
+      organizationId: user.organizationId.toString(),
+      targetUserId: user._id.toString(),
+      targetUserModel: "CrmUser",
+      chatMessage: `🟡 ${user.fullName} started their shift without location sharing turned on.`,
+      notifyTitle: "📍 Location Not Shared",
+      notifyBody: `${user.fullName} started their shift but location sharing is off.`,
+      notifyTag: `shift-alert-no-location-${user._id}`,
+      url: `/crm/timeproof/users/${user._id}`,
+    }).catch(() => {});
+  }
+
+  // Shift Alerts: resumed from break without turning location sharing back on.
+  // Turning it off WHILE on break is expected/private (handled separately in
+  // locator.controller.ts's handleLocationTurnedOff) — this only fires once
+  // they're back to active work and it's still off.
+  if (type === "break-out" && !user.locationConsent?.granted && user.organizationId) {
+    fireShiftAlert({
+      organizationId: user.organizationId.toString(),
+      targetUserId: user._id.toString(),
+      targetUserModel: "CrmUser",
+      chatMessage: `🟡 ${user.fullName} returned from break but location sharing is still off.`,
+      notifyTitle: "📍 Location Not Shared",
+      notifyBody: `${user.fullName} is back from break but location sharing is off.`,
+      notifyTag: `shift-alert-no-location-${user._id}`,
+      url: `/crm/timeproof/users/${user._id}`,
+    }).catch(() => {});
+  }
 
   // Compute gross worked seconds for all completed sessions before this time-in
   // (uses the same session-pairing engine as crmTimeproof/generalTimeclock —

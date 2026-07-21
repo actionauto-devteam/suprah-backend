@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import EmployeeLocation from '../models/EmployeeLocation.model';
+import TimeLog from '../models/TimeLog.model';
 import Place from '../models/Place.model';
 import PlaceVisit from '../models/PlaceVisit.model';
 import PresenceEvent from '../models/PresenceEvent.model';
@@ -18,6 +19,7 @@ import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
+import { fireShiftAlert } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import { invalidateUserCache } from '../utils/cache.util';
 
@@ -120,6 +122,40 @@ async function syncLinkedAccountConsent(actor: LocatorActor, granted: boolean, d
     } catch {
         // Best-effort — the primary account's own consent update already succeeded.
     }
+}
+
+/**
+ * Called whenever a user's location sharing transitions from ON to OFF
+ * (whether via the consent toggle or the opt-out toggle — both funnel here).
+ * If they're actively on shift and NOT on break, this ends their shift
+ * automatically and alerts admins + the user via the Shift Alerts channel —
+ * covers both a deliberate turn-off and one triggered by, say, revoking OS
+ * location permission mid-shift. Turning off location WHILE on break is
+ * expected/private and deliberately exempted here.
+ */
+async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Promise<void> {
+    if (!orgId) return;
+    const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+    if (!isOnShift || isOnBreak) return;
+
+    await TimeLog.create({
+        userId: actor.id,
+        userModel: actor.model,
+        type: 'time-out',
+        timestamp: new Date(),
+        note: 'Auto clock-out — location sharing was turned off mid-shift',
+    });
+
+    await fireShiftAlert({
+        organizationId: orgId,
+        targetUserId: actor.id.toString(),
+        targetUserModel: actor.model,
+        chatMessage: `🔴 ${actor.name} turned off location sharing while on shift — automatically clocked out.`,
+        notifyTitle: '📍 Location Turned Off',
+        notifyBody: `${actor.name} turned off location sharing and was automatically clocked out.`,
+        notifyTag: `shift-alert-location-off-${actor.id}`,
+        url: `/crm/timeproof/users/${actor.id}`,
+    });
 }
 
 async function updateActorLocationConsent(actor: LocatorActor, granted: boolean, deviceHint?: string) {
@@ -397,6 +433,7 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
             userId: actor.id.toString(),
             sharingState: 'off_duty',
         });
+        handleLocationTurnedOff(actor, orgId).catch(() => {});
     }
 
     const event = await PresenceEvent.create({
@@ -441,6 +478,11 @@ const setLocationSharingOptOut = asyncHandler(async (req: Request, res: Response
             userId: actor.id.toString(),
             sharingState: 'off_duty',
         });
+        // Only a genuine ON→OFF transition counts — re-saving optOut:true when
+        // it was already true shouldn't re-fire the alert/re-clock-out someone.
+        if (!actor.locationSharingOptOut) {
+            handleLocationTurnedOff(actor, orgId).catch(() => {});
+        }
     }
 
     res.json(new ApiResponse(200, { optOut: !!optOut }, 'Location sharing preference updated'));

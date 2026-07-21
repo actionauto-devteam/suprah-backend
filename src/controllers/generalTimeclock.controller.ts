@@ -5,12 +5,14 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
 import { PushService } from '../services/push.service';
-import { IUser } from '../models/User.model';
-import { ICrmUser } from '../models/CrmUser.model';
+import User, { IUser } from '../models/User.model';
+import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getSocketIO } from '../utils/socketEmitter';
+import { fireShiftAlert } from '../services/shiftAlerts.service';
+import EmployeeLocation from '../models/EmployeeLocation.model';
 
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
@@ -176,6 +178,44 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     note: note || undefined,
     ipAddress: req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown',
   });
+
+  // A fresh shift resets the connection-loss "already notified" flag — it's
+  // meant to fire once per outage per shift, not stay suppressed forever
+  // because of an alert from a previous, unrelated shift.
+  if (type === 'time-in') {
+    EmployeeLocation.updateOne({ userId: actor.id }, { connectionLostNotifiedAt: null }).catch(() => {});
+  }
+
+  // Shift Alerts: no location sharing at shift-start, or still off after
+  // returning from break — fire-and-forget, must not delay the response.
+  // Turning it off WHILE on break is expected/private (handled separately in
+  // locator.controller.ts's handleLocationTurnedOff), not checked here.
+  // Covers Lot Tech (User model) and any other department on this timeclock.
+  if ((type === 'time-in' || type === 'break-out') && actor.orgId) {
+    (async () => {
+      const doc = actor.model === 'User'
+        ? await User.findById(actor.id).select('locationConsent').lean()
+        : await CrmUser.findById(actor.id).select('locationConsent').lean();
+      if (!(doc as any)?.locationConsent?.granted) {
+        const chatMessage = type === 'time-in'
+          ? `🟡 ${actor.fullName} started their shift without location sharing turned on.`
+          : `🟡 ${actor.fullName} returned from break but location sharing is still off.`;
+        const notifyBody = type === 'time-in'
+          ? `${actor.fullName} started their shift but location sharing is off.`
+          : `${actor.fullName} is back from break but location sharing is off.`;
+        await fireShiftAlert({
+          organizationId: actor.orgId,
+          targetUserId: actor.id.toString(),
+          targetUserModel: actor.model,
+          chatMessage,
+          notifyTitle: '📍 Location Not Shared',
+          notifyBody,
+          notifyTag: `shift-alert-no-location-${actor.id}`,
+          url: `/crm/timeproof/users/${actor.id}`,
+        });
+      }
+    })().catch(() => {});
+  }
 
   try {
     const io = getSocketIO();
