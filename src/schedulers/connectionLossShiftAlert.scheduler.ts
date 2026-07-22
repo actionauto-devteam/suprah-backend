@@ -25,9 +25,23 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
   const nowMs = Date.now();
   const cutoff = new Date(nowMs - CONNECTION_LOST_THRESHOLD_MS);
 
-  // Only rows that look like they're still mid-shift (sharingState hasn't
-  // already been demoted to off_duty/paused by a read-time self-heal
-  // elsewhere) and gone quiet past the threshold.
+  // Deliberately includes BOTH 'sharing' and 'off_duty' rows — not just
+  // 'sharing'. Reason: getActiveEmployeeLocations (locator.controller.ts)
+  // self-heals any 'sharing' row that's gone stale past SHARING_STALE_MS
+  // (10 min, same threshold as ours) by flipping it to 'off_duty' — and it
+  // runs on every Team Pulse map poll, every 15 seconds. An admin with that
+  // map open would almost always see the row get demoted to 'off_duty'
+  // *before* our 5-minute cron tick got a chance to see it as 'sharing',
+  // silently starving this alert of the exact rows it exists to catch.
+  // Explicitly excluded: 'paused_manual' and 'paused_break' — those are
+  // deliberate, known-reason pauses (see useLocationSharing.ts's
+  // pauseManually/break handling), not a lost connection, and must never be
+  // reinterpreted as one just because they also go stale.
+  //
+  // 'off_duty' also legitimately means "shift really ended" (stopSharing) —
+  // that's why this alone isn't enough; the isOnShift/isOnBreak check below
+  // (TimeLog-based, independent of sharingState) is what actually separates
+  // "still on shift, just demoted by the race above" from "shift over".
   //
   // connectionLostNotifiedAt fires this alert AT MOST ONCE PER SHIFT, not
   // once per outage — it's only cleared back to null at the next time-in
@@ -38,7 +52,7 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
   // what's really the same ongoing problem — so once notified, stay quiet
   // until the next shift starts.
   const candidates = await EmployeeLocation.find({
-    sharingState: 'sharing',
+    sharingState: { $in: ['sharing', 'off_duty'] },
     lastSeenAt: { $lt: cutoff },
     connectionLostNotifiedAt: null,
   }).lean();
@@ -46,6 +60,19 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
   let notified = 0;
 
   for (const loc of candidates) {
+    // Atomically claim this candidate BEFORE doing any lookups or firing the
+    // alert — the filter requires connectionLostNotifiedAt to still be null,
+    // so if another concurrent run (overlapping tick, or a second server
+    // process/instance) already claimed it between our find() above and now,
+    // this returns null and we skip. Without this, two processes reading
+    // the same "unclaimed" candidate and only writing back at the END (after
+    // firing) could both fire — exactly what produced the duplicate message.
+    const claimed = await EmployeeLocation.findOneAndUpdate(
+      { _id: loc._id, connectionLostNotifiedAt: null },
+      { connectionLostNotifiedAt: new Date() },
+    );
+    if (!claimed) continue;
+
     // Calling .findById() through a variable holding a union of the two
     // Model types doesn't type-check (their overload sets aren't
     // compatible with each other) — branch and call each concretely instead.
@@ -79,7 +106,6 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
       url: `/crm/timeproof/users/${loc.userId}`,
     });
 
-    await EmployeeLocation.updateOne({ _id: loc._id }, { connectionLostNotifiedAt: new Date() });
     notified++;
   }
 

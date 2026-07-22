@@ -33,7 +33,6 @@ function emitToConversation(conv: any, event: string, payload: any) {
     (conv.members || []).forEach((m: any) => {
       io.to(`user:${m.toString ? m.toString() : m}`).emit(event, payload);
     });
-    if (conv._id) io.to(`conv:${conv._id.toString()}`).emit(event, payload);
   } catch (err) {
     console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
   }

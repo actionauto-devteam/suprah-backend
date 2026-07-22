@@ -19,8 +19,10 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
+import { isMainMonitorOnlyDept } from "../config/departmentMonitoring";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
+import AgentHeartbeat from "../models/AgentHeartbeat.model";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -31,6 +33,9 @@ const COOKIE_OPTIONS = {
 };
 
 const COMPANY_TZ_OFFSET_MINUTES = -360;
+// Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts —
+// same 1-hour allotment, enforced here as a hard cap on starting a new break.
+const BREAK_LIMIT_SECONDS = 3600;
 
 const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || "";
 
@@ -156,6 +161,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const personalInfo = await getMainPersonalInfoByEmail(user.email);
+  const mainMonitorOnly = await isMainMonitorOnlyDept(user.organizationId?.toString(), user.department);
 
   const userData = {
     _id: user._id,
@@ -172,6 +178,9 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     lastLoginAt: user.lastLoginAt,
     personalInfo,
     todayTimeLogs: todayLogs,
+    // Tray-app reads this to decide whether to restrict screenshot capture to
+    // the primary monitor only (Web Dev department) — see isMainMonitorOnlyDept.
+    mainMonitorOnly,
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
@@ -223,6 +232,26 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
   if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
 
+  // Cumulative 1-hour break cap per shift — once the total across all break
+  // sessions since the current time-in reaches the limit (matches
+  // BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts), no further break-in
+  // is allowed for the rest of this shift, however many short breaks it took
+  // to get there.
+  if (type === "break-in") {
+    const lastTimeInLog = [...recentLogsForState].reverse().find((l) => l.type === "time-in");
+    const sessionStart = lastTimeInLog?.timestamp ?? today;
+    const sessionBreakLogs = recentLogsForState.filter(
+      (l) => (l.type === "break-in" || l.type === "break-out") && l.timestamp >= sessionStart
+    );
+    const usedBreakSeconds = buildBreakSessions(sessionBreakLogs).reduce(
+      (sum, b) => sum + (b.out ? b.duration : 0),
+      0
+    );
+    if (usedBreakSeconds >= BREAK_LIMIT_SECONDS) {
+      throw new ApiError(400, "You have already used your 1-hour break for this shift.");
+    }
+  }
+
   const timeLog = await TimeLog.create({
     userId: user._id,
     type,
@@ -230,6 +259,18 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     note: note || undefined,
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
   });
+
+  // A fresh break resets the 1h05m admin-escalation "already notified" flag
+  // (crmTimeproof.controller.ts's postHeartbeat) — that flag is normally
+  // cleared by noticing an on-break→off-break TRANSITION across two
+  // heartbeat snapshots, which can be missed (tray restart, quick back-to-
+  // back breaks, a dropped heartbeat) and then stays stuck set forever,
+  // silently disabling the escalation for every future break. Resetting it
+  // here too, at the one guaranteed, unambiguous break-in event, closes
+  // that gap regardless of what the heartbeat did or didn't catch.
+  if (type === "break-in") {
+    AgentHeartbeat.updateOne({ userId: user._id }, { lastBreakNotifiedAt: null }).catch(() => {});
+  }
 
   // A fresh shift resets the connection-loss "already notified" flag — it's
   // meant to fire once per outage per shift, not stay suppressed forever

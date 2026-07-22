@@ -2,6 +2,7 @@ import { Server as HttpServer } from 'http';
 import { Server as IOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
+import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import config from '../config';
 import logger from '../utils/logger';
@@ -13,6 +14,16 @@ let io: IOServer;
 const onlineUsers = new Map<string, number>();
 
 const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+
+async function isConversationMember(conversationId: string, userId: string): Promise<boolean> {
+  if (!conversationId || !userId) return false;
+  const conversation = await SupraSpaceConversation.exists({
+    _id: conversationId,
+    members: userId,
+    isActive: true,
+  });
+  return Boolean(conversation);
+}
 
 function getCorsOrigins(): string | string[] {
   const raw = config.corsOrigin || '*';
@@ -131,8 +142,17 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     });
 
     // ── Join a conversation room ──────────────────────────────────────────
-    socket.on('join:conversation', ({ conversationId }: { conversationId: string }) => {
-      socket.join(`conv:${conversationId}`);
+    socket.on('join:conversation', async ({ conversationId }: { conversationId: string }) => {
+      try {
+        if (!(await isConversationMember(conversationId, userId))) {
+          logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized conversation room join');
+          socket.emit('conversation:access-denied', { conversationId });
+          return;
+        }
+        socket.join(`conv:${conversationId}`);
+      } catch (err: any) {
+        logger.error(err, '[SupraSpace] join:conversation authorization error');
+      }
     });
 
     // ── Leave a conversation room ─────────────────────────────────────────
@@ -141,7 +161,11 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     });
 
     // ── Typing: start ─────────────────────────────────────────────────────
-    socket.on('typing:start', ({ conversationId }: { conversationId: string }) => {
+    socket.on('typing:start', async ({ conversationId }: { conversationId: string }) => {
+      if (!(await isConversationMember(conversationId, userId))) {
+        logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized typing:start');
+        return;
+      }
       socket.to(`conv:${conversationId}`).emit('typing:start', {
         conversationId,
         userId,
@@ -150,7 +174,11 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     });
 
     // ── Typing: stop ──────────────────────────────────────────────────────
-    socket.on('typing:stop', ({ conversationId }: { conversationId: string }) => {
+    socket.on('typing:stop', async ({ conversationId }: { conversationId: string }) => {
+      if (!(await isConversationMember(conversationId, userId))) {
+        logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized typing:stop');
+        return;
+      }
       socket.to(`conv:${conversationId}`).emit('typing:stop', {
         conversationId,
         userId,
@@ -160,6 +188,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     // ── Mark messages as read ─────────────────────────────────────────────
     socket.on('mark:read', async ({ conversationId }: { conversationId: string }) => {
       try {
+        if (!(await isConversationMember(conversationId, userId))) {
+          logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized mark:read');
+          return;
+        }
         await SupraSpaceMessage.updateMany(
           { conversationId, readBy: { $ne: user._id } },
           { $addToSet: { readBy: user._id } }

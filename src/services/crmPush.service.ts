@@ -1,6 +1,7 @@
 import webpush from 'web-push';
 import config from '../config';
 import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
 import logger from '../utils/logger';
 
 const LOG_PREFIX = '[CrmPushService]';
@@ -30,6 +31,51 @@ function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string
   return allowedHints.some((hint) => normalizedHint.includes(hint.toLowerCase()));
 }
 
+function rememberLatestOwner(
+  owners: Map<string, { ownerKey: string; createdAt: number }>,
+  endpoint: string,
+  ownerKey: string,
+  createdAt?: Date
+): void {
+  const timestamp = createdAt?.getTime?.() || 0;
+  const current = owners.get(endpoint);
+  if (!current || timestamp >= current.createdAt) {
+    owners.set(endpoint, { ownerKey, createdAt: timestamp });
+  }
+}
+
+async function getLatestPushEndpointOwners(endpoints: string[]): Promise<Map<string, { ownerKey: string; createdAt: number }>> {
+  const owners = new Map<string, { ownerKey: string; createdAt: number }>();
+  if (!endpoints.length) return owners;
+
+  const [crmOwners, appOwners] = await Promise.all([
+    CrmUser.find({ 'pushSubscriptions.endpoint': { $in: endpoints } })
+      .select('_id pushSubscriptions')
+      .lean(),
+    User.find({ 'pushSubscriptions.endpoint': { $in: endpoints } })
+      .select('_id pushSubscriptions')
+      .lean(),
+  ]);
+
+  crmOwners.forEach((user) => {
+    user.pushSubscriptions?.forEach((sub) => {
+      if (endpoints.includes(sub.endpoint)) {
+        rememberLatestOwner(owners, sub.endpoint, `crm:${user._id.toString()}`, sub.createdAt);
+      }
+    });
+  });
+
+  appOwners.forEach((user) => {
+    user.pushSubscriptions?.forEach((sub) => {
+      if (endpoints.includes(sub.endpoint)) {
+        rememberLatestOwner(owners, sub.endpoint, `user:${user._id.toString()}`, sub.createdAt);
+      }
+    });
+  });
+
+  return owners;
+}
+
 webpush.setVapidDetails(
   config.push.vapidSubject,
   config.push.vapidPublicKey,
@@ -53,6 +99,15 @@ export class CrmPushService {
       .lean();
     stats.users = users.length;
 
+    const endpoints = [
+      ...new Set(
+        users.flatMap((user) =>
+          (user.pushSubscriptions || []).map((sub) => sub.endpoint).filter(Boolean)
+        )
+      ),
+    ];
+    const latestOwnerByEndpoint = await getLatestPushEndpointOwners(endpoints);
+
     const stringifiedPayload = JSON.stringify(payload);
 
     await Promise.allSettled(
@@ -65,11 +120,27 @@ export class CrmPushService {
 
         const endpointsToPrune: string[] = [];
 
-        const targetSubscriptions = user.pushSubscriptions.filter((sub) =>
-          matchesDeviceHint(sub.deviceHint, options.deviceHints)
-        );
+        const currentOwnerKey = `crm:${user._id.toString()}`;
+        const targetSubscriptions = user.pushSubscriptions.filter((sub) => {
+          const latestOwner = latestOwnerByEndpoint.get(sub.endpoint);
+          if (latestOwner && latestOwner.ownerKey !== currentOwnerKey) {
+            endpointsToPrune.push(sub.endpoint);
+            logger.warn(
+              `${LOG_PREFIX} Skipping stale push endpoint for user ${user._id}; latest owner is ${latestOwner.ownerKey}.`
+            );
+            return false;
+          }
+          return matchesDeviceHint(sub.deviceHint, options.deviceHints);
+        });
         stats.subscriptions += targetSubscriptions.length;
         if (!targetSubscriptions.length) {
+          if (endpointsToPrune.length > 0) {
+            stats.pruned += endpointsToPrune.length;
+            await CrmUser.updateOne(
+              { _id: user._id },
+              { $pull: { pushSubscriptions: { endpoint: { $in: endpointsToPrune } } } }
+            );
+          }
           stats.skippedNoMatchingHint += 1;
           logger.debug(`${LOG_PREFIX} No matching CRM push subscriptions for user ${user._id}. Stored hints: ${
             user.pushSubscriptions.map((sub) => sub.deviceHint || 'unknown').join(', ')
