@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import User from '../models/User.model';
+import CrmUser from '../models/CrmUser.model';
 import PushService from '../services/push.service';
 
 export class PushController {
@@ -14,12 +15,23 @@ export class PushController {
             throw new ApiError(400, 'Invalid subscription object. Expected endpoint and keys (p256dh, auth).');
         }
 
-        await User.updateMany(
-            { 'pushSubscriptions.endpoint': subscription.endpoint },
-            {
-                $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
-            }
-        );
+        // A browser/PWA push endpoint represents one installed app instance.
+        // Keep endpoint ownership exclusive so a shared device or account switch
+        // cannot keep receiving another user's notifications.
+        await Promise.all([
+            User.updateMany(
+                { 'pushSubscriptions.endpoint': subscription.endpoint },
+                {
+                    $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
+                }
+            ),
+            CrmUser.updateMany(
+                { 'pushSubscriptions.endpoint': subscription.endpoint },
+                {
+                    $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
+                }
+            ),
+        ]);
 
         await User.updateOne(
             { _id: userId },

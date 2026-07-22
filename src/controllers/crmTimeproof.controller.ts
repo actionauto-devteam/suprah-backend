@@ -19,6 +19,8 @@ import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import sharp from 'sharp';
+import logger from '../utils/logger';
+import { getShiftStatusForActor } from '../utils/shiftStatus';
 
 const BREAK_LIMIT_SECONDS = 3600;
 // The admin notification fires 5 minutes AFTER the official 1h limit, not the
@@ -31,6 +33,31 @@ const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
 
 const COMPANY_TZ_OFFSET_MINUTES = -360;
+
+/**
+ * Collapses duplicate User-model documents that share the same email —
+ * a real, confirmed data issue (e.g. a "Cesar Pavon" account re-created at
+ * some point, leaving an old ghost document with no presence/activity data
+ * alongside the one actually being used) rather than something this query
+ * can prevent. Without this, a duplicate silently shows up as a second,
+ * always-offline row for the same person and can even win the "which one is
+ * canonical" toss-up in list ordering. Keeps whichever document has the more
+ * recent lastActive (falling back to updatedAt) — the one that's actually
+ * being used right now.
+ */
+function dedupeUsersByEmail<T extends { email?: string; lastActive?: Date; updatedAt?: Date }>(users: T[]): T[] {
+  const byEmail = new Map<string, T>();
+  const noEmail: T[] = [];
+  for (const u of users) {
+    if (!u.email) { noEmail.push(u); continue; }
+    const key = u.email.toLowerCase();
+    const existing = byEmail.get(key);
+    if (!existing) { byEmail.set(key, u); continue; }
+    const activityOf = (x: T) => (x.lastActive ?? x.updatedAt)?.getTime() ?? 0;
+    if (activityOf(u) > activityOf(existing)) byEmail.set(key, u);
+  }
+  return [...byEmail.values(), ...noEmail];
+}
 
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
@@ -207,15 +234,15 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   const weekStart = getWeekStart(now);
   const todayStr = todayMDTStr;
 
-  const users = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
+  const crmUsers = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
 
   const mainDeptByEmail = new Map<string, string>();
   try {
-    const emails = users.map((u) => u.email).filter(Boolean) as string[];
-    const mainUsers = await User.find({ email: { $in: emails } })
+    const emails = crmUsers.map((u) => u.email).filter(Boolean) as string[];
+    const mainUsersByEmail = await User.find({ email: { $in: emails } })
       .select('email personalInfo')
       .lean();
-    mainUsers.forEach((mu) => {
+    mainUsersByEmail.forEach((mu) => {
       const dept = (mu.personalInfo as any)?.department;
       if (mu.email && dept && typeof dept === 'string' && dept.trim()) {
         mainDeptByEmail.set(mu.email, dept.trim());
@@ -224,8 +251,63 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   } catch {
   }
 
+  // Employees who only have a main-site User account (no CrmUser record at
+  // all — e.g. Lot Tech and anyone else clocking in via the general
+  // timeclock, see generalTimeclock.controller.ts) were invisible on this
+  // page entirely, regardless of department filter: this endpoint only ever
+  // queried CrmUser. Merge in User-model employees too — exclude non-staff
+  // roles (customer/driver) but do NOT skip by email overlap with crmUsers:
+  // a CrmUser record existing for the same email doesn't mean it's the one
+  // actually used (Lot Tech in particular may have a dormant CrmUser record
+  // from HR/record-keeping with zero real TimeLog activity, while their
+  // actual clock-ins are on the User account) — excluding by email hid the
+  // one with the real rendered hours in favor of the one showing nothing.
+  // Both are computed below; the dedup step after results are built picks
+  // whichever one shows real activity this month.
+  // organizationId is optional on both User and CrmUser (see their schemas)
+  // and unreliably populated on User specifically — a strict equality match
+  // silently excluded every User-model account whose field was never set,
+  // which in practice was most/all of them. Match the established
+  // call.controller.ts convention: don't gate the User query on
+  // organizationId at all (CrmUser's isActive/organizationId filter above is
+  // the real tenant boundary in this single-org-in-practice setup).
+  const mainOnlyUsersRaw = await User.find({
+    role: { $in: ['employee', 'admin', 'super_admin'] },
+  }).select('fullName name email avatar role personalInfo lastActive updatedAt').lean();
+  const mainOnlyUsers = dedupeUsersByEmail(mainOnlyUsersRaw);
+
+  type TimeproofPerson = {
+    _id: any;
+    fullName: string;
+    username?: string;
+    avatar?: string;
+    role: string;
+    department?: string;
+    email?: string;
+  };
+
+  const people: TimeproofPerson[] = [
+    ...crmUsers.map((u): TimeproofPerson => ({
+      _id: u._id,
+      fullName: u.fullName,
+      username: u.username,
+      avatar: u.avatar,
+      role: u.role,
+      department: (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined,
+      email: u.email,
+    })),
+    ...mainOnlyUsers.map((u): TimeproofPerson => ({
+      _id: u._id,
+      fullName: (u as any).name || (u as any).fullName || u.email || 'Employee',
+      avatar: u.avatar,
+      role: u.role,
+      department: (u.personalInfo as any)?.department,
+      email: u.email,
+    })),
+  ];
+
   const allDeductions = await ScreenshotDeduction.find({
-    userId: { $in: users.map((u) => u._id) },
+    userId: { $in: people.map((u) => u._id) },
   }).select('userId date deductedSeconds').lean();
   const deductionsByUser = new Map<string, Map<string, number>>();
   for (const d of allDeductions) {
@@ -235,7 +317,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   }
 
   const results = await Promise.all(
-    users.map(async (u) => {
+    people.map(async (u) => {
       const logs = await TimeLog.find({
         userId: u._id,
         timestamp: { $gte: monthStart },
@@ -274,16 +356,15 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const todayTotalWorkedSeconds = (calendar[todayStr]?.totalSeconds ?? 0) + totalBreakSeconds;
       const today = formatHours(Math.max(0, (calendar[todayStr]?.totalSeconds ?? 0) - todayDeduction));
 
-      const department = (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined;
-
       return {
+        email: u.email,
         user: {
           _id: u._id,
           fullName: u.fullName,
           username: u.username,
           avatar: u.avatar,
           role: u.role,
-          department,
+          department: u.department,
         },
         today,
         thisWeek: summary.thisWeek,
@@ -297,9 +378,27 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     })
   );
 
-  results.sort((a, b) => b.thisMonth.totalSeconds - a.thisMonth.totalSeconds);
+  // A CrmUser and a User document can legitimately share the same email —
+  // separate collections, separate unique-email constraints — when the same
+  // person has both (e.g. a dormant CrmUser record with zero real activity
+  // alongside the User account they actually clock in with). Whichever one
+  // actually has this month's hours wins the display slot, so the person
+  // isn't listed twice with one row showing real numbers and a ghost row
+  // showing zero.
+  const byEmail = new Map<string, (typeof results)[number]>();
+  const noEmail: typeof results = [];
+  for (const r of results) {
+    if (!r.email) { noEmail.push(r); continue; }
+    const key = r.email.toLowerCase();
+    const existing = byEmail.get(key);
+    if (!existing) { byEmail.set(key, r); continue; }
+    if (r.thisMonth.totalSeconds > existing.thisMonth.totalSeconds) byEmail.set(key, r);
+  }
+  const dedupedResults = [...byEmail.values(), ...noEmail].map(({ email: _email, ...rest }) => rest);
 
-  res.json(new ApiResponse(200, { users: results }, 'Team timeproof fetched'));
+  dedupedResults.sort((a, b) => b.thisMonth.totalSeconds - a.thisMonth.totalSeconds);
+
+  res.json(new ApiResponse(200, { users: dedupedResults }, 'Team timeproof fetched'));
 });
 
 export const getUserTimeproof = asyncHandler(async (req: Request, res: Response) => {
@@ -311,8 +410,38 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const { userId } = req.params;
   const { range = '90' } = req.query;
 
-  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password');
-  if (!targetUser) throw new ApiError(404, 'User not found');
+  // The list this detail page is opened from (getAllUsersTimeproof) now
+  // includes main-site User-model employees too (e.g. Lot Tech) — fall back
+  // to the User collection so clicking into one of them doesn't 404.
+  let targetPerson: { _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string; accountModel: 'CrmUser' | 'User' } | null = null;
+  const crmTargetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password').lean();
+  if (crmTargetUser) {
+    targetPerson = {
+      _id: crmTargetUser._id,
+      fullName: crmTargetUser.fullName,
+      username: crmTargetUser.username,
+      avatar: crmTargetUser.avatar,
+      role: crmTargetUser.role,
+      department: crmTargetUser.department,
+      accountModel: 'CrmUser',
+    };
+  } else {
+    // Same organizationId unreliability as getAllUsersTimeproof — don't gate
+    // the lookup on it, the _id itself (only reachable via the already
+    // org-scoped list this page opened from) is enough.
+    const mainTargetUser = await User.findOne({ _id: userId }).lean();
+    if (mainTargetUser) {
+      targetPerson = {
+        _id: mainTargetUser._id,
+        fullName: (mainTargetUser as any).name || (mainTargetUser as any).fullName || mainTargetUser.email || 'Employee',
+        avatar: mainTargetUser.avatar,
+        role: mainTargetUser.role,
+        department: (mainTargetUser.personalInfo as any)?.department,
+        accountModel: 'User',
+      };
+    }
+  }
+  if (!targetPerson) throw new ApiError(404, 'User not found');
 
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - parseInt(range as string));
@@ -377,14 +506,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
 
   res.json(
     new ApiResponse(200, {
-      user: {
-        _id: targetUser._id,
-        fullName: targetUser.fullName,
-        username: targetUser.username,
-        avatar: targetUser.avatar,
-        role: targetUser.role,
-        department: targetUser.department,
-      },
+      user: targetPerson,
       calendar,
       summary,
       streak,
@@ -815,7 +937,18 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   }
 
   // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
+  // TEMP diagnostic — pinpoints exactly which value is wrong when the
+  // escalation doesn't fire as expected (e.g. tray never getting
+  // breakDurationSeconds past the threshold, or lastBreakNotifiedAt stuck
+  // set from an earlier test). Remove once confirmed working.
+  if (isOnBreak) {
+    logger.info(
+      { userId: user._id.toString(), isOnBreak, isOnShift, breakDurationSeconds, BREAK_ADMIN_NOTIFY_SECONDS, lastBreakNotifiedAt },
+      '[break-escalation] heartbeat check'
+    );
+  }
   if (isOnBreak && isOnShift && breakDurationSeconds >= BREAK_ADMIN_NOTIFY_SECONDS && !lastBreakNotifiedAt) {
+    logger.info({ userId: user._id.toString() }, '[break-escalation] threshold crossed — firing Shift Alert');
     await AgentHeartbeat.updateOne(
       { userId: user._id },
       { lastBreakNotifiedAt: new Date() }
@@ -842,7 +975,9 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       notifyBody: `${user.fullName} exceeds break time.`,
       notifyTag: `crm-break-${user._id}`,
       url: '/crm/timeproof/users',
-    }).catch(() => {});
+    })
+      .then(() => logger.info({ userId: user._id.toString() }, '[break-escalation] fireShiftAlert completed'))
+      .catch((err) => logger.error({ err, userId: user._id.toString() }, '[break-escalation] fireShiftAlert failed'));
   }
 
   res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
@@ -863,14 +998,27 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
   const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
   const now = new Date();
 
-  const users = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
-  const heartbeats = await AgentHeartbeat.find({
-    userId: { $in: users.map(u => u._id) },
-  }).lean();
+  const crmUsers = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
 
+  // Merge in main-site User-model employees (e.g. Lot Tech) so they show up
+  // in the live agent status view too. NOT excluded by email overlap with
+  // crmUsers here (unlike earlier drafts of this fix) — a CrmUser record
+  // existing for the same email doesn't mean it's the one actually used day
+  // to day (Lot Tech in particular may have a dormant CrmUser record from
+  // HR/record-keeping that never logs in — their real activity is on the
+  // User account). Both are computed, then the dedup step below picks
+  // whichever one actually shows real activity.
+  const mainOnlyUsersRaw = await User.find({
+    role: { $in: ['employee', 'admin', 'super_admin'] },
+  }).select('fullName name email avatar role onlineStatus lastActive updatedAt').lean();
+  const mainOnlyUsers = dedupeUsersByEmail(mainOnlyUsersRaw);
+
+  const heartbeats = await AgentHeartbeat.find({
+    userId: { $in: crmUsers.map(u => u._id) },
+  }).lean();
   const hbMap = new Map(heartbeats.map(h => [h.userId.toString(), h]));
 
-  const agents = users.map(u => {
+  const crmAgents = crmUsers.map(u => {
     const hb = hbMap.get(u._id.toString());
     // Online if tray heartbeat is fresh OR CRM tab is open (active socket connection)
     const isOnline = isCrmUserOnline(u._id.toString()) ||
@@ -878,6 +1026,7 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
 
     const isOnBreak = isOnline && (hb?.isOnBreak ?? false);
     return {
+      email: u.email as string | undefined,
       user: { _id: u._id, fullName: u.fullName, username: u.username, avatar: u.avatar, role: u.role },
       isOnline,
       isIdle: isOnline ? (hb?.isIdle ?? false) : false,
@@ -887,6 +1036,52 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
       lastSeenAt: hb?.lastSeenAt ?? null,
     };
   });
+
+  // User-model employees (Lot Tech and anyone else on mobile/PWA, no
+  // tray-app) never hit AgentHeartbeat and never open a CRM-role socket —
+  // both signals the block above relies on are permanently empty for them,
+  // so they'd always read "offline" regardless of actual activity. Derive
+  // presence instead from the general profile heartbeat every web/PWA
+  // session already sends (PATCH /api/profile/heartbeat — see
+  // profile.controller.ts), and break status straight from TimeLog (the
+  // same source getAllUsersTimeproof/getShiftStatusForActor already trust)
+  // rather than a heartbeat record that will never exist for them.
+  const mainAgents = await Promise.all(mainOnlyUsers.map(async (u) => {
+    const lastActive = (u as any).lastActive ? new Date((u as any).lastActive).getTime() : 0;
+    const isOnline = (u as any).onlineStatus === 'online' || (now.getTime() - lastActive < OFFLINE_THRESHOLD_MS);
+    const { isOnBreak: onBreak } = isOnline ? await getShiftStatusForActor(u._id) : { isOnBreak: false };
+    return {
+      email: u.email as string | undefined,
+      user: { _id: u._id, fullName: (u as any).name || (u as any).fullName || u.email || 'Employee', avatar: u.avatar, role: u.role },
+      isOnline,
+      isIdle: false,
+      isOnBreak: isOnline && onBreak,
+      breakStartedAt: null,
+      platform: 'mobile',
+      lastSeenAt: (u as any).lastActive ?? null,
+    };
+  }));
+
+  // A CrmUser and a User document can legitimately share the same email —
+  // separate collections, separate unique-email constraints — when the same
+  // person has both (e.g. a dormant CrmUser record alongside the User
+  // account they actually clock in with). Whichever entry shows real
+  // activity right now (online, or more recently seen) wins the display
+  // slot; the other is dropped so the person isn't listed twice with
+  // conflicting statuses.
+  const combined = [...crmAgents, ...mainAgents];
+  const byEmail = new Map<string, (typeof combined)[number]>();
+  const noEmail: typeof combined = [];
+  for (const a of combined) {
+    if (!a.email) { noEmail.push(a); continue; }
+    const key = a.email.toLowerCase();
+    const existing = byEmail.get(key);
+    if (!existing) { byEmail.set(key, a); continue; }
+    const rank = (x: (typeof combined)[number]) =>
+      (x.isOnline ? 1e15 : 0) + (x.lastSeenAt ? new Date(x.lastSeenAt).getTime() : 0);
+    if (rank(a) > rank(existing)) byEmail.set(key, a);
+  }
+  const agents = [...byEmail.values(), ...noEmail].map(({ email: _email, ...rest }) => rest);
 
   agents.sort((a, b) => {
     if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
@@ -1327,6 +1522,19 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
     throw new ApiError(400, 'Invalid push subscription object');
   }
 
+  // A push endpoint belongs to the current installed browser/PWA instance.
+  // Remove it from any previous account first so shared devices or account
+  // switches cannot keep receiving another user's private notifications.
+  await Promise.all([
+    CrmUser.updateMany(
+      { _id: { $ne: user._id }, 'pushSubscriptions.endpoint': subscription.endpoint },
+      { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } }
+    ),
+    User.updateMany(
+      { 'pushSubscriptions.endpoint': subscription.endpoint },
+      { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } }
+    ),
+  ]);
   // Upsert by endpoint — replace if it already exists, otherwise push
   await CrmUser.updateOne(
     { _id: user._id, 'pushSubscriptions.endpoint': subscription.endpoint },

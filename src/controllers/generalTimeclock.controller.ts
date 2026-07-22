@@ -13,9 +13,14 @@ import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
+import { buildBreakSessions } from '../utils/timeLogEngine';
 
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
+// Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts and
+// crm.controller.ts — same 1-hour allotment, enforced here as a hard cap on
+// starting a new break.
+const BREAK_LIMIT_SECONDS = 3600;
 // See crmTimeproof.controller.ts's HEARTBEAT_FRESH_MS comment — 60s heartbeat
 // cadence with no retry means ordinary blips can create a multi-minute gap
 // even though the user never stopped working; 15 min avoids false "Paused".
@@ -168,6 +173,26 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === 'break-in'  && hasActiveBreak)   throw new ApiError(400, 'You are already on break');
   if (type === 'break-out' && !hasActiveBreak)  throw new ApiError(400, 'No active break to end');
 
+  // Cumulative 1-hour break cap per shift — same rule as crm.controller.ts /
+  // BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts: once the total across
+  // all break sessions since the current time-in reaches the limit, no
+  // further break-in is allowed for the rest of this shift.
+  if (type === 'break-in') {
+    const { today: todayForBreakCap } = getTodayMDTWindow();
+    const lastTimeInLog = [...recentLogs].reverse().find((l) => l.type === 'time-in');
+    const sessionStart = lastTimeInLog?.timestamp ?? todayForBreakCap;
+    const sessionBreakLogs = recentLogs.filter(
+      (l) => (l.type === 'break-in' || l.type === 'break-out') && l.timestamp >= sessionStart
+    );
+    const usedBreakSeconds = buildBreakSessions(sessionBreakLogs).reduce(
+      (sum, b) => sum + (b.out ? b.duration : 0),
+      0
+    );
+    if (usedBreakSeconds >= BREAK_LIMIT_SECONDS) {
+      throw new ApiError(400, 'You have already used your 1-hour break for this shift.');
+    }
+  }
+
   const { today, tomorrow } = getTodayMDTWindow();
 
   const timeLog = await TimeLog.create({
@@ -184,6 +209,16 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // because of an alert from a previous, unrelated shift.
   if (type === 'time-in') {
     EmployeeLocation.updateOne({ userId: actor.id }, { connectionLostNotifiedAt: null }).catch(() => {});
+  }
+
+  // A fresh break resets the 1h05m admin-escalation "already notified" flag
+  // (crmTimeproof.controller.ts's postHeartbeat) — normally cleared only by
+  // noticing an on-break→off-break TRANSITION across two heartbeat
+  // snapshots, which can be missed (tray restart, quick back-to-back
+  // breaks, a dropped heartbeat) and then stays stuck set forever. Resetting
+  // it here too, at the one guaranteed break-in event, closes that gap.
+  if (type === 'break-in') {
+    AgentHeartbeat.updateOne({ userId: actor.id }, { lastBreakNotifiedAt: null }).catch(() => {});
   }
 
   // Shift Alerts: no location sharing at shift-start, or still off after
