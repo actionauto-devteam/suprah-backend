@@ -73,8 +73,7 @@ const setEmploymentLocationType = asyncHandler(async (req: Request, res: Respons
     const { userId } = req.params;
     const { employmentLocationType } = req.body as { employmentLocationType: 'onsite' | 'remote' };
 
-    const isAdmin = ['admin', 'super_admin'].includes(user.role);
-    if (!isAdmin) throw new ApiError(403, 'Only admins can change an employee\'s location type');
+    if (userId !== (user._id as any).toString()) throw new ApiError(403, 'You can only change your own location type');
     if (!['onsite', 'remote'].includes(employmentLocationType)) throw new ApiError(400, 'Invalid employment location type');
 
     const member = await User.findOne({ _id: userId, organizationId: orgId });

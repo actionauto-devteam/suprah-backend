@@ -232,6 +232,14 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
   if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
 
+  // Location sharing is required to clock in — no more pre-shift opt-out. Applies to
+  // every department. Mid-shift, it can be paused/resumed freely from TimeProof itself
+  // (locator.controller.ts's setLocationConsent/handleLocationTurnedOff) without
+  // affecting this gate, since that only runs at the moment of time-in.
+  if (type === "time-in" && !user.locationConsent?.granted) {
+    throw new ApiError(400, "Location sharing must be turned on before you can clock in.");
+  }
+
   // Cumulative 1-hour break cap per shift — once the total across all break
   // sessions since the current time-in reaches the limit (matches
   // BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts), no further break-in
@@ -277,21 +285,6 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // because of an alert from a previous, unrelated shift.
   if (type === "time-in") {
     EmployeeLocation.updateOne({ userId: user._id }, { connectionLostNotifiedAt: null }).catch(() => {});
-  }
-
-  // Shift Alerts: started a shift without location sharing on — fire-and-forget,
-  // must not delay the clock-in response.
-  if (type === "time-in" && !user.locationConsent?.granted && user.organizationId) {
-    fireShiftAlert({
-      organizationId: user.organizationId.toString(),
-      targetUserId: user._id.toString(),
-      targetUserModel: "CrmUser",
-      chatMessage: `🟡 ${user.fullName} started their shift without location sharing turned on.`,
-      notifyTitle: "📍 Location Not Shared",
-      notifyBody: `${user.fullName} started their shift but location sharing is off.`,
-      notifyTag: `shift-alert-no-location-${user._id}`,
-      url: `/crm/timeproof/users/${user._id}`,
-    }).catch(() => {});
   }
 
   // Shift Alerts: resumed from break without turning location sharing back on.

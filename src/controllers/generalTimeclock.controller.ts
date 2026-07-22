@@ -173,6 +173,19 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === 'break-in'  && hasActiveBreak)   throw new ApiError(400, 'You are already on break');
   if (type === 'break-out' && !hasActiveBreak)  throw new ApiError(400, 'No active break to end');
 
+  // Location sharing is required to clock in — no more pre-shift opt-out. Applies to
+  // every department, both account models. Mid-shift, it can be paused/resumed freely
+  // from TimeProof itself (locator.controller.ts's setLocationConsent/handleLocationTurnedOff)
+  // without affecting this gate, since that only runs at the moment of time-in.
+  if (type === 'time-in') {
+    const consentDoc = actor.model === 'User'
+      ? await User.findById(actor.id).select('locationConsent').lean()
+      : await CrmUser.findById(actor.id).select('locationConsent').lean();
+    if (!(consentDoc as any)?.locationConsent?.granted) {
+      throw new ApiError(400, 'Location sharing must be turned on before you can clock in.');
+    }
+  }
+
   // Cumulative 1-hour break cap per shift — same rule as crm.controller.ts /
   // BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts: once the total across
   // all break sessions since the current time-in reaches the limit, no
@@ -221,23 +234,20 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     AgentHeartbeat.updateOne({ userId: actor.id }, { lastBreakNotifiedAt: null }).catch(() => {});
   }
 
-  // Shift Alerts: no location sharing at shift-start, or still off after
-  // returning from break — fire-and-forget, must not delay the response.
-  // Turning it off WHILE on break is expected/private (handled separately in
+  // Shift Alerts: still off after returning from break — fire-and-forget, must not
+  // delay the response. Time-in can no longer reach here without consent (blocked
+  // above), so this now only covers a break-out with location still off. Turning it
+  // off WHILE on break is expected/private (handled separately in
   // locator.controller.ts's handleLocationTurnedOff), not checked here.
   // Covers Lot Tech (User model) and any other department on this timeclock.
-  if ((type === 'time-in' || type === 'break-out') && actor.orgId) {
+  if (type === 'break-out' && actor.orgId) {
     (async () => {
       const doc = actor.model === 'User'
         ? await User.findById(actor.id).select('locationConsent').lean()
         : await CrmUser.findById(actor.id).select('locationConsent').lean();
       if (!(doc as any)?.locationConsent?.granted) {
-        const chatMessage = type === 'time-in'
-          ? `🟡 ${actor.fullName} started their shift without location sharing turned on.`
-          : `🟡 ${actor.fullName} returned from break but location sharing is still off.`;
-        const notifyBody = type === 'time-in'
-          ? `${actor.fullName} started their shift but location sharing is off.`
-          : `${actor.fullName} is back from break but location sharing is off.`;
+        const chatMessage = `🟡 ${actor.fullName} returned from break but location sharing is still off.`;
+        const notifyBody = `${actor.fullName} is back from break but location sharing is off.`;
         await fireShiftAlert({
           organizationId: actor.orgId,
           targetUserId: actor.id.toString(),

@@ -5,7 +5,6 @@ import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import EmployeeLocation from '../models/EmployeeLocation.model';
-import TimeLog from '../models/TimeLog.model';
 import Place from '../models/Place.model';
 import PlaceVisit from '../models/PlaceVisit.model';
 import PresenceEvent from '../models/PresenceEvent.model';
@@ -15,6 +14,7 @@ import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
 import { PushService } from '../services/push.service';
+import { CrmPushService } from '../services/crmPush.service';
 import { isMobileMonitoringDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
@@ -127,32 +127,24 @@ async function syncLinkedAccountConsent(actor: LocatorActor, granted: boolean, d
 /**
  * Called whenever a user's location sharing transitions from ON to OFF
  * (whether via the consent toggle or the opt-out toggle — both funnel here).
- * If they're actively on shift and NOT on break, this ends their shift
- * automatically and alerts admins + the user via the Shift Alerts channel —
- * covers both a deliberate turn-off and one triggered by, say, revoking OS
- * location permission mid-shift. Turning off location WHILE on break is
- * expected/private and deliberately exempted here.
+ * If they're actively on shift and NOT on break, this warns them and admins
+ * via the Shift Alerts channel — it deliberately does NOT end their shift
+ * anymore; turning location off mid-shift is a sanctioned action (TimeProof's
+ * own "Stop Sharing" flow), just one that both sides should know happened.
+ * Turning off location WHILE on break is expected/private and stays exempt.
  */
 async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Promise<void> {
     if (!orgId) return;
     const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
     if (!isOnShift || isOnBreak) return;
 
-    await TimeLog.create({
-        userId: actor.id,
-        userModel: actor.model,
-        type: 'time-out',
-        timestamp: new Date(),
-        note: 'Auto clock-out — location sharing was turned off mid-shift',
-    });
-
     await fireShiftAlert({
         organizationId: orgId,
         targetUserId: actor.id.toString(),
         targetUserModel: actor.model,
-        chatMessage: `🔴 ${actor.name} turned off location sharing while on shift — automatically clocked out.`,
-        notifyTitle: '📍 Location Turned Off',
-        notifyBody: `${actor.name} turned off location sharing and was automatically clocked out.`,
+        chatMessage: `🟡 ${actor.name} turned off location sharing during their active shift.`,
+        notifyTitle: '📍 Location Sharing Paused',
+        notifyBody: `${actor.name} turned off location sharing during their active shift.`,
         notifyTag: `shift-alert-location-off-${actor.id}`,
         url: `/crm/timeproof/users/${actor.id}`,
     });
@@ -295,8 +287,38 @@ function notifyAdmins(orgId: string, payload: { title: string; body: string; tag
     PushService.notifyOrgAdmins(orgId, payload).catch(() => {});
 }
 
-async function findNearestPlace(orgId: string, lat: number, lng: number) {
+// A GPS fix worse than this (WiFi/cell-tower fallback, common indoors at a
+// dealership) is too coarse to trust for geofence math — used purely to gate
+// place-transition detection, never to hide/distort the live map dot itself.
+const GEOFENCE_ACCURACY_THRESHOLD_M = 100;
+// A fix worse than this isn't just unreliable for geofencing — it's unreliable to PLOT at
+// all (this is WiFi/cell-tower positioning territory, hundreds of meters off, not GPS noise).
+// Ingesting it as the person's coords/history point would visibly teleport their pin to a
+// wrong spot on the map — worse than just holding their last known good position, which is
+// what every consumer location-sharing app (Life360, Find My) does during a signal gap.
+const POSITION_ACCURACY_REJECT_M = 300;
+// Extra slack applied only when checking whether someone is STILL inside their
+// current place — without this, ordinary GPS jitter right at a fence's edge
+// flips enter/exit back and forth on consecutive pings ("flapping"). Entering
+// a NEW place still requires being inside its plain radiusM, no buffer.
+const GEOFENCE_EXIT_BUFFER_M = 20;
+
+/**
+ * Resolves which Place (if any) a fresh fix puts someone inside, with
+ * hysteresis: if they already have a current place, they only count as having
+ * left it once they're outside radiusM + GEOFENCE_EXIT_BUFFER_M, not the
+ * instant a noisy ping lands a few meters past the raw edge.
+ */
+async function resolveCurrentPlace(orgId: string, lat: number, lng: number, currentPlaceId?: string | null) {
     const places = await Place.find({ organizationId: orgId, isActive: true }).lean();
+
+    if (currentPlaceId) {
+        const current = places.find((p) => p._id.toString() === currentPlaceId.toString());
+        if (current && distanceMeters(lat, lng, current.coords.lat, current.coords.lng) <= current.radiusM + GEOFENCE_EXIT_BUFFER_M) {
+            return current;
+        }
+    }
+
     for (const place of places) {
         const distance = distanceMeters(lat, lng, place.coords.lat, place.coords.lng);
         if (distance <= place.radiusM) return place;
@@ -304,13 +326,22 @@ async function findNearestPlace(orgId: string, lat: number, lng: number) {
     return null;
 }
 
+function notifyActor(actor: { id: any; model: 'User' | 'CrmUser' }, payload: { title: string; body: string; tag: string; data?: Record<string, any> }) {
+    const pushPayload = { icon: '/icon-192x192.png', ...payload };
+    const send = actor.model === 'CrmUser'
+        ? CrmPushService.sendToUsers([actor.id.toString()], pushPayload)
+        : PushService.send(actor.id, pushPayload);
+    send.catch(() => {});
+}
+
 async function handleGeofenceTransition(
     orgId: string,
-    user: { _id: any; name: string; avatar?: string | null },
+    actor: LocatorActor,
     previousPlaceId: string | undefined | null,
     nextPlace: { _id: any; name: string } | null,
     isLotTech = false,
 ) {
+    const user = { _id: actor.id, name: actor.name, avatar: actor.avatar };
     const prevId = previousPlaceId ? previousPlaceId.toString() : null;
     const nextId = nextPlace ? nextPlace._id.toString() : null;
     if (prevId === nextId) return;
@@ -336,6 +367,12 @@ async function handleGeofenceTransition(
                 userId: user._id.toString(), userName: user.name,
                 placeId: visit.placeId, placeName: visit.placeName,
                 exitedAt: visit.exitedAt, durationMin: visit.durationMin,
+            });
+            notifyActor(actor, {
+                title: '⚠️ You left the area',
+                body: `You left ${visit.placeName}. Admins have been notified.`,
+                tag: `locator-exit-self-${actor.id}`,
+                data: { url: '/team-pulse?tab=activity' },
             });
             if (isLotTech) {
                 notifyAdmins(orgId, {
@@ -372,6 +409,12 @@ async function handleGeofenceTransition(
         emitToOrg(orgId, 'locator:place_entered', {
             userId: user._id.toString(), userName: user.name,
             placeId: nextPlace._id, placeName: nextPlace.name, enteredAt: visit.enteredAt,
+        });
+        notifyActor(actor, {
+            title: '📍 Arrived',
+            body: `You're now at ${nextPlace.name}.`,
+            tag: `locator-arrival-self-${actor.id}`,
+            data: { url: '/team-pulse?tab=activity' },
         });
         if (isLotTech) {
             notifyAdmins(orgId, {
@@ -517,7 +560,17 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     }
 
     const previous = await EmployeeLocation.findOne({ userId: actor.id }).lean();
-    const nextPlace = await findNearestPlace(orgId, lat, lng);
+    // A fix this coarse (WiFi/cell-tower positioning, hundreds of meters off) must never be
+    // plotted as the person's actual position at all — see POSITION_ACCURACY_REJECT_M above.
+    const positionReliable = typeof accuracyM !== 'number' || accuracyM <= POSITION_ACCURACY_REJECT_M;
+    // A coarse fix must never be trusted to move someone in/out of a geofence either —
+    // undefined here means "unknown/unreliable", handled below by leaving currentPlaceId
+    // untouched rather than treating it as "not at any place". Implied false whenever
+    // positionReliable is false, since GEOFENCE_ACCURACY_THRESHOLD_M < POSITION_ACCURACY_REJECT_M.
+    const accuracyReliable = positionReliable && (typeof accuracyM !== 'number' || accuracyM <= GEOFENCE_ACCURACY_THRESHOLD_M);
+    const nextPlace = accuracyReliable
+        ? await resolveCurrentPlace(orgId, lat, lng, previous?.currentPlaceId?.toString())
+        : undefined;
     const isLotTech = await isMobileMonitoringDept(actor.organizationId, actor.department);
 
     const isNewSharingSession = !previous || previous.sharingState !== 'sharing';
@@ -538,12 +591,15 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             organizationId: orgId,
             userModel: actor.model,
             ...actorSnapshot(actor),
-            coords: { lat, lng },
-            heading, speedMph, accuracyM, batteryLevel, isCharging,
+            // coords is a required field — a brand-new doc (no previous fix to fall back to)
+            // always gets this ping's position no matter the accuracy, since a wrong dot is
+            // still better than no dot at all the very first time someone shares.
+            ...(positionReliable || !previous ? { coords: { lat, lng }, heading, speedMph } : {}),
+            accuracyM, batteryLevel, isCharging,
             connectivity: connectivity === 'offline' ? 'offline' : 'online',
             deviceType, connectionType, effectiveType, downlinkMbps,
             sharingState: 'sharing',
-            currentPlaceId: nextPlace?._id ?? null,
+            ...(accuracyReliable ? { currentPlaceId: nextPlace?._id ?? null } : {}),
             lastSeenAt: new Date(),
             stationaryAnchor, stationarySince,
             ...(isNewSharingSession ? { sharingSince: new Date() } : {}),
@@ -574,13 +630,15 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         stationarySince: updated.stationarySince,
     });
 
-    handleGeofenceTransition(
-        orgId,
-        { _id: actor.id, name: actor.name, avatar: actor.avatar },
-        previous?.currentPlaceId?.toString(),
-        nextPlace,
-        isLotTech,
-    ).catch(() => {});
+    if (accuracyReliable) {
+        handleGeofenceTransition(
+            orgId,
+            actor,
+            previous?.currentPlaceId?.toString(),
+            nextPlace ?? null,
+            isLotTech,
+        ).catch(() => {});
+    }
 
     if (isLotTech) {
         const nowMs = Date.now();
@@ -629,7 +687,10 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         await updateDrivingTelematics(orgId, updated.drivingSessionId, { _id: actor.id, name: actor.name } as IUser, lat, lng, speedMph);
     }
 
-    if (isDriving || sinceLastHistory >= HISTORY_THROTTLE_MS) {
+    // A rejected-accuracy fix must never enter the breadcrumb trail either — this is exactly
+    // what produced the reported "history jumps backward to a previous point": a bad fix
+    // recorded mid-trail, then map-matched/connected like a real waypoint.
+    if (positionReliable && (isDriving || sinceLastHistory >= HISTORY_THROTTLE_MS)) {
         LocationHistory.create({
             userId: actor.id,
             organizationId: orgId,
