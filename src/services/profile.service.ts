@@ -7,6 +7,7 @@ import activityService from './activity.service';
 import { storageService } from './storage.service';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import CrmUser from '../models/CrmUser.model';
+import Organization from '../models/Organization.model';
 import { getIO as getSupraSpaceIO } from '../socket/supraspace.socket';
 
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
@@ -84,12 +85,18 @@ const getProfile = async (userId: string) => {
     lastLogin: user.lastActive,
   };
 
+  const orgSubscription = orgId
+    ? (await Organization.findById(orgId).select('subscription'))?.subscription
+    : undefined;
+  const subscriptionTier = orgSubscription?.tier || 'suprah_go';
+
   const accountStatus = {
     isActive: user.isActive,
     isVerified: user.emailVerified,
-    isPremium: user.subscription?.plan !== 'free',
-    accountType: user.subscription?.plan === 'enterprise' ? 'enterprise' :
-      user.subscription?.plan === 'professional' ? 'premium' : 'standard',
+    isPremium: subscriptionTier !== 'suprah_go',
+    accountType:
+      subscriptionTier === 'suprah_origin' || subscriptionTier === 'suprah_premium_ultra' ? 'enterprise' :
+        subscriptionTier === 'suprah_premium_pro' || subscriptionTier === 'suprah_premium' ? 'premium' : 'standard',
     lastActive: user.lastActive,
     memberSince: user.createdAt,
     totalQuotes,

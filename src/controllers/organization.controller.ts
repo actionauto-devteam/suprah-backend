@@ -8,6 +8,7 @@ import mongoose from 'mongoose';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
+import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
     const organizations = await Organization.find({ status: { $ne: 'suspended' } })
@@ -137,6 +138,69 @@ export const updateOrganization = asyncHandler(async (req: Request, res: Respons
     res.status(200).json({
         success: true,
         data: org,
+    });
+});
+
+export const updateOwnOrganizationSubscription = asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { tier } = req.body;
+
+    if (!isValidTier(tier)) {
+        throw new ApiError(400, 'Invalid subscription tier');
+    }
+
+    const org = await Organization.findById(id);
+    if (!org) {
+        throw new ApiError(404, 'Organization not found');
+    }
+
+    const isSuperAdmin = req.user?.role === 'super_admin';
+    const isOrgAdmin = req.orgId === id && req.orgRole === 'admin';
+    const isOwner = org.ownerId.toString() === req.user?._id.toString();
+
+    if (!isSuperAdmin && !isOrgAdmin && !isOwner) {
+        throw new ApiError(403, 'Only the owner or admins can change the subscription plan');
+    }
+
+    if (!isPurchasableTier(tier) && !isSuperAdmin) {
+        throw new ApiError(403, 'This plan can only be assigned by Suprah staff');
+    }
+
+    const previousTier = org.subscription?.tier;
+
+    org.subscription = {
+        tier,
+        status: 'active',
+        seatLimit: TIER_SEAT_LIMITS[tier],
+        startedAt: previousTier === tier ? org.subscription?.startedAt ?? new Date() : new Date(),
+        updatedAt: new Date(),
+        updatedBy: req.user?._id as any,
+    };
+
+    await org.save();
+
+    await activityService.createActivity({
+        userId: (req.user?._id as any).toString(),
+        organizationId: org._id.toString(),
+        type: 'settings_change',
+        title: 'Subscription Plan Changed',
+        description: `${org.name} switched to ${TIER_LABELS[tier]}`,
+        metadata: { previousTier, newTier: tier },
+    });
+
+    notifyOrgAdmins(
+        id,
+        'system_announcement',
+        'Subscription Plan Changed',
+        `Your organization is now on ${TIER_LABELS[tier]}.`,
+        { previousTier, newTier: tier },
+    );
+
+    logger.info({ orgId: org._id, previousTier, newTier: tier }, 'Organization subscription changed');
+
+    res.status(200).json({
+        success: true,
+        data: org.subscription,
     });
 });
 
@@ -309,6 +373,7 @@ export default {
     createOrganization,
     getOrganization,
     updateOrganization,
+    updateOwnOrganizationSubscription,
     deleteOrganization,
     getMembers,
     removeMember

@@ -100,13 +100,6 @@ export interface IUser extends Document {
     driverRequests: boolean;
     crmActivity: boolean;
   };
-  subscription?: {
-    plan: "free" | "starter" | "professional" | "enterprise";
-    status: "active" | "inactive" | "trial" | "cancelled";
-    startDate: Date;
-    endDate?: Date;
-    features: string[];
-  };
   stripeConnectAccountId?: string;
   pushSubscriptions: IPushSubscription[];
   isPasswordMatch(password: string): Promise<boolean>;
@@ -314,30 +307,6 @@ const UserSchema = new Schema(
     stripeConnectAccountId: {
       type: String,
       trim: true,
-    },
-    subscription: {
-      plan: {
-        type: String,
-        enum: ['free', 'starter', 'professional', 'enterprise'],
-        default: 'free',
-      },
-      status: {
-        type: String,
-        enum: ['active', 'inactive', 'trial', 'cancelled'],
-        default: 'active',
-      },
-      startDate: {
-        type: Date,
-        default: Date.now,
-      },
-      endDate: {
-        type: Date,
-        default: null,
-      },
-      features: {
-        type: [String],
-        default: ['Basic Dashboard', 'Up to 10 Vehicles', 'Email Support'],
-      },
     },
     pushSubscriptions: [
       {

@@ -15,6 +15,7 @@ import logger from '../utils/logger';
 import { SystemLog } from '../models/SystemLog.model';
 
 import { metrics, getPercentile } from '../utils/metrics';
+import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const getAllOrganizations = asyncHandler(
   async (req: Request, res: Response) => {
@@ -467,33 +468,42 @@ export const activateOrganization = asyncHandler(
 export const updateOrganizationSubscription = asyncHandler(
   async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { plan, status } = req.body;
+    const { tier, status } = req.body;
 
     const org = await Organization.findById(id);
     if (!org) throw new ApiError(404, "Organization not found");
 
-    const owner = await User.findById(org.ownerId);
-    if (!owner) throw new ApiError(404, "Organization owner not found");
+    if (tier && !isValidTier(tier)) {
+      throw new ApiError(400, "Invalid subscription tier");
+    }
 
-    if (plan) owner.subscription!.plan = plan;
-    if (status) owner.subscription!.status = status;
+    const previousTier = org.subscription?.tier;
+    const adminUser = req.user as any;
 
-    await owner.save();
+    org.subscription = {
+      tier: tier || org.subscription?.tier || 'suprah_go',
+      status: status || org.subscription?.status || 'active',
+      seatLimit: tier ? TIER_SEAT_LIMITS[tier as keyof typeof TIER_SEAT_LIMITS] : org.subscription?.seatLimit ?? null,
+      startedAt: tier && tier !== previousTier ? new Date() : org.subscription?.startedAt ?? new Date(),
+      updatedAt: new Date(),
+      updatedBy: adminUser?._id,
+    };
+
+    await org.save();
 
     // Log activity
-    const adminUser = req.user as any;
     await activityService.logAdminAction(
       adminUser._id.toString(),
       undefined,
       'subscription_changed',
-      owner._id.toString(),
-      `Changed subscription for ${org.name} to plan: ${plan || 'N/A'}, status: ${status || 'N/A'}`
+      org._id.toString(),
+      `Changed subscription for ${org.name} to plan: ${tier ? TIER_LABELS[tier as keyof typeof TIER_LABELS] : previousTier}, status: ${status || org.subscription.status}`
     );
 
     res.json(
       new ApiResponse(
         200,
-        owner.subscription,
+        org.subscription,
         "Subscription updated successfully",
       ),
     );
@@ -503,21 +513,14 @@ export const updateOrganizationSubscription = asyncHandler(
 // --- FINANCIALS ---
 
 export const getFinancialStats = asyncHandler(async (req: Request, res: Response) => {
-  const users = await User.find({ "subscription.status": "active" }).select(
-    "subscription.plan",
+  const orgs = await Organization.find({ "subscription.status": "active" }).select(
+    "subscription.tier",
   );
 
   let mrr = 0;
-  const planPrices: Record<string, number> = {
-    free: 0,
-    starter: 29,
-    professional: 99,
-    enterprise: 299,
-  };
-
-  users.forEach((u) => {
-    const plan = u.subscription?.plan || "free";
-    mrr += planPrices[plan] || 0;
+  orgs.forEach((o) => {
+    const tier = o.subscription?.tier || "suprah_go";
+    mrr += TIER_PRICES[tier] || 0;
   });
 
   res.json(
@@ -526,7 +529,7 @@ export const getFinancialStats = asyncHandler(async (req: Request, res: Response
       {
         mrr,
         totalRevenue: mrr * 12,
-        activeSubscriptions: users.length,
+        activeSubscriptions: orgs.length,
       },
       "Financial stats fetched successfully",
     ),

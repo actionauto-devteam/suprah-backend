@@ -1,5 +1,21 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export type SubscriptionTier =
+    | 'suprah_go'
+    | 'suprah_premium'
+    | 'suprah_premium_pro'
+    | 'suprah_premium_ultra'
+    | 'suprah_origin';
+
+export interface IOrganizationSubscription {
+    tier: SubscriptionTier;
+    status: 'active' | 'past_due' | 'cancelled';
+    seatLimit: number | null;
+    startedAt: Date;
+    updatedAt: Date;
+    updatedBy?: mongoose.Types.ObjectId;
+}
+
 export interface IOrganization extends Document {
     name: string;
     slug: string;
@@ -8,6 +24,7 @@ export interface IOrganization extends Document {
     logoUrl?: string;
     metadata?: any;
     status: 'active' | 'suspended' | 'archived';
+    subscription: IOrganizationSubscription;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -45,6 +62,34 @@ const OrganizationSchema = new Schema<IOrganization>(
             type: String,
             enum: ['active', 'suspended', 'archived'],
             default: 'active',
+        },
+        subscription: {
+            tier: {
+                type: String,
+                enum: ['suprah_go', 'suprah_premium', 'suprah_premium_pro', 'suprah_premium_ultra', 'suprah_origin'],
+                default: 'suprah_go',
+            },
+            status: {
+                type: String,
+                enum: ['active', 'past_due', 'cancelled'],
+                default: 'active',
+            },
+            seatLimit: {
+                type: Number,
+                default: 5,
+            },
+            startedAt: {
+                type: Date,
+                default: Date.now,
+            },
+            updatedAt: {
+                type: Date,
+                default: Date.now,
+            },
+            updatedBy: {
+                type: Schema.Types.ObjectId,
+                ref: 'User',
+            },
         },
     },
     {

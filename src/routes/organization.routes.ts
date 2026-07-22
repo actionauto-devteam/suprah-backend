@@ -10,6 +10,7 @@ import {
     getOrganization,
     removeMember,
     updateOrganization,
+    updateOwnOrganizationSubscription,
 } from '../controllers/organization.controller';
 
 const router = express.Router();
@@ -21,6 +22,7 @@ router.use(auth());
 router.post('/', authorize(['admin', 'super_admin']), createOrganization);
 router.get('/:id', getOrganization);
 router.patch('/:id', requireAdmin, updateOrganization);
+router.patch('/:id/subscription', requireAdmin, updateOwnOrganizationSubscription);
 router.delete('/:id', authorize(['super_admin']), deleteOrganization);
 
 router.get('/:id/members', getMembers);
