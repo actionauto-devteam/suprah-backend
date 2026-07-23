@@ -806,12 +806,20 @@ const stopSharing = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, { sharingState: 'off_duty' }, 'Location sharing stopped'));
 });
 
-/** Higher = "more alive" — actively sharing beats paused beats off-duty, and within the same
- * state the more recently-seen row wins. Used to pick a winner when the same human shows up
- * twice (see getActiveEmployeeLocations). */
+/** Higher = "more alive" — actively sharing beats paused beats off-duty. Used to pick a winner
+ * when the same human shows up twice (see getActiveEmployeeLocations). Tie-break is the linked
+ * account's model, NOT raw lastSeenAt recency: when someone has both a User and CrmUser account
+ * simultaneously sharing (common since consent syncs across both, see syncLinkedAccountConsent),
+ * two independent ~30s ping loops race, and recency-based tie-breaking made the "winning" row —
+ * and therefore the userId the frontend keys markers by — flip between the two accounts almost
+ * every poll, each flip swapping in the OTHER device's real position. That read as the person's
+ * marker teleporting/glitching. Preferring the User row deterministically means the winner only
+ * changes on a real state transition (one account actually stops sharing), never on a recency
+ * coin-flip between two simultaneously-live rows. */
 function locationLiveness(l: any): number {
     const stateRank = l.sharingState === 'sharing' ? 2 : l.sharingState?.startsWith('paused') ? 1 : 0;
-    return stateRank * 1e13 + new Date(l.lastSeenAt || 0).getTime();
+    const modelRank = l.userModel === 'User' ? 1 : 0;
+    return stateRank * 1e13 + modelRank * 1e12 + new Date(l.lastSeenAt || 0).getTime();
 }
 
 const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Response) => {
