@@ -173,11 +173,13 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === 'break-in'  && hasActiveBreak)   throw new ApiError(400, 'You are already on break');
   if (type === 'break-out' && !hasActiveBreak)  throw new ApiError(400, 'No active break to end');
 
-  // Location sharing is required to clock in — no more pre-shift opt-out. Applies to
-  // every department, both account models. Mid-shift, it can be paused/resumed freely
-  // from TimeProof itself (locator.controller.ts's setLocationConsent/handleLocationTurnedOff)
-  // without affecting this gate, since that only runs at the moment of time-in.
-  if (type === 'time-in') {
+  // Location sharing is required to clock in — no more pre-shift opt-out. Covers both
+  // account models. Mid-shift, it can be paused/resumed freely from TimeProof itself
+  // (locator.controller.ts's setLocationConsent/handleLocationTurnedOff) without
+  // affecting this gate, since that only runs at the moment of time-in. Departments
+  // exempted via the "Require Location for TimeProof" toggle (Settings → Departments)
+  // skip this entirely — same switch that also silences the Shift Alerts triggers.
+  if (type === 'time-in' && await isLocationRequiredForTimeproof(actor.orgId, actor.department)) {
     const consentDoc = actor.model === 'User'
       ? await User.findById(actor.id).select('locationConsent').lean()
       : await CrmUser.findById(actor.id).select('locationConsent').lean();

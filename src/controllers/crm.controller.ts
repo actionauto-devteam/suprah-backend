@@ -232,11 +232,17 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
   if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
 
-  // Location sharing is required to clock in — no more pre-shift opt-out. Applies to
-  // every department. Mid-shift, it can be paused/resumed freely from TimeProof itself
-  // (locator.controller.ts's setLocationConsent/handleLocationTurnedOff) without
-  // affecting this gate, since that only runs at the moment of time-in.
-  if (type === "time-in" && !user.locationConsent?.granted) {
+  // Location sharing is required to clock in — no more pre-shift opt-out. Mid-shift,
+  // it can be paused/resumed freely from TimeProof itself (locator.controller.ts's
+  // setLocationConsent/handleLocationTurnedOff) without affecting this gate, since
+  // that only runs at the moment of time-in. Departments exempted via the "Require
+  // Location for TimeProof" toggle (Settings → Departments) skip this entirely —
+  // same switch that also silences the Shift Alerts triggers for them.
+  if (
+    type === "time-in" &&
+    !user.locationConsent?.granted &&
+    (await isLocationRequiredForTimeproof(user.organizationId?.toString(), user.department))
+  ) {
     throw new ApiError(400, "Location sharing must be turned on before you can clock in.");
   }
 
