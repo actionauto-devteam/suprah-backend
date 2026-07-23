@@ -84,9 +84,10 @@ function slugifyKey(label: string): string {
 const createDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
-  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept } = req.body as {
+  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof } = req.body as {
     label?: string; color?: string;
     isMobileMonitoringDept?: boolean; isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
+    locationRequiredForTimeproof?: boolean;
   };
 
   if (!label?.trim()) throw new ApiError(400, 'Department label is required');
@@ -107,6 +108,7 @@ const createDepartment = asyncHandler(async (req: Request, res: Response) => {
     isMobileMonitoringDept: !!isMobileMonitoringDept,
     isTimeEditExempt: !!isTimeEditExempt,
     isMandatoryLocationDept: !!isMandatoryLocationDept,
+    locationRequiredForTimeproof: locationRequiredForTimeproof !== false,
     isActive: true,
     sortOrder: count,
   });
@@ -119,9 +121,10 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
   const { id } = req.params;
-  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept, isActive, isDefault } = req.body as {
+  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, isActive, isDefault } = req.body as {
     label?: string; color?: string; isActive?: boolean; isDefault?: boolean;
     isMobileMonitoringDept?: boolean; isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
+    locationRequiredForTimeproof?: boolean;
   };
 
   const department = await Department.findOne({ _id: id, organizationId: orgId });
@@ -132,6 +135,7 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
   if (isMobileMonitoringDept !== undefined) department.isMobileMonitoringDept = !!isMobileMonitoringDept;
   if (isTimeEditExempt !== undefined) department.isTimeEditExempt = !!isTimeEditExempt;
   if (isMandatoryLocationDept !== undefined) department.isMandatoryLocationDept = !!isMandatoryLocationDept;
+  if (locationRequiredForTimeproof !== undefined) department.locationRequiredForTimeproof = !!locationRequiredForTimeproof;
   if (isActive !== undefined) department.isActive = !!isActive;
   if (isDefault !== undefined) {
     if (isDefault) {

@@ -19,7 +19,7 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForTimeproof } from "../config/departmentMonitoring";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
@@ -279,9 +279,17 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     EmployeeLocation.updateOne({ userId: user._id }, { connectionLostNotifiedAt: null }).catch(() => {});
   }
 
+  // Per-department kill switch for the whole Shift Alerts location-monitoring
+  // feature — admins can exempt a department entirely via the "Require
+  // Location for TimeProof" toggle in Settings → Departments. Computed once
+  // and shared by both triggers below.
+  const locationMonitoringActive = user.organizationId
+    ? await isLocationRequiredForTimeproof(user.organizationId.toString(), user.department)
+    : true;
+
   // Shift Alerts: started a shift without location sharing on — fire-and-forget,
   // must not delay the clock-in response.
-  if (type === "time-in" && !user.locationConsent?.granted && user.organizationId) {
+  if (type === "time-in" && !user.locationConsent?.granted && user.organizationId && locationMonitoringActive) {
     fireShiftAlert({
       organizationId: user.organizationId.toString(),
       targetUserId: user._id.toString(),
@@ -298,7 +306,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // Turning it off WHILE on break is expected/private (handled separately in
   // locator.controller.ts's handleLocationTurnedOff) — this only fires once
   // they're back to active work and it's still off.
-  if (type === "break-out" && !user.locationConsent?.granted && user.organizationId) {
+  if (type === "break-out" && !user.locationConsent?.granted && user.organizationId && locationMonitoringActive) {
     fireShiftAlert({
       organizationId: user.organizationId.toString(),
       targetUserId: user._id.toString(),
@@ -542,6 +550,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     search,
     role,
     status,
+    department,
     dateJoined,
     sortBy = 'createdAt',
     sortOrder = 'desc',
@@ -573,6 +582,11 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     filter.isActive = true;
   } else if (statusValue === 'inactive') {
     filter.isActive = false;
+  }
+
+  const departmentValue = typeof department === 'string' ? department.trim() : '';
+  if (departmentValue && departmentValue !== 'all') {
+    filter.department = departmentValue;
   }
 
   const dateJoinedValue = typeof dateJoined === 'string' ? dateJoined.toLowerCase() : '';

@@ -9,7 +9,7 @@ import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
-import { isMobileMonitoringDept } from '../config/departmentMonitoring';
+import { isMobileMonitoringDept, isLocationRequiredForTimeproof } from '../config/departmentMonitoring';
 import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
@@ -228,6 +228,8 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // Covers Lot Tech (User model) and any other department on this timeclock.
   if ((type === 'time-in' || type === 'break-out') && actor.orgId) {
     (async () => {
+      const locationMonitoringActive = await isLocationRequiredForTimeproof(actor.orgId, actor.department);
+      if (!locationMonitoringActive) return;
       const doc = actor.model === 'User'
         ? await User.findById(actor.id).select('locationConsent').lean()
         : await CrmUser.findById(actor.id).select('locationConsent').lean();
@@ -377,21 +379,21 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
 
   const { todayMDTStr, today: todayMDTStartUTC } = getTodayMDTWindow();
 
-  // Total break seconds in current session
+  // Total break seconds in current session — MUST include the CURRENTLY
+  // OPEN break (if on break right now), not just completed ones. The old
+  // hand-rolled loop here only summed closed break-in/break-out pairs,
+  // silently skipping the live break entirely — so wallClockRenderedSeconds
+  // below kept counting UP through the whole break as if the person were
+  // still working, then jumped once they resumed (closing the break finally
+  // made it count). buildBreakSessions already handles the open-break case
+  // correctly (duration computed up to Date.now()) — same approach
+  // crmTimeproof.controller.ts's getShiftState already uses.
   const currentSessionStart = isOnShift && shiftStartedAt ? new Date(shiftStartedAt) : null;
   const breakLogs = logs
     .filter(l => (l.type === 'break-in' || l.type === 'break-out') && (!currentSessionStart || new Date(l.timestamp) >= currentSessionStart))
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  let totalBreakSeconds = 0;
-  let currentBreakIn: Date | null = null;
-  for (const log of breakLogs) {
-    if (log.type === 'break-in') currentBreakIn = new Date(log.timestamp);
-    else if (log.type === 'break-out' && currentBreakIn) {
-      totalBreakSeconds += (new Date(log.timestamp).getTime() - currentBreakIn.getTime()) / 1000;
-      currentBreakIn = null;
-    }
-  }
+  const totalBreakSeconds = buildBreakSessions(breakLogs).reduce((sum, b) => sum + b.duration, 0);
 
   // Today's completed worked seconds
   const allSessions = buildSessions(logs);

@@ -5,6 +5,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
+import { isLocationRequiredForTimeproof } from '../config/departmentMonitoring';
 
 /**
  * The existing Lot-Tech-only offline check in locator.controller.ts's
@@ -78,10 +79,14 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
     // compatible with each other) — branch and call each concretely instead.
     const userDoc = (
       loc.userModel === 'User'
-        ? await User.findById(loc.userId).select('locationConsent fullName organizationId').lean()
-        : await CrmUser.findById(loc.userId).select('locationConsent fullName organizationId').lean()
+        ? await User.findById(loc.userId).select('locationConsent fullName organizationId department').lean()
+        : await CrmUser.findById(loc.userId).select('locationConsent fullName organizationId department').lean()
     ) as any;
     if (!userDoc) continue;
+
+    // Per-department kill switch for the whole feature (Settings → Departments
+    // → "Require Location for TimeProof").
+    if (!(await isLocationRequiredForTimeproof((loc.organizationId as any)?.toString(), userDoc.department))) continue;
 
     // Consent still granted (i.e. they never explicitly turned it off —
     // that path is handled immediately by locator.controller.ts's

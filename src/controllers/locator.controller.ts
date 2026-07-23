@@ -15,7 +15,7 @@ import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
 import { PushService } from '../services/push.service';
-import { isMobileMonitoringDept } from '../config/departmentMonitoring';
+import { isMobileMonitoringDept, isLocationRequiredForTimeproof } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
@@ -135,6 +135,7 @@ async function syncLinkedAccountConsent(actor: LocatorActor, granted: boolean, d
  */
 async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Promise<void> {
     if (!orgId) return;
+    if (!(await isLocationRequiredForTimeproof(orgId, actor.department))) return;
     const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
     if (!isOnShift || isOnBreak) return;
 
