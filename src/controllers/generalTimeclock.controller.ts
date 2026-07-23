@@ -126,6 +126,13 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
     : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
+  // Frontend reads this so the "Start Shift" flow can skip requesting a GPS
+  // fix entirely for an exempted department — see requestLocationForShiftStart
+  // in timeproof-clock/page.tsx. Without this, the client-side gate had no
+  // way to know about the backend's per-department exemption and kept
+  // blocking exempted users on a failed/denied location prompt.
+  const locationRequiredForTimeproof = await isLocationRequiredForTimeproof(actor.orgId, actor.department);
+
   res.json(new ApiResponse(200, {
     _id: actor.id,
     fullName: actor.fullName,
@@ -136,6 +143,7 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
     department: actor.department,
     userModel: actor.model,
     todayTimeLogs,
+    locationRequiredForTimeproof,
   }, 'User fetched'));
 });
 

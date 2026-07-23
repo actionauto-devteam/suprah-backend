@@ -162,6 +162,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const personalInfo = await getMainPersonalInfoByEmail(user.email);
   const mainMonitorOnly = await isMainMonitorOnlyDept(user.organizationId?.toString(), user.department);
+  const locationRequiredForTimeproof = await isLocationRequiredForTimeproof(user.organizationId?.toString(), user.department);
 
   const userData = {
     _id: user._id,
@@ -181,6 +182,12 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     // Tray-app reads this to decide whether to restrict screenshot capture to
     // the primary monitor only (Web Dev department) — see isMainMonitorOnlyDept.
     mainMonitorOnly,
+    // Frontend reads this so the "Start Shift" flow can skip requesting a GPS
+    // fix entirely for an exempted department — see requestLocationForShiftStart
+    // in timeproof-clock/page.tsx. Without this, the client-side gate had no
+    // way to know about the backend's per-department exemption and kept
+    // blocking exempted users on a failed/denied location prompt.
+    locationRequiredForTimeproof,
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
