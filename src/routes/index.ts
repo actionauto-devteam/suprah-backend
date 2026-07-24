@@ -66,6 +66,7 @@ import calendarRoutes from "./calendar.routes";
 import whatsNewRoute from "./whatsNew.route";
 import internalTrayRoute from "./internalTray.route";
 import mailRoute from "./mail.route";
+import pulse360Route from "./pulse360.route";
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -127,6 +128,12 @@ const defaultRoutes = [
   {
   path: "/crm/whats-new",
   route: whatsNewRoute,
+  },
+  // Must stay ABOVE "/crm" — crm.route.ts owns "/users/:id", which would
+  // otherwise capture "/crm/pulse360/users/:id/health".
+  {
+    path: "/crm/pulse360",
+    route: pulse360Route,
   },
   {
     path: "/mail",
