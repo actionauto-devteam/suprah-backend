@@ -15,7 +15,7 @@ import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
 import { PushService } from '../services/push.service';
 import CrmPushService from '../services/crmPush.service';
-import { isMobileMonitoringDept, isLocationRequiredForTimeproof } from '../config/departmentMonitoring';
+import { isMobileMonitoringDept, isLocationRequiredForUser } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
@@ -51,6 +51,7 @@ type LocatorActor = {
     jobTitle?: string;
     locationConsent?: { granted?: boolean; grantedAt?: Date; deviceHint?: string };
     locationSharingOptOut?: boolean;
+    locationRequiredOverride?: 'default' | 'required' | 'exempt';
 };
 
 function getLocatorActor(req: Request): LocatorActor {
@@ -74,6 +75,7 @@ function getLocatorActor(req: Request): LocatorActor {
         jobTitle: anyDoc.personalInfo?.jobTitle,
         locationConsent: anyDoc.locationConsent,
         locationSharingOptOut: !!anyDoc.locationSharingOptOut,
+        locationRequiredOverride: anyDoc.locationRequiredOverride,
     };
 }
 
@@ -135,7 +137,7 @@ async function syncLinkedAccountConsent(actor: LocatorActor, granted: boolean, d
  */
 async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Promise<void> {
     if (!orgId) return;
-    if (!(await isLocationRequiredForTimeproof(orgId, actor.department))) return;
+    if (!(await isLocationRequiredForUser(orgId, actor.department, actor.locationRequiredOverride))) return;
     const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
     if (!isOnShift || isOnBreak) return;
 

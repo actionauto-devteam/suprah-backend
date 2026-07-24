@@ -39,6 +39,7 @@ export interface ICrmUser extends Document {
   department?: string;
   screenshotExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
+  locationRequiredOverride?: 'default' | 'required' | 'exempt';
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -193,6 +194,16 @@ const CrmUserSchema = new Schema<ICrmUser>(
       // account owner always sees their own screenshots unblurred.
       type: Boolean,
       default: false,
+    },
+    locationRequiredOverride: {
+      // Per-account exception on top of the department-level "Require
+      // Location for TimeProof" toggle — 'default' follows whatever the
+      // user's department is set to; 'required'/'exempt' force the outcome
+      // for this one person regardless of their department's setting. See
+      // isLocationRequiredForUser in config/departmentMonitoring.ts.
+      type: String,
+      enum: ['default', 'required', 'exempt'],
+      default: 'default',
     },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },

@@ -9,7 +9,7 @@ import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
-import { isMobileMonitoringDept, isLocationRequiredForTimeproof } from '../config/departmentMonitoring';
+import { isMobileMonitoringDept, isLocationRequiredForUser } from '../config/departmentMonitoring';
 import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
@@ -42,6 +42,7 @@ interface TimeclockActor {
   avatar?: string;
   role: string;
   department?: string;
+  locationRequiredOverride?: 'default' | 'required' | 'exempt';
 }
 
 function getActor(req: Request): TimeclockActor {
@@ -59,6 +60,7 @@ function getActor(req: Request): TimeclockActor {
       avatar: u.avatar,
       role: u.role,
       department: u.personalInfo?.department,
+      locationRequiredOverride: u.locationRequiredOverride,
     };
   }
 
@@ -73,6 +75,7 @@ function getActor(req: Request): TimeclockActor {
       avatar: c.avatar,
       role: c.role,
       department: c.department,
+      locationRequiredOverride: c.locationRequiredOverride,
     };
   }
 
@@ -131,7 +134,7 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
   // in timeproof-clock/page.tsx. Without this, the client-side gate had no
   // way to know about the backend's per-department exemption and kept
   // blocking exempted users on a failed/denied location prompt.
-  const locationRequiredForTimeproof = await isLocationRequiredForTimeproof(actor.orgId, actor.department);
+  const locationRequiredForTimeproof = await isLocationRequiredForUser(actor.orgId, actor.department, actor.locationRequiredOverride);
 
   res.json(new ApiResponse(200, {
     _id: actor.id,
@@ -187,7 +190,9 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // affecting this gate, since that only runs at the moment of time-in. Departments
   // exempted via the "Require Location for TimeProof" toggle (Settings → Departments)
   // skip this entirely — same switch that also silences the Shift Alerts triggers.
-  if (type === 'time-in' && await isLocationRequiredForTimeproof(actor.orgId, actor.department)) {
+  // A user's own locationRequiredOverride can flip this either way regardless
+  // of their department.
+  if (type === 'time-in' && await isLocationRequiredForUser(actor.orgId, actor.department, actor.locationRequiredOverride)) {
     const consentDoc = actor.model === 'User'
       ? await User.findById(actor.id).select('locationConsent').lean()
       : await CrmUser.findById(actor.id).select('locationConsent').lean();
@@ -252,7 +257,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // Covers Lot Tech (User model) and any other department on this timeclock.
   if (type === 'break-out' && actor.orgId) {
     (async () => {
-      const locationMonitoringActive = await isLocationRequiredForTimeproof(actor.orgId, actor.department);
+      const locationMonitoringActive = await isLocationRequiredForUser(actor.orgId, actor.department, actor.locationRequiredOverride);
       if (!locationMonitoringActive) return;
       const doc = actor.model === 'User'
         ? await User.findById(actor.id).select('locationConsent').lean()

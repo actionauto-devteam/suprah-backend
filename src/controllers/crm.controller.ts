@@ -19,7 +19,7 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForTimeproof } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser } from "../config/departmentMonitoring";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
@@ -162,7 +162,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const personalInfo = await getMainPersonalInfoByEmail(user.email);
   const mainMonitorOnly = await isMainMonitorOnlyDept(user.organizationId?.toString(), user.department);
-  const locationRequiredForTimeproof = await isLocationRequiredForTimeproof(user.organizationId?.toString(), user.department);
+  const locationRequiredForTimeproof = await isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride);
 
   const userData = {
     _id: user._id,
@@ -244,11 +244,12 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // setLocationConsent/handleLocationTurnedOff) without affecting this gate, since
   // that only runs at the moment of time-in. Departments exempted via the "Require
   // Location for TimeProof" toggle (Settings → Departments) skip this entirely —
-  // same switch that also silences the Shift Alerts triggers for them.
+  // same switch that also silences the Shift Alerts triggers for them. A user's own
+  // locationRequiredOverride can flip this either way regardless of their department.
   if (
     type === "time-in" &&
     !user.locationConsent?.granted &&
-    (await isLocationRequiredForTimeproof(user.organizationId?.toString(), user.department))
+    (await isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride))
   ) {
     throw new ApiError(400, "Location sharing must be turned on before you can clock in.");
   }
@@ -302,10 +303,11 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
 
   // Per-department kill switch for the whole Shift Alerts location-monitoring
   // feature — admins can exempt a department entirely via the "Require
-  // Location for TimeProof" toggle in Settings → Departments. Computed once
-  // and shared by both triggers below.
+  // Location for TimeProof" toggle in Settings → Departments, or override it
+  // for this one account specifically. Computed once and shared by both
+  // triggers below.
   const locationMonitoringActive = user.organizationId
-    ? await isLocationRequiredForTimeproof(user.organizationId.toString(), user.department)
+    ? await isLocationRequiredForUser(user.organizationId.toString(), user.department, user.locationRequiredOverride)
     : true;
 
   // Shift Alerts: started a shift without location sharing on — fire-and-forget,
@@ -663,7 +665,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -704,7 +706,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -750,6 +752,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (screenshotExempt !== undefined) {
     user.screenshotExempt = !!screenshotExempt;
+  }
+
+  if (locationRequiredOverride !== undefined && ['default', 'required', 'exempt'].includes(locationRequiredOverride)) {
+    user.locationRequiredOverride = locationRequiredOverride;
   }
 
   await user.save({ validateModifiedOnly: true });

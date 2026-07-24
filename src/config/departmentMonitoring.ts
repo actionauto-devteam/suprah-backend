@@ -50,6 +50,27 @@ export async function isLocationRequiredForTimeproof(
   return entry ? entry.locationRequiredForTimeproof : true;
 }
 
+export type LocationRequirementOverride = 'default' | 'required' | 'exempt';
+
+/**
+ * Layers a per-user exception on top of isLocationRequiredForTimeproof, for
+ * the case where one specific person needs the opposite of what their
+ * department is set to (e.g. required even though their department is
+ * exempted, or vice versa) — set via the "Location Requirement" control on
+ * the Edit User modal. 'default' (the normal case for everyone) defers
+ * entirely to the department-level toggle; 'required'/'exempt' short-circuit
+ * it for this one account.
+ */
+export async function isLocationRequiredForUser(
+  organizationId: string | undefined | null,
+  department: string | undefined | null,
+  override?: LocationRequirementOverride | null
+): Promise<boolean> {
+  if (override === 'required') return true;
+  if (override === 'exempt') return false;
+  return isLocationRequiredForTimeproof(organizationId, department);
+}
+
 // Web Dev only, by explicit request — devs commonly run multiple monitors for
 // work unrelated to what TimeProof needs to verify, and screenshotting all of
 // them captures more than intended. Hardcoded rather than a new admin-facing

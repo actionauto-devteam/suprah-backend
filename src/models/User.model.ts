@@ -72,6 +72,7 @@ export interface IUser extends Document {
     deviceHint?: string;
   };
   locationSharingOptOut?: boolean;
+  locationRequiredOverride?: 'default' | 'required' | 'exempt';
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -249,6 +250,16 @@ const UserSchema = new Schema(
     locationSharingOptOut: {
       type: Boolean,
       default: false,
+    },
+    locationRequiredOverride: {
+      // Per-account exception on top of the department-level "Require
+      // Location for TimeProof" toggle — 'default' follows whatever the
+      // user's department is set to; 'required'/'exempt' force the outcome
+      // for this one person regardless of their department's setting. See
+      // isLocationRequiredForUser in config/departmentMonitoring.ts.
+      type: String,
+      enum: ['default', 'required', 'exempt'],
+      default: 'default',
     },
     lastPasswordChange: {
       type: Date,
