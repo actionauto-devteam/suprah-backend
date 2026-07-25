@@ -15,6 +15,8 @@ const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() ||
 
 const VALID_ITEM_KINDS = ['feature', 'improvement', 'fix', 'announcement'] as const;
 
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /* ── Permission helpers ─────────────────────────────────────────────────────
  * Default: role === 'admin' can post/manage. A WhatsNewPermission doc with
  * revoked=true removes that right for a specific admin (keyed by email so it
@@ -84,7 +86,16 @@ const sanitizeItems = (rawItems: unknown): IWhatsNewItem[] => {
  * GET /api/crm/whats-new
  * Global — no organization filter, by design. Returns releases newest-first
  * with a per-user isRead flag, the user's unread count, and whether the
- * caller may manage posts (drives the admin UI on the frontend). */
+ * caller may manage posts (drives the admin UI on the frontend).
+ *
+ * Query params: search (title/description/item text), kind (release type —
+ * matched against any item's kind), author (release author name/email,
+ * partial match), sort (newest|oldest|unread — unread puts the user's unread
+ * releases first, newest-first within each group), dateFrom/dateTo
+ * (publishedAt range, inclusive). All server-side so pagination stays
+ * correct against the filtered set, not just the current page. */
+
+const VALID_SORTS = ['newest', 'oldest', 'unread'] as const;
 
 const getReleases = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser;
@@ -94,25 +105,84 @@ const getReleases = asyncHandler(async (req: Request, res: Response) => {
   const limitNum = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
   const skip = (pageNum - 1) * limitNum;
 
-  const [releases, total, reads, manage] = await Promise.all([
-    WhatsNewRelease.find({})
-      .sort({ publishedAt: -1, _id: -1 })
-      .skip(skip)
-      .limit(limitNum)
-      .lean(),
-    WhatsNewRelease.countDocuments({}),
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const kind = typeof req.query.kind === 'string' ? req.query.kind.trim() : '';
+  const author = typeof req.query.author === 'string' ? req.query.author.trim() : '';
+  const sort = VALID_SORTS.includes(req.query.sort as any) ? (req.query.sort as string) : 'newest';
+  const dateFrom = typeof req.query.dateFrom === 'string' ? new Date(req.query.dateFrom) : null;
+  const dateTo = typeof req.query.dateTo === 'string' ? new Date(req.query.dateTo) : null;
+
+  const match: Record<string, unknown> = {};
+  if (kind && VALID_ITEM_KINDS.includes(kind as any)) {
+    match['items.kind'] = kind;
+  }
+  if (author) {
+    const re = new RegExp(escapeRegex(author), 'i');
+    match.$or = [{ 'author.fullName': re }, { 'author.email': re }];
+  }
+  if (search) {
+    const re = new RegExp(escapeRegex(search), 'i');
+    const searchOr = [
+      { title: re },
+      { description: re },
+      { 'items.title': re },
+      { 'items.description': re },
+    ];
+    // Combine with the author $or (if present) as an AND of two OR-groups.
+    if (match.$or) {
+      match.$and = [{ $or: match.$or }, { $or: searchOr }];
+      delete match.$or;
+    } else {
+      match.$or = searchOr;
+    }
+  }
+  if ((dateFrom && !Number.isNaN(dateFrom.getTime())) || (dateTo && !Number.isNaN(dateTo.getTime()))) {
+    const range: Record<string, Date> = {};
+    if (dateFrom && !Number.isNaN(dateFrom.getTime())) range.$gte = dateFrom;
+    if (dateTo && !Number.isNaN(dateTo.getTime())) range.$lte = dateTo;
+    match.publishedAt = range;
+  }
+
+  const [reads, manage] = await Promise.all([
     WhatsNewRead.find({ userId: user._id }).select('releaseId').lean(),
     canManage(user),
   ]);
+  const readIds = reads.map((r) => r.releaseId);
+  const readIdSet = new Set(readIds.map((id) => id.toString()));
 
-  const readIds = new Set(reads.map((r) => r.releaseId.toString()));
-  const enriched = releases.map((r) => ({
+  const sortStage =
+    sort === 'oldest'
+      ? { publishedAt: 1 as const, _id: 1 as const }
+      : sort === 'unread'
+        ? { isReadForSort: 1 as const, publishedAt: -1 as const, _id: -1 as const }
+        : { publishedAt: -1 as const, _id: -1 as const };
+
+  const pipeline: any[] = [{ $match: match }];
+  if (sort === 'unread') {
+    pipeline.push({ $addFields: { isReadForSort: { $in: ['$_id', readIds] } } });
+  }
+  pipeline.push(
+    { $sort: sortStage },
+    {
+      $facet: {
+        data: [{ $skip: skip }, { $limit: limitNum }],
+        totalCount: [{ $count: 'count' }],
+      },
+    },
+  );
+
+  const [result] = await WhatsNewRelease.aggregate(pipeline);
+  const releases = result?.data ?? [];
+  const total = result?.totalCount?.[0]?.count ?? 0;
+
+  const enriched = releases.map((r: any) => ({
     ...r,
-    isRead: readIds.has(r._id.toString()),
+    isRead: readIdSet.has(r._id.toString()),
   }));
 
-  // Unread = all releases the user has never opened (not just this page).
-  const unreadCount = Math.max(total - readIds.size, 0);
+  // Unread = all releases the user has never opened platform-wide (not scoped
+  // to the current filters/page) — this drives the sidebar badge.
+  const unreadCount = Math.max((await WhatsNewRelease.countDocuments({})) - readIdSet.size, 0);
 
   res.json(
     new ApiResponse(
@@ -125,7 +195,7 @@ const getReleases = asyncHandler(async (req: Request, res: Response) => {
           page: pageNum,
           limit: limitNum,
           total,
-          totalPages: Math.ceil(total / limitNum),
+          totalPages: Math.max(Math.ceil(total / limitNum), 1),
         },
       },
       'Releases fetched',
