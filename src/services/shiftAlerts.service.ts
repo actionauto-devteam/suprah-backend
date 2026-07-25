@@ -12,10 +12,10 @@ const SYSTEM_SENDER_NAME = 'Shift Alerts';
 const SYSTEM_SENDER_USERNAME = 'shift-alerts';
 
 // The sound file the frontend plays for these notifications specifically —
-// see public/sound/warning_sound.wav. Kept as a named constant (not sprinkled
+// see public/sounds/warning_sound.wav. Kept as a named constant (not sprinkled
 // as a literal across every call site) since the duration/behavior is still
 // expected to change later.
-const SHIFT_ALERT_SOUND_FILE = '/sound/warning_sound.wav';
+const SHIFT_ALERT_SOUND_FILE = '/sounds/warning_sound.wav';
 
 /**
  * Finds or creates a dedicated, inactive "system" CrmUser used as the sender
