@@ -19,7 +19,7 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept } from "../config/departmentMonitoring";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
@@ -163,6 +163,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   const personalInfo = await getMainPersonalInfoByEmail(user.email);
   const mainMonitorOnly = await isMainMonitorOnlyDept(user.organizationId?.toString(), user.department);
   const locationRequiredForTimeproof = await isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride);
+  const idleDetectionExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
 
   const userData = {
     _id: user._id,
@@ -188,6 +189,9 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     // way to know about the backend's per-department exemption and kept
     // blocking exempted users on a failed/denied location prompt.
     locationRequiredForTimeproof,
+    // Tray-app reads this to skip idle detection entirely (Web Dev
+    // department) — see isIdleDetectionExemptDept. Hidden field, no UI.
+    idleDetectionExempt,
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));

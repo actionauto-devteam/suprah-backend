@@ -87,3 +87,18 @@ export async function isMainMonitorOnlyDept(
   const key = entry?.key || department;
   return !!key && MAIN_MONITOR_ONLY_DEPARTMENTS.includes(key);
 }
+
+// Web Dev only, by explicit request — hidden from admins and every other
+// department, no UI/toggle anywhere. Hardcoded the same way as
+// MAIN_MONITOR_ONLY_DEPARTMENTS above, deliberately not a general
+// admin-facing setting.
+const IDLE_DETECTION_EXEMPT_DEPARTMENTS = ['WebDevTeam'];
+
+export async function isIdleDetectionExemptDept(
+  organizationId: string | undefined | null,
+  department?: string | null
+): Promise<boolean> {
+  const entry = await findDepartmentEntry(organizationId, department);
+  const key = entry?.key || department;
+  return !!key && IDLE_DETECTION_EXEMPT_DEPARTMENTS.includes(key);
+}
