@@ -3,6 +3,7 @@ import config from '../config';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import logger from '../utils/logger';
+import { normalizePushPayload } from '../utils/pushPayload';
 
 const LOG_PREFIX = '[CrmPushService]';
 
@@ -108,7 +109,8 @@ export class CrmPushService {
     ];
     const latestOwnerByEndpoint = await getLatestPushEndpointOwners(endpoints);
 
-    const stringifiedPayload = JSON.stringify(payload);
+    const { payload: normalized, topic } = normalizePushPayload(payload as any);
+    const stringifiedPayload = JSON.stringify(normalized);
 
     await Promise.allSettled(
       users.map(async (user) => {
@@ -154,7 +156,7 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: 86400 }
+                { TTL: 86400, ...(topic ? { topic } : {}) }
               );
               stats.sent += 1;
             } catch (error: any) {
@@ -187,7 +189,8 @@ export class CrmPushService {
       .select('_id fullName pushSubscriptions')
       .lean();
 
-    const stringifiedPayload = JSON.stringify(payload);
+    const { payload: normalized, topic } = normalizePushPayload(payload as any);
+    const stringifiedPayload = JSON.stringify(normalized);
 
     await Promise.allSettled(
       admins.map(async (admin) => {
@@ -201,7 +204,7 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: 86400 }
+                { TTL: 86400, ...(topic ? { topic } : {}) }
               );
             } catch (error: any) {
               if (error.statusCode === 410 || error.statusCode === 404) {

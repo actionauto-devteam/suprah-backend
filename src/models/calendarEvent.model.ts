@@ -36,6 +36,8 @@ export interface ICalendarEvent extends Document {
   meetingRoomName?: string;
   status: CalendarItemStatus;
   color?: string;
+  /** "YYYY-MM-DD" (America/Denver) the "starts today" reminder last fired — dedupe key so it only sends once per day. */
+  lastReminderSentDay?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -100,6 +102,7 @@ const CalendarEventSchema = new Schema<ICalendarEvent>(
       index: true,
     },
     color: { type: String, trim: true },
+    lastReminderSentDay: { type: String, match: /^\d{4}-\d{2}-\d{2}$/ },
   },
   { timestamps: true }
 );

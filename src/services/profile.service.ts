@@ -9,6 +9,11 @@ import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import CrmUser from '../models/CrmUser.model';
 import Organization from '../models/Organization.model';
 import { getIO as getSupraSpaceIO } from '../socket/supraspace.socket';
+import { NotificationPreferences } from '../models/notificationPreferences.schema';
+import { NOTIFICATION_CATEGORIES } from '../models/Notification.model';
+
+const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes']);
+import { invalidateUserCache } from '../utils/cache.util';
 
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
   const existingUser = await User.findById(userId).select('avatar email');
@@ -372,28 +377,19 @@ const updateEmail = async (
  */
 const updateNotificationPreferences = async (
   userId: string,
-  preferences: Partial<{
-    quoteCreated: boolean;
-    quoteUpdated: boolean;
-    quoteDeleted: boolean;
-    loadCreated: boolean;
-    loadUpdated: boolean;
-    loadDeleted: boolean;
-    passwordChanged: boolean;
-    emailChanged: boolean;
-    profileUpdated: boolean;
-    loginAlerts: boolean;
-    appointmentCreated: boolean;
-    appointmentUpdated: boolean;
-    appointmentCancelled: boolean;
-    driverRequests: boolean;
-    crmActivity: boolean;
-  }>
+  preferences: Partial<NotificationPreferences>
 ) => {
-  const updateData: Record<string, boolean> = {};
+  const updateData: Record<string, boolean | string[]> = {};
 
   Object.keys(preferences).forEach((key) => {
-    updateData[`notificationPreferences.${key}`] = preferences[key as keyof typeof preferences]!;
+    if (!VALID_PREFERENCE_KEYS.has(key)) return;
+    const value = preferences[key as keyof typeof preferences]!;
+    if (key === 'mutedTypes') {
+      if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return;
+    } else if (typeof value !== 'boolean') {
+      return;
+    }
+    updateData[`notificationPreferences.${key}`] = value;
   });
 
   const user = await User.findByIdAndUpdate(
@@ -405,6 +401,8 @@ const updateNotificationPreferences = async (
   if (!user) {
     throw new ApiError(404, 'User not found');
   }
+
+  invalidateUserCache(userId);
 
   return user;
 };

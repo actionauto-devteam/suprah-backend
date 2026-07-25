@@ -3,6 +3,19 @@ import CrmUser from '../models/CrmUser.model';
 import FeedNotification, { FeedNotificationType } from '../models/FeedNotification.model';
 import { extractMentions, buildSnippet } from '../utils/feedMentions';
 import { getIO } from '../socket/feedSocket';
+import notificationService from './notification.service';
+import { notificationTemplates } from '../utils/notificationTemplates';
+import logger from '../utils/logger';
+
+// Maps Feeds' own notification vocabulary onto the unified Notification
+// system's namespaced feed_* types so both can coexist without renaming
+// FeedNotification's existing (already-live) type strings.
+const UNIFIED_FEED_TYPE_MAP: Record<FeedNotificationType, keyof typeof notificationTemplates> = {
+  mention_post: 'feed_mention_post',
+  mention_comment: 'feed_mention_comment',
+  comment_on_post: 'feed_comment_on_post',
+  all_announcement: 'feed_announcement',
+};
 
 /**
  * services/feedNotification.service.ts
@@ -84,6 +97,38 @@ async function createAndEmit(docs: NotificationDoc[]): Promise<void> {
     // Socket.IO not initialised — notifications are still persisted and will
     // surface via the sidebar poller / Activity panel.
   }
+
+  // Best-effort fan-out into the unified bell/page/push system. Never throw —
+  // a notification failure must not fail the post/comment request itself.
+  await Promise.allSettled(
+    docs.map(async (doc) => {
+      const type = UNIFIED_FEED_TYPE_MAP[doc.type];
+      const feedTemplate = notificationTemplates[type] as (data: {
+        authorName: string;
+        postPreview?: string;
+      }) => { title: string; message: string };
+      const template = feedTemplate({
+        authorName: doc.actorName,
+        postPreview: doc.snippet,
+      });
+      try {
+        await notificationService.createNotification({
+          userId: doc.recipientId,
+          organizationId: doc.organizationId.toString(),
+          type,
+          title: template.title,
+          message: template.message,
+          metadata: {
+            postId: doc.postId.toString(),
+            commentId: doc.commentId?.toString(),
+            route: `/crm/feeds?post=${doc.postId}`,
+          },
+        });
+      } catch (error: any) {
+        logger.error(error, `[FeedNotificationService] Unified notification failed for recipient ${doc.recipientId}`);
+      }
+    })
+  );
 }
 
 /**

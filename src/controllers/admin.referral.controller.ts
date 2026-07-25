@@ -148,7 +148,14 @@ const rejectWithdrawal = asyncHandler(async (req: Request, res: Response) => {
     transaction.note = `${transaction.note} (REJECTED: ${reason})`;
     await transaction.save();
 
-    safeCreateNotification({ userId: transaction.userId.toString(), organizationId: '', type: 'general', title: 'Withdrawal Rejected', message: `Your withdrawal request was rejected: ${reason}` });
+    const user = await User.findById(transaction.userId).select('organizationId').lean();
+    safeCreateNotification({
+        userId: transaction.userId.toString(),
+        organizationId: user?.organizationId?.toString() || transaction.organizationId?.toString() || '',
+        type: 'wallet_payout_failed',
+        title: 'Withdrawal Rejected',
+        message: `Your withdrawal of $${transaction.amount.toFixed(2)} was rejected: ${reason}`,
+    });
 
     res.json(new ApiResponse(200, transaction, 'Withdrawal request rejected'));
 });

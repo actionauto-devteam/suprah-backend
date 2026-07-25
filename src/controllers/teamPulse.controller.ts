@@ -6,7 +6,7 @@ import { ApiError } from '../utils/ApiError';
 import User, { IUser } from '../models/User.model';
 import Absence from '../models/Absence.model';
 import BoardNote from '../models/BoardNote.model';
-import Notification from '../models/Notification.model';
+import notificationService from '../services/notification.service';
 import FeedReaction, { REACTION_TYPES } from '../models/FeedReaction.model';
 import ActivityLog from '../models/ActivityLog.model';
 import PresenceEvent from '../models/PresenceEvent.model';
@@ -175,16 +175,14 @@ const createAbsence = asyncHandler(async (req: Request, res: Response) => {
             // Notify admins of the range request
             const admins = await User.find({ organizationId: orgId, role: { $in: ['admin', 'super_admin'] } }).select('_id').lean();
             const rangeLabel = `${date} → ${endDate}`;
-            await Promise.all(admins.map(admin =>
-                Notification.create({
-                    userId: admin._id,
-                    organizationId: orgId,
-                    type: 'system_announcement',
-                    title: 'Absence Request',
-                    message: `${user.name} requested ${type} from ${rangeLabel}`,
-                    metadata: { absenceType: type, fromDate: date, toDate: endDate, requesterId: userId },
-                })
-            ));
+            await notificationService.createNotificationBatch(admins.map(admin => ({
+                userId: admin._id.toString(),
+                organizationId: orgId,
+                type: 'absence_requested',
+                title: 'Absence Request',
+                message: `${user.name} requested ${type} from ${rangeLabel}`,
+                metadata: { absenceType: type, fromDate: date, toDate: endDate, requesterId: userId },
+            })));
         }
 
         return res.status(201).json(new ApiResponse(201, created, 'Absences created'));
@@ -209,16 +207,14 @@ const createAbsence = asyncHandler(async (req: Request, res: Response) => {
 
     if (requiresApproval) {
         const admins = await User.find({ organizationId: orgId, role: { $in: ['admin', 'super_admin'] } }).select('_id').lean();
-        await Promise.all(admins.map(admin =>
-            Notification.create({
-                userId: admin._id,
-                organizationId: orgId,
-                type: 'system_announcement',
-                title: 'Absence Request',
-                message: `${user.name} requested ${type} on ${date}`,
-                metadata: { absenceId: absence._id, absenceType: type, date, requesterId: userId },
-            })
-        ));
+        await notificationService.createNotificationBatch(admins.map(admin => ({
+            userId: admin._id.toString(),
+            organizationId: orgId,
+            type: 'absence_requested',
+            title: 'Absence Request',
+            message: `${user.name} requested ${type} on ${date}`,
+            metadata: { absenceId: absence._id, absenceType: type, date, requesterId: userId },
+        })));
     }
 
     res.status(201).json(new ApiResponse(201, absence, 'Absence created'));
@@ -279,8 +275,8 @@ const approveAbsence = asyncHandler(async (req: Request, res: Response) => {
     await absence.save();
 
     // Notify the requester
-    await Notification.create({
-        userId: absence.userId,
+    await notificationService.createNotification({
+        userId: absence.userId.toString(),
         organizationId: orgId,
         type: 'absence_approved',
         title: 'Absence Approved',
@@ -311,8 +307,8 @@ const rejectAbsence = asyncHandler(async (req: Request, res: Response) => {
     absence.rejectedReason = reason?.trim() || null;
     await absence.save();
 
-    await Notification.create({
-        userId: absence.userId,
+    await notificationService.createNotification({
+        userId: absence.userId.toString(),
         organizationId: orgId,
         type: 'absence_rejected',
         title: 'Absence Request Rejected',
@@ -444,8 +440,8 @@ const createBoardNote = asyncHandler(async (req: Request, res: Response) => {
     if (notifRecipients.length > 0) {
         const preview = note.title || note.content.slice(0, 60);
         const prefix = note.announcementType === 'urgent' ? '🚨 URGENT: ' : note.announcementType === 'important' ? '⚠️ Important: ' : '📌 ';
-        await Notification.insertMany(notifRecipients.map(m => ({
-            userId: m._id,
+        await notificationService.createNotificationBatch(notifRecipients.map(m => ({
+            userId: m._id.toString(),
             organizationId: orgId,
             type: 'board_note_posted',
             title: `${prefix}${preview}`,
@@ -725,7 +721,7 @@ const pingMember = asyncHandler(async (req: Request, res: Response) => {
     const target = await User.findOne({ _id: targetId, organizationId: orgId }).select('_id name').lean();
     if (!target) throw new ApiError(404, 'User not found');
 
-    await Notification.create({
+    await notificationService.createNotification({
         userId: targetId,
         organizationId: orgId,
         type: 'ping',

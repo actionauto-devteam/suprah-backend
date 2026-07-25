@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import { getIO } from '../socket/supraspace.socket';
+import { pushToConversationMembers } from '../controllers/supraspace.controller';
 import logger from '../utils/logger';
 
 async function emitScheduledMessage(messageId: string) {
@@ -28,6 +29,29 @@ async function emitScheduledMessage(messageId: string) {
   } catch (error) {
     logger.warn({ error }, '[SupraSpaceSchedule] Socket emit failed');
   }
+
+  // Releasing a scheduled message previously only reached actively-connected
+  // sockets — a recipient whose app/tab was closed at release time got
+  // nothing until they happened to reopen it. Mirrors the live send-message
+  // path's push-to-offline-members behavior (supraspace.controller.ts).
+  const sender = message.sender as any;
+  const senderName = sender?.fullName || 'Someone';
+  const content = (message as any).content as string | undefined;
+  const hasGif = !!(message as any).gif?.url;
+  const pushBody = content?.trim()
+    ? content.trim().slice(0, 120)
+    : hasGif ? 'Sent a GIF' : 'Sent an attachment';
+  const convName = (conversation as any).name;
+  const pushTitle = convName ? convName : senderName;
+  const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
+  pushToConversationMembers(
+    conversation,
+    (sender?._id ?? message.sender).toString(),
+    pushTitle,
+    pushBodyFinal,
+    content?.trim() || '',
+    (message._id as any).toString(),
+  ).catch((error) => logger.warn({ error }, '[SupraSpaceSchedule] Push failed'));
 }
 
 export async function releaseDueSupraSpaceMessages(): Promise<void> {

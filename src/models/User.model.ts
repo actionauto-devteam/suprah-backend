@@ -1,6 +1,7 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 import config from '../config';
+import { notificationPreferencesSchema, NotificationPreferences } from './notificationPreferences.schema';
 
 export type OnlineStatus = 'online' | 'idle' | 'away' | 'busy' | 'offline' | 'do_not_disturb';
 
@@ -84,23 +85,7 @@ export interface IUser extends Document {
   walletBalance: number;
   totalEarned: number;
 
-  notificationPreferences: {
-    quoteCreated: boolean;
-    quoteUpdated: boolean;
-    quoteDeleted: boolean;
-    shipmentCreated: boolean;
-    shipmentUpdated: boolean;
-    shipmentDeleted: boolean;
-    appointmentCreated: boolean;
-    appointmentUpdated: boolean;
-    appointmentCancelled: boolean;
-    passwordChanged: boolean;
-    emailChanged: boolean;
-    profileUpdated: boolean;
-    loginAlerts: boolean;
-    driverRequests: boolean;
-    crmActivity: boolean;
-  };
+  notificationPreferences: NotificationPreferences;
   stripeConnectAccountId?: string;
   pushSubscriptions: IPushSubscription[];
   isPasswordMatch(password: string): Promise<boolean>;
@@ -299,21 +284,8 @@ const UserSchema = new Schema(
     },
 
     notificationPreferences: {
-      quoteCreated: { type: Boolean, default: true },
-      quoteUpdated: { type: Boolean, default: true },
-      quoteDeleted: { type: Boolean, default: true },
-      shipmentCreated: { type: Boolean, default: true },
-      shipmentUpdated: { type: Boolean, default: true },
-      shipmentDeleted: { type: Boolean, default: true },
-      appointmentCreated: { type: Boolean, default: true },
-      appointmentUpdated: { type: Boolean, default: true },
-      appointmentCancelled: { type: Boolean, default: true },
-      passwordChanged: { type: Boolean, default: true },
-      emailChanged: { type: Boolean, default: true },
-      profileUpdated: { type: Boolean, default: true },
-      loginAlerts: { type: Boolean, default: true },
-      driverRequests: { type: Boolean, default: true },
-      crmActivity: { type: Boolean, default: true },
+      type: notificationPreferencesSchema,
+      default: () => ({}),
     },
     stripeConnectAccountId: {
       type: String,

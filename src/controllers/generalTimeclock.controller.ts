@@ -4,7 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
-import { PushService } from '../services/push.service';
+import notificationService from '../services/notification.service';
 import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
@@ -313,15 +313,27 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     console.error('Failed to emit time log event:', error);
   }
 
-  // Mobile-monitoring department push notifications (main User model, e.g. Lot Tech)
+  // Mobile-monitoring department notifications (main User model, e.g. Lot Tech) —
+  // routed through notificationService (persisted, preference-gated, unified
+  // push) rather than a raw, unpersisted PushService call, with a dedupeKey
+  // per admin+actor+event-kind so a duplicate/retried clock action within a
+  // few minutes compiles into one notification instead of a fresh alert.
   const isLotTech = actor.model === 'User' && await isMobileMonitoringDept(actor.orgId, actor.department);
   if (isLotTech && actor.orgId) {
     if (type === 'time-in') {
-      PushService.notifyOrgAdmins(actor.orgId, {
-        title: '🟢 Lot Tech — Clocked In',
-        body: `${actor.fullName} clocked in`,
-        tag: `lot-tech-in-${actor.id}`,
-      }).catch(() => {});
+      const admins = await CrmUser.find({ organizationId: actor.orgId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+      for (const admin of admins) {
+        notificationService.createNotification({
+          userId: admin._id.toString(),
+          organizationId: actor.orgId,
+          type: 'crm_timeproof',
+          title: '🟢 Lot Tech — Clocked In',
+          message: `${actor.fullName} clocked in`,
+          metadata: { route: '/crm/timeproof/users' },
+          dedupeKey: `lot-tech-clockin:${admin._id}:${actor.id}`,
+          groupWindowMinutes: 10,
+        }).catch(() => {});
+      }
     }
 
     if (type === 'time-out') {
@@ -345,11 +357,19 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
       const totalM = Math.floor((totalMs % 3_600_000) / 60_000);
       const durationLabel = totalH > 0 ? `${totalH}h ${totalM}m` : `${totalM}m`;
 
-      PushService.notifyOrgAdmins(actor.orgId, {
-        title: '🔴 Lot Tech — Clocked Out',
-        body: `${actor.fullName} clocked out — ${durationLabel}`,
-        tag: `lot-tech-out-${actor.id}`,
-      }).catch(() => {});
+      const admins = await CrmUser.find({ organizationId: actor.orgId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+      for (const admin of admins) {
+        notificationService.createNotification({
+          userId: admin._id.toString(),
+          organizationId: actor.orgId,
+          type: 'crm_timeproof',
+          title: '🔴 Lot Tech — Clocked Out',
+          message: `${actor.fullName} clocked out — ${durationLabel}`,
+          metadata: { route: '/crm/timeproof/users' },
+          dedupeKey: `lot-tech-clockout:${admin._id}:${actor.id}`,
+          groupWindowMinutes: 10,
+        }).catch(() => {});
+      }
     }
   }
 

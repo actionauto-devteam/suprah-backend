@@ -3,9 +3,10 @@ import logger from '../utils/logger';
 import TimeLog from '../models/TimeLog.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
+import User from '../models/User.model';
+import CrmUser from '../models/CrmUser.model';
 import { toCompanyDateStr, getCompanyDayRange } from '../utils/companyTimezone';
-import CrmPushService from '../services/crmPush.service';
-import { PushService } from '../services/push.service';
+import { fireShiftAlert } from '../services/shiftAlerts.service';
 
 /**
  * Backend safety net for forgotten clock-outs. The tray app tries to clock a
@@ -205,16 +206,25 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
         note: closeNote,
       });
 
-      const payload = {
-        title: '🕛 Shift auto-ended — new day',
-        body: 'Your shift was automatically closed because a new day started. Please Start Shift again to continue tracking.',
-        tag: `day-boundary-clockout-${userId}`,
-        data: { url: '/crm/timeproof-clock' },
-      };
-      if (userModel === 'CrmUser') {
-        await CrmPushService.sendToUsers([userId], payload).catch(() => {});
-      } else {
-        await PushService.send(userId, payload).catch(() => {});
+      // Routed through the shared Shift Alerts pipeline (previously a raw,
+      // unpersisted push with zero admin visibility) — this is a net
+      // feature add: admins now see day-boundary auto-clockouts too, grouped
+      // with any other shift-alert triggers for the same person.
+      const userDoc = userModel === 'CrmUser'
+        ? await CrmUser.findById(userId).select('organizationId fullName').lean()
+        : await User.findById(userId).select('organizationId name').lean();
+      if (userDoc?.organizationId) {
+        const displayName = (userDoc as any).fullName || (userDoc as any).name || 'A user';
+        await fireShiftAlert({
+          organizationId: userDoc.organizationId.toString(),
+          targetUserId: userId,
+          targetUserModel: userModel,
+          chatMessage: `🕛 ${displayName}'s shift was auto-ended because a new day started.`,
+          notifyTitle: '🕛 Shift auto-ended — new day',
+          notifyBody: 'Your shift was automatically closed because a new day started. Please Start Shift again to continue tracking.',
+          notifyTag: `day-boundary-clockout-${userId}`,
+          url: '/crm/timeproof-clock',
+        }).catch(() => {});
       }
     }
     closed++;

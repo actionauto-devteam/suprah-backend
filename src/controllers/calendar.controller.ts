@@ -3,18 +3,13 @@ import { Types } from "mongoose";
 import { CalendarEvent } from "../models/calendarEvent.model";
 import {
   emitCalendarChange,
-  emitToUsers,
 } from "../services/calendarSocket.service";
+import notificationService from "../services/notification.service";
 
 // ── INTEGRATION ───────────────────────────────────────────────────────────
 // 1. Appointment merge: import your Appointment model, uncomment the queries
 //    in getFeed/getMySchedule, and align mapAppointment with its fields.
 // TODO(integration): import { Appointment } from "../models/appointment.model";
-//
-// 2. Notifications: swap pushNotification's body for the shared service the
-//    Project Management module uses (it currently emits notification:new
-//    over sockets as a functional fallback).
-// TODO(integration): import { createNotification } from "../services/notification.service";
 // ──────────────────────────────────────────────────────────────────────────
 
 /** Route async errors into the Express error pipeline (ApiError-compatible). */
@@ -130,7 +125,14 @@ export const mapAppointment = (doc: any): FeedItem => {
   };
 };
 
-// TODO(integration): replace body with the shared notification service.
+/**
+ * Persists + pushes a real notification to each assignee via the shared
+ * pipeline (bell/page entry, preference gate, web push) — this used to only
+ * emit a raw `notification:new` socket event through calendarSocket.service's
+ * `ioRef`, which is never wired to the real Socket.IO server (no code calls
+ * `setCalendarIO`/`registerCalendarSocket` anywhere), so being assigned to a
+ * calendar event/meeting produced zero notification of any kind.
+ */
 async function pushNotification(opts: {
   userIds: string[];
   title: string;
@@ -138,14 +140,16 @@ async function pushNotification(opts: {
   link: string;
   orgId: string;
 }): Promise<void> {
-  // await createNotification({ ...opts, category: "calendar" });
-  emitToUsers(opts.userIds, "notification:new", {
-    title: opts.title,
-    body: opts.body,
-    link: opts.link,
-    category: "calendar",
-    createdAt: new Date(),
-  });
+  await notificationService.createNotificationBatch(
+    opts.userIds.map((userId) => ({
+      userId,
+      organizationId: opts.orgId,
+      type: "calendar_event_assigned",
+      title: opts.title,
+      message: opts.body,
+      metadata: { route: opts.link },
+    }))
+  );
 }
 
 const overlapQuery = (from: Date, to: Date) => ({

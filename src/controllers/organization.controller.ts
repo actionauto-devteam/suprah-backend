@@ -190,7 +190,7 @@ export const updateOwnOrganizationSubscription = asyncHandler(async (req: Reques
 
     notifyOrgAdmins(
         id,
-        'system_announcement',
+        'admin_broadcast',
         'Subscription Plan Changed',
         `Your organization is now on ${TIER_LABELS[tier]}.`,
         { previousTier, newTier: tier },

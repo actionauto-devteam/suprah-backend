@@ -12,6 +12,8 @@ export interface IDriverLocation extends Document {
   };
   shipmentIds: mongoose.Types.ObjectId[];
   lastSeenAt: Date;
+  /** Set when a "went offline" alert has already fired for the current silence gap; cleared on the next location ping. */
+  offlineAlertSentAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -49,6 +51,10 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     lastSeenAt: {
       type: Date,
       default: Date.now,
+    },
+    offlineAlertSentAt: {
+      type: Date,
+      default: null,
     },
   },
   {

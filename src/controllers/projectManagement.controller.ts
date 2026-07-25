@@ -17,6 +17,20 @@ import { syncTaskToCalendar, removeTaskCalendarEvent } from '../services/project
 import ProjectNotification, { ProjectNotificationType } from '../models/ProjectNotification.model';
 import { BucketType, storageService } from '../services/storage.service';
 import { getSocketIO } from '../utils/socketEmitter';
+import notificationService from '../services/notification.service';
+import logger from '../utils/logger';
+
+// Maps Project Management's own notification vocabulary onto the unified
+// Notification system's namespaced pm_* types.
+const UNIFIED_PM_TYPE_MAP: Record<ProjectNotificationType, string> = {
+  task_assigned: 'pm_task_assigned',
+  task_comment: 'pm_task_comment',
+  task_status: 'pm_task_status',
+  task_updated: 'pm_task_updated',
+  group_added: 'pm_group_added',
+  task_mention: 'pm_task_mention',
+  task_deadline: 'pm_task_deadline',
+};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -209,6 +223,25 @@ async function notifyUsers({ recipients, actor, type, groupId, taskId, commentId
         }
       }
     } catch { /* socket not initialised — REST flow unaffected */ }
+
+    // Best-effort fan-out into the unified bell/page/push system.
+    await Promise.allSettled(
+      uniqueRecipients.map((userId) =>
+        notificationService.createNotification({
+          userId,
+          organizationId: actor.organizationId.toString(),
+          type: UNIFIED_PM_TYPE_MAP[type],
+          title,
+          message,
+          metadata: {
+            groupId: groupId?.toString(),
+            taskId: taskId ? taskId.toString() : undefined,
+            commentId: commentId ? commentId.toString() : undefined,
+            route: '/crm/project',
+          },
+        }).catch((error) => logger.error(error, `[PM] Unified notification failed for recipient ${userId}`))
+      ),
+    );
   } catch (error) {
     // Notifications are best-effort; never fail the primary request over them.
     console.error('[PM] failed to create notifications:', error);

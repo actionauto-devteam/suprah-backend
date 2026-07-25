@@ -10,7 +10,12 @@ const LOG_PREFIX = '[PushService]';
 export class PushService {
   static async send(userId: string | mongoose.Types.ObjectId, payload: any) {
     if (!config.redis.enabled || !pushQueue) {
-      logger.debug(`${LOG_PREFIX} Skipping push (Redis is disabled).`);
+      // warn, not debug — this returns success:true while delivering nothing;
+      // it's easy to lose track of this legacy Redis-dependent path silently
+      // no-op'ing in a deployment that has Redis disabled. Prefer
+      // UnifiedPushService (services/unifiedPush.service.ts) for new code —
+      // it isn't Redis-gated.
+      logger.warn(`${LOG_PREFIX} Skipping push (Redis is disabled) — this push will NOT be delivered.`);
       return { success: true, message: 'Push skipped (Redis disabled).' };
     }
     try {
@@ -56,7 +61,7 @@ export class PushService {
       }));
 
       if (!config.redis.enabled || !pushQueue) {
-        logger.debug(`${LOG_PREFIX} Skipping broadcast of ${jobs.length} notifications (Redis is disabled).`);
+        logger.warn(`${LOG_PREFIX} Skipping broadcast of ${jobs.length} notifications (Redis is disabled) — NOT delivered.`);
         return { success: true, sentCount: 0, skippedCount: jobs.length };
       }
 

@@ -4,6 +4,7 @@ import ProjectGroup from '../models/ProjectGroup.model';
 import ProjectNotification from '../models/ProjectNotification.model';
 import { emitToUsers } from './calendarSocket.service';
 import { getSocketIO } from '../utils/socketEmitter';
+import notificationService from './notification.service';
 
 /**
  * projectDeadlineReminder — proactive deadline notifications.
@@ -137,6 +138,20 @@ export async function sweep(): Promise<void> {
         window: win.flag,
         createdAt: new Date(),
       });
+
+      // Unified bell/page/push fan-out — best-effort, never blocks the sweep.
+      await Promise.allSettled(
+        recipients.map((userId) =>
+          notificationService.createNotification({
+            userId,
+            organizationId: task.organizationId.toString(),
+            type: 'pm_task_deadline',
+            title,
+            message,
+            metadata: { groupId: task.groupId?.toString(), taskId: String(task._id), route: '/crm/project' },
+          }).catch((err) => console.warn('[deadlineReminders] unified notification failed', err))
+        ),
+      );
     }
   } catch (err) {
     console.warn('[deadlineReminders] sweep failed', err);

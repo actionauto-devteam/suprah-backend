@@ -879,6 +879,18 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         });
     }
 
+    {
+        const { title, message } = notificationTemplates.quote_converted({
+            customerName: `${quote.firstName} ${quote.lastName}`,
+            trackingNumber: load.loadNumber,
+        });
+        notifyOrgAdmins(orgId, 'quote_converted', title, message, {
+            quoteId: quote._id.toString(),
+            loadId: load._id.toString(),
+            route: '/transportation?tab=shipments',
+        }).catch((err) => logger.error(err, 'Failed to notify admins of quote conversion'));
+    }
+
     logger.info(
         {
             quoteId: quote._id,

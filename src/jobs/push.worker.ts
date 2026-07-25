@@ -5,6 +5,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import logger from '../utils/logger';
 import { bullConnection } from './push.queue';
+import { normalizePushPayload } from '../utils/pushPayload';
 
 const LOG_PREFIX = '[PushWorker]';
 
@@ -45,11 +46,16 @@ if (config.redis.enabled) {
         return;
       }
 
-      const stringifiedPayload = JSON.stringify(payload);
+      const { payload: normalized, topic } = normalizePushPayload(payload);
+      const stringifiedPayload = JSON.stringify(normalized);
       const results = await Promise.allSettled(
         subscriptions.map(async (sub: any) => {
           try {
-            await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, stringifiedPayload);
+            await webpush.sendNotification(
+              { endpoint: sub.endpoint, keys: sub.keys },
+              stringifiedPayload,
+              topic ? { topic } : undefined
+            );
             logger.info(`${LOG_PREFIX} Sent to user ${userId} on device ${sub.deviceHint || 'unknown'}`);
             return { endpoint: sub.endpoint, success: true };
           } catch (error: any) {

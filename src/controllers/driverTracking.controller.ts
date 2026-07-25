@@ -66,6 +66,7 @@ const updateLocation = asyncHandler(async (req: Request, res: Response) => {
     organizationId: orgId,
     coords: { lat, lng },
     lastSeenAt: new Date(),
+    offlineAlertSentAt: null, // fresh ping — clear so a future silence gap can alert again
   };
 
   if (status) {

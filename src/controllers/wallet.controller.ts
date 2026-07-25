@@ -8,6 +8,7 @@ import ReferralService from '../services/referral.service';
 import activityService from '../services/activity.service';
 import linkedAccountService from '../services/linkedAccount.service';
 import logger from '../utils/logger';
+import { notifyOrgAdmins } from '../utils/safeNotification';
 
 
 const getWalletDashboard = asyncHandler(async (req: Request, res: Response) => {
@@ -149,6 +150,14 @@ const requestWithdrawal = asyncHandler(async (req: Request, res: Response) => {
         `Requested withdrawal of $${amount.toFixed(2)} via ${methodType}`,
         { transactionId: withdrawal._id.toString(), methodType }
     );
+
+    notifyOrgAdmins(
+        organizationId.toString(),
+        'payment_pending',
+        'Withdrawal Requested',
+        `${dbUser.name || 'A user'} requested a withdrawal of $${amount.toFixed(2)} via ${methodType}. Review in the admin panel.`,
+        { transactionId: withdrawal._id.toString(), methodType, route: '/admin/payouts' },
+    ).catch((err) => logger.error(err, 'Failed to notify admins of withdrawal request'));
 
     logger.info({ userId, amount, methodType }, 'Withdrawal request submitted');
     res.status(201).json(new ApiResponse(201, withdrawal, 'Withdrawal request submitted for Admin review'));

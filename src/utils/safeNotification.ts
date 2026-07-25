@@ -1,5 +1,6 @@
 import notificationService from '../services/notification.service';
 import User from '../models/User.model';
+import CrmUser from '../models/CrmUser.model';
 import Organization from '../models/Organization.model';
 
 interface CreateNotificationParams {
@@ -9,6 +10,8 @@ interface CreateNotificationParams {
   title: string;
   message: string;
   metadata?: any;
+  dedupeKey?: string;
+  groupWindowMinutes?: number;
 }
 
 interface BroadcastParams {
@@ -19,6 +22,10 @@ interface BroadcastParams {
   message: string;
   metadata?: any;
   excludeUserId?: string;
+  // Per-recipient dedupeKey is derived as `${dedupeKeyPrefix}:${recipientUserId}`
+  // so repeat events about the same subject compile into one evolving
+  // notification per admin instead of one row per occurrence.
+  grouping?: { dedupeKeyPrefix: string; groupWindowMinutes?: number };
 }
 
 export async function safeCreateNotification(params: CreateNotificationParams) {
@@ -48,7 +55,7 @@ export async function safeCreateNotification(params: CreateNotificationParams) {
  */
 export async function safeBroadcastNotification(params: BroadcastParams) {
   try {
-    const { organizationId, roles, type, title, message, metadata, excludeUserId } = params;
+    const { organizationId, roles, type, title, message, metadata, excludeUserId, grouping } = params;
 
     // Find all users in the organization with the specified roles
     const users = await User.find({
@@ -76,6 +83,10 @@ export async function safeBroadcastNotification(params: BroadcastParams) {
             title,
             message,
             metadata,
+            ...(grouping ? {
+              dedupeKey: `${grouping.dedupeKeyPrefix}:${user._id}`,
+              groupWindowMinutes: grouping.groupWindowMinutes,
+            } : {}),
           })
         )
     );
@@ -91,7 +102,10 @@ export async function safeBroadcastNotification(params: BroadcastParams) {
 }
 
 /**
- * Notify all admins in an organization
+ * Notify all admins in an organization — reaches both identity models: the
+ * main-site User admins/super_admins AND CrmUser admins/managers, since a
+ * person doing day-to-day admin work may only be logged in via one or the
+ * other (they're linked solely by email, not a shared _id).
  */
 export async function notifyOrgAdmins(
   organizationId: string,
@@ -99,9 +113,10 @@ export async function notifyOrgAdmins(
   title: string,
   message: string,
   metadata?: any,
-  excludeUserId?: string
+  excludeUserId?: string,
+  grouping?: { dedupeKeyPrefix: string; groupWindowMinutes?: number }
 ) {
-  return safeBroadcastNotification({
+  const userResult = await safeBroadcastNotification({
     organizationId,
     roles: ['admin', 'super_admin'],
     type,
@@ -109,7 +124,38 @@ export async function notifyOrgAdmins(
     message,
     metadata,
     excludeUserId,
+    grouping,
   });
+
+  try {
+    const crmAdmins = await CrmUser.find({
+      organizationId,
+      role: { $in: ['admin', 'manager'] },
+      isActive: true,
+      _id: { $ne: excludeUserId },
+    }).select('_id');
+
+    await Promise.all(
+      crmAdmins.map((admin) =>
+        safeCreateNotification({
+          userId: admin._id.toString(),
+          organizationId,
+          type,
+          title,
+          message,
+          metadata,
+          ...(grouping ? {
+            dedupeKey: `${grouping.dedupeKeyPrefix}:${admin._id}`,
+            groupWindowMinutes: grouping.groupWindowMinutes,
+          } : {}),
+        })
+      )
+    );
+  } catch (error) {
+    console.error('Failed to notify CRM admins:', error);
+  }
+
+  return userResult;
 }
 
 /**

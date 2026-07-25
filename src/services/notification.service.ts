@@ -1,9 +1,10 @@
 import Notification from '../models/Notification.model';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
+import { NotificationCategory } from '../models/Notification.model';
 import { ApiError } from '../utils/ApiError';
 import { emitToUser } from '../utils/socketEmitter';
-import PushService from './push.service';
+import UnifiedPushService from './unifiedPush.service';
 import logger from '../utils/logger';
 
 interface CreateNotificationParams {
@@ -13,7 +14,18 @@ interface CreateNotificationParams {
   title: string;
   message: string;
   metadata?: any;
+  // Repeat-event compiling: when set, a new call within groupWindowMinutes of
+  // the last occurrence sharing the same {userId, dedupeKey} updates that
+  // existing notification (occurrenceCount++, re-surfaced as unread) instead
+  // of creating a new row. Always scope dedupeKey by the event's *subject*
+  // (e.g. `agent-idle:${adminId}:${agentUserId}`), never just recipient+type,
+  // so unrelated people's events never merge together.
+  dedupeKey?: string;
+  groupWindowMinutes?: number;
 }
+
+const formatOccurrenceTime = (date: Date) =>
+  date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
 const VALID_NOTIFICATION_TYPES = [
   'quote_created', 'quote_updated', 'quote_deleted', 'quote_converted', 'quote_accepted',
@@ -26,69 +38,103 @@ const VALID_NOTIFICATION_TYPES = [
   'appointment_reminder', 'guest_response',
   'new_lead', 'lead_assigned', 'lead_status_changed',
   'crm_message', 'crm_task_assigned', 'crm_task_due', 'crm_biometric', 'crm_timeproof',
+  'feed_mention_post', 'feed_mention_comment', 'feed_comment_on_post', 'feed_announcement',
+  'pm_task_assigned', 'pm_task_comment', 'pm_task_status', 'pm_task_updated',
+  'pm_group_added', 'pm_task_mention', 'pm_task_deadline',
+  'calendar_event_reminder', 'calendar_event_today', 'calendar_event_assigned',
   'driver_request', 'driver_request_approved', 'driver_request_rejected',
   'driver_assigned', 'driver_location_update', 'driver_payout',
+  'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
-  'team_invite_sent', 'team_member_joined', 'team_member_left', 'role_changed',
+  'wallet_low_balance', 'wallet_payout_failed',
+  'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
+  'team_invite_sent', 'team_member_joined', 'team_member_left', 'role_changed', 'board_note_posted',
   'password_changed', 'email_changed', 'profile_updated', 'login_alert',
-  'system_announcement', 'message_received', 'reminder', 'general',
+  'system_announcement', 'message_received', 'reminder', 'general', 'ping',
   'referral_joined', 'referral_rewarded',
+  'absence_requested', 'absence_approved', 'absence_rejected',
   'delivery_confirmed', 'proof_submitted',
   'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
   'location_share_requested',
+  'agent_idle', 'agent_idle_escalation',
+  'customer_call_requested',
 ] as const;
 
-const PREFERENCE_MAP: Record<string, string> = {
-  quote_created: 'quoteCreated',
-  quote_updated: 'quoteUpdated',
-  quote_deleted: 'quoteDeleted',
-  quote_converted: 'quoteCreated',
-  quote_accepted: 'quoteUpdated',
-  shipment_created: 'shipmentCreated',
-  shipment_updated: 'shipmentUpdated',
-  shipment_deleted: 'shipmentDeleted',
-  shipment_status_changed: 'shipmentUpdated',
-  shipment_assigned: 'shipmentCreated',
-  shipment_picked_up: 'shipmentUpdated',
-  shipment_delivered: 'shipmentUpdated',
-  proof_of_delivery: 'shipmentUpdated',
-  shipment_arrived_at_pickup: 'shipmentUpdated',
-  shipment_arrived_at_delivery: 'shipmentUpdated',
-  appointment_created: 'appointmentCreated',
-  appointment_updated: 'appointmentUpdated',
-  appointment_cancelled: 'appointmentCancelled',
-  appointment_reminder: 'appointmentCreated',
-  guest_response: 'appointmentUpdated',
-  password_changed: 'passwordChanged',
-  email_changed: 'emailChanged',
-  profile_updated: 'profileUpdated',
-  login_alert: 'loginAlerts',
-  driver_request: 'driverRequests',
-  driver_request_approved: 'driverRequests',
-  driver_request_rejected: 'driverRequests',
-  driver_assigned: 'shipmentCreated',
-  driver_payout: 'shipmentUpdated',
-  new_lead: 'crmActivity',
-  lead_assigned: 'crmActivity',
-  lead_status_changed: 'crmActivity',
-  crm_message: 'crmActivity',
-  crm_task_assigned: 'crmActivity',
-  crm_task_due: 'crmActivity',
-  crm_biometric: 'crmActivity',
-  crm_timeproof: 'crmActivity',
-  reminder: 'crmActivity',
-  team_invite_sent: 'crmActivity',
-  team_member_joined: 'crmActivity',
-  team_member_left: 'crmActivity',
-  referral_joined: 'referral_joined',
-  referral_rewarded: 'referral_rewarded',
-  aftermarket_inquiry: 'crmActivity',
-  aftermarket_order: 'crmActivity',
-  location_share_requested: 'crmActivity',
+// Single source of truth for both (a) the `category` stored on the Notification
+// doc (used for UI grouping/filter chips) and (b) the preference gate key looked
+// up on the recipient's `notificationPreferences` — every type maps to exactly
+// one category, so the two can never drift apart the way the old parallel
+// VALID_NOTIFICATION_TYPES/schema-enum lists did.
+const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
+  quote_created: 'transportation', quote_updated: 'transportation', quote_deleted: 'transportation',
+  quote_converted: 'transportation', quote_accepted: 'transportation',
+  shipment_created: 'transportation', shipment_updated: 'transportation', shipment_deleted: 'transportation',
+  shipment_status_changed: 'transportation', shipment_assigned: 'transportation',
+  shipment_picked_up: 'transportation', shipment_delivered: 'transportation', proof_of_delivery: 'transportation',
+  shipment_arrived_at_pickup: 'transportation', shipment_arrived_at_delivery: 'transportation',
+  proof_submitted: 'transportation', delivery_confirmed: 'transportation',
+  driver_request: 'transportation', driver_request_approved: 'transportation',
+  driver_request_rejected: 'transportation', driver_assigned: 'transportation', driver_payout: 'transportation',
+
+  vehicle_added: 'inventory', vehicle_updated: 'inventory', vehicle_sold: 'inventory',
+  vehicle_status_changed: 'inventory', inventory_sync: 'inventory', new_inventory_alert: 'inventory',
+
+  appointment_created: 'appointments', appointment_updated: 'appointments',
+  appointment_cancelled: 'appointments', appointment_reminder: 'appointments', guest_response: 'appointments',
+
+  new_lead: 'crm', lead_assigned: 'crm', lead_status_changed: 'crm', crm_message: 'crm',
+  crm_task_assigned: 'crm', crm_task_due: 'crm', crm_biometric: 'crm', crm_timeproof: 'crm',
+  reminder: 'crm', location_share_requested: 'crm',
+  aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
+  agent_idle: 'crm', agent_idle_escalation: 'crm', customer_call_requested: 'crm',
+
+  feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
+
+  pm_task_assigned: 'projectManagement', pm_task_comment: 'projectManagement', pm_task_status: 'projectManagement',
+  pm_task_updated: 'projectManagement', pm_group_added: 'projectManagement', pm_task_mention: 'projectManagement',
+  pm_task_deadline: 'projectManagement',
+
+  calendar_event_reminder: 'calendar', calendar_event_today: 'calendar', calendar_event_assigned: 'calendar',
+
+  driver_location_update: 'driverTracker', driver_tracker_geofence_alert: 'driverTracker',
+  driver_tracker_offline_alert: 'driverTracker', driver_tracker_place_visit: 'driverTracker',
+
+  payment_received: 'wallet', payment_pending: 'wallet', payment_failed: 'wallet', payment_request: 'wallet',
+  payout_processed: 'wallet', wallet_low_balance: 'wallet', wallet_payout_failed: 'wallet',
+
+  team_invite_sent: 'team', team_member_joined: 'team', team_member_left: 'team', role_changed: 'team',
+  board_note_posted: 'team', absence_requested: 'team', absence_approved: 'team', absence_rejected: 'team', ping: 'team',
+
+  password_changed: 'account', email_changed: 'account', profile_updated: 'account', login_alert: 'account',
+
+  referral_joined: 'referrals', referral_rewarded: 'referrals',
+
+  system_announcement: 'system', message_received: 'system', general: 'system',
+
+  admin_broadcast: 'adminBroadcasts',
+  admin_system_alert: 'adminSystemAlerts',
+  admin_staff_activity: 'adminStaffActivity',
+  admin_security_audit: 'adminSecurityAudit',
+};
+
+// These always deliver (in-app + push) regardless of the recipient's 'account'
+// preference toggle — security-relevant events shouldn't be silenceable.
+const SECURITY_CRITICAL_TYPES = new Set(['password_changed', 'login_alert']);
+
+// Short human label per category, prefixed onto the OS push notification's
+// title (see utils/pushPayload.ts's normalizePushPayload) so the device-level
+// popup itself indicates which part of the system it's from, not just the
+// in-app inbox.
+const CATEGORY_PUSH_LABELS: Record<NotificationCategory, string> = {
+  transportation: 'Transportation', inventory: 'Inventory', appointments: 'Appointments',
+  crm: 'CRM', feeds: 'Feeds', projectManagement: 'Project Mgmt', calendar: 'Calendar',
+  driverTracker: 'Driver Tracker', wallet: 'Suprah Pay', team: 'Team', account: 'Account',
+  referrals: 'Referrals', system: 'System', adminBroadcasts: 'Admin', adminSystemAlerts: 'Admin',
+  adminStaffActivity: 'Admin', adminSecurityAudit: 'Admin',
 };
 
 const createNotification = async (params: CreateNotificationParams) => {
-  const { userId, organizationId, type, title, message, metadata } = params;
+  const { userId, organizationId, type, title, message, metadata, dedupeKey, groupWindowMinutes } = params;
 
   if (!userId || !type || !title || !message) {
     throw new ApiError(400, 'Missing required notification fields');
@@ -104,18 +150,50 @@ const createNotification = async (params: CreateNotificationParams) => {
   const user = await User.findById(userId) || await CrmUser.findById(userId);
   if (!user) throw new ApiError(404, 'Notification target user not found');
 
-  const preferenceKey = PREFERENCE_MAP[type];
-  if (preferenceKey && (user as any).notificationPreferences) {
-    const isEnabled = ((user as any).notificationPreferences as any)[preferenceKey];
+  const category = TYPE_CATEGORY_MAP[type] || 'system';
+
+  if (!SECURITY_CRITICAL_TYPES.has(type) && (user as any).notificationPreferences) {
+    const prefs = (user as any).notificationPreferences as any;
+    const isEnabled = prefs[category];
     if (isEnabled === false) return null;
+    // Finer-grained mute on top of the category toggle — e.g. `crm` stays
+    // enabled overall but this specific type (SupraSpace messages, etc.) has
+    // been individually silenced.
+    if (Array.isArray(prefs.mutedTypes) && prefs.mutedTypes.includes(type)) return null;
   }
 
-  const notification = await Notification.create({
-    userId, organizationId, type, title, message,
-    metadata: metadata || {}, isRead: false,
-  });
+  let notification: any = null;
+  let isGroupedUpdate = false;
 
-  emitToUser(userId, 'notification:new', notification);
+  if (dedupeKey) {
+    const windowMinutes = groupWindowMinutes ?? 20;
+    const windowStart = new Date(Date.now() - windowMinutes * 60_000);
+    const existing = await Notification.findOne({
+      userId, dedupeKey, lastOccurredAt: { $gte: windowStart },
+    }).sort({ lastOccurredAt: -1 });
+
+    if (existing) {
+      existing.occurrenceCount = (existing.occurrenceCount || 1) + 1;
+      existing.lastOccurredAt = new Date();
+      existing.isRead = false;
+      existing.title = title;
+      existing.message = `${message} — ${existing.occurrenceCount}× in the last ${windowMinutes} min, most recently at ${formatOccurrenceTime(existing.lastOccurredAt)}`;
+      if (metadata) existing.metadata = { ...(existing.metadata || {}), ...metadata };
+      await existing.save();
+      notification = existing;
+      isGroupedUpdate = true;
+    }
+  }
+
+  if (!notification) {
+    notification = await Notification.create({
+      userId, organizationId, type, category, title, message,
+      metadata: metadata || {}, isRead: false,
+      ...(dedupeKey ? { dedupeKey, occurrenceCount: 1, lastOccurredAt: new Date() } : {}),
+    });
+  }
+
+  emitToUser(userId, isGroupedUpdate ? 'notification:updated' : 'notification:new', notification);
 
   try {
     const urlMap: Record<string, string> = {
@@ -159,14 +237,54 @@ const createNotification = async (params: CreateNotificationParams) => {
       aftermarket_inquiry: metadata?.route || '/crm/support-center?tab=aftermarket',
       aftermarket_invoice: metadata?.route || '/customer/payments',
       aftermarket_order: metadata?.route || '/crm/aftermarket',
+      // ── Feeds ──
+      feed_mention_post: metadata?.route || '/crm/feeds',
+      feed_mention_comment: metadata?.route || '/crm/feeds',
+      feed_comment_on_post: metadata?.route || '/crm/feeds',
+      feed_announcement: metadata?.route || '/crm/feeds',
+      // ── Project Management ──
+      pm_task_assigned: metadata?.route || '/crm/project',
+      pm_task_comment: metadata?.route || '/crm/project',
+      pm_task_status: metadata?.route || '/crm/project',
+      pm_task_updated: metadata?.route || '/crm/project',
+      pm_group_added: metadata?.route || '/crm/project',
+      pm_task_mention: metadata?.route || '/crm/project',
+      pm_task_deadline: metadata?.route || '/crm/project',
+      // ── Calendar ──
+      calendar_event_reminder: metadata?.route || '/crm/suprah-calendar',
+      calendar_event_today: metadata?.route || '/crm/suprah-calendar',
+      calendar_event_assigned: metadata?.route || '/crm/suprah-calendar',
+      // ── Driver Tracker ──
+      driver_location_update: metadata?.route || '/driver-tracker',
+      driver_tracker_geofence_alert: metadata?.route || '/driver-tracker',
+      driver_tracker_offline_alert: metadata?.route || '/driver-tracker',
+      driver_tracker_place_visit: metadata?.route || '/driver-tracker',
+      // ── Wallet ──
+      wallet_low_balance: metadata?.route || '/billing',
+      wallet_payout_failed: metadata?.route || '/billing',
+      // ── Admin ──
+      admin_broadcast: metadata?.route || '/notifications',
+      admin_system_alert: metadata?.route || '/notifications',
+      admin_staff_activity: metadata?.route || '/notifications',
+      admin_security_audit: metadata?.route || '/notifications',
     };
 
     const targetUrl = metadata?.route || urlMap[type] || '/notifications';
 
     const pushPayload: any = {
-      title,
-      body: message,
-      tag: preferenceKey || 'general',
+      title: notification.title,
+      body: notification.message,
+      tag: dedupeKey || category,
+      // Only set when dedupeKey is present — collapses repeat pushes for the
+      // SAME subject at the push-service level (fixes the "machine gunned
+      // with notifications" burst-on-reconnect problem), never for the bare
+      // category fallback, which would risk silently dropping genuinely
+      // unrelated notifications that just happen to share a category.
+      topic: dedupeKey,
+      // metadata.pushSource lets a caller override the category-derived label
+      // when it knows a more precise one (e.g. an @mention is technically
+      // `crm`-categorized but is more usefully labeled "SupraSpace").
+      source: metadata?.pushSource || CATEGORY_PUSH_LABELS[category],
       data: { url: targetUrl, notificationId: notification._id },
     };
 
@@ -178,8 +296,15 @@ const createNotification = async (params: CreateNotificationParams) => {
       pushPayload.data.driverRequestId = metadata?.driverRequestId || notification._id;
     }
 
-    PushService.send(userId, pushPayload).catch(err =>
-      logger.error(err, `[PushService] Failed to queue push for user ${userId}`)
+    // Lets a caller (e.g. Shift Alerts) request its own distinct notification
+    // sound via metadata rather than every push sharing one generic tone.
+    if (metadata?.playSound) {
+      pushPayload.data.playSound = true;
+      if (metadata.soundFile) pushPayload.data.soundFile = metadata.soundFile;
+    }
+
+    UnifiedPushService.sendToUser(userId, pushPayload).catch(err =>
+      logger.error(err, `[UnifiedPushService] Failed to send push for user ${userId}`)
     );
   } catch (error: any) {
     logger.error(error, '[NotificationService] Error triggering web push');
@@ -256,8 +381,8 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
   );
   if (!notification) throw new ApiError(404, 'Notification not found or access denied');
 
-  const preferenceKey = PREFERENCE_MAP[notification.type] || 'general';
-  PushService.dismiss(userId, preferenceKey).catch(err =>
+  const category = TYPE_CATEGORY_MAP[notification.type] || 'system';
+  UnifiedPushService.dismiss(userId, category).catch(err =>
     logger.error(err, '[NotificationService] Sync dismiss failed')
   );
 
@@ -313,17 +438,29 @@ const broadcastNotification = async (params: {
 }) => {
   const { organizationId, roleTargets, type, title, message, metadata } = params;
 
-  const users = await User.find({ organizationId, $or: roleTargets.map(role => ({ role })) }).select('_id');
+  const users = await User.find({ organizationId, $or: roleTargets.map(role => ({ role })) })
+    .select('_id notificationPreferences');
   if (users.length === 0) return null;
 
-  const notifications = users.map(user => ({
-    userId: user._id, organizationId, roleTargets, type, title, message, metadata,
+  const category = TYPE_CATEGORY_MAP[type] || 'system';
+  const eligibleUsers = SECURITY_CRITICAL_TYPES.has(type)
+    ? users
+    : users.filter(u => {
+      const prefs = (u as any).notificationPreferences;
+      if (prefs?.[category] === false) return false;
+      if (Array.isArray(prefs?.mutedTypes) && prefs.mutedTypes.includes(type)) return false;
+      return true;
+    });
+  if (eligibleUsers.length === 0) return null;
+
+  const notifications = eligibleUsers.map(user => ({
+    userId: user._id, organizationId, roleTargets, type, category, title, message, metadata,
     isRead: false, isBroadcast: true,
   }));
 
   const created = await Notification.insertMany(notifications);
 
-  users.forEach(user => {
+  eligibleUsers.forEach(user => {
     const userNotif = created.find(n => n.userId?.toString() === user._id.toString());
     if (userNotif) emitToUser(user._id.toString(), 'notification:new', userNotif);
   });
@@ -336,10 +473,13 @@ const broadcastNotification = async (params: {
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
       driver_request: '/notifications',
+      admin_broadcast: '/notifications',
     };
-    const broadcastPayload = { title, body: message, data: { url: urlMap[type] || '/notifications' } };
-    const userIds = users.map(u => u._id.toString());
-    PushService.broadcast(userIds, broadcastPayload).catch(err => logger.error(err, '[PushService] Broadcast failed'));
+    const broadcastPayload = { title, body: message, tag: category, source: CATEGORY_PUSH_LABELS[category], data: { url: metadata?.route || urlMap[type] || '/notifications' } };
+    const userIds = eligibleUsers.map(u => u._id.toString());
+    UnifiedPushService.broadcastToUsers(userIds, broadcastPayload).catch(err =>
+      logger.error(err, '[UnifiedPushService] Broadcast failed')
+    );
   } catch (error: any) {
     logger.error(error, '[NotificationService] Error triggering web push broadcast');
   }

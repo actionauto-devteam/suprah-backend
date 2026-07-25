@@ -217,6 +217,18 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     `Created load ${load.loadNumber}`
   );
 
+  {
+    const { title, message } = notificationTemplates.shipment_created({
+      trackingNumber: load.loadNumber,
+      customerName: `${load.pickupLocation.city || ''} → ${load.deliveryLocation.city || ''}`.trim(),
+    });
+    notifyOrgAdmins(organizationId, 'shipment_created', title, message, {
+      loadId: load._id.toString(),
+      loadNumber: load.loadNumber,
+      route: '/transportation?tab=shipments',
+    }, user._id.toString()).catch((err) => logger.error(err, 'Failed to notify admins of new load'));
+  }
+
   logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
 
   return res.status(201).json(new ApiResponse(201, { load, ...(pricingWarning ? { warning: pricingWarning } : {}) }, "Load created successfully"));

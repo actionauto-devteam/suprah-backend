@@ -49,7 +49,7 @@ function supraSpaceMessageUrl(conversationId: string, messageId?: string): strin
   return `/crm/supra-space?${params.toString()}`;
 }
 
-async function pushToConversationMembers(conv: any, senderId: string, title: string, body: string, textForMention = '', messageId?: string): Promise<void> {
+export async function pushToConversationMembers(conv: any, senderId: string, title: string, body: string, textForMention = '', messageId?: string): Promise<void> {
   try {
     const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
@@ -58,7 +58,7 @@ async function pushToConversationMembers(conv: any, senderId: string, title: str
     if (!recipientIds.length) return;
 
     const recipients = await CrmUser.find({ _id: { $in: recipientIds } })
-      .select('_id fullName username')
+      .select('_id fullName username notificationPreferences')
       .lean();
 
     await Promise.allSettled(recipientIds.map(async (memberId: string) => {
@@ -66,6 +66,22 @@ async function pushToConversationMembers(conv: any, senderId: string, title: str
       const pref = getConversationNotificationPref(conv, memberId);
       const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|[^\w@])@all(?=$|[^\w])/i.test(textForMention);
       if (!shouldNotifyForPreference(pref, mentioned)) return;
+
+      // Mentioned members get a separate, more specific "X mentioned you" push
+      // via notifyMentionedMembers() (goes through the unified notification
+      // pipeline, persisted + mutedTypes-aware) — without this, they'd be
+      // double-pushed for the same message.
+      if (mentioned) return;
+
+      // The global "Messages" mute (notificationPreferences.mutedTypes
+      // including 'crm_message', or the whole `crm` category switched off)
+      // previously had no effect here at all — this function bypassed the
+      // unified preference gate entirely, so muting "Messages" silently did
+      // nothing for regular (non-mention) SupraSpace pushes.
+      const notifPrefs = (recipient as any)?.notificationPreferences;
+      const crmCategoryOff = notifPrefs?.crm === false;
+      const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
+      if (crmCategoryOff || messagesMuted) return;
 
       const unreadCount = await SupraSpaceMessage.countDocuments({
         conversationId: conv._id,
@@ -79,6 +95,11 @@ async function pushToConversationMembers(conv: any, senderId: string, title: str
         body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
         icon: '/icon-192x192.png',
         tag: conv._id?.toString() ?? 'supraspace',
+        // Multiple messages in the SAME conversation while offline should
+        // collapse to one delivered push (already correctly summarized above
+        // as "N new messages") instead of machine-gunning on reconnect.
+        topic: conv._id?.toString(),
+        source: 'SupraSpace',
         data: {
           url: supraSpaceMessageUrl(conv._id.toString(), messageId),
           conversationId: conv._id.toString(),
@@ -188,6 +209,7 @@ async function notifyMentionedMembers(params: {
           conversationId: params.conversation._id.toString(),
           messageId: params.messageId,
           route: params.route || supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
+          pushSource: 'SupraSpace',
         },
       })
     ));

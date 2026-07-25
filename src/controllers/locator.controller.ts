@@ -13,8 +13,6 @@ import DrivingSession from '../models/DrivingSession.model';
 import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
-import { PushService } from '../services/push.service';
-import CrmPushService from '../services/crmPush.service';
 import { isMobileMonitoringDept, isLocationRequiredForUser } from '../config/departmentMonitoring';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
@@ -286,8 +284,42 @@ async function updateDrivingTelematics(
     await session.save();
 }
 
-function notifyAdmins(orgId: string, payload: { title: string; body: string; tag?: string; data?: Record<string, any> }) {
-    PushService.notifyOrgAdmins(orgId, payload).catch(() => {});
+// Lot-tech geofence alerts are CRM-internal (Team Pulse activity, CrmUser
+// admins/managers only) — routed through the unified notification service so
+// they persist to the bell/page (not just an ephemeral push, which used to
+// silently no-op for main-User admins whenever Redis was disabled).
+async function notifyAdmins(
+    orgId: string,
+    payload: { title: string; body: string; tag?: string; data?: Record<string, any> },
+    dedupeSubjectId?: string,
+) {
+    try {
+        const admins = await CrmUser.find({ organizationId: orgId, role: { $in: ['admin', 'manager'] }, isActive: true })
+            .select('_id')
+            .lean();
+        await Promise.allSettled(
+            admins.map((admin) =>
+                notificationService.createNotification({
+                    userId: admin._id.toString(),
+                    organizationId: orgId,
+                    type: 'driver_tracker_geofence_alert',
+                    title: payload.title,
+                    message: payload.body,
+                    metadata: { route: payload.data?.url || '/team-pulse?tab=activity', ...payload.data },
+                    // Repeat enter/exit transitions for the SAME employee within the
+                    // window compile into one evolving notification instead of one
+                    // alert per transition — scoped by dedupeSubjectId (the employee),
+                    // never just admin+type, so different employees never merge.
+                    ...(dedupeSubjectId ? {
+                        dedupeKey: `geofence:${admin._id}:${dedupeSubjectId}`,
+                        groupWindowMinutes: 20,
+                    } : {}),
+                })
+            ),
+        );
+    } catch {
+        // Best-effort — never let an alert failure break the location update flow.
+    }
 }
 
 // A GPS fix worse than this (WiFi/cell-tower fallback, common indoors at a
@@ -329,12 +361,25 @@ async function resolveCurrentPlace(orgId: string, lat: number, lng: number, curr
     return null;
 }
 
-function notifyActor(actor: { id: any; model: 'User' | 'CrmUser' }, payload: { title: string; body: string; tag: string; data?: Record<string, any> }) {
-    const pushPayload = { icon: '/icon-192x192.png', ...payload };
-    const send = actor.model === 'CrmUser'
-        ? CrmPushService.sendToUsers([actor.id.toString()], pushPayload)
-        : PushService.send(actor.id, pushPayload);
-    send.catch(() => {});
+// Self-notify (the person who left/arrived, not the admin) — persisted and
+// grouped just like the admin side, so the employee gets their own
+// arrival/departure history instead of an ephemeral, unrecorded push, and
+// rapid in/out/in doesn't spam them with a fresh notification per transition.
+function notifyActor(
+    orgId: string,
+    actor: { id: any },
+    payload: { title: string; body: string; tag: string; data?: Record<string, any> },
+) {
+    notificationService.createNotification({
+        userId: actor.id.toString(),
+        organizationId: orgId,
+        type: 'driver_tracker_geofence_alert',
+        title: payload.title,
+        message: payload.body,
+        metadata: { route: payload.data?.url || '/team-pulse?tab=activity', selfNotify: true, ...payload.data },
+        dedupeKey: `geofence-self:${actor.id}`,
+        groupWindowMinutes: 20,
+    }).catch(() => {});
 }
 
 async function handleGeofenceTransition(
@@ -371,7 +416,7 @@ async function handleGeofenceTransition(
                 placeId: visit.placeId, placeName: visit.placeName,
                 exitedAt: visit.exitedAt, durationMin: visit.durationMin,
             });
-            notifyActor(actor, {
+            notifyActor(orgId, actor, {
                 title: '⚠️ You left the area',
                 body: `You left ${visit.placeName}. Admins have been notified.`,
                 tag: `locator-exit-self-${actor.id}`,
@@ -383,7 +428,7 @@ async function handleGeofenceTransition(
                     body: `${user.name} left ${visit.placeName}`,
                     tag: `lot-tech-exit-${user._id}`,
                     data: { url: '/team-pulse?tab=activity' },
-                });
+                }, user._id.toString());
             }
         }
     }
@@ -413,7 +458,7 @@ async function handleGeofenceTransition(
             userId: user._id.toString(), userName: user.name,
             placeId: nextPlace._id, placeName: nextPlace.name, enteredAt: visit.enteredAt,
         });
-        notifyActor(actor, {
+        notifyActor(orgId, actor, {
             title: '📍 Arrived',
             body: `You're now at ${nextPlace.name}.`,
             tag: `locator-arrival-self-${actor.id}`,
@@ -425,7 +470,7 @@ async function handleGeofenceTransition(
                 body: `${user.name} arrived at ${nextPlace.name}`,
                 tag: `locator-arrival-${user._id}`,
                 data: { url: '/team-pulse?tab=activity' },
-            });
+            }, user._id.toString());
         }
     }
 }

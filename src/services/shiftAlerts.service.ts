@@ -3,8 +3,8 @@ import CrmUser from '../models/CrmUser.model';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import { getIO } from '../socket/supraspace.socket';
-import { CrmPushService } from '../services/crmPush.service';
-import { PushService } from '../services/push.service';
+import { notifyOrgAdmins as persistNotifyOrgAdmins } from '../utils/safeNotification';
+import notificationService from './notification.service';
 import logger from '../utils/logger';
 
 const SHIFT_ALERTS_CHANNEL_NAME = 'Shift Alerts';
@@ -140,31 +140,41 @@ async function postShiftAlertMessage(organizationId: string, text: string): Prom
   }
 }
 
-/** Pushes a notification to one specific user, regardless of which account
- * model (CrmUser or main User — Lot Tech uses the latter) they are. Carries
- * the dedicated warning_sound.wav — this is the ONLY recipient who gets it;
- * admins/managers get the app's normal notification sound instead (see
- * notifyOrgAdmins). */
+/** Notifies the specific affected user, regardless of which account model
+ * (CrmUser or main User — Lot Tech uses the latter) they are. Routed through
+ * notificationService so this alert is now persisted to their own bell/page
+ * (previously push-only — the affected employee had zero record of ever
+ * being flagged), preference-gated, and grouped: repeat connection-loss/
+ * stale-clockout/location-not-shared events for the SAME person within the
+ * window compile into one evolving notification (deliberately not split by
+ * which of the three mechanisms fired — see fireShiftAlert). Carries the
+ * dedicated warning_sound.wav via metadata.playSound — this is the ONLY
+ * recipient who gets it; admins/managers get the app's normal notification
+ * sound instead (see notifyOrgAdmins). */
 async function notifyTargetUser(
+  organizationId: string,
   userId: string,
-  userModel: 'CrmUser' | 'User',
+  _userModel: 'CrmUser' | 'User',
   payload: { title: string; body: string; tag: string; url?: string }
 ): Promise<void> {
-  const pushPayload = {
-    title: payload.title,
-    body: payload.body,
-    tag: payload.tag,
-    icon: '/icon-192x192.png',
-    data: { url: payload.url || '/crm/timeproof-clock', playSound: true, soundFile: SHIFT_ALERT_SOUND_FILE },
-  };
   try {
-    if (userModel === 'CrmUser') {
-      await CrmPushService.sendToUsers([userId], pushPayload);
-    } else {
-      await PushService.send(userId, pushPayload);
-    }
+    await notificationService.createNotification({
+      userId,
+      organizationId,
+      type: 'crm_timeproof',
+      title: payload.title,
+      message: payload.body,
+      metadata: {
+        route: payload.url || '/crm/timeproof-clock',
+        selfNotify: true,
+        playSound: true,
+        soundFile: SHIFT_ALERT_SOUND_FILE,
+      },
+      dedupeKey: `shift-alert-self:${userId}`,
+      groupWindowMinutes: 30,
+    });
   } catch (err) {
-    logger.error({ err, userId }, '[shiftAlerts] Failed to push to target user');
+    logger.error({ err, userId }, '[shiftAlerts] Failed to notify target user');
   }
 }
 
@@ -179,19 +189,28 @@ async function notifyTargetUser(
  */
 async function notifyOrgAdmins(
   organizationId: string,
-  payload: { title: string; body: string; tag: string; url?: string }
+  payload: { title: string; body: string; tag: string; url?: string },
+  dedupeSubjectId?: string,
 ): Promise<void> {
-  const pushPayload = {
-    title: payload.title,
-    body: payload.body,
-    tag: payload.tag,
-    icon: '/icon-192x192.png',
-    data: { url: payload.url || '/crm/timeproof/users' },
-  };
   try {
-    await PushService.notifyOrgAdmins(organizationId, pushPayload);
+    // Persists as an 'admin_staff_activity' notification (bell/page visible,
+    // preference-gated) and pushes to both User and CrmUser admins/managers —
+    // replaces the old push-only, Redis-gated PushService.notifyOrgAdmins.
+    // Grouped by the affected employee (dedupeSubjectId) across all 3 "shift
+    // alert" triggers (connection-loss, stale-clockout, location-not-shared)
+    // uniformly — deliberately not split by which one fired, so repeat
+    // alerts about the same person compile into one notification.
+    await persistNotifyOrgAdmins(
+      organizationId,
+      'admin_staff_activity',
+      payload.title,
+      payload.body,
+      { route: payload.url || '/crm/timeproof/users' },
+      undefined,
+      dedupeSubjectId ? { dedupeKeyPrefix: `shift-alert:${dedupeSubjectId}`, groupWindowMinutes: 30 } : undefined,
+    );
   } catch (err) {
-    logger.error({ err }, '[shiftAlerts] Failed to push to org admins');
+    logger.error({ err }, '[shiftAlerts] Failed to notify org admins');
   }
 }
 
@@ -215,7 +234,7 @@ export async function fireShiftAlert(params: {
   const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, notifyTag, url } = params;
   await Promise.allSettled([
     postShiftAlertMessage(organizationId, chatMessage),
-    notifyOrgAdmins(organizationId, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
-    notifyTargetUser(targetUserId, targetUserModel, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
+    notifyOrgAdmins(organizationId, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }, targetUserId),
+    notifyTargetUser(organizationId, targetUserId, targetUserModel, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
   ]);
 }

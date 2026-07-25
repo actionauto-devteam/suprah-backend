@@ -69,6 +69,39 @@ interface ReferralData {
   amount?: number;
 }
 
+interface FeedData {
+  authorName: string;
+  postPreview?: string;
+}
+
+interface ProjectTaskData {
+  taskTitle: string;
+  actorName?: string;
+  dueDate?: string;
+  groupName?: string;
+  comment?: string;
+}
+
+interface CalendarEventData {
+  eventTitle: string;
+  startTime?: string;
+}
+
+interface DriverTrackerData {
+  driverName: string;
+  placeName?: string;
+}
+
+interface WalletData {
+  amount?: number;
+  reason?: string;
+}
+
+interface AdminAlertData {
+  title: string;
+  message: string;
+}
+
 export const notificationTemplates = {
   quote_created: (data: QuoteData) => ({
     title: 'New Quote Created',
@@ -376,6 +409,122 @@ export const notificationTemplates = {
   delivery_confirmed: (data: { trackingNumber: string }) => ({
     title: 'Delivery Confirmed',
     message: `Your delivery for shipment ${data.trackingNumber} has been confirmed by the dealer`,
+  }),
+
+  // ==================== FEEDS ====================
+  feed_mention_post: (data: FeedData) => ({
+    title: `${data.authorName} mentioned you`,
+    message: data.postPreview || `${data.authorName} mentioned you in a post`,
+  }),
+
+  feed_mention_comment: (data: FeedData) => ({
+    title: `${data.authorName} mentioned you in a comment`,
+    message: data.postPreview || `${data.authorName} mentioned you in a comment`,
+  }),
+
+  feed_comment_on_post: (data: FeedData) => ({
+    title: `${data.authorName} commented on your post`,
+    message: data.postPreview || `${data.authorName} left a comment on your post`,
+  }),
+
+  feed_announcement: (data: FeedData) => ({
+    title: 'New Announcement',
+    message: data.postPreview || `${data.authorName} posted an announcement`,
+  }),
+
+  // ==================== PROJECT MANAGEMENT ====================
+  pm_task_assigned: (data: ProjectTaskData) => ({
+    title: 'New Task Assigned',
+    message: `"${data.taskTitle}" was assigned to you${data.actorName ? ` by ${data.actorName}` : ''}`,
+  }),
+
+  pm_task_comment: (data: ProjectTaskData) => ({
+    title: `New comment on "${data.taskTitle}"`,
+    message: data.comment || `${data.actorName || 'Someone'} commented on "${data.taskTitle}"`,
+  }),
+
+  pm_task_status: (data: ProjectTaskData) => ({
+    title: 'Task Status Updated',
+    message: `"${data.taskTitle}" status was updated${data.actorName ? ` by ${data.actorName}` : ''}`,
+  }),
+
+  pm_task_updated: (data: ProjectTaskData) => ({
+    title: 'Task Updated',
+    message: `"${data.taskTitle}" was updated${data.actorName ? ` by ${data.actorName}` : ''}`,
+  }),
+
+  pm_group_added: (data: ProjectTaskData) => ({
+    title: 'Added to Project Group',
+    message: `You were added to "${data.groupName || data.taskTitle}"`,
+  }),
+
+  pm_task_mention: (data: ProjectTaskData) => ({
+    title: 'You were mentioned',
+    message: `${data.actorName || 'Someone'} mentioned you on "${data.taskTitle}"`,
+  }),
+
+  pm_task_deadline: (data: ProjectTaskData) => ({
+    title: 'Task Deadline Approaching',
+    message: `"${data.taskTitle}" is due${data.dueDate ? ` on ${data.dueDate}` : ' soon'}`,
+  }),
+
+  // ==================== CALENDAR ====================
+  calendar_event_reminder: (data: CalendarEventData) => ({
+    title: 'Upcoming Event',
+    message: `"${data.eventTitle}"${data.startTime ? ` starts at ${data.startTime}` : ' is coming up'}`,
+  }),
+
+  calendar_event_today: (data: CalendarEventData) => ({
+    title: "Today's Event",
+    message: `"${data.eventTitle}" is scheduled for today${data.startTime ? ` at ${data.startTime}` : ''}`,
+  }),
+
+  // ==================== DRIVER TRACKER ====================
+  driver_tracker_geofence_alert: (data: DriverTrackerData) => ({
+    title: 'Geofence Alert',
+    message: `${data.driverName} ${data.placeName ? `left ${data.placeName}` : 'crossed a geofence boundary'}`,
+  }),
+
+  driver_tracker_offline_alert: (data: DriverTrackerData) => ({
+    title: 'Driver Went Offline',
+    message: `${data.driverName}'s location tracking has gone offline`,
+  }),
+
+  driver_tracker_place_visit: (data: DriverTrackerData) => ({
+    title: 'Place Visit Detected',
+    message: `${data.driverName} arrived at ${data.placeName || 'a tracked location'}`,
+  }),
+
+  // ==================== WALLET ====================
+  wallet_low_balance: (data: WalletData) => ({
+    title: 'Low Wallet Balance',
+    message: `Your wallet balance is low${data.amount !== undefined ? ` ($${data.amount.toFixed(2)})` : ''}. Add funds to avoid interruptions.`,
+  }),
+
+  wallet_payout_failed: (data: WalletData) => ({
+    title: 'Payout Failed',
+    message: `A payout of $${(data.amount || 0).toFixed(2)} failed${data.reason ? `: ${data.reason}` : ''}`,
+  }),
+
+  // ==================== ADMIN ====================
+  admin_broadcast: (data: AdminAlertData) => ({
+    title: data.title,
+    message: data.message,
+  }),
+
+  admin_system_alert: (data: AdminAlertData) => ({
+    title: data.title,
+    message: data.message,
+  }),
+
+  admin_staff_activity: (data: AdminAlertData) => ({
+    title: data.title,
+    message: data.message,
+  }),
+
+  admin_security_audit: (data: AdminAlertData) => ({
+    title: data.title,
+    message: data.message,
   }),
 };
 

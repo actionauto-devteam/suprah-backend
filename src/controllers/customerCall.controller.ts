@@ -8,6 +8,7 @@ import CrmUser from '../models/CrmUser.model';
 import User, { IUser } from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { emitToUser } from '../utils/socketEmitter';
+import notificationService from '../services/notification.service';
 import logger from '../utils/logger';
 import jwt from 'jsonwebtoken';
 
@@ -207,6 +208,25 @@ const requestCall = asyncHandler(async (req: Request, res: Response) => {
 
   // Notify staff members (channel) of the incoming request.
   emitToConversation(conversation, 'call:request', payload);
+
+  // A customer waiting on a call is one of the most time-sensitive events in
+  // the app — previously this only reached staff with an already-open CRM
+  // tab (raw socket emit above); anyone whose app was closed got nothing.
+  const staffIds = (conversation.members || []).map((m: any) => (m.toString ? m.toString() : String(m)));
+  if (staffIds.length && orgId) {
+    notificationService.createNotificationBatch(
+      staffIds.map((userId: string) => ({
+        userId,
+        organizationId: orgId,
+        type: 'customer_call_requested',
+        title: `📞 ${mainUser.name || 'A customer'} requested a ${mode} call`,
+        message: `${mainUser.name || 'A customer'} is waiting for a ${mode} call.`,
+        metadata: { route: `/crm/supra-space?conversationId=${conversation._id.toString()}` },
+        dedupeKey: `customer-call:${userId}:${conversation._id.toString()}`,
+        groupWindowMinutes: 10,
+      }))
+    ).catch((err) => logger.warn({ err }, '[CustomerCall] Failed to notify staff'));
+  }
 
   res.status(201).json(
     new ApiResponse(201, { conversationId: conversation._id, mode, status: 'requested' }, 'Call requested')

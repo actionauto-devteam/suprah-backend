@@ -10,7 +10,6 @@ import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
-import { PushService } from '../services/push.service';
 import CrmPushService from '../services/crmPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
@@ -18,6 +17,7 @@ import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
+import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
@@ -890,6 +890,12 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   );
 
   // ── Notify admins: agent went idle ────────────────────────────────────────
+  // Routed through notificationService (persisted, preference-gated, unified
+  // push) with an `agent-idle:{admin}:{agent}` dedupeKey shared with the
+  // 15-min escalation below, so a person flapping idle/active repeatedly —
+  // or escalating from a short idle into a long one — compiles into one
+  // evolving notification instead of spamming admins with a new alert per
+  // transition (see notification.service.ts's createNotification grouping).
   if (!wasIdle && isIdle && isOnShift) {
     // Org-scoped — an unscoped query here would leak this event to every
     // other organization's admins too.
@@ -900,15 +906,18 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     }
     emitToShiftBoard('agent:idle', idlePayload);
 
-    // Push notification to admins across all devices — reaches both CrmUser
-    // and main-User admins of this org, not just whichever model this event
-    // originated from.
-    PushService.notifyOrgAdmins(user.organizationId, {
-      title: '⚪ Agent Idle',
-      body: `${user.fullName} has been idle for 10 minutes.`,
-      tag: `crm-idle-${user._id}`,
-      data: { url: '/crm/timeproof/users' },
-    }).catch(() => {});
+    for (const admin of admins) {
+      notificationService.createNotification({
+        userId: admin._id.toString(),
+        organizationId: user.organizationId.toString(),
+        type: 'agent_idle',
+        title: '⚪ Agent Idle',
+        message: `${user.fullName} has been idle for 10 minutes.`,
+        metadata: { route: '/crm/timeproof/users', agentUserId: user._id },
+        dedupeKey: `agent-idle:${admin._id}:${user._id}`,
+        groupWindowMinutes: 30,
+      }).catch(() => {});
+    }
   }
 
   // ── Notify admins: agent has been idle 15+ minutes — actionable alert ────
@@ -927,12 +936,18 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       }
       emitToShiftBoard('agent:idle-escalation', idleEscalationPayload);
 
-      PushService.notifyOrgAdmins(user.organizationId, {
-        title: '🟠 Agent Idle 15+ Minutes',
-        body: `${user.fullName} has been idle for ${idleMinutes} minutes. Tap to review and clock out if needed.`,
-        tag: `crm-idle-escalation-${user._id}`,
-        data: { url: `/crm/timeproof/users/${user._id}` },
-      }).catch(() => {});
+      for (const admin of admins) {
+        notificationService.createNotification({
+          userId: admin._id.toString(),
+          organizationId: user.organizationId.toString(),
+          type: 'agent_idle_escalation',
+          title: '🟠 Agent Idle 15+ Minutes',
+          message: `${user.fullName} has been idle for ${idleMinutes} minutes. Tap to review and clock out if needed.`,
+          metadata: { route: `/crm/timeproof/users/${user._id}`, agentUserId: user._id },
+          dedupeKey: `agent-idle:${admin._id}:${user._id}`,
+          groupWindowMinutes: 30,
+        }).catch(() => {});
+      }
     }
   }
 
@@ -1311,11 +1326,16 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
       organizationId: requestor.organizationId?.toString(),
     });
 
-    CrmPushService.sendToUsers([targetUserId], {
+    // Persisted (not just a raw push) since this has real payroll impact —
+    // the affected user needs a durable record even if the push is missed
+    // (device off, subscription pruned, notification dismissed unseen).
+    notificationService.createNotification({
+      userId: targetUserId,
+      organizationId: requestor.organizationId?.toString() || '',
+      type: 'crm_timeproof',
       title: '🗑️ Screenshot Deleted by Admin',
-      body: `${requestor.fullName} deleted one of your screenshots from ${date}. ${SCREENSHOT_DELETE_DEDUCTION_SECONDS / 60} minutes were deducted from that day's rendered hours.`,
-      tag: `screenshot-deleted-${targetUserId}-${date}`,
-      data: { url: `/crm/timeproof/${date}` },
+      message: `${requestor.fullName} deleted one of your screenshots from ${date}. ${SCREENSHOT_DELETE_DEDUCTION_SECONDS / 60} minutes were deducted from that day's rendered hours.`,
+      metadata: { route: `/crm/timeproof/${date}` },
     }).catch(() => {});
   }
 

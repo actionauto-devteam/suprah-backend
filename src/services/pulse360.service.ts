@@ -8,6 +8,7 @@ import TimeLog from '../models/TimeLog.model';
 import { getSocketIO } from '../utils/socketEmitter';
 import { buildSessions, buildBreakSessions } from '../utils/timeLogEngine';
 import CrmPushService from '../services/crmPush.service';
+import logger from '../utils/logger';
 import scoring from './pulse360.scoring';
 import taskAdapter, { PulseTask, urgencyScore, hoursUntilDue } from './pulse360.taskAdapter';
 
@@ -386,9 +387,16 @@ async function deliverAlert(alert: IPulseAlert, settings: IPulseSetting) {
         body: alert.reason,
         url: alert.actionUrl || '/crm/pulse360',
         tag: `pulse360-${alert.dedupeKey}`,
+        topic: `pulse360-${alert.dedupeKey}`,
+        source: 'Pulse360',
       });
-    } catch {
-      /* push is best-effort — the in-app popup is the primary channel */
+    } catch (err) {
+      // Push is best-effort — the in-app popup is the primary channel — but
+      // still log it. Pulse360 alerts have no fallback bell/list entry (they
+      // live only in the PulseAlert collection + this push), so a silently
+      // swallowed failure here means the alert is genuinely lost for anyone
+      // whose app isn't open, with zero trace to debug from.
+      logger.error({ err, userId: String(alert.userId), alertId: String(alert._id) }, '[Pulse360] Push delivery failed');
     }
   }
 }

@@ -27,6 +27,9 @@ import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspace
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
 import { initPresenceOfflineScheduler } from "./schedulers/presenceOffline.scheduler";
+import { initDriverOfflineAlertScheduler } from "./schedulers/driverOfflineAlert.scheduler";
+import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
+import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
 import healthRoute from "./routes/health.route";
 import supraSpaceRoute from "./routes/supraspace.route";
 import { initSupraSpaceSocket } from "./socket/supraspace.socket";
@@ -201,6 +204,9 @@ if (require.main === module) {
     initStaleShiftAutoClockoutScheduler();
     initConnectionLossShiftAlertScheduler();
     initPresenceOfflineScheduler();
+    initDriverOfflineAlertScheduler();
+    startProjectDeadlineReminders();
+    startCalendarReminderSweep();
 
     // Suprah Mail — start the Gmail history poll + socket fan-out engine.
     // Placed after waitForDbConnection() so its first tick never queries a

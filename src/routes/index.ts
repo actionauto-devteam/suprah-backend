@@ -5,6 +5,7 @@ import syncRoute from "./sync.route";
 import feedSyncRoute from "./feedSync.route";
 import quoteRoute from "./quote.routes";
 import notificationRoute from "./notification.route";
+import crmNotificationRoute from "./crmNotification.route";
 import profileRoute from "./profile.route";
 import appointmentRoute from "./appointment.route";
 import appointmentDashboardRoute from "./appointmentDashboard.routes";
@@ -92,6 +93,10 @@ const defaultRoutes = [
   {
     path: "/notifications",
     route: notificationRoute,
+  },
+  {
+    path: "/crm/notifications",
+    route: crmNotificationRoute,
   },
   {
     path: "/profile",

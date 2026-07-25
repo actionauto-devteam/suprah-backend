@@ -7,6 +7,7 @@ import SshKey from '../models/SshKey.model';
 import CrmUser from '../models/CrmUser.model';
 import BiometricAuditLog from '../models/BiometricAuditLog.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
+import { notifyOrgAdmins } from '../utils/safeNotification';
 
 
 
@@ -143,6 +144,13 @@ export async function verifySshSignature(
       userAgent,
       metadata: { method: 'ssh' },
     });
+    notifyOrgAdmins(
+      user.organizationId.toString(),
+      'admin_security_audit',
+      'Failed Biometric Login',
+      `${user.fullName} (${user.username}) failed an SSH signature verification.`,
+      { userId: user._id.toString(), ipAddress, route: '/crm/biometrics' },
+    ).catch(() => {});
     throw new Error('SSH signature verification failed. Make sure you signed the correct challenge with a registered key.');
   }
 

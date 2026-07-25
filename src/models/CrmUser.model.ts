@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
+import { notificationPreferencesSchema, NotificationPreferences } from './notificationPreferences.schema';
 
 export interface ICrmPushSubscription {
   endpoint: string;
@@ -36,6 +37,7 @@ export interface ICrmUser extends Document {
   };
   locationSharingOptOut?: boolean;
   pushSubscriptions: ICrmPushSubscription[];
+  notificationPreferences: NotificationPreferences;
   department?: string;
   screenshotExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
@@ -174,6 +176,10 @@ const CrmUserSchema = new Schema<ICrmUser>(
         createdAt: { type: Date, default: Date.now },
       },
     ],
+    notificationPreferences: {
+      type: notificationPreferencesSchema,
+      default: () => ({}),
+    },
     department: {
       type: String,
       trim: true,
