@@ -135,19 +135,26 @@ export const getPosts = asyncHandler(async (req: Request, res: Response) => {
     deletedAt: null,
   };
 
-  // Run count and data fetch in parallel for efficiency
-  const [posts, total] = await Promise.all([
-    Feed.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-    Feed.countDocuments(filter),
-  ]);
+  // Fetch one extra row instead of counting the entire organization feed on
+  // every request. This keeps the initial query fast as the feed grows while
+  // still allowing the client to determine whether another page is available.
+  const rows = await Feed.find(filter)
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit + 1)
+    .lean();
 
-  const signedPosts = await Promise.all(posts.map((post) => signAttachments(post)));
+  const hasMore = rows.length > limit;
+  const posts = hasMore ? rows.slice(0, limit) : rows;
 
-  // hasMore lets the frontend know whether to show a "Load more" button
-  const hasMore = skip + posts.length < total;
+  // URL signing is required only for posts that actually contain attachments.
+  // Posts without files are returned immediately without storage-service calls.
+  const signedPosts = await Promise.all(
+    posts.map((post) => post.attachments?.length ? signAttachments(post) : post)
+  );
 
   res.json(
-    new ApiResponse(200, { posts: signedPosts, total, page, limit, hasMore }, 'Feed fetched successfully')
+    new ApiResponse(200, { posts: signedPosts, page, limit, hasMore }, 'Feed fetched successfully')
   );
 });
 
