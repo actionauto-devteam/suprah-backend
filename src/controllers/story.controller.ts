@@ -40,7 +40,7 @@ function serializeStory(story: any, meId: string) {
     reactionCount: reactions.length,
     myReaction: mine?.emoji ?? null,
     viewedByMe: (story.viewers || []).some((v: any) => v.userId?.toString() === meId),
-    replyCount: (story.replies || []).length,
+    commentCount: (story.comments || []).length,
   };
 }
 
@@ -95,7 +95,7 @@ const createStory = asyncHandler(async (req: Request, res: Response) => {
     caption: typeof req.body.caption === 'string' ? req.body.caption.trim() : undefined,
     viewers: [],
     reactions: [],
-    replies: [],
+    comments: [],
     expiresAt: new Date(Date.now() + STORY_TTL_MS),
   });
 
@@ -192,27 +192,58 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { users }, 'Stories rail'));
 });
 
-/** GET /api/crm/stories/:id — single story (with replies for the owner). */
+/** GET /api/crm/stories/:id — comments are public; owner also sees who viewed/reacted. */
 const getStory = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
+  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId }).lean();
   if (!story) throw new ApiError(404, 'Story not found');
 
-  const base = serializeStory(story.toObject(), user._id.toString());
-  const isOwner = story.userId.toString() === user._id.toString();
+  const meId = user._id.toString();
+  const base = serializeStory(story, meId);
+  const isOwner = story.userId.toString() === meId;
+
+  // Comments are visible to everyone who can see the story.
+  const comments = (story.comments || []).map((c: any) => ({
+    _id: c._id,
+    userId: c.userId,
+    authorName: c.authorName,
+    authorAvatar: c.authorAvatar,
+    text: c.text,
+    createdAt: c.createdAt,
+  }));
+
+  // Owner-only: the "seen by" list, each viewer annotated with their reaction.
+  let viewers: any;
+  let reactions: any;
+  if (isOwner) {
+    const reactionByUser = new Map<string, string>();
+    for (const r of story.reactions || []) reactionByUser.set(r.userId.toString(), r.emoji);
+    viewers = (story.viewers || [])
+      .slice()
+      .sort((a: any, b: any) => new Date(b.viewedAt).getTime() - new Date(a.viewedAt).getTime())
+      .map((v: any) => ({
+        userId: v.userId,
+        name: v.name,
+        avatar: v.avatar,
+        viewedAt: v.viewedAt,
+        emoji: reactionByUser.get(v.userId.toString()) || null,
+      }));
+    reactions = (story.reactions || []).map((r: any) => ({
+      userId: r.userId,
+      authorName: r.authorName,
+      authorAvatar: r.authorAvatar,
+      emoji: r.emoji,
+    }));
+  }
+
   res.json(
     new ApiResponse(200, {
-      story: {
-        ...base,
-        // Owners can see who replied/reacted; others only see aggregates.
-        replies: isOwner ? story.replies : undefined,
-        viewers: isOwner ? story.viewers : undefined,
-      },
+      story: { ...base, isOwner, comments, viewers, reactions },
     }, 'Story fetched')
   );
 });
 
-/** POST /api/crm/stories/:id/view — idempotent view marker. */
+/** POST /api/crm/stories/:id/view — idempotent view marker (records name/avatar). */
 const markViewed = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
@@ -220,8 +251,12 @@ const markViewed = asyncHandler(async (req: Request, res: Response) => {
 
   const already = story.viewers.some((v) => v.userId.toString() === user._id.toString());
   if (!already) {
-    story.viewers.push({ userId: user._id as any, viewedAt: new Date() });
+    story.viewers.push({ userId: user._id as any, name: user.fullName, avatar: user.avatar, viewedAt: new Date() });
     await story.save();
+    // Tell the owner (live "seen by" updates).
+    if (story.userId.toString() !== user._id.toString()) {
+      emitToUser(story.userId.toString(), 'story:view', { storyId: story._id });
+    }
   }
   res.json(new ApiResponse(200, { viewCount: story.viewers.length }, 'Viewed'));
 });
@@ -240,54 +275,67 @@ const react = asyncHandler(async (req: Request, res: Response) => {
   let myReaction: string | null = emoji;
 
   if (existing && existing.emoji === emoji) {
-    // Same emoji → remove.
     story.reactions = story.reactions.filter((r) => r.userId.toString() !== meId) as any;
     myReaction = null;
   } else if (existing) {
     existing.emoji = emoji;
+    existing.authorAvatar = user.avatar;
     existing.createdAt = new Date();
   } else {
-    story.reactions.push({ userId: user._id as any, authorName: user.fullName, emoji, createdAt: new Date() });
+    story.reactions.push({
+      userId: user._id as any,
+      authorName: user.fullName,
+      authorAvatar: user.avatar,
+      emoji,
+      createdAt: new Date(),
+    });
   }
   await story.save();
 
-  // Let the story owner know someone reacted.
-  if (myReaction && story.userId.toString() !== meId) {
-    emitToUser(story.userId.toString(), 'story:reaction', {
-      storyId: story._id, emoji, from: user.fullName,
-    });
+  // Notify the owner so their reactions list updates live.
+  if (story.userId.toString() !== meId) {
+    emitToUser(story.userId.toString(), 'story:reaction', { storyId: story._id, emoji, from: user.fullName });
   }
 
   res.json(new ApiResponse(200, { reactionCount: story.reactions.length, myReaction }, 'Reaction saved'));
 });
 
-/** POST /api/crm/stories/:id/reply — quick DM-style reply to the author. */
-const reply = asyncHandler(async (req: Request, res: Response) => {
+/** POST /api/crm/stories/:id/comment — a PUBLIC comment everyone can see. */
+const comment = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { text } = req.body;
-  if (!text || !text.trim()) throw new ApiError(400, 'Reply text is required.');
-  if (text.trim().length > 500) throw new ApiError(400, 'Reply is too long.');
+  if (!text || !text.trim()) throw new ApiError(400, 'Comment text is required.');
+  if (text.trim().length > 500) throw new ApiError(400, 'Comment is too long.');
 
   const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
   if (!story) throw new ApiError(404, 'Story not found');
 
-  const replyDoc = {
+  const commentDoc = {
     userId: user._id as any,
     authorName: user.fullName,
     authorAvatar: user.avatar,
     text: text.trim(),
     createdAt: new Date(),
   };
-  story.replies.push(replyDoc);
+  story.comments.push(commentDoc);
   await story.save();
 
-  if (story.userId.toString() !== user._id.toString()) {
-    emitToUser(story.userId.toString(), 'story:reply', {
-      storyId: story._id, text: replyDoc.text, from: user.fullName,
-    });
-  }
+  const saved = story.comments[story.comments.length - 1];
 
-  res.status(201).json(new ApiResponse(201, { replyCount: story.replies.length }, 'Reply sent'));
+  // Broadcast to the whole org so every viewer sees the new comment live.
+  emitToOrg(story.organizationId.toString(), 'story:comment', {
+    storyId: story._id,
+    comment: {
+      _id: (saved as any)._id,
+      userId: user._id,
+      authorName: commentDoc.authorName,
+      authorAvatar: commentDoc.authorAvatar,
+      text: commentDoc.text,
+      createdAt: commentDoc.createdAt,
+    },
+  });
+
+  res.status(201).json(new ApiResponse(201, { commentCount: story.comments.length, comment: saved }, 'Comment added'));
 });
 
 /** DELETE /api/crm/stories/:id — owner or admin; also removes R2 objects. */
@@ -315,6 +363,6 @@ export default {
   getStory,
   markViewed,
   react,
-  reply,
+  comment,
   deleteStory,
 };

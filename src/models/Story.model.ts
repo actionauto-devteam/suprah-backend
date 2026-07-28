@@ -5,11 +5,12 @@ export type StoryMediaType = 'image' | 'video';
 export interface IStoryReaction {
   userId: mongoose.Types.ObjectId;
   authorName: string;
+  authorAvatar?: string;
   emoji: string;
   createdAt: Date;
 }
 
-export interface IStoryReply {
+export interface IStoryComment {
   userId: mongoose.Types.ObjectId;
   authorName: string;
   authorAvatar?: string;
@@ -19,6 +20,8 @@ export interface IStoryReply {
 
 export interface IStoryViewer {
   userId: mongoose.Types.ObjectId;
+  name: string;
+  avatar?: string;
   viewedAt: Date;
 }
 
@@ -42,7 +45,7 @@ export interface IStory extends Document {
   caption?: string;
   viewers: IStoryViewer[];
   reactions: IStoryReaction[];
-  replies: IStoryReply[];
+  comments: IStoryComment[];   // public — visible to everyone who views the story
   expiresAt: Date;             // TTL — createdAt + 24h
   createdAt: Date;
   updatedAt: Date;
@@ -70,6 +73,8 @@ const StorySchema = new Schema<IStory>(
     viewers: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
+        name: { type: String, required: true },
+        avatar: { type: String },
         viewedAt: { type: Date, default: Date.now },
       },
     ],
@@ -77,11 +82,12 @@ const StorySchema = new Schema<IStory>(
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
         authorName: { type: String, required: true },
+        authorAvatar: { type: String },
         emoji: { type: String, required: true },
         createdAt: { type: Date, default: Date.now },
       },
     ],
-    replies: [
+    comments: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
         authorName: { type: String, required: true },

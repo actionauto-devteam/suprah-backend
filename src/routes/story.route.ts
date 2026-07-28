@@ -34,7 +34,7 @@ router.post(
 router.get('/:id', storyController.getStory);
 router.post('/:id/view', storyController.markViewed);
 router.post('/:id/react', storyController.react);
-router.post('/:id/reply', storyController.reply);
+router.post('/:id/comment', storyController.comment);
 router.delete('/:id', storyController.deleteStory);
 
 export default router;
