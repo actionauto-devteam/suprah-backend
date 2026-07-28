@@ -383,7 +383,12 @@ export const buildIdleLog = (
   const sessions = buildSessions(logs);
   const breaks = buildBreakSessions(logs);
   const result: IdlePeriod[] = [];
-  const MIN_GAP_MS = 60_000;
+  // Matches the tray-app's own idle threshold (IDLE_THRESHOLD_SEC in
+  // actionauto-tray/src/idle.ts) — the tray itself never flags the user idle
+  // until 10 minutes of no input, so a shorter gap here (e.g. a brief
+  // checkpoint/commit boundary) is not a real idle period and shouldn't be
+  // logged as one.
+  const MIN_GAP_MS = 10 * 60_000;
 
   for (const session of sessions) {
     const sessionStart = session.in.getTime();

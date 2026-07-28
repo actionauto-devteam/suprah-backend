@@ -1630,8 +1630,21 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
     return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
   }
 
-  // Assign the interval to its MDT calendar date
-  const shiftDate = toLocalDateStr(start, COMPANY_TZ_OFFSET_MINUTES);
+  // Unlike screenshots, ActivityIntervals are posted immediately when
+  // committed — there is no offline queue/deferred retry for this endpoint —
+  // so `endAt` should always land within moments of the server's own clock.
+  // A large gap means the tray machine's system clock was wrong at the
+  // moment it stamped this interval (seen in production: a ~12-hour clock
+  // glitch on one machine filed a real, otherwise-normal work segment onto
+  // the wrong calendar day even though it fell in the middle of an
+  // uninterrupted Monday shift). Trust the SERVER's current date for
+  // bucketing when that happens instead of propagating the bad client
+  // timestamp — the segment's duration is still correct either way since
+  // it's a relative (end - start) delta from the same clock.
+  const CLOCK_DRIFT_TOLERANCE_MS = 60 * 60 * 1000; // 1 hour
+  const serverNow = new Date();
+  const clientClockLooksWrong = Math.abs(serverNow.getTime() - end.getTime()) > CLOCK_DRIFT_TOLERANCE_MS;
+  const shiftDate = toLocalDateStr(clientClockLooksWrong ? serverNow : start, COMPANY_TZ_OFFSET_MINUTES);
 
   await ActivityInterval.create({
     userId: user._id,
