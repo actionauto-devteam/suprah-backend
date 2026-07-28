@@ -736,6 +736,67 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
 });
 
+/**
+ * GET /api/supraspace/conversations/:id/attachments?type=media|files&before=&limit=
+ * Lists attachments across the *entire* conversation directly from the DB, independent
+ * of whichever page of messages the client currently has loaded. The Files/Media tab
+ * previously filtered only the last ~40 loaded messages, so anything shared further
+ * back (very common in low-traffic DMs) never showed up even though it still exists.
+ */
+const getConversationAttachments = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { before, limit = '60' } = req.query;
+  const type = req.query.type === 'files' ? 'files' : 'media';
+
+  const conversation = await SupraSpaceConversation.findById(id).lean();
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const filter: any = {
+    conversationId: id,
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+    attachments: { $exists: true, $not: { $size: 0 } },
+  };
+  if (before) filter.createdAt = { $lt: new Date(before as string) };
+  const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
+  if (rawClearedAt) {
+    const clearedDate = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
+    filter.createdAt = { ...(filter.createdAt || {}), $gt: clearedDate };
+  }
+
+  const messages = await SupraSpaceMessage.find(filter)
+    .select('_id conversationId sender attachments createdAt')
+    .sort({ createdAt: -1 })
+    .limit(Math.min(parseInt(limit as string) || 60, 100))
+    .lean();
+
+  const isMedia = (mimeType: string, originalName: string) =>
+    mimeType?.startsWith('image/') || mimeType?.startsWith('video/') || /\.(mp4|mov|webm|m4v|avi|mkv|wmv|flv|3gp|mpeg|mpg|ogv)$/i.test(originalName || '');
+
+  const items: any[] = [];
+  for (const m of messages) {
+    for (const a of (m as any).attachments || []) {
+      const matchesType = type === 'media' ? isMedia(a.mimeType, a.originalName) : !isMedia(a.mimeType, a.originalName) && !a.mimeType?.startsWith('audio/');
+      if (matchesType) items.push({ messageId: m._id, createdAt: (m as any).createdAt, attachment: a });
+    }
+  }
+
+  const signed = await Promise.all(items.map(async (item) => {
+    if (item.attachment.url && !item.attachment.url.startsWith('http')) {
+      const url = await storageService.getSignedUrl(item.attachment.fileKey || item.attachment.url);
+      if (url) item.attachment = { ...item.attachment, url, thumbnailUrl: item.attachment.thumbnailUrl ? url : item.attachment.thumbnailUrl };
+    }
+    return item;
+  }));
+
+  res.json(new ApiResponse(200, {
+    items: signed,
+    hasMore: messages.length === (Math.min(parseInt(limit as string) || 60, 100)),
+  }, 'Attachments fetched'));
+});
+
 /** GET /api/supraspace/conversations/:id/search?q=  — search inside a conversation */
 const searchInConversation = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -1600,6 +1661,7 @@ const supraSpaceController = {
   updateConversationNotifications,
   setTheme,
   getMessages,
+  getConversationAttachments,
   searchInConversation,
   searchMessages,
   sendMessage,

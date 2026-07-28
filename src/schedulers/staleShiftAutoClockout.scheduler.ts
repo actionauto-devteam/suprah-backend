@@ -6,7 +6,7 @@ import ActivityInterval from '../models/ActivityInterval.model';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { toCompanyDateStr, getCompanyDayRange } from '../utils/companyTimezone';
-import { fireShiftAlert } from '../services/shiftAlerts.service';
+import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 
 /**
  * Backend safety net for forgotten clock-outs. The tray app tries to clock a
@@ -152,6 +152,9 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
   const userIds: string[] = await TimeLog.distinct('userId') as any;
   const todayStr = toCompanyDateStr(new Date());
   let closed = 0;
+  // Grouped per org so a tick that closes several stale shifts at once posts
+  // one combined Shift Alerts chat message instead of one per shift.
+  const chatMessagesByOrg = new Map<string, string[]>();
 
   for (const userId of userIds) {
     const logs = await TimeLog.find({ userId }).sort({ timestamp: 1 }).lean();
@@ -215,20 +218,29 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
         : await User.findById(userId).select('organizationId name').lean();
       if (userDoc?.organizationId) {
         const displayName = (userDoc as any).fullName || (userDoc as any).name || 'A user';
+        const orgId = userDoc.organizationId.toString();
+        const chatMessage = `🕛 ${displayName}'s shift was auto-ended because a new day started.`;
         await fireShiftAlert({
-          organizationId: userDoc.organizationId.toString(),
+          organizationId: orgId,
           targetUserId: userId,
           targetUserModel: userModel,
-          chatMessage: `🕛 ${displayName}'s shift was auto-ended because a new day started.`,
+          chatMessage,
           notifyTitle: '🕛 Shift auto-ended — new day',
           notifyBody: 'Your shift was automatically closed because a new day started. Please Start Shift again to continue tracking.',
           notifyTag: `day-boundary-clockout-${userId}`,
           url: '/crm/timeproof-clock',
+          skipChatMessage: true,
         }).catch(() => {});
+        if (!chatMessagesByOrg.has(orgId)) chatMessagesByOrg.set(orgId, []);
+        chatMessagesByOrg.get(orgId)!.push(chatMessage);
       }
     }
     closed++;
   }
+
+  await Promise.allSettled(
+    Array.from(chatMessagesByOrg.entries()).map(([orgId, messages]) => postBatchedShiftAlertMessages(orgId, messages)),
+  );
 
   return { closed, checked: userIds.length };
 }

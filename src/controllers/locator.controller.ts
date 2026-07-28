@@ -151,6 +151,23 @@ async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Prom
     });
 }
 
+/**
+ * Departments flagged `isMandatoryLocationDept` (currently only Lot Tech) may not turn
+ * their own location sharing off while actively clocked in — boss-level policy, not a
+ * privacy trade-off made lightly (see the earlier "rights violation" removal of a similar
+ * blanket lock in the Beacon UI). Scoped narrowly: only blocks while on shift and not on
+ * break, and never blocks the automatic break-pause (`reason === 'break'`) — a Lot Tech can
+ * still always end this by clocking out, which is the sanctioned exit.
+ */
+async function assertCanTurnOffLocation(actor: LocatorActor, orgId: string | undefined, opts?: { isBreakPause?: boolean }): Promise<void> {
+    if (opts?.isBreakPause) return;
+    if (!orgId) return;
+    if (!(await isMandatoryLocationDept(orgId, actor.department))) return;
+    const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+    if (!isOnShift || isOnBreak) return;
+    throw new ApiError(403, 'Lot Tech accounts cannot turn off location sharing while clocked in. End your shift to stop sharing.');
+}
+
 async function updateActorLocationConsent(actor: LocatorActor, granted: boolean, deviceHint?: string) {
     const update = { locationConsent: { granted, grantedAt: new Date(), deviceHint } };
     if (actor.model === 'CrmUser') {
@@ -387,7 +404,6 @@ async function handleGeofenceTransition(
     actor: LocatorActor,
     previousPlaceId: string | undefined | null,
     nextPlace: { _id: any; name: string } | null,
-    isLotTech = false,
 ) {
     const user = { _id: actor.id, name: actor.name, avatar: actor.avatar };
     const prevId = previousPlaceId ? previousPlaceId.toString() : null;
@@ -422,14 +438,14 @@ async function handleGeofenceTransition(
                 tag: `locator-exit-self-${actor.id}`,
                 data: { url: '/team-pulse?tab=activity' },
             });
-            if (isLotTech) {
-                notifyAdmins(orgId, {
-                    title: '🚨 Left Premises',
-                    body: `${user.name} left ${visit.placeName}`,
-                    tag: `lot-tech-exit-${user._id}`,
-                    data: { url: '/team-pulse?tab=activity' },
-                }, user._id.toString());
-            }
+            // Widened from Lot-Tech-only to every department — admins asked to be able to
+            // monitor anyone's office-radius activity, not just the mobile-monitoring dept.
+            notifyAdmins(orgId, {
+                title: '🚨 Left Premises',
+                body: `${user.name} left ${visit.placeName}`,
+                tag: `geofence-exit-${user._id}`,
+                data: { url: '/team-pulse?tab=activity' },
+            }, user._id.toString());
         }
     }
 
@@ -464,14 +480,12 @@ async function handleGeofenceTransition(
             tag: `locator-arrival-self-${actor.id}`,
             data: { url: '/team-pulse?tab=activity' },
         });
-        if (isLotTech) {
-            notifyAdmins(orgId, {
-                title: '📍 Arrival',
-                body: `${user.name} arrived at ${nextPlace.name}`,
-                tag: `locator-arrival-${user._id}`,
-                data: { url: '/team-pulse?tab=activity' },
-            }, user._id.toString());
-        }
+        notifyAdmins(orgId, {
+            title: '📍 Arrival',
+            body: `${user.name} arrived at ${nextPlace.name}`,
+            tag: `geofence-arrival-${user._id}`,
+            data: { url: '/team-pulse?tab=activity' },
+        }, user._id.toString());
     }
 }
 
@@ -500,6 +514,10 @@ const setLocationConsent = asyncHandler(async (req: Request, res: Response) => {
     const { granted, deviceHint } = req.body as { granted: boolean; deviceHint?: string };
 
     const alreadySet = !!actor.locationConsent?.granted === !!granted;
+
+    if (!granted) {
+        await assertCanTurnOffLocation(actor, orgId);
+    }
 
     await updateActorLocationConsent(actor, !!granted, deviceHint);
 
@@ -544,6 +562,10 @@ const setLocationSharingOptOut = asyncHandler(async (req: Request, res: Response
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
     const { optOut } = req.body as { optOut: boolean };
+
+    if (optOut) {
+        await assertCanTurnOffLocation(actor, orgId);
+    }
 
     const update = { locationSharingOptOut: !!optOut };
     if (actor.model === 'CrmUser') {
@@ -684,7 +706,6 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             actor,
             previous?.currentPlaceId?.toString(),
             nextPlace ?? null,
-            isLotTech,
         ).catch(() => {});
     }
 
@@ -758,6 +779,8 @@ const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
     const { reason } = req.body as { reason?: 'manual' | 'break' };
     const sharingState = reason === 'break' ? 'paused_break' : 'paused_manual';
 
+    await assertCanTurnOffLocation(actor, orgId, { isBreakPause: reason === 'break' });
+
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === sharingState;
 
@@ -827,6 +850,8 @@ const resumeSharing = asyncHandler(async (req: Request, res: Response) => {
 const stopSharing = asyncHandler(async (req: Request, res: Response) => {
     const actor = getLocatorActor(req);
     const orgId = req.orgId as string;
+
+    await assertCanTurnOffLocation(actor, orgId);
 
     const existing = await EmployeeLocation.findOne({ userId: actor.id }).select('sharingState').lean();
     const alreadySet = existing?.sharingState === 'off_duty';

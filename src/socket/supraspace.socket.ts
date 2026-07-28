@@ -205,6 +205,32 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       }
     });
 
+    // ── Mark every conversation the user belongs to as read ───────────────
+    socket.on('mark:all:read', async () => {
+      try {
+        const conversations = await SupraSpaceConversation.find({
+          members: userId,
+          isActive: true,
+        }).select('_id').lean();
+        const convIds = conversations.map((c) => c._id);
+        if (!convIds.length) {
+          socket.emit('conversations:all-read', { conversationIds: [] });
+          return;
+        }
+        await SupraSpaceMessage.updateMany(
+          { conversationId: { $in: convIds }, readBy: { $ne: user._id } },
+          { $addToSet: { readBy: user._id } }
+        );
+        const idStrings = convIds.map((id) => id.toString());
+        idStrings.forEach((conversationId) => {
+          socket.to(`conv:${conversationId}`).emit('messages:read', { conversationId, userId });
+        });
+        socket.emit('conversations:all-read', { conversationIds: idStrings });
+      } catch (err: any) {
+        logger.error(err, '[SupraSpace] mark:all:read error');
+      }
+    });
+
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
       const remaining = (onlineUsers.get(userId) || 1) - 1;

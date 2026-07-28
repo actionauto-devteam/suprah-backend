@@ -230,11 +230,35 @@ export async function fireShiftAlert(params: {
   notifyBody: string;
   notifyTag: string;
   url?: string;
+  /** Caller will post the Shift Alerts chat message itself, batched together with
+   * other alerts from the same scheduler tick — see postBatchedShiftAlertMessages.
+   * Used by loops that can fire this many times per tick (e.g. several employees
+   * losing connection at once) so the channel gets one combined message instead of
+   * one per employee, which is what was reaching SupraSpace's per-message toast/
+   * sound/popup handler as an unbatched burst. */
+  skipChatMessage?: boolean;
 }): Promise<void> {
-  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, notifyTag, url } = params;
+  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, notifyTag, url, skipChatMessage } = params;
   await Promise.allSettled([
-    postShiftAlertMessage(organizationId, chatMessage),
+    skipChatMessage ? Promise.resolve() : postShiftAlertMessage(organizationId, chatMessage),
     notifyOrgAdmins(organizationId, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }, targetUserId),
     notifyTargetUser(organizationId, targetUserId, targetUserModel, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
   ]);
+}
+
+/**
+ * Posts one Shift Alerts chat message covering N alerts fired in the same
+ * scheduler tick for the same org, instead of N separate postShiftAlertMessage()
+ * calls — each of which fires its own toast/sound/popup for everyone with
+ * SupraSpace open (SupraSpaceMessengerContext), unbatched. A single-message batch
+ * still posts as a plain line so the common one-or-two-a-tick case is unchanged.
+ */
+export async function postBatchedShiftAlertMessages(organizationId: string, messages: string[]): Promise<void> {
+  if (messages.length === 0) return;
+  if (messages.length === 1) {
+    await postShiftAlertMessage(organizationId, messages[0]);
+    return;
+  }
+  const combined = `⚠️ ${messages.length} shift alerts — a lot going on right now:\n` + messages.map((m) => `• ${m}`).join('\n');
+  await postShiftAlertMessage(organizationId, combined);
 }

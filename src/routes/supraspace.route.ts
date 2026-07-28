@@ -26,7 +26,7 @@ const uploadFiles: RequestHandler = (req, res, next) => {
     if (!err) return next();
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE')
-        return next(new ApiError(400, 'Each attachment must be 100 MB or smaller.'));
+        return next(new ApiError(400, 'Attachments must be 25 MB or smaller (100 MB for videos).'));
       if (err.code === 'LIMIT_FILE_COUNT')
         return next(new ApiError(400, `You can attach up to ${SUPRA_SPACE_MAX_UPLOAD_FILES} files.`));
       return next(new ApiError(400, err.message));
@@ -105,6 +105,7 @@ router.patch('/conversations/:id/theme',    supraSpaceController.setTheme);
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 router.get('/conversations/:id/messages',   supraSpaceController.getMessages);
+router.get('/conversations/:id/attachments', supraSpaceController.getConversationAttachments);
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
 router.post('/conversations/:id/messages',  supraSpaceController.sendMessage);
 router.post('/messages/:messageId/react',   supraSpaceController.reactToMessage);

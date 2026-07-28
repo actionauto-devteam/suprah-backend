@@ -65,7 +65,7 @@ const MODULE_MAP: Array<[RegExp, string]> = [
   [/^\/api\/schedules/, 'Scheduling'],
   [/^\/api\/team-pulse/, 'Team Engagement'],
   [/^\/api\/timeclock/, 'TimeProof'],
-  [/^\/api\/locator/, 'Beacon'],
+  [/^\/api\/locator/, 'Locator'],
   [/^\/api\/analytics/, 'Reports'],
   [/^\/api\/dashboard/, 'Dashboard'],
   [/^\/api\/payments/, 'Finance'],

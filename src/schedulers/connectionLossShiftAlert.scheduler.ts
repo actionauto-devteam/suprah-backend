@@ -4,7 +4,7 @@ import EmployeeLocation from '../models/EmployeeLocation.model';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
-import { fireShiftAlert } from '../services/shiftAlerts.service';
+import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { isLocationRequiredForUser } from '../config/departmentMonitoring';
 
 /**
@@ -59,6 +59,10 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
   }).lean();
 
   let notified = 0;
+  // Grouped per org so a tick that trips several employees at once posts one
+  // combined Shift Alerts chat message instead of one per employee — see
+  // postBatchedShiftAlertMessages.
+  const chatMessagesByOrg = new Map<string, string[]>();
 
   for (const loc of candidates) {
     // Atomically claim this candidate BEFORE doing any lookups or firing the
@@ -99,20 +103,29 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
 
     const name = userDoc.fullName || loc.userName || 'A team member';
     const silentMin = Math.round((nowMs - new Date(loc.lastSeenAt).getTime()) / 60000);
+    const orgId = (loc.organizationId as any).toString();
+    const chatMessage = `🟠 ${name}'s location stopped updating ~${silentMin} min ago while on shift — likely lost connection.`;
 
     await fireShiftAlert({
-      organizationId: (loc.organizationId as any).toString(),
+      organizationId: orgId,
       targetUserId: loc.userId.toString(),
       targetUserModel: loc.userModel as 'CrmUser' | 'User',
-      chatMessage: `🟠 ${name}'s location stopped updating ~${silentMin} min ago while on shift — likely lost connection.`,
+      chatMessage,
       notifyTitle: '📡 Connection Lost',
       notifyBody: `${name}'s location stopped updating — they may have lost internet connection.`,
       notifyTag: `shift-alert-connection-lost-${loc.userId}`,
       url: `/crm/timeproof/users/${loc.userId}`,
+      skipChatMessage: true,
     });
+    if (!chatMessagesByOrg.has(orgId)) chatMessagesByOrg.set(orgId, []);
+    chatMessagesByOrg.get(orgId)!.push(chatMessage);
 
     notified++;
   }
+
+  await Promise.allSettled(
+    Array.from(chatMessagesByOrg.entries()).map(([orgId, messages]) => postBatchedShiftAlertMessages(orgId, messages)),
+  );
 
   return { notified, checked: candidates.length };
 }

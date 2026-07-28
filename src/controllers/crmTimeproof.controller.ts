@@ -1545,13 +1545,19 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
   // A push endpoint belongs to the current installed browser/PWA instance.
   // Remove it from any previous account first so shared devices or account
   // switches cannot keep receiving another user's private notifications.
+  // Excluded: the main-site User record sharing this CRM user's email — that's
+  // the same person's other account (an employee legitimately holds both a
+  // CrmUser and a User identity on one device), not a stale/foreign session.
+  // Without this exclusion, this CrmUser subscribe and the main-site /api/push
+  // subscribe race on every load of the shared dashboard and silently strip
+  // each other's subscription, breaking push delivery for that person.
   await Promise.all([
     CrmUser.updateMany(
       { _id: { $ne: user._id }, 'pushSubscriptions.endpoint': subscription.endpoint },
       { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } }
     ),
     User.updateMany(
-      { 'pushSubscriptions.endpoint': subscription.endpoint },
+      { email: { $ne: user.email }, 'pushSubscriptions.endpoint': subscription.endpoint },
       { $pull: { pushSubscriptions: { endpoint: subscription.endpoint } } }
     ),
   ]);

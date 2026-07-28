@@ -17,7 +17,11 @@ export class PushController {
 
         // A browser/PWA push endpoint represents one installed app instance.
         // Keep endpoint ownership exclusive so a shared device or account switch
-        // cannot keep receiving another user's notifications.
+        // cannot keep receiving another user's notifications. Excluded: a CrmUser
+        // record sharing this user's email — that's this same person's CRM/Supra
+        // Space identity on the same device, not a foreign session. Without this
+        // exclusion, this subscribe and the CRM subscribe race on every shared
+        // dashboard load and silently strip each other's subscription.
         await Promise.all([
             User.updateMany(
                 { 'pushSubscriptions.endpoint': subscription.endpoint },
@@ -26,7 +30,7 @@ export class PushController {
                 }
             ),
             CrmUser.updateMany(
-                { 'pushSubscriptions.endpoint': subscription.endpoint },
+                { email: { $ne: req.user?.email }, 'pushSubscriptions.endpoint': subscription.endpoint },
                 {
                     $pull: { pushSubscriptions: { endpoint: subscription.endpoint } },
                 }

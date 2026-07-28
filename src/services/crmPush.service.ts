@@ -1,7 +1,6 @@
 import webpush from 'web-push';
 import config from '../config';
 import CrmUser from '../models/CrmUser.model';
-import User from '../models/User.model';
 import logger from '../utils/logger';
 import { normalizePushPayload } from '../utils/pushPayload';
 
@@ -45,31 +44,31 @@ function rememberLatestOwner(
   }
 }
 
+// Scoped to CrmUser only — deliberately does NOT also consider User-model
+// owners of the same endpoint. A single device legitimately holds a push
+// subscription row on BOTH models at once for the same physical person (main
+// site + CRM/SupraSpace are separate logins) — the subscribe endpoints
+// (push.controller.ts, crmTimeproof.controller.ts's subscribeCrmPush) already
+// correctly guarantee exclusivity where it actually matters (a shared device
+// switching between different real people, compared by email). Comparing
+// across models here on every SEND re-litigated that already-settled question
+// using stale createdAt timestamps instead, and would silently `$pull` a
+// perfectly valid CrmUser subscription the moment the sibling User-model
+// subscription happened to be re-POSTed more recently (e.g. on every app
+// mount — see useWebPush.ts) — the actual cause of "push works on one surface
+// but silently stops on the other" for anyone with both accounts.
 async function getLatestPushEndpointOwners(endpoints: string[]): Promise<Map<string, { ownerKey: string; createdAt: number }>> {
   const owners = new Map<string, { ownerKey: string; createdAt: number }>();
   if (!endpoints.length) return owners;
 
-  const [crmOwners, appOwners] = await Promise.all([
-    CrmUser.find({ 'pushSubscriptions.endpoint': { $in: endpoints } })
-      .select('_id pushSubscriptions')
-      .lean(),
-    User.find({ 'pushSubscriptions.endpoint': { $in: endpoints } })
-      .select('_id pushSubscriptions')
-      .lean(),
-  ]);
+  const crmOwners = await CrmUser.find({ 'pushSubscriptions.endpoint': { $in: endpoints } })
+    .select('_id pushSubscriptions')
+    .lean();
 
   crmOwners.forEach((user) => {
     user.pushSubscriptions?.forEach((sub) => {
       if (endpoints.includes(sub.endpoint)) {
         rememberLatestOwner(owners, sub.endpoint, `crm:${user._id.toString()}`, sub.createdAt);
-      }
-    });
-  });
-
-  appOwners.forEach((user) => {
-    user.pushSubscriptions?.forEach((sub) => {
-      if (endpoints.includes(sub.endpoint)) {
-        rememberLatestOwner(owners, sub.endpoint, `user:${user._id.toString()}`, sub.createdAt);
       }
     });
   });
