@@ -73,7 +73,7 @@ const StorySchema = new Schema<IStory>(
     viewers: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
-        name: { type: String, required: true },
+        name: { type: String },
         avatar: { type: String },
         viewedAt: { type: Date, default: Date.now },
       },
@@ -81,7 +81,7 @@ const StorySchema = new Schema<IStory>(
     reactions: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
-        authorName: { type: String, required: true },
+        authorName: { type: String },
         authorAvatar: { type: String },
         emoji: { type: String, required: true },
         createdAt: { type: Date, default: Date.now },
@@ -90,7 +90,7 @@ const StorySchema = new Schema<IStory>(
     comments: [
       {
         userId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
-        authorName: { type: String, required: true },
+        authorName: { type: String },
         authorAvatar: { type: String },
         text: { type: String, required: true, trim: true, maxlength: 500 },
         createdAt: { type: Date, default: Date.now },

@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -18,6 +19,15 @@ function emitToOrg(orgId: string, event: string, payload: unknown) {
   try {
     const io = getSocketIO();
     if (io) io.to(`org:${orgId}`).emit(event, payload);
+  } catch {
+    /* socket not ready — ignore */
+  }
+}
+
+/** Guarded direct-to-user emit — never lets a socket failure bubble into a 500. */
+function safeEmitToUser(userId: string, event: string, payload: unknown) {
+  try {
+    emitToUser(userId, event, payload);
   } catch {
     /* socket not ready — ignore */
   }
@@ -243,99 +253,97 @@ const getStory = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-/** POST /api/crm/stories/:id/view — idempotent view marker (records name/avatar). */
+/** POST /api/crm/stories/:id/view — idempotent view marker (atomic; records name/avatar). */
 const markViewed = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
-  if (!story) throw new ApiError(404, 'Story not found');
+  const displayName = user.fullName || (user as any).username || 'User';
 
-  const already = story.viewers.some((v) => v.userId.toString() === user._id.toString());
-  if (!already) {
-    story.viewers.push({ userId: user._id as any, name: user.fullName, avatar: user.avatar, viewedAt: new Date() });
-    await story.save();
-    // Tell the owner (live "seen by" updates).
-    if (story.userId.toString() !== user._id.toString()) {
-      emitToUser(story.userId.toString(), 'story:view', { storyId: story._id });
+  // Atomic add-if-absent — avoids re-validating any pre-existing subdocuments.
+  const result = await Story.updateOne(
+    { _id: req.params.id, organizationId: user.organizationId, 'viewers.userId': { $ne: user._id } },
+    { $push: { viewers: { userId: user._id, name: displayName, avatar: user.avatar, viewedAt: new Date() } } }
+  );
+
+  if (result.modifiedCount) {
+    const story = await Story.findById(req.params.id).select('userId').lean();
+    if (story && story.userId.toString() !== user._id.toString()) {
+      safeEmitToUser(story.userId.toString(), 'story:view', { storyId: req.params.id });
     }
   }
-  res.json(new ApiResponse(200, { viewCount: story.viewers.length }, 'Viewed'));
+  res.json(new ApiResponse(200, { ok: true }, 'Viewed'));
 });
 
-/** POST /api/crm/stories/:id/react — toggle/replace a single emoji reaction. */
+/** POST /api/crm/stories/:id/react — toggle/replace a single emoji reaction (atomic). */
 const react = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { emoji } = req.body;
   if (!emoji || typeof emoji !== 'string') throw new ApiError(400, 'An emoji is required.');
 
-  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
+  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId })
+    .select('reactions userId')
+    .lean();
   if (!story) throw new ApiError(404, 'Story not found');
 
   const meId = user._id.toString();
-  const existing = story.reactions.find((r) => r.userId.toString() === meId);
+  const existing = (story.reactions || []).find((r: any) => r.userId.toString() === meId);
   let myReaction: string | null = emoji;
 
+  // Always drop any prior reaction from this user first (atomic).
+  await Story.updateOne({ _id: story._id }, { $pull: { reactions: { userId: user._id } } });
+
   if (existing && existing.emoji === emoji) {
-    story.reactions = story.reactions.filter((r) => r.userId.toString() !== meId) as any;
-    myReaction = null;
-  } else if (existing) {
-    existing.emoji = emoji;
-    existing.authorAvatar = user.avatar;
-    existing.createdAt = new Date();
+    myReaction = null; // same emoji tapped again → toggled off
   } else {
-    story.reactions.push({
-      userId: user._id as any,
-      authorName: user.fullName,
-      authorAvatar: user.avatar,
-      emoji,
-      createdAt: new Date(),
-    });
+    await Story.updateOne(
+      { _id: story._id },
+      {
+        $push: {
+          reactions: {
+            userId: user._id,
+            authorName: user.fullName || (user as any).username || 'User',
+            authorAvatar: user.avatar,
+            emoji,
+            createdAt: new Date(),
+          },
+        },
+      }
+    );
   }
-  await story.save();
 
-  // Notify the owner so their reactions list updates live.
-  if (story.userId.toString() !== meId) {
-    emitToUser(story.userId.toString(), 'story:reaction', { storyId: story._id, emoji, from: user.fullName });
+  if (myReaction && story.userId.toString() !== meId) {
+    safeEmitToUser(story.userId.toString(), 'story:reaction', { storyId: story._id, emoji, from: user.fullName });
   }
 
-  res.json(new ApiResponse(200, { reactionCount: story.reactions.length, myReaction }, 'Reaction saved'));
+  res.json(new ApiResponse(200, { myReaction }, 'Reaction saved'));
 });
 
-/** POST /api/crm/stories/:id/comment — a PUBLIC comment everyone can see. */
+/** POST /api/crm/stories/:id/comment — a PUBLIC comment everyone can see (atomic). */
 const comment = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { text } = req.body;
   if (!text || !text.trim()) throw new ApiError(400, 'Comment text is required.');
   if (text.trim().length > 500) throw new ApiError(400, 'Comment is too long.');
 
-  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId });
+  const story = await Story.findOne({ _id: req.params.id, organizationId: user.organizationId })
+    .select('userId organizationId')
+    .lean();
   if (!story) throw new ApiError(404, 'Story not found');
 
   const commentDoc = {
-    userId: user._id as any,
-    authorName: user.fullName,
+    _id: new mongoose.Types.ObjectId(),
+    userId: user._id,
+    authorName: user.fullName || (user as any).username || 'User',
     authorAvatar: user.avatar,
     text: text.trim(),
     createdAt: new Date(),
   };
-  story.comments.push(commentDoc);
-  await story.save();
 
-  const saved = story.comments[story.comments.length - 1];
+  await Story.updateOne({ _id: story._id }, { $push: { comments: commentDoc } });
 
   // Broadcast to the whole org so every viewer sees the new comment live.
-  emitToOrg(story.organizationId.toString(), 'story:comment', {
-    storyId: story._id,
-    comment: {
-      _id: (saved as any)._id,
-      userId: user._id,
-      authorName: commentDoc.authorName,
-      authorAvatar: commentDoc.authorAvatar,
-      text: commentDoc.text,
-      createdAt: commentDoc.createdAt,
-    },
-  });
+  emitToOrg(story.organizationId.toString(), 'story:comment', { storyId: story._id, comment: commentDoc });
 
-  res.status(201).json(new ApiResponse(201, { commentCount: story.comments.length, comment: saved }, 'Comment added'));
+  res.status(201).json(new ApiResponse(201, { comment: commentDoc }, 'Comment added'));
 });
 
 /** DELETE /api/crm/stories/:id — owner or admin; also removes R2 objects. */
