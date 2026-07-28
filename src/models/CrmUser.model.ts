@@ -67,6 +67,22 @@ export interface ICrmUser extends Document {
     lastSyncError?: string;
     connectedAt?: Date;
   };
+  /**
+   * Spotify account connection for the dashboard player. Tokens are select:false
+   * and are only read by spotify.service. `product` ("premium"/"free") gates the
+   * in-browser Web Playback SDK, which requires Premium.
+   */
+  spotify?: {
+    connected: boolean;
+    spotifyUserId?: string;
+    displayName?: string;
+    product?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAt?: number;        // epoch ms
+    scope?: string;
+    connectedAt?: Date;
+  };
   createdAt: Date;
   updatedAt: Date;
   isPasswordMatch(password: string): Promise<boolean>;
@@ -229,6 +245,17 @@ const CrmUserSchema = new Schema<ICrmUser>(
       historyId: { type: String },
       lastSyncAt: { type: Date },
       lastSyncError: { type: String },
+      connectedAt: { type: Date },
+    },
+    spotify: {
+      connected: { type: Boolean, default: false },
+      spotifyUserId: { type: String },
+      displayName: { type: String },
+      product: { type: String },
+      accessToken: { type: String, select: false },
+      refreshToken: { type: String, select: false },
+      expiresAt: { type: Number, select: false },
+      scope: { type: String },
       connectedAt: { type: Date },
     },
   },
