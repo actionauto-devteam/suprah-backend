@@ -16,7 +16,7 @@ import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
-import { fireShiftAlert } from '../services/shiftAlerts.service';
+import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -926,6 +926,13 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
         groupWindowMinutes: 30,
       }).catch(() => {});
     }
+
+    // Also leaves a record in the read-only Shift Alerts channel — previously
+    // idle events only reached each admin's own notification bell, with no
+    // shared, browsable log of who went idle and when the way connection-loss/
+    // stale-clockout/location alerts already had via fireShiftAlert.
+    postBatchedShiftAlertMessages(user.organizationId.toString(), [`⚪ ${user.fullName} has been idle for 10 minutes.`])
+      .catch((err) => logger.error({ err, userId: user._id.toString() }, '[shiftAlerts] Failed to post idle alert'));
   }
 
   // ── Notify admins: agent has been idle 15+ minutes — actionable alert ────
@@ -1663,6 +1670,38 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   });
 
   res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
+});
+
+/**
+ * POST /api/crm/timeproof/client-diagnostics
+ * Tray app reports otherwise-invisible local failures here (e.g.
+ * desktopCapturer returning zero screen sources, capture/upload exceptions).
+ * The tray runs hidden with no visible console, so without this there is no
+ * way to find out WHY a specific user's screenshots silently stopped short
+ * of asking them to dig up a log file themselves. Piped through the existing
+ * logger, which already persists to SystemLog in Mongo — queryable by
+ * userId/organizationId the same way any other server log is.
+ */
+export const postClientDiagnostic = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { event, message, meta } = req.body;
+
+  if (!event || typeof event !== 'string') {
+    throw new ApiError(400, 'event is required');
+  }
+
+  logger.warn(
+    {
+      context: 'tray-client-diagnostic',
+      userId: user._id.toString(),
+      organizationId: user.organizationId?.toString(),
+      event,
+      meta,
+    },
+    message || event,
+  );
+
+  res.json(new ApiResponse(200, {}, 'Logged'));
 });
 
 /**

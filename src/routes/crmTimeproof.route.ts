@@ -24,6 +24,7 @@ import {
   getMyIdleLog,
   getUserIdleLog,
   clockOutUser,
+  postClientDiagnostic,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -42,6 +43,7 @@ router.get('/resumable-shift', getResumableShift);
 router.get('/my-agent', getMyAgentStatus);
 router.post('/heartbeat', postHeartbeat);
 router.post('/activity-interval', postActivityInterval);
+router.post('/client-diagnostics', postClientDiagnostic);
 router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.get('/screenshots', getScreenshots);
