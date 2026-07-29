@@ -17,20 +17,6 @@ import { invalidateUserCache } from '../utils/cache.util';
 
 const PRESENCE_TTL_MS = 2 * 60 * 1000;
 
-const pingLog = new Map<string, number[]>();
-const PING_WINDOW_MS = 60 * 60 * 1000;
-const PING_MAX = 3;
-
-function canPing(fromId: string, toId: string): boolean {
-    const key = `${fromId}:${toId}`;
-    const now = Date.now();
-    const times = (pingLog.get(key) || []).filter(t => now - t < PING_WINDOW_MS);
-    if (times.length >= PING_MAX) return false;
-    times.push(now);
-    pingLog.set(key, times);
-    return true;
-}
-
 // ── Members ───────────────────────────────────────────────────────────────────
 
 const getMembers = asyncHandler(async (req: Request, res: Response) => {
@@ -704,42 +690,6 @@ const getPerformanceStats = asyncHandler(async (req: Request, res: Response) => 
     res.json(new ApiResponse(200, { members, period, fromDate }, 'Performance stats fetched'));
 });
 
-// ── Ping ──────────────────────────────────────────────────────────────────────
-
-const pingMember = asyncHandler(async (req: Request, res: Response) => {
-    const user = req.user as IUser;
-    const orgId = req.orgId as string;
-    const { userId: targetId } = req.params;
-    const { message } = req.body;
-
-    if (targetId === user._id.toString()) throw new ApiError(400, 'Cannot ping yourself');
-
-    if (!canPing(user._id.toString(), targetId)) {
-        throw new ApiError(429, 'Too many pings — max 3 per hour to the same person');
-    }
-
-    const target = await User.findOne({ _id: targetId, organizationId: orgId }).select('_id name').lean();
-    if (!target) throw new ApiError(404, 'User not found');
-
-    await notificationService.createNotification({
-        userId: targetId,
-        organizationId: orgId,
-        type: 'ping',
-        title: `Ping from ${user.name}`,
-        message: message?.trim() || `${user.name} pinged you`,
-        metadata: { fromUserId: user._id, fromUserName: user.name, fromUserAvatar: user.avatar },
-    });
-
-    emitToUser(targetId, 'ping:received', {
-        fromUserId: user._id,
-        fromUserName: user.name,
-        fromUserAvatar: user.avatar,
-        message: message?.trim() || null,
-    });
-
-    res.json(new ApiResponse(200, null, 'Ping sent'));
-});
-
 // ── Activity Feed ─────────────────────────────────────────────────────────────
 
 const getActivityFeed = asyncHandler(async (req: Request, res: Response) => {
@@ -834,6 +784,5 @@ export default {
     ackBoardNote, uploadBoardNoteAttachments,
     getBoardNoteReactions, toggleBoardNoteReaction,
     getLeaderboard, getPerformanceStats,
-    pingMember,
     getActivityFeed, startBreak, endBreak,
 };

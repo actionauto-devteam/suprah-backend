@@ -316,12 +316,20 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     deductionsByUser.get(uid)!.set(d.date, d.deductedSeconds);
   }
 
+  const allLogs = await TimeLog.find({
+    userId: { $in: people.map((u) => u._id) },
+    timestamp: { $gte: monthStart },
+  }).sort({ timestamp: 1 }).lean();
+  const logsByUser = new Map<string, typeof allLogs>();
+  for (const log of allLogs) {
+    const uid = log.userId.toString();
+    if (!logsByUser.has(uid)) logsByUser.set(uid, []);
+    logsByUser.get(uid)!.push(log);
+  }
+
   const results = await Promise.all(
     people.map(async (u) => {
-      const logs = await TimeLog.find({
-        userId: u._id,
-        timestamp: { $gte: monthStart },
-      }).sort({ timestamp: 1 }).lean();
+      const logs = logsByUser.get(u._id.toString()) ?? [];
 
       const calendar = buildCalendarMap(logs);
       const userDeductions = deductionsByUser.get(u._id.toString());

@@ -43,8 +43,6 @@ router.post('/board/:id/reactions',              teamPulseController.toggleBoard
 router.get('/leaderboard',                       teamPulseController.getLeaderboard);
 router.get('/performance',                       teamPulseController.getPerformanceStats);
 
-router.post('/ping/:userId',                     teamPulseController.pingMember);
-
 router.get('/activity-feed',                     teamPulseController.getActivityFeed);
 router.post('/break/start',                      teamPulseController.startBreak);
 router.post('/break/end',                        teamPulseController.endBreak);
