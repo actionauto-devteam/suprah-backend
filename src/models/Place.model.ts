@@ -8,6 +8,12 @@ export interface IPlace extends Document {
     lng: number;
   };
   radiusM: number;
+  // Optional wider "warning" ring around the hard radiusM boundary. When set, a person
+  // exiting radiusM but still inside warningRadiusM is treated as "still nearby" rather
+  // than having left — see resolveCurrentPlace's exit hysteresis in locator.controller.ts.
+  // Always > radiusM when present; undefined means "no warning ring, use the normal
+  // fixed hysteresis buffer" (the pre-existing behavior).
+  warningRadiusM?: number;
   icon?: string;
   color?: string;
   address?: string;
@@ -32,6 +38,7 @@ const PlaceSchema = new Schema<IPlace>(
       lng: { type: Number, required: true },
     },
     radiusM: { type: Number, required: true, min: 10, default: 100 },
+    warningRadiusM: { type: Number, min: 20 },
     icon: { type: String },
     color: { type: String },
     address: { type: String, trim: true },

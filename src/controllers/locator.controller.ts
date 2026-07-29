@@ -359,15 +359,24 @@ const GEOFENCE_EXIT_BUFFER_M = 20;
  * Resolves which Place (if any) a fresh fix puts someone inside, with
  * hysteresis: if they already have a current place, they only count as having
  * left it once they're outside radiusM + GEOFENCE_EXIT_BUFFER_M, not the
- * instant a noisy ping lands a few meters past the raw edge.
+ * instant a noisy ping lands a few meters past the raw edge. A place with its
+ * own admin-configured warningRadiusM (must be > radiusM) uses THAT as the
+ * exit threshold instead of the fixed 20m buffer — a deliberately wider
+ * "still nearby, don't count it as left yet" zone for places where a small
+ * step outside shouldn't read the same as genuinely leaving.
  */
 async function resolveCurrentPlace(orgId: string, lat: number, lng: number, currentPlaceId?: string | null) {
     const places = await Place.find({ organizationId: orgId, isActive: true }).lean();
 
     if (currentPlaceId) {
         const current = places.find((p) => p._id.toString() === currentPlaceId.toString());
-        if (current && distanceMeters(lat, lng, current.coords.lat, current.coords.lng) <= current.radiusM + GEOFENCE_EXIT_BUFFER_M) {
-            return current;
+        if (current) {
+            const exitThreshold = current.warningRadiusM && current.warningRadiusM > current.radiusM
+                ? current.warningRadiusM
+                : current.radiusM + GEOFENCE_EXIT_BUFFER_M;
+            if (distanceMeters(lat, lng, current.coords.lat, current.coords.lng) <= exitThreshold) {
+                return current;
+            }
         }
     }
 
@@ -1024,17 +1033,21 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can create places');
 
-    const { name, lat, lng, radiusM, icon, color, address, description } = req.body as {
-        name: string; lat: number; lng: number; radiusM?: number; icon?: string; color?: string; address?: string; description?: string;
+    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description } = req.body as {
+        name: string; lat: number; lng: number; radiusM?: number; warningRadiusM?: number; icon?: string; color?: string; address?: string; description?: string;
     };
     if (!name || typeof lat !== 'number' || typeof lng !== 'number') {
         throw new ApiError(400, 'name, lat and lng are required');
+    }
+    if (warningRadiusM !== undefined && warningRadiusM <= (radiusM || 100)) {
+        throw new ApiError(400, 'warningRadiusM must be greater than radiusM');
     }
 
     const place = await Place.create({
         organizationId: orgId,
         name, coords: { lat, lng },
         radiusM: radiusM || 100,
+        warningRadiusM,
         icon, color, address, description,
         createdBy: actor.id,
     });
@@ -1050,8 +1063,8 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can update places');
 
-    const { name, lat, lng, radiusM, icon, color, address, description, isActive } = req.body as Partial<{
-        name: string; lat: number; lng: number; radiusM: number; icon: string; color: string; address: string; description: string; isActive: boolean;
+    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description, isActive } = req.body as Partial<{
+        name: string; lat: number; lng: number; radiusM: number; warningRadiusM: number | null; icon: string; color: string; address: string; description: string; isActive: boolean;
     }>;
 
     const place = await Place.findOne({ _id: id, organizationId: orgId });
@@ -1060,6 +1073,13 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     if (name !== undefined) place.name = name;
     if (typeof lat === 'number' && typeof lng === 'number') place.coords = { lat, lng };
     if (radiusM !== undefined) place.radiusM = radiusM;
+    if (warningRadiusM !== undefined) {
+        const effectiveRadius = radiusM !== undefined ? radiusM : place.radiusM;
+        if (warningRadiusM !== null && warningRadiusM <= effectiveRadius) {
+            throw new ApiError(400, 'warningRadiusM must be greater than radiusM');
+        }
+        place.warningRadiusM = warningRadiusM ?? undefined;
+    }
     if (icon !== undefined) place.icon = icon;
     if (color !== undefined) place.color = color;
     if (address !== undefined) place.address = address;

@@ -818,19 +818,37 @@ const searchInConversation = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, messages, 'Search results'));
 });
 
-/** GET /api/supraspace/search?q=  — global message search across the user's conversations */
+/**
+ * GET /api/supraspace/search?q=&conversationId=  — message search across the user's
+ * conversations, or (with conversationId) scoped to just that one — used by the
+ * in-conversation search in the info panel, so searching "in this DM/channel" doesn't
+ * also surface hits from every other conversation.
+ */
 const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const q = (req.query.q as string) || '';
+  const conversationId = req.query.conversationId as string | undefined;
   if (!q.trim() || q.trim().length < 2) return res.json(new ApiResponse(200, [], 'No query'));
 
-  const convs = await SupraSpaceConversation.find({
-    members: userId,
-    isActive: true,
-    deletedFor: { $ne: userId },
-    'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
-  }).select('_id').lean();
-  const convIds = convs.map((c: any) => c._id);
+  let convIds: any[];
+  if (conversationId) {
+    const conv = await SupraSpaceConversation.findOne({
+      _id: conversationId,
+      members: userId,
+      isActive: true,
+      deletedFor: { $ne: userId },
+    }).select('_id').lean();
+    if (!conv) return res.json(new ApiResponse(200, [], 'No query'));
+    convIds = [conv._id];
+  } else {
+    const convs = await SupraSpaceConversation.find({
+      members: userId,
+      isActive: true,
+      deletedFor: { $ne: userId },
+      'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
+    }).select('_id').lean();
+    convIds = convs.map((c: any) => c._id);
+  }
 
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
   const messages = await SupraSpaceMessage.find({
