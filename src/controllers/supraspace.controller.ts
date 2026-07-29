@@ -23,6 +23,7 @@ const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toStri
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
+const SHIFT_ALERTS_CHANNEL_NAME_REGEX = /^Shift Alerts$/i;
 type SupraSpaceNotifType = 'all' | 'main' | 'foryou' | 'none';
 type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean };
 const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false };
@@ -114,6 +115,10 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
 function isDayPulseReportConversation(conversation: { name?: string | null }): boolean {
   return DAYPULSE_REPORT_CHANNEL_NAME_REGEX.test(conversation.name || '');
+}
+
+function isShiftAlertsConversation(conversation: { name?: string | null }): boolean {
+  return SHIFT_ALERTS_CHANNEL_NAME_REGEX.test(conversation.name || '');
 }
 
 function getConversationNotificationPref(conv: any, userId: string): SupraSpaceNotifPref {
@@ -864,6 +869,9 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
+  if (isShiftAlertsConversation(conversation)) {
+    throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
+  }
 
   const scheduledDate = scheduledAt ? new Date(scheduledAt) : null;
   const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime()) && scheduledDate.getTime() > Date.now() + 30_000;
@@ -1008,6 +1016,9 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
+  if (isShiftAlertsConversation(conversation)) {
+    throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
   }
 
   const files = req.files as Express.Multer.File[];
@@ -1288,6 +1299,9 @@ const createPoll = asyncHandler(async (req: Request, res: Response) => {
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
+  if (isShiftAlertsConversation(conversation)) {
+    throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
+  }
 
   const message = await SupraSpaceMessage.create({
     conversationId: id,
@@ -1360,6 +1374,9 @@ const createEvent = asyncHandler(async (req: Request, res: Response) => {
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
+  }
+  if (isShiftAlertsConversation(conversation)) {
+    throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
   }
 
   const message = await SupraSpaceMessage.create({
