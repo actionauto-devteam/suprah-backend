@@ -10,6 +10,13 @@ export interface IAgentHeartbeat extends Document {
   lastBreakNotifiedAt: Date | null;
   currentIntervalStartAt: Date | null;
   platform: string;
+  // macOS only — whether the OS's Screen Recording permission (TCC) is
+  // currently granted to the tray app. null = unknown/not applicable
+  // (Windows, or an old tray build that doesn't report it yet). Since the
+  // Mac build is unsigned, this permission does not reliably carry over
+  // across auto-updates — see screenRecordingLastNotifiedAt below.
+  screenRecordingGranted: boolean | null;
+  lastScreenRecordingNotifiedAt: Date | null;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -55,6 +62,14 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
     platform: {
       type: String,
       default: 'win32',
+    },
+    screenRecordingGranted: {
+      type: Boolean,
+      default: null,
+    },
+    lastScreenRecordingNotifiedAt: {
+      type: Date,
+      default: null,
     },
     lastSeenAt: {
       type: Date,

@@ -854,6 +854,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     breakDurationSeconds = 0,
     isOnShift = false,
     currentIntervalStartAt,
+    screenRecordingGranted = null,
   } = req.body;
 
   const existing = await AgentHeartbeat.findOne({ userId: user._id });
@@ -879,6 +880,14 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
   if (!isIdle) lastIdleEscalationNotifiedAt = null;
 
+  // Reset the notify-cooldown once permission is (re-)granted, so if it's
+  // ever revoked again later (e.g. after another auto-update, since the
+  // build is unsigned) the next loss gets its own fresh notification instead
+  // of staying silenced by an old timestamp from a previous incident.
+  const wasScreenRecordingGranted = existing?.screenRecordingGranted ?? null;
+  let lastScreenRecordingNotifiedAt = existing?.lastScreenRecordingNotifiedAt ?? null;
+  if (screenRecordingGranted === true) lastScreenRecordingNotifiedAt = null;
+
   await AgentHeartbeat.findOneAndUpdate(
     { userId: user._id },
     {
@@ -889,6 +898,8 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? existing?.breakStartedAt ?? null : null),
       lastBreakNotifiedAt,
       platform,
+      screenRecordingGranted,
+      lastScreenRecordingNotifiedAt,
       lastSeenAt: new Date(),
       ...(currentIntervalStartAt !== undefined && {
         currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
@@ -896,6 +907,57 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     },
     { upsert: true, new: true }
   );
+
+  // ── Notify: macOS Screen Recording permission is missing ──────────────────
+  // Unsigned build (no Apple Developer cert) means this permission doesn't
+  // reliably survive an auto-update — the tray keeps running and heartbeating
+  // normally, so nothing else here would ever surface it. Notifies both the
+  // affected user (so they can self-resolve) and admins (as a fallback in
+  // case the user's own notification goes unnoticed), and leaves a record in
+  // the read-only Shift Alerts channel. Re-notifies at most once every 24h
+  // per person while unresolved, rather than once per 60s heartbeat forever.
+  if (platform === 'darwin' && screenRecordingGranted === false && isOnShift) {
+    const notifyCooldownMs = 24 * 60 * 60 * 1000;
+    const dueForNotify = !lastScreenRecordingNotifiedAt
+      || Date.now() - new Date(lastScreenRecordingNotifiedAt).getTime() > notifyCooldownMs;
+    if (dueForNotify) {
+      await AgentHeartbeat.updateOne({ userId: user._id }, { lastScreenRecordingNotifiedAt: new Date() });
+
+      const title = '🔒 Screen Recording Permission Needed';
+      const body = `${user.fullName}'s Mac needs Screen Recording permission re-granted for the tray app — screenshots have stopped.`;
+
+      notificationService.createNotification({
+        userId: user._id.toString(),
+        organizationId: user.organizationId.toString(),
+        type: 'screen_recording_missing',
+        title: '🔒 Screen Recording Permission Needed',
+        message: 'Your Mac needs Screen Recording permission re-granted for the tray app, or your screenshots will stop. Open System Settings → Privacy & Security → Screen Recording, enable it for the tray app, then relaunch the app.',
+        metadata: { route: '/guide', selfNotify: true },
+        dedupeKey: `screen-recording-self:${user._id}`,
+        groupWindowMinutes: 60 * 24,
+      }).catch(() => {});
+
+      const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+      for (const admin of admins) {
+        notificationService.createNotification({
+          userId: admin._id.toString(),
+          organizationId: user.organizationId.toString(),
+          type: 'agent_screen_recording_missing',
+          title,
+          message: body,
+          metadata: { route: `/crm/timeproof/users/${user._id}`, agentUserId: user._id },
+          dedupeKey: `agent-screen-recording:${admin._id}:${user._id}`,
+          groupWindowMinutes: 60 * 24,
+        }).catch(() => {});
+      }
+
+      postBatchedShiftAlertMessages(user.organizationId.toString(), [`🔒 ${user.fullName}'s Mac needs Screen Recording permission re-granted — screenshots have stopped.`])
+        .catch((err) => logger.error({ err, userId: user._id.toString() }, '[shiftAlerts] Failed to post screen-recording alert'));
+    }
+  } else if (platform === 'darwin' && screenRecordingGranted === true && wasScreenRecordingGranted === false) {
+    postBatchedShiftAlertMessages(user.organizationId.toString(), [`✅ ${user.fullName} re-granted Screen Recording permission — screenshots resumed.`])
+      .catch((err) => logger.error({ err, userId: user._id.toString() }, '[shiftAlerts] Failed to post screen-recording resolved alert'));
+  }
 
   // ── Notify admins: agent went idle ────────────────────────────────────────
   // Routed through notificationService (persisted, preference-gated, unified
