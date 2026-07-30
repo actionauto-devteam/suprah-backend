@@ -8,7 +8,7 @@ import { createServer } from "http";
 import path from "path";
 import { Server } from "socket.io";
 import { setupSocket } from "./socket";
-import { setSocketIO } from "./utils/socketEmitter";
+import { setSocketIO, streamLogToAdmins } from "./utils/socketEmitter";
 import cors from "cors";
 import helmet from "helmet";
 import mongoSanitize from "express-mongo-sanitize";
@@ -45,6 +45,10 @@ import "./jobs/push.worker";
 
 const app: Application = express();
 
+// api.suprah-app.com sits behind a single nginx hop on AWS EC2 (no
+// Cloudflare proxy in front of the API), so exactly 1 trusted hop is
+// correct. Do NOT change this to `true` — a blanket trust lets clients
+// spoof X-Forwarded-For and evade the per-IP rate limiters.
 app.set("trust proxy", 1);
 
 app.use(globalLimiter);
@@ -260,10 +264,24 @@ if (require.main === module) {
 
     // ─── Global Error Handlers ────────────────────────────────────────────────
     process.on("unhandledRejection", (reason, promise) => {
+      // FIXED: previously this called shutdown() in production, which
+      // restarted the entire API whenever ANY promise anywhere (12
+      // schedulers, socket handlers, fire-and-forget calls) rejected
+      // without a .catch(). Every restart killed all in-flight requests —
+      // including token refreshes — and users mid-refresh were logged out.
+      //
+      // Unhandled rejections are now logged loudly and streamed to admins,
+      // but the process stays up. Process exit remains reserved for
+      // uncaughtException, where process state is genuinely undefined.
       logger.error({ reason, promise }, "Unhandled Rejection at Promise");
-      // In production, we might want to exit and let Docker restart the container
-      if (config.env === "production") {
-        shutdown("UNHANDLED_REJECTION");
+      try {
+        streamLogToAdmins({
+          level: "error",
+          message: `Unhandled rejection: ${(reason as any)?.message || String(reason)}`,
+          timestamp: new Date().toISOString(),
+        });
+      } catch {
+        // Never let the reporter itself throw here.
       }
     });
 

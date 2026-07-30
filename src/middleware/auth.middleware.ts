@@ -160,7 +160,14 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
         } else if (isDbOutageError(error)) {
             next(new ApiError(503, DB_OUTAGE_MESSAGE));
         } else {
-            next(new ApiError(401, 'Please authenticate'));
+            // Unexpected server-side failure — NOT an auth problem.
+            // Previously this returned 401, which made the frontend
+            // interceptor attempt a refresh, retry, hit the same error,
+            // receive a second 401 on the _retry request, and log the
+            // user out. A transient server error must never masquerade
+            // as an authentication failure. (Same rule already applied
+            // to crmAuth: unexpected errors → 500, not 401.)
+            next(new ApiError(500, 'Internal authentication error'));
         }
     }
 };

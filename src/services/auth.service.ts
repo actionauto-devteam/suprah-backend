@@ -304,9 +304,27 @@ class AuthService {
     }
 
     /**
-     * Refresh tokens
+     * Refresh tokens — rotation with a 60s reuse grace window.
+     *
+     * WHY THIS EXISTS:
+     * Multiple tabs (or a page reload racing the 15-minute access-token
+     * expiry) can fire concurrent refresh calls carrying the SAME refresh
+     * cookie. The old implementation hard-deleted the session on first use,
+     * so the losing tab's refresh got a 401 → the frontend interpreted it as
+     * "session revoked" → user was logged out mid-session.
+     *
+     * NEW BEHAVIOR:
+     * - First use of a refresh token: mark it rotated (rotatedAt), shorten
+     *   its TTL so Mongo reaps it shortly after the grace window, and issue
+     *   a brand-new token pair.
+     * - Reuse WITHIN the grace window: benign multi-tab race → issue fresh
+     *   tokens without re-rotating.
+     * - Reuse AFTER the grace window: possible token theft → revoke ALL of
+     *   the user's sessions and reject.
      */
     async refreshTokens(refreshToken: string) {
+        const REUSE_GRACE_MS = 60 * 1000;
+
         const payload = tokenService.verifyRefreshToken(refreshToken);
         const refreshTokenHash = this.hashToken(refreshToken);
 
@@ -320,9 +338,28 @@ class AuthService {
             throw new ApiError(401, 'User not found');
         }
 
-        await session.deleteOne();
-        const tokens = await this.generateAuthTokens(user);
-        return tokens;
+        if (session.rotatedAt) {
+            const sinceRotation = Date.now() - session.rotatedAt.getTime();
+
+            if (sinceRotation > REUSE_GRACE_MS) {
+                // Token was already rotated long ago and is being replayed.
+                // Treat as compromise: revoke every session for this user.
+                await Session.deleteMany({ userId: payload.sub });
+                throw new ApiError(401, 'Invalid refresh token');
+            }
+
+            // Benign concurrent reuse (another tab just rotated this token).
+            // Issue fresh tokens; do NOT touch rotatedAt again.
+            return await this.generateAuthTokens(user);
+        }
+
+        // First use: mark as rotated and let the TTL index clean it up
+        // shortly after the grace window closes.
+        session.rotatedAt = new Date();
+        session.expiresAt = new Date(Date.now() + REUSE_GRACE_MS + 10 * 1000);
+        await session.save();
+
+        return await this.generateAuthTokens(user);
     }
 
     /**

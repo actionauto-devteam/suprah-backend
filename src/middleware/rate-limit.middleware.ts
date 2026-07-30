@@ -95,6 +95,7 @@ export const replyLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
+
 export const bulkReplyLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
@@ -132,12 +133,22 @@ export const uploadLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
+
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1000,
 
     skip: (req: any) => {
-        return process.env.SKIP_RATE_LIMIT === 'true' || req.path === '/health';
+        // /api/auth/refresh-tokens is exempted: a 429 on the refresh
+        // endpoint is indistinguishable from an auth failure to some
+        // clients and must never be able to knock a user out of their
+        // session. Refresh is already implicitly bounded by the access
+        // token lifetime (one legitimate refresh per ~15 min per user).
+        return (
+            process.env.SKIP_RATE_LIMIT === 'true' ||
+            req.path === '/health' ||
+            req.path === '/api/auth/refresh-tokens'
+        );
     },
     message: {
         success: false,
@@ -169,7 +180,7 @@ export const inventorySyncLimiter = rateLimit({
 
 export const marketplaceLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100, 
+    max: 100,
     skip: () => process.env.SKIP_RATE_LIMIT === 'true',
     keyGenerator: (req: any) => {
         return req.user?._id?.toString() || req.ip;
@@ -185,4 +196,3 @@ export const marketplaceLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
-

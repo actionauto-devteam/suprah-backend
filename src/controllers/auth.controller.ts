@@ -18,6 +18,20 @@ import { userAuthCache } from '../utils/cache.util';
 import CrmUser from '../models/CrmUser.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 
+/**
+ * Shared cookie options for the refresh token. Centralized so that
+ * res.cookie() and res.clearCookie() always use IDENTICAL attributes —
+ * browsers only clear a cookie when path/secure/sameSite match how it
+ * was originally set.
+ */
+const refreshCookieOptions = () => {
+    const isProduction = process.env.NODE_ENV === 'production';
+    return {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+    };
+};
 
 class AuthController {
     register = asyncHandler(async (req: Request, res: Response) => {
@@ -39,11 +53,8 @@ class AuthController {
         const { email, otp } = verifyEmailSchema.parse(req.body);
         const result = await authService.verifyEmail(email, otp);
 
-        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', result.refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
+            ...refreshCookieOptions(),
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
@@ -63,11 +74,8 @@ class AuthController {
         const { email, password } = loginSchema.parse(req.body);
         const result = await authService.login(email, password);
 
-        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', result.refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
+            ...refreshCookieOptions(),
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
@@ -105,11 +113,8 @@ class AuthController {
         const { email, otp, newPassword } = req.body;
         const result = await authService.upgradeLegacyUser(email, otp, newPassword);
 
-        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', result.refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
+            ...refreshCookieOptions(),
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
@@ -133,16 +138,16 @@ class AuthController {
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
 
         if (!refreshToken) {
-            return res.status(401).json(new ApiResponse(419, null, 'Refresh token missing'));
+            // FIXED: previously sent HTTP 401 with a body code of 419,
+            // which made the frontend's status-based branching ambiguous.
+            // HTTP status and body code now agree: 401.
+            return res.status(401).json(new ApiResponse(401, null, 'Refresh token missing'));
         }
 
         const tokens = await authService.refreshTokens(refreshToken);
 
-        const isProduction = process.env.NODE_ENV === 'production';
         res.cookie('refreshToken', tokens.refreshToken, {
-            httpOnly: true,
-            secure: isProduction,
-            sameSite: isProduction ? 'none' : 'lax',
+            ...refreshCookieOptions(),
             maxAge: 7 * 24 * 60 * 60 * 1000,
         });
 
@@ -171,7 +176,9 @@ class AuthController {
             logger.info({ userId: user._id }, 'User logout');
         }
 
-        res.clearCookie('refreshToken');
+        // FIXED: clearCookie must carry the same secure/sameSite attributes
+        // the cookie was set with, or some browsers silently keep it.
+        res.clearCookie('refreshToken', refreshCookieOptions());
         res.json(new ApiResponse(200, null, 'Logged out successfully'));
     });
 

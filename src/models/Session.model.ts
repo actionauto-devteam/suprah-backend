@@ -6,6 +6,14 @@ export interface ISession extends Document {
     deviceHeader?: string;
     ip?: string;
     expiresAt: Date;
+    /**
+     * Set the first time this refresh token is used (rotated).
+     * While `Date.now() - rotatedAt` is within the reuse grace window,
+     * concurrent reuse (multi-tab race) is treated as benign and fresh
+     * tokens are issued. Outside the window, reuse is treated as theft
+     * and all of the user's sessions are revoked.
+     */
+    rotatedAt?: Date;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -33,6 +41,9 @@ const SessionSchema = new Schema(
             type: Date,
             required: true,
             index: { expires: 0 },
+        },
+        rotatedAt: {
+            type: Date,
         },
     },
     {
