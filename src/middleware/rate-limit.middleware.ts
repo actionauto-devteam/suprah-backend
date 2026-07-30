@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { ApiError } from '../utils/ApiError';
 
@@ -134,20 +135,38 @@ export const uploadLimiter = rateLimit({
     validate: { default: false }
 });
 
+/**
+ * Global limiter — hardened against shared-IP false positives.
+ *
+ * KEYING: authenticated requests are keyed by a hash of their Bearer token
+ * (i.e., per user), NOT by IP. This makes the limiter immune to many users
+ * sharing one IP: office NAT, VPNs, or a proxy hop that isn't unwrapped by
+ * `trust proxy`. Anonymous traffic still falls back to per-IP limiting.
+ *
+ * EXEMPTIONS:
+ * - /api/auth/refresh-tokens: a 429 on refresh reads as an auth failure to
+ *   clients and must never knock a user out of their session.
+ * - /api/users/me (exact path only): the session-bootstrap call the
+ *   frontend fires on every page load. Starving it with a 429 was being
+ *   interpreted as "signed out" and caused forced logouts on page refresh.
+ *   Subroutes like /api/users/me/organizations remain limited.
+ */
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 1000,
-
+    keyGenerator: (req: any) => {
+        const authHeader = req.headers.authorization;
+        if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+            return crypto.createHash('sha256').update(authHeader).digest('hex');
+        }
+        return req.ip;
+    },
     skip: (req: any) => {
-        // /api/auth/refresh-tokens is exempted: a 429 on the refresh
-        // endpoint is indistinguishable from an auth failure to some
-        // clients and must never be able to knock a user out of their
-        // session. Refresh is already implicitly bounded by the access
-        // token lifetime (one legitimate refresh per ~15 min per user).
         return (
             process.env.SKIP_RATE_LIMIT === 'true' ||
             req.path === '/health' ||
-            req.path === '/api/auth/refresh-tokens'
+            req.path === '/api/auth/refresh-tokens' ||
+            req.path === '/api/users/me'
         );
     },
     message: {
