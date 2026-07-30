@@ -59,7 +59,12 @@ const FeedSchema = new Schema<IFeed>(
 
     content: {
       type: String,
-      required: true,
+      // Not required at the schema level — attachment-only posts (no text)
+      // are valid and enforced instead by the controller, which rejects
+      // only when BOTH content and attachments are empty. Mongoose's
+      // required validator treats "" as missing, which would otherwise
+      // reject every attachment-only post.
+      default: '',
       trim: true,
       // Visible-text limit stays 5000 (enforced in the controller against the
       // mention-stripped content). The raw string carries headroom because

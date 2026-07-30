@@ -50,6 +50,16 @@ const parseAttachments: RequestHandler = (req, res, next) => {
   });
 };
 
+// The upload limiter is meant to throttle file uploads, not every post/comment.
+// It must run AFTER parseAttachments so it can see whether files were actually
+// attached — otherwise every text-only post/comment burns from the same
+// 5-per-10-minutes budget as real uploads.
+const limitIfAttachments: RequestHandler = (req, res, next) => {
+  const files = (req.files as Express.Multer.File[] | undefined) || [];
+  if (files.length === 0) return next();
+  return uploadLimiter(req, res, next);
+};
+
 // All feed routes require CRM authentication
 router.use(crmAuth());
 
@@ -64,12 +74,12 @@ router.get('/mention-candidates', feedNotificationController.getMentionCandidate
 
 // ── Posts ──
 router.get('/', feedController.getPosts);
-router.post('/', uploadLimiter, parseAttachments, feedController.createPost);
+router.post('/', parseAttachments, limitIfAttachments, feedController.createPost);
 router.put('/:id', feedController.updatePost);
 router.delete('/:id', feedController.deletePost);
 
 // ── Comments (merged in — same URLs as before: /crm/feeds/:postId/comments) ──
-router.post('/:postId/comments', uploadLimiter, parseAttachments, addComment);
+router.post('/:postId/comments', parseAttachments, limitIfAttachments, addComment);
 router.get('/:postId/comments', getComments);
 router.delete('/:postId/comments/:commentId', deleteComment);
 

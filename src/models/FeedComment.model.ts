@@ -61,7 +61,11 @@ const FeedCommentSchema = new Schema<IFeedComment>(
     },
     content: {
       type: String,
-      required: true,
+      // Not required at the schema level — attachment-only comments (no
+      // text) are valid; the controller rejects only when BOTH content and
+      // attachments are empty. Mongoose's required validator treats "" as
+      // missing, which would otherwise reject every attachment-only comment.
+      default: '',
       trim: true,
       // Visible-text limit stays 1000 (enforced in the controller against the
       // mention-stripped content); raw headroom covers mention tokens.
