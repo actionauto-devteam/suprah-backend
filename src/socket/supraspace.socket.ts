@@ -8,6 +8,11 @@ import config from '../config';
 import logger from '../utils/logger';
 import { setSupraSpaceSocketIO } from '../utils/socketEmitter';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
+// Suprah YapLine — PTT voice + screen share signaling rides on this same
+// socket connection (no second WebSocket). Handlers are registered per
+// connection below; disconnect cleanup removes the user from any live yap
+// sessions so a closed tab never leaves a ghost participant.
+import { registerYapLineHandlers, handleYapLineDisconnect } from './yapline.socket';
 
 let io: IOServer;
 
@@ -117,6 +122,9 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     }
 
     logger.info({ userId, fullName: user.fullName }, '[SupraSpace] User connected');
+
+    // ── Suprah YapLine (PTT voice + screen share) ─────────────────────────
+    registerYapLineHandlers(io, socket);
 
     // ── Presence sync — send the current online roster to the requesting socket ─
     socket.on('presence:request', () => {
@@ -233,6 +241,14 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
 
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
+      // YapLine first: remove this socket from any live yap sessions so the
+      // remaining participants tear down their peer connections immediately.
+      try {
+        handleYapLineDisconnect(io, socket);
+      } catch (err: any) {
+        logger.error(err, '[YapLine] disconnect cleanup error');
+      }
+
       const remaining = (onlineUsers.get(userId) || 1) - 1;
       if (remaining <= 0) {
         onlineUsers.delete(userId);

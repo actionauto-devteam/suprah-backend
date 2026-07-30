@@ -173,6 +173,10 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
     const note = noteByUser.get(id);
     const hasStory = myStories.length > 0;
     const hasUnseen = id !== meId && myStories.some((s) => !s.viewedByMe);
+    // Most recent activity = newest story OR the note's last update.
+    let latestAt = 0;
+    if (myStories.length) latestAt = Math.max(latestAt, new Date(myStories[myStories.length - 1].createdAt).getTime());
+    if (note) latestAt = Math.max(latestAt, new Date(note.updatedAt).getTime());
     return {
       _id: id,
       fullName: u.fullName,
@@ -184,18 +188,21 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
       storyCount: myStories.length,
       stories: myStories,
       note: note ? { _id: note._id, text: note.text, updatedAt: note.updatedAt } : null,
+      latestAt,
     };
   });
 
-  // New/unseen stories come first. Once you've viewed someone's story, they
-  // drop to the back alongside everyone who has no story at all.
-  const rank = (u: any) => (u.hasUnseen ? 0 : 1);
+  // Anyone with a note or story stays pinned to the front, newest activity
+  // first — even after their story is viewed (only the ring color changes,
+  // green → amber). Everyone else follows alphabetically.
+  const hasActivity = (u: any) => u.hasStory || Boolean(u.note);
   users.sort((a, b) => {
     if (a.isMe) return -1;
     if (b.isMe) return 1;
-    const ra = rank(a);
-    const rb = rank(b);
-    if (ra !== rb) return ra - rb;
+    const aa = hasActivity(a);
+    const ba = hasActivity(b);
+    if (aa !== ba) return aa ? -1 : 1;          // active users first
+    if (aa && ba) return b.latestAt - a.latestAt; // latest activity first
     return (a.fullName || '').localeCompare(b.fullName || '');
   });
 

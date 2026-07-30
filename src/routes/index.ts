@@ -71,6 +71,7 @@ import pulse360Route from "./pulse360.route";
 import storyRoute from "./story.route";
 import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
+import yapLineRoute from "./yapline.route";
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -157,6 +158,13 @@ const defaultRoutes = [
   {
     path: "/crm/spotify",
     route: spotifyRoute,
+  },
+  // Suprah YapLine — same shadowing rule: must stay ABOVE "/crm" so
+  // crm.route's dynamic "/:id"-style routes don't capture
+  // "/crm/yapline/sessions" and "/crm/yapline/recent".
+  {
+    path: "/crm/yapline",
+    route: yapLineRoute,
   },
   {
     path: "/mail",
