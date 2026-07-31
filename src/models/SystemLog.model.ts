@@ -18,6 +18,12 @@ export interface ISystemLog extends Document {
   err?: Record<string, any>;
   context?: string;
   env: string;
+  // Structured extras for client-reported diagnostics (e.g. the tray-app's
+  // idle-detection / screenshot-capture reports) — kept separate from `err`
+  // since these aren't errors, and separate from `req` since they don't come
+  // from an HTTP request object.
+  event?: string;
+  meta?: Record<string, any>;
   createdAt: Date;
 }
 
@@ -38,6 +44,8 @@ const SystemLogSchema = new Schema<ISystemLog>({
   },
   err: Object,
   context: String,
+  event: { type: String, index: true },
+  meta: Object,
   env: String,
   createdAt: { 
     type: Date, 

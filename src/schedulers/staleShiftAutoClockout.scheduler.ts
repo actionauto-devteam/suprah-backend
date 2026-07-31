@@ -19,9 +19,14 @@ import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shift
  * clocking in, auto-close it using the last known activity as the time-out —
  * never "now", which would falsely inflate hours by the entire silent gap.
  *
- * Shifts that haven't reached 8 rendered hours yet are intentionally left
- * open — same rule as the tray-side mechanisms, so a shift only ever gets
- * auto-closed after the user's minimum work is already done.
+ * Shifts under 8 rendered hours are handled by a separate, shorter rule: if
+ * there IS real activity data for this shift (the tray genuinely ran) and
+ * the heartbeat has gone silent for 30+ minutes, close it at the last known
+ * activity time regardless of hours rendered — a genuine sleep/shutdown/
+ * crash this early in a shift means the device is very unlikely to still be
+ * in use, and there's no reason to make the shift stay open for the rest of
+ * the day (or until the next MDT-day boundary closure) just because 8h
+ * hadn't accumulated yet. See SHORT_SILENCE_THRESHOLD_MS below.
  *
  * Exception: a shift with ZERO ActivityInterval/heartbeat data ever (the
  * tray never ran this session — e.g. clocked in from the web only) can
@@ -33,6 +38,15 @@ import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shift
  */
 const RENDERED_HOURS_THRESHOLD_SECONDS = 8 * 60 * 60;
 const HEARTBEAT_SILENCE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+// Below 8h rendered, a genuine sleep/shutdown/crash this early in a shift
+// means the device is very unlikely to still be in use — no reason to make
+// them wait until 8h accumulates before ever considering a close. Shorter
+// than the 1h threshold above since there's no rendered-hours minimum acting
+// as a second gate here. (Confirmed in production: a user stopped working
+// around 3:49 PM having rendered ~5h48m, but with nothing below 8h ever
+// eligible to close, the shift stayed open until the next MDT day's
+// boundary closure — wall-clock "Work Time" showed ~14h.)
+const SHORT_SILENCE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
 const NO_DATA_GRACE_HOURS = 16;
 
 export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {}): Promise<{ closed: number; checked: number }> {
@@ -71,7 +85,7 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
 
     const heartbeat = await AgentHeartbeat.findOne({ userId }).lean();
     const silentMs = heartbeat ? now.getTime() - new Date(heartbeat.lastSeenAt).getTime() : Infinity;
-    if (silentMs < HEARTBEAT_SILENCE_THRESHOLD_MS) continue; // tray still recently checking in — leave it alone
+    if (silentMs < SHORT_SILENCE_THRESHOLD_MS) continue; // tray still recently checking in — leave it alone
 
     // Sum all committed active intervals since this shift began (not just
     // "today" — a forgotten clock-out can span multiple calendar days).
@@ -81,18 +95,25 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
     }).select('startAt endAt durationSeconds').lean();
     const renderedSeconds = intervals.reduce((sum, i) => sum + i.durationSeconds, 0);
 
+    const lastIntervalEndMs = intervals.length
+      ? Math.max(...intervals.map((i) => new Date(i.endAt).getTime()))
+      : null;
+    const lastHeartbeatMs = heartbeat ? new Date(heartbeat.lastSeenAt).getTime() : null;
+    const lastKnownActivityMsCandidates = [lastIntervalEndMs, lastHeartbeatMs].filter((v): v is number => v !== null);
+    const closeAtMs = lastKnownActivityMsCandidates.length ? Math.max(...lastKnownActivityMsCandidates) : null;
+
     let closeAt: Date | null = null;
     let closeNote = '';
 
-    if (renderedSeconds >= RENDERED_HOURS_THRESHOLD_SECONDS) {
-      const lastIntervalEndMs = intervals.length
-        ? Math.max(...intervals.map((i) => new Date(i.endAt).getTime()))
-        : null;
-      const lastHeartbeatMs = heartbeat ? new Date(heartbeat.lastSeenAt).getTime() : null;
-      const closeAtMs = Math.max(...[lastIntervalEndMs, lastHeartbeatMs].filter((v): v is number => v !== null));
-      if (Number.isFinite(closeAtMs) && closeAtMs > shiftStartedAt.getTime()) {
+    if (renderedSeconds >= RENDERED_HOURS_THRESHOLD_SECONDS && silentMs >= HEARTBEAT_SILENCE_THRESHOLD_MS) {
+      if (closeAtMs !== null && closeAtMs > shiftStartedAt.getTime()) {
         closeAt = new Date(closeAtMs);
         closeNote = 'Auto clock-out — device went idle/offline after rendering 8+ hours';
+      }
+    } else if (renderedSeconds < RENDERED_HOURS_THRESHOLD_SECONDS && intervals.length > 0 && silentMs >= SHORT_SILENCE_THRESHOLD_MS) {
+      if (closeAtMs !== null && closeAtMs > shiftStartedAt.getTime()) {
+        closeAt = new Date(closeAtMs);
+        closeNote = 'Auto clock-out — device went idle/offline for 30+ minutes';
       }
     } else {
       const openHours = (now.getTime() - shiftStartedAt.getTime()) / 3_600_000;

@@ -88,11 +88,24 @@ export const buildSessions = (logs: TimeLogEntry[]): Session[] => {
   }
 
   // Currently clocked in (no matching time-out).
-  // Cap at 12 hours so a single forgotten clock-out cannot inflate every subsequent
-  // calendar day with 24:00 entries (one unclosed session -> one live slice per day).
+  // Cap the live/ongoing slice so a genuinely forgotten, multi-day-open shift
+  // can't inflate every subsequent calendar day with a full day's worth of
+  // hours (one unclosed session -> one live slice per day). Was previously
+  // 12 hours, which also capped genuinely active shifts running longer than
+  // that in a single day — showing a frozen/looping display on the live
+  // TimeProof Clock and Today card even while the person kept working,
+  // though the calendar showed the correct total once they actually clocked
+  // out (since a completed session's duration is never capped, only a still-
+  // open one). Raised to match a full MDT calendar day: closeShiftsFromPrevious
+  // MDTDays (staleShiftAutoClockout.scheduler.ts) already force-closes any
+  // shift that didn't start "today" (MDT), running every 15 minutes — so a
+  // live session can never actually reach this cap unless every other
+  // safety net (that scheduler, the 8h+1h-silence rule, and the tray's own
+  // 30-min idle/suspend auto-clockout) has also failed. This is now a
+  // last-resort backstop, not the primary defense.
   if (currentIn) {
     const now = new Date();
-    const MAX_LIVE_MS = 12 * 60 * 60 * 1000;
+    const MAX_LIVE_MS = 25 * 60 * 60 * 1000;
     const elapsedMs = now.getTime() - currentIn.getTime();
     const isCapped = elapsedMs > MAX_LIVE_MS;
     sessions.push({

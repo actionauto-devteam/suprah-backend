@@ -14,6 +14,7 @@ import CrmPushService from '../services/crmPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
+import { SystemLog } from '../models/SystemLog.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
@@ -1755,8 +1756,12 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
   logger.warn(
     {
       context: 'tray-client-diagnostic',
-      userId: user._id.toString(),
-      organizationId: user.organizationId?.toString(),
+      // Nested under req (not top-level) — this is what SystemLog's
+      // indexed req.userId/req.organizationId fields actually key off of;
+      // a top-level userId here would silently be dropped by both Mongo log
+      // transports (mongoDevStream / pino-mongodb-transport), which only
+      // pick out req/res/err/context/event/meta/env from the log line.
+      req: { userId: user._id.toString(), organizationId: user.organizationId?.toString() },
       event,
       meta,
     },
@@ -1764,6 +1769,55 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
   );
 
   res.json(new ApiResponse(200, {}, 'Logged'));
+});
+
+/**
+ * GET /api/crm/timeproof/user/:userId/idle-diagnostics?date=YYYY-MM-DD
+ * Admin/Manager: surfaces the raw OS-reported idle-seconds readings behind
+ * each "flagged idle" event for a user on a given day, straight from
+ * SystemLog — previously only checkable via a direct MongoDB query. Exists
+ * so a "but I wasn't idle!" dispute can be settled by looking at what the
+ * operating system itself measured, without asking an engineer to look it
+ * up each time.
+ */
+export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied — admin or manager role required');
+  }
+  const { userId } = req.params;
+  const { date: dateStr } = req.query;
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr as string)) {
+    throw new ApiError(400, 'date is required (YYYY-MM-DD)');
+  }
+
+  const { start, end } = getCompanyDayRange(dateStr as string);
+
+  // Includes both the "flagged idle" events AND the unconditional periodic
+  // trace (idle_periodic_check, every ~5 min regardless of whether idle ever
+  // fires) — the latter is what proves whether the check loop was even
+  // running at all during a period where no flag ever fired, which the
+  // flagged-only view alone can't distinguish from "genuinely never idle".
+  const logs = await SystemLog.find({
+    event: { $in: ['idle_detected', 'idle_periodic_check'] },
+    'req.userId': userId,
+    timestamp: { $gte: start, $lte: end },
+  })
+    .sort({ timestamp: -1 })
+    .select('timestamp event meta')
+    .lean();
+
+  const entries = logs.map((l) => ({
+    at: l.timestamp,
+    event: l.event,
+    idleSeconds: l.meta?.idleSeconds ?? null,
+    idleSecondsHistory: l.meta?.idleSecondsHistory ?? [],
+    idleDetectionExempt: l.meta?.idleDetectionExempt ?? null,
+    platform: l.meta?.platform ?? null,
+    wasTracking: l.meta?.wasTracking ?? null,
+  }));
+
+  res.json(new ApiResponse(200, { entries }, 'Idle diagnostics fetched'));
 });
 
 /**

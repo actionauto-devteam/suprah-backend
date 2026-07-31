@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
 
-const REVIEW_DAYS_AFTER_CUTOFF = 21;
+const REVIEW_DAYS_AFTER_CUTOFF = 15;
 const CRON_SCHEDULE = process.env.SCREENSHOT_RETENTION_CRON || '0 3 * * *';
 
 function lastDayOfMonth(y: number, m: number): Date {

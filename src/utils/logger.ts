@@ -35,6 +35,8 @@ const mongoDevStream = {
           res: logData.res,
           err: logData.err,
           context: logData.context,
+          event: logData.event,
+          meta: logData.meta,
           env: logData.env || process.env.NODE_ENV,
         }).catch((e: any) => console.error('[Mongo-Log-Dev] Error:', e));
       }
