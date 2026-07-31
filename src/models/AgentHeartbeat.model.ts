@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+// v1.4.0
 
 export interface IAgentHeartbeat extends Document {
   userId: mongoose.Types.ObjectId;

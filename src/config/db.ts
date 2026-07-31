@@ -1,4 +1,5 @@
 import logger from '../utils/logger';
+// v1.4.0
 import mongoose from 'mongoose';
 import config from './index';
 import seedCrmUsers from '../utils/seedCrmUsers';

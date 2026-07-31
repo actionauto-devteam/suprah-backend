@@ -1,3 +1,4 @@
+// v1.4.0
 /**
  * Shared TimeLog "core math" — pairing raw time-in/time-out/break-in/break-out
  * events into sessions, building per-day calendars, and aggregating summaries.
