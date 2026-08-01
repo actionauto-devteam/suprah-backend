@@ -8,6 +8,7 @@ import CrmUser from '../models/CrmUser.model';
 import Note from '../models/Note.model';
 import { storageService } from '../services/storage.service';
 import { getSocketIO, emitToUser } from '../utils/socketEmitter';
+import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 
 const STORY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_VIDEO_SECONDS = 120;
@@ -145,7 +146,7 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
       isOffboarded: { $ne: true },
       isSystem: { $ne: true },
     })
-      .select('fullName avatar role')
+      .select('fullName avatar role email')
       .lean(),
   ]);
 
@@ -164,8 +165,10 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
   const byId = new Map<string, any>();
   for (const u of orgUsers) byId.set(u._id.toString(), u);
   if (!byId.has(meId)) {
-    byId.set(meId, { _id: user._id, fullName: user.fullName, avatar: user.avatar, role: user.role });
+    byId.set(meId, { _id: user._id, fullName: user.fullName, avatar: user.avatar, role: user.role, email: user.email });
   }
+
+  const presenceByUser = await resolvePresenceForCrmRoster(Array.from(byId.values()));
 
   const users = Array.from(byId.values()).map((u) => {
     const id = u._id.toString();
@@ -173,6 +176,7 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
     const note = noteByUser.get(id);
     const hasStory = myStories.length > 0;
     const hasUnseen = id !== meId && myStories.some((s) => !s.viewedByMe);
+    const presence = presenceByUser.get(id);
     // Most recent activity = newest story OR the note's last update.
     let latestAt = 0;
     if (myStories.length) latestAt = Math.max(latestAt, new Date(myStories[myStories.length - 1].createdAt).getTime());
@@ -189,6 +193,8 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
       stories: myStories,
       note: note ? { _id: note._id, text: note.text, updatedAt: note.updatedAt } : null,
       latestAt,
+      onlineStatus: presence?.onlineStatus || 'offline',
+      lastDeviceType: presence?.lastDeviceType ?? null,
     };
   });
 

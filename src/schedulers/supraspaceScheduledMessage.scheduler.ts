@@ -3,6 +3,7 @@ import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import { getIO } from '../socket/supraspace.socket';
 import { pushToConversationMembers } from '../controllers/supraspace.controller';
+import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
 import logger from '../utils/logger';
 
 async function emitScheduledMessage(messageId: string) {
@@ -39,7 +40,7 @@ async function emitScheduledMessage(messageId: string) {
   const content = (message as any).content as string | undefined;
   const hasGif = !!(message as any).gif?.url;
   const pushBody = content?.trim()
-    ? content.trim().slice(0, 120)
+    ? truncateWithEllipsis(stripMessageFormatting(content.trim()), 120)
     : hasGif ? 'Sent a GIF' : 'Sent an attachment';
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;

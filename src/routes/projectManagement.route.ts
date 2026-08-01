@@ -56,6 +56,7 @@ router.delete('/tasks/:taskId',         pmController.deleteTask);
 // ── Task comments ──
 router.get('/tasks/:taskId/comments',  pmController.getComments);
 router.post('/tasks/:taskId/comments', attachmentUpload.array('attachments', 5), pmController.addComment);
+router.patch('/comments/:commentId',   pmController.updateComment);
 router.delete('/comments/:commentId',  pmController.deleteComment);
 
 export default router;

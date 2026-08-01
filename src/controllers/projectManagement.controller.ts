@@ -11,6 +11,8 @@ import ProjectTask, {
   IProjectAttachment,
   PROJECT_TASK_STATUSES,
   ProjectTaskStatus,
+  PROJECT_TASK_PRIORITIES,
+  ProjectTaskPriority,
 } from '../models/ProjectTask.model';
 import ProjectTaskComment from '../models/ProjectTaskComment.model';
 import { syncTaskToCalendar, removeTaskCalendarEvent } from '../services/projectCalendarSync.service';
@@ -475,7 +477,7 @@ export const getGroupTree = asyncHandler(async (req: Request, res: Response) => 
     ProjectFolder.find({ groupId: group._id, deletedAt: null })
       .sort({ order: 1, createdAt: 1 }).lean(),
     ProjectTask.find({ groupId: group._id, deletedAt: null })
-      .select('title status assigneeIds createdBy startDate deadline folderId sectionId commentCount attachments seenBy order createdAt updatedAt')
+      .select('title status priority assigneeIds createdBy startDate deadline folderId sectionId commentCount attachments seenBy order createdAt updatedAt')
       .sort({ createdAt: -1 }).lean(), // latest task always first
     CrmUser.find({ _id: { $in: group.memberIds }, organizationId: actor.organizationId })
       .select('fullName username email avatar role').lean(),
@@ -710,9 +712,19 @@ function parseAssigneeIds(raw: unknown, group: IProjectGroup): mongoose.Types.Ob
   return unique.map(oid);
 }
 
+/** Validates and normalizes an incoming priority value; '' / undefined clears it. */
+function parsePriority(raw: unknown): ProjectTaskPriority | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '') return null;
+  if (!PROJECT_TASK_PRIORITIES.includes(raw as ProjectTaskPriority)) {
+    throw new ApiError(400, `priority must be one of: ${PROJECT_TASK_PRIORITIES.join(', ')}, or empty to clear`);
+  }
+  return raw as ProjectTaskPriority;
+}
+
 /**
  * POST /api/crm/projects/folders/:folderId/tasks   (multipart)
- * Fields: title, description?, assigneeIds[]?, startDate?, deadline?, status?
+ * Fields: title, description?, assigneeIds[]?, startDate?, deadline?, status?, priority?
  * Files:  attachments[] (same R2 private-bucket flow as DayPulse)
  */
 export const createTask = asyncHandler(async (req: Request, res: Response) => {
@@ -725,9 +737,9 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
 
   const group = await loadGroupForMember(folder.groupId.toString(), actor);
 
-  const { title, description, startDate, deadline, status } = req.body as {
+  const { title, description, startDate, deadline, status, priority } = req.body as {
     title?: string; description?: string;
-    startDate?: string; deadline?: string; status?: string;
+    startDate?: string; deadline?: string; status?: string; priority?: string;
   };
 
   if (!title?.trim()) throw new ApiError(400, 'Task title is required');
@@ -739,6 +751,8 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
     }
     taskStatus = status as ProjectTaskStatus;
   }
+
+  const taskPriority = parsePriority(priority) ?? 'normal';
 
   // Every assignee must be a member of THIS group (which itself is org-scoped).
   const assigneeIds = parseAssigneeIds(req.body.assigneeIds, group);
@@ -766,6 +780,7 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
       title: title.trim(),
       description: description?.trim() || '',
       status: taskStatus,
+      priority: taskPriority,
       createdBy: actor._id,
       assigneeIds,
       startDate: parsedStart,
@@ -849,9 +864,9 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
     || actor.role === 'admin';
   if (!canEdit) throw new ApiError(403, 'Only the task creator or an assignee can edit this task');
 
-  const { title, description, startDate, deadline } = req.body as {
+  const { title, description, startDate, deadline, priority } = req.body as {
     title?: string; description?: string;
-    startDate?: string | null; deadline?: string | null;
+    startDate?: string | null; deadline?: string | null; priority?: string | null;
   };
 
   if (title !== undefined) {
@@ -859,6 +874,9 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
     task.title = title.trim();
   }
   if (description !== undefined) task.description = description?.trim() || '';
+
+  const nextPriority = parsePriority(priority);
+  if (nextPriority !== undefined) task.priority = nextPriority;
 
   // Replace the assignee set; only members NEW to the task get the
   // "assigned to you" notification.
@@ -1154,6 +1172,49 @@ export const addComment = asyncHandler(async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * PATCH /api/crm/projects/comments/:commentId — comment author ONLY (no admin
+ * override — you can only edit what you wrote). Body: { message, mentions? }.
+ */
+export const updateComment = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, 'Not authenticated');
+  assertObjectId(req.params.commentId, 'comment ID');
+
+  const comment = await ProjectTaskComment.findOne({ _id: req.params.commentId, deletedAt: null });
+  if (!comment) throw new ApiError(404, 'Comment not found');
+
+  if (comment.userId.toString() !== actor._id.toString()) {
+    throw new ApiError(403, 'You can only edit your own comments');
+  }
+
+  const group = await loadGroupForMember(comment.groupId.toString(), actor);
+
+  const message = typeof req.body.message === 'string' ? req.body.message.trim() : '';
+  if (!message && comment.attachments.length === 0) {
+    throw new ApiError(400, 'Comment must contain a message or at least one attachment');
+  }
+
+  const memberSet = new Set(group.memberIds.map((m) => m.toString()));
+  const mentionIds = req.body.mentions !== undefined
+    ? parseAssigneeIds(req.body.mentions, group).filter((id) => memberSet.has(id.toString()))
+    : comment.mentions;
+
+  comment.message = message;
+  comment.mentions = mentionIds;
+  comment.isEdited = true;
+  await comment.save();
+
+  const commentForClient = await signAttachments(comment.toObject());
+  emitToMembers(group.memberIds, 'pm:comment:updated', {
+    groupId: group._id,
+    taskId: comment.taskId,
+    comment: commentForClient,
+  });
+
+  res.json(new ApiResponse(200, { comment: commentForClient }, 'Comment updated'));
+});
+
 /** DELETE /api/crm/projects/comments/:commentId — comment author or admin. */
 export const deleteComment = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
@@ -1287,6 +1348,10 @@ const MY_TASKS_MAX_LIMIT = 50;
  * still a member of, so leaving (or being removed from) a group also removes
  * its tasks from these lists.
  */
+const MY_TASKS_SORT_FIELDS = ['createdAt', 'deadline', 'title', 'group', 'priority'] as const;
+const PRIORITY_RANK: Record<ProjectTaskPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+type MyTasksSortField = typeof MY_TASKS_SORT_FIELDS[number];
+
 export const getMyTasks = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
@@ -1299,6 +1364,15 @@ export const getMyTasks = asyncHandler(async (req: Request, res: Response) => {
     MY_TASKS_MAX_LIMIT,
   );
   const skip = (page - 1) * limit;
+
+  const sortByRaw = req.query.sortBy as string;
+  const sortBy: MyTasksSortField = MY_TASKS_SORT_FIELDS.includes(sortByRaw as MyTasksSortField)
+    ? (sortByRaw as MyTasksSortField)
+    : 'createdAt';
+  // Dates default newest-first; title/group/priority default ascending
+  // (priority "ascending" means urgent → low, per PRIORITY_RANK).
+  const sortDirDefault = sortBy === 'title' || sortBy === 'group' || sortBy === 'priority' ? 1 : -1;
+  const sortDir = req.query.sortDir === 'asc' ? 1 : req.query.sortDir === 'desc' ? -1 : sortDirDefault;
 
   // Live groups the actor is a member of (org-scoped) — the visibility fence.
   const memberGroups = await ProjectGroup.find({
@@ -1317,16 +1391,63 @@ export const getMyTasks = asyncHandler(async (req: Request, res: Response) => {
     status: view === 'completed' ? 'completed' : { $ne: 'completed' },
   };
 
-  const [tasks, total] = await Promise.all([
-    ProjectTask.find(filter)
-      .select('title status assigneeIds createdBy startDate deadline groupId sectionId folderId commentCount attachments seenBy completedAt createdAt')
-      .populate('assigneeIds', 'fullName username avatar')
-      .sort({ createdAt: -1 }) // latest task always first
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    ProjectTask.countDocuments(filter),
-  ]);
+  // "deadline"/"title"/"group" sorts need in-memory handling: deadline must
+  // push null/missing values to the end regardless of direction, and "group"
+  // sorts by a name that only exists in `groupNames` (not on the task doc).
+  // The candidate set is already bounded by the standard pagination window
+  // fetched a page ahead-of-time isn't feasible without an aggregation, so we
+  // fetch the full filtered set (still org+actor scoped, realistically small)
+  // sorted by createdAt, re-sort in JS, then slice the requested page.
+  const needsJsSort = sortBy !== 'createdAt';
+
+  const baseQuery = ProjectTask.find(filter)
+    .select('title status priority assigneeIds createdBy startDate deadline groupId sectionId folderId commentCount attachments seenBy completedAt createdAt')
+    .populate('assigneeIds', 'fullName username avatar')
+    .sort({ createdAt: -1 });
+
+  let tasks: any[];
+  let total: number;
+
+  if (needsJsSort) {
+    const [allTasks, count] = await Promise.all([
+      baseQuery.lean(),
+      ProjectTask.countDocuments(filter),
+    ]);
+    total = count;
+
+    const compare = (a: any, b: any): number => {
+      if (sortBy === 'deadline') {
+        const aTime = a.deadline ? new Date(a.deadline).getTime() : null;
+        const bTime = b.deadline ? new Date(b.deadline).getTime() : null;
+        if (aTime === null && bTime === null) return 0;
+        if (aTime === null) return 1; // no deadline always sinks to the end
+        if (bTime === null) return -1;
+        return (aTime - bTime) * sortDir;
+      }
+      if (sortBy === 'title') {
+        return a.title.localeCompare(b.title) * sortDir;
+      }
+      if (sortBy === 'priority') {
+        const aRank = PRIORITY_RANK[a.priority as ProjectTaskPriority] ?? PRIORITY_RANK.normal;
+        const bRank = PRIORITY_RANK[b.priority as ProjectTaskPriority] ?? PRIORITY_RANK.normal;
+        return (aRank - bRank) * sortDir;
+      }
+      // group
+      const aName = groupNames.get(a.groupId.toString()) || '';
+      const bName = groupNames.get(b.groupId.toString()) || '';
+      return aName.localeCompare(bName) * sortDir;
+    };
+
+    allTasks.sort(compare);
+    tasks = allTasks.slice(skip, skip + limit);
+  } else {
+    const [pageTasks, count] = await Promise.all([
+      baseQuery.sort({ createdAt: sortDir }).skip(skip).limit(limit).lean(),
+      ProjectTask.countDocuments(filter),
+    ]);
+    tasks = pageTasks;
+    total = count;
+  }
 
   // Folder names for "Group · Folder" context lines (one indexed query).
   const folderIds = Array.from(new Set(
@@ -1432,6 +1553,7 @@ export default {
   deleteTask,
   getComments,
   addComment,
+  updateComment,
   deleteComment,
   getMyTasks,
   getMentions,

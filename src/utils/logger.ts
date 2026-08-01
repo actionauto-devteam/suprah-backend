@@ -80,7 +80,9 @@ if (isDev) {
     pino.multistream([
       { stream: terminalStream, level: logLevel },
       { stream: fileStream, level: 'info' },
-      { stream: mongoDevStream as any, level: 'info' }
+      // Routine request logs stay local only — only warn/error/fatal are
+      // worth persisting to Mongo. See the `streams` array below for why.
+      { stream: mongoDevStream as any, level: 'warn' }
     ])
   );
 } else if (isTest) {
@@ -104,13 +106,17 @@ if (isDev) {
       level: 'info',
     },
     {
+      // Every request at 'info' was writing ~290k docs/day into MongoDB and
+      // blew through the Atlas storage quota (8.7M docs, ~3GB) in 30 days.
+      // Routine request logs stay in the local rotating file above; only
+      // warn/error/fatal are worth the Mongo write.
       stream: pino.transport({
         target: path.join(__dirname, `pino-mongodb-transport${__filename.endsWith('.ts') ? '.ts' : '.js'}`),
-        options: { 
-          uri: process.env.MONGODB_URI 
+        options: {
+          uri: process.env.MONGODB_URI
         },
       }),
-      level: 'info',
+      level: 'warn',
     }
   ];
 

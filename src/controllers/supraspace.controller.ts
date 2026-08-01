@@ -17,6 +17,7 @@ import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import notificationService from '../services/notification.service';
+import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
 
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
@@ -201,7 +202,7 @@ async function notifyMentionedMembers(params: {
 
     const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
     const senderName = (senderDoc as any)?.fullName || 'Someone';
-    const preview = text.length > 100 ? `${text.slice(0, 100)}...` : text;
+    const preview = truncateWithEllipsis(stripMessageFormatting(text), 100);
 
     await Promise.allSettled(uniqueRecipients.map((memberId: string) =>
       notificationService.createNotification({
@@ -945,7 +946,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   // Web Push to offline members (those whose socket has disconnected, e.g. mobile background)
   const senderName = (req.crmUser as any)?.fullName || 'Someone';
   const pushBody = content?.trim()
-    ? content.trim().slice(0, 120)
+    ? truncateWithEllipsis(stripMessageFormatting(content.trim()), 120)
     : hasGif ? 'Sent a GIF' : 'Sent an attachment';
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;

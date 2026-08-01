@@ -16,6 +16,15 @@ export const PROJECT_TASK_STATUSES = [
 
 export type ProjectTaskStatus = (typeof PROJECT_TASK_STATUSES)[number];
 
+/**
+ * Priority levels. `null` means "no priority set" (the "Clear" option in the
+ * picker) — kept distinct from 'normal' so a task can be explicitly
+ * unprioritized rather than defaulting into the middle tier.
+ */
+export const PROJECT_TASK_PRIORITIES = ['urgent', 'high', 'normal', 'low'] as const;
+
+export type ProjectTaskPriority = (typeof PROJECT_TASK_PRIORITIES)[number];
+
 /** Attachment shape shared with task comments (mirrors DayPulse attachments). */
 export interface IProjectAttachment {
   url: string;            // signed URL at read time; stores the R2 key at rest
@@ -50,6 +59,7 @@ export interface IProjectTask extends Document {
   title: string;
   description?: string;
   status: ProjectTaskStatus;
+  priority: ProjectTaskPriority | null;
   createdBy: mongoose.Types.ObjectId;      // CrmUser — may change status
   assigneeIds: mongoose.Types.ObjectId[];  // CrmUser — any assignee may change status
   startDate?: Date | null;
@@ -126,6 +136,12 @@ const ProjectTaskSchema = new Schema<IProjectTask>(
       type: String,
       enum: PROJECT_TASK_STATUSES,
       default: 'todo',
+      index: true,
+    },
+    priority: {
+      type: String,
+      enum: [...PROJECT_TASK_PRIORITIES, null],
+      default: 'normal',
       index: true,
     },
     createdBy: {
