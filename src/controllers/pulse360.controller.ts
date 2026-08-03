@@ -209,8 +209,8 @@ const acknowledgeAlert = asyncHandler(async (req: Request, res: Response) => {
 
 /**
  * POST /api/crm/pulse360/alerts/:id/snooze
- * Snoozing keeps the alert open — it comes back. Critical items cannot be
- * snoozed past a short ceiling, otherwise "snooze" becomes "ignore forever".
+ * Snoozing keeps the alert open — it comes back. Capped at 8 hours so
+ * "snooze" never quietly becomes "ignore forever", critical or not.
  */
 const snoozeAlert = asyncHandler(async (req: Request, res: Response) => {
   const { alert } = await loadOwnedAlert(req);
@@ -220,7 +220,7 @@ const snoozeAlert = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'minutes must be a positive number');
   }
 
-  const ceiling = alert.severity >= 90 ? 60 : 8 * 60;
+  const ceiling = 8 * 60;
   const capped = Math.min(minutes, ceiling);
 
   alert.status = 'snoozed';
@@ -237,7 +237,7 @@ const snoozeAlert = asyncHandler(async (req: Request, res: Response) => {
     new ApiResponse(
       200,
       { ...pulse.serializeAlert(alert), cappedTo: capped },
-      capped < minutes ? `Snoozed for ${capped} minutes — critical alerts cap at ${ceiling}` : 'Alert snoozed'
+      capped < minutes ? `Snoozed for ${capped} minutes — snoozes cap at ${ceiling} minutes` : 'Alert snoozed'
     )
   );
 });

@@ -275,6 +275,15 @@ export async function raiseAlert(input: RaiseAlertInput): Promise<IPulseAlert | 
 
       // A snooze that has expired puts the alert back in play.
       const snoozeExpired = existing.status === 'snoozed' && existing.snoozedUntil && existing.snoozedUntil <= now;
+      // Actively snoozed (snoozedUntil still in the future) — the cooldown
+      // window is for re-announcing OPEN alerts, not for overriding a snooze
+      // the user explicitly chose. Only an escalating condition should cut
+      // a live snooze short.
+      const stillSnoozed = existing.status === 'snoozed' && !snoozeExpired;
+
+      if (stillSnoozed && !escalating) {
+        return existing; // honor the snooze regardless of cooldown
+      }
 
       if (!escalating && !cooledDown && !snoozeExpired) {
         return existing; // suppressed — still open, just not re-announced
@@ -289,7 +298,7 @@ export async function raiseAlert(input: RaiseAlertInput): Promise<IPulseAlert | 
         existing.priority = input.escalateTo;
         existing.severity = PULSE_SEVERITY[input.escalateTo];
       }
-      if (snoozeExpired || existing.status === 'snoozed') {
+      if (snoozeExpired || (stillSnoozed && escalating)) {
         existing.status = 'pending';
         existing.snoozedUntil = undefined;
       }

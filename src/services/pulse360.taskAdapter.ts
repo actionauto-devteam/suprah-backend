@@ -138,7 +138,7 @@ export function normalizeTask(doc: any): PulseTask {
     projectName: projectRef?.name ?? projectRef?.title ?? null,
     priority: normalizePriority(pick(doc, FIELD_MAP.priority)),
     // Matches the Project Management module's existing route shape.
-    url: `/crm/projects?task=${id}`,
+    url: `/project?task=${id}`,
     organizationId: (() => {
       const org = pick(doc, FIELD_MAP.organization);
       return org ? String(org?._id ?? org) : null;

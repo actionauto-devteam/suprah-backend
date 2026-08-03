@@ -170,7 +170,7 @@ export async function evaluateIdle(organizationId: string, settings: IPulseSetti
       recommendedAction: suggestion
         ? `Pick up "${suggestion.title}" — ${suggestion.why}`
         : 'Open your task board and move something forward, or start a break if you are stepping away.',
-      actionUrl: suggestion?.url ?? '/crm/projects',
+      actionUrl: suggestion?.url ?? '/project',
       actionLabel: suggestion ? 'Open task' : 'Open my tasks',
       dedupeKey: `idle:${row.userId}:${pulse.companyDayStart().toISOString().slice(0, 10)}`,
       // Today's idle concern is not tomorrow's problem.
@@ -216,7 +216,7 @@ export async function evaluateStalledWork(organizationId: string, settings: IPul
       recommendedAction: next[0]
         ? `Start with "${next[0].title}" — ${next[0].why}`
         : 'Update the status on your open items so the board reflects reality.',
-      actionUrl: next[0]?.url ?? '/crm/projects',
+      actionUrl: next[0]?.url ?? '/project',
       actionLabel: 'Open my tasks',
       dedupeKey: `stalled:${row.userId}`,
       context: { daysSinceProgress: Math.floor(daysSince), openTasks: row.stats?.openTasks },
