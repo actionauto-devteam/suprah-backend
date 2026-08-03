@@ -126,8 +126,9 @@ const createStory = asyncHandler(async (req: Request, res: Response) => {
  * The client uses this single payload to render rings + note bubbles and to
  * drive the story viewer.
  *
- * Ordering: me first, then unseen stories, then seen stories, then note-only,
- * then everyone else alphabetically.
+ * Ordering: me first, then unseen stories, then seen stories, then note-only
+ * (newest activity first), then everyone else by presence (online > busy >
+ * do_not_disturb > idle > away > offline), then alphabetically.
  */
 const getFeed = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser;
@@ -200,15 +201,28 @@ const getFeed = asyncHandler(async (req: Request, res: Response) => {
 
   // Anyone with a note or story stays pinned to the front, newest activity
   // first — even after their story is viewed (only the ring color changes,
-  // green → amber). Everyone else follows alphabetically.
+  // green → amber). Everyone else is grouped by presence (online first,
+  // offline last) before falling back to alphabetical order.
   const hasActivity = (u: any) => u.hasStory || Boolean(u.note);
+  const STATUS_RANK: Record<string, number> = {
+    online: 0,
+    busy: 1,
+    do_not_disturb: 2,
+    idle: 3,
+    away: 4,
+    offline: 5,
+  };
+  const statusRank = (u: any) => STATUS_RANK[u.onlineStatus] ?? STATUS_RANK.offline;
   users.sort((a, b) => {
     if (a.isMe) return -1;
     if (b.isMe) return 1;
     const aa = hasActivity(a);
     const ba = hasActivity(b);
-    if (aa !== ba) return aa ? -1 : 1;          // active users first
+    if (aa !== ba) return aa ? -1 : 1;          // active users (story/note) first
     if (aa && ba) return b.latestAt - a.latestAt; // latest activity first
+    const ra = statusRank(a);
+    const rb = statusRank(b);
+    if (ra !== rb) return ra - rb;               // then by presence (online first)
     return (a.fullName || '').localeCompare(b.fullName || '');
   });
 
