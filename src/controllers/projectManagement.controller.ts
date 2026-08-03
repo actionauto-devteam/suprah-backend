@@ -1040,6 +1040,100 @@ export const deleteTask = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { taskId: task._id }, 'Task deleted'));
 });
 
+/**
+ * POST /api/crm/projects/tasks/:taskId/attachments   (multipart)
+ * Files: attachments[] (up to 10 per request, 25 MB each — same multer
+ * config as createTask). Lets the creator/assignee/admin add files to a task
+ * after the fact, not just at creation time.
+ */
+export const addTaskAttachments = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, 'Not authenticated');
+  assertObjectId(req.params.taskId, 'task ID');
+
+  const files = (req.files as Express.Multer.File[] | undefined) || [];
+  if (files.length === 0) throw new ApiError(400, 'No files were uploaded');
+
+  const task = await ProjectTask.findOne({ _id: req.params.taskId, deletedAt: null });
+  if (!task) throw new ApiError(404, 'Task not found');
+
+  const group = await loadGroupForMember(task.groupId.toString(), actor);
+
+  const actorId = actor._id.toString();
+  const canEdit = task.createdBy.toString() === actorId
+    || task.assigneeIds.some((a) => a.toString() === actorId)
+    || actor.role === 'admin';
+  if (!canEdit) throw new ApiError(403, 'Only the task creator or an assignee can add attachments');
+
+  if (task.attachments.length + files.length > 30) {
+    throw new ApiError(400, 'A task can hold at most 30 attachments');
+  }
+
+  const { attachments, uploadedKeys } = await uploadAttachments(files, actor._id);
+
+  try {
+    task.attachments.push(...attachments);
+    task.seenBy = [actor._id];
+    await task.save();
+  } catch (error) {
+    await rollbackUploads(uploadedKeys);
+    throw error;
+  }
+
+  await notifyUsers({
+    recipients: [task.createdBy, ...task.assigneeIds],
+    actor,
+    type: 'task_updated',
+    groupId: group._id as mongoose.Types.ObjectId,
+    taskId: task._id as mongoose.Types.ObjectId,
+    title: 'Task updated',
+    message: `${displayNameOf(actor)} added ${attachments.length > 1 ? `${attachments.length} attachments` : 'an attachment'} to "${task.title}"`,
+  });
+
+  const taskForClient = await signAttachments(task.toObject());
+  emitToMembers(group.memberIds, 'pm:task:updated', { groupId: group._id, task: taskForClient });
+
+  res.status(201).json(new ApiResponse(201, { task: taskForClient }, 'Attachments added'));
+});
+
+/**
+ * DELETE /api/crm/projects/tasks/:taskId/attachments/:attachmentId
+ * Removes a single attachment from a task (creator, assignee, or admin) and
+ * deletes the underlying R2 object.
+ */
+export const deleteTaskAttachment = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+  if (!actor) throw new ApiError(401, 'Not authenticated');
+  assertObjectId(req.params.taskId, 'task ID');
+  assertObjectId(req.params.attachmentId, 'attachment ID');
+
+  const task = await ProjectTask.findOne({ _id: req.params.taskId, deletedAt: null });
+  if (!task) throw new ApiError(404, 'Task not found');
+
+  const group = await loadGroupForMember(task.groupId.toString(), actor);
+
+  const actorId = actor._id.toString();
+  const canEdit = task.createdBy.toString() === actorId
+    || task.assigneeIds.some((a) => a.toString() === actorId)
+    || actor.role === 'admin';
+  if (!canEdit) throw new ApiError(403, 'Only the task creator or an assignee can remove attachments');
+
+  const attachment = (task.attachments as any[]).find((a) => a._id?.toString() === req.params.attachmentId);
+  if (!attachment) throw new ApiError(404, 'Attachment not found');
+
+  task.attachments = (task.attachments as any[]).filter(
+    (a) => a._id?.toString() !== req.params.attachmentId,
+  ) as typeof task.attachments;
+  await task.save();
+
+  await storageService.delete(attachment.fileKey || attachment.url, BucketType.PRIVATE).catch(() => undefined);
+
+  const taskForClient = await signAttachments(task.toObject());
+  emitToMembers(group.memberIds, 'pm:task:updated', { groupId: group._id, task: taskForClient });
+
+  res.json(new ApiResponse(200, { task: taskForClient }, 'Attachment removed'));
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  TASK COMMENTS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1551,6 +1645,8 @@ export default {
   updateTask,
   updateTaskStatus,
   deleteTask,
+  addTaskAttachments,
+  deleteTaskAttachment,
   getComments,
   addComment,
   updateComment,

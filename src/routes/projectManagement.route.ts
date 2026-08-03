@@ -52,6 +52,8 @@ router.get('/tasks/:taskId',            pmController.getTask);
 router.patch('/tasks/:taskId',          pmController.updateTask);
 router.patch('/tasks/:taskId/status',   pmController.updateTaskStatus);
 router.delete('/tasks/:taskId',         pmController.deleteTask);
+router.post('/tasks/:taskId/attachments', attachmentUpload.array('attachments', 10), pmController.addTaskAttachments);
+router.delete('/tasks/:taskId/attachments/:attachmentId', pmController.deleteTaskAttachment);
 
 // ── Task comments ──
 router.get('/tasks/:taskId/comments',  pmController.getComments);
