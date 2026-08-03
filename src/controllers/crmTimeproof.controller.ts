@@ -16,8 +16,11 @@ import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { SystemLog } from '../models/SystemLog.model';
+import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
+import { PayPeriodLock } from '../models/PayPeriodLock.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
+import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
@@ -423,7 +426,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   // The list this detail page is opened from (getAllUsersTimeproof) now
   // includes main-site User-model employees too (e.g. Lot Tech) — fall back
   // to the User collection so clicking into one of them doesn't 404.
-  let targetPerson: { _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string; accountModel: 'CrmUser' | 'User' } | null = null;
+  let targetPerson: { _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string; accountModel: 'CrmUser' | 'User'; hourlyRate?: number | null } | null = null;
   const crmTargetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password').lean();
   if (crmTargetUser) {
     targetPerson = {
@@ -434,6 +437,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       role: crmTargetUser.role,
       department: crmTargetUser.department,
       accountModel: 'CrmUser',
+      hourlyRate: crmTargetUser.hourlyRate ?? null,
     };
   } else {
     // Same organizationId unreliability as getAllUsersTimeproof — don't gate
@@ -1429,6 +1433,27 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
  * is written to AuditLog with before/after values — TimeLog is never silently
  * mutated without a trail. Exempt departments (e.g. Web Dev) cannot be corrected.
  */
+/**
+ * Whether a given calendar date falls inside a pay period that's closed for
+ * corrections — either an admin explicitly marked that user paid for the
+ * period ('paid'), or nobody did but the period's fixed payday has already
+ * passed ('auto-locked', computed on the fly rather than requiring the
+ * scheduler to have already written a row for it). A 'unlocked' record
+ * (emergency override) always wins over both, regardless of payday.
+ */
+async function getPeriodLockStatus(userId: string, date: Date): Promise<{
+  locked: boolean;
+  status: 'paid' | 'auto-locked' | 'unlocked' | 'open';
+}> {
+  const { periodStart, periodEnd, payDayDate } = getPayPeriodBounds(date);
+  const lock = await PayPeriodLock.findOne({ userId, periodStart, periodEnd }).lean();
+  if (lock) {
+    return { locked: lock.status !== 'unlocked', status: lock.status };
+  }
+  const pastPayday = new Date() >= payDayDate;
+  return { locked: pastPayday, status: pastPayday ? 'auto-locked' : 'open' };
+}
+
 export const correctTimeLog = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
@@ -1449,6 +1474,11 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
   }
 
   const { start, end } = getCompanyDayRange(date);
+
+  const { locked } = await getPeriodLockStatus(userId, start);
+  if (locked) {
+    throw new ApiError(403, 'This pay period has already been processed and is locked for corrections. Use the emergency unlock on the Payroll Status page if a correction is truly necessary.');
+  }
   const correctedAt = new Date(correctedTimeOut);
   if (correctedAt < start || correctedAt >= new Date(end.getTime() + 12 * 60 * 60 * 1000)) {
     throw new ApiError(400, 'correctedTimeOut must fall on or shortly after the given date');
@@ -1488,6 +1518,230 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
   });
 
   res.json(new ApiResponse(200, { logId, correctedTimeOut: correctedAt }, 'Time log corrected'));
+});
+
+/**
+ * PATCH /api/crm/timeproof/user/:userId/hourly-rate
+ * Admin/manager sets an employee's hourly pay rate. Previously stored only
+ * in the setting admin's own browser localStorage — moved to CrmUser so
+ * every admin sees the same value, with every change recorded in
+ * HourlyRateChangeLog for accountability.
+ */
+export const updateHourlyRate = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can set hourly rates');
+  }
+  const { userId } = req.params;
+  const { rate } = req.body as { rate?: number };
+  if (rate === undefined || rate === null || isNaN(Number(rate)) || Number(rate) < 0) {
+    throw new ApiError(400, 'A valid non-negative rate is required');
+  }
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId });
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const previousRate = targetUser.hourlyRate ?? null;
+  targetUser.hourlyRate = Number(rate);
+  await targetUser.save();
+
+  await HourlyRateChangeLog.create({
+    organizationId: targetUser.organizationId,
+    userId: targetUser._id,
+    previousRate,
+    newRate: Number(rate),
+    changedByAdminId: requestor._id,
+    changedByAdminName: requestor.fullName,
+  });
+
+  res.json(new ApiResponse(200, { hourlyRate: targetUser.hourlyRate }, 'Hourly rate updated'));
+});
+
+/**
+ * GET /api/crm/timeproof/user/:userId/hourly-rate-history
+ * Full change history (not just the current value) — lets a rate dispute be
+ * settled by seeing exactly who changed it, when, and from what.
+ */
+export const getHourlyRateHistory = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can view rate history');
+  }
+  const { userId } = req.params;
+  const history = await HourlyRateChangeLog.find({ userId, organizationId: requestor.organizationId })
+    .sort({ createdAt: -1 })
+    .lean();
+  res.json(new ApiResponse(200, { history }, 'Hourly rate history'));
+});
+
+/**
+ * POST /api/crm/timeproof/user/:userId/mark-paid
+ * Admin/manager explicitly closes a specific pay period for a specific
+ * user — locks it for TimeLog corrections immediately, regardless of
+ * whether the period's fixed payday has passed yet. Idempotent: marking an
+ * already-paid (or auto-locked) period paid again just refreshes who/when.
+ */
+export const markPeriodPaid = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can mark payroll as paid');
+  }
+  const { userId } = req.params;
+  const { year, month, periodNumber } = req.body as { year?: number; month?: number; periodNumber?: 1 | 2 };
+  if (year === undefined || month === undefined || (periodNumber !== 1 && periodNumber !== 2)) {
+    throw new ApiError(400, 'year, month, and periodNumber (1 or 2) are required');
+  }
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('organizationId fullName').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const { periodStart, periodEnd } = getPayPeriodBoundsFor(year, month, periodNumber);
+
+  const lock = await PayPeriodLock.findOneAndUpdate(
+    { userId, periodStart, periodEnd },
+    {
+      organizationId: targetUser.organizationId,
+      userId,
+      periodStart,
+      periodEnd,
+      status: 'paid',
+      lockedAt: new Date(),
+      lockedBy: requestor._id,
+      lockedByName: requestor.fullName,
+      unlockedAt: null,
+      unlockedBy: null,
+      unlockedByName: null,
+      unlockReason: null,
+    },
+    { upsert: true, new: true },
+  );
+
+  res.json(new ApiResponse(200, { lock }, `Marked ${targetUser.fullName} as paid for this period`));
+});
+
+/**
+ * POST /api/crm/timeproof/user/:userId/unlock-period
+ * Admin-only emergency override — reopens an already-locked period for
+ * correction. Requires a reason (kept on the lock record) since this
+ * bypasses the whole point of locking. Stays unlocked until an admin
+ * re-locks it via mark-paid; the auto-lock scheduler will never re-close it
+ * on its own once explicitly overridden.
+ */
+export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (requestor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can use the emergency unlock');
+  }
+  const { userId } = req.params;
+  const { year, month, periodNumber, reason } = req.body as {
+    year?: number; month?: number; periodNumber?: 1 | 2; reason?: string;
+  };
+  if (year === undefined || month === undefined || (periodNumber !== 1 && periodNumber !== 2) || !reason?.trim()) {
+    throw new ApiError(400, 'year, month, periodNumber (1 or 2), and reason are all required');
+  }
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('organizationId fullName').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const { periodStart, periodEnd, payDayDate } = getPayPeriodBoundsFor(year, month, periodNumber);
+
+  let lock = await PayPeriodLock.findOne({ userId, periodStart, periodEnd });
+  const wasAutoLockedOnly = !lock && new Date() >= payDayDate;
+  if (!lock && !wasAutoLockedOnly) {
+    throw new ApiError(400, 'This period is not currently locked');
+  }
+  if (lock && lock.status === 'unlocked') {
+    throw new ApiError(400, 'This period is already unlocked');
+  }
+
+  if (!lock) {
+    // Was only auto-locked on the fly (no row existed yet) — create one
+    // directly in the unlocked state so the override is explicit and audited.
+    lock = new PayPeriodLock({ organizationId: targetUser.organizationId, userId, periodStart, periodEnd });
+  }
+  lock.status = 'unlocked';
+  lock.unlockedAt = new Date();
+  lock.unlockedBy = requestor._id as any;
+  lock.unlockedByName = requestor.fullName;
+  lock.unlockReason = reason.trim();
+  await lock.save();
+
+  await AuditLog.create({
+    entityType: 'TimeLog',
+    entityId: userId,
+    action: 'UPDATE',
+    changes: { periodStart, periodEnd, action: 'emergency-unlock-pay-period' },
+    reason: reason.trim(),
+    performedBy: requestor._id,
+    organizationId: targetUser.organizationId?.toString(),
+  });
+
+  res.json(new ApiResponse(200, { lock }, `Unlocked ${targetUser.fullName}'s period for correction`));
+});
+
+/**
+ * GET /api/crm/timeproof/payroll-status?year=&month=&periodNumber=
+ * Dedicated list (separate from the real-time Live Shift Board) of every
+ * user's hours/rate/payout and paid/locked status for one pay period, so an
+ * admin can track who's been paid without it getting mixed up with
+ * moment-to-moment shift/idle/break presence.
+ */
+export const getPayrollStatus = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can view payroll status');
+  }
+  const now = new Date();
+  const year = req.query.year ? parseInt(req.query.year as string, 10) : now.getUTCFullYear();
+  const month = req.query.month !== undefined ? parseInt(req.query.month as string, 10) : now.getUTCMonth();
+  const periodNumber = (req.query.periodNumber === '2' ? 2 : 1) as 1 | 2;
+
+  const { periodStart, periodEnd, payDayDate } = getPayPeriodBoundsFor(year, month, periodNumber);
+
+  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true })
+    .select('fullName username avatar role department hourlyRate')
+    .lean();
+  const userIds = users.map((u) => u._id);
+
+  const [logs, locks] = await Promise.all([
+    TimeLog.find({ userId: { $in: userIds }, timestamp: { $gte: periodStart, $lt: periodEnd } }).sort({ timestamp: 1 }).lean(),
+    PayPeriodLock.find({ userId: { $in: userIds }, periodStart, periodEnd }).lean(),
+  ]);
+
+  const logsByUser = new Map<string, typeof logs>();
+  for (const log of logs) {
+    const key = log.userId.toString();
+    if (!logsByUser.has(key)) logsByUser.set(key, []);
+    logsByUser.get(key)!.push(log);
+  }
+  const lockByUser = new Map(locks.map((l) => [l.userId.toString(), l]));
+  const pastPayday = new Date() >= payDayDate;
+
+  const results = users.map((u) => {
+    const uLogs = logsByUser.get(u._id.toString()) || [];
+    const calendar = buildCalendarMap(uLogs, COMPANY_TZ_OFFSET_MINUTES);
+    const totalSeconds = Object.values(calendar).reduce((sum, d) => sum + d.totalSeconds, 0);
+    const lock = lockByUser.get(u._id.toString());
+    const rate = u.hourlyRate ?? null;
+    const status = lock ? lock.status : pastPayday ? 'auto-locked' : 'open';
+    return {
+      userId: u._id.toString(),
+      fullName: u.fullName,
+      username: u.username,
+      avatar: u.avatar,
+      role: u.role,
+      department: u.department,
+      totalSeconds,
+      hourlyRate: rate,
+      payout: rate ? Math.floor(totalSeconds / 3600) * rate : null,
+      status,
+      lockedAt: lock?.lockedAt ?? null,
+      lockedByName: lock?.lockedByName ?? null,
+      unlockReason: status === 'unlocked' ? lock?.unlockReason ?? null : null,
+    };
+  });
+
+  res.json(new ApiResponse(200, { periodStart, periodEnd, payDayDate, users: results }, 'Payroll status'));
 });
 
 /**

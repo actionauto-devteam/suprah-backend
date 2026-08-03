@@ -106,7 +106,20 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
     let closeAt: Date | null = null;
     let closeNote = '';
 
-    if (renderedSeconds >= RENDERED_HOURS_THRESHOLD_SECONDS && silentMs >= HEARTBEAT_SILENCE_THRESHOLD_MS) {
+    if (openBreakStartedAt) {
+      // On a declared, still-open break — heartbeat silence here is expected,
+      // not a signal of an abandoned shift. Locking the laptop or letting it
+      // sleep during a normal lunch break stops heartbeats exactly the way a
+      // genuine crash/shutdown would, and silence alone can't tell the two
+      // apart. Without this exemption, any break lasting past the 30-minute
+      // short-silence threshold below (well within the existing 1-hour break
+      // cap — an ordinary lunch break) would auto-close the whole shift at
+      // the moment the break started, forcing the employee into a brand-new
+      // "Start Shift" instead of a normal break-resume when they come back.
+      // A break that really has been abandoned all day still gets closed by
+      // closeShiftsFromPreviousMDTDays at the next MDT midnight, same
+      // backstop as any other forgotten shift.
+    } else if (renderedSeconds >= RENDERED_HOURS_THRESHOLD_SECONDS && silentMs >= HEARTBEAT_SILENCE_THRESHOLD_MS) {
       if (closeAtMs !== null && closeAtMs > shiftStartedAt.getTime()) {
         closeAt = new Date(closeAtMs);
         closeNote = 'Auto clock-out — device went idle/offline after rendering 8+ hours';

@@ -27,6 +27,11 @@ import {
   clockOutUser,
   postClientDiagnostic,
   getUserIdleDiagnostics,
+  updateHourlyRate,
+  getHourlyRateHistory,
+  markPeriodPaid,
+  unlockPayPeriod,
+  getPayrollStatus,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -57,6 +62,12 @@ router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, 
 
 router.patch('/correct-time', correctTimeLog);
 router.post('/users/:userId/clock-out', clockOutUser); // admin/manager-only, role check inside
+
+router.patch('/user/:userId/hourly-rate', updateHourlyRate); // admin/manager-only, role check inside
+router.get('/user/:userId/hourly-rate-history', getHourlyRateHistory); // admin/manager-only, role check inside
+router.post('/user/:userId/mark-paid', markPeriodPaid); // admin/manager-only, role check inside
+router.post('/user/:userId/unlock-period', unlockPayPeriod); // admin-only, role check inside
+router.get('/payroll-status', getPayrollStatus); // admin/manager-only, role check inside
 
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);
