@@ -42,6 +42,15 @@ export interface ICrmUser extends Document {
   screenshotExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
+  /**
+   * Admin-set hourly pay rate — shared across every admin's view (previously
+   * stored client-side only, in each admin's own browser localStorage, so
+   * different admins on different devices saw different or blank values for
+   * the same employee). Every change is also recorded in
+   * HourlyRateChangeLog for accountability; this field always holds just the
+   * current value for fast payslip/payroll-status calculations.
+   */
+  hourlyRate?: number;
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -226,6 +235,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: String,
       enum: ['default', 'required', 'exempt'],
       default: 'default',
+    },
+    hourlyRate: {
+      type: Number,
+      default: null,
+      min: 0,
     },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },
