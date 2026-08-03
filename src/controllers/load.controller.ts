@@ -26,6 +26,64 @@ import Quote from "../models/Quote.model";
 
 const getUser = (req: Request) => req.user as IUser;
 
+// ─── Inventory Image Enrichment ───────────────────────────────────────────────
+// Load vehicles only persist vin/year/make/model — real photos live on the
+// Vehicle (inventory) collection in `images[]`. This helper batch-resolves
+// inventory matches (by vehicleId first, then VIN fallback) for a page of
+// loads and attaches `imageUrl` to each load vehicle so the frontend can
+// render actual vehicle photos instead of a stock placeholder.
+// One query per request regardless of page size.
+
+const attachInventoryImages = async (
+  loads: Array<Record<string, any>>,
+  organizationId: string,
+): Promise<void> => {
+  const idSet = new Set<string>();
+  const vinSet = new Set<string>();
+
+  for (const load of loads) {
+    for (const v of load?.vehicles ?? []) {
+      if (!v) continue;
+      if (v.vehicleId) idSet.add(String(v.vehicleId));
+      if (v.vin) vinSet.add(String(v.vin).toUpperCase().trim());
+    }
+  }
+
+  if (idSet.size === 0 && vinSet.size === 0) return;
+
+  const or: Record<string, unknown>[] = [];
+  if (idSet.size) or.push({ _id: { $in: Array.from(idSet) } });
+  if (vinSet.size) or.push({ vin: { $in: Array.from(vinSet) } });
+
+  try {
+    const inventory = await Vehicle.find({ organizationId, isDeleted: false, $or: or })
+      .select("vin images exteriorColor")
+      .lean();
+
+    const byId = new Map(inventory.map((v) => [String(v._id), v]));
+    const byVin = new Map(
+      inventory
+        .filter((v) => v.vin)
+        .map((v) => [String(v.vin).toUpperCase().trim(), v]),
+    );
+
+    for (const load of loads) {
+      for (const v of load?.vehicles ?? []) {
+        if (!v) continue;
+        const match =
+          (v.vehicleId && byId.get(String(v.vehicleId))) ||
+          (v.vin && byVin.get(String(v.vin).toUpperCase().trim()));
+        const image = match?.images?.[0];
+        if (image) v.imageUrl = image;
+        if (!v.color && match?.exteriorColor) v.color = match.exteriorColor;
+      }
+    }
+  } catch (err) {
+    // Non-fatal: loads render without photos rather than failing the request
+    logger.error({ err, organizationId }, "Failed to attach inventory images to loads");
+  }
+};
+
 
 const lookupVin = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
@@ -189,6 +247,32 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  // Link load vehicles to inventory by VIN so photos resolve on every fetch.
+  // Non-fatal: an unmatched VIN just means no photo enrichment for that unit.
+  const vehiclesWithLinks = [...(vehicles ?? [])] as Array<Record<string, any>>;
+  if (vins.length) {
+    try {
+      const inventoryMatches = await Vehicle.find({
+        organizationId,
+        isDeleted: false,
+        vin: { $in: vins.map((v: string) => v.toUpperCase().trim()) },
+      })
+        .select("vin")
+        .lean();
+      const vinToId = new Map(
+        inventoryMatches.map((v) => [String(v.vin).toUpperCase().trim(), v._id]),
+      );
+      for (const v of vehiclesWithLinks) {
+        if (v.vin && !v.vehicleId) {
+          const match = vinToId.get(String(v.vin).toUpperCase().trim());
+          if (match) v.vehicleId = match;
+        }
+      }
+    } catch (err) {
+      logger.error({ err, orgId: organizationId }, "Non-fatal: failed to link load vehicles to inventory");
+    }
+  }
+
   const load = await Load.create({
     organizationId,
     orgId: (user as any).orgId,
@@ -196,7 +280,7 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     postType,
     pickupLocation,
     deliveryLocation,
-    vehicles,
+    vehicles: vehiclesWithLinks,
     trailerType,
     dates,
     pricing,
@@ -252,7 +336,7 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
   }
 
   const vehicles = await Vehicle.find(filter)
-    .select("vin year make modelName exteriorColor status")
+    .select("vin year make modelName exteriorColor status images")
     .limit(50)
     .lean();
 
@@ -263,12 +347,11 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
     model: v.modelName,
     color: v.exteriorColor || "",
     condition: v.status === "In Recon" ? "Inoperable" : "Operable",
+    imageUrl: v.images?.[0] || undefined,
   }));
 
   return res.status(200).json(new ApiResponse(200, data, "Vehicles fetched"));
 });
-
-// ─── Get Loads ────────────────────────────────────────────────────────────────
 
 // ─── Get Loads (with filters, search, pagination) ────────────────────────────
 // GET /api/loads?status=Posted&q=LD-2026&postType=load-board&page=1&limit=20
@@ -343,6 +426,9 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     ? rawLoads.map((load) => maskLoadForDriver(load as unknown as Record<string, unknown>))
     : rawLoads;
 
+  // Attach real inventory photos (runs AFTER masking so imageUrl survives)
+  await attachInventoryImages(loads as Array<Record<string, any>>, organizationId);
+
   const loadsWithSignedProofs = await Promise.all(
     loads.map(async (load: any) => {
       if (load.proofOfDelivery?.imageUrl) {
@@ -398,10 +484,16 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
     { $group: { _id: "$status", count: { $sum: 1 } } },
   ]);
 
+  // BUG FIX: "Accepted" and "Picked Up" were previously missing from this
+  // object, so the `_id in stats` guard silently discarded their counts —
+  // loads in those statuses inflated `all` but had no row and no filter in
+  // the sidebar.
   const stats: Record<string, number> = {
     all: 0,
     Posted: 0,
     Assigned: 0,
+    Accepted: 0,
+    "Picked Up": 0,
     "In-Transit": 0,
     Delivered: 0,
     Cancelled: 0,
@@ -429,6 +521,9 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   const load = user?.role === "driver"
     ? maskLoadForDriver(raw as unknown as Record<string, unknown>)
     : raw;
+
+  // Attach real inventory photos (single-item batch)
+  await attachInventoryImages([load as Record<string, any>], organizationId);
 
   // Sign proof of delivery URL if exists
   const loadObj = load as any;
@@ -483,7 +578,6 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
   if (pricing !== undefined) {
     // If pricing is provided, we merge it with existing pricing to preserve computed fields
     updateData.pricing = { ...load.pricing, ...pricing };
-    // If carrierPayAmount changed, balanceAmount will be recalculated by pre-save hook
   }
 
   if (status !== undefined) {
@@ -515,6 +609,16 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
     } catch (err) {
       logger.error({ err, loadId }, "Error recalculating pricing on update");
     }
+  }
+
+  // BUG FIX: the model's pre("save") hook computes balanceAmount, but
+  // Mongoose pre-save hooks do NOT run on findOneAndUpdate — the old comment
+  // claimed otherwise, leaving balanceAmount stale after carrier pay edits.
+  // Recompute it explicitly whenever pricing is part of this update.
+  if (updateData.pricing) {
+    const pay = updateData.pricing.carrierPayAmount ?? 0;
+    const cod = updateData.pricing.copCodAmount ?? 0;
+    updateData.pricing.balanceAmount = pay - cod;
   }
 
   const updatedLoad = await Load.findOneAndUpdate(
@@ -551,17 +655,24 @@ const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
   await Load.deleteOne({ _id: load._id });
 
   const _io = getSocketIO();
-  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted" });
+  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
 
-  // Log activity
-  await activityService.createActivity({
-    userId: user._id.toString(),
-    organizationId,
-    type: 'load_deleted', // Using load terminology
-    title: 'Load Deleted',
-    description: `Deleted load ${load.loadNumber}`,
-    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
-  });
+  // Log activity — NON-FATAL. The load is already deleted at this point;
+  // a logging failure must not turn a successful delete into a 500 response
+  // (root-cause fix: the client was reporting "delete not working" while the
+  // document was in fact removed).
+  try {
+    await activityService.createActivity({
+      userId: user._id.toString(),
+      organizationId,
+      type: 'load_deleted',
+      title: 'Load Deleted',
+      description: `Deleted load ${load.loadNumber}`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
+    });
+  } catch (err) {
+    logger.error({ err, loadId: load._id }, 'Non-fatal: failed to log load deletion activity');
+  }
 
   logger.warn({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load deleted');
 
