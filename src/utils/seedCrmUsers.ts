@@ -7,8 +7,6 @@ const CRM_USERS = [
   { fullName: 'Candice Saligumba', username: '2026-00003', email: 'candice@actionautoutah.com', role: 'admin' as const },
   { fullName: 'RJ Turingan', username: '2026-00004', email: 'roque@actionautoutah.com', role: 'admin' as const },
   { fullName: 'Alexandra Marie SAA', username: '2026-00005', email: 'alexandra@actionautoutah.com', role: 'admin' as const },
-  { fullName: 'John Belen', username: '2026-00006', email: 'john2@actionautoutah.com', role: 'admin' as const },
-  { fullName: 'Kim Vega', username: '2026-00007', email: 'kim@actionautoutah.com', role: 'admin' as const },
   { fullName: 'Mikka Catumber', username: '2026-00008', email: 'mikka@actionautoutah.com', role: 'admin' as const },
   { fullName: 'Charl Narvaez', username: '2026-00009', email: 'charl@actionautoutah.com', role: 'admin' as const },
   { fullName: 'Romuel Lopez', username: '2026-00010', email: 'romuel@actionautoutah.com', role: 'admin' as const },
