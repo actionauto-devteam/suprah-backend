@@ -1,7 +1,3 @@
-// Mongoose model for Leads (Inquiries)
-// Updated: Centralized ingestion via actionautoutah.dev@gmail.com
-// Added: channel detection (sms/email/adf/phone/web), parsedContent for clean ADF display
-
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ILead extends Document {
@@ -58,6 +54,9 @@ export interface ILead extends Document {
   };
 
   comments: string;
+  address?: string;
+  tags?: string[];
+  opportunityValue?: number | null;
 
   followUp?: {
     lastCustomerActivityAt?: Date;
@@ -217,6 +216,24 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
     comments: {
       type: String,
+    },
+
+    address: {
+      type: String,
+      default: '',
+    },
+
+    tags: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
+
+    opportunityValue: {
+      type: Number,
+      min: 0,
+      default: null,
     },
 
     followUp: {

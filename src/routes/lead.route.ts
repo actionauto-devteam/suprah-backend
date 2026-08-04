@@ -5,6 +5,8 @@ import {
   getLeadById,
   getUnansweredInquiryReminders,
   runUnansweredInquiryReminderCheck,
+  updateLeadContact,
+  updateLeadDetails,
   updateLead,
   createInquiry,
   markAsRead,
@@ -68,6 +70,8 @@ router.post(
 );
 
 router.post("/:id/notes", addLeadNote);
+router.patch("/:id/contact", updateLeadContact);
+router.patch("/:id/details", updateLeadDetails);
 
 router.patch("/:id", updateLead);
 

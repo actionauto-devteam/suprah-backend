@@ -567,7 +567,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source status vehicle comments appointment createdAt updatedAt ' +
+        'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes'
       )
       .sort(sort)
@@ -601,8 +601,8 @@ export const getLeadById = async (req: Request, res: Response) => {
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source status vehicle comments appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory'
+        'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
+        'centralIngestion labels followUp statusHistory notes'
       )
       .lean();
 
@@ -736,6 +736,219 @@ export const runUnansweredInquiryReminderCheck = async (req: Request, res: Respo
   } catch (error) {
     logger.error(error, '[LEAD-REMINDERS] Error running unanswered inquiry reminders');
     res.status(500).json({ message: 'Error running unanswered inquiry reminder check' });
+  }
+};
+
+export const updateLeadContact = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    const { id } = req.params;
+    const user = req.user || req.crmUser;
+
+    if (!user) {
+      throw new ApiError(401, 'Please authenticate');
+    }
+
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
+    }
+
+    const firstName = String(req.body?.firstName || '').trim();
+    const lastName = String(req.body?.lastName || '').trim();
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const phone = String(req.body?.phone || '').trim();
+
+    if (!firstName) {
+      return res.status(400).json({
+        message: 'First name is required',
+      });
+    }
+
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        message: 'A valid email address is required',
+      });
+    }
+
+    const lead = await Lead.findOneAndUpdate(
+      {
+        _id: id,
+        organizationId: orgId,
+      },
+      {
+        $set: {
+          firstName,
+          lastName,
+          email,
+          phone,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (!lead) {
+      return res.status(404).json({
+        message: 'Lead not found',
+      });
+    }
+
+    await activityService.createActivity({
+      userId: user._id.toString(),
+      organizationId: orgId,
+      type: 'other',
+      title: 'Lead contact updated',
+      description: `Contact details updated for ${lead.firstName} ${lead.lastName || ''}`.trim(),
+      metadata: {
+        leadId: lead._id.toString(),
+        activityKind: 'lead_contact_update',
+      },
+      ipAddress: req.ip,
+    });
+
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
+    logger.info(
+      {
+        leadId: lead._id,
+        userId: user._id,
+        orgId,
+      },
+      'Lead contact information updated',
+    );
+
+    return res.json(
+      new ApiResponse(
+        200,
+        lead,
+        'Contact information updated',
+      ),
+    );
+  } catch (error) {
+    console.error('[ERROR] Error updating lead contact:', error);
+    return res.status(500).json({
+      message: 'Error updating lead contact',
+    });
+  }
+};
+
+export const updateLeadDetails = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    const { id } = req.params;
+    const user = req.user || req.crmUser;
+
+    if (!user) throw new ApiError(401, 'Please authenticate');
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+
+    const currentLead = await Lead.findOne({ _id: id, organizationId: orgId });
+    if (!currentLead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    const setValues: Record<string, unknown> = {};
+    const body = req.body || {};
+
+    if (Object.prototype.hasOwnProperty.call(body, 'firstName')) {
+      const firstName = String(body.firstName || '').trim();
+      if (!firstName) {
+        return res.status(400).json({ message: 'First name is required' });
+      }
+      setValues.firstName = firstName;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'lastName')) {
+      setValues.lastName = String(body.lastName || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'email')) {
+      const email = String(body.email || '').trim().toLowerCase();
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ message: 'A valid email address is required' });
+      }
+      setValues.email = email;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'phone')) {
+      setValues.phone = String(body.phone || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'address')) {
+      setValues.address = String(body.address || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'tags')) {
+      const rawTags = Array.isArray(body.tags)
+        ? body.tags
+        : String(body.tags || '').split(',');
+      setValues.tags = Array.from(
+        new Set(rawTags.map((tag: unknown) => String(tag || '').trim()).filter(Boolean)),
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'source')) {
+      setValues.source = String(body.source || '').trim() || 'Manual Entry';
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'opportunityValue')) {
+      if (body.opportunityValue === null || body.opportunityValue === '') {
+        setValues.opportunityValue = null;
+      } else {
+        const opportunityValue = Number(body.opportunityValue);
+        if (!Number.isFinite(opportunityValue) || opportunityValue < 0) {
+          return res.status(400).json({ message: 'Opportunity value must be zero or greater' });
+        }
+        setValues.opportunityValue = opportunityValue;
+      }
+    }
+
+    if (body.vehicle && typeof body.vehicle === 'object') {
+      for (const key of ['year', 'make', 'model'] as const) {
+        if (Object.prototype.hasOwnProperty.call(body.vehicle, key)) {
+          setValues[`vehicle.${key}`] = String(body.vehicle[key] || '').trim();
+        }
+      }
+    }
+
+    if (Object.keys(setValues).length === 0) {
+      return res.status(400).json({ message: 'No editable lead details were provided' });
+    }
+
+    const lead = await Lead.findOneAndUpdate(
+      { _id: id, organizationId: orgId },
+      { $set: setValues },
+      { new: true, runValidators: true },
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    await activityService.createActivity({
+      userId: user._id.toString(),
+      organizationId: orgId,
+      type: 'other',
+      title: 'Lead details updated',
+      description: `Customer and dealership lead details updated for ${lead.firstName} ${lead.lastName || ''}`.trim(),
+      metadata: {
+        leadId: lead._id.toString(),
+        activityKind: 'lead_details_update',
+        updatedFields: Object.keys(setValues),
+      },
+      ipAddress: req.ip,
+    });
+
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+
+    return res.json(new ApiResponse(200, lead, 'Lead details updated'));
+  } catch (error) {
+    console.error('[ERROR] Error updating lead details:', error);
+    return res.status(500).json({ message: 'Error updating lead details' });
   }
 };
 
@@ -1748,6 +1961,8 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
 export default {
   receiveADF,
   getAllLeads,
+  updateLeadContact,
+  updateLeadDetails,
   updateLead,
   createInquiry,
   markAsRead,

@@ -1,8 +1,9 @@
 import mongoose, { Document, Schema } from "mongoose";
 
-export type CommunicationChannel = "sms" | "call";
+export type CommunicationChannel = "sms" | "email" | "call";
 export type CommunicationDirection = "inbound" | "outbound";
 export type CommunicationStatus =
+  | "logged"
   | "queued"
   | "sent"
   | "delivered"
@@ -23,7 +24,7 @@ export interface ICommunicationLog extends Document {
   durationSeconds?: number;
   provider?: string;
   providerMessageId?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   createdBy?: mongoose.Types.ObjectId;
   createdByModel?: "User" | "CrmUser";
   createdAt: Date;
@@ -45,7 +46,7 @@ const CommunicationLogSchema = new Schema<ICommunicationLog>(
     },
     channel: {
       type: String,
-      enum: ["sms", "call"],
+      enum: ["sms", "email", "call"],
       required: true,
       index: true,
     },
@@ -58,6 +59,7 @@ const CommunicationLogSchema = new Schema<ICommunicationLog>(
     status: {
       type: String,
       enum: [
+        "logged",
         "queued",
         "sent",
         "delivered",
@@ -72,7 +74,7 @@ const CommunicationLogSchema = new Schema<ICommunicationLog>(
     },
     from: { type: String, trim: true },
     to: { type: String, trim: true },
-    body: { type: String, trim: true, maxlength: 4000 },
+    body: { type: String, trim: true, maxlength: 10_000 },
     durationSeconds: { type: Number, min: 0, default: null },
     provider: { type: String, trim: true, default: "internal" },
     providerMessageId: { type: String, trim: true },
