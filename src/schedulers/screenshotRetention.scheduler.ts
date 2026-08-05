@@ -77,15 +77,9 @@ export const initScreenshotRetentionScheduler = () => {
 
 export const runScreenshotRetentionNow = purgeOldScreenshots;
 
-/**
- * One-time admin operation: deletes TimeProof screenshots from R2.
- * TimeLog (clock-in/out history) is untouched.
- *
- * `allowedUserIds`, when provided, restricts deletion to objects whose
- * `screenshots/{userId}/...` path segment is in the set — callers must scope
- * this to their own organization's users rather than wiping the whole
- * platform's archive.
- */
+// One-time admin tool to delete TimeProof screenshots from R2;
+// leaves TimeLog history intact. Optional allowedUserIds restricts
+// deletion scope to specific org users, preventing full archive wipes.
 export async function wipeAllScreenshots(allowedUserIds?: Set<string>): Promise<{ deleted: number; failures: number }> {
   const all = await storageService.list('screenshots/', BucketType.PRIVATE);
   if (all.length === 0) return { deleted: 0, failures: 0 };

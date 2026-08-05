@@ -5,14 +5,7 @@ import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import notificationService from '../services/notification.service';
 
-/**
- * driverOfflineAlert — flags drivers who are actively on a shipment
- * (shipmentIds non-empty) but have gone silent (no location ping in
- * OFFLINE_THRESHOLD_MS) and haven't already been flagged for this silence
- * gap (offlineAlertSentAt). Notifies each org's admins once per gap; the
- * flag is cleared by driverTracking.controller.ts's updateLocation on the
- * driver's next ping, so a later silence period can alert again.
- */
+// Alert drivers on active shipments who go silent past threshold; notify once per gap
 
 const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000; // 20 minutes of silence
 
