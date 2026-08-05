@@ -14,6 +14,7 @@ import {
   getMyAgentStatus,
   getAgentStatus,
   submitScreenshot,
+  submitScreenshotPlaceholder,
   getScreenshots,
   getBlurredScreenshot,
   deleteMyScreenshot,
@@ -54,6 +55,7 @@ router.post('/activity-interval', postActivityInterval);
 router.post('/client-diagnostics', postClientDiagnostic);
 router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
+router.post('/screenshots/placeholder', submitScreenshotPlaceholder);
 router.get('/screenshots', getScreenshots);
 router.get('/screenshot-blurred', getBlurredScreenshot);
 router.delete('/screenshots', deleteMyScreenshot); // self-service only, ownership check inside

@@ -14,6 +14,14 @@ export enum BucketType {
 
 interface UploadOptions {
     allowLocalFallback?: boolean;
+    // Opt-in only — every existing caller keeps getting a randomized filename
+    // (collision-proof for arbitrary user-supplied names like avatars). Some
+    // callers (screenshots) build meaning INTO the filename itself — e.g.
+    // "{capturedAtMs}-{flag}.jpg", later parsed back out by listing the
+    // bucket with no separate database record — and need that name to
+    // survive upload verbatim instead of being discarded down to just its
+    // extension.
+    preserveFilename?: boolean;
 }
 
 class StorageService {
@@ -65,7 +73,9 @@ class StorageService {
     ): Promise<string> {
         const allowLocalFallback = options.allowLocalFallback ?? true;
         const extension = path.extname(file.originalname).toLowerCase();
-        const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+        const fileName = options.preserveFilename
+            ? file.originalname
+            : `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
         const key = `${folder}/${fileName}`;
         const bucketName = this.getBucketName(type);
 
