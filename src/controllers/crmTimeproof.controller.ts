@@ -1219,10 +1219,60 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
     fileWithName,
     `screenshots/${user._id.toString()}/${shiftDate}`,
     BucketType.PRIVATE,
-    { allowLocalFallback: true }
+    { allowLocalFallback: true, preserveFilename: true }
   );
 
   res.json(new ApiResponse(201, { r2Key }, 'Screenshot uploaded'));
+});
+
+/**
+ * POST /api/crm/timeproof/screenshots/placeholder
+ * Separate, dedicated endpoint from submitScreenshot above — deliberately
+ * does not touch or share logic with the real upload path, so a bug here
+ * can never affect screenshots that ARE capturing successfully. Used only
+ * when the tray already knows (via the OS itself, not a failed attempt) a
+ * real capture is impossible — currently just macOS's Screen Recording
+ * permission being off, which isn't a per-attempt error but a settled state
+ * the tray can check up front. Without this, that whole stretch of the day
+ * is just a silent gap in the timeline, indistinguishable from the tray not
+ * running or the employee not working at all.
+ *
+ * Generates its own small neutral placeholder image and uploads it through
+ * the exact same R2 key convention as a real screenshot, just with a
+ * distinct flag ("noaccess") the read path recognizes — no MongoDB record,
+ * consistent with how every other screenshot is tracked.
+ */
+export const submitScreenshotPlaceholder = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { capturedAt, shiftDate, reason } = req.body as { capturedAt?: string; shiftDate?: string; reason?: string };
+
+  if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
+    throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
+  }
+  if (reason !== 'screen-recording-permission-missing') {
+    throw new ApiError(400, 'Unrecognized placeholder reason');
+  }
+
+  const capturedAtDate = capturedAt ? new Date(capturedAt) : new Date();
+  const placeholderJpeg = await sharp({
+    create: { width: 640, height: 360, channels: 3, background: { r: 39, g: 39, b: 42 } },
+  }).jpeg({ quality: 60 }).toBuffer();
+
+  const customFileName = `${capturedAtDate.getTime()}-noaccess.jpg`;
+  const fileWithName = {
+    buffer: placeholderJpeg,
+    originalname: customFileName,
+    mimetype: 'image/jpeg',
+  } as Express.Multer.File;
+
+  const r2Key = await storageService.upload(
+    fileWithName,
+    `screenshots/${user._id.toString()}/${shiftDate}`,
+    BucketType.PRIVATE,
+    { allowLocalFallback: true, preserveFilename: true }
+  );
+
+  res.json(new ApiResponse(201, { r2Key }, 'Placeholder recorded'));
 });
 
 /**
@@ -1284,6 +1334,11 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
         r2Key: obj.key,
         capturedAt: new Date(ms),
         idleDetected: flag === 'idle',
+        // 'noaccess' = submitScreenshotPlaceholder's stand-in image for a
+        // capture macOS's Screen Recording permission blocked outright —
+        // not a real screenshot, so the frontend needs to know to render it
+        // differently instead of showing it as if it were one.
+        isPlaceholder: flag === 'noaccess',
       };
     })
     .filter((x): x is NonNullable<typeof x> => !!x)
@@ -1294,6 +1349,7 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
       _id: s.r2Key, // use the key as the unique identifier
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
+      isPlaceholder: s.isPlaceholder,
       isBlurred: shouldBlur,
       url: shouldBlur
         ? `/api/crm/timeproof/screenshot-blurred?key=${encodeURIComponent(s.r2Key)}&t=${encodeURIComponent(requestToken)}`
