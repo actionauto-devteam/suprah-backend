@@ -448,7 +448,10 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (!target) {
-    throw new ApiError(404, 'This driver does not have an active Suprah Space account in your organization');
+    throw new ApiError(
+      409,
+      'Messaging is unavailable because this driver does not have an active Suprah Space account in your organization',
+    );
   }
 
   const resolvedTargetId = target._id;
@@ -1563,8 +1566,30 @@ const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
 
 const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   const mainUser = req.user as IUser;
-  const crmUser = await CrmUser.findOne({ email: mainUser.email }).select('_id').lean();
-  if (!crmUser) throw new ApiError(404, 'No CRM account linked to this user. Please contact your administrator.');
+  const organizationId =
+    (req.orgId as string | undefined) ??
+    mainUser.organizationId?.toString();
+
+  if (!organizationId) {
+    throw new ApiError(403, 'Your account is not linked to an organization.');
+  }
+
+  const crmUser = await CrmUser.findOne({
+    email: mainUser.email.trim().toLowerCase(),
+    organizationId,
+  })
+    .select('_id isActive')
+    .lean();
+
+  if (!crmUser) {
+    throw new ApiError(
+      409,
+      'Suprah Space is unavailable because no account is linked to this user in the active organization.',
+    );
+  }
+  if (!crmUser.isActive) {
+    throw new ApiError(403, 'The linked Suprah Space account is inactive.');
+  }
 
   // Routed through generateCrmToken so the token carries type:'crm' and uses the
   // same secret chain as the SupraSpace socket. (Fixes "Invalid CRM token type".)

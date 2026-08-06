@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import User from "../models/User.model";
+import CrmUser from "../models/CrmUser.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import Load from "../models/Load.model";
@@ -44,6 +45,9 @@ interface OrgDriver {
   activeLoadCount: number;
   remainingCapacity: number | null;
   assignable: boolean;
+  messagingAvailable: boolean;
+  crmUserId: string | null;
+  messagingUnavailableReason: string | null;
   warnings: string[];
 }
 
@@ -71,8 +75,11 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const ids = users.map((u: any) => u._id);
+  const driverEmails = users
+    .map((u: any) => String(u.email ?? "").trim().toLowerCase())
+    .filter(Boolean);
 
-  const [profiles, locations, loads] = await Promise.all([
+  const [profiles, locations, loads, crmUsers] = await Promise.all([
     DriverProfile.find({ userId: { $in: ids } }).lean(),
     DriverLocation.find({ userId: { $in: ids } })
       .select("userId status lastSeenAt coords")
@@ -87,10 +94,23 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       )
       .sort({ createdAt: -1 })
       .lean(),
+    CrmUser.find({
+      organizationId,
+      isActive: true,
+      email: { $in: driverEmails },
+    })
+      .select("_id email")
+      .lean(),
   ]);
 
   const profileByUser = new Map(profiles.map((p: any) => [String(p.userId), p]));
   const locationByUser = new Map(locations.map((l: any) => [String(l.userId), l]));
+  const crmUserByEmail = new Map(
+    crmUsers.map((crmUser: any) => [
+      String(crmUser.email ?? "").trim().toLowerCase(),
+      crmUser,
+    ]),
+  );
   const loadsByUser = new Map<string, any[]>();
 
   for (const load of loads as any[]) {
@@ -108,6 +128,8 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     const location: any = locationByUser.get(key) ?? null;
     const driverLoads = loadsByUser.get(key) ?? [];
     const activeLoadCount = driverLoads.length;
+    const crmUser: any =
+      crmUserByEmail.get(String(u.email ?? "").trim().toLowerCase()) ?? null;
 
     const maxCapacity: number | null =
       typeof profile?.maxVehicleCapacity === "number"
@@ -170,6 +192,11 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       remainingCapacity:
         maxCapacity != null ? Math.max(0, maxCapacity - activeLoadCount) : null,
       assignable: Boolean(u.isActive),
+      messagingAvailable: Boolean(crmUser),
+      crmUserId: crmUser ? String(crmUser._id) : null,
+      messagingUnavailableReason: crmUser
+        ? null
+        : "No active Suprah Space account is linked to this driver.",
       warnings,
     };
   });
