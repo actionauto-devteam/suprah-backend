@@ -6,6 +6,15 @@ import { normalizePushPayload } from '../utils/pushPayload';
 
 const LOG_PREFIX = '[CrmPushService]';
 
+// A push send can fail for reasons that never surface as a clean 404/410 (iOS
+// web push is known to be inconsistent about this, especially for a
+// torn-down/reinstalled PWA's orphaned endpoint) — without this, a dead
+// subscription that never 404s just sits there forever, silently failing on
+// every future send with nothing pruning it and nothing alerting anyone.
+// Requiring several consecutive failures (not a single blip) avoids evicting
+// a subscription over one transient network error.
+const STALE_FAILURE_THRESHOLD = 5;
+
 type CrmPushSendOptions = {
   deviceHints?: string[];
 };
@@ -149,6 +158,9 @@ export class CrmPushService {
           return;
         }
 
+        const endpointsSucceeded: string[] = [];
+        const endpointsFailedSoft: string[] = [];
+
         await Promise.allSettled(
           targetSubscriptions.map(async (sub) => {
             try {
@@ -158,12 +170,20 @@ export class CrmPushService {
                 { TTL: 86400, ...(topic ? { topic } : {}) }
               );
               stats.sent += 1;
+              endpointsSucceeded.push(sub.endpoint);
             } catch (error: any) {
               if (error.statusCode === 410 || error.statusCode === 404) {
                 endpointsToPrune.push(sub.endpoint);
               } else {
                 stats.failed += 1;
                 logger.warn(`${LOG_PREFIX} Push failed for user ${user._id}: ${error.message}`);
+                const newFailureCount = (sub.failureCount || 0) + 1;
+                if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
+                  logger.warn(`${LOG_PREFIX} Pruning endpoint for user ${user._id} after ${newFailureCount} consecutive non-410/404 failures.`);
+                  endpointsToPrune.push(sub.endpoint);
+                } else {
+                  endpointsFailedSoft.push(sub.endpoint);
+                }
               }
             }
           })
@@ -174,6 +194,20 @@ export class CrmPushService {
           await CrmUser.updateOne(
             { _id: user._id },
             { $pull: { pushSubscriptions: { endpoint: { $in: endpointsToPrune } } } }
+          );
+        }
+        if (endpointsSucceeded.length > 0) {
+          await CrmUser.updateOne(
+            { _id: user._id },
+            { $set: { 'pushSubscriptions.$[elem].lastSuccessAt': new Date(), 'pushSubscriptions.$[elem].failureCount': 0 } },
+            { arrayFilters: [{ 'elem.endpoint': { $in: endpointsSucceeded } }] }
+          );
+        }
+        if (endpointsFailedSoft.length > 0) {
+          await CrmUser.updateOne(
+            { _id: user._id },
+            { $inc: { 'pushSubscriptions.$[elem].failureCount': 1 } },
+            { arrayFilters: [{ 'elem.endpoint': { $in: endpointsFailedSoft } }] }
           );
         }
       })
@@ -196,6 +230,8 @@ export class CrmPushService {
         if (!admin.pushSubscriptions?.length) return;
 
         const endpointsToPrune: string[] = [];
+        const endpointsSucceeded: string[] = [];
+        const endpointsFailedSoft: string[] = [];
 
         await Promise.allSettled(
           admin.pushSubscriptions.map(async (sub) => {
@@ -205,11 +241,18 @@ export class CrmPushService {
                 stringifiedPayload,
                 { TTL: 86400, ...(topic ? { topic } : {}) }
               );
+              endpointsSucceeded.push(sub.endpoint);
             } catch (error: any) {
               if (error.statusCode === 410 || error.statusCode === 404) {
                 endpointsToPrune.push(sub.endpoint);
               } else {
                 logger.warn(`${LOG_PREFIX} Push failed for admin ${admin.fullName}: ${error.message}`);
+                const newFailureCount = (sub.failureCount || 0) + 1;
+                if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
+                  endpointsToPrune.push(sub.endpoint);
+                } else {
+                  endpointsFailedSoft.push(sub.endpoint);
+                }
               }
             }
           })
@@ -219,6 +262,20 @@ export class CrmPushService {
           await CrmUser.updateOne(
             { _id: admin._id },
             { $pull: { pushSubscriptions: { endpoint: { $in: endpointsToPrune } } } }
+          );
+        }
+        if (endpointsSucceeded.length > 0) {
+          await CrmUser.updateOne(
+            { _id: admin._id },
+            { $set: { 'pushSubscriptions.$[elem].lastSuccessAt': new Date(), 'pushSubscriptions.$[elem].failureCount': 0 } },
+            { arrayFilters: [{ 'elem.endpoint': { $in: endpointsSucceeded } }] }
+          );
+        }
+        if (endpointsFailedSoft.length > 0) {
+          await CrmUser.updateOne(
+            { _id: admin._id },
+            { $inc: { 'pushSubscriptions.$[elem].failureCount': 1 } },
+            { arrayFilters: [{ 'elem.endpoint': { $in: endpointsFailedSoft } }] }
           );
         }
       })
