@@ -10,6 +10,8 @@ export interface ICrmPushSubscription {
   };
   deviceHint?: string;
   createdAt?: Date;
+  lastSuccessAt?: Date;
+  failureCount?: number;
 }
 
 export interface ICrmUser extends Document {
@@ -199,6 +201,8 @@ const CrmUserSchema = new Schema<ICrmUser>(
         },
         deviceHint: { type: String },
         createdAt: { type: Date, default: Date.now },
+        lastSuccessAt: { type: Date },
+        failureCount: { type: Number, default: 0 },
       },
     ],
     notificationPreferences: {

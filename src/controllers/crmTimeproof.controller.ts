@@ -37,6 +37,9 @@ const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 
 const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
 
+// Cap on stored push subscriptions per CRM user — see subscribeCrmPush for why.
+const MAX_PUSH_SUBSCRIPTIONS = 6;
+
 const COMPANY_TZ_OFFSET_MINUTES = -360;
 
 /**
@@ -1965,16 +1968,24 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
     }
   );
 
-  // If no existing entry was matched, push a new one
+  // If no existing entry was matched, push a new one. Capped at MAX_PUSH_SUBSCRIPTIONS
+  // via $sort+$slice (atomic, newest-first) so repeated PWA reinstalls — which each
+  // mint a brand-new endpoint on iOS instead of reusing the old one — can't let dead
+  // subscriptions accumulate forever; the oldest (most likely dead) entries get
+  // evicted first, while a handful of genuinely-concurrent devices are unaffected.
   await CrmUser.updateOne(
     { _id: user._id, 'pushSubscriptions.endpoint': { $ne: subscription.endpoint } },
     {
       $push: {
         pushSubscriptions: {
-          endpoint: subscription.endpoint,
-          keys: subscription.keys,
-          deviceHint: deviceHint ?? 'unknown',
-          createdAt: new Date(),
+          $each: [{
+            endpoint: subscription.endpoint,
+            keys: subscription.keys,
+            deviceHint: deviceHint ?? 'unknown',
+            createdAt: new Date(),
+          }],
+          $sort: { createdAt: -1 },
+          $slice: MAX_PUSH_SUBSCRIPTIONS,
         },
       },
     }
