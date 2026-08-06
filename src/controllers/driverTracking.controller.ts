@@ -8,9 +8,11 @@ import User, { IUser } from "../models/User.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import logger from "../utils/logger";
-import { getSocketIO } from "../utils/socketEmitter";
+import { getSocketIO, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 import activityService from "../services/activity.service";
+import Notification from "../models/Notification.model";
+import notificationService from "../services/notification.service";
 import { driverSignSchema } from "../validations/load.validation";
 
 // ── Driver contract signature — required on both accept and request; a
@@ -18,7 +20,8 @@ import { driverSignSchema } from "../validations/load.validation";
 function parseDriverSignature(body: unknown) {
   const result = driverSignSchema.safeParse(body);
   if (!result.success) {
-    const message = result.error.issues[0]?.message || "A signed contract is required";
+    const message =
+      result.error.issues[0]?.message || "A signed contract is required";
     throw new ApiError(400, message);
   }
   return result.data;
@@ -252,7 +255,7 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   await safeCreateNotificationLoose({
     userId: driverId,
     organizationId,
-    type: "load_assigned",
+    type: "driver_assigned",
     title: "New Load Assigned",
     message: `You've been assigned load ${load.loadNumber}`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -311,7 +314,7 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
     await safeCreateNotificationLoose({
       userId: previousDriverId,
       organizationId,
-      type: "load_reassigned",
+      type: "driver_assigned",
       title: "Load Reassigned",
       message: `Load ${load.loadNumber} has been reassigned to another driver`,
       metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -320,7 +323,7 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   await safeCreateNotificationLoose({
     userId: driverId,
     organizationId,
-    type: "load_assigned",
+    type: "driver_assigned",
     title: "New Load Assigned",
     message: `You've been assigned load ${load.loadNumber}`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -370,7 +373,7 @@ const removeLoad = asyncHandler(async (req: Request, res: Response) => {
   await safeCreateNotificationLoose({
     userId: previousDriverId,
     organizationId,
-    type: "load_removed",
+    type: "general",
     title: "Load Removed",
     message: `Load ${load.loadNumber} has been removed from your assignments`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -553,7 +556,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   try {
     await notifyOrgAdminsLoose(
       organizationId,
-      "load_requested",
+      "driver_request",
       "Load Request",
       `${user.name} requested load ${load.loadNumber}`,
       {
@@ -600,7 +603,7 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   await safeCreateNotificationLoose({
     userId: driverId,
     organizationId,
-    type: "load_request_approved",
+    type: "driver_request_approved",
     title: "Load Request Approved",
     message: `Your request for load ${load.loadNumber} was approved`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
@@ -644,13 +647,215 @@ const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   await safeCreateNotificationLoose({
     userId: driverId,
     organizationId,
-    type: "load_request_rejected",
+    type: "driver_request_rejected",
     title: "Load Request Declined",
     message: `Your request for load ${load.loadNumber} was declined`,
     metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
   });
 
   return res.status(200).json(new ApiResponse(200, load, "Request rejected"));
+});
+
+
+// ─── Pending Load Requests (dispatcher view) ─────────────────────────────────
+// GET /api/driver-tracking/load-requests
+
+const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = req.orgId as string;
+
+  const loads = await Load.find({
+    organizationId,
+    assignedDriverId: null,
+    status: "Posted",
+    "driverRequests.0": { $exists: true },
+  })
+    .select("loadNumber pickupLocation deliveryLocation vehicles trailerType driverRequests")
+    .lean();
+
+  const driverIds = [
+    ...new Set(
+      loads.flatMap((load: any) =>
+        (load.driverRequests ?? []).map((request: any) => String(request.driverId)),
+      ),
+    ),
+  ];
+
+  const drivers = await User.find({
+    _id: { $in: driverIds },
+    organizationId,
+    role: "driver",
+  })
+    .select("name email avatar")
+    .lean();
+
+  const driverById = new Map(drivers.map((driver: any) => [String(driver._id), driver]));
+
+  const requests = loads.flatMap((load: any) =>
+    (load.driverRequests ?? []).map((request: any) => {
+      const driver: any = driverById.get(String(request.driverId));
+      return {
+        id: `${load._id}:${request.driverId}`,
+        loadId: String(load._id),
+        loadNumber: load.loadNumber,
+        driverId: String(request.driverId),
+        driverName: driver?.name ?? "Unknown Driver",
+        driverEmail: driver?.email ?? "",
+        driverAvatar: driver?.avatar ?? null,
+        requestedAt: request.requestedAt,
+        note: request.note ?? "",
+        origin: [load.pickupLocation?.city, load.pickupLocation?.state].filter(Boolean).join(", "),
+        destination: [load.deliveryLocation?.city, load.deliveryLocation?.state].filter(Boolean).join(", "),
+        vehicleCount: Array.isArray(load.vehicles) ? load.vehicles.length : 0,
+        trailerType: load.trailerType ?? null,
+      };
+    }),
+  );
+
+  requests.sort(
+    (a: any, b: any) =>
+      new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
+  );
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, requests, "Pending load requests fetched"));
+});
+
+// ─── Dispatcher → Driver Alert ───────────────────────────────────────────────
+// POST /api/driver-tracking/drivers/:driverId/alert
+
+const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
+  const sender = getUser(req);
+  const organizationId = req.orgId as string;
+  const { driverId } = req.params;
+  const { destinationType, destinationName, address, message } = req.body as {
+    destinationType?: "site" | "carshop" | "specific-shop";
+    destinationName?: string;
+    address?: string;
+    message?: string;
+  };
+
+  const allowedDestinationTypes = ["site", "carshop", "specific-shop"];
+  if (!destinationType || !allowedDestinationTypes.includes(destinationType)) {
+    throw new ApiError(400, "A valid destinationType is required");
+  }
+  if (!destinationName?.trim()) {
+    throw new ApiError(400, "destinationName is required");
+  }
+
+  const driver = await User.findOne({
+    _id: driverId,
+    organizationId,
+    role: "driver",
+    isActive: true,
+  })
+    .select("name email")
+    .lean();
+
+  if (!driver) throw new ApiError(404, "Driver not found in this organization");
+
+  const cleanDestinationName = destinationName.trim().slice(0, 160);
+  const cleanAddress = address?.trim().slice(0, 300) || "";
+  const cleanMessage = message?.trim().slice(0, 500) || "";
+  const alertMessage = cleanMessage
+    ? `${cleanMessage} Destination: ${cleanDestinationName}.`
+    : `Please proceed to ${cleanDestinationName}.`;
+
+  const notification: any = await notificationService.createNotification({
+    userId: driverId,
+    organizationId,
+    type: "driver_dispatch_alert",
+    title: "Dispatch Alert",
+    message: alertMessage,
+    metadata: {
+      driverId,
+      driverName: driver.name,
+      destinationType,
+      destinationName: cleanDestinationName,
+      address: cleanAddress,
+      dispatcherMessage: cleanMessage,
+      sentByUserId: sender._id.toString(),
+      sentByName: sender.name,
+      response: "pending",
+      playSound: true,
+      soundFile: "/sounds/warning_sound.wav",
+      route: "/driver/notifications",
+      pushSource: "Driver Tracker",
+    },
+  });
+
+  if (!notification) {
+    throw new ApiError(409, "The driver has disabled Driver Tracker notifications");
+  }
+
+  const payload = {
+    alertId: notification._id.toString(),
+    title: notification.title,
+    message: notification.message,
+    metadata: notification.metadata,
+    createdAt: notification.createdAt,
+  };
+
+  emitToUser(driverId, "driver:dispatch_alert", payload);
+  emitToOrg(organizationId, "driver:dispatch_alert_sent", {
+    ...payload,
+    driverId,
+    driverName: driver.name,
+  });
+
+  return res
+    .status(201)
+    .json(new ApiResponse(201, notification, "Driver alert sent"));
+});
+
+// POST /api/driver-tracking/alerts/:alertId/respond
+const respondToDriverAlert = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  const { alertId } = req.params;
+  const { response } = req.body as {
+    response?: "acknowledged" | "on_my_way" | "unable";
+  };
+
+  const allowedResponses = ["acknowledged", "on_my_way", "unable"];
+  if (!response || !allowedResponses.includes(response)) {
+    throw new ApiError(400, "A valid response is required");
+  }
+
+  const notification: any = await Notification.findOne({
+    _id: alertId,
+    userId: user._id,
+    organizationId,
+    type: "driver_dispatch_alert",
+  });
+
+  if (!notification) throw new ApiError(404, "Driver alert not found");
+
+  const respondedAt = new Date();
+  notification.metadata = {
+    ...(notification.metadata ?? {}),
+    response,
+    respondedAt: respondedAt.toISOString(),
+    respondedByUserId: user._id.toString(),
+  };
+  notification.isRead = true;
+  notification.markModified("metadata");
+  await notification.save();
+
+  emitToUser(user._id.toString(), "notification:updated", notification);
+  emitToOrg(organizationId, "driver:dispatch_alert_acknowledged", {
+    alertId: notification._id.toString(),
+    driverId: user._id.toString(),
+    driverName: user.name,
+    response,
+    respondedAt: respondedAt.toISOString(),
+    destinationName: notification.metadata?.destinationName,
+    sentByUserId: notification.metadata?.sentByUserId,
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, notification, "Driver alert response saved"));
 });
 
 // ─── Driver status transitions ───────────────────────────────────────────────
@@ -839,6 +1044,9 @@ const dropLoad = asyncHandler(async (req: Request, res: Response) => {
 export default {
   heartbeat,
   getActiveDrivers,
+  getPendingLoadRequests,
+  sendDriverAlert,
+  respondToDriverAlert,
   assignLoad,
   reassignLoad,
   removeLoad,

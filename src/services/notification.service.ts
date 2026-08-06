@@ -45,6 +45,7 @@ const VALID_NOTIFICATION_TYPES = [
   'driver_request', 'driver_request_approved', 'driver_request_rejected',
   'driver_assigned', 'driver_location_update', 'driver_payout',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
+  'driver_dispatch_alert',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
@@ -98,6 +99,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
 
   driver_location_update: 'driverTracker', driver_tracker_geofence_alert: 'driverTracker',
   driver_tracker_offline_alert: 'driverTracker', driver_tracker_place_visit: 'driverTracker',
+  driver_dispatch_alert: 'driverTracker',
 
   payment_received: 'wallet', payment_pending: 'wallet', payment_failed: 'wallet', payment_request: 'wallet',
   payout_processed: 'wallet', wallet_low_balance: 'wallet', wallet_payout_failed: 'wallet',
@@ -117,9 +119,9 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   admin_security_audit: 'adminSecurityAudit',
 };
 
-// These always deliver (in-app + push) regardless of the recipient's 'account'
-// preference toggle — security-relevant events shouldn't be silenceable.
-const SECURITY_CRITICAL_TYPES = new Set(['password_changed', 'login_alert']);
+// These always deliver (in-app + push) regardless of preference toggles.
+// Security events and dispatcher safety alerts must not be silently dropped.
+const SECURITY_CRITICAL_TYPES = new Set(['password_changed', 'login_alert', 'driver_dispatch_alert']);
 
 // Short human label per category, prefixed onto the OS push notification's
 // title (see utils/pushPayload.ts's normalizePushPayload) so the device-level
@@ -259,6 +261,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       driver_tracker_geofence_alert: metadata?.route || '/driver-tracker',
       driver_tracker_offline_alert: metadata?.route || '/driver-tracker',
       driver_tracker_place_visit: metadata?.route || '/driver-tracker',
+      driver_dispatch_alert: metadata?.route || '/driver/notifications',
       // ── Wallet ──
       wallet_low_balance: metadata?.route || '/billing',
       wallet_payout_failed: metadata?.route || '/billing',
@@ -294,6 +297,14 @@ const createNotification = async (params: CreateNotificationParams) => {
         { action: 'reject', title: 'Reject' },
       ];
       pushPayload.data.driverRequestId = metadata?.driverRequestId || notification._id;
+    }
+
+    if (type === 'driver_dispatch_alert') {
+      pushPayload.actions = [
+        { action: 'acknowledge', title: 'Acknowledge' },
+        { action: 'on-my-way', title: 'On My Way' },
+      ];
+      pushPayload.data.alertId = notification._id.toString();
     }
 
     // Lets a caller (e.g. Shift Alerts) request its own distinct notification

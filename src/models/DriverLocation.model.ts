@@ -62,6 +62,8 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
   },
 );
 
+DriverLocationSchema.index({ organizationId: 1, status: 1, lastSeenAt: -1 });
+
 const DriverLocation = mongoose.model<IDriverLocation>(
   "DriverLocation",
   DriverLocationSchema,

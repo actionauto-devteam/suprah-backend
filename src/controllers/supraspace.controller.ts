@@ -424,18 +424,40 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   if (!targetUserId) throw new ApiError(400, 'targetUserId is required');
   if (targetUserId === userId.toString()) throw new ApiError(400, 'Cannot DM yourself');
 
-  let target = await CrmUser.findById(targetUserId).lean();
+  const organizationId = req.crmUser!.organizationId;
+
+  let target = await CrmUser.findOne({
+    _id: targetUserId,
+    organizationId,
+    isActive: true,
+  }).lean();
 
   if (!target) {
-    const mainUser = await User.findById(targetUserId).select('email').lean();
+    const mainUser = await User.findOne({
+      _id: targetUserId,
+      organizationId,
+      isActive: true,
+    }).select('email').lean();
     if (mainUser?.email) {
-      target = await CrmUser.findOne({ email: mainUser.email }).lean();
+      target = await CrmUser.findOne({
+        email: mainUser.email.toLowerCase(),
+        organizationId,
+        isActive: true,
+      }).lean();
     }
   }
 
-  if (!target) throw new ApiError(404, 'User not found');
+  if (!target) {
+    throw new ApiError(
+      409,
+      'Messaging is unavailable because this driver does not have an active Suprah Space account in your organization',
+    );
+  }
 
   const resolvedTargetId = target._id;
+  if (resolvedTargetId.toString() === userId.toString()) {
+    throw new ApiError(400, 'Cannot DM yourself');
+  }
 
   let conversation = await SupraSpaceConversation.findOne({
     type: 'direct',
@@ -1544,8 +1566,30 @@ const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
 
 const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   const mainUser = req.user as IUser;
-  const crmUser = await CrmUser.findOne({ email: mainUser.email }).select('_id').lean();
-  if (!crmUser) throw new ApiError(404, 'No CRM account linked to this user. Please contact your administrator.');
+  const organizationId =
+    (req.orgId as string | undefined) ??
+    mainUser.organizationId?.toString();
+
+  if (!organizationId) {
+    throw new ApiError(403, 'Your account is not linked to an organization.');
+  }
+
+  const crmUser = await CrmUser.findOne({
+    email: mainUser.email.trim().toLowerCase(),
+    organizationId,
+  })
+    .select('_id isActive')
+    .lean();
+
+  if (!crmUser) {
+    throw new ApiError(
+      409,
+      'Suprah Space is unavailable because no account is linked to this user in the active organization.',
+    );
+  }
+  if (!crmUser.isActive) {
+    throw new ApiError(403, 'The linked Suprah Space account is inactive.');
+  }
 
   // Routed through generateCrmToken so the token carries type:'crm' and uses the
   // same secret chain as the SupraSpace socket. (Fixes "Invalid CRM token type".)
