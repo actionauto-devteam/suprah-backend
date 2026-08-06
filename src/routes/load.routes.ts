@@ -36,6 +36,8 @@ router.post("/:id/send-email", staffOnly, loadController.sendDetailsEmail);
 
 router.post("/:id/submit-proof", uploadLimiter, uploadProofImage, loadController.submitProofOfDelivery);
 
+router.post("/:id/vehicles/:index/inspection-photo", staffOnly, uploadLimiter, uploadProofImage, loadController.uploadInspectionPhoto);
+
 router.get("/:id/proof-image", staffOnly, loadController.streamProofImage);
 
 router.post("/:id/confirm-delivery", staffOnly, loadController.confirmDelivery);

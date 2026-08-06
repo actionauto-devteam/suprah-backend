@@ -25,6 +25,22 @@ import Quote from "../models/Quote.model";
 
 const getUser = (req: Request) => req.user as IUser;
 
+// ── Inspect step: sign each vehicle's private-bucket inspection photo key
+// the same way proofOfDelivery.imageUrl is signed — an unsigned key is not
+// directly viewable against the PRIVATE bucket. ──
+async function signInspectionPhotos(load: Record<string, any>) {
+  const vehicles = load?.vehicles;
+  if (!Array.isArray(vehicles) || !vehicles.length) return;
+  await Promise.all(
+    vehicles.map(async (v: any) => {
+      if (v?.inspectionPhotoUrl) {
+        const signed = await getSignedProofUrl(v.inspectionPhotoUrl);
+        if (signed) v.inspectionPhotoUrl = signed;
+      }
+    }),
+  );
+}
+
 // ─── Inventory Image Enrichment ───────────────────────────────────────────────
 // Load vehicles only persist vin/year/make/model — real photos live on the
 // Vehicle (inventory) collection in `images[]`. This helper batch-resolves
@@ -468,6 +484,7 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
         const signed = await getSignedProofUrl(load.proofOfDelivery.imageUrl);
         if (signed) load.proofOfDelivery.imageUrl = signed;
       }
+      await signInspectionPhotos(load);
       return load;
     }),
   );
@@ -562,6 +579,7 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
     const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
     if (signed) loadObj.proofOfDelivery.imageUrl = signed;
   }
+  await signInspectionPhotos(loadObj);
 
   return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
 });
@@ -594,6 +612,7 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
     dates,
     pricing,
     additionalInfo,
+    contract,
     status
   } = req.body;
 
@@ -606,6 +625,12 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
   if (trailerType !== undefined) updateData.trailerType = trailerType;
   if (dates !== undefined) updateData.dates = dates;
   if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
+  if (contract !== undefined) {
+    updateData.contract = {
+      ...contract,
+      signedAt: contract.agreedToTerms ? new Date() : load.contract?.signedAt,
+    };
+  }
   if (pricing !== undefined) {
     // If pricing is provided, we merge it with existing pricing to preserve
     // computed fields. pricePerMile rides through this merge automatically —
@@ -796,6 +821,45 @@ const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) =
   return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
 });
 
+// ─── Inspect step: vehicle condition photo ───────────────────────────────────
+// POST /api/loads/:id/vehicles/:index/inspection-photo
+// Dispatcher uploads a per-vehicle condition photo (or a photo of a QR/
+// inventory tag) during Create Load / Edit Load. Same storage pattern as
+// submitProofOfDelivery — PRIVATE bucket, key stored raw, signed on read.
+
+const uploadInspectionPhoto = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = req.orgId as string;
+  const file = (req as any).file as Express.Multer.File | undefined;
+  const index = Number(req.params.index);
+
+  if (!file) throw new ApiError(400, "An image is required");
+  if (!Number.isInteger(index) || index < 0) {
+    throw new ApiError(400, "Invalid vehicle index");
+  }
+
+  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+  if (!load.vehicles?.[index]) {
+    throw new ApiError(404, "Vehicle not found on this load");
+  }
+
+  const existing = (load.vehicles[index] as any).inspectionPhotoUrl;
+  if (existing) {
+    try { await storageService.delete(existing, BucketType.PRIVATE); } catch { /* non-fatal */ }
+  }
+
+  const imageUrl = await storageService.upload(file, "load-inspection", BucketType.PRIVATE);
+  (load.vehicles[index] as any).inspectionPhotoUrl = imageUrl;
+  load.markModified("vehicles");
+  await load.save();
+
+  const _io = getSocketIO();
+  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: load._id.toString() });
+
+  const signed = await getSignedProofUrl(imageUrl);
+  return res.status(200).json(new ApiResponse(200, { inspectionPhotoUrl: signed || imageUrl }, "Inspection photo uploaded"));
+});
+
 // ─── Proof Image Proxy ────────────────────────────────────────────────────────
 // GET /api/loads/:id/proof-image
 // Streams the private proof image to authenticated admin/dealer clients.
@@ -951,4 +1015,4 @@ const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
 });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail };
+export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
