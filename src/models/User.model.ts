@@ -88,6 +88,8 @@ export interface IUser extends Document {
   notificationPreferences: NotificationPreferences;
   stripeConnectAccountId?: string;
   pushSubscriptions: IPushSubscription[];
+  signatureDataUrl?: string | null;
+  signatureUpdatedAt?: Date | null;
   isPasswordMatch(password: string): Promise<boolean>;
 }
 
@@ -302,6 +304,17 @@ const UserSchema = new Schema(
         createdAt: { type: Date, default: Date.now },
       },
     ],
+
+    // Digital signature (Create Load e-sign)
+    signatureDataUrl: {
+      type: String,
+      default: null,
+      maxlength: 200000,
+    },
+    signatureUpdatedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -347,6 +360,14 @@ UserSchema.pre<IUser>('save', async function (next) {
     }
   }
 
+  next();
+});
+
+// Keep signatureUpdatedAt in sync with signature changes
+UserSchema.pre<IUser>('save', function (next) {
+  if (this.isModified('signatureDataUrl')) {
+    this.signatureUpdatedAt = this.signatureDataUrl ? new Date() : null;
+  }
   next();
 });
 

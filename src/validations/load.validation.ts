@@ -1,130 +1,169 @@
 import { z } from "zod";
 
+// ─── Shared pieces ────────────────────────────────────────────────────────────
 
-const LOCATION_TYPES = [
-  "Business", "Residence", "Auction", "Port",
-  "Repo Yard", "Dealer", "Auto Show", "Other",
-] as const;
+const zipSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{5}(-\d{4})?$/, "ZIP code must be 5 digits");
 
-const US_STATES = [
-  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
-  "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
-  "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
-  "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
-  "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
-] as const;
-
-export const locationBlockSchema = z.object({
-  locationType: z.enum(LOCATION_TYPES).optional(),
-  companyName: z.string().trim().max(100).optional(),
-  contactName: z.string().trim().max(100).optional(),
+const locationBlockSchema = z.object({
+  name: z.string().trim().max(160).optional().or(z.literal("")),
+  address: z.string().trim().min(1, "Address is required").max(240),
+  city: z.string().trim().min(1, "City is required").max(120),
+  state: z.string().trim().min(2, "State is required").max(40),
+  zip: zipSchema,
+  // ── NEW: LocationFields additions (country / ext / per-location notes) ──
+  // Must exist here AND in Load.model.ts's locationSchema, or zod's strip
+  // mode / Mongoose strict mode silently discards them (same failure mode
+  // as dates.notes and pricing.pricePerMile).
+  country: z.string().trim().max(3).optional().or(z.literal("")),
+  phone: z.string().trim().max(30).optional().or(z.literal("")),
+  phoneExt: z.string().trim().max(6).optional().or(z.literal("")),
   email: z.string().trim().email("Invalid email").optional().or(z.literal("")),
-  phone: z.string().trim().regex(/^\d{10}$/, "Phone must be exactly 10 digits").optional().or(z.literal("")),
-  cellPhone: z.string().trim().max(20).optional(),
-  phoneExt: z.string().trim().max(6).optional(),
-  street: z.string().trim().max(200).optional(),
-  city: z.string().trim().min(2, "City is required").max(100),
-  state: z.enum(US_STATES),
-  zip: z.string().trim().min(5, "ZIP code is required").max(10),
-  country: z.string().trim().length(2).default("US"),
-  buyerReferenceNumber: z.string().trim().max(50).optional(),
-  isTwicRequired: z.boolean().default(false),
-  notes: z.string().trim().max(500).optional(),
+  contactName: z.string().trim().max(120).optional().or(z.literal("")),
+  locationType: z
+    .enum(["dealership", "auction", "residence", "business", "port", "other"])
+    .optional(),
+  notes: z.string().trim().max(1000).optional().or(z.literal("")),
 });
 
+const vehicleConditionSchema = z.enum(["Operable", "Inoperable"]);
 
-const TRAILER_TYPES = [
-  "open_3car_wedge", "open_2car", "5car_open", "9car_stinger", "7car_stinger",
-  "enclosed_2car", "enclosed_3car", "flatbed", "dually_flatbed", "hotshot",
-  "gooseneck", "lowboy", "step_deck", "rgn", "double_drop", "power_only", "other",
+const loadVehicleSchema = z.object({
+  vehicleId: z.string().trim().optional(),
+  vin: z
+    .string()
+    .trim()
+    .max(17, "VIN must be at most 17 characters")
+    .optional()
+    .or(z.literal("")),
+  year: z.coerce
+    .number()
+    .int()
+    .min(1900, "Invalid year")
+    .max(2100, "Invalid year")
+    .optional(),
+  make: z.string().trim().max(80).optional().or(z.literal("")),
+  model: z.string().trim().max(80).optional().or(z.literal("")),
+  color: z.string().trim().max(60).optional().or(z.literal("")),
+  condition: vehicleConditionSchema.default("Operable"),
+});
+
+export const TRAILER_TYPES = [
+  "open_3car_wedge",
+  "open_2car",
+  "enclosed_2car",
+  "enclosed_3car",
+  "flatbed",
+  "hotshot",
+  "dually_flatbed",
+  "gooseneck",
+  "lowboy",
+  "step_deck",
+  "9car_stinger",
+  "7car_stinger",
+  "5car_open",
+  "rgn",
+  "double_drop",
+  "power_only",
+  "other",
 ] as const;
 
-export const loadVehicleSchema = z.object({
-  hasVin: z.boolean().default(false),
-  vin: z.string().trim().toUpperCase().max(17).optional(),
-  vehicleType: z.string().trim().max(50).optional(),
-  year: z.coerce.number().int().min(1900).max(new Date().getFullYear() + 1).optional(),
-  make: z.string().trim().max(50).optional(),
-  model: z.string().trim().max(50).optional(),
-  color: z.string().trim().max(50).optional(),
-  condition: z.enum(["Operable", "Inoperable"]).default("Operable"),
-  oversized: z.boolean().default(false),
-  lotNumber: z.string().trim().max(50).optional(),
-  licensePlate: z.string().trim().toUpperCase().max(20).optional(),
-  licenseState: z.string().trim().toUpperCase().max(2).optional(),
-  carrierNotes: z.string().trim().max(500).optional(),
-});
+const datesSchema = z
+  .object({
+    firstAvailable: z.string().trim().optional().or(z.literal("")),
+    pickupDeadline: z.string().trim().optional().or(z.literal("")),
+    deliveryDeadline: z.string().trim().optional().or(z.literal("")),
+    // Date Notes textarea from DatesSection — without this, zod's default
+    // strip mode silently discards it
+    notes: z.string().trim().max(1000).optional().or(z.literal("")),
+  })
+  .optional();
 
+const additionalInfoSchema = z
+  .object({
+    visibility: z.enum(["public", "private"]).default("public"),
+    notes: z.string().trim().max(4000).optional().or(z.literal("")),
+    instructions: z.string().trim().max(4000).optional().or(z.literal("")),
+    referenceNumber: z.string().trim().max(120).optional().or(z.literal("")),
+  })
+  .optional();
 
-export const loadDatesSchema = z.object({
-  firstAvailable: z.coerce.date().optional(),
-  expirationDate: z.coerce.date().optional(),
-  pickupDeadline: z.coerce.date().optional(),
-  deliveryDeadline: z.coerce.date().optional(),
-  notes: z.string().trim().max(500).optional(),
-}).refine(
-  (d) => {
-    if (d.firstAvailable && d.deliveryDeadline) {
-      return d.deliveryDeadline >= d.firstAvailable;
-    }
-    return true;
-  },
-  { message: "Delivery deadline must be on or after first available date" }
-).refine(
-  (d) => {
-    if (d.firstAvailable && d.expirationDate) {
-      return d.expirationDate >= d.firstAvailable;
-    }
-    return true;
-  },
-  { message: "Expiration date must be on or after first available date" }
-);
+const contractSchema = z
+  .object({
+    agreedToTerms: z.boolean().default(false),
+    // ── Freehand e-signature from the SignaturePad ──
+    // PNG data URL. 200k ceiling mirrors the User model field.
+    signatureDataUrl: z
+      .string()
+      .trim()
+      .max(200_000, "Signature image is too large")
+      .refine(
+        (v: string) => v === "" || v.startsWith("data:image/"),
+        "Signature must be an image data URL",
+      )
+      .optional()
+      .or(z.literal(""))
+      .nullable(),
+    signerName: z.string().trim().max(160).optional().or(z.literal("")),
+  })
+  .optional();
 
+const pricingInputSchema = z
+  .object({
+    // ── NEW: dispatcher's $/mi rate from the Create Load Pricing step ──
+    // Kept in two-way sync with carrierPayAmount on the frontend
+    // (pay = pricePerMile × miles) and persisted on pricing.pricePerMile.
+    // Without this line, zod's default strip mode silently discards the
+    // field before the controller sees it — the same failure mode the
+    // dates.notes field hit. Ceiling of 1,000 $/mi is a sanity bound:
+    // carrierPayAmount caps at $1M and no real route is under ~1,000 mi
+    // at that price.
+    pricePerMile: z.coerce.number().min(0).max(1_000).optional(),
+    carrierPayAmount: z.coerce.number().min(0).max(1_000_000).optional(),
+    copCodAmount: z.coerce.number().min(0).max(1_000_000).optional(),
+  })
+  .optional();
 
-export const loadAdditionalInfoSchema = z.object({
-  notes: z.string().trim().max(4000).optional(),
-  instructions: z.string().trim().max(4000).optional(),
-  visibility: z.enum(["public", "private"]).default("public"),
-  internalLoadId: z.string().trim().max(50).optional(),
-  preDispatchNotes: z.string().trim().max(4000).optional(),
-  specialInstructions: z.string().trim().max(4000).optional(),
-  loadSpecificTerms: z.string().trim().max(500).optional(),
-});
+// ─── Create Load ──────────────────────────────────────────────────────────────
+// RAISED: vehicles max was 9 — the platform-wide limit is now 20 for BOTH
+// load-board and assign-carrier workflows. This must match:
+//   · MAX_VEHICLES in components/create-load/types.ts (frontend)
+//   · MAX_VEHICLES_PER_LOAD in controllers/load.controller.ts (backend)
 
-
-export const loadContractSchema = z.object({
-  agreedToTerms: z.boolean(),
-  signatureName: z.string().trim().max(200).optional(),
-  signedAt: z.coerce.date().optional(),
-}).refine(
-  (c) => !c.agreedToTerms || !!c.signatureName?.trim(),
-  { message: "Signature name is required when terms are agreed", path: ["signatureName"] }
-);
-
+export const MAX_VEHICLES_PER_LOAD = 20;
 
 export const createLoadSchema = z.object({
-  postType: z.enum(["load-board", "assign-carrier"]).default("load-board"),
+  postType: z.enum(["load-board", "assign-carrier"]),
   pickupLocation: locationBlockSchema,
   deliveryLocation: locationBlockSchema,
-  vehicles: z.array(loadVehicleSchema).max(12, "Maximum 12 vehicles per load").default([]),
+  vehicles: z
+    .array(loadVehicleSchema)
+    .min(1, "At least one vehicle is required")
+    .max(
+      MAX_VEHICLES_PER_LOAD,
+      `A load can include at most ${MAX_VEHICLES_PER_LOAD} vehicles`,
+    ),
   trailerType: z.enum(TRAILER_TYPES),
-  dates: loadDatesSchema.optional(),
-  additionalInfo: loadAdditionalInfoSchema.optional(),
-  contract: loadContractSchema.optional(),
-  pricing: z.object({
-    carrierPayAmount: z.number().min(0).optional(),
-    copCodAmount: z.number().min(0).default(0),
-  }).optional(),
+  dates: datesSchema,
+  additionalInfo: additionalInfoSchema,
+  contract: contractSchema,
+  pricing: pricingInputSchema,
 });
 
 export type CreateLoadInput = z.infer<typeof createLoadSchema>;
 
+// ─── Rate Calculation ─────────────────────────────────────────────────────────
 
 export const calculateRateSchema = z.object({
-  pickupZip: z.string().trim().min(5).max(10),
-  deliveryZip: z.string().trim().min(5).max(10),
+  pickupZip: zipSchema,
+  deliveryZip: zipSchema,
   trailerType: z.enum(TRAILER_TYPES),
-  vehicles: z.array(z.object({
-    condition: z.enum(["Operable", "Inoperable"]),
-  })).default([]),
+  vehicles: z
+    .array(z.object({ condition: vehicleConditionSchema }))
+    .min(1)
+    .max(MAX_VEHICLES_PER_LOAD),
 });
+
+export type CalculateRateInput = z.infer<typeof calculateRateSchema>;

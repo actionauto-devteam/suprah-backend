@@ -1,5 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export type InviteAccountType = 'customer' | 'driver';
+
 export interface ICustomerInviteToken extends Document {
   shortCode: string;
   organizationId: mongoose.Types.ObjectId;
@@ -7,6 +9,7 @@ export interface ICustomerInviteToken extends Document {
   expiresAt: Date;
   isUsed: boolean;
   multiUse: boolean;
+  accountType: InviteAccountType;
   usedAt?: Date;
   usedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
@@ -42,6 +45,14 @@ const CustomerInviteTokenSchema = new Schema<ICustomerInviteToken>(
     multiUse: {
       type: Boolean,
       default: false,
+    },
+    // Which kind of account this invite creates. Existing tokens without the
+    // field fall back to 'customer', so old links keep working unchanged.
+    accountType: {
+      type: String,
+      enum: ['customer', 'driver'],
+      default: 'customer',
+      index: true,
     },
     usedAt: {
       type: Date,

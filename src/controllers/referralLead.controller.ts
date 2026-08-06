@@ -189,9 +189,9 @@ export const updateLeadStatus = asyncHandler(async (req: Request, res: Response)
   res.json(new ApiResponse(200, lead, 'Lead updated'));
 });
 
-// ─── CRM: Convert lead → create customer account ─────────────────────────────
+// ─── CRM: Convert lead → create customer OR driver account ───────────────────
 // POST /api/referral-leads/crm-leads/:id/convert
-// Body: { email }
+// Body: { email, accountType?: 'customer' | 'driver' }  (defaults to customer)
 // Password is always set to 'customer123' and emailed directly to the customer.
 export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
@@ -200,6 +200,12 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { email } = req.body;
   if (!email) throw new ApiError(400, 'email is required');
+
+  // Anything other than an explicit 'driver' falls back to 'customer'
+  const accountType: 'customer' | 'driver' =
+    req.body.accountType === 'driver' ? 'driver' : 'customer';
+  const typeLabel   = accountType === 'driver' ? 'Driver' : 'Customer';
+  const accentColor = accountType === 'driver' ? '#f97316' : '#10b981';
 
   const lead = await ReferralLead.findOne({ _id: id, organizationId: orgId });
   if (!lead) throw new ApiError(404, 'Lead not found');
@@ -215,7 +221,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
     name:           lead.name,
     email:          email.toLowerCase().trim(),
     passwordHash,
-    role:           'customer',
+    role:           accountType,
     organizationId: orgId,
     emailVerified:  true,
     isActive:       true,
@@ -238,8 +244,8 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   // Send welcome email with credentials directly to the customer (fire and forget)
   emailService.sendEmail({
     to:      newUser.email,
-    subject: 'Your Action Auto Customer Account is Ready',
-    text: `Hi ${newUser.name},\n\nOne of our representatives has created a customer account for you at Action Auto Utah.\n\nYour Login Credentials:\nEmail: ${newUser.email}\nTemporary Password: ${tempPassword}\n\nPlease log in and change your password as soon as possible to keep your account secure.\n\nAction Auto Utah`,
+    subject: `Your Action Auto ${typeLabel} Account is Ready`,
+    text: `Hi ${newUser.name},\n\nOne of our representatives has created a ${typeLabel.toLowerCase()} account for you at Action Auto Utah.\n\nYour Login Credentials:\nEmail: ${newUser.email}\nTemporary Password: ${tempPassword}\n\nPlease log in and change your password as soon as possible to keep your account secure.\n\nAction Auto Utah`,
     html: `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -250,9 +256,9 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
 
         <!-- Header -->
         <tr>
-          <td style="background:#10b981;padding:32px 40px;text-align:center;">
+          <td style="background:${accentColor};padding:32px 40px;text-align:center;">
             <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">Action Auto Utah</p>
-            <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">Your Account is Ready!</h1>
+            <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">Your ${typeLabel} Account is Ready!</h1>
           </td>
         </tr>
 
@@ -261,7 +267,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
           <td style="padding:36px 40px;">
             <p style="margin:0 0 8px;font-size:15px;color:#18181b;font-weight:600;">Hi ${newUser.name},</p>
             <p style="margin:0 0 24px;font-size:14px;color:#52525b;line-height:1.6;">
-              One of our representatives has created a <strong style="color:#18181b;">customer account</strong> for you at Action Auto Utah. Use the credentials below to sign in.
+              One of our representatives has created a <strong style="color:#18181b;">${typeLabel.toLowerCase()} account</strong> for you at Action Auto Utah. Use the credentials below to sign in.
             </p>
 
             <!-- Credentials box -->
@@ -272,7 +278,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
                   <p style="margin:0 0 4px;font-size:12px;color:#71717a;font-weight:500;">Email</p>
                   <p style="margin:0 0 16px;font-size:14px;font-weight:700;color:#18181b;">${newUser.email}</p>
                   <p style="margin:0 0 4px;font-size:12px;color:#71717a;font-weight:500;">Temporary Password</p>
-                  <p style="margin:0;font-size:22px;font-weight:800;color:#10b981;font-family:'Courier New',monospace;letter-spacing:0.05em;">${tempPassword}</p>
+                  <p style="margin:0;font-size:22px;font-weight:800;color:${accentColor};font-family:'Courier New',monospace;letter-spacing:0.05em;">${tempPassword}</p>
                 </td>
               </tr>
             </table>
@@ -324,10 +330,11 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
 
   res.status(201).json(
     new ApiResponse(201, {
-      userId: newUser._id,
-      name:   newUser.name,
-      email:  newUser.email,
-    }, 'Customer account created successfully'),
+      userId:      newUser._id,
+      name:        newUser.name,
+      email:       newUser.email,
+      accountType,
+    }, `${typeLabel} account created successfully`),
   );
 });
 
@@ -469,4 +476,3 @@ export const getGuestCallToken = asyncHandler(async (req: Request, res: Response
 
   res.json(new ApiResponse(200, { domain, room, jitsiRoom, jwt: guestToken, displayName: lead.name }, 'Guest token issued'));
 });
-

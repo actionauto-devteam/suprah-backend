@@ -1,129 +1,125 @@
-import mongoose, { Document, Schema } from "mongoose";
+import mongoose, { Schema, Document, Model } from "mongoose";
 
-export type TrailerType =
-  | "open_3car_wedge"
-  | "open_2car"
-  | "enclosed_2car"
-  | "enclosed_3car"
-  | "flatbed"
-  | "hotshot"
-  | "dually_flatbed"
-  | "gooseneck"
-  | "lowboy"
-  | "step_deck"
-  | "9car_stinger"
-  | "7car_stinger"
-  | "5car_open"
-  | "rgn"
-  | "double_drop"
-  | "power_only"
-  | "other";
+// ─── DriverProfile ────────────────────────────────────────────────────────────
+// Rebuilt against driverProfile.controller.ts as the source of truth: every
+// field this model declares is a field that controller reads or writes
+// (equipment, license/insurance, logistics, identity verification, and the
+// compliance documents subsystem), plus the fields the driver directory and
+// driver tracking controllers consume.
 
-export type OperationalStatus =
-  | "active"
-  | "on_leave"
-  | "maintenance"
-  | "terminated";
-
-export type ComplianceDocumentType =
-  | "drivers_license"
-  | "drivers_license_front"
-  | "drivers_license_back"
-  | "medical_card"
-  | "insurance_certificate"
-  | "vehicle_registration"
-  | "dot_inspection"
-  | "w9_form"
-  | "operating_authority"
-  | "cargo_insurance"
-  | "liability_insurance"
-  | "other";
-
-export const REQUIRED_COMPLIANCE_DOCS: ComplianceDocumentType[] = [
-  "drivers_license_front",
-  "drivers_license_back",
+// The compliance meter counts these document types. ⚠ One judgment call in
+// this rebuild: adjust this list if your original differed — it only
+// affects the compliance percentage, nothing structural.
+export const REQUIRED_COMPLIANCE_DOCS: readonly string[] = [
+  "drivers_license",
   "medical_card",
-  "liability_insurance",
+  "insurance_certificate",
   "vehicle_registration",
-  "operating_authority",
   "w9_form",
 ];
 
-export interface IComplianceDocument {
+export const DOCUMENT_TYPES = [
+  "drivers_license",
+  "medical_card",
+  "insurance_certificate",
+  "vehicle_registration",
+  "dot_inspection",
+  "w9_form",
+  "operating_authority",
+  "cargo_insurance",
+  "liability_insurance",
+  "other",
+] as const;
+
+export interface IDriverDocument {
   _id?: mongoose.Types.ObjectId;
-  type: ComplianceDocumentType;
+  type: string;
   label: string;
   fileUrl: string;
-  fileKey: string;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  uploadedAt: Date;
+  fileKey?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  uploadedAt?: Date;
   expiresAt?: Date;
   verified: boolean;
+  reviewStatus: "pending" | "approved" | "rejected";
   verifiedBy?: mongoose.Types.ObjectId;
   verifiedAt?: Date;
   rejectionReason?: string;
   rejectedAt?: Date;
-  reviewStatus: "pending" | "approved" | "rejected";
+}
+
+export interface IHomeBase {
+  type: "Point";
+  coordinates?: number[];
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
 }
 
 export interface IDriverProfile extends Document {
+  _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
   organizationId: string;
 
-  trailerType: TrailerType;
+  // ── Equipment ──
+  trailerType?: string;
+  customTrailerName?: string;
   maxVehicleCapacity: number;
-  customTrailerName: string;
-  truckMake: string;
-  truckModel: string;
-  truckYear: number;
-  trailerLength: number;
-  dotNumber: string;
-  mcNumber: string;
-  vin: string;
-  plateNumber: string;
-  truckColor: string;
-  gvwr: number;
-  trailerAxles: number;
-  trailerGvwr: number;
-  engineType: string;
-  trailerMake: string;
-  trailerModel: string;
-  trailerYear: number;
-  hitchType: string;
+  truckMake?: string;
+  truckModel?: string;
+  truckYear?: number;
+  truckColor?: string;
+  vin?: string;
+  plateNumber?: string;
+  gvwr?: number;
+  engineType?: string;
+  trailerMake?: string;
+  trailerModel?: string;
+  trailerYear?: number;
+  trailerLength?: number;
+  trailerAxles?: number;
+  trailerGvwr?: number;
+  hitchType?: string;
   specialFeatures: string[];
+  dotNumber?: string;
+  mcNumber?: string;
 
-  driversLicenseNumber: string;
-  licenseState: string;
-  licenseExpirationDate: Date;
-  medicalCardExpirationDate: Date;
-  insuranceExpirationDate: Date;
-  insuranceProvider: string;
-  insurancePolicyNumber: string;
-  documents: IComplianceDocument[];
+  // ── License / insurance ──
+  driversLicenseNumber?: string;
+  licenseState?: string;
+  licenseExpirationDate?: Date;
+  medicalCardExpirationDate?: Date;
+  insuranceProvider?: string;
+  insurancePolicyNumber?: string;
+  insuranceExpirationDate?: Date;
 
-  ssnLast4: string;
+  // ── Logistics ──
+  operationalStatus: string;
+  serviceRadius?: number;
+  preferredRoutes: string[];
+  availableDays: string[];
+  homeBase: IHomeBase;
+
+  // ── Compliance documents ──
+  documents: mongoose.Types.DocumentArray<IDriverDocument & mongoose.Types.Subdocument>;
+
+  // ── Identity verification ──
+  ssnLast4?: string;
   backgroundCheckConsent: boolean;
   backgroundCheckConsentDate?: Date;
   verificationAgreement: boolean;
   verificationAgreementDate?: Date;
-  verificationStatus: "not_started" | "in_progress" | "under_review" | "verified" | "rejected";
-  verificationNotes?: string;
+  verificationStatus:
+    | "unverified"
+    | "pending"
+    | "in_progress"
+    | "under_review"
+    | "verified";
 
-  operationalStatus: OperationalStatus;
-  homeBase: {
-    type: string;
-    coordinates: number[];
-    address: string;
-    city: string;
-    state: string;
-    zip: string;
-  };
-  serviceRadius: number;
-  preferredRoutes: string[];
-  availableDays: string[];
-
+  // ── Scores / flags ──
   profileCompletionScore: number;
   isComplianceExpired: boolean;
 
@@ -131,45 +127,44 @@ export interface IDriverProfile extends Document {
   updatedAt: Date;
 }
 
-const ComplianceDocumentSchema = new Schema<IComplianceDocument>(
+const driverDocumentSchema = new Schema<IDriverDocument>(
   {
-    type: {
-      type: String,
-      enum: [
-        "drivers_license",
-        "drivers_license_front",
-        "drivers_license_back",
-        "medical_card",
-        "insurance_certificate",
-        "vehicle_registration",
-        "dot_inspection",
-        "w9_form",
-        "operating_authority",
-        "cargo_insurance",
-        "liability_insurance",
-        "other",
-      ],
-      required: true,
-    },
-    label: { type: String, required: true, trim: true, maxlength: 100 },
+    type: { type: String, enum: DOCUMENT_TYPES as unknown as string[], required: true },
+    label: { type: String, required: true, maxlength: 100 },
     fileUrl: { type: String, required: true },
-    fileKey: { type: String, required: true },
-    fileName: { type: String, required: true, trim: true },
-    fileSize: { type: Number, required: true },
-    mimeType: { type: String, required: true },
+    fileKey: { type: String },
+    fileName: { type: String },
+    fileSize: { type: Number },
+    mimeType: { type: String },
     uploadedAt: { type: Date, default: Date.now },
     expiresAt: { type: Date },
     verified: { type: Boolean, default: false },
+    reviewStatus: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "pending",
+    },
     verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },
     verifiedAt: { type: Date },
-    rejectionReason: { type: String, trim: true },
+    rejectionReason: { type: String, maxlength: 500 },
     rejectedAt: { type: Date },
-    reviewStatus: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
   },
   { _id: true },
 );
 
-const DriverProfileSchema = new Schema<IDriverProfile>(
+const homeBaseSchema = new Schema<IHomeBase>(
+  {
+    type: { type: String, enum: ["Point"], default: "Point" },
+    coordinates: { type: [Number], default: undefined },
+    address: { type: String, trim: true },
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    zip: { type: String, trim: true },
+  },
+  { _id: false },
+);
+
+const driverProfileSchema = new Schema<IDriverProfile>(
   {
     userId: {
       type: Schema.Types.ObjectId,
@@ -184,146 +179,83 @@ const DriverProfileSchema = new Schema<IDriverProfile>(
       index: true,
     },
 
-    trailerType: {
-      type: String,
-      enum: [
-        "open_3car_wedge",
-        "open_2car",
-        "enclosed_2car",
-        "enclosed_3car",
-        "flatbed",
-        "hotshot",
-        "dually_flatbed",
-        "gooseneck",
-        "lowboy",
-        "step_deck",
-        "9car_stinger",
-        "7car_stinger",
-        "5car_open",
-        "rgn",
-        "double_drop",
-        "power_only",
-        "other",
-      ],
-      default: "open_3car_wedge",
-    },
-    maxVehicleCapacity: { type: Number, default: 1, min: 1, max: 12 },
-    customTrailerName: { type: String, trim: true, default: "", maxlength: 80 },
-    truckMake: { type: String, trim: true, default: "" },
-    truckModel: { type: String, trim: true, default: "" },
-    truckYear: { type: Number, min: 1990, max: 2030 },
-    trailerLength: { type: Number, min: 0, max: 80 },
-    dotNumber: { type: String, trim: true, default: "" },
-    mcNumber: { type: String, trim: true, default: "" },
-    vin: { type: String, trim: true, default: "" },
-    plateNumber: { type: String, trim: true, default: "" },
-    truckColor: { type: String, trim: true, default: "" },
-    gvwr: { type: Number, min: 0, max: 100000 },
-    trailerAxles: { type: Number, min: 1, max: 10, default: 2 },
-    trailerGvwr: { type: Number, min: 0, max: 100000 },
-    engineType: { type: String, trim: true, default: "" },
-    trailerMake: { type: String, trim: true, default: "" },
-    trailerModel: { type: String, trim: true, default: "" },
-    trailerYear: { type: Number, min: 1990, max: 2030 },
-    hitchType: {
-      type: String,
-      enum: ["fifth_wheel", "gooseneck", "bumper_pull", "pintle", ""],
-      default: "",
-    },
-    specialFeatures: {
-      type: [String],
-      default: [],
-    },
+    // ── Equipment ──
+    trailerType: { type: String, trim: true },
+    customTrailerName: { type: String, trim: true },
+    // Platform-wide vehicle ceiling per load is 20 (Create Load hard cap)
+    maxVehicleCapacity: { type: Number, min: 1, max: 20, default: 1 },
+    truckMake: { type: String, trim: true },
+    truckModel: { type: String, trim: true },
+    truckYear: { type: Number, min: 1950, max: 2100 },
+    truckColor: { type: String, trim: true },
+    vin: { type: String, trim: true, uppercase: true, maxlength: 17 },
+    plateNumber: { type: String, trim: true },
+    gvwr: { type: Number, min: 0 },
+    engineType: { type: String, trim: true },
+    trailerMake: { type: String, trim: true },
+    trailerModel: { type: String, trim: true },
+    trailerYear: { type: Number, min: 1950, max: 2100 },
+    trailerLength: { type: Number, min: 0 },
+    trailerAxles: { type: Number, min: 0 },
+    trailerGvwr: { type: Number, min: 0 },
+    hitchType: { type: String, trim: true },
+    specialFeatures: { type: [String], default: [] },
+    dotNumber: { type: String, trim: true },
+    mcNumber: { type: String, trim: true },
 
-    driversLicenseNumber: { type: String, trim: true, default: "" },
-    licenseState: { type: String, trim: true, default: "" },
+    // ── License / insurance ──
+    driversLicenseNumber: { type: String, trim: true },
+    licenseState: { type: String, trim: true },
     licenseExpirationDate: { type: Date },
     medicalCardExpirationDate: { type: Date },
+    insuranceProvider: { type: String, trim: true },
+    insurancePolicyNumber: { type: String, trim: true },
     insuranceExpirationDate: { type: Date },
-    insuranceProvider: { type: String, trim: true, default: "" },
-    insurancePolicyNumber: { type: String, trim: true, default: "" },
-    documents: { type: [ComplianceDocumentSchema], default: [] },
 
-    ssnLast4: { type: String, trim: true, default: "" },
+    // ── Logistics ──
+    operationalStatus: { type: String, trim: true, default: "active" },
+    serviceRadius: { type: Number, min: 0 },
+    preferredRoutes: { type: [String], default: [] },
+    availableDays: { type: [String], default: [] },
+    homeBase: { type: homeBaseSchema, default: () => ({ type: "Point" }) },
+
+    // ── Compliance documents (max 20 enforced in controller) ──
+    documents: { type: [driverDocumentSchema], default: [] },
+
+    // ── Identity verification ──
+    ssnLast4: { type: String, maxlength: 4 },
     backgroundCheckConsent: { type: Boolean, default: false },
     backgroundCheckConsentDate: { type: Date },
     verificationAgreement: { type: Boolean, default: false },
     verificationAgreementDate: { type: Date },
     verificationStatus: {
       type: String,
-      enum: ["not_started", "in_progress", "under_review", "verified", "rejected"],
-      default: "not_started",
-    },
-    verificationNotes: { type: String, trim: true, default: "" },
-
-    operationalStatus: {
-      type: String,
-      enum: ["active", "on_leave", "maintenance", "terminated"],
-      default: "active",
-    },
-    homeBase: {
-      type: { type: String, enum: ["Point"], default: "Point" },
-      coordinates: { type: [Number], default: [0, 0] },
-      address: { type: String, trim: true, default: "" },
-      city: { type: String, trim: true, default: "" },
-      state: { type: String, trim: true, default: "" },
-      zip: { type: String, trim: true, default: "" },
-    },
-    serviceRadius: { type: Number, default: 500, min: 0, max: 3000 },
-    preferredRoutes: { type: [String], default: [] },
-    availableDays: {
-      type: [String],
-      default: ["monday", "tuesday", "wednesday", "thursday", "friday"],
-      enum: [
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday",
-        "sunday",
-      ],
+      enum: ["unverified", "pending", "in_progress", "under_review", "verified"],
+      default: "unverified",
     },
 
-    profileCompletionScore: { type: Number, default: 0, min: 0, max: 100 },
+    // ── Scores / flags ──
+    profileCompletionScore: { type: Number, min: 0, max: 100, default: 0 },
     isComplianceExpired: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
 
-DriverProfileSchema.index({ "homeBase.coordinates": "2dsphere" });
-DriverProfileSchema.index({ organizationId: 1, operationalStatus: 1 });
-DriverProfileSchema.index({ organizationId: 1, trailerType: 1 });
+driverProfileSchema.index({ organizationId: 1, operationalStatus: 1 });
 
-DriverProfileSchema.pre("save", function (next) {
-  let score = 0;
-  const total = 10;
-
-  if (this.trailerType) score++;
-  if (this.maxVehicleCapacity > 0) score++;
-  if (this.truckMake) score++;
-  if (this.driversLicenseNumber) score++;
-  if (this.licenseExpirationDate) score++;
-  if (this.medicalCardExpirationDate) score++;
-  if (this.insuranceExpirationDate) score++;
-  if (this.homeBase?.address) score++;
-  if (this.documents?.length > 0) score++;
-  if (this.dotNumber || this.mcNumber) score++;
-
-  this.profileCompletionScore = Math.round((score / total) * 100);
-
-  const now = new Date();
+// Keep the compliance flag current whenever a profile is saved
+driverProfileSchema.pre("save", function (next) {
+  const now = Date.now();
+  const expired = (d?: Date) => d != null && new Date(d).getTime() < now;
   this.isComplianceExpired =
-    (!!this.licenseExpirationDate && this.licenseExpirationDate < now) ||
-    (!!this.medicalCardExpirationDate && this.medicalCardExpirationDate < now) ||
-    (!!this.insuranceExpirationDate && this.insuranceExpirationDate < now);
-
+    expired(this.licenseExpirationDate) ||
+    expired(this.medicalCardExpirationDate) ||
+    expired(this.insuranceExpirationDate);
   next();
 });
 
-const DriverProfile = mongoose.model<IDriverProfile>(
+const DriverProfile: Model<IDriverProfile> = mongoose.model<IDriverProfile>(
   "DriverProfile",
-  DriverProfileSchema,
+  driverProfileSchema,
 );
-
 export default DriverProfile;

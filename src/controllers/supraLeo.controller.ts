@@ -18,9 +18,20 @@ import Feed from '../models/Feed.model';
 import FeedComment from '../models/FeedComment.model';
 import Appointment from '../models/Appointment.model';
 
+/**
+ * Placeholder credential.
+ *
+ * The OpenAI / Anthropic SDKs throw synchronously inside their constructors when
+ * given an empty-string apiKey. Because these clients are created at module load
+ * time, a single missing env var would crash the entire backend on boot.
+ *
+ * This placeholder is NEVER used for a real request — every handler below guards
+ * on the corresponding process.env.* value before touching a client.
+ */
+const NO_KEY_PLACEHOLDER = 'disabled-no-key';
 
 const gemini = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY || '',
+  apiKey: process.env.GEMINI_API_KEY || NO_KEY_PLACEHOLDER,
   baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
 });
 
@@ -33,7 +44,7 @@ const AI_CREDIT_MESSAGE =
   'Low Suprah Autrix credits — contact admin to upgrade.';
 
 const groq = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY || '',
+  apiKey: process.env.GROQ_API_KEY || NO_KEY_PLACEHOLDER,
   baseURL: 'https://api.groq.com/openai/v1',
 });
 
@@ -70,7 +81,7 @@ function getAiErrorMessage(error: any): string {
 }
 
 async function createAnthropicFallbackCompletion(options: any): Promise<any> {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' });
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || NO_KEY_PLACEHOLDER });
   const sourceMessages = Array.isArray(options.messages) ? options.messages : [];
   const systemMessage = sourceMessages
     .filter((message: any) => message.role === 'system')
@@ -120,6 +131,10 @@ async function createAnthropicFallbackCompletion(options: any): Promise<any> {
 }
 
 async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new ApiError(500, 'AI service not configured');
+  }
+
   try {
     return await gemini.chat.completions.create(options);
   } catch (error: any) {
@@ -990,6 +1005,7 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, {
     version: '2.1.0',
     name: 'Suprah Autrix',
+    aiConfigured: Boolean(process.env.GEMINI_API_KEY),
     features: {
       messageReading: true,
       voiceReply: true,

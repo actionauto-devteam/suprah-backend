@@ -13,7 +13,7 @@ import logger from '../utils/logger';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 
 const stripe = new Stripe(config.stripe.secretKey, {
-  apiVersion: "2026-01-28.clover",
+  apiVersion: "2026-02-25.clover",
 });
 
 const getUserId = (req: Request): string => {

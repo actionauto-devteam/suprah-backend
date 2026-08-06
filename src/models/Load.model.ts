@@ -1,171 +1,4 @@
-import mongoose, { Document, Schema } from "mongoose";
-
-
-export interface ILocationBlock {
-  locationType?: string;
-  companyName?: string;
-  contactName?: string;
-  email?: string;
-  phone?: string;
-  cellPhone?: string;
-  phoneExt?: string;
-  street?: string;
-  city: string;
-  state: string;
-  zip: string;
-  country: string;
-  buyerReferenceNumber?: string;
-  isTwicRequired?: boolean;
-  notes?: string;
-}
-
-const LocationBlockSchema = new Schema<ILocationBlock>(
-  {
-    locationType: { type: String, trim: true },
-    companyName: { type: String, trim: true },
-    contactName: { type: String, trim: true },
-    email: { type: String, trim: true, lowercase: true },
-    phone: { type: String, trim: true },
-    cellPhone: { type: String, trim: true },
-    phoneExt: { type: String, trim: true },
-    street: { type: String, trim: true },
-    city: { type: String, required: true, trim: true },
-    state: { type: String, required: true, trim: true, uppercase: true },
-    zip: { type: String, required: true, trim: true },
-    country: { type: String, default: "US", trim: true, uppercase: true },
-    buyerReferenceNumber: { type: String, trim: true, maxlength: 50 },
-    isTwicRequired: { type: Boolean, default: false },
-    notes: { type: String, trim: true, maxlength: 500 },
-  },
-  { _id: false },
-);
-
-
-export interface ILoadVehicle {
-  vehicleId?: mongoose.Types.ObjectId;
-  hasVin?: boolean;
-  vin?: string;
-  vehicleType?: string;
-  year?: number;
-  make?: string;
-  model?: string;
-  color?: string;
-  condition: "Operable" | "Inoperable";
-  oversized?: boolean;
-  lotNumber?: string;
-  licensePlate?: string;
-  licenseState?: string;
-  carrierNotes?: string;
-}
-
-const LoadVehicleSchema = new Schema<ILoadVehicle>(
-  {
-    vehicleId: { type: Schema.Types.ObjectId, ref: "Vehicle" },
-    hasVin: { type: Boolean, default: false },
-    vin: { type: String, trim: true, uppercase: true, maxlength: 17 },
-    vehicleType: { type: String, trim: true },
-    year: { type: Number },
-    make: { type: String, trim: true },
-    model: { type: String, trim: true },
-    color: { type: String, trim: true },
-    condition: {
-      type: String,
-      enum: ["Operable", "Inoperable"],
-      default: "Operable",
-    },
-    oversized: { type: Boolean, default: false },
-    lotNumber: { type: String, trim: true },
-    licensePlate: { type: String, trim: true, uppercase: true },
-    licenseState: { type: String, trim: true, uppercase: true },
-    carrierNotes: { type: String, trim: true, maxlength: 500 },
-  },
-  { _id: false },
-);
-
-
-export interface ILoadDates {
-  firstAvailable?: Date;
-  expirationDate?: Date;
-  pickupDeadline?: Date;
-  deliveryDeadline?: Date;
-  notes?: string;
-}
-
-const LoadDatesSchema = new Schema<ILoadDates>(
-  {
-    firstAvailable: { type: Date },
-    expirationDate: { type: Date },
-    pickupDeadline: { type: Date },
-    deliveryDeadline: { type: Date },
-    notes: { type: String, trim: true, maxlength: 500 },
-  },
-  { _id: false },
-);
-
-
-export interface ILoadPricing {
-  miles?: number;
-  estimatedRate?: number;
-  carrierPayAmount?: number;
-  copCodAmount?: number;
-  balanceAmount?: number;
-}
-
-const LoadPricingSchema = new Schema<ILoadPricing>(
-  {
-    miles: { type: Number },
-    estimatedRate: { type: Number },
-    carrierPayAmount: { type: Number },
-    copCodAmount: { type: Number, default: 0 },
-    balanceAmount: { type: Number },
-  },
-  { _id: false },
-);
-
-
-export interface ILoadAdditionalInfo {
-  notes?: string;
-  instructions?: string;
-  visibility: "public" | "private";
-  internalLoadId?: string;
-  preDispatchNotes?: string;
-  specialInstructions?: string;
-  loadSpecificTerms?: string;
-}
-
-const LoadAdditionalInfoSchema = new Schema<ILoadAdditionalInfo>(
-  {
-    notes: { type: String, trim: true, maxlength: 4000 },
-    instructions: { type: String, trim: true, maxlength: 4000 },
-    visibility: {
-      type: String,
-      enum: ["public", "private"],
-      default: "public",
-    },
-    internalLoadId: { type: String, trim: true, maxlength: 50 },
-    preDispatchNotes: { type: String, trim: true, maxlength: 4000 },
-    specialInstructions: { type: String, trim: true, maxlength: 4000 },
-    loadSpecificTerms: { type: String, trim: true, maxlength: 500 },
-  },
-  { _id: false },
-);
-
-
-export interface ILoadContract {
-  agreedToTerms: boolean;
-  signatureName?: string;
-  signedAt?: Date;
-}
-
-const LoadContractSchema = new Schema<ILoadContract>(
-  {
-    agreedToTerms: { type: Boolean, required: true, default: false },
-    signatureName: { type: String, trim: true, maxlength: 200 },
-    signedAt: { type: Date },
-  },
-  { _id: false },
-);
-
+import mongoose, { Schema, Document, Model } from "mongoose";
 
 export type LoadStatus =
   | "Draft"
@@ -176,199 +9,253 @@ export type LoadStatus =
   | "In-Transit"
   | "Delivered"
   | "Cancelled";
-export type LoadPostType = "load-board" | "assign-carrier";
 
 export interface ILoad extends Document {
+  _id: mongoose.Types.ObjectId;
   organizationId: string;
   orgId?: mongoose.Types.ObjectId;
-  createdBy: mongoose.Types.ObjectId;
-
+  createdBy?: mongoose.Types.ObjectId;
+  /** Set when the load was converted from a quote — referral.service
+   *  resolves referral credit through this link. */
   quoteId?: mongoose.Types.ObjectId;
-  migratedFromShipment?: boolean;
-
   loadNumber: string;
-  postType: LoadPostType;
+  postType: "load-board" | "assign-carrier";
   status: LoadStatus;
+  pickupLocation: Record<string, any>;
+  deliveryLocation: Record<string, any>;
+  vehicles: Array<Record<string, any>>;
   trailerType: string;
-
-  pickupLocation: ILocationBlock;
-  deliveryLocation: ILocationBlock;
-
-  vehicles: ILoadVehicle[];
-  dates?: ILoadDates;
-  pricing?: ILoadPricing;
-  additionalInfo?: ILoadAdditionalInfo;
-  contract?: ILoadContract;
-
+  dates?: Record<string, any>;
+  pricing: Record<string, any>;
+  additionalInfo?: Record<string, any>;
+  contract?: Record<string, any>;
   assignedDriverId?: mongoose.Types.ObjectId;
+  driverRequests: Array<{
+    driverId: mongoose.Types.ObjectId;
+    requestedAt: Date;
+    note?: string;
+  }>;
+  notes: Array<{ text: string; author: mongoose.Types.ObjectId; date: Date }>;
+  proofOfDelivery?: Record<string, any>;
   assignedAt?: Date;
-  driverAcceptedAt?: Date;
   acceptedAt?: Date;
   pickedUpAt?: Date;
   inTransitAt?: Date;
   deliveredAt?: Date;
-  droppedAt?: Date;
-
-  proofOfDelivery?: {
-    imageUrl: string;
-    submittedAt: Date;
-    note?: string;
-    submittedTo?: mongoose.Types.ObjectId;
-    confirmedAt?: Date;
-    confirmedBy?: mongoose.Types.ObjectId;
-  };
-
-  pendingDriverRequests?: Array<{
-    driverId: mongoose.Types.ObjectId;
-    driverName: string;
-    requestedAt: Date;
-    status: "pending" | "approved" | "rejected";
-    reviewedAt?: Date;
-    reviewedBy?: mongoose.Types.ObjectId;
-    rejectionReason?: string;
-  }>;
-
-  notes?: Array<{
-    text: string;
-    author: mongoose.Types.ObjectId;
-    date: Date;
-  }>;
-
   createdAt: Date;
   updatedAt: Date;
 }
 
-const LoadSchema = new Schema<ILoad>(
+const locationSchema = new Schema(
   {
-    organizationId: { type: String, required: true },
-    orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
-    createdBy: {
-      type: Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
+    name: { type: String, trim: true, default: "" },
+    address: { type: String, trim: true, required: true },
+    city: { type: String, trim: true, required: true },
+    state: { type: String, trim: true, required: true },
+    zip: { type: String, trim: true, required: true },
+    // ── NEW: LocationFields additions ──
+    // Mirrored in validations/load.validation.ts (zod locationBlockSchema);
+    // both layers must know these fields or they're silently dropped.
+    country: { type: String, trim: true, uppercase: true, maxlength: 3, default: "" },
+    phone: { type: String, trim: true, default: "" },
+    phoneExt: { type: String, trim: true, maxlength: 6, default: "" },
+    email: { type: String, trim: true, default: "" },
+    contactName: { type: String, trim: true, default: "" },
+    locationType: {
+      type: String,
+      enum: ["dealership", "auction", "residence", "business", "port", "other"],
+      default: undefined,
     },
+    notes: { type: String, trim: true, maxlength: 1000, default: "" },
+  },
+  { _id: false },
+);
 
-    loadNumber: { type: String, unique: true, sparse: true },
+const loadVehicleSchema = new Schema(
+  {
+    vehicleId: { type: Schema.Types.ObjectId, ref: "Vehicle", default: undefined },
+    vin: { type: String, trim: true, uppercase: true, maxlength: 17 },
+    year: { type: Number, min: 1900, max: 2100 },
+    make: { type: String, trim: true, default: "" },
+    model: { type: String, trim: true, default: "" },
+    color: { type: String, trim: true, default: "" },
+    condition: {
+      type: String,
+      enum: ["Operable", "Inoperable"],
+      default: "Operable",
+    },
+  },
+  { _id: false },
+);
 
+// ── "Make it Available Load" request queue ──
+// Drivers request a Posted, unassigned load from their account; the
+// dispatcher approves or rejects from the Transportation page.
+const driverRequestSchema = new Schema(
+  {
+    driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    requestedAt: { type: Date, default: Date.now },
+    note: { type: String, trim: true, maxlength: 500, default: "" },
+  },
+  { _id: false },
+);
+
+const loadSchema = new Schema<ILoad>(
+  {
+    organizationId: { type: String, required: true, index: true },
+    orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User" },
+    quoteId: { type: Schema.Types.ObjectId, ref: "Quote", index: true, sparse: true },
+    loadNumber: { type: String, unique: true, index: true },
     postType: {
       type: String,
       enum: ["load-board", "assign-carrier"],
       required: true,
-      default: "load-board",
     },
     status: {
       type: String,
-      enum: ["Draft", "Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"],
-      default: "Draft",
+      enum: [
+        "Draft",
+        "Posted",
+        "Assigned",
+        "Accepted",
+        "Picked Up",
+        "In-Transit",
+        "Delivered",
+        "Cancelled",
+      ],
+      default: "Posted",
+      index: true,
     },
-    trailerType: { type: String, required: true, trim: true },
-
-    pickupLocation: { type: LocationBlockSchema, required: true },
-    deliveryLocation: { type: LocationBlockSchema, required: true },
-
-    vehicles: { type: [LoadVehicleSchema], default: [] },
-    dates: { type: LoadDatesSchema },
-    pricing: { type: LoadPricingSchema },
-    additionalInfo: { type: LoadAdditionalInfoSchema },
-    contract: { type: LoadContractSchema },
-
-    quoteId: { type: Schema.Types.ObjectId, ref: "Quote" },
-    migratedFromShipment: { type: Boolean, default: false },
-
-    assignedDriverId: { type: Schema.Types.ObjectId, ref: "User", index: true },
-    assignedAt: { type: Date },
-    driverAcceptedAt: { type: Date },
-    acceptedAt: { type: Date },
-    pickedUpAt: { type: Date },
-    inTransitAt: { type: Date },
-    deliveredAt: { type: Date },
-    droppedAt: { type: Date },
-
+    pickupLocation: { type: locationSchema, required: true },
+    deliveryLocation: { type: locationSchema, required: true },
+    // Platform limit of 20 is enforced in validation + controller; the
+    // schema-level ceiling is a final backstop.
+    vehicles: {
+      type: [loadVehicleSchema],
+      validate: {
+        validator: (v: unknown[]) => Array.isArray(v) && v.length >= 1 && v.length <= 20,
+        message: "A load must include between 1 and 20 vehicles",
+      },
+    },
+    trailerType: { type: String, required: true },
+    dates: {
+      firstAvailable: { type: Date },
+      pickupDeadline: { type: Date },
+      deliveryDeadline: { type: Date },
+      notes: { type: String, trim: true, maxlength: 1000, default: "" },
+    },
+    pricing: {
+      miles: { type: Number, min: 0 },
+      estimatedRate: { type: Number, min: 0 },
+      // ── NEW: dispatcher's $/mi rate from Create Load ──
+      // Optional; absent on loads created before this field existed and on
+      // loads where carrier pay was typed directly without a rate estimate.
+      pricePerMile: { type: Number, min: 0 },
+      carrierPayAmount: { type: Number, min: 0 },
+      copCodAmount: { type: Number, min: 0, default: 0 },
+      balanceAmount: { type: Number },
+    },
+    additionalInfo: {
+      visibility: { type: String, enum: ["public", "private"], default: "public" },
+      notes: { type: String, trim: true, maxlength: 4000, default: "" },
+      instructions: { type: String, trim: true, maxlength: 4000, default: "" },
+      referenceNumber: { type: String, trim: true, maxlength: 120, default: "" },
+    },
+    contract: {
+      agreedToTerms: { type: Boolean, default: false },
+      signedAt: { type: Date },
+      // ── SignaturePad e-signature ──
+      signatureDataUrl: { type: String, maxlength: 200_000, default: null },
+      signerName: { type: String, trim: true, maxlength: 160, default: "" },
+    },
+    assignedDriverId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    driverRequests: { type: [driverRequestSchema], default: [] },
+    notes: [
+      {
+        text: { type: String, trim: true, maxlength: 4000 },
+        author: { type: Schema.Types.ObjectId, ref: "User" },
+        date: { type: Date, default: Date.now },
+      },
+    ],
     proofOfDelivery: {
-      imageUrl: { type: String, trim: true },
+      imageUrl: { type: String },
       submittedAt: { type: Date },
-      note: { type: String, trim: true },
+      note: { type: String, trim: true, maxlength: 2000 },
       submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },
-
-    pendingDriverRequests: [
-      {
-        driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
-        driverName: { type: String, required: true },
-        requestedAt: { type: Date, default: Date.now },
-        status: {
-          type: String,
-          enum: ["pending", "approved", "rejected"],
-          default: "pending",
-        },
-        reviewedAt: { type: Date },
-        reviewedBy: { type: Schema.Types.ObjectId, ref: "User" },
-        rejectionReason: { type: String, trim: true },
-      },
-    ],
-
-    notes: [
-      {
-        text: { type: String, required: true, trim: true, maxlength: 4000 },
-        author: { type: Schema.Types.ObjectId, ref: "User", required: true },
-        date: { type: Date, default: Date.now },
-      },
-    ],
+    // ── Lifecycle timestamps written by driver-tracking transitions ──
+    assignedAt: { type: Date },
+    acceptedAt: { type: Date },
+    pickedUpAt: { type: Date },
+    inTransitAt: { type: Date },
+    deliveredAt: { type: Date },
   },
   { timestamps: true },
 );
 
+// ── Indexes ──
+loadSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+loadSchema.index({ organizationId: 1, assignedDriverId: 1, status: 1 });
+loadSchema.index({
+  loadNumber: "text",
+  "pickupLocation.city": "text",
+  "deliveryLocation.city": "text",
+  "vehicles.vin": "text",
+  "vehicles.make": "text",
+  "vehicles.model": "text",
+});
 
-const LoadCounterSchema = new Schema(
-  { _id: { type: String, required: true }, seq: { type: Number, default: 0 } },
-  { collection: "loadcounters" },
+// ── Daily load-number counter: LD-YYYYMMDD-### per org per day ──
+const loadCounterSchema = new Schema(
+  { _id: String, seq: { type: Number, default: 0 } },
+  { versionKey: false },
 );
 const LoadCounter =
-  mongoose.models.LoadCounter ||
-  mongoose.model("LoadCounter", LoadCounterSchema);
+  (mongoose.models.LoadCounter as Model<any>) ||
+  mongoose.model("LoadCounter", loadCounterSchema);
 
-LoadSchema.pre("save", async function (next) {
-  if (!this.loadNumber) {
-    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    const counter = await LoadCounter.findOneAndUpdate(
-      { _id: datePart },
-      { $inc: { seq: 1 } },
-      { upsert: true, new: true },
-    );
-    this.loadNumber = `LD-${datePart}-${String(counter.seq).padStart(4, "0")}`;
+loadSchema.pre("validate", async function (this: ILoad, next: (err?: Error) => void) {
+  try {
+    if (this.isNew && !this.loadNumber) {
+      const now = new Date();
+      const yyyymmdd = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, "0"),
+        String(now.getDate()).padStart(2, "0"),
+      ].join("");
+      const counter = await LoadCounter.findOneAndUpdate(
+        { _id: `load-${this.organizationId}-${yyyymmdd}` },
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true },
+      );
+      this.loadNumber = `LD-${yyyymmdd}-${String(counter.seq).padStart(3, "0")}`;
+    }
+    next();
+  } catch (err) {
+    next(err as Error);
   }
+});
 
-  // 2. Compute balanceAmount from pricing
-  if (this.pricing) {
-    const pay = this.pricing.carrierPayAmount ?? 0;
-    const cod = this.pricing.copCodAmount ?? 0;
-    this.pricing.balanceAmount = pay - cod;
+// ── Balance auto-computation ──
+// NOTE: pre("save") does NOT run on findOneAndUpdate — controllers that
+// update pricing via $set (see updateLoad) recompute balanceAmount
+// explicitly. This hook covers document-style saves.
+loadSchema.pre("save", function (this: ILoad, next: (err?: Error) => void) {
+  const p: any = this.pricing ?? {};
+  if (typeof p.carrierPayAmount === "number") {
+    p.balanceAmount = p.carrierPayAmount - (p.copCodAmount ?? 0);
+    this.pricing = p;
   }
-
   next();
 });
 
-LoadSchema.index({ organizationId: 1, createdAt: -1 });
-LoadSchema.index({ organizationId: 1, status: 1 });
-LoadSchema.index({ organizationId: 1, "additionalInfo.visibility": 1 });
-LoadSchema.index({
-  "pendingDriverRequests.driverId": 1,
-  "pendingDriverRequests.status": 1,
-});
-LoadSchema.index({
-  loadNumber: "text",
-  "pickupLocation.city": "text",
-  "pickupLocation.state": "text",
-  "deliveryLocation.city": "text",
-  "deliveryLocation.state": "text",
-  "vehicles.make": "text",
-  "vehicles.model": "text",
-  "vehicles.vin": "text",
-});
-
-const Load = mongoose.model<ILoad>("Load", LoadSchema);
-
+const Load: Model<ILoad> = mongoose.model<ILoad>("Load", loadSchema);
 export default Load;

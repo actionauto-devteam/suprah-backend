@@ -1,10 +1,9 @@
 import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
 import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import CustomerInviteToken from '../models/CustomerInviteToken.model';
+import CustomerInviteToken, { InviteAccountType } from '../models/CustomerInviteToken.model';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import emailService from '../services/email.service';
@@ -23,14 +22,31 @@ function nameFromEmail(email: string): string {
   return prefix.charAt(0).toUpperCase() + prefix.slice(1);
 }
 
+// Normalize + validate the requested account type. Anything other than an
+// explicit 'driver' falls back to 'customer' so existing callers are unaffected.
+function resolveAccountType(raw: unknown): InviteAccountType {
+  return raw === 'driver' ? 'driver' : 'customer';
+}
+
+function accountTypeLabel(t: InviteAccountType): string {
+  return t === 'driver' ? 'driver' : 'customer';
+}
+
+/**
+ * POST /api/crm/customer-invites/generate
+ * CRM admin only — generate invite link(s).
+ * Body: { count?, multiUse?, accountType?: 'customer' | 'driver' }
+ */
 export const generateInviteLinks = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
   if (actor.role !== 'admin') {
-    throw new ApiError(403, 'Only admins can generate customer invite links');
+    throw new ApiError(403, 'Only admins can generate invite links');
   }
 
   const count = Math.min(Math.max(Number(req.body.count) || 1, 1), MAX_BULK);
   const multiUse = req.body.multiUse === true || req.body.multiUse === 'true';
+  const accountType = resolveAccountType(req.body.accountType);
+
   const org = await Organization.findById(actor.organizationId).lean();
   if (!org) throw new ApiError(404, 'Organization not found');
 
@@ -51,6 +67,7 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
       createdBy: actor._id,
       expiresAt,
       multiUse,
+      accountType,
     });
 
     invites.push({
@@ -58,6 +75,7 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
       link: `${config.frontendUrl}/join/${shortCode}`,
       expiresAt,
       multiUse,
+      accountType,
     });
   }
 
@@ -66,16 +84,19 @@ export const generateInviteLinks = asyncHandler(async (req: Request, res: Respon
 
 /**
  * POST /api/crm/customer-invites/bulk-create
- * CRM admin only — create accounts for a list of existing customers.
- * Body: { emails: string[] }
+ * CRM admin only — create accounts for a list of existing people.
+ * Body: { emails: string[], accountType?: 'customer' | 'driver' }
  */
 export const bulkCreateCustomerAccounts = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
   if (actor.role !== 'admin') {
-    throw new ApiError(403, 'Only admins can bulk-create customer accounts');
+    throw new ApiError(403, 'Only admins can bulk-create accounts');
   }
 
   const { emails } = req.body;
+  const accountType = resolveAccountType(req.body.accountType);
+  const label = accountTypeLabel(accountType);
+
   if (!Array.isArray(emails) || emails.length === 0) {
     throw new ApiError(400, 'emails must be a non-empty array');
   }
@@ -85,8 +106,6 @@ export const bulkCreateCustomerAccounts = asyncHandler(async (req: Request, res:
 
   const org = await Organization.findById(actor.organizationId).lean();
   if (!org) throw new ApiError(404, 'Organization not found');
-
-  const passwordHash = await bcrypt.hash(BULK_TEMP_PASSWORD, 10);
 
   const results: { email: string; status: 'created' | 'already_exists' | 'error'; reason?: string }[] = [];
 
@@ -105,11 +124,14 @@ export const bulkCreateCustomerAccounts = asyncHandler(async (req: Request, res:
 
     try {
       const name = nameFromEmail(email);
+      // NOTE: pass the PLAIN temp password — the User pre-save hook hashes
+      // `password` itself. (Previously a bcrypt hash was passed in and then
+      // hashed again by the hook, which double-hashed and broke first login.)
       await User.create({
         name,
         email,
-        password: passwordHash,
-        role: 'customer',
+        password: BULK_TEMP_PASSWORD,
+        role: accountType,
         organizationId: actor.organizationId,
         emailVerified: true,
         isApproved: true,
@@ -119,13 +141,13 @@ export const bulkCreateCustomerAccounts = asyncHandler(async (req: Request, res:
       // Send credentials email
       await emailService.sendEmail({
         to: email,
-        subject: `Your ${org.name} customer account is ready`,
-        text: `Hello ${name},\n\nYour customer account at ${org.name} has been created.\n\nEmail: ${email}\nTemporary password: ${BULK_TEMP_PASSWORD}\n\nPlease log in and update your password at your earliest convenience.\n\n${config.frontendUrl}/sign-in`,
+        subject: `Your ${org.name} ${label} account is ready`,
+        text: `Hello ${name},\n\nYour ${label} account at ${org.name} has been created.\n\nEmail: ${email}\nTemporary password: ${BULK_TEMP_PASSWORD}\n\nPlease log in and update your password at your earliest convenience.\n\n${config.frontendUrl}/sign-in`,
         html: `
           <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-            <h2 style="color:#111">Your account at ${org.name} is ready</h2>
+            <h2 style="color:#111">Your ${label} account at ${org.name} is ready</h2>
             <p>Hello <strong>${name}</strong>,</p>
-            <p>An account has been created for you on the ${org.name} platform.</p>
+            <p>A ${label} account has been created for you on the ${org.name} platform.</p>
             <table style="border-collapse:collapse;margin:16px 0">
               <tr><td style="padding:4px 12px 4px 0;color:#555">Email</td><td style="padding:4px 0"><strong>${email}</strong></td></tr>
               <tr><td style="padding:4px 12px 4px 0;color:#555">Temporary password</td><td style="padding:4px 0"><strong>${BULK_TEMP_PASSWORD}</strong></td></tr>
@@ -147,13 +169,13 @@ export const bulkCreateCustomerAccounts = asyncHandler(async (req: Request, res:
   const skipped = results.filter(r => r.status === 'already_exists').length;
   const failed  = results.filter(r => r.status === 'error').length;
 
-  res.json(new ApiResponse(200, { results, created, skipped, failed },
+  res.json(new ApiResponse(200, { results, created, skipped, failed, accountType },
     `Done: ${created} created, ${skipped} skipped (already exist), ${failed} failed`));
 });
 
 /**
  * GET /api/auth/invite/:shortCode
- * Public — validate a customer invite link and return org info.
+ * Public — validate an invite link and return org info + account type.
  */
 export const validateInviteLink = asyncHandler(async (req: Request, res: Response) => {
   const { shortCode } = req.params;
@@ -180,12 +202,14 @@ export const validateInviteLink = asyncHandler(async (req: Request, res: Respons
     orgName: org.name,
     orgLogo: org.logoUrl ?? null,
     expiresAt: token.expiresAt,
+    accountType: token.accountType || 'customer',
   }, 'Invite link is valid'));
 });
 
 /**
  * POST /api/auth/invite/:shortCode/register
- * Public — register a customer account via an invite link.
+ * Public — register an account via an invite link. The role is taken from the
+ * invite token (customer or driver), never from the request body.
  * Body: { name, email, password }
  */
 export const registerViaInvite = asyncHandler(async (req: Request, res: Response) => {
@@ -204,6 +228,9 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   if (!token.multiUse && token.isUsed) throw new ApiError(410, 'This invite link has already been used');
   if (new Date() > token.expiresAt) throw new ApiError(410, 'This invite link has expired');
 
+  const accountType = resolveAccountType(token.accountType);
+  const label = accountTypeLabel(accountType);
+
   const normalizedEmail = email.trim().toLowerCase();
   const existing = await User.findOne({ email: normalizedEmail });
   if (existing) throw new ApiError(400, 'An account with this email already exists');
@@ -215,7 +242,7 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     name: name.trim(),
     email: normalizedEmail,
     password,
-    role: 'customer',
+    role: accountType,
     organizationId: token.organizationId,
     emailVerified: true,
     isApproved: true,
@@ -235,12 +262,12 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     await emailService.sendEmail({
       to: normalizedEmail,
       subject: `Welcome to ${org.name} - account created`,
-      text: `Hello ${name.trim()},\n\nYour customer account at ${org.name} has been successfully created.\n\nEmail: ${normalizedEmail}\nPassword: ${password}\n\nYou can now log in at: ${config.frontendUrl}/sign-in`,
+      text: `Hello ${name.trim()},\n\nYour ${label} account at ${org.name} has been successfully created.\n\nEmail: ${normalizedEmail}\nPassword: ${password}\n\nYou can now log in at: ${config.frontendUrl}/sign-in`,
       html: `
         <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
           <h2 style="color:#111">Welcome to ${org.name}!</h2>
           <p>Hello <strong>${name.trim()}</strong>,</p>
-          <p>Your customer account has been successfully created.</p>
+          <p>Your ${label} account has been successfully created.</p>
           <table style="border-collapse:collapse;margin:16px 0">
             <tr><td style="padding:4px 12px 4px 0;color:#555">Email</td><td style="padding:4px 0"><strong>${normalizedEmail}</strong></td></tr>
             <tr><td style="padding:4px 12px 4px 0;color:#555">Password</td><td style="padding:4px 0"><strong>${password}</strong></td></tr>
@@ -254,13 +281,14 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     // Email failure is non-fatal — account is already created
   }
 
-  res.status(201).json(new ApiResponse(201, { email: normalizedEmail }, 'Account created successfully'));
+  res.status(201).json(new ApiResponse(201, { email: normalizedEmail, accountType }, 'Account created successfully'));
 });
 
 /**
  * GET /api/crm/customer-invites/customers
- * CRM admin only — list all customer accounts for the org.
- * Query: { search?, sortBy?, sortOrder?, page?, limit? }
+ * CRM admin only — list customer/driver accounts for the org.
+ * Query: { search?, sortBy?, sortOrder?, page?, limit?, role?: 'customer' | 'driver' | 'all' }
+ * Defaults to role=customer so existing callers behave exactly as before.
  */
 export const getCustomers = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
@@ -277,14 +305,22 @@ export const getCustomers = asyncHandler(async (req: Request, res: Response) => 
     sortOrder = 'desc',
     page = '1',
     limit = '50',
+    role = 'customer',
   } = req.query;
 
   const pageNum = Math.max(Number(page) || 1, 1);
   const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 100);
   const skip = (pageNum - 1) * limitNum;
 
+  const roleFilter =
+    role === 'all'
+      ? { $in: ['customer', 'driver'] }
+      : role === 'driver'
+        ? 'driver'
+        : 'customer';
+
   const filter: any = {
-    role: 'customer',
+    role: roleFilter,
     organizationId: actor.organizationId,
   };
 
@@ -326,10 +362,14 @@ export const getCustomers = asyncHandler(async (req: Request, res: Response) => 
   );
 });
 
+/**
+ * DELETE /api/crm/customer-invites/customers/:userId
+ * CRM admin only — delete a customer or driver account.
+ */
 export const deleteCustomer = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser!;
   if (actor.role !== 'admin') {
-    throw new ApiError(403, 'Only admins can delete customer accounts');
+    throw new ApiError(403, 'Only admins can delete accounts');
   }
   if (!actor.organizationId) {
     throw new ApiError(403, 'Account not linked to an organization');
@@ -339,15 +379,15 @@ export const deleteCustomer = asyncHandler(async (req: Request, res: Response) =
 
   const customer = await User.findOne({
     _id: userId,
-    role: 'customer',
+    role: { $in: ['customer', 'driver'] },
     organizationId: actor.organizationId,
   });
 
   if (!customer) {
-    throw new ApiError(404, 'Customer account not found');
+    throw new ApiError(404, 'Account not found');
   }
 
   await User.deleteOne({ _id: customer._id });
 
-  res.json(new ApiResponse(200, { deletedId: userId }, 'Customer account deleted'));
+  res.json(new ApiResponse(200, { deletedId: userId }, 'Account deleted'));
 });

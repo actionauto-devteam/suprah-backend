@@ -13,7 +13,6 @@ import {
   calculateRate,
   calculateETA,
 } from "../utils/calculations";
-import { maskLoadForDriver } from "../utils/loadMask";
 import { storageService, BucketType } from "../services/storage.service";
 import { getSignedProofUrl } from "../utils/signedUrlCache";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
@@ -175,9 +174,24 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     pricingWarning = "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
   }
 
+  // ── NEW: persist the dispatcher's $/mi rate ──
+  // The frontend keeps pricePerMile and carrierPayAmount in two-way sync
+  // (pay = ppm × miles); we store the rate the dispatcher settled on so
+  // load cards and detail views can show "$X.XX/mi" without re-deriving
+  // it from rounded totals. Guarded to non-negative finite numbers —
+  // NaN/negative input degrades to "field absent", never a bad write.
+  // NOTE: requires `pricePerMile` in createLoadSchema's pricing shape,
+  // otherwise zod strips it before we get here (see load.validation.ts).
+  const rawPpm = (clientPricing as any)?.pricePerMile;
+  const pricePerMile =
+    typeof rawPpm === "number" && Number.isFinite(rawPpm) && rawPpm >= 0
+      ? rawPpm
+      : undefined;
+
   const pricing = {
     miles: computedMiles,
     estimatedRate,
+    pricePerMile,
     carrierPayAmount: clientPricing?.carrierPayAmount,
     copCodAmount: clientPricing?.copCodAmount ?? 0,
     // balanceAmount computed automatically by pre-save hook in the model
@@ -198,7 +212,13 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     });
   }
 
-  // Validation 2: Check trailer capacity
+  // Validation 2: Vehicle count limits.
+  // HARD LIMIT: 20 vehicles per load (applies to both load-board and
+  // assign-carrier). Per-trailer capacity is now a NON-BLOCKING warning —
+  // the dispatcher may intentionally post multi-trip or oversized loads,
+  // but they're told when the selected trailer's rated capacity is exceeded.
+  const MAX_VEHICLES_PER_LOAD = 20;
+
   const TRAILER_CAPACITY: Record<string, number> = {
     open_3car_wedge: 3,
     open_2car: 2,
@@ -216,19 +236,24 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     rgn: 2,
     double_drop: 2,
     power_only: 0,
-    other: 1,
+    other: 20,
   };
 
-  const maxVehicles = TRAILER_CAPACITY[trailerType] ?? 1;
   const vehicleCount = vehicles?.length || 0;
 
-  if (vehicleCount > maxVehicles) {
+  if (vehicleCount > MAX_VEHICLES_PER_LOAD) {
     return res.status(400).json({
       success: false,
-      error: `Max ${maxVehicles} vehicles allowed for ${trailerType}`,
+      error: `Max ${MAX_VEHICLES_PER_LOAD} vehicles allowed per load`,
       code: 'CAPACITY_EXCEEDED',
       field: 'vehicles',
     });
+  }
+
+  let capacityWarning: string | undefined;
+  const ratedCapacity = TRAILER_CAPACITY[trailerType];
+  if (ratedCapacity !== undefined && vehicleCount > ratedCapacity) {
+    capacityWarning = `This load has ${vehicleCount} vehicles but the selected trailer (${trailerType.replace(/_/g, ' ')}) is rated for ${ratedCapacity}. Multiple trips or a larger trailer may be required.`;
   }
 
   // Validation 3: Check for past dates
@@ -315,7 +340,17 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
 
   logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
 
-  return res.status(201).json(new ApiResponse(201, { load, ...(pricingWarning ? { warning: pricingWarning } : {}) }, "Load created successfully"));
+  const warnings = [pricingWarning, capacityWarning].filter(Boolean);
+  return res.status(201).json(
+    new ApiResponse(
+      201,
+      {
+        load,
+        ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+      },
+      "Load created successfully",
+    ),
+  );
 });
 
 // ─── Get Inventory Vehicles (for VIN picker) ──────────────────────────────────
@@ -395,9 +430,6 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     filter.createdAt = { $gte: startDate, $lt: endDate };
   }
 
-  const user = getUser(req);
-  const isDriver = user?.role === "driver";
-
   const [rawLoads, total, summaryRows] = await Promise.all([
     Load.find(filter)
       .populate("assignedDriverId", "name email phone avatar")
@@ -422,11 +454,12 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     ]),
   ]);
 
-  const loads = isDriver
-    ? rawLoads.map((load) => maskLoadForDriver(load as unknown as Record<string, unknown>))
-    : rawLoads;
+  // BUSINESS RULE CHANGE: drivers now receive the COMPLETE load record —
+  // no simplified/masked version. Drivers need full pickup/delivery contact,
+  // pricing, notes, and reference data to perform the transport task.
+  const loads = rawLoads;
 
-  // Attach real inventory photos (runs AFTER masking so imageUrl survives)
+  // Attach real inventory photos
   await attachInventoryImages(loads as Array<Record<string, any>>, organizationId);
 
   const loadsWithSignedProofs = await Promise.all(
@@ -511,16 +544,14 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
 
 const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
-  const user = getUser(req);
 
   const raw = await Load.findOne({ _id: req.params.id, organizationId })
     .populate("assignedDriverId", "name email phone avatar")
     .lean();
   if (!raw) throw new ApiError(404, "Load not found");
 
-  const load = user?.role === "driver"
-    ? maskLoadForDriver(raw as unknown as Record<string, unknown>)
-    : raw;
+  // BUSINESS RULE CHANGE: no driver masking — full load record for all roles.
+  const load = raw;
 
   // Attach real inventory photos (single-item batch)
   await attachInventoryImages([load as Record<string, any>], organizationId);
@@ -576,7 +607,10 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
   if (dates !== undefined) updateData.dates = dates;
   if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
   if (pricing !== undefined) {
-    // If pricing is provided, we merge it with existing pricing to preserve computed fields
+    // If pricing is provided, we merge it with existing pricing to preserve
+    // computed fields. pricePerMile rides through this merge automatically —
+    // an edit payload that includes it overwrites, one that omits it keeps
+    // the stored rate.
     updateData.pricing = { ...load.pricing, ...pricing };
   }
 
@@ -605,6 +639,23 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
         if (!updateData.pricing) updateData.pricing = { ...load.pricing };
         updateData.pricing.miles = miles;
         updateData.pricing.estimatedRate = estimatedRate;
+
+        // ── NEW: keep the dispatcher's rate consistent over a NEW distance ──
+        // Mirrors the Create Load frontend behavior: if a $/mi rate is on
+        // file and this edit did NOT explicitly set carrierPayAmount, the
+        // rate wins and pay is re-derived against the recalculated mileage.
+        // An explicit carrierPayAmount in the payload always takes priority.
+        const storedPpm = updateData.pricing.pricePerMile;
+        const payExplicitlyProvided =
+          pricing !== undefined && pricing.carrierPayAmount !== undefined;
+        if (
+          !payExplicitlyProvided &&
+          typeof storedPpm === "number" &&
+          Number.isFinite(storedPpm) &&
+          storedPpm > 0
+        ) {
+          updateData.pricing.carrierPayAmount = Math.round(storedPpm * miles);
+        }
       }
     } catch (err) {
       logger.error({ err, loadId }, "Error recalculating pricing on update");

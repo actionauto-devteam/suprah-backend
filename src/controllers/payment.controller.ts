@@ -16,7 +16,7 @@ import { getSocketIO, emitToUser } from '../utils/socketEmitter';
 import { getIO } from '../socket/supraspace.socket';
 
 const stripe = new Stripe(config.stripe.secretKey, {
-  apiVersion: '2026-01-28.clover',
+  apiVersion: '2026-02-25.clover',
 });
 
 const CUSTOMER_APP_URL =
