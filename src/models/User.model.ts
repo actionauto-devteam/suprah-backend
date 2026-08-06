@@ -377,6 +377,11 @@ UserSchema.methods.isPasswordMatch = async function (password: string): Promise<
   return bcrypt.compare(password, user.password!);
 };
 
+// Backs the org-drivers directory lookup (User.find({ organizationId, role,
+// isActive })) — without this, that query only narrows on the single-field
+// organizationId index and filters role/isActive in memory.
+UserSchema.index({ organizationId: 1, role: 1, isActive: 1 });
+
 const User = mongoose.model<IUser, IUserModel>('User', UserSchema);
 
 export default User;
