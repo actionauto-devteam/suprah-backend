@@ -669,7 +669,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride payrollLocation isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -710,7 +710,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, payrollLocation } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -760,6 +760,13 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (locationRequiredOverride !== undefined && ['default', 'required', 'exempt'].includes(locationRequiredOverride)) {
     user.locationRequiredOverride = locationRequiredOverride;
+  }
+
+  if (payrollLocation !== undefined) {
+    if (payrollLocation !== null && !['Utah', 'Philippines'].includes(payrollLocation)) {
+      throw new ApiError(400, 'payrollLocation must be "Utah" or "Philippines"');
+    }
+    user.payrollLocation = payrollLocation ?? undefined;
   }
 
   await user.save({ validateModifiedOnly: true });

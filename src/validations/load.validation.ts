@@ -48,6 +48,9 @@ const loadVehicleSchema = z.object({
   model: z.string().trim().max(80).optional().or(z.literal("")),
   color: z.string().trim().max(60).optional().or(z.literal("")),
   condition: vehicleConditionSchema.default("Operable"),
+  // Inspect step — set via the dedicated inspection-photo upload endpoint,
+  // not the create/update body, but must round-trip through updateLoad.
+  inspectionPhotoUrl: z.string().trim().optional().or(z.literal("")),
 });
 
 export const TRAILER_TYPES = [
@@ -90,25 +93,38 @@ const additionalInfoSchema = z
   })
   .optional();
 
+// ── Freehand e-signature from the SignaturePad ──
+// PNG data URL. 200k ceiling mirrors the User model field. Shared shape
+// between the dispatcher's contract (optional — enforced client-side +
+// by validateContract()) and the driver's signature (required — see
+// driverSignSchema below, no signing without both fields present).
+const signatureDataUrlSchema = z
+  .string()
+  .trim()
+  .max(200_000, "Signature image is too large")
+  .refine(
+    (v: string) => v === "" || v.startsWith("data:image/"),
+    "Signature must be an image data URL",
+  );
+
 const contractSchema = z
   .object({
     agreedToTerms: z.boolean().default(false),
-    // ── Freehand e-signature from the SignaturePad ──
-    // PNG data URL. 200k ceiling mirrors the User model field.
-    signatureDataUrl: z
-      .string()
-      .trim()
-      .max(200_000, "Signature image is too large")
-      .refine(
-        (v: string) => v === "" || v.startsWith("data:image/"),
-        "Signature must be an image data URL",
-      )
-      .optional()
-      .or(z.literal(""))
-      .nullable(),
+    signatureDataUrl: signatureDataUrlSchema.optional().or(z.literal("")).nullable(),
     signerName: z.string().trim().max(160).optional().or(z.literal("")),
   })
   .optional();
+
+// ─── Driver contract signature (accept / request load) ───────────────────────
+// Required, not optional — a driver cannot accept or request a load without
+// agreeing to terms and providing a signature.
+export const driverSignSchema = z.object({
+  agreedToTerms: z.literal(true, "You must agree to the transport terms"),
+  signatureDataUrl: signatureDataUrlSchema.min(1, "A signature is required"),
+  signerName: z.string().trim().max(160).optional().or(z.literal("")),
+});
+
+export type DriverSignInput = z.infer<typeof driverSignSchema>;
 
 const pricingInputSchema = z
   .object({

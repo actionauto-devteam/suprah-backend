@@ -1,4 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
+// This router serves both dispatchers (staff) and drivers, both of whom are
+// regular User-model accounts authenticated through the main JWT, not CrmUser
+// records. It therefore uses auth(), which sets req.user and req.orgId.
 import auth from "../middleware/auth.middleware";
 import driverTrackingController from "../controllers/driverTracking.controller";
 import driverDirectoryController from "../controllers/driverDirectory.controller";
@@ -15,6 +18,7 @@ const staffOnly = (req: Request, res: Response, next: NextFunction) => {
 const router = Router();
 
 // Driver Tracker uses the main User identity for both staff and drivers.
+// Everything below requires an authenticated organization member.
 router.use(auth());
 
 // Directory / map
@@ -41,6 +45,7 @@ router.post(
 
 // Driver load lists
 router.get("/my-loads", driverTrackingController.getMyLoads);
+router.get("/my-requests", driverTrackingController.getMyRequests);
 router.get("/available-loads", driverTrackingController.getAvailableLoads);
 
 router.get("/loads/:id", driverTrackingController.getLoadDetail);

@@ -12,6 +12,19 @@ import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotificati
 import activityService from "../services/activity.service";
 import Notification from "../models/Notification.model";
 import notificationService from "../services/notification.service";
+import { driverSignSchema } from "../validations/load.validation";
+
+// ── Driver contract signature — required on both accept and request; a
+// driver cannot take a load without agreeing to terms and signing. ──
+function parseDriverSignature(body: unknown) {
+  const result = driverSignSchema.safeParse(body);
+  if (!result.success) {
+    const message =
+      result.error.issues[0]?.message || "A signed contract is required";
+    throw new ApiError(400, message);
+  }
+  return result.data;
+}
 
 const getUser = (req: Request) => req.user as IUser;
 
@@ -450,6 +463,32 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+// GET /api/driver-tracking/my-requests
+// Loads this driver has requested that are still awaiting a dispatcher
+// decision. There's no persisted "rejected" state — rejectLoadRequest
+// removes the entry outright — so every driverRequests match here is
+// inherently pending.
+const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const loads = await Load.find({
+    organizationId,
+    status: "Posted",
+    "driverRequests.driverId": user._id,
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const myId = user._id.toString();
+  const data = (loads as any[]).map((l) => {
+    const mine = (l.driverRequests ?? []).find((r: any) => String(r.driverId) === myId);
+    return { ...l, myRequestStatus: "pending", myRequestedAt: mine?.requestedAt ?? null };
+  });
+
+  return res.status(200).json(new ApiResponse(200, data, "My requests fetched"));
+});
+
 // GET /api/driver-tracking/loads/:id
 // BUSINESS RULE CHANGE: no driver masking — the full load record is
 // returned. maskLoadForDriver is no longer used anywhere.
@@ -471,6 +510,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
   const { note } = req.body as { note?: string };
+  const signature = parseDriverSignature(req.body);
 
   const load = await Load.findOne({ _id: req.params.id, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
@@ -500,6 +540,12 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     note: (note ?? "").slice(0, 500),
   });
   (load as any).driverRequests = requests;
+  (load as any).driverContract = {
+    agreedToTerms: true,
+    signedAt: new Date(),
+    signatureDataUrl: signature.signatureDataUrl,
+    signerName: signature.signerName || user.name || "",
+  };
   await load.save();
 
   emitLoadSync(organizationId, [], load._id.toString());
@@ -823,6 +869,7 @@ const requireAssignedDriver = (load: any, userId: string) => {
 const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
+  const signature = parseDriverSignature(req.body);
 
   const load = await Load.findOne({ _id: req.params.id, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
@@ -833,6 +880,12 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
 
   load.status = "Accepted";
   (load as any).acceptedAt = new Date();
+  (load as any).driverContract = {
+    agreedToTerms: true,
+    signedAt: new Date(),
+    signatureDataUrl: signature.signatureDataUrl,
+    signerName: signature.signerName || user.name || "",
+  };
   await load.save();
 
   emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
@@ -997,6 +1050,7 @@ export default {
   reassignLoad,
   removeLoad,
   getMyLoads,
+  getMyRequests,
   getAvailableLoads,
   getLoadDetail,
   requestLoad,

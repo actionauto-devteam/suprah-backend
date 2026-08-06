@@ -29,6 +29,7 @@ export interface ILoad extends Document {
   pricing: Record<string, any>;
   additionalInfo?: Record<string, any>;
   contract?: Record<string, any>;
+  driverContract?: Record<string, any>;
   assignedDriverId?: mongoose.Types.ObjectId;
   driverRequests: Array<{
     driverId: mongoose.Types.ObjectId;
@@ -84,6 +85,8 @@ const loadVehicleSchema = new Schema(
       enum: ["Operable", "Inoperable"],
       default: "Operable",
     },
+    // ── Inspect step: per-vehicle condition photo (or a photo of a QR/tag) ──
+    inspectionPhotoUrl: { type: String, default: "" },
   },
   { _id: false },
 );
@@ -166,6 +169,15 @@ const loadSchema = new Schema<ILoad>(
       agreedToTerms: { type: Boolean, default: false },
       signedAt: { type: Date },
       // ── SignaturePad e-signature ──
+      signatureDataUrl: { type: String, maxlength: 200_000, default: null },
+      signerName: { type: String, trim: true, maxlength: 160, default: "" },
+    },
+    // ── Driver's own signature — separate from the dispatcher's `contract`
+    // above. Signed at accept-time (Assigned loads) or request-time
+    // (Posted/board loads) in driverTracking.controller.ts. ──
+    driverContract: {
+      agreedToTerms: { type: Boolean, default: false },
+      signedAt: { type: Date },
       signatureDataUrl: { type: String, maxlength: 200_000, default: null },
       signerName: { type: String, trim: true, maxlength: 160, default: "" },
     },
