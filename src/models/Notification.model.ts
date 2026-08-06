@@ -124,6 +124,7 @@ const NotificationSchema = new Schema(
         'driver_tracker_geofence_alert',
         'driver_tracker_offline_alert',
         'driver_tracker_place_visit',
+        'driver_dispatch_alert',
 
         'payment_received',
         'payment_pending',

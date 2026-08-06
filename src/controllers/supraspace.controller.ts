@@ -424,18 +424,37 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
   if (!targetUserId) throw new ApiError(400, 'targetUserId is required');
   if (targetUserId === userId.toString()) throw new ApiError(400, 'Cannot DM yourself');
 
-  let target = await CrmUser.findById(targetUserId).lean();
+  const organizationId = req.crmUser!.organizationId;
+
+  let target = await CrmUser.findOne({
+    _id: targetUserId,
+    organizationId,
+    isActive: true,
+  }).lean();
 
   if (!target) {
-    const mainUser = await User.findById(targetUserId).select('email').lean();
+    const mainUser = await User.findOne({
+      _id: targetUserId,
+      organizationId,
+      isActive: true,
+    }).select('email').lean();
     if (mainUser?.email) {
-      target = await CrmUser.findOne({ email: mainUser.email }).lean();
+      target = await CrmUser.findOne({
+        email: mainUser.email.toLowerCase(),
+        organizationId,
+        isActive: true,
+      }).lean();
     }
   }
 
-  if (!target) throw new ApiError(404, 'User not found');
+  if (!target) {
+    throw new ApiError(404, 'This driver does not have an active Suprah Space account in your organization');
+  }
 
   const resolvedTargetId = target._id;
+  if (resolvedTargetId.toString() === userId.toString()) {
+    throw new ApiError(400, 'Cannot DM yourself');
+  }
 
   let conversation = await SupraSpaceConversation.findOne({
     type: 'direct',
