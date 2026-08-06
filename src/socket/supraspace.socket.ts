@@ -204,6 +204,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
           { conversationId, readBy: { $ne: user._id } },
           { $addToSet: { readBy: user._id } }
         );
+        await SupraSpaceConversation.updateOne(
+          { _id: conversationId, manualUnreadBy: user._id },
+          { $pull: { manualUnreadBy: user._id } }
+        );
         socket.to(`conv:${conversationId}`).emit('messages:read', {
           conversationId,
           userId,
@@ -228,6 +232,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
         await SupraSpaceMessage.updateMany(
           { conversationId: { $in: convIds }, readBy: { $ne: user._id } },
           { $addToSet: { readBy: user._id } }
+        );
+        await SupraSpaceConversation.updateMany(
+          { _id: { $in: convIds }, manualUnreadBy: user._id },
+          { $pull: { manualUnreadBy: user._id } }
         );
         const idStrings = convIds.map((id) => id.toString());
         idStrings.forEach((conversationId) => {

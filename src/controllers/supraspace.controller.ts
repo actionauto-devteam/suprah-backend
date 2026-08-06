@@ -331,12 +331,14 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const safeConv = { ...c, members: (c.members || []).filter(Boolean) };
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
+      const manualUnreadCleared = idIn(safeConv.manualUnreadBy as any, userId);
       return {
         ...safeConv,
         notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
         lastMessage: null,
         lastMessageAt: null,
-        unreadCount: 0,
+        unreadCount: manualUnreadCleared ? 1 : 0,
+        manualUnread: manualUnreadCleared,
       };
     }
     const unreadFilter: any = {
@@ -367,12 +369,14 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
           $or: mentionContentQuery,
         })
       : 0;
+    const manualUnread = idIn(safeConv.manualUnreadBy as any, userId);
     return {
       ...safeConv,
       notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
-      unreadCount,
+      unreadCount: manualUnread ? Math.max(unreadCount, 1) : unreadCount,
       mentionCount,
       unreadMentionCount,
+      manualUnread,
     };
   }));
 
@@ -661,6 +665,32 @@ const pinConversation = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { conversationId: id, pinned }, pinned ? 'Conversation pinned' : 'Conversation unpinned'));
 });
 
+/** POST /api/supraspace/conversations/:id/mark-unread  { unread: boolean } */
+const markConversationUnread = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const unread = req.body?.unread !== false;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  if (unread) {
+    if (!idIn(conversation.manualUnreadBy as any, userId)) conversation.manualUnreadBy.push(userId as any);
+  } else {
+    conversation.manualUnreadBy = conversation.manualUnreadBy.filter((m) => m.toString() !== userId.toString()) as any;
+  }
+  await conversation.save();
+
+  try {
+    getIO().to(`user:${userId.toString()}`).emit('conversation:manual-unread', { conversationId: id, unread });
+  } catch {
+    // Realtime sync across the user's own tabs/devices is best-effort only.
+  }
+
+  res.json(new ApiResponse(200, { conversationId: id, unread }, unread ? 'Conversation marked unread' : 'Conversation marked read'));
+});
+
 /** PATCH /api/supraspace/conversations/:id/theme  { theme } */
 const setTheme = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -720,6 +750,10 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   SupraSpaceMessage.updateMany(
     { conversationId: id, readBy: { $ne: userId } },
     { $addToSet: { readBy: userId } }
+  ).catch(() => {});
+  SupraSpaceConversation.updateOne(
+    { _id: id, manualUnreadBy: userId },
+    { $pull: { manualUnreadBy: userId } }
   ).catch(() => {});
 
   // Customer messages use a synthetic sentinel ObjectId for `sender` that doesn't
@@ -1693,6 +1727,7 @@ const supraSpaceController = {
   updateAvatar,
   deleteConversation,
   archiveConversation,
+  markConversationUnread,
   pinConversation,
   updateConversationNotifications,
   setTheme,

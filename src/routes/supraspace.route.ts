@@ -98,6 +98,7 @@ router.patch('/conversations/:id',          supraSpaceController.updateConversat
 router.post('/conversations/:id/avatar',    uploadAvatarImage, supraSpaceController.updateAvatar);
 router.delete('/conversations/:id',         supraSpaceController.deleteConversation);
 router.post('/conversations/:id/archive',   supraSpaceController.archiveConversation);
+router.post('/conversations/:id/mark-unread', supraSpaceController.markConversationUnread);
 router.post('/conversations/:id/pin',       supraSpaceController.pinConversation);
 router.patch('/conversations/:id/notifications', supraSpaceController.updateConversationNotifications);
 router.patch('/conversations/:id/theme',    supraSpaceController.setTheme);

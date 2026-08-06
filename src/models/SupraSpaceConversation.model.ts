@@ -36,6 +36,7 @@ export interface ISupraSpaceConversation extends Document {
   admins: mongoose.Types.ObjectId[];
   pinnedBy: mongoose.Types.ObjectId[];
   archivedBy: mongoose.Types.ObjectId[];
+  manualUnreadBy: mongoose.Types.ObjectId[];
   deletedFor: mongoose.Types.ObjectId[];
   clearedAt: Record<string, Date>;
   spaceId?: mongoose.Types.ObjectId | null;
@@ -93,6 +94,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
     admins:     [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     pinnedBy:   [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     archivedBy: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
+    manualUnreadBy: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     deletedFor: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     clearedAt:  { type: Schema.Types.Mixed, default: () => ({}) },
     spaceId:    { type: Schema.Types.ObjectId, ref: 'SupraSpaceSpace', default: null },

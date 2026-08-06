@@ -234,9 +234,10 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
         // Same user joining from a second socket replaces the first — the
         // client tears down old peers when it sees peer-left for itself.
         const prev = s.participants.get(userId);
-        if (prev && prev.socketId !== socket.id) {
-          io.to(prev.socketId).emit('yapline:replaced', { conversationId });
-          const prevSock = io.sockets.sockets.get(prev.socketId);
+        const movedFromAnotherDevice = !!prev && prev.socketId !== socket.id;
+        if (movedFromAnotherDevice) {
+          io.to(prev!.socketId).emit('yapline:replaced', { conversationId });
+          const prevSock = io.sockets.sockets.get(prev!.socketId);
           prevSock?.leave(`yap:${conversationId}`);
           ((prevSock as any)?.__yapJoined as Set<string> | undefined)?.delete(conversationId);
         }
@@ -277,8 +278,8 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
           broadcastUpdate(io, s);
         }
 
-        ack?.({ ok: true, session: summarize(s) });
-        logger.info({ userId, conversationId, listenOnly: !!listenOnly }, '[YapLine] Joined');
+        ack?.({ ok: true, session: summarize(s), movedFromAnotherDevice });
+        logger.info({ userId, conversationId, listenOnly: !!listenOnly, movedFromAnotherDevice }, '[YapLine] Joined');
       } catch (err: any) {
         logger.error(err, '[YapLine] join error');
         ack?.({ ok: false, error: 'Failed to join YapLine session' });
