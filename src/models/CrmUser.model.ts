@@ -53,6 +53,8 @@ export interface ICrmUser extends Document {
    * current value for fast payslip/payroll-status calculations.
    */
   hourlyRate?: number;
+  /** Utah (ADP payroll) vs Philippines/Online (PayPal) — drives Live Shift Board team tabs and payroll reporting split. Unset until an admin classifies the account. */
+  payrollLocation?: 'Utah' | 'Philippines';
   googleCalendar?: {
     calendarConnected: boolean;
     gmailAddress?: string;
@@ -244,6 +246,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
       type: Number,
       default: null,
       min: 0,
+    },
+    payrollLocation: {
+      type: String,
+      enum: ['Utah', 'Philippines'],
+      default: null,
     },
     googleCalendar: {
       calendarConnected: { type: Boolean, default: false },

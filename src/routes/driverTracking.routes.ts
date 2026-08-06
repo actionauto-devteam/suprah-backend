@@ -1,8 +1,9 @@
 import { Router, Request, Response, NextFunction } from "express";
-// crmAuth is the middleware module's DEFAULT export (TS2614 confirmed no
-// named exports). If your middleware is a factory used as crmAuth()
-// elsewhere in routes, change the router.use line below to crmAuth().
-import crmAuth from "../middleware/crmAuth.middleware";
+// This router serves both dispatchers (staff) and drivers, both of whom are
+// regular User-model accounts authenticated via the main JWT — not CrmUser
+// records — so it uses the main auth() middleware (matches driverProfile.routes.ts),
+// not crmAuth (which is for CRM-staff-only routes and never sets req.user).
+import auth from "../middleware/auth.middleware";
 
 // Local staff guard — the middleware exports no staffOnly, so the role
 // gate lives here, using the platform's real role names from User.model
@@ -21,7 +22,7 @@ import driverDirectoryController from "../controllers/driverDirectory.controller
 const router = Router();
 
 // Everything below requires an authenticated org member
-router.use(crmAuth);
+router.use(auth());
 
 // ─── Static routes FIRST (before any /:id) — codebase convention ─────────────
 
@@ -43,6 +44,7 @@ router.post("/remove-load", staffOnly, driverTrackingController.removeLoad);
 
 // Driver's Account load lists
 router.get("/my-loads", driverTrackingController.getMyLoads);
+router.get("/my-requests", driverTrackingController.getMyRequests);
 router.get("/available-loads", driverTrackingController.getAvailableLoads);
 
 // ─── Parameterized routes ────────────────────────────────────────────────────

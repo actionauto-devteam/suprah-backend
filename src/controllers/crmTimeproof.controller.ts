@@ -292,6 +292,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     role: string;
     department?: string;
     email?: string;
+    payrollLocation?: 'Utah' | 'Philippines';
   };
 
   const people: TimeproofPerson[] = [
@@ -303,6 +304,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       role: u.role,
       department: (u.department && u.department.trim()) || mainDeptByEmail.get(u.email) || undefined,
       email: u.email,
+      payrollLocation: u.payrollLocation,
     })),
     ...mainOnlyUsers.map((u): TimeproofPerson => ({
       _id: u._id,
@@ -381,6 +383,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
           avatar: u.avatar,
           role: u.role,
           department: u.department,
+          payrollLocation: u.payrollLocation,
         },
         today,
         thisWeek: summary.thisWeek,
@@ -1617,6 +1620,10 @@ export const updateHourlyRate = asyncHandler(async (req: Request, res: Response)
 });
 
 /**
+ * PATCH /api/crm/timeproof/user/:userId/payroll-location
+ * Utah (ADP) vs Philippines/Online (PayPal) classification, admin-set.
+ */
+/**
  * GET /api/crm/timeproof/user/:userId/hourly-rate-history
  * Full change history (not just the current value) — lets a rate dispute be
  * settled by seeing exactly who changed it, when, and from what.
@@ -1738,6 +1745,18 @@ export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) 
   res.json(new ApiResponse(200, { lock }, `Unlocked ${targetUser.fullName}'s period for correction`));
 });
 
+// De-minimis cutoff for leftover minutes past a full hour — Erik wants exact-minute
+// payout, but truly negligible remainders (his "butal" example) shouldn't count.
+// 0 = no cutoff (pay every exact minute) until he gives a specific number.
+const PAYROLL_DE_MINIMIS_SECONDS = 0;
+
+function computeExactPayout(totalSeconds: number, hourlyRate: number): number {
+  const wholeHourSeconds = Math.floor(totalSeconds / 3600) * 3600;
+  const remainderSeconds = totalSeconds - wholeHourSeconds;
+  const payableSeconds = wholeHourSeconds + (remainderSeconds < PAYROLL_DE_MINIMIS_SECONDS ? 0 : remainderSeconds);
+  return (payableSeconds / 3600) * hourlyRate;
+}
+
 /**
  * GET /api/crm/timeproof/payroll-status?year=&month=&periodNumber=
  * Dedicated list (separate from the real-time Live Shift Board) of every
@@ -1792,7 +1811,7 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
       department: u.department,
       totalSeconds,
       hourlyRate: rate,
-      payout: rate ? Math.floor(totalSeconds / 3600) * rate : null,
+      payout: rate ? computeExactPayout(totalSeconds, rate) : null,
       status,
       lockedAt: lock?.lockedAt ?? null,
       lockedByName: lock?.lockedByName ?? null,

@@ -448,6 +448,32 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+// GET /api/driver-tracking/my-requests
+// Loads this driver has requested that are still awaiting a dispatcher
+// decision. There's no persisted "rejected" state — rejectLoadRequest
+// removes the entry outright — so every driverRequests match here is
+// inherently pending.
+const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const loads = await Load.find({
+    organizationId,
+    status: "Posted",
+    "driverRequests.driverId": user._id,
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const myId = user._id.toString();
+  const data = (loads as any[]).map((l) => {
+    const mine = (l.driverRequests ?? []).find((r: any) => String(r.driverId) === myId);
+    return { ...l, myRequestStatus: "pending", myRequestedAt: mine?.requestedAt ?? null };
+  });
+
+  return res.status(200).json(new ApiResponse(200, data, "My requests fetched"));
+});
+
 // GET /api/driver-tracking/loads/:id
 // BUSINESS RULE CHANGE: no driver masking — the full load record is
 // returned. maskLoadForDriver is no longer used anywhere.
@@ -790,6 +816,7 @@ export default {
   reassignLoad,
   removeLoad,
   getMyLoads,
+  getMyRequests,
   getAvailableLoads,
   getLoadDetail,
   requestLoad,
