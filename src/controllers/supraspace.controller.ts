@@ -40,6 +40,41 @@ function emitToConversation(conv: any, event: string, payload: any) {
   }
 }
 
+function crmOrganizationCandidates(organizationId: string) {
+  return [
+    { organizationId },
+    { organizationId: null },
+    { organizationId: { $exists: false } },
+  ];
+}
+
+async function claimLegacyCrmOrganization<T extends { _id: any; organizationId?: any }>(
+  crmUser: T | null,
+  organizationId: string,
+): Promise<T | null> {
+  if (!crmUser || crmUser.organizationId) return crmUser;
+
+  const result = await CrmUser.updateOne(
+    {
+      _id: crmUser._id,
+      $or: [
+        { organizationId: null },
+        { organizationId: { $exists: false } },
+      ],
+    },
+    { $set: { organizationId } },
+  );
+
+  if (result.matchedCount === 0) {
+    return null;
+  }
+
+  return {
+    ...crmUser,
+    organizationId: new mongoose.Types.ObjectId(organizationId),
+  };
+}
+
 // Push Web Push notifications to conversation members. Desktop users who are
 // online already receive the realtime socket event, but mobile/PWA sockets can
 // stay "online" briefly after the app is backgrounded. To keep installed mobile
@@ -428,22 +463,35 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
 
   let target = await CrmUser.findOne({
     _id: targetUserId,
-    organizationId,
     isActive: true,
+    $or: crmOrganizationCandidates(organizationId.toString()),
   }).lean();
+
+  target = await claimLegacyCrmOrganization(
+    target as any,
+    organizationId.toString(),
+  );
 
   if (!target) {
     const mainUser = await User.findOne({
       _id: targetUserId,
       organizationId,
       isActive: true,
-    }).select('email').lean();
+    })
+      .select('email')
+      .lean();
+
     if (mainUser?.email) {
       target = await CrmUser.findOne({
-        email: mainUser.email.toLowerCase(),
-        organizationId,
+        email: mainUser.email.trim().toLowerCase(),
         isActive: true,
+        $or: crmOrganizationCandidates(organizationId.toString()),
       }).lean();
+
+      target = await claimLegacyCrmOrganization(
+        target as any,
+        organizationId.toString(),
+      );
     }
   }
 
@@ -1513,7 +1561,12 @@ const rsvpEvent = asyncHandler(async (req: Request, res: Response) => {
 /** GET /api/supraspace/users */
 const getCrmUsers = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
-  const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
+  const organizationId = req.crmUser!.organizationId;
+  const users = await CrmUser.find({
+    _id: { $ne: userId },
+    organizationId,
+    isActive: true,
+  })
     .select('fullName username avatar role email')
     .sort({ fullName: 1 })
     .lean();
@@ -1525,7 +1578,12 @@ const getCrmUsers = asyncHandler(async (req: Request, res: Response) => {
 /** GET /api/supraspace/active  — all team users, real onlineStatus resolved via presenceBridge */
 const getActiveUsers = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
-  const users = await CrmUser.find({ _id: { $ne: userId }, isActive: true })
+  const organizationId = req.crmUser!.organizationId;
+  const users = await CrmUser.find({
+    _id: { $ne: userId },
+    organizationId,
+    isActive: true,
+  })
     .select('fullName username avatar role email')
     .sort({ fullName: 1 })
     .lean();
@@ -1574,11 +1632,11 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Your account is not linked to an organization.');
   }
 
-  const crmUser = await CrmUser.findOne({
+  let crmUser = await CrmUser.findOne({
     email: mainUser.email.trim().toLowerCase(),
-    organizationId,
+    $or: crmOrganizationCandidates(organizationId),
   })
-    .select('_id isActive')
+    .select('_id isActive organizationId')
     .lean();
 
   if (!crmUser) {
@@ -1589,6 +1647,14 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   }
   if (!crmUser.isActive) {
     throw new ApiError(403, 'The linked Suprah Space account is inactive.');
+  }
+
+  crmUser = await claimLegacyCrmOrganization(crmUser as any, organizationId);
+  if (!crmUser) {
+    throw new ApiError(
+      409,
+      'The Suprah Space account could not be linked to the active organization.',
+    );
   }
 
   // Routed through generateCrmToken so the token carries type:'crm' and uses the

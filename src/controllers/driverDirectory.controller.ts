@@ -94,23 +94,27 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       )
       .sort({ createdAt: -1 })
       .lean(),
+    // Fetch matching active CRM identities regardless of organization so we
+    // can distinguish a valid same-org account, a legacy account that predates
+    // organization linking, and an account that belongs to another org.
     CrmUser.find({
-      organizationId,
       isActive: true,
       email: { $in: driverEmails },
     })
-      .select("_id email")
+      .select("_id email organizationId")
       .lean(),
   ]);
 
   const profileByUser = new Map(profiles.map((p: any) => [String(p.userId), p]));
   const locationByUser = new Map(locations.map((l: any) => [String(l.userId), l]));
-  const crmUserByEmail = new Map(
-    crmUsers.map((crmUser: any) => [
-      String(crmUser.email ?? "").trim().toLowerCase(),
-      crmUser,
-    ]),
-  );
+  const crmUsersByEmail = new Map<string, any[]>();
+  for (const crmUser of crmUsers as any[]) {
+    const email = String(crmUser.email ?? "").trim().toLowerCase();
+    if (!email) continue;
+    const current = crmUsersByEmail.get(email) ?? [];
+    current.push(crmUser);
+    crmUsersByEmail.set(email, current);
+  }
   const loadsByUser = new Map<string, any[]>();
 
   for (const load of loads as any[]) {
@@ -128,8 +132,20 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     const location: any = locationByUser.get(key) ?? null;
     const driverLoads = loadsByUser.get(key) ?? [];
     const activeLoadCount = driverLoads.length;
+    const normalizedEmail = String(u.email ?? "").trim().toLowerCase();
+    const crmCandidates = crmUsersByEmail.get(normalizedEmail) ?? [];
     const crmUser: any =
-      crmUserByEmail.get(String(u.email ?? "").trim().toLowerCase()) ?? null;
+      crmCandidates.find(
+        (candidate: any) =>
+          candidate.organizationId &&
+          String(candidate.organizationId) === String(organizationId),
+      ) ??
+      crmCandidates.find((candidate: any) => !candidate.organizationId) ??
+      null;
+    const hasCrmAccountInAnotherOrganization =
+      !crmUser && crmCandidates.length > 0;
+    const usesLegacyCrmOrganizationLink =
+      Boolean(crmUser) && !crmUser.organizationId;
 
     const maxCapacity: number | null =
       typeof profile?.maxVehicleCapacity === "number"
@@ -149,6 +165,12 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       warnings.push("at_capacity");
     }
     if (!isSharing) warnings.push("offline_or_stale_location");
+    if (usesLegacyCrmOrganizationLink) {
+      warnings.push("legacy_supraspace_org_link");
+    }
+    if (hasCrmAccountInAnotherOrganization) {
+      warnings.push("supraspace_account_other_organization");
+    }
 
     return {
       id: key,
@@ -196,7 +218,9 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       crmUserId: crmUser ? String(crmUser._id) : null,
       messagingUnavailableReason: crmUser
         ? null
-        : "No active Suprah Space account is linked to this driver.",
+        : hasCrmAccountInAnotherOrganization
+          ? "An active Suprah Space account exists for this email, but it belongs to another organization."
+          : "No active Suprah Space account is linked to this driver.",
       warnings,
     };
   });

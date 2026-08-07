@@ -108,8 +108,21 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
     status?: string;
   };
 
-  if (typeof lat !== "number" || typeof lng !== "number") {
-    throw new ApiError(400, "lat and lng are required numbers");
+  if (user.role !== "driver") {
+    throw new ApiError(403, "Only driver accounts can publish Driver Tracker locations");
+  }
+
+  if (
+    typeof lat !== "number" ||
+    typeof lng !== "number" ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    throw new ApiError(400, "A valid latitude and longitude are required");
   }
 
   const allowedStatuses = ["on-route", "idle", "on-break", "waiting", "offline"];
