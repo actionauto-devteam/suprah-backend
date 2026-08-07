@@ -160,10 +160,12 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     ? lookbackLogs.filter((l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime())
     : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  const personalInfo = await getMainPersonalInfoByEmail(user.email);
-  const mainMonitorOnly = await isMainMonitorOnlyDept(user.organizationId?.toString(), user.department);
-  const locationRequiredForTimeproof = await isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride);
-  const idleDetectionExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
+  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt] = await Promise.all([
+    getMainPersonalInfoByEmail(user.email),
+    isMainMonitorOnlyDept(user.organizationId?.toString(), user.department),
+    isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride),
+    isIdleDetectionExemptDept(user.organizationId?.toString(), user.department),
+  ]);
 
   const userData = {
     _id: user._id,
