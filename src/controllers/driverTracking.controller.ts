@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-// c
+// t
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -661,7 +661,7 @@ const requireAssignedDriver = (load: any, userId: string) => {
   }
 };
 
-// POST /api/driver-tracking/loads/:id/accept
+// POST /api/driver-tracking/loads/:id/accept  { signatureDataUrl, signerName }
 const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
