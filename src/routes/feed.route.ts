@@ -22,7 +22,6 @@ const upload = multer({
 
 
 const parseAttachments: RequestHandler = (req, res, next) => {
-  console.log("[parseAttachments] LIVE — multipart?", req.is("multipart/form-data"));
   if (!req.is("multipart/form-data")) return next();
   upload.any()(req, res, (err: any) => {
     if (err) {

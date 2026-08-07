@@ -24,6 +24,12 @@ export interface ISupraSpaceConversationMetadata {
 export interface ISupraSpaceNotificationPreference {
   type: 'all' | 'main' | 'foryou' | 'none';
   muted: boolean;
+  muteUntil?: Date | null;
+}
+
+export interface ISupraSpaceMemberSettings {
+  nickname?: string | null;
+  quickReactions?: string[];
 }
 
 export interface ISupraSpaceConversation extends Document {
@@ -43,6 +49,7 @@ export interface ISupraSpaceConversation extends Document {
   theme: ISupraSpaceTheme;
   metadata: ISupraSpaceConversationMetadata;
   notificationPrefs: Record<string, ISupraSpaceNotificationPreference>;
+  memberSettings: Record<string, ISupraSpaceMemberSettings>;
   lastMessage?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
   createdBy: mongoose.Types.ObjectId;
@@ -101,6 +108,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
     theme:      { type: ThemeSchema, default: () => ({}) },
     metadata:   { type: MetadataSchema, default: () => ({}) },
     notificationPrefs: { type: Schema.Types.Mixed, default: () => ({}) },
+    memberSettings: { type: Schema.Types.Mixed, default: () => ({}) },
     lastMessage:   { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
     lastMessageAt: { type: Date, default: null },
     createdBy:  { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },

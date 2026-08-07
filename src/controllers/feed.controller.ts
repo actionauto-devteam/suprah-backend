@@ -182,8 +182,8 @@ export const updatePost = asyncHandler(async (req: Request, res: Response) => {
   if (!mongoose.Types.ObjectId.isValid(id)) throw new ApiError(400, 'Invalid post ID');
 
   const { content } = req.body;
-  if (!content || !content.trim())         throw new ApiError(400, 'Post content cannot be empty');
-  if (stripMentionTokens(content.trim()).length > 5000) {
+  const trimmedContent = (content || '').trim();
+  if (stripMentionTokens(trimmedContent).length > 5000) {
     throw new ApiError(400, 'Post content cannot exceed 5000 characters');
   }
 
@@ -191,13 +191,19 @@ export const updatePost = asyncHandler(async (req: Request, res: Response) => {
   const post = await Feed.findOne({ _id: id, deletedAt: null });
   if (!post) throw new ApiError(404, 'Post not found');
 
+  // Editing text is content-only (no re-upload here) — only reject an empty
+  // body when the post also has no attachments left to stand on its own.
+  if (!trimmedContent && (!post.attachments || post.attachments.length === 0)) {
+    throw new ApiError(400, 'Post content cannot be empty');
+  }
+
   // Permission check: only the owner (or an admin) may edit
   const isOwner = post.userId.toString() === actor._id.toString();
   const isAdmin = actor.role === 'admin';
   if (!isOwner && !isAdmin) throw new ApiError(403, 'You can only edit your own posts');
 
   // Apply the edit
-  post.content  = content.trim();
+  post.content  = trimmedContent;
   post.isEdited = true;
   await post.save();
 

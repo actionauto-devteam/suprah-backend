@@ -102,6 +102,7 @@ router.post('/conversations/:id/mark-unread', supraSpaceController.markConversat
 router.post('/conversations/:id/pin',       supraSpaceController.pinConversation);
 router.patch('/conversations/:id/notifications', supraSpaceController.updateConversationNotifications);
 router.patch('/conversations/:id/theme',    supraSpaceController.setTheme);
+router.patch('/conversations/:id/member-settings', supraSpaceController.updateMemberSettings);
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
