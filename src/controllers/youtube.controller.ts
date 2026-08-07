@@ -31,10 +31,11 @@ const search = asyncHandler(async (req: Request, res: Response) => {
   const key = process.env.YOUTUBE_API_KEY;
   if (!key) throw new ApiError(500, 'YouTube API key is not configured on the server (set YOUTUBE_API_KEY).');
 
-  // Bias toward embeddable music videos.
+  // Bias toward embeddable music videos that are allowed to play OFF youtube.com
+  // (videoSyndicated) — this removes most "can't be embedded" playback errors.
   const searchUrl =
     `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video` +
-    `&videoEmbeddable=true&videoCategoryId=10&maxResults=15&q=${encodeURIComponent(q)}&key=${key}`;
+    `&videoEmbeddable=true&videoSyndicated=true&videoCategoryId=10&maxResults=15&q=${encodeURIComponent(q)}&key=${key}`;
 
   let sJson: any;
   try {
