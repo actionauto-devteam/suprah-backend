@@ -72,6 +72,9 @@ import storyRoute from "./story.route";
 import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
+import youtubeRoute from "./youtube.route";
+
+
 const router = express.Router();
 const defaultRoutes = [
   {
@@ -93,6 +96,10 @@ const defaultRoutes = [
   {
     path: "/quotes",
     route: quoteRoute,
+  },
+  {
+    path: "/youtube",
+    route: youtubeRoute,
   },
   {
     path: "/notifications",
