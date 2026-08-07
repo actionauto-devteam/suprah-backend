@@ -26,8 +26,8 @@ const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
 const SHIFT_ALERTS_CHANNEL_NAME_REGEX = /^Shift Alerts$/i;
 type SupraSpaceNotifType = 'all' | 'main' | 'foryou' | 'none';
-type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean };
-const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false };
+type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean; muteUntil?: string | null };
+const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false, muteUntil: null };
 
 function emitToConversation(conv: any, event: string, payload: any) {
   try {
@@ -122,10 +122,32 @@ function isShiftAlertsConversation(conversation: { name?: string | null }): bool
   return SHIFT_ALERTS_CHANNEL_NAME_REGEX.test(conversation.name || '');
 }
 
+function withMemberNicknames(conv: any): any {
+  const settings = conv?.memberSettings || {};
+  const members = (conv?.members || []).map((m: any) => {
+    if (!m) return m;
+    const nickname = settings[m._id?.toString?.() || m._id]?.nickname;
+    return nickname ? { ...m, displayNickname: nickname } : m;
+  });
+  return { ...conv, members };
+}
+
+// memberSettings carries every member's personal prefs (incl. other users'
+// quickReactions) — never send the raw map to clients. Callers read what they
+// need from it first (viewerQuickReactions, displayNickname) then strip it.
+function omitMemberSettings(conv: any): any {
+  const { memberSettings, ...rest } = conv || {};
+  return rest;
+}
+
 function getConversationNotificationPref(conv: any, userId: string): SupraSpaceNotifPref {
   const raw = conv?.notificationPrefs?.[userId];
   const type = raw?.type === 'main' || raw?.type === 'foryou' || raw?.type === 'none' ? raw.type : 'all';
-  return { type, muted: !!raw?.muted };
+  const muteUntil: string | null = raw?.muteUntil ? new Date(raw.muteUntil).toISOString() : null;
+  // A timed mute auto-expires — no cron needed, just stop treating it as
+  // muted once the stored expiry has passed.
+  const timedMuteActive = !!muteUntil && new Date(muteUntil).getTime() > Date.now();
+  return { type, muted: !!raw?.muted || timedMuteActive, muteUntil: raw?.muted ? null : muteUntil };
 }
 
 function mentionBoundaryRegex(alias: string): RegExp | null {
@@ -328,18 +350,19 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     // Strip null member entries that can appear when a CrmUser is hard-deleted
     // after being added to a conversation. Keeping nulls causes the frontend to
     // crash on member._id access, triggering the "Something went wrong" error page.
-    const safeConv = { ...c, members: (c.members || []).filter(Boolean) };
+    const safeConv = withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) });
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
       const manualUnreadCleared = idIn(safeConv.manualUnreadBy as any, userId);
-      return {
+      return omitMemberSettings({
         ...safeConv,
         notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
+        viewerQuickReactions: safeConv.memberSettings?.[userIdStr]?.quickReactions || [],
         lastMessage: null,
         lastMessageAt: null,
         unreadCount: manualUnreadCleared ? 1 : 0,
         manualUnread: manualUnreadCleared,
-      };
+      });
     }
     const unreadFilter: any = {
       conversationId: safeConv._id,
@@ -370,14 +393,15 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
         })
       : 0;
     const manualUnread = idIn(safeConv.manualUnreadBy as any, userId);
-    return {
+    return omitMemberSettings({
       ...safeConv,
       notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
+      viewerQuickReactions: safeConv.memberSettings?.[userIdStr]?.quickReactions || [],
       unreadCount: manualUnread ? Math.max(unreadCount, 1) : unreadCount,
       mentionCount,
       unreadMentionCount,
       manualUnread,
-    };
+    });
   }));
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
@@ -386,17 +410,20 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
 const updateConversationNotifications = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { type, muted } = req.body || {};
+  const { type, muted, muteUntil } = req.body || {};
   const validTypes: SupraSpaceNotifType[] = ['all', 'main', 'foryou', 'none'];
 
   if (!validTypes.includes(type)) throw new ApiError(400, 'Invalid notification type');
+  if (muteUntil !== undefined && muteUntil !== null && Number.isNaN(new Date(muteUntil).getTime())) {
+    throw new ApiError(400, 'Invalid muteUntil date');
+  }
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
   const userKey = userId.toString();
-  const nextPref: SupraSpaceNotifPref = { type, muted: !!muted };
+  const nextPref: SupraSpaceNotifPref = { type, muted: !!muted, muteUntil: muteUntil ? new Date(muteUntil).toISOString() : null };
   conversation.notificationPrefs = {
     ...((conversation.notificationPrefs as any) || {}),
     [userKey]: nextPref,
@@ -732,6 +759,56 @@ const setTheme = asyncHandler(async (req: Request, res: Response) => {
   await conversation.save();
   emitToConversation(conversation, 'conversation:theme', { conversationId: id, theme: conversation.theme });
   res.json(new ApiResponse(200, { conversationId: id, theme: conversation.theme }, 'Theme updated'));
+});
+
+const MAX_NICKNAME_LENGTH = 32;
+const MAX_QUICK_REACTIONS = 8;
+
+/** PATCH /api/supraspace/conversations/:id/member-settings  { nickname?, quickReactions? } — self-service only */
+const updateMemberSettings = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const { nickname, quickReactions } = req.body;
+
+  const conversation = await SupraSpaceConversation.findById(id);
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  if (nickname !== undefined && nickname !== null && typeof nickname !== 'string') {
+    throw new ApiError(400, 'Invalid nickname');
+  }
+  if (nickname && nickname.length > MAX_NICKNAME_LENGTH) {
+    throw new ApiError(400, `Nickname must be ${MAX_NICKNAME_LENGTH} characters or fewer`);
+  }
+  if (quickReactions !== undefined) {
+    if (!Array.isArray(quickReactions) || quickReactions.some((e: any) => typeof e !== 'string')) {
+      throw new ApiError(400, 'quickReactions must be an array of emoji strings');
+    }
+    if (quickReactions.length > MAX_QUICK_REACTIONS) {
+      throw new ApiError(400, `You can pick up to ${MAX_QUICK_REACTIONS} quick reactions`);
+    }
+  }
+
+  const userKey = userId.toString();
+  const existing = ((conversation.memberSettings as any)?.[userKey]) || {};
+  const nextSettings = {
+    nickname: nickname !== undefined ? (nickname?.trim() || null) : (existing.nickname ?? null),
+    quickReactions: quickReactions !== undefined ? quickReactions : (existing.quickReactions ?? []),
+  };
+  conversation.memberSettings = {
+    ...((conversation.memberSettings as any) || {}),
+    [userKey]: nextSettings,
+  };
+  conversation.markModified('memberSettings');
+  await conversation.save({ validateModifiedOnly: true });
+
+  emitToConversation(conversation, 'conversation:member-settings', {
+    conversationId: id,
+    userId: userKey,
+    settings: nextSettings,
+  });
+
+  res.json(new ApiResponse(200, { conversationId: id, userId: userKey, settings: nextSettings }, 'Settings saved'));
 });
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
@@ -1775,6 +1852,7 @@ const supraSpaceController = {
   pinConversation,
   updateConversationNotifications,
   setTheme,
+  updateMemberSettings,
   getMessages,
   getConversationAttachments,
   searchInConversation,
