@@ -581,6 +581,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
     status,
     department,
     dateJoined,
+    hourlyTrackingExempt,
     sortBy = 'createdAt',
     sortOrder = 'desc',
   } = req.query;
@@ -616,6 +617,10 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const departmentValue = typeof department === 'string' ? department.trim() : '';
   if (departmentValue && departmentValue !== 'all') {
     filter.department = departmentValue;
+  }
+
+  if (hourlyTrackingExempt === 'true') {
+    filter.hourlyTrackingExempt = true;
   }
 
   const dateJoinedValue = typeof dateJoined === 'string' ? dateJoined.toLowerCase() : '';
@@ -671,7 +676,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride payrollLocation isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)

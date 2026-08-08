@@ -18,7 +18,7 @@ import AuditLog from '../models/AuditLog.model';
 import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
-import { isTimeEditExempt } from '../config/departmentMonitoring';
+import { isTimeEditExempt, isIdleDetectionExemptDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod } from '../utils/payrollOvertime';
@@ -220,7 +220,10 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  // Web Dev is exempt from idle detection — never surface an idle period for
+  // them, regardless of what caused any ActivityInterval gap (sleep, crash, etc).
+  const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -342,17 +345,15 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     people.map(async (u) => {
       const logs = logsByUser.get(u._id.toString()) ?? [];
 
-      const calendar = buildCalendarMap(logs);
+      const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
       const userDeductions = deductionsByUser.get(u._id.toString());
-      let todayDeduction = 0;
       if (userDeductions) {
         for (const [date, seconds] of userDeductions) {
           if (calendar[date]) calendar[date].totalSeconds = Math.max(0, calendar[date].totalSeconds - seconds);
-          if (date === todayStr) todayDeduction = seconds;
         }
       }
-      const summary = aggregateSummary(calendar);
-      const { streak } = computeStreak(calendar);
+      const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
+      const { streak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
       // Chronological walk over the FULL fetched range (from monthStart), not
@@ -368,12 +369,12 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       }
 
       // Today's totals come from the same calendar the employee's own page
-      // uses (already midnight-split and break-netted), so a multi-day-old
-      // shift is at least reported consistently everywhere rather than
-      // recomputed a second, different way here.
+      // uses (already midnight-split, break-netted, and deduction-applied
+      // above), so a multi-day-old shift is at least reported consistently
+      // everywhere rather than recomputed a second, different way here.
       const totalBreakSeconds = calendar[todayStr]?.breakSeconds ?? 0;
       const todayTotalWorkedSeconds = (calendar[todayStr]?.totalSeconds ?? 0) + totalBreakSeconds;
-      const today = formatHours(Math.max(0, (calendar[todayStr]?.totalSeconds ?? 0) - todayDeduction));
+      const today = formatHours(calendar[todayStr]?.totalSeconds ?? 0);
 
       return {
         email: u.email,
@@ -558,7 +559,7 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
   }
 
-  const targetUser = await CrmUser.findById(userId).select('_id');
+  const targetUser = await CrmUser.findById(userId).select('_id department organizationId');
   if (!targetUser) throw new ApiError(404, 'User not found');
 
   const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
@@ -577,7 +578,10 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  // Web Dev is exempt from idle detection — never surface an idle period for
+  // them, regardless of what caused any ActivityInterval gap (sleep, crash, etc).
+  const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -861,7 +865,7 @@ export const getMyAgentStatus = asyncHandler(async (req: Request, res: Response)
 export const postHeartbeat = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const {
-    isIdle = false,
+    isIdle: rawIsIdle = false,
     platform = 'win32',
     isOnBreak = false,
     breakDurationSeconds = 0,
@@ -869,6 +873,12 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     currentIntervalStartAt,
     screenRecordingGranted = null,
   } = req.body;
+
+  // Web Dev is exempt from idle detection entirely — force isIdle false
+  // server-side regardless of what the tray reports, so a client-side edge
+  // case (old tray version, sleep/resume race) can never flag them anyway.
+  const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
+  const isIdle = idleExempt ? false : rawIsIdle;
 
   const existing = await AgentHeartbeat.findOne({ userId: user._id });
   const wasIdle = existing?.isIdle ?? false;
@@ -1821,6 +1831,7 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
       avatar: u.avatar,
       role: u.role,
       department: u.department,
+      payrollLocation: u.payrollLocation,
       totalSeconds,
       hourlyRate: rate,
       payout: basePay !== null ? basePay + otPremiumPay : null,
@@ -2109,6 +2120,15 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
     throw new ApiError(400, 'event is required');
   }
 
+  // Web Dev is exempt from idle detection — no idle-related diagnostic
+  // (flagged or periodic-check) should ever be recorded for them, so the
+  // panel stays completely empty, not just free of flagged events.
+  const isIdleDiagnosticEvent = event === 'idle_detected' || event === 'idle_periodic_check';
+  if (isIdleDiagnosticEvent && await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department)) {
+    res.json(new ApiResponse(200, {}, 'Skipped (idle-detection-exempt department)'));
+    return;
+  }
+
   logger.warn(
     {
       context: 'tray-client-diagnostic',
@@ -2173,7 +2193,14 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
     wasTracking: l.meta?.wasTracking ?? null,
   }));
 
-  res.json(new ApiResponse(200, { entries }, 'Idle diagnostics fetched'));
+  // Web Dev is exempt from idle detection — the panel should show nothing at
+  // all for them, including historical rows written before this exemption
+  // existed (both event types queried above are idle-diagnostic only).
+  const targetUser = await CrmUser.findById(userId).select('department organizationId').lean();
+  const idleExempt = targetUser ? await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department) : false;
+  const filteredEntries = idleExempt ? [] : entries;
+
+  res.json(new ApiResponse(200, { entries: filteredEntries }, 'Idle diagnostics fetched'));
 });
 
 /**
