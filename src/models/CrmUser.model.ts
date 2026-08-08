@@ -42,6 +42,8 @@ export interface ICrmUser extends Document {
   notificationPreferences: NotificationPreferences;
   department?: string;
   screenshotExempt?: boolean;
+  /** Commission-based roles (sales, finance managers, etc.) excluded from hourly/payroll reports — per Erik's directive. */
+  hourlyTrackingExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
   /**
@@ -220,6 +222,10 @@ const CrmUserSchema = new Schema<ICrmUser>(
       // Per-account exemption from tray screenshot capture, set by an admin
       // for an individual user (e.g. a role that shouldn't be screen-monitored)
       // — distinct from department-level monitoring rules.
+      type: Boolean,
+      default: false,
+    },
+    hourlyTrackingExempt: {
       type: Boolean,
       default: false,
     },

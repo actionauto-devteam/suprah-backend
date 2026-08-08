@@ -21,6 +21,7 @@ import { PayPeriodLock } from '../models/PayPeriodLock.model';
 import { isTimeEditExempt } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
+import { computeWeeklyOvertime, sumRegularSecondsInPeriod } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
@@ -1776,13 +1777,17 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
 
   const { periodStart, periodEnd, payDayDate } = getPayPeriodBoundsFor(year, month, periodNumber);
 
-  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true })
-    .select('fullName username avatar role department hourlyRate')
+  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
+    .select('fullName username avatar role department hourlyRate payrollLocation')
     .lean();
   const userIds = users.map((u) => u._id);
 
+  // Widened 6-day lookback so a Sun-Sat week that started in the previous period still
+  // gets a correct weekTotalSeconds when its Saturday lands inside this period (weekly OT).
+  const weeklyLookbackStart = new Date(periodStart.getTime() - 6 * 24 * 60 * 60 * 1000);
+
   const [logs, locks] = await Promise.all([
-    TimeLog.find({ userId: { $in: userIds }, timestamp: { $gte: periodStart, $lt: periodEnd } }).sort({ timestamp: 1 }).lean(),
+    TimeLog.find({ userId: { $in: userIds }, timestamp: { $gte: weeklyLookbackStart, $lt: periodEnd } }).sort({ timestamp: 1 }).lean(),
     PayPeriodLock.find({ userId: { $in: userIds }, periodStart, periodEnd }).lean(),
   ]);
 
@@ -1798,10 +1803,17 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
   const results = users.map((u) => {
     const uLogs = logsByUser.get(u._id.toString()) || [];
     const calendar = buildCalendarMap(uLogs, COMPANY_TZ_OFFSET_MINUTES);
-    const totalSeconds = Object.values(calendar).reduce((sum, d) => sum + d.totalSeconds, 0);
+    const totalSeconds = sumRegularSecondsInPeriod(calendar, periodStart, periodEnd);
     const lock = lockByUser.get(u._id.toString());
     const rate = u.hourlyRate ?? null;
     const status = lock ? lock.status : pastPayday ? 'auto-locked' : 'open';
+
+    const isUtah = u.payrollLocation === 'Utah';
+    const { otPremiumSeconds, otPremiumPay, flaggedWeeks } = isUtah
+      ? computeWeeklyOvertime(calendar, periodStart, periodEnd, rate)
+      : { otPremiumSeconds: 0, otPremiumPay: 0, flaggedWeeks: [] };
+    const basePay = rate ? computeExactPayout(totalSeconds, rate) : null;
+
     return {
       userId: u._id.toString(),
       fullName: u.fullName,
@@ -1811,7 +1823,10 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
       department: u.department,
       totalSeconds,
       hourlyRate: rate,
-      payout: rate ? computeExactPayout(totalSeconds, rate) : null,
+      payout: basePay !== null ? basePay + otPremiumPay : null,
+      otPremiumSeconds,
+      otPremiumPay,
+      flaggedWeeks,
       status,
       lockedAt: lock?.lockedAt ?? null,
       lockedByName: lock?.lockedByName ?? null,
