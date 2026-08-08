@@ -712,7 +712,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, payrollLocation } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, payrollLocation, hourlyTrackingExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -758,6 +758,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (screenshotExempt !== undefined) {
     user.screenshotExempt = !!screenshotExempt;
+  }
+
+  if (hourlyTrackingExempt !== undefined) {
+    user.hourlyTrackingExempt = !!hourlyTrackingExempt;
   }
 
   if (locationRequiredOverride !== undefined && ['default', 'required', 'exempt'].includes(locationRequiredOverride)) {
