@@ -191,8 +191,11 @@ export const getMidnightSegments = (
  * Attach weekTotalSeconds to the Saturday of each Sun-Sat week.
  * A skeleton CalendarDay is created for Saturday if no logs exist on that day,
  * so the frontend can still render the week-total badge. Break time is excluded.
+ * Exported so callers that mutate totalSeconds AFTER buildCalendarMap returns
+ * (stale-open-session strip, ScreenshotDeduction) can re-run this afterward —
+ * otherwise the cached badge goes stale relative to the corrected daily totals.
  */
-const attachWeekTotals = (calendar: Record<string, CalendarDay>): void => {
+export const attachWeekTotals = (calendar: Record<string, CalendarDay>): void => {
   const weekMap: Record<string, string[]> = {};
 
   for (const dateStr of Object.keys(calendar)) {

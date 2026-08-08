@@ -89,7 +89,7 @@ const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
 import {
   buildSessions, buildBreakSessions, buildCalendarMap, computeStreak,
   buildHourPattern, aggregateSummary, getWeekStart, toDateStr, toLocalDateStr,
-  formatHours, buildIdleLog, type CalendarDay,
+  formatHours, buildIdleLog, attachWeekTotals, type CalendarDay,
 } from '../utils/timeLogEngine';
 
 
@@ -160,6 +160,12 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
       calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
     }
   }
+
+  // Re-run now that every correction above has finished mutating totalSeconds —
+  // buildCalendarMap already cached weekTotalSeconds once, on the RAW totals,
+  // so the Saturday week-total badge would otherwise go stale relative to the
+  // corrected daily numbers this same response returns.
+  attachWeekTotals(calendar);
 
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
@@ -519,6 +525,10 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
     }
   }
+
+  // Re-run now that every correction above has finished mutating totalSeconds —
+  // see getMyTimeproof for the full explanation of why this must happen again here.
+  attachWeekTotals(calendar);
 
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
   const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
