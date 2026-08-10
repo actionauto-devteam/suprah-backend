@@ -528,16 +528,36 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
 const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
 
-  // organizationId is stored as String on the Load model — do NOT cast to ObjectId
+  const postType = req.query.postType as string | undefined;
+  const countBy = req.query.countBy as string | undefined;
+
+  const match: Record<string, unknown> = { organizationId };
+
+  if (postType === "load-board" || postType === "assign-carrier") {
+    match.postType = postType;
+  }
+
+  const countVehicles = countBy === "vehicles";
+
+  // organizationId is stored as String on the Load model — do NOT cast to ObjectId.
+  //
+  // Normal Transportation stats count LOAD RECORDS.
+  // Board stats can request countBy=vehicles, in which case each status count is
+  // the number of vehicles contained in matching Board loads instead.
   const agg = await Load.aggregate([
-    { $match: { organizationId } },
-    { $group: { _id: "$status", count: { $sum: 1 } } },
+    { $match: match },
+    {
+      $group: {
+        _id: "$status",
+        count: {
+          $sum: countVehicles
+            ? { $size: { $ifNull: ["$vehicles", []] } }
+            : 1,
+        },
+      },
+    },
   ]);
 
-  // BUG FIX: "Accepted" and "Picked Up" were previously missing from this
-  // object, so the `_id in stats` guard silently discarded their counts —
-  // loads in those statuses inflated `all` but had no row and no filter in
-  // the sidebar.
   const stats: Record<string, number> = {
     all: 0,
     Posted: 0,
@@ -550,11 +570,18 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
   };
 
   for (const { _id, count } of agg) {
-    if (_id && _id in stats) stats[_id] = count;
-    stats.all += count;
+    const numericCount = Number(count ?? 0);
+    if (_id && _id in stats) stats[_id] = numericCount;
+    stats.all += numericCount;
   }
 
-  return res.status(200).json(new ApiResponse(200, stats, "Load stats fetched"));
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      stats,
+      countVehicles ? "Vehicle stats fetched" : "Load stats fetched",
+    ),
+  );
 });
 
 // ─── Get Load by ID ───────────────────────────────────────────────────────────
