@@ -7,6 +7,7 @@ import Load from "../models/Load.model";
 import User, { IUser } from "../models/User.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
+import DriverPayout from "../models/DriverPayout.model";
 import logger from "../utils/logger";
 import { getSocketIO, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
@@ -129,35 +130,26 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const nextStatus =
     status && allowedStatuses.includes(status) ? status : undefined;
 
-  const heartbeatAt = new Date();
-
-  const setFields: Record<string, unknown> = {
-    organizationId,
-    coords: { lat, lng },
-    lastSeenAt: heartbeatAt,
-    // A successful ping starts a new online period, so allow a future
-    // offline alert to fire again if this driver later goes silent.
-    offlineAlertSentAt: null,
+  // MongoDB does not allow the same path to be updated by both $set and
+  // $setOnInsert in one operation. When a status is supplied, update it only
+  // through $set. When status is omitted, initialize new records to "idle"
+  // without changing the status of an existing location record.
+  const locationUpdate: Record<string, any> = {
+    $set: {
+      organizationId,
+      coords: { lat, lng },
+      lastSeenAt: new Date(),
+      ...(nextStatus ? { status: nextStatus } : {}),
+    },
   };
 
-  if (nextStatus) {
-    setFields.status = nextStatus;
-  }
-
-  const update: Record<string, unknown> = {
-    $set: setFields,
-  };
-
-  // MongoDB rejects updates that target the same path in both $set and
-  // $setOnInsert. Only seed "idle" when this heartbeat did not already
-  // provide a status.
   if (!nextStatus) {
-    update.$setOnInsert = { status: "idle" };
+    locationUpdate.$setOnInsert = { status: "idle" };
   }
 
   const location = await DriverLocation.findOneAndUpdate(
     { userId: user._id },
-    update,
+    locationUpdate,
     { new: true, upsert: true },
   );
 
@@ -425,6 +417,87 @@ const removeLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   return res.status(200).json(new ApiResponse(200, load, "Driver removed from load"));
+});
+
+// ─── Driver's Account: dashboard statistics ─────────────────────────────────
+// GET /api/driver-tracking/dashboard-stats
+//
+// Read-only summary used by the /driver Command Center.
+// IMPORTANT:
+// - Total earnings come from PAID DriverPayout records, not quoted/carrier pay.
+// - Every query is scoped to both the authenticated driver and organization.
+// - No load, payout, profile, notification, GPS, or messaging records are changed.
+const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  if (user.role !== "driver") {
+    throw new ApiError(403, "Only driver accounts can view driver dashboard statistics");
+  }
+
+  const [pendingRequests, completedLoads, profile, payoutTotals] =
+    await Promise.all([
+      // A request is pending only while the load is still Posted and the
+      // driver's request entry still exists. Approved/rejected requests are
+      // removed by the existing workflow, so this mirrors getMyRequests().
+      Load.countDocuments({
+        organizationId,
+        status: "Posted",
+        "driverRequests.driverId": user._id,
+      }),
+
+      // Completed means a Delivered load that is actually assigned to this
+      // authenticated driver in this organization.
+      Load.countDocuments({
+        organizationId,
+        assignedDriverId: user._id,
+        status: "Delivered",
+      }),
+
+      // Profile data is optional; a driver without a profile should still be
+      // able to load the dashboard with safe defaults.
+      DriverProfile.findOne({
+        userId: user._id,
+        organizationId,
+      })
+        .select("profileCompletionScore isComplianceExpired")
+        .lean(),
+
+      // Earnings are authoritative only after the payout reached "paid".
+      // Pending/processing/failed payouts are intentionally excluded.
+      DriverPayout.aggregate<{ _id: null; total: number }>([
+        {
+          $match: {
+            organizationId,
+            driverId: user._id,
+            status: "paid",
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: "$amount" },
+          },
+        },
+      ]),
+    ]);
+
+  const totalEarnings =
+    payoutTotals.length > 0 && Number.isFinite(payoutTotals[0]?.total)
+      ? payoutTotals[0].total
+      : 0;
+
+  const data = {
+    pendingRequests,
+    totalEarnings,
+    profileCompletionScore: profile?.profileCompletionScore ?? 0,
+    isComplianceExpired: Boolean(profile?.isComplianceExpired),
+    completedLoads,
+  };
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, data, "Driver dashboard statistics fetched"));
 });
 
 // ─── Driver's Account: my loads / available loads / detail ───────────────────
@@ -1075,6 +1148,7 @@ const dropLoad = asyncHandler(async (req: Request, res: Response) => {
 export default {
   heartbeat,
   getActiveDrivers,
+  getDashboardStats,
   getPendingLoadRequests,
   sendDriverAlert,
   respondToDriverAlert,

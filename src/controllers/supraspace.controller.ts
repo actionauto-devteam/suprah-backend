@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { randomBytes } from 'crypto';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -73,6 +74,110 @@ async function claimLegacyCrmOrganization<T extends { _id: any; organizationId?:
     ...crmUser,
     organizationId: new mongoose.Types.ObjectId(organizationId),
   };
+}
+
+
+type MainUserForCrmIdentity = {
+  _id: any;
+  name?: string | null;
+  email?: string | null;
+  avatar?: string | null;
+};
+
+/**
+ * Resolves the Suprah Space identity for a main-site User.
+ *
+ * Driver accounts are first-class app users, but older driver onboarding did
+ * not always create the parallel CrmUser used by Suprah Space. That left the
+ * driver able to use Transportation/GPS while both session-token creation and
+ * Driver Tracker messaging failed. SSO is the source of truth here, so a
+ * random unusable password is stored only to satisfy the legacy CrmUser schema.
+ *
+ * Organization isolation remains strict: an email already owned by another
+ * organization is never moved or duplicated.
+ */
+async function ensureCrmIdentityForMainUser(
+  mainUser: MainUserForCrmIdentity,
+  organizationId: string,
+) {
+  const email = String(mainUser.email ?? '').trim().toLowerCase();
+  if (!email) {
+    throw new ApiError(400, 'A valid email is required for Suprah Space messaging.');
+  }
+
+  const validateExisting = async (candidate: any) => {
+    if (!candidate) return null;
+    if (!candidate.isActive) {
+      throw new ApiError(403, 'The linked Suprah Space account is inactive.');
+    }
+    if (
+      candidate.organizationId &&
+      String(candidate.organizationId) !== String(organizationId)
+    ) {
+      throw new ApiError(
+        409,
+        'A Suprah Space account for this email belongs to another organization.',
+      );
+    }
+
+    const claimed = await claimLegacyCrmOrganization(candidate, organizationId);
+    if (!claimed) {
+      throw new ApiError(
+        409,
+        'The Suprah Space account could not be linked to the active organization.',
+      );
+    }
+    return claimed;
+  };
+
+  // CrmUser.email is globally unique, so check by email without an org filter
+  // before creating anything. This also prevents cross-organization takeover.
+  let crmUser = await CrmUser.findOne({ email })
+    .select('_id isActive organizationId email')
+    .lean();
+
+  crmUser = await validateExisting(crmUser);
+  if (crmUser) return crmUser;
+
+  const idSuffix = String(mainUser._id ?? '').slice(-8) || randomBytes(4).toString('hex');
+  const usernameBase =
+    (email.split('@')[0] || 'driver')
+      .replace(/[^a-z0-9._-]/gi, '')
+      .slice(0, 40) || 'driver';
+
+  try {
+    const created = await CrmUser.create({
+      organizationId,
+      fullName: String(mainUser.name ?? '').trim() || email,
+      username: `${usernameBase}-${idSuffix}`,
+      email,
+      // This identity is SSO-only. The random value is hashed by CrmUser's
+      // pre-save hook and is never disclosed or used as a driver password.
+      password: randomBytes(32).toString('hex'),
+      avatar: mainUser.avatar ?? null,
+      role: 'employee',
+      isActive: true,
+    });
+
+    return {
+      _id: created._id,
+      isActive: created.isActive,
+      organizationId: created.organizationId,
+      email: created.email,
+    } as any;
+  } catch (error: any) {
+    // React/provider startup can request a session token more than once. If
+    // another request won the create race, resolve the just-created identity
+    // instead of surfacing an E11000 error.
+    if (error?.code !== 11000) throw error;
+
+    const raced = await CrmUser.findOne({ email })
+      .select('_id isActive organizationId email')
+      .lean();
+    const resolved = await validateExisting(raced);
+    if (resolved) return resolved;
+    throw error;
+  }
 }
 
 // Push Web Push notifications to conversation members. Desktop users who are
@@ -505,18 +610,15 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
       organizationId,
       isActive: true,
     })
-      .select('email')
+      .select('name email avatar organizationId isActive')
       .lean();
 
     if (mainUser?.email) {
-      target = await CrmUser.findOne({
-        email: mainUser.email.trim().toLowerCase(),
-        isActive: true,
-        $or: crmOrganizationCandidates(organizationId.toString()),
-      }).lean();
-
-      target = await claimLegacyCrmOrganization(
-        target as any,
+      // Driver Tracker passes the main User id. Provision the driver's
+      // Suprah Space identity on demand when older onboarding did not create
+      // one, then continue through the normal direct-message flow.
+      target = await ensureCrmIdentityForMainUser(
+        mainUser as MainUserForCrmIdentity,
         organizationId.toString(),
       );
     }
@@ -1709,30 +1811,10 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Your account is not linked to an organization.');
   }
 
-  let crmUser = await CrmUser.findOne({
-    email: mainUser.email.trim().toLowerCase(),
-    $or: crmOrganizationCandidates(organizationId),
-  })
-    .select('_id isActive organizationId')
-    .lean();
-
-  if (!crmUser) {
-    throw new ApiError(
-      409,
-      'Suprah Space is unavailable because no account is linked to this user in the active organization.',
-    );
-  }
-  if (!crmUser.isActive) {
-    throw new ApiError(403, 'The linked Suprah Space account is inactive.');
-  }
-
-  crmUser = await claimLegacyCrmOrganization(crmUser as any, organizationId);
-  if (!crmUser) {
-    throw new ApiError(
-      409,
-      'The Suprah Space account could not be linked to the active organization.',
-    );
-  }
+  const crmUser = await ensureCrmIdentityForMainUser(
+    mainUser as MainUserForCrmIdentity,
+    organizationId,
+  );
 
   // Routed through generateCrmToken so the token carries type:'crm' and uses the
   // same secret chain as the SupraSpace socket. (Fixes "Invalid CRM token type".)

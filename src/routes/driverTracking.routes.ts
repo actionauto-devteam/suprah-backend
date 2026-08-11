@@ -44,6 +44,9 @@ router.post(
   driverTrackingController.respondToDriverAlert,
 );
 
+// Driver dashboard summary (read-only)
+router.get("/dashboard-stats", driverTrackingController.getDashboardStats);
+
 // Driver load lists
 router.get("/my-loads", driverTrackingController.getMyLoads);
 router.get("/my-requests", driverTrackingController.getMyRequests);
