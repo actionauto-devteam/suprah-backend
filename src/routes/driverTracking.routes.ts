@@ -1,4 +1,5 @@
-import { Router, Request, Response, NextFunction } from "express";
+import { Router, Request, Response, NextFunction, RequestHandler } from "express";
+import multer from "multer";
 // c
 // This router serves both dispatchers (staff) and drivers, both of whom are
 // regular User-model accounts authenticated through the main JWT, not CrmUser
@@ -6,6 +7,8 @@ import { Router, Request, Response, NextFunction } from "express";
 import auth from "../middleware/auth.middleware";
 import driverTrackingController from "../controllers/driverTracking.controller";
 import driverDirectoryController from "../controllers/driverDirectory.controller";
+import dispatchChatController from "../controllers/dispatchChat.controller";
+import { ApiError } from "../utils/ApiError";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const staffOnly = (req: Request, res: Response, next: NextFunction) => {
@@ -17,6 +20,69 @@ const staffOnly = (req: Request, res: Response, next: NextFunction) => {
 };
 
 const router = Router();
+
+const DISPATCH_CHAT_MAX_FILES = 5;
+const DISPATCH_CHAT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const BLOCKED_ATTACHMENT_EXTENSIONS =
+  /\.(exe|msi|bat|cmd|com|scr|ps1|vbs|jar)$/i;
+
+const dispatchChatUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: DISPATCH_CHAT_MAX_FILES,
+    fileSize: DISPATCH_CHAT_MAX_FILE_SIZE_BYTES,
+  },
+});
+
+const uploadDispatchChatFiles: RequestHandler = (req, res, next) => {
+  dispatchChatUpload.array("files", DISPATCH_CHAT_MAX_FILES)(
+    req,
+    res,
+    (error: any) => {
+      if (error instanceof multer.MulterError) {
+        if (error.code === "LIMIT_FILE_SIZE") {
+          return next(
+            new ApiError(
+              400,
+              "Each Dispatch Chat attachment must be 25 MB or smaller",
+            ),
+          );
+        }
+        if (error.code === "LIMIT_FILE_COUNT") {
+          return next(
+            new ApiError(
+              400,
+              `You can attach up to ${DISPATCH_CHAT_MAX_FILES} files at once`,
+            ),
+          );
+        }
+        return next(new ApiError(400, error.message));
+      }
+
+      if (error) {
+        return next(
+          new ApiError(400, error.message || "Failed to process attachment"),
+        );
+      }
+
+      const files = (req.files || []) as Express.Multer.File[];
+      const blocked = files.find((file) =>
+        BLOCKED_ATTACHMENT_EXTENSIONS.test(file.originalname || ""),
+      );
+      if (blocked) {
+        return next(
+          new ApiError(
+            400,
+            `${blocked.originalname} is not an allowed Dispatch Chat attachment`,
+          ),
+        );
+      }
+
+      return next();
+    },
+  );
+};
+
 
 // Driver Tracker uses the main User identity for both staff and drivers.
 // Everything below requires an authenticated organization member.
@@ -42,6 +108,32 @@ router.post(
 router.post(
   "/alerts/:alertId/respond",
   driverTrackingController.respondToDriverAlert,
+);
+
+// Suprah Dispatch Chat — isolated from Suprah Space.
+// Access is enforced again inside the controller:
+//   driver -> own thread only
+//   staff  -> drivers in the same organization only
+router.get(
+  "/dispatch-chat/:driverId/messages",
+  dispatchChatController.getMessages,
+);
+router.get(
+  "/dispatch-chat/:driverId/unread",
+  dispatchChatController.getUnreadCount,
+);
+router.post(
+  "/dispatch-chat/:driverId/messages",
+  dispatchChatController.sendMessage,
+);
+router.post(
+  "/dispatch-chat/:driverId/attachments",
+  uploadDispatchChatFiles,
+  dispatchChatController.uploadAttachments,
+);
+router.post(
+  "/dispatch-chat/:driverId/read",
+  dispatchChatController.markRead,
 );
 
 // Driver dashboard summary (read-only)
