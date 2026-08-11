@@ -419,7 +419,11 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     const key = r.email.toLowerCase();
     const existing = byEmail.get(key);
     if (!existing) { byEmail.set(key, r); continue; }
-    if (r.thisMonth.totalSeconds > existing.thisMonth.totalSeconds) byEmail.set(key, r);
+    // payrollLocation only ever lives on the CrmUser-sourced record — whichever
+    // record wins on hours, don't let it drop the classification the loser had.
+    const payrollLocation = r.user.payrollLocation ?? existing.user.payrollLocation;
+    const winner = r.thisMonth.totalSeconds > existing.thisMonth.totalSeconds ? r : existing;
+    byEmail.set(key, { ...winner, user: { ...winner.user, payrollLocation } });
   }
   const dedupedResults = [...byEmail.values(), ...noEmail].map(({ email: _email, ...rest }) => rest);
 
