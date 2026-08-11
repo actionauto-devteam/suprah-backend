@@ -44,6 +44,8 @@ export interface ICrmUser extends Document {
   screenshotExempt?: boolean;
   /** Commission-based roles (sales, finance managers, etc.) excluded from hourly/payroll reports — per Erik's directive. */
   hourlyTrackingExempt?: boolean;
+  /** Suppresses only the 43h "OT Watch" warning badge for this person — their overtime pay still computes normally. For valued employees whose extra hours are already known/approved. */
+  otWarningExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
   /**
@@ -226,6 +228,10 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: false,
     },
     hourlyTrackingExempt: {
+      type: Boolean,
+      default: false,
+    },
+    otWarningExempt: {
       type: Boolean,
       default: false,
     },

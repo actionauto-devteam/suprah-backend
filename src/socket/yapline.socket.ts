@@ -2,6 +2,8 @@ import { Server as IOServer, Socket } from 'socket.io';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import YapLineSession, { YAPLINE_MAX_ACTIVITY, YapLineActivityType } from '../models/YapLineSession.model';
 import logger from '../utils/logger';
+import { CrmPushService } from '../services/crmPush.service';
+import notificationService from '../services/notification.service';
 
 /**
  * Suprah YapLine — push-to-talk voice + live screen share over the existing
@@ -296,6 +298,109 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
       removeParticipant(io, s, userId, 'left');
     }
   });
+
+  // ── Ping/summon channel members not currently on the line ──────────────
+  // Any member of the conversation can call this, whether or not a live
+  // session exists yet — "come start/join the Finance channel" is a valid
+  // use case, not just "come join us, we're already talking." Optional
+  // `targetUserId` narrows this from "summon everyone" to "summon this one
+  // person" (e.g. "I need to talk to you here") — same delivery rails, just a
+  // smaller/different-worded target list. Delivery rides the same two rails
+  // SupraSpace messages already use: direct webpush for an immediate buzz,
+  // plus a persisted `type: 'ping'` notification (an already-reserved-but-
+  // unused type, mapped to the 'team' category) so it shows in the bell and
+  // respects the recipient's existing mute prefs.
+  socket.on(
+    'yapline:ping-channel',
+    async (
+      { conversationId, targetUserId }: { conversationId: string; targetUserId?: string },
+      ack?: (res: any) => void
+    ) => {
+      try {
+        if (!(await isConversationMember(conversationId, userId))) {
+          ack?.({ ok: false, error: 'Not a member of this conversation' });
+          return;
+        }
+
+        const s = sessions.get(conversationId);
+        let memberIds: string[];
+        let conversationName: string | null;
+
+        if (s) {
+          memberIds = s.memberIds;
+          conversationName = s.conversationName;
+        } else {
+          const conv = await SupraSpaceConversation.findById(conversationId)
+            .select('name members')
+            .lean();
+          if (!conv) {
+            ack?.({ ok: false, error: 'Conversation not found' });
+            return;
+          }
+          memberIds = ((conv as any).members || []).map((m: any) => m.toString());
+          conversationName = (conv as any).name || null;
+        }
+
+        // Don't ping the pinger, and don't ping anyone already on the line.
+        const alreadyIn = s ? new Set(s.participants.keys()) : new Set<string>();
+        let targets = memberIds.filter((id) => id !== userId && !alreadyIn.has(id));
+
+        if (targetUserId) {
+          if (!targets.includes(targetUserId)) {
+            ack?.({ ok: false, error: 'That person is not available to summon right now.' });
+            return;
+          }
+          targets = [targetUserId];
+        }
+
+        if (!targets.length) {
+          ack?.({ ok: true, notified: 0 });
+          return;
+        }
+
+        const channelLabel = conversationName || 'the channel';
+        const title = targetUserId
+          ? `${user.fullName} needs you in ${channelLabel}`
+          : `${user.fullName} is calling you into ${channelLabel}`;
+        const body = targetUserId
+          ? `${user.fullName} wants to talk to you on Suprah YapLine`
+          : `Join ${channelLabel} on Suprah YapLine`;
+        const url = `/crm/yapline?join=${conversationId}`;
+        const organizationId = (user.organizationId || '').toString();
+        const dedupeSuffix = targetUserId ? `-${targetUserId}` : '';
+
+        await Promise.allSettled([
+          CrmPushService.sendToUsers(targets, {
+            title,
+            body,
+            icon: '/icon-192x192.png',
+            tag: `yapline-ping-${conversationId}${dedupeSuffix}`,
+            topic: `yapline-ping-${conversationId}${dedupeSuffix}`,
+            source: 'SupraSpace',
+            data: { url, conversationId, kind: 'yapline_ping' },
+          }),
+          ...targets.map((memberId) =>
+            notificationService.createNotification({
+              userId: memberId,
+              organizationId,
+              type: 'ping',
+              title,
+              message: body,
+              metadata: { conversationId, route: url, pushSource: 'YapLine' },
+              dedupeKey: `yapline-ping-${conversationId}${dedupeSuffix}`,
+              groupWindowMinutes: 5,
+            })
+          ),
+        ]);
+
+        ack?.({ ok: true, notified: targets.length });
+        logger.info({ userId, conversationId, notified: targets.length }, '[YapLine] Channel ping sent');
+      } catch (err: any) {
+        logger.error(err, '[YapLine] ping-channel error');
+        ack?.({ ok: false, error: 'Failed to ping channel' });
+      }
+    }
+  );
 
   // ── WebRTC signaling relay (SDP descriptions + ICE candidates) ─────────
   socket.on(

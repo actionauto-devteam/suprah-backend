@@ -33,6 +33,7 @@ import {
   markPeriodPaid,
   unlockPayPeriod,
   getPayrollStatus,
+  getWeeklyOvertimeReport,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -70,6 +71,7 @@ router.get('/user/:userId/hourly-rate-history', getHourlyRateHistory); // admin/
 router.post('/user/:userId/mark-paid', markPeriodPaid); // admin/manager-only, role check inside
 router.post('/user/:userId/unlock-period', unlockPayPeriod); // admin-only, role check inside
 router.get('/payroll-status', getPayrollStatus); // admin/manager-only, role check inside
+router.get('/weekly-overtime-report', getWeeklyOvertimeReport); // admin/manager-only, role check inside
 
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);

@@ -21,7 +21,7 @@ import { PayPeriodLock } from '../models/PayPeriodLock.model';
 import { isTimeEditExempt, isIdleDetectionExemptDept } from '../config/departmentMonitoring';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
-import { computeWeeklyOvertime, sumRegularSecondsInPeriod } from '../utils/payrollOvertime';
+import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
@@ -1798,7 +1798,7 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
   const { periodStart, periodEnd, payDayDate } = getPayPeriodBoundsFor(year, month, periodNumber);
 
   const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
-    .select('fullName username avatar role department hourlyRate payrollLocation')
+    .select('fullName username avatar role department hourlyRate payrollLocation otWarningExempt')
     .lean();
   const userIds = users.map((u) => u._id);
 
@@ -1830,7 +1830,7 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
 
     const isUtah = u.payrollLocation === 'Utah';
     const { otPremiumSeconds, otPremiumPay, flaggedWeeks } = isUtah
-      ? computeWeeklyOvertime(calendar, periodStart, periodEnd, rate)
+      ? computeWeeklyOvertime(calendar, periodStart, periodEnd, rate, !!u.otWarningExempt)
       : { otPremiumSeconds: 0, otPremiumPay: 0, flaggedWeeks: [] };
     const basePay = rate ? computeExactPayout(totalSeconds, rate) : null;
 
@@ -1856,6 +1856,95 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
   });
 
   res.json(new ApiResponse(200, { periodStart, periodEnd, payDayDate, users: results }, 'Payroll status'));
+});
+
+/**
+ * GET /api/crm/timeproof/weekly-overtime-report?weekStart=YYYY-MM-DD
+ * Admin/manager: one Sun-Sat week's total + overtime hours for every active
+ * employee, Utah and Philippines both — for HR's weekly overtime report
+ * (previously built by hand). Reporting-only: does not affect payout anywhere.
+ * PH gets the same 40h/week threshold as Utah purely for visibility here —
+ * their pay (computeExactPayout, no premium) is untouched by this endpoint.
+ */
+export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can view the weekly overtime report');
+  }
+
+  const weekStartStr = req.query.weekStart as string | undefined;
+  if (!weekStartStr || !/^\d{4}-\d{2}-\d{2}$/.test(weekStartStr)) {
+    throw new ApiError(400, 'weekStart is required (YYYY-MM-DD, must be a Sunday)');
+  }
+  // Weekday check on the date string itself (noon UTC avoids any boundary ambiguity),
+  // same technique attachWeekTotals uses for its own Saturday-of-week computation.
+  if (new Date(weekStartStr + 'T12:00:00Z').getUTCDay() !== 0) {
+    throw new ApiError(400, 'weekStart must be a Sunday');
+  }
+  const weekStartDate = getCompanyDayRange(weekStartStr).start;
+  const weekEndExclusive = new Date(weekStartDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const saturdayStr = toLocalDateStr(new Date(weekStartDate.getTime() + 6 * 24 * 60 * 60 * 1000), COMPANY_TZ_OFFSET_MINUTES);
+
+  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
+    .select('fullName username department payrollLocation')
+    .lean();
+  const userIds = users.map((u) => u._id);
+
+  const logs = await TimeLog.find({ userId: { $in: userIds }, timestamp: { $gte: weekStartDate, $lt: weekEndExclusive } })
+    .sort({ timestamp: 1 })
+    .lean();
+  const logsByUser = new Map<string, typeof logs>();
+  for (const log of logs) {
+    const key = log.userId.toString();
+    if (!logsByUser.has(key)) logsByUser.set(key, []);
+    logsByUser.get(key)!.push(log);
+  }
+
+  const allDeductions = await ScreenshotDeduction.find({
+    userId: { $in: userIds },
+    date: { $gte: weekStartStr, $lte: saturdayStr },
+  }).select('userId date deductedSeconds').lean();
+  const deductionsByUser = new Map<string, typeof allDeductions>();
+  for (const d of allDeductions) {
+    const key = d.userId.toString();
+    if (!deductionsByUser.has(key)) deductionsByUser.set(key, []);
+    deductionsByUser.get(key)!.push(d);
+  }
+
+  const employees = users.map((u) => {
+    const uLogs = logsByUser.get(u._id.toString()) || [];
+    const calendar = buildCalendarMap(uLogs, COMPANY_TZ_OFFSET_MINUTES);
+
+    for (const d of deductionsByUser.get(u._id.toString()) || []) {
+      if (calendar[d.date]) {
+        calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
+      }
+    }
+    // Re-run after the deduction above, same fix as getMyTimeproof/getUserTimeproof —
+    // otherwise the week total stays stale from before the correction.
+    attachWeekTotals(calendar);
+
+    const totalWorkedSeconds = calendar[saturdayStr]?.weekTotalSeconds ?? 0;
+    const overtimeSeconds = Math.max(0, totalWorkedSeconds - WEEKLY_OT_THRESHOLD_SECONDS);
+
+    return {
+      userId: u._id.toString(),
+      fullName: u.fullName,
+      username: u.username,
+      department: u.department,
+      payrollLocation: u.payrollLocation,
+      totalWorkedSeconds,
+      overtimeSeconds,
+    };
+  });
+
+  employees.sort((a, b) => b.totalWorkedSeconds - a.totalWorkedSeconds);
+
+  res.json(new ApiResponse(200, {
+    weekStart: weekStartStr,
+    weekEnd: toLocalDateStr(new Date(weekEndExclusive.getTime() - 1), COMPANY_TZ_OFFSET_MINUTES),
+    employees,
+  }, 'Weekly overtime report generated'));
 });
 
 /**
