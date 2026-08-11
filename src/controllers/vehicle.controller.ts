@@ -239,6 +239,9 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     sortOrder = "desc",
     page = "1",
     limit = "20",
+    all,
+    includeMetrics,
+    metricsOnly,
   } = req.query;
 
   const search = searchParam || q;
@@ -355,8 +358,10 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const pageNum = Math.max(1, Number(page));
-  const limitNum = Number(limit);
+  const limitNum = Math.max(1, Number(limit) || 20);
   const skip = (pageNum - 1) * limitNum;
+  const fetchAll = all === "true";
+  const returnMetricsOnly = metricsOnly === "true";
 
   // Build Aggregation Pipeline
   const pipeline: any[] = [];
@@ -416,6 +421,8 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
 
   // Stage 2.5: Lead-count lookup (only when demand sort or highDemand filter is active)
   const needsDemandMetrics =
+    returnMetricsOnly ||
+    includeMetrics === "true" ||
     sortBy === "demand" ||
     sortBy === "low-performing" ||
     highDemand === "true" ||
@@ -446,42 +453,86 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  // Metrics-only mode is used by the Inventory UI after the page is already
+  // interactive. Return only IDs + lead counts and skip the assigned-user
+  // lookup, normalization payload, images, notes, and other vehicle fields.
+  if (returnMetricsOnly) {
+    pipeline.push({
+      $project: {
+        _id: 1,
+        leadCount: { $ifNull: ["$leadCount", 0] },
+      },
+    });
+
+    const metricRows = await Vehicle.aggregate(pipeline);
+    const metrics = metricRows.map((vehicle: any) => ({
+      id: vehicle._id.toString(),
+      leadCount: vehicle.leadCount || 0,
+    }));
+
+    return res.json(
+      new ApiResponse(
+        200,
+        {
+          vehicles: metrics,
+          total: metrics.length,
+          pagination: {
+            page: 1,
+            limit: metrics.length,
+            total: metrics.length,
+            totalPages: 1,
+          },
+        },
+        "Vehicle demand metrics fetched successfully",
+      ),
+    );
+  }
+
   // Stage 3: Sorting
   pipeline.push({ $sort: sortObj });
 
-  // Stage 4: Pagination & Metadata Facets
+  // Stage 4: Pagination & Metadata Facets. The All Inventory page can request
+  // the complete filtered set once (`all=true`) and perform sorting/pagination
+  // locally. That prevents a second server response from replacing the grid
+  // every time the user changes the sort option.
+  const dataPipeline: any[] = [];
+
+  if (!fetchAll) {
+    dataPipeline.push({ $skip: skip }, { $limit: limitNum });
+  }
+
+  dataPipeline.push(
+    {
+      $lookup: {
+        from: "users",
+        localField: "assignedTo",
+        foreignField: "_id",
+        as: "assignedTo",
+      },
+    },
+    {
+      $unwind: {
+        path: "$assignedTo",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $project: {
+        "assignedTo.password": 0,
+        "assignedTo.otp": 0,
+        "assignedTo.otpExpires": 0,
+        _leadData: 0,
+      },
+    },
+  );
+
   pipeline.push({
     $facet: {
       metadata: [{ $count: "total" }],
-      data: [
-        { $skip: skip },
-        { $limit: limitNum > 0 ? limitNum : 100 },
-        {
-          $lookup: {
-            from: "users",
-            localField: "assignedTo",
-            foreignField: "_id",
-            as: "assignedTo",
-          },
-        },
-        {
-          $unwind: {
-            path: "$assignedTo",
-            preserveNullAndEmptyArrays: true,
-          },
-        },
-        {
-          $project: {
-            "assignedTo.password": 0,
-            "assignedTo.otp": 0,
-            "assignedTo.otpExpires": 0,
-          },
-        },
-      ],
+      data: dataPipeline,
     },
   });
 
-  console.log("[DEBUG] Vehicle Pipeline:", JSON.stringify(pipeline, null, 2));
   const [result] = await Vehicle.aggregate(pipeline);
 
   const total = result.metadata[0]?.total || 0;
@@ -494,10 +545,10 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
   };
 
   responseData.pagination = {
-    page: pageNum,
-    limit: limitNum,
+    page: fetchAll ? 1 : pageNum,
+    limit: fetchAll ? total : limitNum,
     total,
-    totalPages: limitNum > 0 ? Math.ceil(total / limitNum) : 1,
+    totalPages: fetchAll ? 1 : Math.max(1, Math.ceil(total / limitNum)),
   };
 
   res.json(new ApiResponse(200, responseData, "Vehicles fetched successfully"));

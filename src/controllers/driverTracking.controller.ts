@@ -129,17 +129,35 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
   const nextStatus =
     status && allowedStatuses.includes(status) ? status : undefined;
 
+  const heartbeatAt = new Date();
+
+  const setFields: Record<string, unknown> = {
+    organizationId,
+    coords: { lat, lng },
+    lastSeenAt: heartbeatAt,
+    // A successful ping starts a new online period, so allow a future
+    // offline alert to fire again if this driver later goes silent.
+    offlineAlertSentAt: null,
+  };
+
+  if (nextStatus) {
+    setFields.status = nextStatus;
+  }
+
+  const update: Record<string, unknown> = {
+    $set: setFields,
+  };
+
+  // MongoDB rejects updates that target the same path in both $set and
+  // $setOnInsert. Only seed "idle" when this heartbeat did not already
+  // provide a status.
+  if (!nextStatus) {
+    update.$setOnInsert = { status: "idle" };
+  }
+
   const location = await DriverLocation.findOneAndUpdate(
     { userId: user._id },
-    {
-      $set: {
-        organizationId,
-        coords: { lat, lng },
-        lastSeenAt: new Date(),
-        ...(nextStatus ? { status: nextStatus } : {}),
-      },
-      $setOnInsert: { status: nextStatus ?? "idle" },
-    },
+    update,
     { new: true, upsert: true },
   );
 
