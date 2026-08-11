@@ -6,6 +6,8 @@ export interface IAgentHeartbeat extends Document {
   isIdle: boolean;
   idleSince: Date | null;
   lastIdleEscalationNotifiedAt: Date | null;
+  // Cooldown for the Shift Alerts channel idle message.
+  lastIdleChannelPostedAt: Date | null;
   isOnBreak: boolean;
   breakStartedAt: Date | null;
   lastBreakNotifiedAt: Date | null;
@@ -41,6 +43,10 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
       default: null,
     },
     lastIdleEscalationNotifiedAt: {
+      type: Date,
+      default: null,
+    },
+    lastIdleChannelPostedAt: {
       type: Date,
       default: null,
     },

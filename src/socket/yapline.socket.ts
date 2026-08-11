@@ -2,7 +2,6 @@ import { Server as IOServer, Socket } from 'socket.io';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import YapLineSession, { YAPLINE_MAX_ACTIVITY, YapLineActivityType } from '../models/YapLineSession.model';
 import logger from '../utils/logger';
-import { CrmPushService } from '../services/crmPush.service';
 import notificationService from '../services/notification.service';
 
 /**
@@ -304,12 +303,11 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
   // session exists yet — "come start/join the Finance channel" is a valid
   // use case, not just "come join us, we're already talking." Optional
   // `targetUserId` narrows this from "summon everyone" to "summon this one
-  // person" (e.g. "I need to talk to you here") — same delivery rails, just a
-  // smaller/different-worded target list. Delivery rides the same two rails
-  // SupraSpace messages already use: direct webpush for an immediate buzz,
-  // plus a persisted `type: 'ping'` notification (an already-reserved-but-
-  // unused type, mapped to the 'team' category) so it shows in the bell and
-  // respects the recipient's existing mute prefs.
+  // person" (e.g. "I need to talk to you here") — same delivery pipeline,
+  // just a smaller/different-worded target list. Delivery is a persisted
+  // `type: 'ping'` notification (an already-reserved-but-unused type, mapped
+  // to the 'team' category) — shows in the bell, respects the recipient's
+  // mute prefs, and pushes via the shared notification pipeline (see below).
   socket.on(
     'yapline:ping-channel',
     async (
@@ -323,23 +321,22 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
         }
 
         const s = sessions.get(conversationId);
-        let memberIds: string[];
-        let conversationName: string | null;
 
-        if (s) {
-          memberIds = s.memberIds;
-          conversationName = s.conversationName;
-        } else {
-          const conv = await SupraSpaceConversation.findById(conversationId)
-            .select('name members')
-            .lean();
-          if (!conv) {
-            ack?.({ ok: false, error: 'Conversation not found' });
-            return;
-          }
-          memberIds = ((conv as any).members || []).map((m: any) => m.toString());
-          conversationName = (conv as any).name || null;
+        // Always read membership fresh from the conversation doc — s.memberIds
+        // is only a snapshot captured when the session first started (see the
+        // `yapline:join` handler above), so a long-running session with
+        // membership changed since then would silently exclude/include the
+        // wrong people from a ping. A ping happens far less often than
+        // session state changes, so the extra read is worth the correctness.
+        const conv = await SupraSpaceConversation.findById(conversationId)
+          .select('name members')
+          .lean();
+        if (!conv) {
+          ack?.({ ok: false, error: 'Conversation not found' });
+          return;
         }
+        const memberIds: string[] = ((conv as any).members || []).map((m: any) => m.toString());
+        const conversationName: string | null = (conv as any).name || s?.conversationName || null;
 
         // Don't ping the pinger, and don't ping anyone already on the line.
         const alreadyIn = s ? new Set(s.participants.keys()) : new Set<string>();
@@ -369,32 +366,58 @@ export function registerYapLineHandlers(io: IOServer, socket: Socket): void {
         const organizationId = (user.organizationId || '').toString();
         const dedupeSuffix = targetUserId ? `-${targetUserId}` : '';
 
-        await Promise.allSettled([
-          CrmPushService.sendToUsers(targets, {
-            title,
-            body,
-            icon: '/icon-192x192.png',
-            tag: `yapline-ping-${conversationId}${dedupeSuffix}`,
-            topic: `yapline-ping-${conversationId}${dedupeSuffix}`,
-            source: 'SupraSpace',
-            data: { url, conversationId, kind: 'yapline_ping' },
-          }),
-          ...targets.map((memberId) =>
+        // Delivery goes through notificationService.createNotification alone
+        // (NOT also a separate CrmPushService.sendToUsers call, which the
+        // first version of this feature made — that double-pushed every
+        // recipient, since createNotification already dispatches its own push
+        // via UnifiedPushService). Routing through the one shared pipeline
+        // also means the ping now correctly respects the recipient's "Team"
+        // category/mute preferences (the direct CrmPushService path bypassed
+        // them entirely), and can carry a custom notification sound via
+        // metadata.playSound/soundFile — see notification.service.ts:310-315
+        // and sw.ts's push handler, the same mechanism Shift Alerts uses for
+        // its dedicated warning sound instead of the OS default.
+        //
+        // Promise.allSettled deliberately never throws, but that also means a
+        // real failure here (bad payload, DB error, etc.) used to vanish
+        // silently — the ack/toast would still say "Pinged N members" even if
+        // every single send failed underneath. Logging rejections explicitly
+        // is the only way to tell "nobody delivered" apart from "delivered
+        // but the recipient's device/prefs swallowed it" after the fact.
+        const notifResults = await Promise.allSettled(
+          targets.map((memberId) =>
             notificationService.createNotification({
               userId: memberId,
               organizationId,
               type: 'ping',
               title,
               message: body,
-              metadata: { conversationId, route: url, pushSource: 'YapLine' },
+              metadata: {
+                conversationId,
+                route: url,
+                pushSource: 'YapLine',
+                playSound: true,
+                soundFile: '/sounds/ElevenLabs.wav',
+              },
               dedupeKey: `yapline-ping-${conversationId}${dedupeSuffix}`,
               groupWindowMinutes: 5,
             })
-          ),
-        ]);
+          )
+        );
+        notifResults.forEach((r, i) => {
+          if (r.status === 'rejected') {
+            logger.warn({ err: r.reason, conversationId, targetUserId: targets[i] }, '[YapLine] Ping bell notification failed');
+          } else if (!r.value) {
+            // createNotification resolves null (not a rejection) when the
+            // recipient has the 'team' category or 'ping' type explicitly
+            // muted — legitimate, but silent otherwise, and easy to mistake
+            // for a bug when someone reports "I got nothing."
+            logger.info({ conversationId, targetUserId: targets[i] }, '[YapLine] Ping bell notification skipped — recipient has it muted');
+          }
+        });
 
         ack?.({ ok: true, notified: targets.length });
-        logger.info({ userId, conversationId, notified: targets.length }, '[YapLine] Channel ping sent');
+        logger.info({ userId, conversationId, targets, notified: targets.length }, '[YapLine] Channel ping sent');
       } catch (err: any) {
         logger.error(err, '[YapLine] ping-channel error');
         ack?.({ ok: false, error: 'Failed to ping channel' });

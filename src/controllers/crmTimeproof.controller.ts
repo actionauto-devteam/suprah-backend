@@ -913,6 +913,10 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
   if (!isIdle) lastIdleEscalationNotifiedAt = null;
 
+  // Resets on returning from idle, so the next idle stretch gets a fresh cooldown.
+  let lastIdleChannelPostedAt = existing?.lastIdleChannelPostedAt ?? null;
+  if (!isIdle) lastIdleChannelPostedAt = null;
+
   // Reset the notify-cooldown once permission is (re-)granted, so if it's
   // ever revoked again later (e.g. after another auto-update, since the
   // build is unsigned) the next loss gets its own fresh notification instead
@@ -927,6 +931,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       isIdle,
       idleSince,
       lastIdleEscalationNotifiedAt,
+      lastIdleChannelPostedAt,
       isOnBreak,
       breakStartedAt: isOnBreak && !wasOnBreak ? new Date() : (isOnBreak ? existing?.breakStartedAt ?? null : null),
       lastBreakNotifiedAt,
@@ -1026,8 +1031,15 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     // idle events only reached each admin's own notification bell, with no
     // shared, browsable log of who went idle and when the way connection-loss/
     // stale-clockout/location alerts already had via fireShiftAlert.
-    postBatchedShiftAlertMessages(user.organizationId.toString(), [`⚪ ${user.fullName} has been idle for 10 minutes.`])
-      .catch((err) => logger.error({ err, userId: user._id.toString() }, '[shiftAlerts] Failed to post idle alert'));
+    // Cooldown so flapping idle/active doesn't spam a new message per flip.
+    const idleChannelCooldownMs = 5 * 60 * 1000;
+    const dueForIdleChannelPost = !existing?.lastIdleChannelPostedAt
+      || Date.now() - new Date(existing.lastIdleChannelPostedAt).getTime() > idleChannelCooldownMs;
+    if (dueForIdleChannelPost) {
+      await AgentHeartbeat.updateOne({ userId: user._id }, { lastIdleChannelPostedAt: new Date() });
+      postBatchedShiftAlertMessages(user.organizationId.toString(), [`⚪ ${user.fullName} has been idle for 10 minutes.`])
+        .catch((err) => logger.error({ err, userId: user._id.toString() }, '[shiftAlerts] Failed to post idle alert'));
+    }
   }
 
   // ── Notify admins: agent has been idle 15+ minutes — actionable alert ────
