@@ -28,6 +28,8 @@ export function computeWeeklyOvertime(
   periodStart: Date,
   periodEnd: Date,
   hourlyRate: number | null,
+  // Suppresses the 43h heads-up badge only — OT pay below is untouched by this flag.
+  flagExempt: boolean = false,
 ): WeeklyOvertimeResult {
   const otEligible = periodStart >= WEEKLY_OT_EFFECTIVE_FROM;
   const startStr = toCompanyDateStr(periodStart);
@@ -39,7 +41,7 @@ export function computeWeeklyOvertime(
   for (const [dateStr, day] of Object.entries(calendar)) {
     if (day.weekTotalSeconds === undefined) continue;
 
-    if (day.weekTotalSeconds > WEEKLY_OVERAGE_FLAG_SECONDS) {
+    if (!flagExempt && day.weekTotalSeconds > WEEKLY_OVERAGE_FLAG_SECONDS) {
       flaggedWeeks.push({ weekEndingDate: dateStr, weekTotalSeconds: day.weekTotalSeconds });
     }
 
