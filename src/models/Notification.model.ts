@@ -245,9 +245,12 @@ const NotificationSchema = new Schema(
 // never take effect (existing behavior is preserved either way — see the
 // `.on('index', ...)` safety net below, which keeps a missed/late migration
 // from crashing the process on boot instead of just logging it).
+// MongoDB partial indexes support equality filters and `$exists: true`, but
+// not `$exists: false`. Equality to null matches documents where dedupeKey is
+// either null or missing, which is exactly the ungrouped-notification set.
 NotificationSchema.index(
   { createdAt: 1 },
-  { name: 'createdAt_ttl_ungrouped', expireAfterSeconds: 7776000, partialFilterExpression: { dedupeKey: { $exists: false } } },
+  { name: 'createdAt_ttl_ungrouped', expireAfterSeconds: 7776000, partialFilterExpression: { dedupeKey: null } },
 );
 NotificationSchema.index(
   { lastOccurredAt: 1 },

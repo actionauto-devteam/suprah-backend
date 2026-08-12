@@ -11,27 +11,33 @@ const run = async () => {
   await mongoose.connect(databaseUri);
   console.log('Connected to database.');
 
-  try {
-    await mongoose.connection.collection('notifications').dropIndex('createdAt_1');
-    console.log('Dropped old createdAt_1 TTL index.');
-  } catch {
-    console.log('createdAt_1 index not found — already removed or never existed, skipping.');
+  const notificationIndexesToDrop = [
+    'createdAt_1',
+    'lastOccurredAt_1',
+    'createdAt_ttl_ungrouped',
+    'lastOccurredAt_ttl_grouped',
+  ];
+
+  for (const indexName of notificationIndexesToDrop) {
+    try {
+      await mongoose.connection
+        .collection('notifications')
+        .dropIndex(indexName);
+
+      console.log(`Dropped notification index: ${indexName}`);
+    } catch (error: any) {
+      if (error?.code === 27 || error?.codeName === 'IndexNotFound') {
+        console.log(`${indexName} not found — skipping.`);
+      } else {
+        throw error;
+      }
+    }
   }
 
-  // lastOccurredAt_1 (auto-named, no partialFilterExpression) was created by
-  // an earlier version of this same migration before it had an explicit
-  // partialFilterExpression — same IndexOptionsConflict applies to it too,
-  // confirmed by directly inspecting the live collection's indexes: renaming
-  // alone (without dropping first) does NOT let the new spec through.
-  try {
-    await mongoose.connection.collection('notifications').dropIndex('lastOccurredAt_1');
-    console.log('Dropped old lastOccurredAt_1 index.');
-  } catch {
-    console.log('lastOccurredAt_1 index not found — already removed or never existed, skipping.');
-  }
-
-  console.log('Run this BEFORE deploying the new backend build — on next boot, Mongoose');
-  console.log('will create createdAt_ttl_ungrouped and lastOccurredAt_ttl_grouped in their place.');
+  console.log('Notification index cleanup complete.');
+  console.log('Restart the backend now. Mongoose will recreate:');
+  console.log('  - createdAt_ttl_ungrouped');
+  console.log('  - lastOccurredAt_ttl_grouped');
 
   await mongoose.disconnect();
   process.exit(0);

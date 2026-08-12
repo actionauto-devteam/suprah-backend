@@ -114,6 +114,29 @@ async function signAttachment(attachment: any) {
   };
 }
 
+async function resolveParticipantAvatar(
+  raw: string | null | undefined,
+): Promise<string | null> {
+  const value = String(raw ?? "").trim();
+  if (!value) return null;
+
+  if (
+    /^https?:\/\//i.test(value) ||
+    value.startsWith("data:")
+  ) {
+    return value;
+  }
+
+  try {
+    const signed = await storageService.getSignedUrl(value, 7 * 24 * 60 * 60);
+    return signed || value;
+  } catch {
+    // Some profiles use a public/relative path rather than a private storage
+    // key. Return it unchanged and let resolveImageUrl() handle it client-side.
+    return value;
+  }
+}
+
 async function serializeMessage(message: any) {
   const sender = message?.senderId;
   const attachments = await Promise.all(
@@ -132,6 +155,8 @@ async function serializeMessage(message: any) {
       role: sender?.role ?? message.senderRole,
     },
     senderRole: message.senderRole,
+    messageType: message.messageType || "message",
+    systemEvent: message.systemEvent ?? null,
     content: message.content || "",
     attachments,
     readBy: Array.isArray(message.readBy)
@@ -149,8 +174,11 @@ function serializeNotification(notification: any) {
     String(notification.type).includes("geofence") ||
     String(notification.type).includes("offline");
 
+  const eventIdentity =
+    notification.metadata?.incidentId ?? String(notification._id);
+
   return {
-    id: `notification:${String(notification._id)}`,
+    id: `notification:${String(eventIdentity)}`,
     kind: isAlert ? "alert" : "notification",
     notificationType: notification.type,
     title: notification.title,
@@ -184,7 +212,7 @@ async function getThreadContext(
         driverId: driver._id,
         senderRole: "dispatcher",
       })
-        .populate("senderId", "_id name email")
+        .populate("senderId", "_id name email avatar")
         .sort({ createdAt: -1 })
         .lean(),
 
@@ -201,40 +229,86 @@ async function getThreadContext(
     id: string | null;
     name: string;
     email?: string;
+    avatar?: string | null;
   };
 
   if (actor.role !== "driver") {
+    // Resolve the current dispatcher from the main User record so the chat
+    // header uses the same stored profile picture as the rest of SUPRAH.
+    const actorProfile: any = await User.findOne({
+      _id: actor._id,
+      organizationId,
+      isActive: true,
+    })
+      .select("_id name email avatar")
+      .lean();
+
     dispatcher = {
       id: actor._id.toString(),
-      name: actor.name || "Dispatcher",
-      email: actor.email || "",
+      name: actorProfile?.name || actor.name || "Dispatcher",
+      email: actorProfile?.email || actor.email || "",
+      avatar: actorProfile?.avatar || null,
     };
   } else {
     const sender: any = (latestDispatcherMessage as any)?.senderId;
     const alertMetadata: any = (latestDispatchAlert as any)?.metadata ?? {};
+
+    let fallbackDispatcher: any = null;
+
+    if (!sender?._id && alertMetadata.sentByUserId) {
+      fallbackDispatcher = await User.findOne({
+        _id: alertMetadata.sentByUserId,
+        organizationId,
+        role: { $in: STAFF_ROLES },
+        isActive: true,
+      })
+        .select("_id name email avatar")
+        .lean();
+    }
 
     dispatcher = sender?._id
       ? {
           id: String(sender._id),
           name: sender.name || "Dispatch Team",
           email: sender.email || "",
+          avatar: sender.avatar || null,
         }
-      : {
-          id: alertMetadata.sentByUserId
-            ? String(alertMetadata.sentByUserId)
-            : null,
-          name: alertMetadata.sentByName || "Dispatch Team",
-        };
+      : fallbackDispatcher?._id
+        ? {
+            id: String(fallbackDispatcher._id),
+            name:
+              fallbackDispatcher.name ||
+              alertMetadata.sentByName ||
+              "Dispatch Team",
+            email: fallbackDispatcher.email || "",
+            avatar: fallbackDispatcher.avatar || null,
+          }
+        : {
+            id: alertMetadata.sentByUserId
+              ? String(alertMetadata.sentByUserId)
+              : null,
+            name: alertMetadata.sentByName || "Dispatch Team",
+            avatar: null,
+          };
   }
+
+  const [resolvedDriverAvatar, resolvedDispatcherAvatar] =
+    await Promise.all([
+      resolveParticipantAvatar(driver.avatar),
+      resolveParticipantAvatar(dispatcher.avatar),
+    ]);
 
   return {
     driver: {
       id: String(driver._id),
       name: driver.name || "Driver",
       email: driver.email || "",
-      avatar: driver.avatar || null,
+      avatar: resolvedDriverAvatar,
     },
-    dispatcher,
+    dispatcher: {
+      ...dispatcher,
+      avatar: resolvedDispatcherAvatar,
+    },
     loads: (activeLoads as any[]).map((load) => ({
       id: String(load._id),
       loadNumber: load.loadNumber || String(load._id),
@@ -321,21 +395,40 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
     Notification.find({
       organizationId,
-      userId: driver._id,
       type: { $in: TIMELINE_NOTIFICATION_TYPES },
+      $or: [
+        // Existing driver-facing operational notifications.
+        { userId: driver._id },
+
+        // The 10-minute location-silence alert is sent to Dispatch staff, not
+        // to the driver. Pull it into this driver's private Dispatch Chat by
+        // its explicit driverId metadata.
+        {
+          type: "driver_tracker_offline_alert",
+          "metadata.driverId": String(driver._id),
+        },
+      ],
     })
       .select("_id type title message metadata createdAt")
       .sort({ createdAt: -1 })
-      .limit(80)
+      .limit(120)
       .lean(),
 
     getThreadContext(actor, organizationId, driver),
   ]);
 
   const messages = await Promise.all(rows.reverse().map(serializeMessage));
-  const systemEvents = (notifications as any[])
-    .reverse()
-    .map(serializeNotification);
+  // Multiple dispatchers each receive their own notification record for the
+  // same safety incident. Collapse copies with the same metadata.incidentId
+  // so Suprah Dispatch Chat displays one centered alert card.
+  const systemEventMap = new Map<string, ReturnType<typeof serializeNotification>>();
+
+  for (const notification of (notifications as any[]).reverse()) {
+    const event = serializeNotification(notification);
+    systemEventMap.set(event.id, event);
+  }
+
+  const systemEvents = [...systemEventMap.values()];
 
   return res.status(200).json(
     new ApiResponse(
