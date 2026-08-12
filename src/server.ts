@@ -26,6 +26,7 @@ import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivity
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
+import { initLotTechLocationEscalationScheduler } from "./schedulers/lotTechLocationEscalation.scheduler";
 import { initPresenceOfflineScheduler } from "./schedulers/presenceOffline.scheduler";
 import { initDriverOfflineAlertScheduler } from "./schedulers/driverOfflineAlert.scheduler";
 import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
@@ -207,6 +208,7 @@ if (require.main === module) {
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();
     initConnectionLossShiftAlertScheduler();
+    initLotTechLocationEscalationScheduler();
     initPresenceOfflineScheduler();
     initDriverOfflineAlertScheduler();
     startProjectDeadlineReminders();

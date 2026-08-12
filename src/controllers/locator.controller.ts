@@ -684,6 +684,8 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             ...(isNewSharingSession ? { sharingSince: new Date() } : {}),
             ...(isNewAnchor ? { stationaryNotifiedAt: null } : {}),
             permissionDeniedNotifiedAt: null,
+            locationIssueDetectedAt: null,
+            locationWarningStage: 0,
         },
         { upsert: true, new: true },
     );
@@ -796,7 +798,13 @@ const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
 
     await EmployeeLocation.findOneAndUpdate(
         { userId: actor.id },
-        { organizationId: orgId, userModel: actor.model, ...actorSnapshot(actor), sharingState },
+        {
+            organizationId: orgId, userModel: actor.model, ...actorSnapshot(actor), sharingState,
+            // Break time isn't a location violation — cancel any in-flight escalation so the
+            // elapsed-time clock doesn't keep ticking silently through the break.
+            locationIssueDetectedAt: null,
+            locationWarningStage: 0,
+        },
         { upsert: true },
     );
 
@@ -836,9 +844,16 @@ const reportPermissionDenied = asyncHandler(async (req: Request, res: Response) 
         res.json(new ApiResponse(200, {}, 'Ignored — location not required for this account')); return;
     }
 
+    // Stage 1 of the mandatory-dept location-loss escalation (see lotTechLocationEscalation
+    // scheduler) — locationIssueDetectedAt anchors the +5/+10/+15min warning/clockout timeline.
     const claimed = await EmployeeLocation.findOneAndUpdate(
         { userId: actor.id, permissionDeniedNotifiedAt: null },
-        { permissionDeniedNotifiedAt: new Date(), sharingState: 'declined_permission' },
+        {
+            permissionDeniedNotifiedAt: new Date(),
+            sharingState: 'declined_permission',
+            locationIssueDetectedAt: new Date(),
+            locationWarningStage: 1,
+        },
     );
     if (!claimed) { res.json(new ApiResponse(200, {}, 'Already notified')); return; }
 
