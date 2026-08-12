@@ -77,6 +77,17 @@ const parseAttachments: RequestHandler = (req, res, next) => {
     });
 };
 
+// The upload limiter is meant to throttle file uploads, not every report
+// submission. It must run AFTER parseAttachments so it can see whether files
+// were actually attached — otherwise every text-only report burns from the
+// same upload rate-limit budget as real attachments.
+const limitIfAttachments: RequestHandler = (req, res, next) => {
+    const uploadedFiles = (req.files || {}) as Record<string, Express.Multer.File[]>;
+    const hasFiles = Object.values(uploadedFiles).some((files) => files && files.length > 0);
+    if (!hasFiles) return next();
+    return uploadLimiter(req, res, next);
+};
+
 // All DayPulse routes require CRM authentication
 router.use(crmAuth());
 
@@ -85,7 +96,7 @@ router.get('/dates', dayPulseController.getReportDates);
 
 // ── Core CRUD ──
 router.get('/', dayPulseController.getReports);
-router.post('/', uploadLimiter, parseAttachments, dayPulseController.createReport);
+router.post('/', parseAttachments, limitIfAttachments, dayPulseController.createReport);
 router.put('/:id', dayPulseController.updateReport);
 router.delete('/:id', dayPulseController.deleteReport);
 
