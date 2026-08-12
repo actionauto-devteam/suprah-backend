@@ -6,6 +6,7 @@ import CrmUser from '../models/CrmUser.model';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { isLocationRequiredForUser } from '../config/departmentMonitoring';
+import { isMandatoryLocationDept } from '../constants/departments';
 
 // Proactive offline check for all depts, independent of Lot Tech
 const CONNECTION_LOST_THRESHOLD_MS = 10 * 60 * 1000;
@@ -61,6 +62,10 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
 
     // Treat silence as lost connection only if consent still on
     if (!userDoc.locationConsent?.granted) continue;
+
+    // Mandatory-location depts (Lot Tech) get faster detection + a real escalation with
+    // consequence via lotTechLocationEscalation.scheduler.ts — skip here to avoid double alerts.
+    if (await isMandatoryLocationDept((loc.organizationId as any)?.toString(), userDoc.department)) continue;
 
     const { isOnShift, isOnBreak } = await getShiftStatusForActor(loc.userId);
     if (!isOnShift || isOnBreak) continue; // exempt while on break, and irrelevant once shift has ended
