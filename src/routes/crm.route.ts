@@ -4,9 +4,6 @@ import multer from 'multer';
 import crmController from '../controllers/crm.controller';
 import departmentController from '../controllers/department.controller';
 import hrController from '../controllers/hr.controller';
-import feedController from '../controllers/feed.controller';
-import feedCommentController from '../controllers/feedComment.controller';
-import feedReactionRouter from './feedReaction.routes';
 import crmAuth from '../middleware/crmAuth.middleware';
 import { authLimiter, otpLimiter } from '../middleware/rate-limit.middleware';
 
@@ -54,15 +51,12 @@ router.get('/hr/milestones',           hrController.getMilestones);
 router.get('/hr/offboarded',           hrController.getOffboarded);
 router.post('/hr/milestones/trigger',  hrController.triggerMilestones);
 
-router.get('/feeds',        feedController.getPosts);
-router.post('/feeds',       feedController.createPost);
-router.put('/feeds/:id',    feedController.updatePost);
-router.delete('/feeds/:id', feedController.deletePost);
-
-router.use('/feeds/reactions', feedReactionRouter);
-
-router.get('/feeds/:postId/comments',               feedCommentController.getComments);
-router.post('/feeds/:postId/comments',              feedCommentController.addComment);
-router.delete('/feeds/:postId/comments/:commentId', feedCommentController.deleteComment);
+// Feed/DayPulse routes are intentionally NOT defined here. This router is
+// mounted at "/crm", which matches "/crm/feeds/*" before the dedicated
+// "/crm/feeds" mount in routes/index.ts ever gets a chance to run. Defining
+// them here shadowed feed.route.ts entirely, so uploads reached createPost
+// with no multer in the chain — req.files/req.body were never populated and
+// every attachment post failed with "Post content cannot be empty". Keep them
+// in feed.route.ts, which owns the attachment-parsing middleware.
 
 export default router;
