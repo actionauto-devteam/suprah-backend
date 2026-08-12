@@ -94,6 +94,11 @@ async function ensureLegacyDepartmentsSeeded(organizationId?: string | null): Pr
   );
 }
 
+// Dedupes concurrent cache-miss fetches per org — without this, every heartbeat
+// (60s interval, same as the cache TTL) landing right after expiry independently
+// re-seeds + re-queries at once instead of sharing one in-flight fetch.
+const inFlightFetches = new Map<string, Promise<DepartmentEntry[]>>();
+
 /** All departments (active + inactive) for the org, cached. Every read that misses the cache
  * ensures the legacy default set exists as real documents before returning — never fabricates
  * in-memory entries without a real _id, and self-heals an org whose Department collection is
@@ -103,14 +108,22 @@ export async function getOrgDepartments(organizationId?: string | null): Promise
   const cached = departmentListCache.get(cacheKey);
   if (cached) return cached as DepartmentEntry[];
 
-  await ensureLegacyDepartmentsSeeded(organizationId);
+  const existingFetch = inFlightFetches.get(cacheKey);
+  if (existingFetch) return existingFetch;
 
-  const query = departmentQuery(organizationId);
-  const docs = await Department.find(query).sort({ sortOrder: 1, label: 1 }).lean();
+  const fetchPromise = (async () => {
+    await ensureLegacyDepartmentsSeeded(organizationId);
+    const query = departmentQuery(organizationId);
+    const docs = await Department.find(query).sort({ sortOrder: 1, label: 1 }).lean();
+    const result = docs.map(toEntry);
+    departmentListCache.set(cacheKey, result);
+    return result;
+  })().finally(() => {
+    inFlightFetches.delete(cacheKey);
+  });
 
-  const result = docs.map(toEntry);
-  departmentListCache.set(cacheKey, result);
-  return result;
+  inFlightFetches.set(cacheKey, fetchPromise);
+  return fetchPromise;
 }
 
 export async function getActiveOrgDepartments(organizationId?: string | null): Promise<DepartmentEntry[]> {

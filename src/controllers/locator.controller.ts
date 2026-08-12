@@ -683,6 +683,7 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
             stationaryAnchor, stationarySince,
             ...(isNewSharingSession ? { sharingSince: new Date() } : {}),
             ...(isNewAnchor ? { stationaryNotifiedAt: null } : {}),
+            permissionDeniedNotifiedAt: null,
         },
         { upsert: true, new: true },
     );
@@ -817,6 +818,47 @@ const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
     emitToOrg(orgId, 'activity:new', event);
 
     res.json(new ApiResponse(200, { sharingState }, 'Location sharing paused'));
+});
+
+// Reported by the client the moment it detects OS/browser location permission was denied —
+// the one way sharing can stop that never hits a guarded endpoint (assertCanTurnOffLocation
+// can't block what never calls it), so this exists purely to alert admins fast instead of
+// waiting up to ~15min for the connection-lost cron to notice the row went silent.
+const reportPermissionDenied = asyncHandler(async (req: Request, res: Response) => {
+    const actor = getLocatorActor(req);
+    const orgId = req.orgId as string;
+    if (!orgId) { res.json(new ApiResponse(200, {}, 'Ignored — no organization')); return; }
+
+    const { isOnShift, isOnBreak } = await getShiftStatusForActor(actor.id);
+    if (!isOnShift || isOnBreak) { res.json(new ApiResponse(200, {}, 'Ignored — not on shift')); return; }
+
+    if (!(await isLocationRequiredForUser(orgId, actor.department, actor.locationRequiredOverride))) {
+        res.json(new ApiResponse(200, {}, 'Ignored — location not required for this account')); return;
+    }
+
+    const claimed = await EmployeeLocation.findOneAndUpdate(
+        { userId: actor.id, permissionDeniedNotifiedAt: null },
+        { permissionDeniedNotifiedAt: new Date(), sharingState: 'declined_permission' },
+    );
+    if (!claimed) { res.json(new ApiResponse(200, {}, 'Already notified')); return; }
+
+    emitToOrg(orgId, 'locator:sharing_state_changed', { userId: actor.id.toString(), sharingState: 'declined_permission' });
+
+    // notifyTitle/notifyBody go to BOTH admins and the affected employee (fireShiftAlert's
+    // notifyTargetUser) — phrased as a direct instruction so it reads correctly either way.
+    // chatMessage (admin-only Shift Alerts channel) keeps the name for admin context.
+    await fireShiftAlert({
+        organizationId: orgId,
+        targetUserId: actor.id.toString(),
+        targetUserModel: actor.model,
+        chatMessage: `🚫 ${actor.name} turned off location access while clocked in.`,
+        notifyTitle: '🚫 Location Turned Off',
+        notifyBody: 'Location access was turned off while clocked in — please turn it back on to continue your shift.',
+        notifyTag: `shift-alert-permission-denied-${actor.id}`,
+        url: `/crm/timeproof/users/${actor.id}`,
+    });
+
+    res.json(new ApiResponse(200, {}, 'Reported'));
 });
 
 const resumeSharing = asyncHandler(async (req: Request, res: Response) => {
@@ -1425,6 +1467,7 @@ const getActiveSosAlerts = asyncHandler(async (req: Request, res: Response) => {
 export default {
     getMyLocatorStatus, setLocationConsent, setLocationSharingOptOut,
     ingestLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
+    reportPermissionDenied,
     requestLocationShare,
     getPlaces, createPlace, updatePlace, deletePlace, manualCheckIn,
     getLocationHistory, getTimeAtPlaceReport, getDailyActivityLog,

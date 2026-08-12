@@ -20,6 +20,7 @@ router.post('/ping', locatorController.ingestLocation);
 router.post('/pause', locatorController.pauseSharing);
 router.post('/resume', locatorController.resumeSharing);
 router.post('/off-duty', locatorController.stopSharing);
+router.post('/permission-denied', locatorController.reportPermissionDenied);
 router.get('/active', locatorController.getActiveEmployeeLocations);
 router.post('/request/:userId', locatorController.requestLocationShare);
 

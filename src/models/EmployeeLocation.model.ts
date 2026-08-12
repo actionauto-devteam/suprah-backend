@@ -38,6 +38,7 @@ export interface IEmployeeLocation extends Document {
   stationarySince?: Date;
   stationaryNotifiedAt?: Date | null;
   connectionLostNotifiedAt?: Date | null;
+  permissionDeniedNotifiedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -116,6 +117,7 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
     stationarySince: { type: Date },
     stationaryNotifiedAt: { type: Date, default: null },
     connectionLostNotifiedAt: { type: Date, default: null },
+    permissionDeniedNotifiedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
