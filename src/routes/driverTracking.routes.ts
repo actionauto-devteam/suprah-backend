@@ -9,6 +9,7 @@ import driverTrackingController from "../controllers/driverTracking.controller";
 import driverDirectoryController from "../controllers/driverDirectory.controller";
 import dispatchChatController from "../controllers/dispatchChat.controller";
 import { ApiError } from "../utils/ApiError";
+import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const staffOnly = (req: Request, res: Response, next: NextFunction) => {
@@ -92,6 +93,10 @@ router.use(auth());
 router.get("/org-drivers", staffOnly, driverDirectoryController.getOrgDrivers);
 router.get("/active-drivers", staffOnly, driverTrackingController.getActiveDrivers);
 router.post("/heartbeat", driverTrackingController.heartbeat);
+router.post(
+  "/location-offline",
+  driverTrackingController.markLocationOffline,
+);
 
 // Dispatcher load actions
 router.post("/assign-load", staffOnly, driverTrackingController.assignLoad);
@@ -161,5 +166,10 @@ router.post("/loads/:id/accept", driverTrackingController.acceptLoad);
 router.post("/loads/:id/pickup", driverTrackingController.markPickedUp);
 router.post("/loads/:id/start-route", driverTrackingController.startRoute);
 router.post("/loads/:id/drop", driverTrackingController.dropLoad);
+
+// Start the organization-wide location-silence monitor once when Driver
+// Tracking routes are initialized. The service internally guards against
+// duplicate timers.
+startDriverLocationMonitor();
 
 export default router;

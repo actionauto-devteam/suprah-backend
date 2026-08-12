@@ -13,6 +13,7 @@ import { getSocketIO, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 import activityService from "../services/activity.service";
 import Notification from "../models/Notification.model";
+import DispatchChatMessage from "../models/DispatchChatMessage.model";
 import notificationService from "../services/notification.service";
 import { driverSignSchema } from "../validations/load.validation";
 
@@ -139,6 +140,12 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
       organizationId,
       coords: { lat, lng },
       lastSeenAt: new Date(),
+
+      // A successful location heartbeat ends any previous "not sharing"
+      // incident. This allows the 10-minute monitor to notify dispatch again
+      // only if a NEW silence gap happens later.
+      offlineAlertSentAt: null,
+
       ...(nextStatus ? { status: nextStatus } : {}),
     },
   };
@@ -167,6 +174,91 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
     .status(200)
     .json(new ApiResponse(200, { ok: true }, "Location updated"));
 });
+
+// POST /api/driver-tracking/location-offline
+const markLocationOffline = asyncHandler(
+  async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const organizationId = req.orgId as string;
+
+    if (user.role !== "driver") {
+      throw new ApiError(
+        403,
+        "Only driver accounts can publish Driver Tracker presence",
+      );
+    }
+
+    const activeLoad = await Load.exists({
+      organizationId,
+      assignedDriverId: user._id,
+      status: { $in: ACTIVE_LOAD_STATUSES },
+    });
+
+    if (!activeLoad) {
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          { ok: true, required: false },
+          "No active load requires forced GPS presence",
+        ),
+      );
+    }
+
+    const now = new Date();
+
+    let location: any = await DriverLocation.findOneAndUpdate(
+      {
+        userId: user._id,
+        organizationId,
+        status: { $ne: "offline" },
+      },
+      {
+        $set: {
+          status: "offline",
+          lastSeenAt: now,
+          offlineAlertSentAt: null,
+        },
+      },
+      { new: true },
+    );
+
+    let startedAt = now;
+
+    if (!location) {
+      location = await DriverLocation.findOne({
+        userId: user._id,
+        organizationId,
+      });
+
+      if (location?.status === "offline" && location?.lastSeenAt) {
+        startedAt = new Date(location.lastSeenAt);
+      }
+    }
+
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${organizationId}`).emit("driver:location", {
+        driverId: user._id.toString(),
+        coords: location?.coords ?? null,
+        status: "offline",
+        lastSeenAt: startedAt,
+      });
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          ok: true,
+          required: true,
+          status: "offline",
+          silenceStartedAt: startedAt,
+        },
+        "Driver location marked offline",
+      ),
+    );
+  },
+);
 
 // ─── Active Drivers (map view) ────────────────────────────────────────────────
 // GET /api/driver-tracking/active-drivers
@@ -946,6 +1038,107 @@ const respondToDriverAlert = asyncHandler(async (req: Request, res: Response) =>
   notification.markModified("metadata");
   await notification.save();
 
+  const responseLabel =
+    response === "on_my_way"
+      ? "On My Way"
+      : response === "unable"
+        ? "Unable"
+        : "Acknowledged";
+
+  const destinationName =
+    String(notification.metadata?.destinationName || "").trim();
+
+  const responseMessage =
+    response === "on_my_way"
+      ? destinationName
+        ? `${user.name || "Driver"} is on the way to ${destinationName}.`
+        : `${user.name || "Driver"} is on the way.`
+      : response === "unable"
+        ? destinationName
+          ? `${user.name || "Driver"} is unable to proceed to ${destinationName}.`
+          : `${user.name || "Driver"} is unable to proceed with the dispatch request.`
+        : destinationName
+          ? `${user.name || "Driver"} acknowledged the dispatch request for ${destinationName}.`
+          : `${user.name || "Driver"} acknowledged the dispatch request.`;
+
+  // Persist the response inside Suprah Dispatch Chat itself. This makes the
+  // operational response part of the actual driver↔dispatcher history, so it
+  // remains visible after refresh/reopen instead of existing only as a socket
+  // event for the current browser session.
+  const chatResponse: any = await DispatchChatMessage.create({
+    organizationId,
+    driverId: user._id,
+    senderId: user._id,
+    senderRole: "driver",
+    messageType: "system",
+    systemEvent: {
+      type: "driver_dispatch_alert_response",
+      title: `Driver Response: ${responseLabel}`,
+      message: responseMessage,
+      metadata: {
+        alertId: notification._id.toString(),
+        driverId: user._id.toString(),
+        driverName: user.name,
+        response,
+        responseLabel,
+        respondedAt: respondedAt.toISOString(),
+        destinationName:
+          notification.metadata?.destinationName ?? null,
+        sentByUserId:
+          notification.metadata?.sentByUserId ?? null,
+      },
+    },
+    content: responseMessage,
+    attachments: [],
+    // The responding driver has already seen their own response. Dispatch
+    // remains unread until a dispatcher opens this driver's chat.
+    readBy: [user._id],
+  });
+
+  const populatedChatResponse: any =
+    await DispatchChatMessage.findById(chatResponse._id)
+      .populate("senderId", "name email role")
+      .lean();
+
+  const dispatchChatPayload = {
+    id: String(populatedChatResponse?._id ?? chatResponse._id),
+    driverId: user._id.toString(),
+    sender: {
+      id: user._id.toString(),
+      name:
+        populatedChatResponse?.senderId?.name ??
+        user.name ??
+        "Driver",
+      email: populatedChatResponse?.senderId?.email ?? "",
+      role: "driver",
+    },
+    senderRole: "driver",
+    messageType: "system",
+    systemEvent: chatResponse.systemEvent,
+    content: responseMessage,
+    attachments: [],
+    readBy: [user._id.toString()],
+    createdAt:
+      populatedChatResponse?.createdAt ??
+      chatResponse.createdAt,
+    updatedAt:
+      populatedChatResponse?.updatedAt ??
+      chatResponse.updatedAt,
+  };
+
+  // DispatchChatDialog dedupes by message id, so broadcasting to both rooms is
+  // safe even when a driver is also joined to the organization room.
+  emitToUser(
+    user._id.toString(),
+    "dispatch-chat:message",
+    dispatchChatPayload,
+  );
+  emitToOrg(
+    organizationId,
+    "dispatch-chat:message",
+    dispatchChatPayload,
+  );
+
   emitToUser(user._id.toString(), "notification:updated", notification);
   emitToOrg(organizationId, "driver:dispatch_alert_acknowledged", {
     alertId: notification._id.toString(),
@@ -1147,6 +1340,7 @@ const dropLoad = asyncHandler(async (req: Request, res: Response) => {
 
 export default {
   heartbeat,
+  markLocationOffline,
   getActiveDrivers,
   getDashboardStats,
   getPendingLoadRequests,

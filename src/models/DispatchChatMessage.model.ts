@@ -13,6 +13,13 @@ export interface IDispatchChatMessage extends Document {
   driverId: mongoose.Types.ObjectId;
   senderId: mongoose.Types.ObjectId;
   senderRole: "driver" | "dispatcher";
+  messageType: "message" | "system";
+  systemEvent?: {
+    type?: string;
+    title?: string;
+    message?: string;
+    metadata?: Record<string, unknown>;
+  } | null;
   content: string;
   attachments: IDispatchChatAttachment[];
   readBy: mongoose.Types.ObjectId[];
@@ -54,6 +61,16 @@ const dispatchChatMessageSchema = new Schema<IDispatchChatMessage>(
       type: String,
       enum: ["driver", "dispatcher"],
       required: true,
+    },
+    messageType: {
+      type: String,
+      enum: ["message", "system"],
+      default: "message",
+      index: true,
+    },
+    systemEvent: {
+      type: Schema.Types.Mixed,
+      default: null,
     },
     content: {
       type: String,
