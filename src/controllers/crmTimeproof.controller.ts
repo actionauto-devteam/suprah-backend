@@ -1632,9 +1632,10 @@ export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) 
   if (requestor.role !== 'admin') {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
-  // Confirmed with the user: this tool must stay entirely within the exempt department —
-  // only a Web Dev admin can see/use it, even for a Web Dev target. An admin from any other
-  // department must get the same 403 an ordinary non-admin would, not just a hidden UI.
+  // Confirmed with the user: this is a Web Dev-only POWER, not a Web-Dev-only PROTECTION — a
+  // Web Dev admin can use it on ANY user's records (any department), but no one outside Web
+  // Dev can see/use it at all, even on a Web Dev target. Only the requestor's own department
+  // gates this — the target user's department is irrelevant here.
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
     throw new ApiError(403, 'This tool is only available to admins in an exempt department');
   }
@@ -1644,9 +1645,6 @@ export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) 
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
-  if (!(await isTimeEditExempt(targetUser.organizationId?.toString(), targetUser.department))) {
-    throw new ApiError(403, 'This tool is only for departments exempt from standard time correction');
-  }
 
   const { start, end } = getCompanyDayRange(date);
   const logs = await TimeLog.find({ userId, timestamp: { $gte: start, $lt: end } })
@@ -1675,8 +1673,8 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
   if (requestor.role !== 'admin') {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
-  // Confirmed with the user: stays entirely within the exempt department — only a Web Dev
-  // admin can use this, not any admin.
+  // Web Dev-only POWER, not a Web-Dev-only PROTECTION — a Web Dev admin can use this on ANY
+  // user's records, any department. Only the requestor's own department gates access.
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
     throw new ApiError(403, 'This tool is only available to admins in an exempt department');
   }
@@ -1689,17 +1687,13 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
     throw new ApiError(400, 'userId, date and action are all required');
   }
   // Reason is optional here (unlike correctTimeLog) — this tool is already restricted to
-  // Web Dev admins acting on Web Dev users, per the user's explicit instruction. Still
-  // recorded in AuditLog when given; falls back to a placeholder when omitted so the audit
-  // trail never has a blank reason.
+  // Web Dev admins, per the user's explicit instruction. Still recorded in AuditLog when
+  // given; falls back to a placeholder when omitted so the audit trail never has a blank reason.
   const auditReason = reason?.trim() || '(no reason provided)';
   const noteSuffix = reason?.trim() ? `: ${reason.trim()}` : '';
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
-  if (!(await isTimeEditExempt(targetUser.organizationId?.toString(), targetUser.department))) {
-    throw new ApiError(403, 'This tool is only for departments exempt from standard time correction — use Correct Time instead');
-  }
 
   const { start } = getCompanyDayRange(date);
   const { locked } = await getPeriodLockStatus(userId, start);
