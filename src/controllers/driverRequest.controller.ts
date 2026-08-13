@@ -5,6 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import DriverRequest from "../models/DriverRequest.model";
 import User, { IUser } from "../models/User.model";
 import Organization from "../models/Organization.model";
+import DriverProfile from "../models/DriverProfile.model";
 import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
 import logger from "../utils/logger";
@@ -43,12 +44,20 @@ const createDriverRequest = asyncHandler(
 
     const driverRequest = await DriverRequest.create({
       driverUserId: userId,
+      organizationId: currentUser.organizationId,
       status: "pending",
     });
 
-    const superAdmins = await User.find({ role: "super_admin" });
+    // Notify the driver's own org admins; fall back to all super_admins
+    // only if no org has been resolved for this driver yet.
+    const recipients = currentUser.organizationId
+      ? await User.find({
+          organizationId: currentUser.organizationId,
+          $or: [{ role: "admin" }, { organizationRole: "admin" }],
+        })
+      : await User.find({ role: "super_admin" });
 
-    for (const admin of superAdmins) {
+    for (const admin of recipients) {
       try {
         await notificationService.createNotification({
           userId: admin._id.toString(),
@@ -122,12 +131,40 @@ const getDriverRequests = asyncHandler(
       filter.status = status;
     }
 
+    // super_admin sees every org; a plain org admin only sees their own org's requests.
+    if (user.role !== "super_admin") {
+      filter.organizationId = user.organizationId;
+    }
+
     const requests = await DriverRequest.find(filter)
       .populate("driverUserId", "name email avatar")
       .populate("reviewedBy", "name")
       .sort({ createdAt: -1 });
 
     res.json(new ApiResponse(200, requests, "Driver requests fetched"));
+  },
+);
+
+// GET /api/driver-requests/by-driver/:userId — org-scoped lookup used by the
+// admin driver-detail review page to show that driver's request status inline.
+const getDriverRequestByDriver = asyncHandler(
+  async (req: Request, res: Response) => {
+    const adminUser = req.user as IUser;
+    const orgRole = req.orgRole;
+
+    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
+    if (!isAdmin) {
+      throw new ApiError(403, "You do not have permission to view driver requests");
+    }
+
+    const filter: any = { driverUserId: req.params.userId };
+    if (adminUser.role !== "super_admin") {
+      filter.organizationId = adminUser.organizationId;
+    }
+
+    const request = await DriverRequest.findOne(filter).sort({ createdAt: -1 });
+
+    res.json(new ApiResponse(200, request, "Driver request fetched"));
   },
 );
 
@@ -169,6 +206,17 @@ const approveDriverRequest = asyncHandler(
     request.reviewedBy = adminUser._id as any;
     request.reviewedAt = new Date();
     await request.save();
+
+    // Keep the compliance-document review in sync with the account-level
+    // decision so admins don't have to separately flip it in two places.
+    try {
+      await DriverProfile.findOneAndUpdate(
+        { userId: driverUser._id },
+        { verificationStatus: "verified" },
+      );
+    } catch (err) {
+      logger.error({ err, driverId: driverUser._id }, "Non-fatal: failed to sync DriverProfile verificationStatus on approve");
+    }
 
     try {
       await notificationService.createNotification({
@@ -289,6 +337,50 @@ const rejectDriverRequest = asyncHandler(
             driverRequestId: request._id.toString(),
           },
         });
+
+        try {
+          await emailService.sendEmail({
+            to: driverUser.email,
+            subject: "Update on Your Driver Application - Action Auto",
+            text: `Hi ${driverUser.name},\n\nThank you for applying to join Action Auto as a driver. After review, we're unable to approve your application at this time.\n\nIf you believe this was a mistake or would like more information, please contact your administrator.\n\n— Action Auto Team`,
+            html: `
+              <!DOCTYPE html>
+              <html>
+              <head>
+                <style>
+                  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f4f4f4; margin: 0; padding: 0; }
+                  .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                  .header { background: #6b7280; color: white; padding: 30px 20px; text-align: center; }
+                  .header h1 { margin: 0; font-size: 24px; }
+                  .content { padding: 30px; }
+                  .notice-box { background: #f9fafb; border-left: 4px solid #6b7280; padding: 20px; border-radius: 4px; margin: 20px 0; }
+                  .footer { text-align: center; color: #6b7280; font-size: 12px; padding: 20px; background: #f9fafb; border-top: 1px solid #e5e7eb; }
+                </style>
+              </head>
+              <body>
+                <div class="container">
+                  <div class="header">
+                    <h1>Application Update</h1>
+                    <p style="margin: 8px 0 0 0; opacity: 0.9;">Action Auto Driver Portal</p>
+                  </div>
+                  <div class="content">
+                    <p style="font-size: 16px;">Hi <strong>${driverUser.name}</strong>,</p>
+                    <div class="notice-box">
+                      <p style="margin: 0; font-size: 16px; font-weight: bold; color: #374151;">We're unable to approve your driver application at this time.</p>
+                      <p style="margin: 8px 0 0 0; color: #4b5563;">If you believe this was a mistake or would like more information, please contact your administrator.</p>
+                    </div>
+                  </div>
+                  <div class="footer">
+                    <p>Action Auto Team</p>
+                  </div>
+                </div>
+              </body>
+              </html>
+            `,
+          });
+        } catch (emailErr) {
+          logger.error({ err: emailErr, driverId: driverUser._id }, 'Failed to send driver rejection email');
+        }
       }
     } catch {
     }
@@ -303,6 +395,7 @@ export default {
   createDriverRequest,
   getMyDriverRequestStatus,
   getDriverRequests,
+  getDriverRequestByDriver,
   approveDriverRequest,
   rejectDriverRequest,
 };

@@ -55,6 +55,11 @@ class AuthService {
 
             if (roleToAssign === 'driver' && !inviteToken) {
                 isApproved = false;
+                // The dedicated /sign-up/driver form already collects role +
+                // organization together, so there's no separate role-selection
+                // step needed — treat registration itself as onboarding-complete
+                // (approval is a distinct, separate gate handled by isApproved).
+                onboardingCompleted = true;
             }
 
             let finalGlobalRole = roleToAssign;
@@ -503,11 +508,20 @@ class AuthService {
             if (!existingRequest) {
                 const driverRequest = await DriverRequest.create({
                     driverUserId: user._id,
+                    organizationId: user.organizationId,
                     status: 'pending'
                 });
 
-                const superAdmins = await User.find({ role: 'super_admin' });
-                for (const admin of superAdmins) {
+                // Notify the driver's own org admins so the right people see it.
+                // Fall back to all super_admins only if no org was resolved yet.
+                const recipients = user.organizationId
+                    ? await User.find({
+                        organizationId: user.organizationId,
+                        $or: [{ role: 'admin' }, { organizationRole: 'admin' }],
+                    })
+                    : await User.find({ role: 'super_admin' });
+
+                for (const admin of recipients) {
                     await notificationService.createNotification({
                         userId: admin._id.toString(),
                         organizationId: admin.organizationId?.toString() || 'global',

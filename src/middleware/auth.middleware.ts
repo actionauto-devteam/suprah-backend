@@ -119,7 +119,11 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             isAftermarketBrowse ||
             url.includes('/api/invitations/accept') ||
             url.includes('/api/push/subscribe') ||
-            url.includes('/api/driver-requests/my-status');
+            url.includes('/api/driver-requests/my-status') ||
+            // Driver's Account application wizard (documents/compliance/
+            // agreement) must be reachable before admin approval — that's
+            // the whole point of it existing.
+            url.includes('/api/driver-profile');
 
         if (!user.onboardingCompleted && !isWhitelisted) {
             throw new ApiError(403, 'Account setup incomplete. Please finish onboarding to access this feature.');

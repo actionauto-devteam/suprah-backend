@@ -13,6 +13,11 @@ router.get(
 );
 
 router.get("/", auth(), driverRequestController.getDriverRequests);
+router.get(
+  "/by-driver/:userId",
+  auth(),
+  driverRequestController.getDriverRequestByDriver,
+);
 router.patch(
   "/:id/approve",
   auth(),
