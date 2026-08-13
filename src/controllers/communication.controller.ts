@@ -2,403 +2,285 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
-import CommunicationLog from "../models/CommunicationLog.model";
-import Lead from "../models/lead.model";
-import emailService from "../services/email.service";
-import { emitToOrg } from "../utils/socketEmitter";
+import {
+  Conversation,
+  CommunicationMessage,
+  CallLog,
+} from "../models/communication.model";
+import * as comm from "../services/communication.service";
+import * as telnyx from "../services/telnyx.service";
 
-function resolveOrgId(req: Request): string {
-  const orgId = req.orgId;
-  if (!orgId) {
-    throw new ApiError(403, "Organization context required");
-  }
-  return orgId;
+/** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
+ *  as lead.controller). */
+function actor(req: Request) {
+  const u: any = (req as any).user || (req as any).crmUser || {};
+  return {
+    userId: u._id || u.id || u.userId,
+    name:
+      u.name ||
+      [u.firstName, u.lastName].filter(Boolean).join(" ") ||
+      u.email ||
+      "Team member",
+    email: u.email,
+  };
 }
+const orgOf = (req: Request) => (req as any).orgId;
 
-function resolveActor(req: Request): {
-  actorId: string | null;
-  actorModel: "User" | "CrmUser";
-} {
-  const crmUser = (req as any).crmUser;
-  if (crmUser?._id) {
-    return { actorId: crmUser._id.toString(), actorModel: "CrmUser" };
-  }
+/* ------------------------------ conversations --------------------------- */
 
-  const user = req.user as any;
-  if (user?._id || user?.id) {
-    return {
-      actorId: (user._id || user.id).toString(),
-      actorModel: "User",
-    };
-  }
+export const listConversations = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10));
+  const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || "20"), 10)));
 
-  return { actorId: null, actorModel: "CrmUser" };
-}
+  const [items, total] = await Promise.all([
+    Conversation.find({ orgId })
+      .sort({ lastMessageAt: -1, updatedAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Conversation.countDocuments({ orgId }),
+  ]);
 
-async function resolveLeadAndValidateOrg(orgId: string, leadId?: string) {
-  if (!leadId) return null;
-  if (!leadId.match(/^[a-f\d]{24}$/i)) {
-    throw new ApiError(400, "Invalid leadId");
-  }
+  res.json(new ApiResponse(200, { items, total, page, limit }, "Conversations"));
+});
 
-  const lead = await Lead.findOne({ _id: leadId, organizationId: orgId })
-    .select(
-      "_id firstName lastName email senderEmail phone subject organizationId",
-    )
+export const getConversationMessages = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { id } = req.params;
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10)));
+  const before = req.query.before ? new Date(String(req.query.before)) : null;
+
+  const conversation = await Conversation.findOne({ _id: id, orgId }).lean();
+  if (!conversation) throw new ApiError(404, "Conversation not found");
+
+  const query: any = { conversationId: id, orgId };
+  if (before && !isNaN(before.getTime())) query.createdAt = { $lt: before };
+
+  const messages = await CommunicationMessage.find(query)
+    .sort({ createdAt: -1 })
+    .limit(limit)
     .lean();
-
-  if (!lead) throw new ApiError(404, "Lead not found");
-  return lead;
-}
-
-function emitCommunication(orgId: string, log: any, leadId?: string) {
-  emitToOrg(orgId, "communications:new", {
-    ...log.toObject(),
-    leadId,
-  });
-}
-
-function isEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-const getCapabilities = asyncHandler(async (_req: Request, res: Response) => {
-  const smsLive = Boolean(
-    process.env.TWILIO_ACCOUNT_SID &&
-      process.env.TWILIO_AUTH_TOKEN &&
-      process.env.TWILIO_PHONE_NUMBER,
-  );
 
   res.json(
     new ApiResponse(
       200,
-      {
-        sms: {
-          mode: smsLive ? "live" : "simulation",
-          provider: smsLive ? "twilio" : "internal-simulated",
-        },
-        email: {
-          mode: "live",
-          provider: "organization-gmail-or-smtp",
-        },
-        calling: {
-          mode: "logging-only",
-          provider: "internal",
-        },
-      },
-      "Communication capabilities fetched",
-    ),
+      { conversation, messages: messages.reverse(), hasMore: messages.length === limit },
+      "Messages"
+    )
   );
 });
 
-const listLogs = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = resolveOrgId(req);
-  const {
-    leadId,
-    channel,
-    limit = "100",
-  } = req.query as {
-    leadId?: string;
-    channel?: "sms" | "email" | "call";
-    limit?: string;
-  };
+/** Reply inside an existing conversation. */
+export const replyToConversation = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { id } = req.params;
+  const { body } = req.body || {};
 
-  if (leadId) await resolveLeadAndValidateOrg(orgId, leadId);
+  const conversation = await Conversation.findOne({ _id: id, orgId });
+  if (!conversation) throw new ApiError(404, "Conversation not found");
 
-  const query: Record<string, any> = { organizationId: orgId };
-  if (leadId) query.leadId = leadId;
-  if (channel && ["sms", "email", "call"].includes(channel)) {
-    query.channel = channel;
-  }
-
-  const cappedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 250);
-  const logs = await CommunicationLog.find(query)
-    .sort({ createdAt: -1 })
-    .limit(cappedLimit)
-    .lean();
-
-  res.json(new ApiResponse(200, { logs }, "Communication logs fetched"));
-});
-
-const sendSms = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = resolveOrgId(req);
-  const { actorId, actorModel } = resolveActor(req);
-  const { leadId, to, body, from } = req.body || {};
-
-  if (!leadId) throw new ApiError(400, "leadId is required");
-
-  const smsBody = String(body || "").trim();
-  if (!smsBody) throw new ApiError(400, "SMS body is required");
-  if (smsBody.length > 4000) {
-    throw new ApiError(400, "SMS body cannot exceed 4000 characters");
-  }
-
-  const lead = await resolveLeadAndValidateOrg(orgId, String(leadId));
-  const toPhone = String(to || lead?.phone || "").trim();
-  if (!toPhone) throw new ApiError(400, "Destination phone is required");
-
-  const fromPhone = String(
-    from || process.env.TWILIO_PHONE_NUMBER || "",
-  ).trim();
-
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  const twilioFrom = process.env.TWILIO_PHONE_NUMBER;
-  const isLiveProviderConfigured = Boolean(sid && token && twilioFrom);
-
-  let status: "logged" | "sent" | "failed" = isLiveProviderConfigured
-    ? "sent"
-    : "logged";
-  let provider = isLiveProviderConfigured ? "twilio" : "internal-simulated";
-  let providerMessageId: string | undefined;
-  let providerError: string | undefined;
-
-  if (isLiveProviderConfigured) {
-    try {
-      const form = new URLSearchParams({
-        To: toPhone,
-        From: twilioFrom!,
-        Body: smsBody,
-      });
-      const auth = Buffer.from(`${sid}:${token}`).toString("base64");
-      const twilioRes = await fetch(
-        `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${auth}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: form,
-        },
-      );
-
-      if (!twilioRes.ok) {
-        providerError = `Twilio returned HTTP ${twilioRes.status}`;
-        throw new Error(providerError);
-      }
-
-      const message = (await twilioRes.json()) as { sid?: string };
-      providerMessageId = message.sid;
-    } catch (error) {
-      status = "failed";
-      provider = "twilio";
-      providerError =
-        providerError ||
-        (error instanceof Error ? error.message : "Twilio request failed");
-    }
-  }
-
-  const log = await CommunicationLog.create({
-    organizationId: orgId,
-    leadId: lead?._id,
-    channel: "sms",
-    direction: "outbound",
-    status,
-    from: fromPhone || undefined,
-    to: toPhone,
-    body: smsBody,
-    provider,
-    providerMessageId,
-    metadata: {
-      mode: isLiveProviderConfigured ? "provider" : "simulation",
-      ...(providerError ? { providerError } : {}),
-    },
-    createdBy: actorId,
-    createdByModel: actorModel,
+  const result = await comm.sendSmsFromUser({
+    orgId,
+    user: actor(req),
+    toPhone: conversation.customerPhone,
+    body,
+    customerId: conversation.customerId,
+    customerName: conversation.customerName,
   });
 
-  emitCommunication(orgId, log, lead?._id?.toString());
-
-  if (status === "failed") {
-    throw new ApiError(502, "SMS provider call failed. The failed attempt was logged.");
-  }
-
-  const message =
-    status === "logged"
-      ? "SMS saved in simulation mode. No real text message was sent."
-      : "SMS sent successfully";
-
-  res.status(201).json(
-    new ApiResponse(
-      201,
-      {
-        log,
-        deliveryMode: status === "logged" ? "simulation" : "live",
-      },
-      message,
-    ),
-  );
+  res.status(201).json(new ApiResponse(201, { message: result.message }, "Message sent"));
 });
 
-const sendEmail = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = resolveOrgId(req);
-  const { actorId, actorModel } = resolveActor(req);
-  const { leadId, to, subject, body } = req.body || {};
+/** Start (or continue) a thread by phone/customer/lead — used by the leads
+ *  page SMS Reply and the customer profile. */
+export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { toPhone, body, customerId, customerName, leadId } = req.body || {};
+  if (!toPhone) throw new ApiError(400, "toPhone is required");
 
-  if (!leadId) throw new ApiError(400, "leadId is required");
+  const result = await comm.sendSmsFromUser({
+    orgId,
+    user: actor(req),
+    toPhone,
+    body,
+    customerId,
+    customerName,
+    leadId,
+  });
 
-  const emailBody = String(body || "").trim();
-  if (!emailBody) throw new ApiError(400, "Email body is required");
-  if (emailBody.length > 10_000) {
-    throw new ApiError(400, "Email body cannot exceed 10000 characters");
+  res
+    .status(201)
+    .json(
+      new ApiResponse(
+        201,
+        { message: result.message, conversationId: result.conversation._id },
+        "Message sent"
+      )
+    );
+});
+
+/** Everything for one customer's profile widget: thread + calls, shared org-wide. */
+export const getCustomerThread = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { customerId } = req.params;
+  const phone = req.query.phone ? comm.normalizePhone(String(req.query.phone)) : null;
+
+  const convQuery: any = { orgId, $or: [{ customerId }] };
+  if (phone) convQuery.$or.push({ customerPhone: phone });
+
+  const conversation = await Conversation.findOne(convQuery).sort({ lastMessageAt: -1 });
+
+  const [messages, calls] = await Promise.all([
+    conversation
+      ? CommunicationMessage.find({ conversationId: conversation._id })
+          .sort({ createdAt: -1 })
+          .limit(50)
+          .lean()
+          .then((m) => m.reverse())
+      : Promise.resolve([]),
+    CallLog.find({
+      orgId,
+      $or: [
+        { customerId },
+        ...(phone ? [{ from: phone }, { to: phone }] : []),
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean(),
+  ]);
+
+  res.json(new ApiResponse(200, { conversation, messages, calls }, "Customer thread"));
+});
+
+/** Thread by phone (leads page SMS conversations). */
+export const getThreadByPhone = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const phone = String(req.query.phone || "");
+  const leadId = req.query.leadId ? String(req.query.leadId) : undefined;
+  if (!phone) throw new ApiError(400, "phone is required");
+
+  const data = await comm.getThreadByPhone(orgId, phone, leadId);
+  res.json(new ApiResponse(200, data, "Thread"));
+});
+
+/** Caller record for the calls workspace (customer or lead by phone). */
+export const lookupCaller = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const phone = String(req.query.phone || "");
+  if (!phone) throw new ApiError(400, "phone is required");
+
+  const record = await comm.lookupCallerRecord(orgId, phone);
+  res.json(new ApiResponse(200, { record }, "Caller lookup"));
+});
+
+/* --------------------------------- calls -------------------------------- */
+
+export const listCalls = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10));
+  const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || "20"), 10)));
+  const query: any = { orgId };
+  if (req.query.customerId) query.customerId = req.query.customerId;
+
+  const [items, total] = await Promise.all([
+    CallLog.find(query).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+    CallLog.countDocuments(query),
+  ]);
+
+  res.json(new ApiResponse(200, { items, total, page, limit }, "Calls"));
+});
+
+/** Ringing inbound calls (page-load recovery if a socket event was missed). */
+export const listRingingCalls = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const items = await CallLog.find({ orgId, status: "ringing", direction: "inbound" })
+    .sort({ createdAt: -1 })
+    .limit(5)
+    .lean();
+  res.json(new ApiResponse(200, { items }, "Ringing calls"));
+});
+
+/** First-to-answer claim; 409 if someone beat you to it. */
+export const claimCall = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { id } = req.params;
+  const call = await comm.claimInboundCall({ callId: id, orgId, user: actor(req) });
+  res.json(new ApiResponse(200, { call }, "Call claimed — bridging to your browser"));
+});
+
+/** Browser-originated outbound call lifecycle logging. */
+export const logClientCall = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { clientCallId, event, toPhone, customerId, hangupCause } = req.body || {};
+  if (!clientCallId || !event) throw new ApiError(400, "clientCallId and event are required");
+
+  const call = await comm.logClientCall({
+    orgId,
+    user: actor(req),
+    clientCallId,
+    event,
+    toPhone,
+    customerId,
+    hangupCause,
+  });
+  res.json(new ApiResponse(200, { call }, "Call logged"));
+});
+
+/* ------------------------------ WebRTC token ---------------------------- */
+
+export const getRtcToken = asyncHandler(async (req: Request, res: Response) => {
+  const data = await comm.getRtcToken(actor(req));
+  res.json(new ApiResponse(200, data, "RTC token"));
+});
+
+/* ------------------------------ Telnyx webhook --------------------------- */
+/** PUBLIC endpoint (no crmAuth) — authenticity comes from the Ed25519
+ *  signature. Requires raw body capture in app.ts (see setup guide). */
+export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) => {
+  const signature = req.header("telnyx-signature-ed25519") || "";
+  const timestamp = req.header("telnyx-timestamp") || "";
+  const rawBody: Buffer | string =
+    (req as any).rawBody ?? JSON.stringify(req.body ?? {});
+
+  if (!telnyx.verifyWebhookSignature(rawBody, signature, timestamp)) {
+    // Always tell Telnyx 2xx? No — invalid signature must be rejected.
+    throw new ApiError(401, "Invalid webhook signature");
   }
 
-  const lead = await resolveLeadAndValidateOrg(orgId, String(leadId));
-  const recipient = String(lead?.email || to || lead?.senderEmail || "").trim();
-  if (!recipient || !isEmail(recipient)) {
-    throw new ApiError(400, "A valid destination email is required");
-  }
+  const event = req.body?.data;
+  const type: string = event?.event_type || "";
+  const payload = event?.payload || {};
 
-  const emailSubject =
-    String(subject || "").trim() || `Re: ${lead?.subject || "Your inquiry"}`;
-
-  let status: "sent" | "failed" = "sent";
-  let failureMessage: string | undefined;
+  // Respond fast; process async. Telnyx retries on non-2xx/timeouts.
+  res.status(200).json({ received: true });
 
   try {
-    await emailService.sendEmail({
-      to: recipient,
-      subject: emailSubject,
-      text: emailBody,
-      html: `<div style="font-family:Arial,sans-serif;white-space:pre-wrap;line-height:1.55">${escapeHtml(emailBody)}</div>`,
-      organizationId: orgId,
-    });
-  } catch (error) {
-    status = "failed";
-    failureMessage =
-      error instanceof Error ? error.message : "Email provider failed";
+    switch (type) {
+      case "message.received":
+        await comm.handleInboundSms(payload);
+        break;
+      case "message.sent":
+      case "message.finalized":
+        await comm.handleSmsStatus(payload);
+        break;
+      case "call.initiated":
+        await comm.handleCallInitiated(payload);
+        break;
+      case "call.answered":
+        await comm.handleCallAnswered(payload);
+        break;
+      case "call.hangup":
+        await comm.handleCallHangup(payload);
+        break;
+      case "call.speak.ended":
+        await comm.handleSpeakEnded(payload);
+        break;
+      default:
+        break; // ignore everything else
+    }
+  } catch (err) {
+    console.error(`[comm] webhook handler error for ${type}:`, err);
   }
-
-  const log = await CommunicationLog.create({
-    organizationId: orgId,
-    leadId: lead?._id,
-    channel: "email",
-    direction: "outbound",
-    status,
-    to: recipient,
-    body: emailBody,
-    provider: "organization-gmail-or-smtp",
-    metadata: {
-      subject: emailSubject,
-      ...(failureMessage ? { providerError: failureMessage } : {}),
-    },
-    createdBy: actorId,
-    createdByModel: actorModel,
-  });
-
-  emitCommunication(orgId, log, lead?._id?.toString());
-
-  if (status === "failed") {
-    throw new ApiError(502, "Email could not be sent. The failed attempt was logged.");
-  }
-
-  res.status(201).json(
-    new ApiResponse(201, { log }, "Email sent successfully"),
-  );
 });
-
-const logCall = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = resolveOrgId(req);
-  const { actorId, actorModel } = resolveActor(req);
-  const { leadId, direction, status, from, to, durationSeconds, notes } =
-    req.body || {};
-
-  if (!leadId) throw new ApiError(400, "leadId is required");
-  if (!["inbound", "outbound"].includes(direction)) {
-    throw new ApiError(400, "direction must be inbound or outbound");
-  }
-
-  const normalizedStatus = String(status || "").trim() || "completed";
-  if (!["completed", "missed", "failed"].includes(normalizedStatus)) {
-    throw new ApiError(400, "Invalid call status");
-  }
-
-  const lead = await resolveLeadAndValidateOrg(orgId, String(leadId));
-  const safeDuration = Number(durationSeconds);
-  const safeNotes = String(notes || "").trim();
-
-  const log = await CommunicationLog.create({
-    organizationId: orgId,
-    leadId: lead?._id,
-    channel: "call",
-    direction,
-    status: normalizedStatus,
-    from: String(from || "").trim() || undefined,
-    to: String(to || lead?.phone || "").trim() || undefined,
-    durationSeconds:
-      Number.isFinite(safeDuration) && safeDuration >= 0
-        ? Math.floor(safeDuration)
-        : undefined,
-    body: safeNotes || undefined,
-    provider: "internal",
-    metadata: { mode: "logging-only" },
-    createdBy: actorId,
-    createdByModel: actorModel,
-  });
-
-  emitCommunication(orgId, log, lead?._id?.toString());
-
-  res.status(201).json(
-    new ApiResponse(201, { log }, "Call interaction logged"),
-  );
-});
-
-const receiveInboundSms = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = resolveOrgId(req);
-  const { actorId, actorModel } = resolveActor(req);
-  const { leadId, from, to, body } = req.body || {};
-
-  if (!leadId) throw new ApiError(400, "leadId is required");
-
-  const inboundBody = String(body || "").trim();
-  if (!inboundBody) throw new ApiError(400, "Inbound SMS body is required");
-  if (inboundBody.length > 4000) {
-    throw new ApiError(400, "Inbound SMS body cannot exceed 4000 characters");
-  }
-
-  const lead = await resolveLeadAndValidateOrg(orgId, String(leadId));
-
-  const log = await CommunicationLog.create({
-    organizationId: orgId,
-    leadId: lead?._id,
-    channel: "sms",
-    direction: "inbound",
-    status: "received",
-    from: String(from || lead?.phone || "").trim() || undefined,
-    to: String(to || "").trim() || undefined,
-    body: inboundBody,
-    provider: "internal",
-    metadata: { source: "manual-inbound-simulation", mode: "simulation" },
-    createdBy: actorId,
-    createdByModel: actorModel,
-  });
-
-  emitCommunication(orgId, log, lead?._id?.toString());
-
-  res.status(201).json(
-    new ApiResponse(
-      201,
-      { log },
-      "Inbound SMS added to the simulated conversation",
-    ),
-  );
-});
-
-export default {
-  getCapabilities,
-  listLogs,
-  sendSms,
-  sendEmail,
-  logCall,
-  receiveInboundSms,
-};

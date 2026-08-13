@@ -72,6 +72,8 @@ import storyRoute from "./story.route";
 import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
+import communicationRoute from "./communication.routes";
+import telnyxWebhookRoute from "./telnyxWebhook.route";
 import youtubeRoute from "./youtube.route";
 
 
@@ -172,6 +174,18 @@ const defaultRoutes = [
   {
     path: "/crm/yapline",
     route: yapLineRoute,
+  },
+  // Suprah Communications (SMS + Telephony) — same shadowing rule: must
+  // stay ABOVE "/crm" so crm.route's dynamic "/:id"-style routes don't
+  // capture "/crm/communications/conversations" etc.
+  {
+    path: "/crm/communications",
+    route: communicationRoute,
+  },
+  // Telnyx webhooks — PUBLIC (signature-verified in controller, no crmAuth).
+  {
+    path: "/webhooks/telnyx",
+    route: telnyxWebhookRoute,
   },
   {
     path: "/mail",
