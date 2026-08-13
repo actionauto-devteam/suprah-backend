@@ -1684,9 +1684,15 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
     userId?: string; date?: string; action?: 'edit' | 'delete' | 'create';
     logId?: string; type?: 'time-in' | 'time-out'; timestamp?: string; reason?: string;
   };
-  if (!userId || !date || !action || !reason?.trim()) {
-    throw new ApiError(400, 'userId, date, action and reason are all required');
+  if (!userId || !date || !action) {
+    throw new ApiError(400, 'userId, date and action are all required');
   }
+  // Reason is optional here (unlike correctTimeLog) — this tool is already restricted to
+  // Web Dev admins acting on Web Dev users, per the user's explicit instruction. Still
+  // recorded in AuditLog when given; falls back to a placeholder when omitted so the audit
+  // trail never has a blank reason.
+  const auditReason = reason?.trim() || '(no reason provided)';
+  const noteSuffix = reason?.trim() ? `: ${reason.trim()}` : '';
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
@@ -1710,7 +1716,7 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
     if (!existing) throw new ApiError(404, 'Time log entry not found');
     before = existing.timestamp;
     after = new Date(timestamp);
-    await TimeLog.updateOne({ _id: logId }, { timestamp: after, note: `Admin override by ${requestor.fullName}: ${reason}` });
+    await TimeLog.updateOne({ _id: logId }, { timestamp: after, note: `Admin override by ${requestor.fullName}${noteSuffix}` });
     logResultId = logId;
   } else if (action === 'delete') {
     if (!logId) throw new ApiError(400, 'logId is required to delete an entry');
@@ -1723,7 +1729,7 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
     if (!type || !timestamp) throw new ApiError(400, 'type and timestamp are required to create an entry');
     const created = await TimeLog.create({
       userId, userModel: 'CrmUser', type, timestamp: new Date(timestamp),
-      note: `Added by ${requestor.fullName} (admin time-override): ${reason}`,
+      note: `Added by ${requestor.fullName} (admin time-override)${noteSuffix}`,
     });
     after = created.timestamp;
     logResultId = created._id.toString();
@@ -1736,7 +1742,7 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
     entityId: logResultId,
     action: 'ADMIN_TIME_OVERRIDE',
     changes: { userId, date, action, type, before, after },
-    reason,
+    reason: auditReason,
     performedBy: requestor._id,
     organizationId: targetUser.organizationId?.toString(),
   });
