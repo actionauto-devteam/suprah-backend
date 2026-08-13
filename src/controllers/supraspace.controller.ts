@@ -12,6 +12,7 @@ import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 import { storageService, BucketType } from '../services/storage.service';
+import { getCachedSignedUrl } from '../utils/signedUrlCache';
 import { CrmPushService } from '../services/crmPush.service';
 import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
@@ -429,15 +430,20 @@ async function getOrCreateDayPulseReportConversation(organizationId: string, cre
 
 async function signAttachments(message: any) {
   if (Array.isArray(message?.attachments)) {
-    for (const a of message.attachments) {
+    // Attachments within one message are signed in parallel (was sequential
+    // await-per-file) and cached — was unconditionally re-signed on every
+    // single fetch of this message (e.g. every conversation open/refetch),
+    // even though nothing about the file or its key ever changes between
+    // fetches within the URL's own TTL window.
+    await Promise.all(message.attachments.map(async (a: any) => {
       if (a.url && !a.url.startsWith('http')) {
-        const signed = await storageService.getSignedUrl(a.fileKey || a.url);
+        const signed = await getCachedSignedUrl('supraspace-attachment', a.fileKey || a.url);
         if (signed) {
           a.url = signed;
           if (a.thumbnailUrl) a.thumbnailUrl = signed;
         }
       }
-    }
+    }));
   }
   return message;
 }
@@ -446,7 +452,7 @@ const AVATAR_SIGN_TTL = 7 * 24 * 60 * 60;
 
 async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: string | null }>(conv: T): Promise<T> {
   if (conv?.avatarKey) {
-    const signed = await storageService.getSignedUrl(conv.avatarKey, AVATAR_SIGN_TTL);
+    const signed = await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL);
     if (signed) conv.avatar = signed;
   }
   return conv;
