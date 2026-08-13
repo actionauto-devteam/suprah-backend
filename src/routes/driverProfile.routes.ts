@@ -3,7 +3,7 @@ import driverProfileController from "../controllers/driverProfile.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import { uploadDriverDocument } from "../middleware/upload.middleware";
-import { uploadLimiter } from "../middleware/rate-limit.middleware";
+import { driverDocumentUploadLimiter } from "../middleware/rate-limit.middleware";
 
 const router = express.Router();
 
@@ -12,7 +12,7 @@ router.use(auth());
 router.get("/", driverProfileController.getProfile);
 router.patch("/equipment", driverProfileController.updateEquipment);
 router.patch("/compliance", driverProfileController.updateCompliance);
-router.post("/documents", uploadLimiter, auth(), uploadDriverDocument, driverProfileController.uploadDocument);
+router.post("/documents", driverDocumentUploadLimiter, auth(), uploadDriverDocument, driverProfileController.uploadDocument);
 router.delete("/documents/:documentId", driverProfileController.deleteDocument);
 router.patch("/logistics", driverProfileController.updateLogistics);
 router.patch("/identity-verification", driverProfileController.updateIdentityVerification);
