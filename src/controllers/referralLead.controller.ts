@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -215,12 +214,15 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   if (existing) throw new ApiError(409, 'A user with this email already exists');
 
   const tempPassword = 'customer123';
-  const passwordHash = await bcrypt.hash(tempPassword, 10);
 
+  // Pass the PLAIN temp password — the User pre-save hook hashes `password`
+  // itself. Writing a bcrypt hash into `passwordHash` here was a dead field
+  // that nothing in the login flow reads, so accounts created this way had
+  // an empty `password` and could never log in.
   const newUser = await User.create({
     name:           lead.name,
     email:          email.toLowerCase().trim(),
-    passwordHash,
+    password:       tempPassword,
     role:           accountType,
     organizationId: orgId,
     emailVerified:  true,
