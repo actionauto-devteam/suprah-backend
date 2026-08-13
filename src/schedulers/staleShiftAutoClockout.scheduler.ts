@@ -185,6 +185,7 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
             chatMessage,
             notifyTitle: "⏸️ Shift auto-ended — inactivity",
             notifyBody: "Your shift was automatically ended due to inactivity. If you were still working, click Start Shift to resume.",
+            adminNotifyBody: `${displayName}'s shift was auto-ended due to inactivity.`,
             notifyTag: `stale-shift-clockout-${userId}`,
             url: "/crm/timeproof-clock",
             skipChatMessage: true,
@@ -295,6 +296,7 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
           notifyTitle: "🕛 Shift auto-ended — new day",
           notifyBody:
             "Your shift was automatically closed because a new day started. Please Start Shift again to continue tracking.",
+          adminNotifyBody: `${displayName}'s shift was auto-ended because a new day started.`,
           notifyTag: `day-boundary-clockout-${userId}`,
           url: "/crm/timeproof-clock",
           skipChatMessage: true,

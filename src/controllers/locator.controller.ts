@@ -145,7 +145,8 @@ async function handleLocationTurnedOff(actor: LocatorActor, orgId: string): Prom
         targetUserModel: actor.model,
         chatMessage: `🟡 ${actor.name} turned off location sharing during their active shift.`,
         notifyTitle: '📍 Location Sharing Paused',
-        notifyBody: `${actor.name} turned off location sharing during their active shift.`,
+        notifyBody: `You turned off location sharing during your active shift — please turn it back on.`,
+        adminNotifyBody: `${actor.name} turned off location sharing during their active shift.`,
         notifyTag: `shift-alert-location-off-${actor.id}`,
         url: `/crm/timeproof/users/${actor.id}`,
     });
@@ -869,6 +870,7 @@ const reportPermissionDenied = asyncHandler(async (req: Request, res: Response) 
         chatMessage: `🚫 ${actor.name} turned off location access while clocked in.`,
         notifyTitle: '🚫 Location Turned Off',
         notifyBody: 'Location access was turned off while clocked in — please turn it back on to continue your shift.',
+        adminNotifyBody: `${actor.name} turned off location access while clocked in.`,
         notifyTag: `shift-alert-permission-denied-${actor.id}`,
         url: `/crm/timeproof/users/${actor.id}`,
     });

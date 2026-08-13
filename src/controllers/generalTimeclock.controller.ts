@@ -264,7 +264,8 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
         : await CrmUser.findById(actor.id).select('locationConsent').lean();
       if (!(doc as any)?.locationConsent?.granted) {
         const chatMessage = `🟡 ${actor.fullName} returned from break but location sharing is still off.`;
-        const notifyBody = `${actor.fullName} is back from break but location sharing is off.`;
+        const notifyBody = `You're back from break but location sharing is still off — please turn it on.`;
+        const adminNotifyBody = `${actor.fullName} is back from break but location sharing is off.`;
         await fireShiftAlert({
           organizationId: actor.orgId,
           targetUserId: actor.id.toString(),
@@ -272,6 +273,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
           chatMessage,
           notifyTitle: '📍 Location Not Shared',
           notifyBody,
+          adminNotifyBody,
           notifyTag: `shift-alert-no-location-${actor.id}`,
           url: `/crm/timeproof/users/${actor.id}`,
         });

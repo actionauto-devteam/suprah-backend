@@ -1113,7 +1113,8 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       targetUserModel: 'CrmUser',
       chatMessage: `☕ ${user.fullName} has exceeded their 1-hour break.`,
       notifyTitle: '☕ Break Exceeded',
-      notifyBody: `${user.fullName} exceeds break time.`,
+      notifyBody: `You've exceeded your 1-hour break — please wrap up.`,
+      adminNotifyBody: `${user.fullName} exceeded their break time.`,
       notifyTag: `crm-break-${user._id}`,
       url: '/crm/timeproof/users',
     })
