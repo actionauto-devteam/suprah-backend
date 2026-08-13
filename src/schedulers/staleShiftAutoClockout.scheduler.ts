@@ -17,11 +17,22 @@ const NO_DATA_GRACE_HOURS = 16;
 // Prevents race where break-out just before cron tick gets misclosed
 const BREAK_RESUME_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
+// Mirrors AUTO_SILENCE_CLOCKOUT_NOTES in crmTimeproof.controller.ts's getResumableShift/resumeShift
+// — these are the two notes written below that qualify for a seamless Resume Shift, so only
+// these two get an immediate alert (the "no activity data ever" branch is a different, more
+// extreme case that isn't resumable and shouldn't be conflated with it).
+const SILENCE_CLOSURE_NOTES = [
+  'Auto clock-out — device went idle/offline after rendering 8+ hours',
+  'Auto clock-out — device went idle/offline for 30+ minutes',
+];
+
 export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {}): Promise<{ closed: number; checked: number }> {
   const dryRun = !!opts.dryRun;
   const userIds: string[] = await TimeLog.distinct('userId') as any;
   const now = new Date();
   let closed = 0;
+  // Batch alerts per org so several closures in one tick don't spam separate chat messages.
+  const chatMessagesByOrg = new Map<string, string[]>();
 
   for (const userId of userIds) {
     const logs = await TimeLog.find({ userId }).sort({ timestamp: 1 }).lean();
@@ -152,9 +163,45 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
         timestamp: closeAt,
         note: closeNote,
       });
+
+      // Immediate heads-up for the two resumable (silence-based) closures — previously this
+      // closed with zero notification, so the employee had no way to know until they happened
+      // to notice their web tab disagreed with the tray, sometimes an hour or more later. Now
+      // that Resume Shift can actually undo an erroneous closure (see resumeShift in
+      // crmTimeproof.controller.ts), this alert is directly actionable.
+      if (SILENCE_CLOSURE_NOTES.includes(closeNote)) {
+        const userDoc =
+          userModel === "CrmUser"
+            ? await CrmUser.findById(userId).select("organizationId fullName").lean()
+            : await User.findById(userId).select("organizationId name").lean();
+        if (userDoc?.organizationId) {
+          const displayName = (userDoc as any).fullName || (userDoc as any).name || "A user";
+          const orgId = userDoc.organizationId.toString();
+          const chatMessage = `⏸️ ${displayName}'s shift was auto-ended due to inactivity.`;
+          await fireShiftAlert({
+            organizationId: orgId,
+            targetUserId: userId,
+            targetUserModel: userModel,
+            chatMessage,
+            notifyTitle: "⏸️ Shift auto-ended — inactivity",
+            notifyBody: "Your shift was automatically ended due to inactivity. If you were still working, click Start Shift to resume.",
+            notifyTag: `stale-shift-clockout-${userId}`,
+            url: "/crm/timeproof-clock",
+            skipChatMessage: true,
+          }).catch(() => {});
+          if (!chatMessagesByOrg.has(orgId)) chatMessagesByOrg.set(orgId, []);
+          chatMessagesByOrg.get(orgId)!.push(chatMessage);
+        }
+      }
     }
     closed++;
   }
+
+  await Promise.allSettled(
+    Array.from(chatMessagesByOrg.entries()).map(([orgId, messages]) =>
+      postBatchedShiftAlertMessages(orgId, messages),
+    ),
+  );
 
   return { closed, checked: userIds.length };
 }

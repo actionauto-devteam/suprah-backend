@@ -601,6 +601,13 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
+// Mirrors AUTO_SILENCE_CLOCKOUT_NOTES in crmTimeproof.controller.ts — same two note strings
+// staleShiftAutoClockout.scheduler.ts writes for its silence-based closures.
+const AUTO_SILENCE_CLOCKOUT_NOTES = [
+  'Auto clock-out — device went idle/offline after rendering 8+ hours',
+  'Auto clock-out — device went idle/offline for 30+ minutes',
+];
+
 /**
  * GET /api/timeclock/resumable-shift
  * Check if today has a previous clock-out that can be resumed.
@@ -620,7 +627,52 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   const resumable = !isOnShift && timeOuts.length > 0;
   const originalClockIn = resumable && timeIns.length > 0 ? new Date(timeIns[0].timestamp).toISOString() : null;
 
-  res.json(new ApiResponse(200, { resumable, originalClockIn }, 'Resumable shift checked'));
+  const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
+  const canSeamlessResume = !!lastTimeOut && AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note);
+
+  res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
+});
+
+/**
+ * POST /api/timeclock/resume-shift
+ * See resumeShift in crmTimeproof.controller.ts for the full rationale — same fix, mirrored
+ * for the "main" auth-mode path (non-CRM Users).
+ */
+export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
+  const actor = getActor(req);
+  const { today, tomorrow } = getTodayMDTWindow();
+
+  const todayLogs = await TimeLog.find({
+    userId: actor.id,
+    timestamp: { $gte: today, $lt: tomorrow },
+  }).sort({ timestamp: 1 }).lean();
+
+  const timeIns  = todayLogs.filter(l => l.type === 'time-in');
+  const timeOuts = todayLogs.filter(l => l.type === 'time-out');
+  const isOnShift = timeIns.length > timeOuts.length;
+  if (isOnShift) throw new ApiError(400, 'Already on shift');
+  if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
+
+  const lastTimeOut = todayLogs[todayLogs.length - 1];
+  if (lastTimeOut.type !== 'time-out' || !AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note)) {
+    throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
+  }
+
+  await TimeLog.deleteOne({ _id: lastTimeOut._id });
+
+  const originalTimeIn = timeIns[timeIns.length - 1];
+  try {
+    const io = getSocketIO();
+    io?.to(`user:${actor.id.toString()}`).emit('time-in', {
+      _id: originalTimeIn._id,
+      type: 'time-in',
+      timestamp: originalTimeIn.timestamp,
+      shiftStartedAt: originalTimeIn.timestamp,
+    });
+  } catch {
+  }
+
+  res.json(new ApiResponse(200, { resumed: true, shiftStartedAt: originalTimeIn.timestamp }, 'Shift resumed'));
 });
 
 /**
@@ -694,4 +746,4 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   res.json(new ApiResponse(201, { durationSeconds }, 'Activity interval saved'));
 });
 
-export default { getMe, timeClock, getShiftState, getMyTimeproof, getMyIdleLog, getResumableShift, postHeartbeat, postActivityInterval };
+export default { getMe, timeClock, getShiftState, getMyTimeproof, getMyIdleLog, getResumableShift, resumeShift, postHeartbeat, postActivityInterval };
