@@ -519,10 +519,16 @@ function decodeHtmlEntities(text: string): string {
 export function extractPlainTextInquiry(rawBody: string): string {
   if (!rawBody) return '';
 
-  // Strip any HTML tags, decode entities, collapse whitespace.
-  const text = decodeHtmlEntities(
-    rawBody.replace(/<[^>]*>/g, ' ')
-  ).replace(/\s+/g, ' ').trim();
+  // Convert HTML to text while PRESERVING line structure (labeled sections
+  // like "SHOPPER COMMENT:" depend on line/paragraph boundaries).
+  const multiline = decodeHtmlEntities(
+    rawBody
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+      .replace(/<[^>]*>/g, ' ')
+  ).replace(/\r\n/g, '\n');
+
+  const text = multiline.replace(/\s+/g, ' ').trim();
   if (!text) return '';
 
   const METADATA_PREFIXES = [
@@ -530,20 +536,41 @@ export function extractPlainTextInquiry(rawBody: string): string {
     'is from shippable', 'delivery cost', 'price + delivery', 'vin:',
     'stock#', 'stock #', 'sales lead', 'lead details', 'contact information',
     'vehicle interest', 'request date', 'dealer/vendor', 'unsubscribe',
+    'lead type', 'tracking', 'pixall', 'tcpaoptin',
   ];
   const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/;
   const EMAIL_RE = /[^\s]+@[^\s]+\.[^\s]+/;
   const URL_RE = /https?:\/\//i;
 
-  // Prefer an explicit "Comments:"/"Message:" label anywhere in the text.
-  const labeled = text.match(
-    /\b(?:comments?|message|customer message|inquiry)\s*:\s*([^|]{10,500})/i
+  /*
+   * PASS 1 — labeled section (AutoTrader "SHOPPER COMMENT:", generic
+   * "Comments:"/"Message:" etc.). Works on the MULTILINE text and captures
+   * from the label to the next blank line or the next ALL-CAPS section
+   * header (e.g. "VEHICLE OF INTEREST:", "TRACKING:"), so it never bleeds
+   * into the sections that follow.
+   */
+  const labelMatch = multiline.match(
+    /\b(?:shopper\s+comments?|customer\s+comments?|comments?|customer\s+message|message|inquiry)\s*:\s*/i
   );
-  if (labeled) {
-    const candidate = labeled[1].replace(/\([^)]*\)\s*$/, '').trim();
-    if (candidate.length >= 10) return candidate;
+  if (labelMatch && labelMatch.index !== undefined) {
+    const after = multiline.slice(labelMatch.index + labelMatch[0].length);
+    const stop = after.search(/\n\s*\n|\n[A-Z][A-Z0-9 \/#&'.-]{2,}:\s*(?:\n|$)/);
+    let candidate = (stop >= 0 ? after.slice(0, stop) : after.slice(0, 600))
+      .replace(/\s+/g, ' ')
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .trim();
+    if (
+      candidate.length >= 10 &&
+      candidate.length <= 600 &&
+      !URL_RE.test(candidate) &&
+      !VIN_RE.test(candidate) &&
+      /[a-zA-Z]{3}/.test(candidate)
+    ) {
+      return candidate;
+    }
   }
 
+  // PASS 2 — pipe-delimited summary (DealersCloud/CarGurus format).
   const segments = text.split('|').map((seg) => seg.trim()).filter(Boolean);
   for (const segment of segments) {
     // Remove trailing "(CarGurus IMV: ... )"-style metadata parentheticals.
@@ -552,7 +579,15 @@ export function extractPlainTextInquiry(rawBody: string): string {
 
     const lower = cleaned.toLowerCase();
     if (METADATA_PREFIXES.some((pfx) => lower.startsWith(pfx))) continue;
-    if (URL_RE.test(cleaned) || EMAIL_RE.test(cleaned) || VIN_RE.test(cleaned)) continue;
+    if (URL_RE.test(cleaned) || VIN_RE.test(cleaned)) continue;
+    /*
+     * FIX: customers often include their own email INSIDE the message
+     * ("You can reach me by email at ..."). Only reject an email-bearing
+     * segment when it does NOT read like a sentence — otherwise real
+     * messages were dropped and the raw summary leaked into the UI.
+     */
+    const sentenceLike = /[.!?]/.test(cleaned) && cleaned.split(/\s+/).length >= 6;
+    if (EMAIL_RE.test(cleaned) && !sentenceLike) continue;
     if (!/[a-zA-Z]{3}/.test(cleaned)) continue;
     if (cleaned.split(' ').length < 4) continue;
 
