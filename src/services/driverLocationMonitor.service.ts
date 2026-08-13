@@ -10,8 +10,11 @@ const LOCATION_SILENCE_MS = 10 * 60 * 1000;
 const MONITOR_INTERVAL_MS = 60 * 1000;
 const ALERT_REPEAT_MS = 10 * 60 * 1000;
 
-const ACTIVE_LOAD_STATUSES = [
-  "Assigned",
+// Dispatcher GPS-silence notifications begin only after the driver has
+// accepted the load. "Assigned" remains an active-load status elsewhere in
+// the Driver Tracker/GPS gate; it is intentionally excluded only from this
+// 10-minute notification monitor.
+const GPS_ALERT_LOAD_STATUSES = [
   "Accepted",
   "Picked Up",
   "In-Transit",
@@ -206,12 +209,13 @@ async function monitorDriverLocationSilence() {
     const cutoff = new Date(now.getTime() - LOCATION_SILENCE_MS);
     const repeatCutoff = new Date(now.getTime() - ALERT_REPEAT_MS);
 
-    // Only active-load drivers are monitored. Drivers with no active load are
-    // intentionally allowed to turn GPS off under the current Driver Portal
-    // policy, so alerting Dispatch for those drivers would create false alarms.
+    // Only drivers whose loads have moved beyond Assigned are monitored for
+    // 10-minute GPS-silence notifications. Assigned loads remain active for the
+    // Driver Portal GPS gate, but do not notify Dispatch until the driver accepts.
+    // Drivers with no qualifying load are intentionally ignored here.
     const activeLoads = (await Load.find({
       assignedDriverId: { $ne: null },
-      status: { $in: ACTIVE_LOAD_STATUSES },
+      status: { $in: GPS_ALERT_LOAD_STATUSES },
     })
       .select(
         "_id organizationId assignedDriverId loadNumber status assignedAt createdAt updatedAt",
@@ -327,9 +331,9 @@ async function monitorDriverLocationSilence() {
         continue;
       }
 
-      // A driver may receive a load before ever publishing their first GPS
-      // heartbeat. In that case the active-load assignment time starts the
-      // 10-minute requirement window.
+      // A driver may reach a notification-eligible load status before ever
+      // publishing their first GPS heartbeat. In that case the qualifying load's
+      // recorded tracking start is used for the 10-minute requirement window.
       const silenceStartedAt = driverLoads
         .map(getLoadTrackingStart)
         .sort((a, b) => a.getTime() - b.getTime())[0];
