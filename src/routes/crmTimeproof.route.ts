@@ -9,6 +9,7 @@ import {
   exportTimeproof,
   getShiftState,
   getResumableShift,
+  resumeShift,
   postHeartbeat,
   postActivityInterval,
   getMyAgentStatus,
@@ -22,6 +23,8 @@ import {
   subscribeCrmPush,
   unsubscribeCrmPush,
   correctTimeLog,
+  getAdminDayLogs,
+  adminTimeOverride,
   excludeScreenshots,
   getMyIdleLog,
   getUserIdleLog,
@@ -50,6 +53,7 @@ router.get('/user/:userId/idle-diagnostics', getUserIdleDiagnostics);
 
 router.get('/shift-state', getShiftState);
 router.get('/resumable-shift', getResumableShift);
+router.post('/resume-shift', resumeShift);
 router.get('/my-agent', getMyAgentStatus);
 router.post('/heartbeat', postHeartbeat);
 router.post('/activity-interval', postActivityInterval);
@@ -64,6 +68,8 @@ router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler); // admin-only, 
 router.post('/screenshots/exclude', excludeScreenshots); // admin/manager-only, role + department exemption check inside
 
 router.patch('/correct-time', correctTimeLog);
+router.get('/admin/day-logs', getAdminDayLogs);
+router.post('/admin/time-override', adminTimeOverride);
 router.post('/users/:userId/clock-out', clockOutUser); // admin/manager-only, role check inside
 
 router.patch('/user/:userId/hourly-rate', updateHourlyRate); // admin/manager-only, role check inside

@@ -34,6 +34,7 @@ import devToolsRoute from "./devTools.routes";
 import pushRoute from "./push.route";
 import loadRoute from "./load.routes";
 import analyticsRoute from "./analytics.routes";
+import suprahRadarRoute from "./suprahRadar.routes";
 import activityRoute from "./activity.routes";
 import customerRoute from "./customer.route";
 import customerLeadRoute from "./customerLead.route";
@@ -72,6 +73,8 @@ import storyRoute from "./story.route";
 import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
+import communicationRoute from "./communication.routes";
+import telnyxWebhookRoute from "./telnyxWebhook.route";
 import youtubeRoute from "./youtube.route";
 
 
@@ -173,6 +176,18 @@ const defaultRoutes = [
     path: "/crm/yapline",
     route: yapLineRoute,
   },
+  // Suprah Communications (SMS + Telephony) — same shadowing rule: must
+  // stay ABOVE "/crm" so crm.route's dynamic "/:id"-style routes don't
+  // capture "/crm/communications/conversations" etc.
+  {
+    path: "/crm/communications",
+    route: communicationRoute,
+  },
+  // Telnyx webhooks — PUBLIC (signature-verified in controller, no crmAuth).
+  {
+    path: "/webhooks/telnyx",
+    route: telnyxWebhookRoute,
+  },
   {
     path: "/mail",
     route: mailRoute,
@@ -268,6 +283,10 @@ const defaultRoutes = [
   {
     path: "/analytics",
     route: analyticsRoute,
+  },
+  {
+    path: "/suprah-radar",
+    route: suprahRadarRoute,
   },
   {
     path: "/activity",

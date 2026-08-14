@@ -36,6 +36,16 @@ const envVarsSchema = Joi.object()
     DEALERSCLOUD_FTP_PASSWORD: Joi.string().allow('').default(''),
     DEALERSCLOUD_FTP_FILE: Joi.string().allow('').default('DealerCloud.txt'),
     SYNC_SCHEDULE: Joi.string().default('0 0 * * *'),
+
+    // ── FTP full-replace sync safety guards ─────────────────────────────
+    // Minimum valid VINs a feed must contain before ANY write is allowed.
+    SYNC_MIN_FEED_VEHICLES: Joi.number().min(1).default(1)
+      .description('Minimum valid VINs required in a feed before sync writes anything'),
+    // The archive pass refuses to archive more than this % of the active
+    // (non-Sold) inventory in a single run. 100 disables the guard.
+    SYNC_MAX_ARCHIVE_PERCENT: Joi.number().min(0).max(100).default(50)
+      .description('Max % of active inventory a single sync may archive'),
+
     SMTP_HOST: Joi.string().allow('').description('Email server host'),
     SMTP_PORT: Joi.number().allow('').description('Email server port'),
     SMTP_SECURE: Joi.boolean().allow('').description('Email server secure'),
@@ -116,6 +126,8 @@ const config = {
   },
   sync: {
     schedule: envVars.SYNC_SCHEDULE,
+    minFeedVehicles: envVars.SYNC_MIN_FEED_VEHICLES,
+    maxArchivePercent: envVars.SYNC_MAX_ARCHIVE_PERCENT,
   },
   email: {
     host: envVars.SMTP_HOST,

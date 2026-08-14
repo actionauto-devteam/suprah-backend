@@ -231,7 +231,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       crm_biometric: metadata?.route || '/crm/biometrics',
       crm_timeproof: metadata?.route || '/crm/biometrics',
       reminder: metadata?.route || '/crm/leads',
-      driver_request: '/driver-tracker',
+      driver_request: '/settings?tab=drivers',
       driver_request_approved: '/driver/loads',
       driver_request_rejected: '/driver/loads',
       driver_assigned: '/driver/loads',

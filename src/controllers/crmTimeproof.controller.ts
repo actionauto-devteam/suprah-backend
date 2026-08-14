@@ -10,7 +10,7 @@ import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
-import { emitToUser, emitToShiftBoard, isCrmUserOnline } from '../utils/socketEmitter';
+import { emitToUser, emitToShiftBoard, isCrmUserOnline, getSocketIO } from '../utils/socketEmitter';
 import CrmPushService from '../services/crmPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
@@ -1113,7 +1113,8 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       targetUserModel: 'CrmUser',
       chatMessage: `☕ ${user.fullName} has exceeded their 1-hour break.`,
       notifyTitle: '☕ Break Exceeded',
-      notifyBody: `${user.fullName} exceeds break time.`,
+      notifyBody: `You've exceeded your 1-hour break — please wrap up.`,
+      adminNotifyBody: `${user.fullName} exceeded their break time.`,
       notifyTag: `crm-break-${user._id}`,
       url: '/crm/timeproof/users',
     })
@@ -1617,6 +1618,131 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
   });
 
   res.json(new ApiResponse(200, { logId, correctedTimeOut: correctedAt }, 'Time log corrected'));
+});
+
+/**
+ * GET /api/crm/timeproof/admin/day-logs?userId=&date=
+ * Feeds the admin time-override UI's entry picker (Edit/Delete need a real logId, not a
+ * timestamp guess) — raw TimeLog rows for one user/date. Same admin-only + exempt-department
+ * gating as adminTimeOverride below (including the requestor-must-be-exempt-too restriction);
+ * read-only, no audit entry needed for a plain list.
+ */
+export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (requestor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can use the manual time-override tool');
+  }
+  // Confirmed with the user: this is a Web Dev-only POWER, not a Web-Dev-only PROTECTION — a
+  // Web Dev admin can use it on ANY user's records (any department), but no one outside Web
+  // Dev can see/use it at all, even on a Web Dev target. Only the requestor's own department
+  // gates this — the target user's department is irrelevant here.
+  if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
+    throw new ApiError(403, 'This tool is only available to admins in an exempt department');
+  }
+  const userId = req.query.userId as string;
+  const date = req.query.date as string;
+  if (!userId || !date) throw new ApiError(400, 'userId and date are required');
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const { start, end } = getCompanyDayRange(date);
+  const logs = await TimeLog.find({ userId, timestamp: { $gte: start, $lt: end } })
+    .sort({ timestamp: 1 })
+    .select('type timestamp note')
+    .lean();
+
+  res.json(new ApiResponse(200, { logs }, 'Day logs fetched'));
+});
+
+/**
+ * POST /api/crm/timeproof/admin/time-override
+ * A separate, narrower recovery path from correctTimeLog above (which stays exactly as-is,
+ * isTimeEditExempt and all) — this one is the intentional counterpart reserved specifically
+ * for departments the standard tool refuses (currently only Web Dev). It only activates when
+ * the TARGET user's department is itself exempt from normal time editing — never a general
+ * bypass for any department — and only for admins (not managers), per explicit instruction.
+ * Also unlike correctTimeLog (time-out only), this can edit/delete/create either a time-in or
+ * a time-out, which is what's actually needed to merge an erroneously-split shift back into
+ * one continuous session (e.g. edit the second session's time-in back to the true start, then
+ * delete the now-redundant first pair). No separate rendered-hours math is needed — the
+ * existing hours engine reads TimeLog/breaks generically regardless of how a row was created.
+ */
+export const adminTimeOverride = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (requestor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can use the manual time-override tool');
+  }
+  // Web Dev-only POWER, not a Web-Dev-only PROTECTION — a Web Dev admin can use this on ANY
+  // user's records, any department. Only the requestor's own department gates access.
+  if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
+    throw new ApiError(403, 'This tool is only available to admins in an exempt department');
+  }
+
+  const { userId, date, action, logId, type, timestamp, reason } = req.body as {
+    userId?: string; date?: string; action?: 'edit' | 'delete' | 'create';
+    logId?: string; type?: 'time-in' | 'time-out'; timestamp?: string; reason?: string;
+  };
+  if (!userId || !date || !action) {
+    throw new ApiError(400, 'userId, date and action are all required');
+  }
+  // Reason is optional here (unlike correctTimeLog) — this tool is already restricted to
+  // Web Dev admins, per the user's explicit instruction. Still recorded in AuditLog when
+  // given; falls back to a placeholder when omitted so the audit trail never has a blank reason.
+  const auditReason = reason?.trim() || '(no reason provided)';
+  const noteSuffix = reason?.trim() ? `: ${reason.trim()}` : '';
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const { start } = getCompanyDayRange(date);
+  const { locked } = await getPeriodLockStatus(userId, start);
+  if (locked) {
+    throw new ApiError(403, 'This pay period has already been processed and is locked for corrections. Use the emergency unlock on the Payroll Status page if a correction is truly necessary.');
+  }
+
+  let logResultId: string;
+  let before: unknown = null;
+  let after: unknown = null;
+
+  if (action === 'edit') {
+    if (!logId || !timestamp) throw new ApiError(400, 'logId and timestamp are required to edit an entry');
+    const existing = await TimeLog.findOne({ _id: logId, userId }).lean();
+    if (!existing) throw new ApiError(404, 'Time log entry not found');
+    before = existing.timestamp;
+    after = new Date(timestamp);
+    await TimeLog.updateOne({ _id: logId }, { timestamp: after, note: `Admin override by ${requestor.fullName}${noteSuffix}` });
+    logResultId = logId;
+  } else if (action === 'delete') {
+    if (!logId) throw new ApiError(400, 'logId is required to delete an entry');
+    const existing = await TimeLog.findOne({ _id: logId, userId }).lean();
+    if (!existing) throw new ApiError(404, 'Time log entry not found');
+    before = { type: existing.type, timestamp: existing.timestamp };
+    await TimeLog.deleteOne({ _id: logId });
+    logResultId = logId;
+  } else if (action === 'create') {
+    if (!type || !timestamp) throw new ApiError(400, 'type and timestamp are required to create an entry');
+    const created = await TimeLog.create({
+      userId, userModel: 'CrmUser', type, timestamp: new Date(timestamp),
+      note: `Added by ${requestor.fullName} (admin time-override)${noteSuffix}`,
+    });
+    after = created.timestamp;
+    logResultId = created._id.toString();
+  } else {
+    throw new ApiError(400, 'action must be edit, delete, or create');
+  }
+
+  await AuditLog.create({
+    entityType: 'TimeLog',
+    entityId: logResultId,
+    action: 'ADMIN_TIME_OVERRIDE',
+    changes: { userId, date, action, type, before, after },
+    reason: auditReason,
+    performedBy: requestor._id,
+    organizationId: targetUser.organizationId?.toString(),
+  });
+
+  res.json(new ApiResponse(200, { logId: logResultId }, 'Time override applied'));
 });
 
 /**
@@ -2341,6 +2467,14 @@ export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: 
   res.json(new ApiResponse(200, result, `Wiped ${result.deleted} screenshot record(s)`));
 });
 
+// Exact note text the two silence-based branches in staleShiftAutoClockout.scheduler.ts write —
+// only these count as an erroneous auto-close eligible for a seamless resume. A manual/deliberate
+// time-out or the day-boundary closer's note must NOT qualify (see resumeShift below).
+const AUTO_SILENCE_CLOCKOUT_NOTES = [
+  'Auto clock-out — device went idle/offline after rendering 8+ hours',
+  'Auto clock-out — device went idle/offline for 30+ minutes',
+];
+
 export const getResumableShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
@@ -2366,7 +2500,62 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
     ? new Date(timeIns[0].timestamp).toISOString()
     : null;
 
-  res.json(new ApiResponse(200, { resumable, originalClockIn }, 'Resumable shift checked'));
+  const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
+  const canSeamlessResume = !!lastTimeOut && AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note);
+
+  res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
+});
+
+/**
+ * POST /api/crm/timeproof/resume-shift
+ * Undoes an erroneous stale-shift auto-clockout — deletes that time-out row so the original
+ * time-in is open/continuous again, instead of the old flow's silent, disconnected fresh
+ * time-in (which permanently discarded whatever gap was in between). Re-validates everything
+ * server-side; never trusts the client's cached canSeamlessResume flag.
+ */
+export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
+    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+
+  const todayLogs = await TimeLog.find({
+    userId: user._id,
+    timestamp: { $gte: new Date(todayMDTStartUTC) },
+  }).sort({ timestamp: 1 }).lean();
+
+  const timeIns  = todayLogs.filter(l => l.type === 'time-in');
+  const timeOuts = todayLogs.filter(l => l.type === 'time-out');
+  const isOnShift = timeIns.length > timeOuts.length;
+  if (isOnShift) throw new ApiError(400, 'Already on shift');
+  if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
+
+  const lastTimeOut = todayLogs[todayLogs.length - 1];
+  if (lastTimeOut.type !== 'time-out' || !AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note)) {
+    throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
+  }
+
+  await TimeLog.deleteOne({ _id: lastTimeOut._id });
+
+  const originalTimeIn = timeIns[timeIns.length - 1];
+  try {
+    // Mirrors the same event/payload shape the normal time-in path emits (crm.controller.ts's
+    // timeClock) so the tray's existing 'time-in' socket listener needs no special-casing —
+    // shiftStartedAt is the ORIGINAL time-in, not now, so the tray's local clock reflects the
+    // true restored duration. todayTotalWorkedSeconds is left for the next 60s syncShiftState
+    // poll to fill in accurately rather than risk drift here.
+    getSocketIO()?.to(`user:${user._id.toString()}`).emit('time-in', {
+      _id: originalTimeIn._id,
+      type: 'time-in',
+      timestamp: originalTimeIn.timestamp,
+      shiftStartedAt: originalTimeIn.timestamp,
+    });
+  } catch {
+  }
+
+  res.json(new ApiResponse(200, { resumed: true, shiftStartedAt: originalTimeIn.timestamp }, 'Shift resumed'));
 });
 
 
@@ -2379,6 +2568,9 @@ export default {
   postActivityInterval,
   getAgentStatus,
   getResumableShift,
+  resumeShift,
+  getAdminDayLogs,
+  adminTimeOverride,
   submitScreenshot,
   getScreenshots,
   getBlurredScreenshot,

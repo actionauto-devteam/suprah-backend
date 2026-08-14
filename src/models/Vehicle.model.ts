@@ -57,6 +57,20 @@ export interface IVehicle extends Document {
     manualStatusLock: boolean;
     organizationId: string;
     isDeleted: boolean;
+
+    /**
+     * Archive/Sold state — set by the FTP sync when a VIN disappears from the
+     * latest confirmed DealersCloud feed. Archived vehicles keep their entire
+     * document (notes, images, history) and are hidden from All Inventory,
+     * accessible through the Archive/Sold view. Automatically cleared when
+     * the VIN reappears in a later feed.
+     */
+    isArchived: boolean;
+    archivedAt?: Date | null;
+    archiveReason?: string | null;
+    /** Timestamp of the last confirmed feed that contained this VIN. */
+    lastSeenInFeedAt?: Date;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -133,11 +147,25 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         manualStatusLock: { type: Boolean, default: false },
         organizationId: { type: String, index: true },
         isDeleted: { type: Boolean, default: false },
+
+        // Archive/Sold state (FTP full-replace sync). Existing documents
+        // without this field are treated as active via `{ $ne: true }`
+        // queries, so no data migration is required.
+        isArchived: { type: Boolean, default: false, index: true },
+        archivedAt: { type: Date, default: null },
+        archiveReason: { type: String, trim: true, default: null },
+        lastSeenInFeedAt: { type: Date },
     },
     {
         timestamps: true,
     }
 );
+
+// Fast default listing: active (non-archived) inventory per organization.
+VehicleSchema.index({ organizationId: 1, isArchived: 1, isDeleted: 1 });
+VehicleSchema.index({ isDeleted: 1, dealerState: 1, status: 1 });
+VehicleSchema.index({ isDeleted: 1, dateSold: -1 });
+VehicleSchema.index({ organizationId: 1, isDeleted: 1, status: 1 });
 
 const Vehicle = mongoose.model<IVehicle, IVehicleModel>('Vehicle', VehicleSchema);
 

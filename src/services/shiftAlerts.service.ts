@@ -227,7 +227,15 @@ export async function fireShiftAlert(params: {
   targetUserModel: 'CrmUser' | 'User';
   chatMessage: string;
   notifyTitle: string;
+  /** Sent to the affected employee themselves — phrase this in second person
+   * ("Your shift was...", "You turned off..."). */
   notifyBody: string;
+  /** Sent to admins/managers instead of notifyBody — phrase this in third person with the
+   * employee's name (like chatMessage already is), so an admin's own notification never reads
+   * as if it's about their own shift. Falls back to notifyBody if omitted, but every call site
+   * should supply this — a shared second-person body read by an admin about someone else's
+   * shift is exactly the confusion this param exists to prevent. */
+  adminNotifyBody?: string;
   notifyTag: string;
   url?: string;
   /** Caller will post the Shift Alerts chat message itself, batched together with
@@ -238,10 +246,10 @@ export async function fireShiftAlert(params: {
    * sound/popup handler as an unbatched burst. */
   skipChatMessage?: boolean;
 }): Promise<void> {
-  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, notifyTag, url, skipChatMessage } = params;
+  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, adminNotifyBody, notifyTag, url, skipChatMessage } = params;
   await Promise.allSettled([
     skipChatMessage ? Promise.resolve() : postShiftAlertMessage(organizationId, chatMessage),
-    notifyOrgAdmins(organizationId, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }, targetUserId),
+    notifyOrgAdmins(organizationId, { title: notifyTitle, body: adminNotifyBody ?? notifyBody, tag: notifyTag, url }, targetUserId),
     notifyTargetUser(organizationId, targetUserId, targetUserModel, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
   ]);
 }

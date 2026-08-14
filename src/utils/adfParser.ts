@@ -1,4 +1,3 @@
-
 import { parseStringPromise } from 'xml2js';
 import logger from './logger';
 
@@ -115,6 +114,38 @@ function extractText(node: any): string {
   return str === '[object Object]' ? '' : str;
 }
 
+/**
+ * Last-resort deep scan: walk the parsed ADF object looking for any
+ * comments/notes/message/remarks node with real text, so a customer's
+ * message is never silently dropped just because a provider put it in a
+ * non-standard spot. Skips vendor/provider subtrees (their notes are not
+ * customer messages).
+ */
+function deepFindComments(node: any, depth = 0): string {
+  if (!node || typeof node !== 'object' || depth > 6) return '';
+  const COMMENT_KEYS = ['comments', 'comment', 'notes', 'message', 'remarks'];
+  const SKIP_KEYS = ['vendor', 'provider'];
+
+  for (const key of Object.keys(node)) {
+    const lower = key.toLowerCase();
+    if (SKIP_KEYS.includes(lower)) continue;
+    if (COMMENT_KEYS.includes(lower)) {
+      const text = extractText(node[key]);
+      if (text && text.length > 1) return text;
+    }
+  }
+  for (const key of Object.keys(node)) {
+    const lower = key.toLowerCase();
+    if (SKIP_KEYS.includes(lower)) continue;
+    const child = node[key];
+    if (child && typeof child === 'object') {
+      const found = deepFindComments(child, depth + 1);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
 export function isADFContent(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   const trimmed = text.trim();
@@ -217,7 +248,17 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     if (!prospect) return null;
 
     const customer = prospect.customer?.contact || prospect.customer;
-    const vehicle = prospect.vehicle;
+    /*
+     * FIX: <vehicle> may be an ARRAY (multi-vehicle ADF from Autotrader /
+     * Cars.com). Previously an array here silently broke every vehicle
+     * field AND hid vehicle-level customer comments.
+     */
+    const vehicles = Array.isArray(prospect.vehicle)
+      ? prospect.vehicle
+      : prospect.vehicle
+        ? [prospect.vehicle]
+        : [];
+    const vehicle = vehicles[0];
     const vendor = prospect.vendor;
     const provider = prospect.provider;
 
@@ -281,11 +322,35 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     };
 
     // --- Extract comments ---
+    /*
+     * FIX: the customer's actual message can live in MANY places depending
+     * on the source. Previously only customer-level and prospect-level
+     * comments were checked, so messages sent inside <vehicle><comments>
+     * (very common: Autotrader, Cars.com, DealersCloud forwards) or other
+     * variants were silently dropped — leads displayed with no customer
+     * message at all. Now checked, in order of preference:
+     *   1. <prospect><customer><comments>          (ADF standard)
+     *   2. <prospect><customer><contact><comments> (nested variant)
+     *   3. <prospect><comments>                    (prospect-level)
+     *   4. <vehicle><comments> on ANY vehicle      (marketplace variant)
+     *   5. deep scan for any remaining comments/notes/message node
+     */
     let comments = '';
-    if (prospect.customer?.comments) {
-      comments = extractText(prospect.customer.comments);
-    } else if (prospect.comments) {
-      comments = extractText(prospect.comments);
+    const commentCandidates: any[] = [
+      prospect.customer?.comments,
+      prospect.customer?.contact?.comments,
+      prospect.comments,
+      ...vehicles.map((v: any) => v?.comments),
+    ];
+    for (const candidate of commentCandidates) {
+      const text = extractText(candidate);
+      if (text) {
+        comments = text;
+        break;
+      }
+    }
+    if (!comments) {
+      comments = deepFindComments(prospect);
     }
 
     // --- Extract source / provider / vendor ---
@@ -420,6 +485,117 @@ function cleanString(s: string): string {
   return (s || '').replace(/\s+/g, ' ').trim();
 }
 
+/** Decode the HTML entities DealersCloud leaves in plain-text summaries. */
+function decodeHtmlEntities(text: string): string {
+  return (text || '')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'");
+}
+
+/**
+ * Extract the customer's free-text inquiry from a PLAIN-TEXT lead summary.
+ *
+ * DealersCloud (and similar aggregators) forward marketplace leads as a
+ * single pipe-delimited line. The ADF part of the email — when present —
+ * often OMITS the customer's message entirely; the message exists only in
+ * this plain-text summary, e.g.:
+ *
+ *   2026-08-12T02:35:09 2025 JEEP WRANGLER 4XE 1C4RJ... Yahaira Martinez
+ *   y@icloud.com 432-232-5816 View Shopper Signals: https://... |
+ *   I'm interested in this 2025 Jeep Wrangler 4xe and I'd like to know if
+ *   it's still available. (CarGurus IMV: $30,633 / Deal Rating: ...) |
+ *   Likelihood to buy: Warm, VIN:..., Stock#:...
+ *
+ * Strategy: split on pipes, strip trailing "(...metadata...)" parentheticals,
+ * and keep the first segment that reads like a human message rather than
+ * metadata (no URLs, emails, VINs, or known metadata prefixes).
+ */
+export function extractPlainTextInquiry(rawBody: string): string {
+  if (!rawBody) return '';
+
+  // Convert HTML to text while PRESERVING line structure (labeled sections
+  // like "SHOPPER COMMENT:" depend on line/paragraph boundaries).
+  const multiline = decodeHtmlEntities(
+    rawBody
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+      .replace(/<[^>]*>/g, ' ')
+  ).replace(/\r\n/g, '\n');
+
+  const text = multiline.replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+
+  const METADATA_PREFIXES = [
+    'view shopper signals', 'likelihood to buy', 'cargurus', 'deal rating',
+    'is from shippable', 'delivery cost', 'price + delivery', 'vin:',
+    'stock#', 'stock #', 'sales lead', 'lead details', 'contact information',
+    'vehicle interest', 'request date', 'dealer/vendor', 'unsubscribe',
+    'lead type', 'tracking', 'pixall', 'tcpaoptin',
+  ];
+  const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/;
+  const EMAIL_RE = /[^\s]+@[^\s]+\.[^\s]+/;
+  const URL_RE = /https?:\/\//i;
+
+  /*
+   * PASS 1 — labeled section (AutoTrader "SHOPPER COMMENT:", generic
+   * "Comments:"/"Message:" etc.). Works on the MULTILINE text and captures
+   * from the label to the next blank line or the next ALL-CAPS section
+   * header (e.g. "VEHICLE OF INTEREST:", "TRACKING:"), so it never bleeds
+   * into the sections that follow.
+   */
+  const labelMatch = multiline.match(
+    /\b(?:shopper\s+comments?|customer\s+comments?|comments?|customer\s+message|message|inquiry)\s*:\s*/i
+  );
+  if (labelMatch && labelMatch.index !== undefined) {
+    const after = multiline.slice(labelMatch.index + labelMatch[0].length);
+    const stop = after.search(/\n\s*\n|\n[A-Z][A-Z0-9 \/#&'.-]{2,}:\s*(?:\n|$)/);
+    let candidate = (stop >= 0 ? after.slice(0, stop) : after.slice(0, 600))
+      .replace(/\s+/g, ' ')
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .trim();
+    if (
+      candidate.length >= 10 &&
+      candidate.length <= 600 &&
+      !URL_RE.test(candidate) &&
+      !VIN_RE.test(candidate) &&
+      /[a-zA-Z]{3}/.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  // PASS 2 — pipe-delimited summary (DealersCloud/CarGurus format).
+  const segments = text.split('|').map((seg) => seg.trim()).filter(Boolean);
+  for (const segment of segments) {
+    // Remove trailing "(CarGurus IMV: ... )"-style metadata parentheticals.
+    const cleaned = segment.replace(/\s*\([^)]*\)\s*$/, '').trim();
+    if (cleaned.length < 15 || cleaned.length > 600) continue;
+
+    const lower = cleaned.toLowerCase();
+    if (METADATA_PREFIXES.some((pfx) => lower.startsWith(pfx))) continue;
+    if (URL_RE.test(cleaned) || VIN_RE.test(cleaned)) continue;
+    /*
+     * FIX: customers often include their own email INSIDE the message
+     * ("You can reach me by email at ..."). Only reject an email-bearing
+     * segment when it does NOT read like a sentence — otherwise real
+     * messages were dropped and the raw summary leaked into the UI.
+     */
+    const sentenceLike = /[.!?]/.test(cleaned) && cleaned.split(/\s+/).length >= 6;
+    if (EMAIL_RE.test(cleaned) && !sentenceLike) continue;
+    if (!/[a-zA-Z]{3}/.test(cleaned)) continue;
+    if (cleaned.split(' ').length < 4) continue;
+
+    return cleaned;
+  }
+  return '';
+}
+
 /**
  * Attempt to parse an email body: if it contains ADF, parse it;
  * otherwise return the body as-is with channel detection.
@@ -432,16 +608,34 @@ export async function parseEmailBody(
   parsedContent: string;
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
   adfData: ParsedADFLead | null;
+  comments: string;
 }> {
   // Check for ADF content
   const adfXml = extractADFFromBody(body);
   if (adfXml) {
     const adfData = await parseADF(adfXml);
     if (adfData) {
+      /*
+       * FIX: aggregators (DealersCloud forwarding CarGurus/Autotrader/etc.)
+       * often OMIT the customer's message from the ADF part and carry it
+       * only in the plain-text summary of the same email. When the ADF has
+       * no comments, recover the message from the surrounding plain text so
+       * it is stored on the lead and shown in the conversation card.
+       */
+      if (!adfData.comments) {
+        const plainInquiry = extractPlainTextInquiry(body);
+        if (plainInquiry) {
+          adfData.comments = plainInquiry;
+          if (!adfData.parsedContent.includes(plainInquiry)) {
+            adfData.parsedContent = `${adfData.parsedContent}\n\n— Customer Comments —\n${plainInquiry}`;
+          }
+        }
+      }
       return {
         parsedContent: adfData.parsedContent,
         channel: 'adf',
         adfData,
+        comments: adfData.comments || '',
       };
     }
   }
@@ -467,5 +661,6 @@ export async function parseEmailBody(
     parsedContent: cleanedBody,
     channel,
     adfData: null,
+    comments: extractPlainTextInquiry(body),
   };
 }

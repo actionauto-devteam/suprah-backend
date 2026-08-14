@@ -9,6 +9,7 @@ import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 import Organization from '../models/Organization.model';
 import DriverRequest from '../models/DriverRequest.model';
+import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
 
 class AuthService {
@@ -260,6 +261,21 @@ class AuthService {
         const isMatch = await user.isPasswordMatch(password);
         if (!isMatch) {
             throw new ApiError(401, 'Invalid email or password');
+        }
+
+        // An unapproved driver may still log in WHILE their application is
+        // incomplete (they need to be able to resume the documents/compliance/
+        // agreement wizard). Once they've actually submitted it — the
+        // DriverProfile has reached "under_review" — there's nothing left for
+        // them to do, so login is blocked until an admin approves the account.
+        if (user.role === 'driver' && !user.isApproved) {
+            const profile = await DriverProfile.findOne({ userId: user._id })
+                .select('verificationStatus')
+                .lean();
+            const verificationStatus = (profile as any)?.verificationStatus;
+            if (verificationStatus === 'under_review' || verificationStatus === 'verified') {
+                throw new ApiError(403, 'Your driver application has been submitted and is awaiting admin approval. You will be able to log in once it is approved.');
+            }
         }
 
         const tokens = await this.generateAuthTokens(user);

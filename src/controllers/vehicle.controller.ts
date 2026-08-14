@@ -73,7 +73,24 @@ const normalizeVehicle = (vehicle: any) => ({
   notes: vehicle.notes || [],
   comments: vehicle.comments || (vehicle as any).description || "",
   leadCount: vehicle.leadCount || 0,
+  isArchived: vehicle.isArchived === true,
+  archivedAt: vehicle.archivedAt || null,
+  archiveReason: vehicle.archiveReason || null,
+  lastSeenInFeedAt: vehicle.lastSeenInFeedAt || null,
 });
+
+/**
+ * Archive scoping for inventory queries.
+ * - Default / archived=false  → only active vehicles ({ $ne: true } also
+ *   matches legacy documents created before the isArchived field existed).
+ * - archived=true             → only Archive/Sold vehicles.
+ * - archived=all              → both (admin/reporting use).
+ */
+const archivedScope = (archived: unknown): Record<string, any> => {
+  if (archived === "all") return {};
+  if (archived === "true") return { isArchived: true };
+  return { isArchived: { $ne: true } };
+};
 
 const normalizePublicVehicle = (vehicle: any) => ({
   id: vehicle._id.toString(),
@@ -242,11 +259,15 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     all,
     includeMetrics,
     metricsOnly,
+    archived,
   } = req.query;
 
   const search = searchParam || q;
 
-  const filter: any = { isDeleted: false }; // organizationId is handled in pipeline or match below
+  // organizationId is handled in pipeline or match below. The archived scope
+  // hides Archive/Sold vehicles from All Inventory by default; the dedicated
+  // Archive/Sold view passes archived=true.
+  const filter: any = { isDeleted: false, ...archivedScope(archived) };
 
   if (status && status !== "all") {
     filter.status = status;
@@ -921,7 +942,11 @@ const stripQueryField = (query: Record<string, any>, field: string) => {
 const getFilters = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const hasScopedParams = hasScopedFilterParams(req.query);
-  const cacheKey = `veh:filters:${orgId}`;
+  const archiveScope = archivedScope(req.query.archived);
+  const cacheKey =
+    req.query.archived === "true"
+      ? `veh:filters:${orgId}:archived`
+      : `veh:filters:${orgId}`;
 
   if (!hasScopedParams) {
     const cached = await cacheService.get(cacheKey);
@@ -935,10 +960,11 @@ const getFilters = asyncHandler(async (req: Request, res: Response) => {
   const scopedQuery = buildScopedFilterQuery(req.query, {
     organizationId: orgId,
     isDeleted: false,
+    ...archiveScope,
   });
 
   // Make is always unscoped — show all available makes regardless of other filter selections
-  const baseQuery = { organizationId: orgId, isDeleted: false };
+  const baseQuery = { organizationId: orgId, isDeleted: false, ...archiveScope };
 
   const [makes, models, statuses, years, locations, bodyStyles, driveTrains] =
     await Promise.all([
@@ -978,15 +1004,24 @@ const getStats = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const [total, byStatus, vehicles] = await Promise.all([
-    Vehicle.countDocuments({ organizationId: orgId, isDeleted: false }),
+  const activeMatch = {
+    organizationId: orgId,
+    isDeleted: false,
+    isArchived: { $ne: true },
+  };
+
+  const [total, byStatus, vehicles, archivedTotal] = await Promise.all([
+    Vehicle.countDocuments(activeMatch),
     Vehicle.aggregate([
-      { $match: { organizationId: orgId, isDeleted: false } },
+      { $match: activeMatch },
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]),
-    Vehicle.find({ organizationId: orgId, isDeleted: false }).select(
-      "price daysOnLot",
-    ),
+    Vehicle.find(activeMatch).select("price daysOnLot"),
+    Vehicle.countDocuments({
+      organizationId: orgId,
+      isDeleted: false,
+      isArchived: true,
+    }),
   ]);
 
   const statusBreakdown = byStatus.reduce((acc: any, item: any) => {
@@ -1014,6 +1049,7 @@ const getStats = asyncHandler(async (req: Request, res: Response) => {
     averagePrice,
     averageDaysOnLot,
     totalValue,
+    archivedTotal,
   };
 
   await cacheService.set(cacheKey, data, VEH_CACHE_TTL);
@@ -1072,6 +1108,7 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
       $match: {
         organizationId: orgId,
         isDeleted: false,
+        isArchived: { $ne: true },
         status: { $ne: "Sold" },
       },
     },
@@ -1090,6 +1127,7 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
       $match: {
         organizationId: orgId,
         isDeleted: false,
+        isArchived: { $ne: true },
         status: { $ne: "Sold" },
         price: { $gt: 0 },
       },
@@ -1126,6 +1164,7 @@ const getDashboardGraphs = asyncHandler(async (req: Request, res: Response) => {
     Vehicle.find({
       organizationId: orgId,
       isDeleted: false,
+      isArchived: { $ne: true },
       status: { $ne: "Sold" },
       dateAdded: { $gte: lastMonth },
     }).select("daysOnLot"),
@@ -1229,9 +1268,12 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
     maxPrice,
     minMileage,
     maxMileage,
+    archived,
   } = req.query;
 
-  const filter: any = {}; // Used for match stage after search
+  // Used for match stage after search. Archived vehicles are excluded unless
+  // explicitly requested (archived=true exports the Archive/Sold view).
+  const filter: any = { ...archivedScope(archived) };
 
   if (status) {
     if (status !== "all") {
@@ -1340,12 +1382,22 @@ const exportVehicles = asyncHandler(async (req: Request, res: Response) => {
 const getDashboard = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const [recentVehicles, stats, alerts] = await Promise.all([
-    Vehicle.find({ organizationId: orgId, isDeleted: false })
+    Vehicle.find({
+      organizationId: orgId,
+      isDeleted: false,
+      isArchived: { $ne: true },
+    })
       .sort({ createdAt: -1 })
       .limit(5)
       .populate("assignedTo", "email name"),
     Vehicle.aggregate([
-      { $match: { organizationId: orgId, isDeleted: false } },
+      {
+        $match: {
+          organizationId: orgId,
+          isDeleted: false,
+          isArchived: { $ne: true },
+        },
+      },
       {
         $group: {
           _id: "$status",
@@ -1357,6 +1409,7 @@ const getDashboard = asyncHandler(async (req: Request, res: Response) => {
     Vehicle.find({
       organizationId: orgId,
       isDeleted: false,
+      isArchived: { $ne: true },
       status: "In Recon",
       daysOnLot: { $gt: 30 },
     }).countDocuments(),
@@ -1394,7 +1447,11 @@ const autocomplete = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const regex = { $regex: q, $options: "i" };
-  const query = { organizationId: orgId, isDeleted: false };
+  const query = {
+    organizationId: orgId,
+    isDeleted: false,
+    isArchived: { $ne: true },
+  };
 
   const [vins, makes, models, stockNumbers] = await Promise.all([
     Vehicle.distinct("vin", { ...query, vin: regex }),
@@ -1538,6 +1595,7 @@ const getMarketplaceVehicles = asyncHandler(
     // STRICT MARKETPLACE FILTERS
     const filter: any = {
       isDeleted: false,
+      isArchived: { $ne: true },
       status: "Ready for Sale", // Customers only see retail-ready inventory
     };
 
@@ -1648,9 +1706,21 @@ const getMarketplaceVehicles = asyncHandler(
       });
 
       // After search, we STILL must match the marketplace status
-      pipeline.push({ $match: { status: "Ready for Sale", isDeleted: false } });
+      pipeline.push({
+        $match: {
+          status: "Ready for Sale",
+          isDeleted: false,
+          isArchived: { $ne: true },
+        },
+      });
     } else {
-      pipeline.push({ $match: { status: "Ready for Sale", isDeleted: false } });
+      pipeline.push({
+        $match: {
+          status: "Ready for Sale",
+          isDeleted: false,
+          isArchived: { $ne: true },
+        },
+      });
     }
 
     pipeline.push({ $match: filter });
@@ -1756,10 +1826,15 @@ const getMarketplaceFilters = asyncHandler(
     const scopedQuery = buildScopedFilterQuery(req.query, {
       status: "Ready for Sale",
       isDeleted: false,
+      isArchived: { $ne: true },
     });
 
     // Make is always unscoped — show all available makes regardless of other filter selections
-    const baseMarketplaceQuery = { status: "Ready for Sale", isDeleted: false };
+    const baseMarketplaceQuery = {
+      status: "Ready for Sale",
+      isDeleted: false,
+      isArchived: { $ne: true },
+    };
 
     const [makes, models, statuses, years, locations, bodyStyles, driveTrains] =
       await Promise.all([

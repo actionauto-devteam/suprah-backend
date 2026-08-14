@@ -135,6 +135,32 @@ export const uploadLimiter = rateLimit({
     validate: { default: false }
 });
 
+// Same as uploadLimiter, but a driver who hasn't been approved yet is exempt —
+// they may legitimately need to upload several required documents (CDL,
+// medical card, insurance, etc.) in one sitting while finishing their
+// application, and the standard 5-per-10-min cap is too tight for that.
+// Once approved, the normal uploadLimiter behavior applies to them again.
+export const driverDocumentUploadLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 5,
+    skip: (req: any) =>
+        process.env.SKIP_RATE_LIMIT === 'true' ||
+        (req.user?.role === 'driver' && req.user?.isApproved === false),
+    keyGenerator: (req: any) => {
+        return (req.user?._id || req.ip).toString();
+    },
+    message: {
+        success: false,
+        message: "You've reached the limit for file uploads. To ensure system stability for all users, please wait 10 minutes before trying again. If you need to upload multiple files, try sending them in one batch within the allowed attachment limit.",
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 /**
  * Global limiter — hardened against shared-IP false positives.
  *
@@ -188,6 +214,25 @@ export const inventorySyncLimiter = rateLimit({
     message: {
         success: false,
         message: 'An inventory sync is already in progress or was recently completed. Please wait 5 minutes before triggering again.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const marketIqLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 400,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'Market intelligence is refreshing too quickly. Please wait a moment before loading more data.',
     },
     handler: (req, res, next, options) => {
         next(new ApiError(429, options.message.message));

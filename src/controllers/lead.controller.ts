@@ -273,7 +273,7 @@ async function sendLeadReplyEmail(
       .replace(/\//g, '_')
       .replace(/=/g, '');
 
-  await gmail.users.messages.send({
+  const sendResult = await gmail.users.messages.send({
     userId: 'me',
     requestBody: {
       raw: encodedMessage,
@@ -282,6 +282,24 @@ async function sendLeadReplyEmail(
         : {}),
     },
   });
+
+  /*
+   * FIX: persist the Gmail threadId created by this reply. ADF/website leads
+   * arrive with NO Gmail thread, so the first reply creates one — but the
+   * threadId was previously discarded, leaving lead.threadId empty forever.
+   * Result: getThreadMessages 404'd, the frontend never fetched the thread,
+   * and customer email replies were permanently invisible. Persisting via
+   * updateOne (not just the in-memory doc) also covers the bulk-reply path,
+   * which saves the lead BEFORE calling this helper.
+   */
+  const sentThreadId = sendResult?.data?.threadId;
+  if (sentThreadId && !lead.threadId) {
+    lead.threadId = sentThreadId;
+    await Lead.updateOne(
+      { _id: lead._id },
+      { $set: { threadId: sentThreadId } },
+    );
+  }
 
   console.log(
     `[REPLY] Email sent to ${recipientEmail} with ${attachments.length} attachment(s)`,
@@ -1679,12 +1697,15 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
             make: parsed.adfData.vehicle.make,
             model: parsed.adfData.vehicle.model,
           };
-          comments = parsed.adfData.comments;
+          comments = parsed.adfData.comments || (parsed as any).comments || '';
           leadSource = parsed.adfData.source || 'ADF Lead (DealersCloud)';
         } else {
           const nameParts = senderName.split(' ').filter((p: string) => p.length > 0);
           firstName = nameParts[0] || emailAddr.split('@')[0];
           lastName = nameParts.slice(1).join(' ') || '';
+          // FIX: plain-text (non-ADF) lead emails can still carry the
+          // customer's message — recovered by extractPlainTextInquiry.
+          comments = (parsed as any).comments || '';
           leadSource = 'DealersCloud Lead';
         }
 
@@ -1892,8 +1913,13 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
   const userId = user._id;
 
   const lead = await Lead.findOne({ _id: id, organizationId: req.orgId });
-  if (!lead || !lead.threadId) {
-    return res.status(404).json(new ApiResponse(404, null, 'Lead or thread not found'));
+  if (!lead) {
+    return res.status(404).json(new ApiResponse(404, null, 'Lead not found'));
+  }
+  // FIX: a lead with no Gmail thread yet is a normal state (ADF/web leads
+  // before the first reply) — return an empty thread instead of a 404.
+  if (!lead.threadId) {
+    return res.json(new ApiResponse(200, { messages: [] }, 'No email thread yet'));
   }
 
   try {
@@ -1936,18 +1962,34 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
           body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
         }
 
+        const isOwn =
+          email === threadUser?.email || (config?.gmailAddress === email);
+
+        /*
+         * FIX: ConversationView reads message text via body/text/snippet/
+         * content and direction via `direction` — the old shape only exposed
+         * `message` + `isOwn`, so even loaded threads rendered blank bubbles.
+         */
         return {
           id: msg.id,
+          _id: msg.id,
           messageId: msg.id,
           sender,
+          senderName: sender,
           senderEmail: email,
           message: body,
+          body,
+          direction: isOwn ? 'outbound' : 'inbound',
           timestamp: new Date(parseInt(msg.internalDate || Date.now())),
-          isOwn: email === threadUser?.email || (config?.gmailAddress === email),
+          createdAt: new Date(parseInt(msg.internalDate || Date.now())),
+          isOwn,
         };
       });
 
-    await cacheService.set(threadCacheKey, { messages }, 1800);
+    // FIX: was 1800s (30 min) — customer replies took up to half an hour to
+    // appear while the UI polls every 15s. 45s keeps Gmail quota safe and
+    // messages fresh.
+    await cacheService.set(threadCacheKey, { messages }, 45);
     res.json(new ApiResponse(200, { messages }, 'Thread messages fetched'));
   } catch (error: any) {
     if (error.message?.includes('connect your email leads') || error.message?.includes('configuration not found')) {

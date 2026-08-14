@@ -7,15 +7,11 @@ import mongoose, { Schema, Document, Model } from "mongoose";
 // compliance documents subsystem), plus the fields the driver directory and
 // driver tracking controllers consume.
 
-// The compliance meter counts these document types. ⚠ One judgment call in
-// this rebuild: adjust this list if your original differed — it only
-// affects the compliance percentage, nothing structural.
+// The compliance meter counts these document types — only the driver's
+// license is mandatory to complete an application; everything else in
+// DOCUMENT_TYPES is optional.
 export const REQUIRED_COMPLIANCE_DOCS: readonly string[] = [
   "drivers_license",
-  "medical_card",
-  "insurance_certificate",
-  "vehicle_registration",
-  "w9_form",
 ];
 
 export const DOCUMENT_TYPES = [

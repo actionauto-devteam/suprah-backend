@@ -322,6 +322,12 @@ export const getCustomers = asyncHandler(async (req: Request, res: Response) => 
   const filter: any = {
     role: roleFilter,
     organizationId: actor.organizationId,
+    // Drivers who self-registered via /sign-up/driver and haven't been
+    // approved yet shouldn't show up in this "registered accounts" list —
+    // they belong in the Drivers approval queue (Settings → Drivers) until
+    // an admin approves them. Customers are unaffected (isApproved defaults
+    // true and isn't gated for that role).
+    isApproved: true,
   };
 
   const searchValue = typeof search === 'string' ? search.trim() : '';

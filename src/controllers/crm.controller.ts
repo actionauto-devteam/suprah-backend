@@ -325,7 +325,8 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       targetUserModel: "CrmUser",
       chatMessage: `🟡 ${user.fullName} started their shift without location sharing turned on.`,
       notifyTitle: "📍 Location Not Shared",
-      notifyBody: `${user.fullName} started their shift but location sharing is off.`,
+      notifyBody: `You started your shift but location sharing is off — please turn it on.`,
+      adminNotifyBody: `${user.fullName} started their shift but location sharing is off.`,
       notifyTag: `shift-alert-no-location-${user._id}`,
       url: `/crm/timeproof/users/${user._id}`,
     }).catch(() => {});
@@ -342,7 +343,8 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       targetUserModel: "CrmUser",
       chatMessage: `🟡 ${user.fullName} returned from break but location sharing is still off.`,
       notifyTitle: "📍 Location Not Shared",
-      notifyBody: `${user.fullName} is back from break but location sharing is off.`,
+      notifyBody: `You're back from break but location sharing is still off — please turn it on.`,
+      adminNotifyBody: `${user.fullName} is back from break but location sharing is off.`,
       notifyTag: `shift-alert-no-location-${user._id}`,
       url: `/crm/timeproof/users/${user._id}`,
     }).catch(() => {});
