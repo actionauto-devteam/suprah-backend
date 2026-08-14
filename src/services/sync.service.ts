@@ -81,6 +81,7 @@ interface SyncResult {
   archived: number;
   skippedIncomplete: number;
   duplicateRowsInFeed: number;
+  duplicatesMergedInDb: number;
   archiveGuardTripped: boolean;
   warnings: string[];
 }
@@ -171,6 +172,25 @@ export class SyncService {
       return { message: "Sync already in progress" };
     }
 
+    // Cross-process guard: the FTP worker and the API server are separate
+    // processes, so the in-memory lock above can't see the other side. A
+    // RUNNING SyncLog younger than 15 minutes means another process is
+    // mid-sync (older RUNNING rows are treated as crashed and ignored).
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000);
+    const runningElsewhere = await SyncLog.findOne({
+      status: "RUNNING",
+      startTime: { $gte: staleCutoff },
+    })
+      .select("_id startTime")
+      .lean();
+    if (runningElsewhere) {
+      console.log(
+        `[SyncService] Another process started a sync at ` +
+          `${(runningElsewhere as any).startTime?.toISOString?.() || "?"} — skipping (${sourceLabel}).`,
+      );
+      return { message: "Sync already in progress (another process)" };
+    }
+
     this.isLocked = true;
 
     const startTime = new Date();
@@ -199,6 +219,12 @@ export class SyncService {
         );
       }
 
+      // ── PHASE 1.5: merge duplicate vehicle documents already in the DB ───
+      // Legacy imports matched VINs case-sensitively, so the same physical
+      // car can exist twice (e.g. "abc123" and "ABC123"). Merge those before
+      // upserting so the feed always updates exactly one document per VIN.
+      const dedupeStats = await this.dedupeVehicles();
+
       // ── PHASE 2: upsert the confirmed dataset ────────────────────────────
       const upsertStats = await this.applyUpserts(completeRows);
 
@@ -221,6 +247,11 @@ export class SyncService {
           `${duplicateRowsInFeed} duplicate VIN row(s) inside the feed were collapsed (last occurrence wins).`,
         );
       }
+      if (dedupeStats.removed > 0) {
+        warnings.push(
+          `${dedupeStats.removed} duplicate vehicle document(s) in the database were merged into their primary record (notes preserved).`,
+        );
+      }
       if (upsertStats.writeErrorCount > 0) {
         warnings.push(
           `${upsertStats.writeErrorCount} row(s) failed to write (see server logs).`,
@@ -238,6 +269,7 @@ export class SyncService {
         archived: archiveStats.archivedCount,
         skippedIncomplete,
         duplicateRowsInFeed,
+        duplicatesMergedInDb: dedupeStats.removed,
         archiveGuardTripped: archiveStats.guardTripped,
         warnings,
       };
@@ -441,8 +473,13 @@ export class SyncService {
 
     // VIN is globally unique in the schema, so the existence lookup is by VIN
     // (matches previous behavior). Everything written is stamped with the
-    // Action Auto org id.
-    const existingDocs = await Vehicle.find({ vin: { $in: vins } }).lean();
+    // Action Auto org id. The case-insensitive collation (strength 2) makes
+    // sure a legacy lowercase-VIN document is FOUND and updated (its VIN is
+    // normalized to uppercase by the $set) instead of a second, duplicate
+    // uppercase document being inserted next to it.
+    const existingDocs = await Vehicle.find({ vin: { $in: vins } })
+      .collation({ locale: "en", strength: 2 })
+      .lean();
     const existingByVin = new Map<string, any>(
       existingDocs.map((doc: any) => [
         String(doc.vin).trim().toUpperCase(),
@@ -623,12 +660,16 @@ export class SyncService {
       v.trim().toUpperCase(),
     );
 
+    // Case-insensitive collation: a legacy lowercase-VIN document whose car
+    // IS in the feed (uppercase) must never fall through the $nin and be
+    // wrongly archived because of casing.
     const candidates = await Vehicle.find({
       organizationId: ACTION_AUTO_ORG_ID, // strict org scope
       isDeleted: false,
       isArchived: { $ne: true },
       vin: { $nin: normalizedFeedVins },
     })
+      .collation({ locale: "en", strength: 2 })
       .select("_id vin status manualStatusLock dateSold")
       .lean();
 
@@ -734,6 +775,148 @@ export class SyncService {
   // ──────────────────────────────────────────────────────────────────────────
   //  MAINTENANCE
   // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Merges duplicate vehicle documents that share the same normalized VIN.
+   *
+   * How duplicates happen: the `vin` unique index is case-SENSITIVE, and the
+   * legacy import didn't normalize casing — so "1hgcm82633a" and
+   * "1HGCM82633A" could both exist as separate documents for the same car.
+   * (The unique index also never builds at all if duplicates predate it,
+   * silently disabling the constraint.)
+   *
+   * Merge strategy (idempotent, runs every sync — a no-op when clean):
+   *  • KEEPER  = the "richest" document: not deleted > not archived > has
+   *    notes > has an assigned user, tie-broken by most recently updated.
+   *  • Keeper's VIN is normalized to uppercase.
+   *  • Losers' notes are merged into the keeper (history preserved).
+   *  • Losers are soft-deleted + archived (never hard-deleted) and their VIN
+   *    gets a "-DUPMERGED-<id>" suffix so the unique index can finally build
+   *    cleanly. The original VIN is recorded in the AuditLog entry.
+   */
+  private async dedupeVehicles(): Promise<{ groups: number; removed: number }> {
+    const dupGroups: Array<{ _id: string; count: number; ids: any[] }> =
+      await Vehicle.aggregate([
+        { $match: { organizationId: ACTION_AUTO_ORG_ID } },
+        {
+          $group: {
+            _id: { $toUpper: { $trim: { input: "$vin" } } },
+            count: { $sum: 1 },
+            ids: { $push: "$_id" },
+          },
+        },
+        { $match: { count: { $gt: 1 } } },
+      ]);
+
+    if (dupGroups.length === 0) {
+      return { groups: 0, removed: 0 };
+    }
+
+    const now = new Date();
+    const bulkOps: any[] = [];
+    const auditDocs: any[] = [];
+    let removed = 0;
+
+    for (const group of dupGroups) {
+      const docs = await Vehicle.find({ _id: { $in: group.ids } }).lean();
+      if (docs.length < 2) continue;
+
+      const score = (d: any) =>
+        (d.isDeleted ? 0 : 8) +
+        (d.isArchived ? 0 : 4) +
+        ((d.notes?.length ?? 0) > 0 ? 2 : 0) +
+        (d.assignedTo ? 1 : 0);
+
+      const sorted = [...docs].sort((a: any, b: any) => {
+        const diffScore = score(b) - score(a);
+        if (diffScore !== 0) return diffScore;
+        return (
+          new Date(b.updatedAt || 0).getTime() -
+          new Date(a.updatedAt || 0).getTime()
+        );
+      });
+
+      const keeper: any = sorted[0];
+      const losers: any[] = sorted.slice(1);
+      const normVin = String(group._id);
+
+      // Merge losers' notes into the keeper (skip exact text+date repeats).
+      const keeperNotes: any[] = Array.isArray(keeper.notes)
+        ? [...keeper.notes]
+        : [];
+      const seen = new Set(
+        keeperNotes.map(
+          (n: any) => `${n.text}|${new Date(n.date || 0).getTime()}`,
+        ),
+      );
+      for (const loser of losers) {
+        for (const n of loser.notes ?? []) {
+          const sig = `${n.text}|${new Date(n.date || 0).getTime()}`;
+          if (!seen.has(sig)) {
+            seen.add(sig);
+            keeperNotes.push(n);
+          }
+        }
+      }
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: keeper._id },
+          update: { $set: { vin: normVin, notes: keeperNotes } },
+        },
+      });
+
+      for (const loser of losers) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: loser._id },
+            update: {
+              $set: {
+                // Suffix frees the (case-insensitive) logical VIN so the
+                // unique index can build; original VIN kept in the audit log.
+                vin: `${normVin}-DUPMERGED-${String(loser._id)}`,
+                isDeleted: true,
+                isArchived: true,
+                archivedAt: now,
+                archiveReason: `Duplicate of VIN ${normVin} — merged into primary record`,
+              },
+            },
+          },
+        });
+        auditDocs.push({
+          entityType: "Vehicle",
+          entityId: loser._id,
+          action: "UPDATE",
+          reason: `Duplicate VIN merged — this document was a duplicate of ${normVin} (kept ${String(keeper._id)})`,
+          changes: {
+            originalVin: loser.vin,
+            mergedInto: keeper._id,
+            isDeleted: true,
+            isArchived: true,
+          },
+          organizationId: ACTION_AUTO_ORG_ID,
+        });
+        removed++;
+      }
+    }
+
+    if (bulkOps.length > 0) {
+      await Vehicle.bulkWrite(bulkOps, { ordered: false });
+    }
+    try {
+      if (auditDocs.length > 0) {
+        await AuditLog.insertMany(auditDocs, { ordered: false });
+      }
+    } catch (err) {
+      console.error("[SyncService] Failed to write dedupe audit logs:", err);
+    }
+
+    console.log(
+      `[SyncService] Dedupe pass — merged ${removed} duplicate document(s) across ${dupGroups.length} VIN group(s).`,
+    );
+
+    return { groups: dupGroups.length, removed };
+  }
 
   /**
    * Bulk updates daysOnLot for all active vehicles in the target organization.
