@@ -31,6 +31,8 @@ export interface ILoad extends Document {
   contract?: Record<string, any>;
   driverContract?: Record<string, any>;
   assignedDriverId?: mongoose.Types.ObjectId;
+  /** Dispatcher currently responsible for this driver assignment. */
+  dispatchOwnerId?: mongoose.Types.ObjectId;
   driverRequests: Array<{
     driverId: mongoose.Types.ObjectId;
     requestedAt: Date;
@@ -186,6 +188,13 @@ const loadSchema = new Schema<ILoad>(
       ref: "User",
       default: null,
       index: true,
+    },
+    // Dispatcher responsible for the current driver assignment. GPS safety
+    // alerts use this explicit ownership instead of broadcasting to all staff.
+    dispatchOwnerId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
     },
     driverRequests: { type: [driverRequestSchema], default: [] },
     notes: [

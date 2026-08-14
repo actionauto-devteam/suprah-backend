@@ -6,6 +6,12 @@ import CrmUser from "../models/CrmUser.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import Load from "../models/Load.model";
+import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
+import {
+  finalizeDriverStatusChangeIfClear,
+  isStatusRequestBlockingNewWork,
+  OPEN_DRIVER_STATUS_REQUEST_STATES,
+} from "../services/driverStatusTransition.service";
 
 const PRESENCE_STALE_MS = 5 * 60 * 1000;
 const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
@@ -48,6 +54,15 @@ interface OrgDriver {
   messagingAvailable: boolean;
   crmUserId: string | null;
   messagingUnavailableReason: string | null;
+  statusRequest: {
+    id: string;
+    requestedStatus: "on_leave" | "maintenance";
+    priority: "standard" | "emergency";
+    status: string;
+    reason?: string | null;
+    message?: string | null;
+    submittedAt?: Date | null;
+  } | null;
   warnings: string[];
 }
 
@@ -79,10 +94,10 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     .map((u: any) => String(u.email ?? "").trim().toLowerCase())
     .filter(Boolean);
 
-  const [profiles, locations, loads, crmUsers] = await Promise.all([
+  const [profiles, locations, loads, crmUsers, statusRequests] = await Promise.all([
     DriverProfile.find({ userId: { $in: ids } }).lean(),
     DriverLocation.find({ userId: { $in: ids } })
-      .select("userId status lastSeenAt coords")
+      .select("userId status lastSeenAt coords isSharing")
       .lean(),
     Load.find({
       organizationId,
@@ -103,9 +118,21 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     })
       .select("_id email organizationId")
       .lean(),
+    DriverStatusChangeRequest.find({
+      organizationId,
+      driverId: { $in: ids },
+      status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
+    })
+      .sort({ createdAt: -1 })
+      .lean(),
   ]);
 
   const profileByUser = new Map(profiles.map((p: any) => [String(p.userId), p]));
+  const statusRequestByUser = new Map<string, any>();
+  for (const request of statusRequests as any[]) {
+    const key = String(request.driverId);
+    if (!statusRequestByUser.has(key)) statusRequestByUser.set(key, request);
+  }
   const locationByUser = new Map(locations.map((l: any) => [String(l.userId), l]));
   const crmUsersByEmail = new Map<string, any[]>();
   for (const crmUser of crmUsers as any[]) {
@@ -122,6 +149,27 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     const current = loadsByUser.get(key) ?? [];
     current.push(load);
     loadsByUser.set(key, current);
+  }
+
+  // Lazy finalization makes the status transition robust even if the final
+  // load was delivered through a different controller. Driver Tracker polls
+  // this directory, so an approved request becomes effective within the normal
+  // tracker refresh cycle once all active loads are gone.
+  for (const [driverId, request] of statusRequestByUser.entries()) {
+    if (
+      request.status === "approved_awaiting_reassignment" &&
+      (loadsByUser.get(driverId)?.length ?? 0) === 0
+    ) {
+      const completed = await finalizeDriverStatusChangeIfClear(
+        driverId,
+        organizationId,
+      );
+      if (completed) {
+        statusRequestByUser.delete(driverId);
+        const profile: any = profileByUser.get(driverId);
+        if (profile) profile.operationalStatus = completed.requestedStatus;
+      }
+    }
   }
 
   const now = Date.now();
@@ -151,11 +199,38 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       typeof profile?.maxVehicleCapacity === "number"
         ? profile.maxVehicleCapacity
         : null;
+    const operationalStatus =
+      (profile?.operationalStatus ?? "active") as
+        | "active"
+        | "on_leave"
+        | "maintenance";
+    const statusRequest: any = statusRequestByUser.get(key) ?? null;
 
     const lastSeenAt = location?.lastSeenAt ?? null;
     const isStale =
       !lastSeenAt || now - new Date(lastSeenAt).getTime() > PRESENCE_STALE_MS;
-    const isSharing = Boolean(location?.coords) && !isStale && location?.status !== "offline";
+    // GPS sharing is independent from Dispatch Status / Live Status.
+    // Legacy rows may not have the new isSharing field yet, so fall back to
+    // the previous status-based inference until the driver's next heartbeat.
+    const persistedSharing =
+      typeof location?.isSharing === "boolean"
+        ? location.isSharing
+        : location?.status !== "offline";
+    const isSharing =
+      Boolean(location?.coords) && !isStale && Boolean(persistedSharing);
+
+    // Dispatch Status still owns the driver's Live Status presentation:
+    // On Leave -> Offline, In Shop -> Waiting. GPS can be Sharing or
+    // Not Sharing independently in either state.
+    const liveStatus =
+      operationalStatus === "on_leave"
+        ? "offline"
+        : operationalStatus === "maintenance"
+          ? "waiting"
+          : isSharing
+            ? (location?.status ?? "idle")
+            : "offline";
+    const requestBlocksNewWork = isStatusRequestBlockingNewWork(statusRequest);
 
     const warnings: string[] = [];
     if (!u.isActive) warnings.push("inactive_account");
@@ -164,7 +239,16 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     if (maxCapacity != null && activeLoadCount >= maxCapacity) {
       warnings.push("at_capacity");
     }
-    if (!isSharing) warnings.push("offline_or_stale_location");
+    if (operationalStatus === "active" && !isSharing) warnings.push("offline_or_stale_location");
+    if (operationalStatus === "on_leave") warnings.push("on_leave");
+    if (operationalStatus === "maintenance") warnings.push("in_shop");
+    if (requestBlocksNewWork) {
+      warnings.push(
+        statusRequest?.priority === "emergency"
+          ? "emergency_release_active"
+          : "status_change_awaiting_reassignment",
+      );
+    }
     if (usesLegacyCrmOrganizationLink) {
       warnings.push("legacy_supraspace_org_link");
     }
@@ -184,7 +268,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
         ? {
             trailerType: profile.trailerType ?? null,
             maxVehicleCapacity: maxCapacity,
-            operationalStatus: profile.operationalStatus ?? null,
+            operationalStatus,
             truckMake: profile.truckMake ?? null,
             truckModel: profile.truckModel ?? null,
             isComplianceExpired: Boolean(profile.isComplianceExpired),
@@ -192,7 +276,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
           }
         : null,
       presence: {
-        status: !isSharing ? "offline" : (location.status ?? "idle"),
+        status: liveStatus,
         lastSeenAt,
         coords: location?.coords ?? null,
         isSharing,
@@ -213,7 +297,10 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       activeLoadCount,
       remainingCapacity:
         maxCapacity != null ? Math.max(0, maxCapacity - activeLoadCount) : null,
-      assignable: Boolean(u.isActive),
+      assignable:
+        Boolean(u.isActive) &&
+        operationalStatus === "active" &&
+        !requestBlocksNewWork,
       messagingAvailable: Boolean(crmUser),
       crmUserId: crmUser ? String(crmUser._id) : null,
       messagingUnavailableReason: crmUser
@@ -221,11 +308,32 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
         : hasCrmAccountInAnotherOrganization
           ? "An active Suprah Space account exists for this email, but it belongs to another organization."
           : "No active Suprah Space account is linked to this driver.",
+      statusRequest: statusRequest
+        ? {
+            id: String(statusRequest._id),
+            requestedStatus: statusRequest.requestedStatus,
+            priority: statusRequest.priority,
+            status: statusRequest.status,
+            reason: statusRequest.reason ?? null,
+            message: statusRequest.message ?? null,
+            submittedAt: statusRequest.submittedAt ?? statusRequest.createdAt ?? null,
+          }
+        : null,
       warnings,
     };
   });
 
   drivers.sort((a, b) => {
+    const attentionRank = (driver: OrgDriver) =>
+      driver.statusRequest?.priority === "emergency"
+        ? 0
+        : driver.statusRequest?.status === "approved_awaiting_reassignment"
+          ? 1
+          : 2;
+    const aAttention = attentionRank(a);
+    const bAttention = attentionRank(b);
+    if (aAttention !== bAttention) return aAttention - bAttention;
+
     if (a.assignable !== b.assignable) return a.assignable ? -1 : 1;
     const aOnline = a.presence.isSharing ? 0 : 1;
     const bOnline = b.presence.isSharing ? 0 : 1;

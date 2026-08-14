@@ -80,3 +80,16 @@ export const uploadScreenshot = multer({
   fileFilter: imageFileFilter,
   limits: { fileSize: 10 * 1024 * 1024 },
 }).single('screenshot');
+
+// Optional evidence for Driver Dispatch Status change requests.
+// Kept separate from permanent compliance documents so request evidence has
+// its own lifecycle and can safely allow multiple files without changing the
+// existing /driver-profile/documents behavior.
+export const uploadDriverStatusRequestAttachments = multer({
+  storage: storage,
+  fileFilter: driverDocumentFilter,
+  limits: {
+    files: 5,
+    fileSize: 10 * 1024 * 1024,
+  },
+}).array('attachments', 5);

@@ -10,6 +10,11 @@ export interface IDispatchChatAttachment {
 
 export interface IDispatchChatMessage extends Document {
   organizationId: string;
+  // New private-thread fields are optional at schema level so existing legacy
+  // shared-driver records remain readable in MongoDB. Every NEW message written
+  // by the private-chat controller includes both fields.
+  threadId?: mongoose.Types.ObjectId;
+  dispatcherId?: mongoose.Types.ObjectId;
   driverId: mongoose.Types.ObjectId;
   senderId: mongoose.Types.ObjectId;
   senderRole: "driver" | "dispatcher";
@@ -43,6 +48,16 @@ const dispatchChatMessageSchema = new Schema<IDispatchChatMessage>(
     organizationId: {
       type: String,
       required: true,
+      index: true,
+    },
+    threadId: {
+      type: Schema.Types.ObjectId,
+      ref: "DispatchChatThread",
+      index: true,
+    },
+    dispatcherId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
       index: true,
     },
     driverId: {
@@ -91,10 +106,27 @@ const dispatchChatMessageSchema = new Schema<IDispatchChatMessage>(
   { timestamps: true },
 );
 
+// Private-thread indexes. Legacy records without threadId/dispatcherId remain
+// untouched and are intentionally excluded from new private unread/history
+// queries unless their ownership can be established safely.
 dispatchChatMessageSchema.index({
   organizationId: 1,
+  threadId: 1,
+  createdAt: -1,
+});
+
+dispatchChatMessageSchema.index({
+  organizationId: 1,
+  dispatcherId: 1,
   driverId: 1,
   createdAt: -1,
+});
+
+dispatchChatMessageSchema.index({
+  organizationId: 1,
+  dispatcherId: 1,
+  readBy: 1,
+  senderId: 1,
 });
 
 dispatchChatMessageSchema.index({
@@ -102,6 +134,15 @@ dispatchChatMessageSchema.index({
   driverId: 1,
   readBy: 1,
   senderId: 1,
+});
+
+// Keep the old index shape as a migration-friendly lookup for explicit legacy
+// dispatcher-authored messages. New private queries do not use it as the sole
+// privacy boundary.
+dispatchChatMessageSchema.index({
+  organizationId: 1,
+  driverId: 1,
+  createdAt: -1,
 });
 
 const DispatchChatMessage: Model<IDispatchChatMessage> =

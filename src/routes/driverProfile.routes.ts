@@ -1,8 +1,12 @@
 import express from "express";
 import driverProfileController from "../controllers/driverProfile.controller";
+import driverStatusChangeRequestController from "../controllers/driverStatusChangeRequest.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
-import { uploadDriverDocument } from "../middleware/upload.middleware";
+import {
+  uploadDriverDocument,
+  uploadDriverStatusRequestAttachments,
+} from "../middleware/upload.middleware";
 import { uploadLimiter } from "../middleware/rate-limit.middleware";
 
 const router = express.Router();
@@ -16,6 +20,51 @@ router.post("/documents", uploadLimiter, auth(), uploadDriverDocument, driverPro
 router.delete("/documents/:documentId", driverProfileController.deleteDocument);
 router.patch("/logistics", driverProfileController.updateLogistics);
 router.patch("/identity-verification", driverProfileController.updateIdentityVerification);
+
+// Driver Dispatch Status requests. These stay under /driver-profile so the
+// existing mounted router handles both driver and dispatcher access without
+// introducing another top-level route registration.
+router.get(
+  "/status-requests/my-current",
+  driverStatusChangeRequestController.getMyCurrentRequest,
+);
+router.post(
+  "/status-requests",
+  uploadLimiter,
+  uploadDriverStatusRequestAttachments,
+  driverStatusChangeRequestController.createRequest,
+);
+router.patch(
+  "/status-requests/:requestId/details",
+  uploadLimiter,
+  uploadDriverStatusRequestAttachments,
+  driverStatusChangeRequestController.updateRequestDetails,
+);
+router.post(
+  "/status-requests/:requestId/cancel",
+  driverStatusChangeRequestController.cancelRequest,
+);
+
+router.get(
+  "/status-requests/org",
+  requireOrg,
+  driverStatusChangeRequestController.getOrganizationRequests,
+);
+router.get(
+  "/status-requests/:requestId",
+  requireOrg,
+  driverStatusChangeRequestController.getRequestById,
+);
+router.post(
+  "/status-requests/:requestId/approve",
+  requireOrg,
+  driverStatusChangeRequestController.approveRequest,
+);
+router.post(
+  "/status-requests/:requestId/reject",
+  requireOrg,
+  driverStatusChangeRequestController.rejectRequest,
+);
 
 router.get("/org", requireOrg, driverProfileController.getOrgDriverProfiles);
 router.get("/org/:driverId", requireOrg, driverProfileController.getDriverProfileById);

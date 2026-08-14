@@ -59,6 +59,9 @@ export interface IHomeBase {
   zip?: string;
 }
 
+export const DRIVER_OPERATIONAL_STATUSES = ["active", "on_leave", "maintenance"] as const;
+export type DriverOperationalStatus = (typeof DRIVER_OPERATIONAL_STATUSES)[number];
+
 export interface IDriverProfile extends Document {
   _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
@@ -97,7 +100,7 @@ export interface IDriverProfile extends Document {
   insuranceExpirationDate?: Date;
 
   // ── Logistics ──
-  operationalStatus: string;
+  operationalStatus: DriverOperationalStatus;
   serviceRadius?: number;
   preferredRoutes: string[];
   availableDays: string[];
@@ -213,7 +216,12 @@ const driverProfileSchema = new Schema<IDriverProfile>(
     insuranceExpirationDate: { type: Date },
 
     // ── Logistics ──
-    operationalStatus: { type: String, trim: true, default: "active" },
+    operationalStatus: {
+      type: String,
+      enum: DRIVER_OPERATIONAL_STATUSES,
+      trim: true,
+      default: "active",
+    },
     serviceRadius: { type: Number, min: 0 },
     preferredRoutes: { type: [String], default: [] },
     availableDays: { type: [String], default: [] },

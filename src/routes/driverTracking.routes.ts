@@ -115,10 +115,17 @@ router.post(
   driverTrackingController.respondToDriverAlert,
 );
 
-// Suprah Dispatch Chat — isolated from Suprah Space.
-// Access is enforced again inside the controller:
-//   driver -> own thread only
-//   staff  -> drivers in the same organization only
+// Suprah Dispatch Chat — isolated from Suprah Space and private per exact
+// dispatcher↔driver pair. The controller enforces the participant boundary on
+// every history, unread, send, attachment, and read operation.
+router.get(
+  "/dispatch-chat/threads",
+  dispatchChatController.getThreads,
+);
+router.get(
+  "/dispatch-chat/unread-total",
+  dispatchChatController.getUnreadTotal,
+);
 router.get(
   "/dispatch-chat/:driverId/messages",
   dispatchChatController.getMessages,

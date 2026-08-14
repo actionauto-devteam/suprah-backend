@@ -1,7 +1,10 @@
 import Load from "../models/Load.model";
 import User from "../models/User.model";
 import DriverLocation from "../models/DriverLocation.model";
+import DriverProfile from "../models/DriverProfile.model";
+import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
 import Notification from "../models/Notification.model";
+import DispatchChatMessage from "../models/DispatchChatMessage.model";
 import notificationService from "./notification.service";
 import { emitToOrg, emitToUser } from "../utils/socketEmitter";
 import logger from "../utils/logger";
@@ -29,6 +32,7 @@ type ActiveLoadSnapshot = {
   _id: any;
   organizationId: string;
   assignedDriverId: any;
+  dispatchOwnerId?: any;
   loadNumber?: string;
   status?: string;
   assignedAt?: Date | null;
@@ -43,6 +47,86 @@ function getLoadTrackingStart(load: ActiveLoadSnapshot): Date {
       load.createdAt ??
       new Date(),
   );
+}
+
+function getDispatchOwnerId(load: ActiveLoadSnapshot): string | null {
+  const value = String(load.dispatchOwnerId ?? "").trim();
+  return value || null;
+}
+
+function groupLoadsByDispatchOwner(loads: ActiveLoadSnapshot[]) {
+  const groups = new Map<string, ActiveLoadSnapshot[]>();
+  for (const load of loads) {
+    const dispatcherId = getDispatchOwnerId(load);
+    if (!dispatcherId) continue;
+    const current = groups.get(dispatcherId) ?? [];
+    current.push(load);
+    groups.set(dispatcherId, current);
+  }
+  return groups;
+}
+
+// Older active loads may predate dispatchOwnerId. Recover ownership only when
+// the already-private Dispatch Chat timeline contains explicit dispatcher-
+// authored assignment evidence for that exact load + driver. This is safe to
+// run in the monitor because it never falls back to "any dispatcher in org".
+async function backfillExplicitDispatchOwners(
+  loads: ActiveLoadSnapshot[],
+): Promise<void> {
+  const missing = loads.filter((load) => !getDispatchOwnerId(load));
+  if (!missing.length) return;
+
+  const missingById = new Map(
+    missing.map((load) => [String(load._id), load]),
+  );
+
+  const evidenceRows: any[] = await DispatchChatMessage.find({
+    senderRole: "dispatcher",
+    messageType: "system",
+    "systemEvent.type": {
+      $in: ["driver_load_assigned", "driver_load_request_approved"],
+    },
+    "systemEvent.metadata.loadId": { $in: [...missingById.keys()] },
+  })
+    .select(
+      "organizationId driverId dispatcherId senderId systemEvent.metadata.loadId createdAt",
+    )
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const resolvedLoadIds = new Set<string>();
+
+  for (const evidence of evidenceRows) {
+    const loadId = String(evidence?.systemEvent?.metadata?.loadId ?? "").trim();
+    if (!loadId || resolvedLoadIds.has(loadId)) continue;
+
+    const load = missingById.get(loadId);
+    if (!load) continue;
+    if (String(evidence.organizationId) !== String(load.organizationId)) continue;
+    if (String(evidence.driverId) !== String(load.assignedDriverId)) continue;
+
+    const dispatcherId = String(
+      evidence.dispatcherId ?? evidence.senderId ?? "",
+    ).trim();
+    if (!dispatcherId) continue;
+
+    // Persist only if another request has not already supplied an owner.
+    const result = await Load.updateOne(
+      {
+        _id: load._id,
+        $or: [
+          { dispatchOwnerId: null },
+          { dispatchOwnerId: { $exists: false } },
+        ],
+      },
+      { $set: { dispatchOwnerId: dispatcherId } },
+    );
+
+    if (result.modifiedCount > 0 || result.matchedCount > 0) {
+      load.dispatchOwnerId = dispatcherId;
+      resolvedLoadIds.add(loadId);
+    }
+  }
 }
 
 async function createGuaranteedDispatchNotification(params: {
@@ -98,14 +182,13 @@ async function createGuaranteedDispatchNotification(params: {
   return fallback;
 }
 
-async function notifyDispatchers(params: {
+async function notifyResponsibleDispatchers(params: {
   organizationId: string;
   driverId: string;
   driverName: string;
   lastSeenAt: Date | null;
   silenceStartedAt: Date;
-  loadNumbers: string[];
-  loadIds: string[];
+  driverLoads: ActiveLoadSnapshot[];
 }) {
   const {
     organizationId,
@@ -113,11 +196,23 @@ async function notifyDispatchers(params: {
     driverName,
     lastSeenAt,
     silenceStartedAt,
-    loadNumbers,
-    loadIds,
+    driverLoads,
   } = params;
 
+  const loadsByDispatcher = groupLoadsByDispatchOwner(driverLoads);
+  const dispatcherIds = [...loadsByDispatcher.keys()];
+  if (!dispatcherIds.length) {
+    logger.warn(
+      { driverId, loadIds: driverLoads.map((load) => String(load._id)) },
+      "[DriverLocationMonitor] GPS alert skipped because no explicit dispatch owner is recorded",
+    );
+    return;
+  }
+
+  // Validate only the explicitly recorded owners. Same-organization membership
+  // alone never grants another dispatcher access to this GPS safety alert.
   const dispatchers = await User.find({
+    _id: { $in: dispatcherIds },
     organizationId,
     role: { $in: DISPATCH_ROLES },
     isActive: true,
@@ -133,19 +228,6 @@ async function notifyDispatchers(params: {
     10,
     Math.floor((now.getTime() - reference.getTime()) / 60_000),
   );
-
-  const loadLabel =
-    loadNumbers.length === 1
-      ? `load ${loadNumbers[0]}`
-      : loadNumbers.length > 1
-        ? `${loadNumbers.length} active loads (${loadNumbers.join(", ")})`
-        : "an active load";
-
-  const title = "Driver Is Not Sharing Location";
-  const message =
-    `${driverName} has not shared a GPS location for ` +
-    `${minutesWithoutLocation} minutes while assigned to ${loadLabel}.`;
-
   const silenceIncidentId =
     `driver-location-silence:${driverId}:` +
     `${reference.toISOString()}`;
@@ -156,48 +238,72 @@ async function notifyDispatchers(params: {
   const incidentId =
     `${silenceIncidentId}:reminder:${reminderNumber}`;
 
-  const metadata = {
-    incidentId,
-    silenceIncidentId,
-    reminderNumber,
-    driverId,
-    driverName,
-    lastSeenAt: lastSeenAt?.toISOString() ?? null,
-    silenceStartedAt: reference.toISOString(),
-    minutesWithoutLocation,
-    silenceThresholdMinutes: 10,
-    loadIds,
-    loadNumbers,
-    route:
-      `/driver-tracker?driverId=${encodeURIComponent(driverId)}` +
-      "&openDispatchChat=1",
-    pushSource: "Driver Tracker",
-    requiresAttention: true,
-  };
-
   await Promise.allSettled(
-    dispatchers.map((dispatcher: any) =>
-      createGuaranteedDispatchNotification({
-        dispatcherId: String(dispatcher._id),
+    (dispatchers as any[]).map(async (dispatcher: any) => {
+      const dispatcherId = String(dispatcher._id);
+      const ownedLoads = loadsByDispatcher.get(dispatcherId) ?? [];
+      if (!ownedLoads.length) return;
+
+      const loadNumbers = ownedLoads
+        .map((load) => load.loadNumber)
+        .filter((value): value is string => Boolean(value));
+      const loadIds = ownedLoads.map((load) => String(load._id));
+      const loadLabel =
+        loadNumbers.length === 1
+          ? `load ${loadNumbers[0]}`
+          : loadNumbers.length > 1
+            ? `${loadNumbers.length} active loads (${loadNumbers.join(", ")})`
+            : "an active load";
+
+      const title = "Driver Is Not Sharing Location";
+      const message =
+        `${driverName} has not shared a GPS location for ` +
+        `${minutesWithoutLocation} minutes while assigned to ${loadLabel}.`;
+
+      const metadata = {
+        incidentId,
+        silenceIncidentId,
+        reminderNumber,
+        dispatcherId,
+        driverId,
+        driverName,
+        lastSeenAt: lastSeenAt?.toISOString() ?? null,
+        silenceStartedAt: reference.toISOString(),
+        minutesWithoutLocation,
+        silenceThresholdMinutes: 10,
+        loadIds,
+        loadNumbers,
+        route:
+          `/driver-tracker?driverId=${encodeURIComponent(driverId)}` +
+          "&openDispatchChat=1",
+        pushSource: "Driver Tracker",
+        requiresAttention: true,
+      };
+
+      const notification = await createGuaranteedDispatchNotification({
+        dispatcherId,
         organizationId,
         title,
         message,
         metadata,
         incidentId,
-      }),
-    ),
-  );
+      });
 
-  // Also update currently-open Driver Tracker clients immediately.
-  emitToOrg(organizationId, "driver:location_offline_alert", {
-    type: "driver_tracker_offline_alert",
-    title,
-    message,
-    metadata,
-    driverId,
-    driverName,
-    createdAt: now.toISOString(),
-  });
+      // Realtime safety alert content is private too. Do not emit this event to
+      // the organization room; only the dispatcher who owns these load(s) gets it.
+      if (notification) {
+        emitToUser(dispatcherId, "driver:location_offline_alert", {
+          type: "driver_tracker_offline_alert",
+          title,
+          message,
+          metadata,
+          driverId,
+          driverName,
+          createdAt: now.toISOString(),
+        });
+      }
+    }),
+  );
 }
 
 async function monitorDriverLocationSilence() {
@@ -218,11 +324,16 @@ async function monitorDriverLocationSilence() {
       status: { $in: GPS_ALERT_LOAD_STATUSES },
     })
       .select(
-        "_id organizationId assignedDriverId loadNumber status assignedAt createdAt updatedAt",
+        "_id organizationId assignedDriverId dispatchOwnerId loadNumber status assignedAt createdAt updatedAt",
       )
       .lean()) as ActiveLoadSnapshot[];
 
     if (!activeLoads.length) return;
+
+    // Privacy-safe compatibility for already-active loads created before this
+    // ownership field existed. Explicit private assignment history is enough;
+    // ambiguous legacy loads remain un-routed rather than leaking an alert.
+    await backfillExplicitDispatchOwners(activeLoads);
 
     const loadsByDriver = new Map<string, ActiveLoadSnapshot[]>();
 
@@ -237,7 +348,7 @@ async function monitorDriverLocationSilence() {
     const driverIds = [...loadsByDriver.keys()];
     if (!driverIds.length) return;
 
-    const [drivers, locations] = await Promise.all([
+    const [drivers, locations, profiles, emergencyRequests, retainedGpsRequests] = await Promise.all([
       User.find({
         _id: { $in: driverIds },
         role: "driver",
@@ -250,8 +361,35 @@ async function monitorDriverLocationSilence() {
         userId: { $in: driverIds },
       })
         .select(
-          "_id userId organizationId status coords lastSeenAt offlineAlertSentAt",
+          "_id userId organizationId status coords lastSeenAt isSharing offlineAlertSentAt",
         )
+        .lean(),
+
+      DriverProfile.find({ userId: { $in: driverIds } })
+        .select("userId operationalStatus")
+        .lean(),
+
+      DriverStatusChangeRequest.find({
+        driverId: { $in: driverIds },
+        priority: "emergency",
+        status: { $in: ["pending", "approved_awaiting_reassignment"] },
+      })
+        .select("driverId priority status")
+        .lean(),
+
+      // Completed/transitioning Keep Assigned decisions are durable GPS-policy
+      // records. Fetch them in one batch so the monitor does not issue N+1
+      // policy queries for On Leave / In Shop drivers.
+      DriverStatusChangeRequest.find({
+        driverId: { $in: driverIds },
+        requestedStatus: { $in: ["on_leave", "maintenance"] },
+        status: { $in: ["approved_awaiting_reassignment", "completed"] },
+        loadHandlingDecision: "keep_assigned",
+      })
+        .select(
+          "driverId requestedStatus affectedLoadIds retainedGpsRequired reviewedAt completedAt createdAt",
+        )
+        .sort({ reviewedAt: -1, completedAt: -1, createdAt: -1 })
         .lean(),
     ]);
 
@@ -268,19 +406,66 @@ async function monitorDriverLocationSilence() {
         location,
       ]),
     );
+    const profileByDriver = new Map(
+      (profiles as any[]).map((profile) => [String(profile.userId), profile]),
+    );
+    const emergencyDriverIds = new Set(
+      (emergencyRequests as any[]).map((request) => String(request.driverId)),
+    );
+    const retainedPoliciesByDriver = new Map<string, any[]>();
+    for (const policy of retainedGpsRequests as any[]) {
+      const key = String(policy.driverId);
+      const current = retainedPoliciesByDriver.get(key) ?? [];
+      current.push(policy);
+      retainedPoliciesByDriver.set(key, current);
+    }
 
     for (const [driverId, driverLoads] of loadsByDriver.entries()) {
       const driver: any = driverById.get(driverId);
       if (!driver) continue;
 
+      const profile: any = profileByDriver.get(driverId) ?? null;
+      const operationalStatus = profile?.operationalStatus ?? "active";
+
+      const qualifyingLoadIds = new Set(
+        driverLoads.map((load) => String(load._id)),
+      );
+      const retainedPolicy =
+        operationalStatus === "active"
+          ? null
+          : (retainedPoliciesByDriver.get(driverId) ?? []).find(
+              (policy: any) =>
+                policy.requestedStatus === operationalStatus &&
+                (policy.affectedLoadIds ?? []).some((loadId: any) =>
+                  qualifyingLoadIds.has(String(loadId)),
+                ),
+            ) ?? null;
+      const dispatchRequiresRetainedGps =
+        Boolean(retainedPolicy) && retainedPolicy.retainedGpsRequired === true;
+
+      // Off-duty statuses remain exempt unless Dispatch explicitly kept one of
+      // these qualifying loads assigned and required GPS for it.
+      if (
+        operationalStatus !== "active" &&
+        !dispatchRequiresRetainedGps
+      ) {
+        continue;
+      }
+
+      // Emergency release is safety-first: keep GPS if it is available, but
+      // suppress ordinary 10-minute compliance-style reminders while Dispatch
+      // is already handling the emergency and affected loads.
+      if (emergencyDriverIds.has(driverId)) continue;
+
       const organizationId = String(driver.organizationId);
       const location: any = locationByDriver.get(driverId) ?? null;
 
-      const loadNumbers = driverLoads
-        .map((load) => load.loadNumber)
-        .filter((value): value is string => Boolean(value));
-
-      const loadIds = driverLoads.map((load) => String(load._id));
+      // GPS safety alerts are tied to explicit dispatcher ownership. A legacy
+      // load with no owner is never guessed into another dispatcher's alerts.
+      const ownedDriverLoads = driverLoads.filter((load) =>
+        Boolean(getDispatchOwnerId(load)),
+      );
+      if (!ownedDriverLoads.length) continue;
 
       // If the driver has shared at least once, lastSeenAt is authoritative.
       if (location?.lastSeenAt) {
@@ -302,6 +487,7 @@ async function monitorDriverLocationSilence() {
           {
             $set: {
               status: "offline",
+              isSharing: false,
               offlineAlertSentAt: now,
             },
           },
@@ -310,14 +496,13 @@ async function monitorDriverLocationSilence() {
 
         if (!claimed) continue;
 
-        await notifyDispatchers({
+        await notifyResponsibleDispatchers({
           organizationId,
           driverId,
           driverName: driver.name || "Driver",
           lastSeenAt,
           silenceStartedAt: lastSeenAt,
-          loadNumbers,
-          loadIds,
+          driverLoads: ownedDriverLoads,
         });
 
         // Keep the open Driver Tracker map/list synchronized immediately.
@@ -325,6 +510,7 @@ async function monitorDriverLocationSilence() {
           driverId,
           coords: claimed.coords ?? null,
           status: "offline",
+          isSharing: false,
           lastSeenAt: claimed.lastSeenAt,
         });
 
@@ -334,7 +520,7 @@ async function monitorDriverLocationSilence() {
       // A driver may reach a notification-eligible load status before ever
       // publishing their first GPS heartbeat. In that case the qualifying load's
       // recorded tracking start is used for the 10-minute requirement window.
-      const silenceStartedAt = driverLoads
+      const silenceStartedAt = ownedDriverLoads
         .map(getLoadTrackingStart)
         .sort((a, b) => a.getTime() - b.getTime())[0];
 
@@ -365,49 +551,30 @@ async function monitorDriverLocationSilence() {
       const incidentId =
         `${silenceIncidentId}:reminder:${reminderNumber}`;
 
-      const alreadyAlerted = await Notification.exists({
-        organizationId,
-        type: "driver_tracker_offline_alert",
-        "metadata.incidentId": incidentId,
+      const ownerIds = [...groupLoadsByDispatchOwner(ownedDriverLoads).keys()];
+      const alreadyAlertedOwnerIds = new Set(
+        (await Notification.distinct("userId", {
+          organizationId,
+          type: "driver_tracker_offline_alert",
+          userId: { $in: ownerIds },
+          "metadata.incidentId": incidentId,
+        })).map((id: any) => String(id)),
+      );
+
+      const loadsNeedingAlert = ownedDriverLoads.filter((load) => {
+        const ownerId = getDispatchOwnerId(load);
+        return Boolean(ownerId && !alreadyAlertedOwnerIds.has(ownerId));
       });
 
-      if (alreadyAlerted) continue;
+      if (!loadsNeedingAlert.length) continue;
 
-      await notifyDispatchers({
+      await notifyResponsibleDispatchers({
         organizationId,
         driverId,
         driverName: driver.name || "Driver",
         lastSeenAt: null,
         silenceStartedAt,
-        loadNumbers,
-        loadIds,
-      });
-
-      emitToOrg(organizationId, "driver:location_offline_alert", {
-        type: "driver_tracker_offline_alert",
-        title: "Driver Is Not Sharing Location",
-        message:
-          `${driver.name || "Driver"} has not started GPS location sharing ` +
-          "within 10 minutes of receiving an active load.",
-        metadata: {
-          incidentId,
-          silenceIncidentId,
-          reminderNumber,
-          driverId,
-          driverName: driver.name || "Driver",
-          lastSeenAt: null,
-          silenceStartedAt: silenceStartedAt.toISOString(),
-          silenceThresholdMinutes: 10,
-          loadIds,
-          loadNumbers,
-          route:
-      `/driver-tracker?driverId=${encodeURIComponent(driverId)}` +
-      "&openDispatchChat=1",
-          requiresAttention: true,
-        },
-        driverId,
-        driverName: driver.name || "Driver",
-        createdAt: now.toISOString(),
+        driverLoads: loadsNeedingAlert,
       });
     }
   } catch (error) {

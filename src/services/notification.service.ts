@@ -46,6 +46,8 @@ const VALID_NOTIFICATION_TYPES = [
   'driver_assigned', 'driver_location_update', 'driver_payout',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'driver_dispatch_alert',
+  'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
+  'driver_status_request_completed', 'driver_emergency_request',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
@@ -100,6 +102,9 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   driver_location_update: 'driverTracker', driver_tracker_geofence_alert: 'driverTracker',
   driver_tracker_offline_alert: 'driverTracker', driver_tracker_place_visit: 'driverTracker',
   driver_dispatch_alert: 'driverTracker',
+  driver_status_request: 'driverTracker', driver_status_request_approved: 'driverTracker',
+  driver_status_request_rejected: 'driverTracker', driver_status_request_completed: 'driverTracker',
+  driver_emergency_request: 'driverTracker',
 
   payment_received: 'wallet', payment_pending: 'wallet', payment_failed: 'wallet', payment_request: 'wallet',
   payout_processed: 'wallet', wallet_low_balance: 'wallet', wallet_payout_failed: 'wallet',
@@ -121,7 +126,12 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
 
 // These always deliver (in-app + push) regardless of preference toggles.
 // Security events and dispatcher safety alerts must not be silently dropped.
-const SECURITY_CRITICAL_TYPES = new Set(['password_changed', 'login_alert', 'driver_dispatch_alert']);
+const SECURITY_CRITICAL_TYPES = new Set([
+  'password_changed',
+  'login_alert',
+  'driver_dispatch_alert',
+  'driver_emergency_request',
+]);
 
 // Short human label per category, prefixed onto the OS push notification's
 // title (see utils/pushPayload.ts's normalizePushPayload) so the device-level
@@ -262,6 +272,11 @@ const createNotification = async (params: CreateNotificationParams) => {
       driver_tracker_offline_alert: metadata?.route || '/driver-tracker',
       driver_tracker_place_visit: metadata?.route || '/driver-tracker',
       driver_dispatch_alert: metadata?.route || '/driver/notifications',
+      driver_status_request: metadata?.route || '/driver-tracker',
+      driver_emergency_request: metadata?.route || '/driver-tracker',
+      driver_status_request_approved: metadata?.route || '/driver',
+      driver_status_request_rejected: metadata?.route || '/driver',
+      driver_status_request_completed: metadata?.route || '/driver',
       // ── Wallet ──
       wallet_low_balance: metadata?.route || '/billing',
       wallet_payout_failed: metadata?.route || '/billing',

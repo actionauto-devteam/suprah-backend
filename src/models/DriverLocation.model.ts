@@ -12,6 +12,8 @@ export interface IDriverLocation extends Document {
   };
   shipmentIds: mongoose.Types.ObjectId[];
   lastSeenAt: Date;
+  /** Independent GPS-sharing flag. A driver may share GPS while On Leave/In Shop even though live status stays Offline/Waiting. */
+  isSharing: boolean;
   /** Set when a "went offline" alert has already fired for the current silence gap; cleared on the next location ping. */
   offlineAlertSentAt?: Date | null;
   createdAt: Date;
@@ -51,6 +53,10 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     lastSeenAt: {
       type: Date,
       default: Date.now,
+    },
+    isSharing: {
+      type: Boolean,
+      default: false,
     },
     offlineAlertSentAt: {
       type: Date,

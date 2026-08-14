@@ -7,6 +7,13 @@ import { IUser } from "../models/User.model";
 import storageService, { BucketType } from "../services/storage.service";
 import activityService from "../services/activity.service";
 import logger from "../utils/logger";
+import Load from "../models/Load.model";
+import {
+  ACTIVE_DRIVER_LOAD_STATUSES,
+  applyDriverOperationalStatus,
+  finalizeDriverStatusChangeIfClear,
+  getOpenDriverStatusRequest,
+} from "../services/driverStatusTransition.service";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -28,7 +35,13 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
   const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  let profile = await getOrCreateProfile(user._id.toString(), orgId);
+
+  // Lazy finalization covers delivery flows that may complete outside the
+  // Driver Tracking controller. Once the driver has zero active loads, an
+  // approved transition becomes effective automatically.
+  await finalizeDriverStatusChangeIfClear(user._id.toString(), orgId);
+  profile = (await DriverProfile.findOne({ userId: user._id })) || profile;
 
   const profileObj = profile.toJSON();
   if (profileObj.documents) {
@@ -275,7 +288,9 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
   const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  let profile = await getOrCreateProfile(user._id.toString(), orgId);
+  await finalizeDriverStatusChangeIfClear(user._id.toString(), orgId);
+  profile = (await DriverProfile.findOne({ userId: user._id })) || profile;
 
   const {
     operationalStatus,
@@ -285,7 +300,13 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
     availableDays,
   } = req.body;
 
-  if (operationalStatus !== undefined) profile.operationalStatus = operationalStatus;
+  if (operationalStatus !== undefined) {
+    const allowed = ["active", "on_leave", "maintenance"];
+    if (!allowed.includes(String(operationalStatus))) {
+      throw new ApiError(400, "Invalid Dispatch Status");
+    }
+  }
+
   if (serviceRadius !== undefined) profile.serviceRadius = serviceRadius;
   if (preferredRoutes !== undefined) profile.preferredRoutes = preferredRoutes;
   if (availableDays !== undefined) profile.availableDays = availableDays;
@@ -302,6 +323,52 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
 
   await profile.save();
 
+  if (operationalStatus !== undefined) {
+    const nextStatus = String(operationalStatus) as
+      | "active"
+      | "on_leave"
+      | "maintenance";
+
+    if (nextStatus !== profile.operationalStatus) {
+      // Active -> unavailable cannot bypass the petition flow while loads are
+      // still assigned. Returning to Active remains direct for now.
+      if (
+        profile.operationalStatus === "active" &&
+        nextStatus !== "active"
+      ) {
+        const openRequest = await getOpenDriverStatusRequest(
+          user._id.toString(),
+          orgId,
+        );
+        if (openRequest) {
+          throw new ApiError(
+            409,
+            "You already have an active Dispatch Status request. Wait for Dispatch or update that request instead of changing status directly.",
+          );
+        }
+
+        const activeLoadCount = await Load.countDocuments({
+          organizationId: orgId,
+          assignedDriverId: user._id,
+          status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
+        });
+
+        if (activeLoadCount > 0) {
+          throw new ApiError(
+            409,
+            `You currently have ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}. Submit a Dispatch Status request so Dispatch can review and reassign the affected loads.`,
+          );
+        }
+      }
+
+      profile = await applyDriverOperationalStatus({
+        driverId: user._id.toString(),
+        organizationId: orgId,
+        status: nextStatus,
+      });
+    }
+  }
+
   res.json(new ApiResponse(200, profile, "Logistics updated"));
 
   logger.info({ profileId: profile._id, userId: user._id }, 'Logistics information updated');
@@ -311,8 +378,8 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
     organizationId: orgId,
     type: 'other',
     title: 'Logistics Updated',
-    description: `Driver ${user.name} updated service area/routes`,
-    metadata: { profileId: profile._id.toString(), serviceRadius }
+    description: `Driver ${user.name} updated service area/routes or Dispatch Status`,
+    metadata: { profileId: profile._id.toString(), serviceRadius, operationalStatus: profile.operationalStatus }
   });
 });
 
