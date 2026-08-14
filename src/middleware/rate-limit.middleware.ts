@@ -223,6 +223,25 @@ export const inventorySyncLimiter = rateLimit({
     validate: { default: false }
 });
 
+export const marketIqLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 400,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'Market intelligence is refreshing too quickly. Please wait a moment before loading more data.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 export const marketplaceLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,

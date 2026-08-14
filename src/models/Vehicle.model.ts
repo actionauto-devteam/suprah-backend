@@ -163,6 +163,9 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
 
 // Fast default listing: active (non-archived) inventory per organization.
 VehicleSchema.index({ organizationId: 1, isArchived: 1, isDeleted: 1 });
+VehicleSchema.index({ isDeleted: 1, dealerState: 1, status: 1 });
+VehicleSchema.index({ isDeleted: 1, dateSold: -1 });
+VehicleSchema.index({ organizationId: 1, isDeleted: 1, status: 1 });
 
 const Vehicle = mongoose.model<IVehicle, IVehicleModel>('Vehicle', VehicleSchema);
 

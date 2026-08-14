@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "cross-env NODE_OPTIONS=--max-old-space-size=4096 ts-node-dev --transpile-only --respawn --no-notify src/server.ts",
     "dev:ftp": "dotenv -e .env -- cross-env NODE_OPTIONS=--max-old-space-size=4096 ts-node-dev --transpile-only --respawn --no-notify src/ftp-worker.ts",
-    "build": "tsc",
+    "build": "cross-env NODE_OPTIONS=--max-old-space-size=4096 tsc",
     "start": "ts-node --transpile-only -r tsconfig-paths/register src/server.ts",
     "start:ftp": "node dist/ftp-worker.js",
     "seed": "ts-node --transpile-only scripts/seed.ts",
@@ -14,6 +14,7 @@
     "clean": "rimraf dist",
     "prebuild": "npm run clean",
     "test": "jest --detectOpenHandles --forceExit",
+    "test:unit": "jest --config jest.unit.config.js",
     "test:watch": "jest --watch"
   },
   "keywords": [

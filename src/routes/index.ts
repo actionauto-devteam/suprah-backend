@@ -34,6 +34,7 @@ import devToolsRoute from "./devTools.routes";
 import pushRoute from "./push.route";
 import loadRoute from "./load.routes";
 import analyticsRoute from "./analytics.routes";
+import suprahRadarRoute from "./suprahRadar.routes";
 import activityRoute from "./activity.routes";
 import customerRoute from "./customer.route";
 import customerLeadRoute from "./customerLead.route";
@@ -282,6 +283,10 @@ const defaultRoutes = [
   {
     path: "/analytics",
     route: analyticsRoute,
+  },
+  {
+    path: "/suprah-radar",
+    route: suprahRadarRoute,
   },
   {
     path: "/activity",
