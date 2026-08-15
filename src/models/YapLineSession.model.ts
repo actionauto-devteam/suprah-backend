@@ -13,6 +13,7 @@ import mongoose, { Document, Schema } from 'mongoose';
  *
  * activity is a capped rolling log (MAX_ACTIVITY entries) so a very chatty
  * session can't grow the document unboundedly.
+ * test
  */
 
 export type YapLineActivityType =
