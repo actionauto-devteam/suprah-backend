@@ -28,6 +28,11 @@ import {
   getDriverStatusContext,
   getDriverWorkEligibility,
 } from "../services/driverStatusTransition.service";
+import {
+  assertDriverLoadCompatibility,
+  evaluateDriverLoadCompatibilityWithRecommendations,
+} from "../services/driverLoadCompatibility.service";
+import { getCoordinatesFromZip } from "../utils/calculations";
 
 // ── Driver contract signature — required on both accept and request; a
 // driver cannot take a load without agreeing to terms and signing. ──
@@ -45,10 +50,6 @@ const getUser = (req: Request) => req.user as IUser;
 
 // Statuses that count against a driver's active workload
 const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
-
-// Conservative capacity fallback for drivers with no profile yet. Drivers
-// who haul more raise their own limit in Driver's Account (up to 20).
-const DEFAULT_MAX_CAPACITY = 12;
 
 // ─── Loosely-typed service aliases ───────────────────────────────────────────
 // activityService and the notification utils type their `type` param as
@@ -489,7 +490,7 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
       assignedDriverId: { $in: userIds },
       status: { $in: ACTIVE_LOAD_STATUSES },
     })
-      .select("loadNumber status pickupLocation deliveryLocation assignedDriverId")
+      .select("loadNumber status pickupLocation deliveryLocation assignedDriverId vehicles trailerType dates")
       .lean(),
   ]);
 
@@ -544,19 +545,30 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
         equipment: p
           ? {
               trailerType: p.trailerType ?? null,
-              maxVehicleCapacity: p.maxVehicleCapacity ?? DEFAULT_MAX_CAPACITY,
+              // maxVehicleCapacity is a per-load VEHICLE count. Never invent a
+              // large fallback or mix it with the number of active load records.
+              maxVehicleCapacity:
+                typeof p.maxVehicleCapacity === "number"
+                  ? p.maxVehicleCapacity
+                  : null,
               operationalStatus: p.operationalStatus ?? "active",
               truckMake: p.truckMake ?? undefined,
               truckModel: p.truckModel ?? undefined,
               isComplianceExpired: Boolean(p.isComplianceExpired),
             }
           : null,
+        availability: {
+          availableDays: Array.isArray(p?.availableDays) ? p.availableDays : [],
+        },
         shipments: driverLoads.map((l: any) => ({
           id: String(l._id),
           trackingNumber: l.loadNumber,
           status: l.status,
           origin: `${l.pickupLocation?.city ?? ""}, ${l.pickupLocation?.state ?? ""}`,
           destination: `${l.deliveryLocation?.city ?? ""}, ${l.deliveryLocation?.state ?? ""}`,
+          vehicleCount: Array.isArray(l.vehicles) ? l.vehicles.length : 0,
+          trailerType: l.trailerType ?? null,
+          pickupDate: l.dates?.firstAvailable ?? l.dates?.pickupDeadline ?? null,
         })),
       };
     });
@@ -572,7 +584,17 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
 const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
-  const { loadId, driverId } = req.body as { loadId?: string; driverId?: string };
+  const {
+    loadId,
+    driverId,
+    overrideAvailability = false,
+    overrideCapacity = false,
+  } = req.body as {
+    loadId?: string;
+    driverId?: string;
+    overrideAvailability?: boolean;
+    overrideCapacity?: boolean;
+  };
 
   if (!loadId || !driverId) throw new ApiError(400, "loadId and driverId are required");
 
@@ -584,9 +606,26 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
   if (!load) throw new ApiError(404, "Load not found");
   if (!driver) throw new ApiError(404, "Driver not found in this organization");
   await assertDriverCanTakeNewWork(driverId, organizationId, "assign");
-  if (["Delivered", "Cancelled"].includes(load.status)) {
-    throw new ApiError(400, `Cannot assign a load in ${load.status} status`);
+
+  // Normal assignment owns only Posted + unassigned loads. Already-assigned
+  // records must go through the dedicated reassign path so one action cannot
+  // silently replace another driver's assignment.
+  if (load.status !== "Posted" || load.assignedDriverId) {
+    throw new ApiError(
+      409,
+      load.assignedDriverId
+        ? "This load is already assigned. Use Reassign instead."
+        : `Cannot assign a load in ${load.status} status`,
+    );
   }
+
+  await assertDriverLoadCompatibility({
+    driverId,
+    organizationId,
+    load,
+    actor: "dispatcher",
+    overrides: { overrideAvailability, overrideCapacity },
+  });
 
   load.assignedDriverId = driver._id as any;
   (load as any).dispatchOwnerId = user._id;
@@ -643,7 +682,17 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
 const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
-  const { loadId, driverId } = req.body as { loadId?: string; driverId?: string };
+  const {
+    loadId,
+    driverId,
+    overrideAvailability = false,
+    overrideCapacity = false,
+  } = req.body as {
+    loadId?: string;
+    driverId?: string;
+    overrideAvailability?: boolean;
+    overrideCapacity?: boolean;
+  };
 
   if (!loadId || !driverId) throw new ApiError(400, "loadId and driverId are required");
 
@@ -658,6 +707,14 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
   if (["Delivered", "Cancelled"].includes(load.status)) {
     throw new ApiError(400, `Cannot reassign a load in ${load.status} status`);
   }
+
+  await assertDriverLoadCompatibility({
+    driverId,
+    organizationId,
+    load,
+    actor: "dispatcher",
+    overrides: { overrideAvailability, overrideCapacity },
+  });
 
   const previousDriverId = load.assignedDriverId
     ? load.assignedDriverId.toString()
@@ -940,6 +997,188 @@ const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, data, "My loads fetched"));
 });
 
+// POST /api/driver-tracking/compatibility-preview
+// Staff-only compatibility preview used by Create Load and Driver Tracker.
+// It supports one load or a small load matrix and never mutates assignments,
+// profiles, Dispatch Status, or GPS state.
+const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = req.orgId as string;
+  const body = (req.body ?? {}) as {
+    driverIds?: string[];
+    loadId?: string;
+    load?: Record<string, any>;
+    loads?: Array<{ key?: string; loadId?: string; load?: Record<string, any> }>;
+  };
+
+  const requestedDriverIds = Array.isArray(body.driverIds)
+    ? [...new Set(body.driverIds.map((id) => String(id)).filter(Boolean))].slice(0, 100)
+    : [];
+
+  if (requestedDriverIds.length === 0) {
+    throw new ApiError(400, "At least one driver is required for compatibility preview");
+  }
+
+  const normalizePreviewLoad = async (previewLoad: any) => {
+    const pickupZip = String(
+      previewLoad?.pickupLocation?.zip ?? previewLoad?.pickupZip ?? "",
+    ).trim();
+    let pickupCoordinates = previewLoad?.pickupLocation?.coordinates;
+
+    // Resolve the pickup once per previewed load instead of once per driver.
+    // This avoids a burst of identical ZIP geocoding calls when Dispatch is
+    // comparing many drivers against the same load. Failure is non-blocking.
+    if (!pickupCoordinates && /^\d{5}(?:-\d{4})?$/.test(pickupZip)) {
+      try {
+        const coords = await getCoordinatesFromZip(pickupZip.slice(0, 5));
+        if (coords) {
+          pickupCoordinates = { lat: coords.lat, lng: coords.lon };
+        }
+      } catch {
+        // Recommendation preview degrades to unknown proximity/service area.
+      }
+    }
+
+    return {
+      pickupLocation: {
+        city: previewLoad?.pickupLocation?.city ?? "",
+        state: previewLoad?.pickupLocation?.state ?? previewLoad?.originState ?? "",
+        zip: pickupZip,
+        coordinates: pickupCoordinates,
+      },
+      deliveryLocation: {
+        city: previewLoad?.deliveryLocation?.city ?? "",
+        state:
+          previewLoad?.deliveryLocation?.state ?? previewLoad?.destinationState ?? "",
+        zip: previewLoad?.deliveryLocation?.zip ?? previewLoad?.deliveryZip ?? "",
+        coordinates: previewLoad?.deliveryLocation?.coordinates,
+      },
+      dates: previewLoad?.dates ?? null,
+      requestedPickupDate: previewLoad?.requestedPickupDate ?? null,
+      trailerType:
+        previewLoad?.trailerType ?? previewLoad?.trailerTypeRequired ?? null,
+      vehicleCount: Array.isArray(previewLoad?.vehicles)
+        ? previewLoad.vehicles.length
+        : Number(previewLoad?.vehicleCount ?? 0),
+    };
+  };
+
+  const previewEntries: Array<{ key: string; load: any }> = [];
+
+  if (Array.isArray(body.loads) && body.loads.length > 0) {
+    for (const entry of body.loads.slice(0, 50)) {
+      const key = String(entry?.key ?? "").trim();
+      if (!key) continue;
+
+      let previewLoad: any = entry?.load ?? null;
+      if (entry?.loadId) {
+        previewLoad = await Load.findOne({
+          _id: entry.loadId,
+          organizationId,
+        }).lean();
+      }
+      if (!previewLoad) continue;
+      previewEntries.push({ key, load: await normalizePreviewLoad(previewLoad) });
+    }
+  } else {
+    let previewLoad: any = body.load ?? null;
+    if (body.loadId) {
+      previewLoad = await Load.findOne({
+        _id: body.loadId,
+        organizationId,
+      }).lean();
+      if (!previewLoad) throw new ApiError(404, "Load not found");
+    }
+
+    if (!previewLoad || typeof previewLoad !== "object") {
+      throw new ApiError(400, "Load details are required for compatibility preview");
+    }
+
+    previewEntries.push({ key: "single", load: await normalizePreviewLoad(previewLoad) });
+  }
+
+  if (previewEntries.length === 0) {
+    throw new ApiError(400, "No valid loads were supplied for compatibility preview");
+  }
+
+  const [drivers, profiles, locations] = await Promise.all([
+    User.find({
+      _id: { $in: requestedDriverIds },
+      organizationId,
+      role: "driver",
+      isActive: true,
+    })
+      .select("_id")
+      .lean(),
+    DriverProfile.find({
+      userId: { $in: requestedDriverIds },
+      organizationId,
+    }).lean(),
+    DriverLocation.find({
+      userId: { $in: requestedDriverIds },
+      organizationId,
+    })
+      .select("userId coords isSharing lastSeenAt")
+      .lean(),
+  ]);
+
+  const allowedDriverIds = new Set(
+    drivers.map((driver: any) => String(driver._id)),
+  );
+  const profileById = new Map(
+    profiles.map((profile: any) => [String(profile.userId), profile]),
+  );
+  const locationById = new Map(
+    locations.map((location: any) => [String(location.userId), location]),
+  );
+
+  const compatibilityByLoadKey: Record<string, Record<string, any>> = {};
+
+  const PREVIEW_CONCURRENCY = 8;
+  for (const entry of previewEntries) {
+    const compatibilityByDriverId: Record<string, any> = {};
+    const validDriverIds = requestedDriverIds.filter((driverId) =>
+      allowedDriverIds.has(driverId),
+    );
+
+    // Home-base city/state geocoding is cached, but the first lookup for many
+    // drivers can still touch an external geocoder. Keep that work bounded so
+    // the read-only recommendation endpoint cannot create a request burst.
+    for (let index = 0; index < validDriverIds.length; index += PREVIEW_CONCURRENCY) {
+      const batch = validDriverIds.slice(index, index + PREVIEW_CONCURRENCY);
+      await Promise.all(
+        batch.map(async (driverId) => {
+          compatibilityByDriverId[driverId] =
+            await evaluateDriverLoadCompatibilityWithRecommendations(
+              profileById.get(driverId) ?? null,
+              entry.load,
+              locationById.get(driverId) ?? null,
+            );
+        }),
+      );
+    }
+
+    compatibilityByLoadKey[entry.key] = compatibilityByDriverId;
+  }
+
+  const singleCompatibility =
+    previewEntries.length === 1 && previewEntries[0].key === "single"
+      ? compatibilityByLoadKey.single
+      : undefined;
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        compatibilityByLoadKey,
+        ...(singleCompatibility
+          ? { compatibilityByDriverId: singleCompatibility }
+          : {}),
+      },
+      "Driver compatibility preview generated",
+    ),
+  );
+});
+
 // GET /api/driver-tracking/available-loads
 // BUSINESS RULE CHANGE: drivers see the COMPLETE load record for available
 // loads — pickup/delivery contacts, dates, notes, pricing, trailer type and
@@ -959,18 +1198,29 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
     $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
   };
 
-  const [loads, total] = await Promise.all([
+  const [loads, total, profile, location] = await Promise.all([
     Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     Load.countDocuments(filter),
+    DriverProfile.findOne({ userId: user._id, organizationId }).lean(),
+    DriverLocation.findOne({ userId: user._id, organizationId })
+      .select("coords isSharing lastSeenAt")
+      .lean(),
   ]);
 
   const myId = user._id.toString();
-  const data = (loads as any[]).map((l) => ({
-    ...l,
-    hasRequested: Array.isArray(l.driverRequests)
-      ? l.driverRequests.some((r: any) => String(r.driverId) === myId)
-      : false,
-  }));
+  const data = await Promise.all(
+    (loads as any[]).map(async (l) => ({
+      ...l,
+      hasRequested: Array.isArray(l.driverRequests)
+        ? l.driverRequests.some((r: any) => String(r.driverId) === myId)
+        : false,
+      compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
+        profile,
+        l,
+        location,
+      ),
+    })),
+  );
 
   return res.status(200).json(
     new ApiResponse(
@@ -1020,6 +1270,7 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
 // BUSINESS RULE CHANGE: no driver masking — the full load record is
 // returned. maskLoadForDriver is no longer used anywhere.
 const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
   const organizationId = req.orgId as string;
 
   const load = await Load.findOne({ _id: req.params.id, organizationId })
@@ -1027,7 +1278,37 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
     .lean();
   if (!load) throw new ApiError(404, "Load not found");
 
-  return res.status(200).json(new ApiResponse(200, load, "Load fetched"));
+  if (user.role !== "driver") {
+    return res.status(200).json(new ApiResponse(200, load, "Load fetched"));
+  }
+
+  const [profile, location] = await Promise.all([
+    DriverProfile.findOne({
+      userId: user._id,
+      organizationId,
+    }).lean(),
+    DriverLocation.findOne({ userId: user._id, organizationId })
+      .select("coords isSharing lastSeenAt")
+      .lean(),
+  ]);
+
+  const compatibility =
+    await evaluateDriverLoadCompatibilityWithRecommendations(
+      profile,
+      load,
+      location,
+    );
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        ...load,
+        compatibility,
+      },
+      "Load fetched",
+    ),
+  );
 });
 
 // ─── Available-load request / approval flow ──────────────────────────────────
@@ -1036,7 +1317,13 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
 const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
-  const { note } = req.body as { note?: string };
+  const {
+    note,
+    overrideAvailability = false,
+  } = req.body as {
+    note?: string;
+    overrideAvailability?: boolean;
+  };
   const signature = parseDriverSignature(req.body);
 
   await assertDriverCanTakeNewWork(
@@ -1051,16 +1338,16 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "This load is no longer available");
   }
 
-  const profile = await DriverProfile.findOne({ userId: user._id }).lean();
-  const maxCapacity = (profile as any)?.maxVehicleCapacity ?? DEFAULT_MAX_CAPACITY;
-  const activeCount = await Load.countDocuments({
+  // Vehicle capacity is a per-load equipment constraint. It must never be
+  // compared with the number of active load records. Existing active loads are
+  // left untouched; this check evaluates only whether this specific load fits.
+  await assertDriverLoadCompatibility({
+    driverId: user._id.toString(),
     organizationId,
-    assignedDriverId: user._id,
-    status: { $in: ACTIVE_LOAD_STATUSES },
+    load,
+    actor: "driver",
+    overrides: { overrideAvailability },
   });
-  if (activeCount >= maxCapacity) {
-    throw new ApiError(400, "You are at your active load capacity");
-  }
 
   const requests: any[] = (load as any).driverRequests ?? [];
   if (requests.some((r) => String(r.driverId) === user._id.toString())) {
@@ -1109,7 +1396,15 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
 const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
-  const { driverId } = req.body as { driverId?: string };
+  const {
+    driverId,
+    overrideAvailability = false,
+    overrideCapacity = false,
+  } = req.body as {
+    driverId?: string;
+    overrideAvailability?: boolean;
+    overrideCapacity?: boolean;
+  };
 
   if (!driverId) throw new ApiError(400, "driverId is required");
 
@@ -1125,6 +1420,13 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await assertDriverCanTakeNewWork(driverId, organizationId, "approve");
+  await assertDriverLoadCompatibility({
+    driverId,
+    organizationId,
+    load,
+    actor: "dispatcher",
+    overrides: { overrideAvailability, overrideCapacity },
+  });
 
   load.assignedDriverId = driverId as any;
   (load as any).dispatchOwnerId = user._id;
@@ -1246,7 +1548,7 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
     status: "Posted",
     "driverRequests.0": { $exists: true },
   })
-    .select("loadNumber pickupLocation deliveryLocation vehicles trailerType driverRequests")
+    .select("loadNumber pickupLocation deliveryLocation vehicles trailerType dates pricing driverRequests")
     .lean();
 
   const driverIds: string[] = [
@@ -1257,7 +1559,7 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
     ),
   ];
 
-  const [drivers, profiles, eligibilityPairs] = await Promise.all([
+  const [drivers, profiles, locations, eligibilityPairs] = await Promise.all([
     User.find({
       _id: { $in: driverIds },
       organizationId,
@@ -1266,6 +1568,9 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
       .select("name email avatar")
       .lean(),
     DriverProfile.find({ userId: { $in: driverIds }, organizationId }).lean(),
+    DriverLocation.find({ userId: { $in: driverIds }, organizationId })
+      .select("userId coords isSharing lastSeenAt")
+      .lean(),
     Promise.all(
       driverIds.map(async (driverId) => [
         driverId,
@@ -1276,13 +1581,19 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
 
   const driverById = new Map(drivers.map((driver: any) => [String(driver._id), driver]));
   const profileById = new Map(profiles.map((profile: any) => [String(profile.userId), profile]));
+  const locationById = new Map(locations.map((location: any) => [String(location.userId), location]));
   const eligibilityById = new Map<string, any>(eligibilityPairs as any);
 
-  const requests = loads.flatMap((load: any) =>
-    (load.driverRequests ?? []).map((request: any) => {
+  const requestRows = loads.flatMap((load: any) =>
+    (load.driverRequests ?? []).map((request: any) => ({ load, request })),
+  );
+
+  const requests = await Promise.all(
+    requestRows.map(async ({ load, request }: any) => {
       const driverId = String(request.driverId);
       const driver: any = driverById.get(driverId);
       const profile: any = profileById.get(driverId) ?? null;
+      const location: any = locationById.get(driverId) ?? null;
       const eligibility = eligibilityById.get(driverId);
       return {
         id: `${load._id}:${request.driverId}`,
@@ -1299,6 +1610,15 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
         destination: [load.deliveryLocation?.city, load.deliveryLocation?.state].filter(Boolean).join(", "),
         vehicleCount: Array.isArray(load.vehicles) ? load.vehicles.length : 0,
         trailerType: load.trailerType ?? null,
+        trailerTypeRequired: load.trailerType ?? null,
+        requestedPickupDate:
+          load.dates?.firstAvailable ?? load.dates?.pickupDeadline ?? null,
+        carrierPayAmount: load.pricing?.carrierPayAmount ?? null,
+        compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
+          profile,
+          load,
+          location,
+        ),
         equipment: profile
           ? {
               trailerType: profile.trailerType ?? undefined,
@@ -1881,6 +2201,7 @@ export default {
   getActiveDrivers,
   getDashboardStats,
   getPendingLoadRequests,
+  previewDriverLoadCompatibility,
   sendDriverAlert,
   respondToDriverAlert,
   assignLoad,

@@ -33,6 +33,19 @@ interface OrgDriver {
     isComplianceExpired: boolean;
     profileCompletionScore: number;
   } | null;
+  availability: {
+    availableDays: string[];
+  };
+  logistics: {
+    serviceRadiusMiles: number | null;
+    preferredRoutes: string[];
+    homeBase: {
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+      coordinates: { lat: number; lng: number } | null;
+    };
+  };
   presence: {
     status: string;
     lastSeenAt: Date | null;
@@ -47,8 +60,20 @@ interface OrgDriver {
     destination: string;
     vehicleCount: number;
     trailerType: string | null;
+    pickupDate: Date | null;
+    pickupLocation: {
+      state: string | null;
+      zip: string | null;
+      coordinates: { lat: number; lng: number } | null;
+    };
+    deliveryLocation: {
+      state: string | null;
+      zip: string | null;
+    };
   }>;
   activeLoadCount: number;
+  // Deprecated compatibility field. Vehicle capacity is per load, so there is
+  // no meaningful "remaining" value obtained by subtracting active load count.
   remainingCapacity: number | null;
   assignable: boolean;
   messagingAvailable: boolean;
@@ -105,7 +130,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       status: { $in: ACTIVE_LOAD_STATUSES },
     })
       .select(
-        "assignedDriverId loadNumber status pickupLocation deliveryLocation vehicles trailerType",
+        "assignedDriverId loadNumber status pickupLocation deliveryLocation vehicles trailerType dates",
       )
       .sort({ createdAt: -1 })
       .lean(),
@@ -236,9 +261,6 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     if (!u.isActive) warnings.push("inactive_account");
     if (!profile) warnings.push("no_driver_profile");
     if (profile?.isComplianceExpired) warnings.push("compliance_expired");
-    if (maxCapacity != null && activeLoadCount >= maxCapacity) {
-      warnings.push("at_capacity");
-    }
     if (operationalStatus === "active" && !isSharing) warnings.push("offline_or_stale_location");
     if (operationalStatus === "on_leave") warnings.push("on_leave");
     if (operationalStatus === "maintenance") warnings.push("in_shop");
@@ -275,6 +297,33 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
             profileCompletionScore: Number(profile.profileCompletionScore ?? 0),
           }
         : null,
+      availability: {
+        availableDays: Array.isArray(profile?.availableDays)
+          ? profile.availableDays
+          : [],
+      },
+      logistics: {
+        serviceRadiusMiles:
+          typeof profile?.serviceRadius === "number" && profile.serviceRadius > 0
+            ? profile.serviceRadius
+            : null,
+        preferredRoutes: Array.isArray(profile?.preferredRoutes)
+          ? profile.preferredRoutes
+          : [],
+        homeBase: {
+          city: profile?.homeBase?.city ?? null,
+          state: profile?.homeBase?.state ?? null,
+          zip: profile?.homeBase?.zip ?? null,
+          coordinates:
+            Array.isArray(profile?.homeBase?.coordinates) &&
+            profile.homeBase.coordinates.length >= 2
+              ? {
+                  lat: Number(profile.homeBase.coordinates[1]),
+                  lng: Number(profile.homeBase.coordinates[0]),
+                }
+              : null,
+        },
+      },
       presence: {
         status: liveStatus,
         lastSeenAt,
@@ -293,10 +342,31 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
           .join(", "),
         vehicleCount: Array.isArray(load.vehicles) ? load.vehicles.length : 0,
         trailerType: load.trailerType ?? null,
+        pickupDate:
+          load.dates?.firstAvailable ?? load.dates?.pickupDeadline ?? null,
+        pickupLocation: {
+          state: load.pickupLocation?.state ?? null,
+          zip: load.pickupLocation?.zip ?? null,
+          coordinates:
+            load.pickupLocation?.coordinates &&
+            typeof load.pickupLocation.coordinates === "object" &&
+            !Array.isArray(load.pickupLocation.coordinates)
+              ? {
+                  lat: Number(load.pickupLocation.coordinates.lat),
+                  lng: Number(
+                    load.pickupLocation.coordinates.lng ??
+                      load.pickupLocation.coordinates.lon,
+                  ),
+                }
+              : null,
+        },
+        deliveryLocation: {
+          state: load.deliveryLocation?.state ?? null,
+          zip: load.deliveryLocation?.zip ?? null,
+        },
       })),
       activeLoadCount,
-      remainingCapacity:
-        maxCapacity != null ? Math.max(0, maxCapacity - activeLoadCount) : null,
+      remainingCapacity: null,
       assignable:
         Boolean(u.isActive) &&
         operationalStatus === "active" &&

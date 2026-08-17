@@ -100,6 +100,11 @@ router.post(
 
 // Dispatcher load actions
 router.post("/assign-load", staffOnly, driverTrackingController.assignLoad);
+router.post(
+  "/compatibility-preview",
+  staffOnly,
+  driverTrackingController.previewDriverLoadCompatibility,
+);
 router.post("/reassign-load", staffOnly, driverTrackingController.reassignLoad);
 router.post("/remove-load", staffOnly, driverTrackingController.removeLoad);
 router.get("/load-requests", staffOnly, driverTrackingController.getPendingLoadRequests);
