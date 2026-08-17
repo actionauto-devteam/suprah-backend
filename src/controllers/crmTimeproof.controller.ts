@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import crypto from 'crypto';
 // v1.4.0
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -2299,6 +2300,27 @@ export const unsubscribeCrmPush = asyncHandler(async (req: Request, res: Respons
 });
 
 /**
+ * GET /api/crm/timeproof/push/status
+ * Self-scoped check so a user (or RJ, over a screenshare) can confirm whether
+ * push is actually wired up on the current account without a device debugger.
+ * Never returns raw endpoints/keys — only a short fingerprint per device.
+ */
+export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const fresh = await CrmUser.findById(user._id).select('pushSubscriptions').lean();
+  const subscriptions = fresh?.pushSubscriptions || [];
+
+  res.json(new ApiResponse(200, {
+    subscribed: subscriptions.length > 0,
+    devices: subscriptions.map((s: any) => ({
+      deviceHint: s.deviceHint || 'unknown',
+      createdAt: s.createdAt,
+      endpointFingerprint: crypto.createHash('sha256').update(s.endpoint).digest('hex').slice(0, 12),
+    })),
+  }, 'Push subscription status'));
+});
+
+/**
  * POST /api/crm/timeproof/activity-interval
  * Tray app posts a completed active period when the user goes idle.
  */
@@ -2578,4 +2600,5 @@ export default {
   wipeAllScreenshotsHandler,
   subscribeCrmPush,
   unsubscribeCrmPush,
+  getCrmPushStatus,
 };
