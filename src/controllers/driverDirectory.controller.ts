@@ -62,11 +62,13 @@ interface OrgDriver {
     trailerType: string | null;
     pickupDate: Date | null;
     pickupLocation: {
+      city: string | null;
       state: string | null;
       zip: string | null;
       coordinates: { lat: number; lng: number } | null;
     };
     deliveryLocation: {
+      city: string | null;
       state: string | null;
       zip: string | null;
     };
@@ -345,6 +347,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
         pickupDate:
           load.dates?.firstAvailable ?? load.dates?.pickupDeadline ?? null,
         pickupLocation: {
+          city: load.pickupLocation?.city ?? null,
           state: load.pickupLocation?.state ?? null,
           zip: load.pickupLocation?.zip ?? null,
           coordinates:
@@ -361,6 +364,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
               : null,
         },
         deliveryLocation: {
+          city: load.deliveryLocation?.city ?? null,
           state: load.deliveryLocation?.state ?? null,
           zip: load.deliveryLocation?.zip ?? null,
         },

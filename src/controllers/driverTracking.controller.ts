@@ -2131,6 +2131,96 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, load, "Route started"));
 });
 
+// POST /api/driver-tracking/loads/:id/deliver
+// Driver completes an in-transit load only after the existing proof-of-delivery
+// upload flow has successfully stored a proof image. Proof verification remains
+// available to Dispatch through the existing confirm-delivery workflow.
+const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+
+  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+  requireAssignedDriver(load, user._id.toString());
+
+  // Make delivery completion safe to retry if the browser lost the first
+  // successful response after the server had already persisted Delivered.
+  if (load.status === "Delivered") {
+    return res
+      .status(200)
+      .json(new ApiResponse(200, load, "Load already delivered"));
+  }
+
+  if (load.status !== "In-Transit") {
+    throw new ApiError(
+      400,
+      `Cannot complete delivery from ${load.status} status`,
+    );
+  }
+
+  if (!(load as any).proofOfDelivery?.imageUrl) {
+    throw new ApiError(
+      400,
+      "A proof-of-delivery photo is required before completing this load",
+    );
+  }
+
+  load.status = "Delivered";
+  (load as any).deliveredAt = new Date();
+  await load.save();
+
+  emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
+
+  // Keep the driver's delivery completion separate from Dispatch proof
+  // confirmation. We intentionally do not set proofOfDelivery.confirmedAt or
+  // confirmedBy here; the existing staff confirmation workflow still owns
+  // those fields.
+  try {
+    await notifyOrgAdminsLoose(
+      organizationId,
+      "load_delivered",
+      "Load Delivered",
+      `${user.name} completed load ${load.loadNumber} and submitted proof of delivery`,
+      {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        proofSubmitted: true,
+      },
+      user._id.toString(),
+    );
+  } catch (err) {
+    logger.error({ err }, "Non-fatal: delivery notification failed");
+  }
+
+  try {
+    await logLoadActivityLoose(
+      user._id.toString(),
+      organizationId,
+      "load_delivered",
+      load._id.toString(),
+      `Driver completed load ${load.loadNumber} with proof of delivery`,
+    );
+  } catch (err) {
+    logger.error({ err }, "Non-fatal: delivery activity logging failed");
+  }
+
+  try {
+    await finalizeDriverStatusChangeIfClear(
+      user._id.toString(),
+      organizationId,
+    );
+  } catch (err) {
+    logger.error(
+      { err, driverId: user._id },
+      "Non-fatal: failed to finalize driver status transition after delivery",
+    );
+  }
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, load, "Delivery completed"));
+});
+
 // POST /api/driver-tracking/loads/:id/drop
 // Driver releases an assigned load → returns the same Transportation load to the available pool
 const dropLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -2217,5 +2307,6 @@ export default {
   acceptLoad,
   markPickedUp,
   startRoute,
+  completeDelivery,
   dropLoad,
 };

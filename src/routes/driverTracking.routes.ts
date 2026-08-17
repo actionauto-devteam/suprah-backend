@@ -123,6 +123,10 @@ router.post(
 // Suprah Dispatch Chat — isolated from Suprah Space and private per exact
 // dispatcher↔driver pair. The controller enforces the participant boundary on
 // every history, unread, send, attachment, and read operation.
+router.post(
+  "/dispatch-chat/load/:loadId/open",
+  dispatchChatController.openLoadCreatorThread,
+);
 router.get(
   "/dispatch-chat/threads",
   dispatchChatController.getThreads,
@@ -177,6 +181,7 @@ router.post(
 router.post("/loads/:id/accept", driverTrackingController.acceptLoad);
 router.post("/loads/:id/pickup", driverTrackingController.markPickedUp);
 router.post("/loads/:id/start-route", driverTrackingController.startRoute);
+router.post("/loads/:id/deliver", driverTrackingController.completeDelivery);
 router.post("/loads/:id/drop", driverTrackingController.dropLoad);
 
 // Start the organization-wide location-silence monitor once when Driver

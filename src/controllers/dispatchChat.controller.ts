@@ -495,6 +495,132 @@ async function backfillSafeDriverThreads(
   }
 }
 
+// POST /api/driver-tracking/dispatch-chat/load/:loadId/open
+// Driver-only entry point for the Load Board. The server derives the exact
+// dispatcher from Load.createdBy instead of trusting a client-supplied staff id,
+// so a driver cannot use this route to open arbitrary staff conversations.
+// ensureDispatchChatThread reuses the same exact dispatcher↔driver thread when
+// one already exists, preserving the previous Suprah Dispatch Chat history.
+const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) => {
+  const actor = getUser(req);
+  const organizationId = req.orgId as string;
+  const loadId = String(req.params.loadId ?? '').trim();
+
+  if (!organizationId) {
+    throw new ApiError(403, 'Organization access is required');
+  }
+  if (actor.role !== 'driver') {
+    throw new ApiError(403, 'Only drivers can open a load creator conversation');
+  }
+  if (!mongoose.Types.ObjectId.isValid(loadId)) {
+    throw new ApiError(400, 'A valid loadId is required');
+  }
+
+  // This action is intentionally limited to loads that are still on the
+  // driver's Available Loads board. If assignment state changes between the
+  // card render and the click, do not open a stale load-board conversation.
+  const load: any = await Load.findOne({
+    _id: loadId,
+    organizationId,
+    status: 'Posted',
+    $or: [
+      { assignedDriverId: null },
+      { assignedDriverId: { $exists: false } },
+    ],
+  })
+    .select('_id loadNumber createdBy')
+    .lean();
+
+  if (!load) {
+    throw new ApiError(409, 'This load is no longer available on the Load Board');
+  }
+
+  const creatorId = String(load.createdBy ?? '').trim();
+  if (!creatorId || !mongoose.Types.ObjectId.isValid(creatorId)) {
+    throw new ApiError(
+      409,
+      'The creator of this load is unavailable for Suprah Dispatch Chat',
+    );
+  }
+
+  const [dispatcher, driver] = await Promise.all([
+    User.findOne({
+      _id: creatorId,
+      organizationId,
+      role: { $in: STAFF_ROLES },
+      isActive: true,
+    })
+      .select('_id name email avatar isActive role')
+      .lean(),
+    User.findOne({
+      _id: actor._id,
+      organizationId,
+      role: 'driver',
+      isActive: true,
+    })
+      .select('_id name email avatar isActive role')
+      .lean(),
+  ]);
+
+  if (!dispatcher) {
+    throw new ApiError(
+      409,
+      'The creator of this load is no longer available for Suprah Dispatch Chat',
+    );
+  }
+  if (!driver) {
+    throw new ApiError(403, 'Driver account is unavailable for Suprah Dispatch Chat');
+  }
+
+  const ensuredThread = await ensureDispatchChatThread({
+    organizationId,
+    dispatcherId: dispatcher._id,
+    driverId: driver._id,
+  });
+  const thread: any = await seedThreadActivityFromSafeLegacy(ensuredThread);
+
+  const unreadCount = await DispatchChatMessage.countDocuments({
+    organizationId,
+    threadId: thread._id,
+    senderId: { $ne: actor._id },
+    readBy: { $ne: actor._id },
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        load: {
+          id: String(load._id),
+          loadNumber: load.loadNumber || String(load._id),
+        },
+        thread: {
+          id: String(thread._id),
+          dispatcher: {
+            id: String(dispatcher._id),
+            name: dispatcher.name || 'Dispatcher',
+            email: dispatcher.email || '',
+            avatar: await resolveParticipantAvatar(dispatcher.avatar),
+            isActive: dispatcher.isActive !== false,
+          },
+          driver: {
+            id: String(driver._id),
+            name: driver.name || 'Driver',
+            email: driver.email || '',
+            avatar: await resolveParticipantAvatar(driver.avatar),
+            isActive: driver.isActive !== false,
+          },
+          unreadCount,
+          lastMessageAt: thread.lastMessageAt ?? null,
+          lastMessagePreview: thread.lastMessagePreview || '',
+          lastMessageType: thread.lastMessageType ?? null,
+        },
+      },
+      'Load creator Dispatch Chat ready',
+    ),
+  );
+});
+
 // GET /api/driver-tracking/dispatch-chat/threads
 const getThreads = asyncHandler(async (req: Request, res: Response) => {
   const actor = getUser(req);
@@ -1014,6 +1140,7 @@ const markRead = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export default {
+  openLoadCreatorThread,
   getThreads,
   getUnreadTotal,
   getMessages,

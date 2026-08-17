@@ -21,8 +21,11 @@ export interface DriverRouteCompatibilitySignals {
   preferredRoute: {
     status: PreferredRouteCompatibilityStatus;
     originState: string | null;
+    originCity?: string | null;
     destinationState: string | null;
+    destinationCity?: string | null;
     matchedRoute: string | null;
+    matchLevel?: "city" | "mixed" | "state" | null;
     preferredRoutes: string[];
   };
   proximity: {
@@ -95,6 +98,9 @@ const STATE_NAME_TO_CODE: Record<string, string> = {
 };
 
 const VALID_STATE_CODES = new Set(Object.values(STATE_NAME_TO_CODE));
+const STATE_NAMES_LONGEST_FIRST = Object.keys(STATE_NAME_TO_CODE).sort(
+  (a, b) => b.length - a.length,
+);
 
 function finiteNumber(value: unknown): number | null {
   const number = Number(value);
@@ -128,6 +134,27 @@ function normalizeState(value: unknown): string | null {
   return STATE_NAME_TO_CODE[raw.toLowerCase()] ?? null;
 }
 
+function normalizeCity(value: unknown): string | null {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/^,+|,+$/g, "")
+    .trim();
+  return normalized || null;
+}
+
+function cityKey(value: unknown): string | null {
+  const city = normalizeCity(value);
+  if (!city) return null;
+  return city
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[.'’]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizePreferredRoutes(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -136,9 +163,64 @@ function normalizePreferredRoutes(value: unknown): string[] {
     .slice(0, 20);
 }
 
+interface ParsedRouteEndpoint {
+  city: string | null;
+  state: string | null;
+}
+
+function parseRouteEndpoint(rawEndpoint: string): ParsedRouteEndpoint {
+  const endpoint = rawEndpoint.trim();
+  if (!endpoint) return { city: null, state: null };
+
+  const commaParts = endpoint
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (commaParts.length >= 2) {
+    const state = normalizeState(commaParts[commaParts.length - 1]);
+    if (state) {
+      return {
+        city: normalizeCity(commaParts.slice(0, -1).join(", ")),
+        state,
+      };
+    }
+  }
+
+  const directState = normalizeState(endpoint);
+  if (directState) return { city: null, state: directState };
+
+  const abbreviationMatch = endpoint.match(/^(.*?)[\s,]+([A-Za-z]{2})$/);
+  if (abbreviationMatch) {
+    const state = normalizeState(abbreviationMatch[2]);
+    if (state) {
+      return {
+        city: normalizeCity(abbreviationMatch[1]),
+        state,
+      };
+    }
+  }
+
+  const lower = endpoint.toLowerCase();
+  for (const stateName of STATE_NAMES_LONGEST_FIRST) {
+    if (lower === stateName) {
+      return { city: null, state: STATE_NAME_TO_CODE[stateName] };
+    }
+    if (lower.endsWith(` ${stateName}`) || lower.endsWith(`, ${stateName}`)) {
+      const cityPart = endpoint.slice(0, endpoint.length - stateName.length);
+      return {
+        city: normalizeCity(cityPart.replace(/[\s,]+$/, "")),
+        state: STATE_NAME_TO_CODE[stateName],
+      };
+    }
+  }
+
+  return { city: null, state: null };
+}
+
 function parsePreferredRoute(route: string): {
-  origin: string | null;
-  destination: string | null;
+  origin: ParsedRouteEndpoint;
+  destination: ParsedRouteEndpoint;
   bidirectional: boolean;
 } {
   const bidirectional = /↔|<->|⇄/.test(route);
@@ -149,18 +231,31 @@ function parsePreferredRoute(route: string): {
 
   if (parts.length >= 2) {
     return {
-      origin: normalizeState(parts[0]),
-      destination: normalizeState(parts[1]),
+      origin: parseRouteEndpoint(parts[0]),
+      destination: parseRouteEndpoint(parts[1]),
       bidirectional,
     };
   }
 
   const stateTokens = route.toUpperCase().match(/\b[A-Z]{2}\b/g) ?? [];
   return {
-    origin: normalizeState(stateTokens[0]),
-    destination: normalizeState(stateTokens[1]),
+    origin: { city: null, state: normalizeState(stateTokens[0]) },
+    destination: { city: null, state: normalizeState(stateTokens[1]) },
     bidirectional,
   };
+}
+
+function routeEndpointMatches(
+  endpoint: ParsedRouteEndpoint,
+  loadState: string | null,
+  loadCity: string | null,
+) {
+  if (!endpoint.state || endpoint.state !== loadState) return false;
+  if (!endpoint.city) return true;
+
+  const expectedCity = cityKey(endpoint.city);
+  const actualCity = cityKey(loadCity);
+  return Boolean(expectedCity && actualCity && expectedCity === actualCity);
 }
 
 function homeBaseLabel(profile: any): string | null {
@@ -282,24 +377,38 @@ export async function evaluateDriverRouteCompatibility(
   const destinationState = normalizeState(
     load?.deliveryLocation?.state ?? load?.destinationState,
   );
+  const originCity = normalizeCity(load?.pickupLocation?.city);
+  const destinationCity = normalizeCity(load?.deliveryLocation?.city);
   const preferredRoutes = normalizePreferredRoutes(profile?.preferredRoutes);
 
   let preferredRouteStatus: PreferredRouteCompatibilityStatus = "unknown";
   let matchedRoute: string | null = null;
+  let preferredRouteMatchLevel: "city" | "mixed" | "state" | null = null;
 
   if (originState && destinationState && preferredRoutes.length > 0) {
     preferredRouteStatus = "not_preferred";
     for (const route of preferredRoutes) {
       const parsed = parsePreferredRoute(route);
       const forward =
-        parsed.origin === originState && parsed.destination === destinationState;
+        routeEndpointMatches(parsed.origin, originState, originCity) &&
+        routeEndpointMatches(
+          parsed.destination,
+          destinationState,
+          destinationCity,
+        );
       const reverse =
         parsed.bidirectional &&
-        parsed.origin === destinationState &&
-        parsed.destination === originState;
+        routeEndpointMatches(parsed.origin, destinationState, destinationCity) &&
+        routeEndpointMatches(parsed.destination, originState, originCity);
+
       if (forward || reverse) {
         preferredRouteStatus = "preferred";
         matchedRoute = route;
+        const cityCount =
+          Number(Boolean(parsed.origin.city)) +
+          Number(Boolean(parsed.destination.city));
+        preferredRouteMatchLevel =
+          cityCount === 2 ? "city" : cityCount === 1 ? "mixed" : "state";
         break;
       }
     }
@@ -332,8 +441,11 @@ export async function evaluateDriverRouteCompatibility(
     preferredRoute: {
       status: preferredRouteStatus,
       originState,
+      originCity,
       destinationState,
+      destinationCity,
       matchedRoute,
+      matchLevel: preferredRouteMatchLevel,
       preferredRoutes,
     },
     proximity: {
