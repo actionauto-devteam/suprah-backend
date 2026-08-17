@@ -17,7 +17,7 @@ export async function runLotTechLocationEscalation(): Promise<{ warned: number; 
   const now = new Date();
   const nowMs = now.getTime();
 
-  // Deliberately does NOT filter out sharingState: 'off_duty' — a mandatory-location employee
+  // Deliberately does NOT filter out sharingState: 'off_duty'. — a mandatory-location employee
   // who's clocked in but never granted consent this session (e.g. was already on shift when
   // "Require Location" got turned on for their department) would otherwise sit in off_duty
   // forever, invisible to every candidate check below, with no warning and no auto-clockout
