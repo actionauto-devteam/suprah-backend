@@ -69,6 +69,43 @@ function dedupeUsersByEmail<T extends { email?: string; lastActive?: Date; updat
   return [...byEmail.values(), ...noEmail];
 }
 
+// Shared by getAdminDayLogs/adminTimeOverride/correctTimeLog — mirrors getUserTimeproof's
+// CrmUser-then-User fallback (see its comment) so these admin tools don't 404 for a Lot Tech
+// (or any other User-model, general-timeclock) employee. organizationId is unreliable on User
+// docs, so the User-side lookup isn't gated on it — _id alone is enough since it's only
+// reachable via an already org-scoped admin page.
+type ResolvedTargetUser = {
+  _id: any;
+  fullName: string;
+  department?: string;
+  organizationId?: any;
+  userModel: 'CrmUser' | 'User';
+};
+
+async function resolveTargetUserAnyModel(userId: string, requestorOrgId: string | undefined): Promise<ResolvedTargetUser | null> {
+  const crmTargetUser = await CrmUser.findOne({ _id: userId, organizationId: requestorOrgId }).select('department fullName organizationId').lean();
+  if (crmTargetUser) {
+    return {
+      _id: crmTargetUser._id,
+      fullName: crmTargetUser.fullName,
+      department: crmTargetUser.department,
+      organizationId: crmTargetUser.organizationId,
+      userModel: 'CrmUser',
+    };
+  }
+  const mainTargetUser = await User.findOne({ _id: userId }).lean();
+  if (mainTargetUser) {
+    return {
+      _id: mainTargetUser._id,
+      fullName: (mainTargetUser as any).name || (mainTargetUser as any).fullName || mainTargetUser.email || 'Employee',
+      department: (mainTargetUser.personalInfo as any)?.department,
+      organizationId: requestorOrgId,
+      userModel: 'User',
+    };
+  }
+  return null;
+}
+
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
 // How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
@@ -1568,7 +1605,7 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'userId, date, correctedTimeOut and reason are all required');
   }
 
-  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
+  const targetUser = await resolveTargetUserAnyModel(userId, requestor.organizationId?.toString());
   if (!targetUser) throw new ApiError(404, 'User not found');
   if (await isTimeEditExempt(targetUser.organizationId?.toString(), targetUser.department)) {
     throw new ApiError(403, `${targetUser.fullName}'s time logs are exempt from admin correction`);
@@ -1602,7 +1639,7 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
     logId = existingTimeOut._id.toString();
   } else {
     const created = await TimeLog.create({
-      userId, userModel: 'CrmUser', type: 'time-out',
+      userId, userModel: targetUser.userModel, type: 'time-out',
       timestamp: correctedAt, note: `Added by ${requestor.fullName} (forgotten clock-out): ${reason}`,
     });
     logId = created._id.toString();
@@ -1644,7 +1681,7 @@ export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) 
   const date = req.query.date as string;
   if (!userId || !date) throw new ApiError(400, 'userId and date are required');
 
-  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department').lean();
+  const targetUser = await resolveTargetUserAnyModel(userId, requestor.organizationId?.toString());
   if (!targetUser) throw new ApiError(404, 'User not found');
 
   const { start, end } = getCompanyDayRange(date);
@@ -1693,7 +1730,7 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
   const auditReason = reason?.trim() || '(no reason provided)';
   const noteSuffix = reason?.trim() ? `: ${reason.trim()}` : '';
 
-  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department fullName organizationId').lean();
+  const targetUser = await resolveTargetUserAnyModel(userId, requestor.organizationId?.toString());
   if (!targetUser) throw new ApiError(404, 'User not found');
 
   const { start } = getCompanyDayRange(date);
@@ -1724,7 +1761,7 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
   } else if (action === 'create') {
     if (!type || !timestamp) throw new ApiError(400, 'type and timestamp are required to create an entry');
     const created = await TimeLog.create({
-      userId, userModel: 'CrmUser', type, timestamp: new Date(timestamp),
+      userId, userModel: targetUser.userModel, type, timestamp: new Date(timestamp),
       note: `Added by ${requestor.fullName} (admin time-override)${noteSuffix}`,
     });
     after = created.timestamp;
@@ -2028,9 +2065,42 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
   const weekEndExclusive = new Date(weekStartDate.getTime() + 7 * 24 * 60 * 60 * 1000);
   const saturdayStr = toLocalDateStr(new Date(weekStartDate.getTime() + 6 * 24 * 60 * 60 * 1000), COMPANY_TZ_OFFSET_MINUTES);
 
-  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
-    .select('fullName username department payrollLocation')
+  const crmUsersRaw = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
+    .select('fullName username department payrollLocation email')
     .lean();
+
+  // Merge in User-model employees (Lot Tech, any other general-timeclock account) — same
+  // pattern as getAllUsersTimeproof (see its comment). This endpoint previously only ever
+  // queried CrmUser, so every User-model employee was silently absent from the whole report,
+  // every week, regardless of how much they actually worked. hourlyTrackingExempt is a
+  // CrmUser-only field — User-model employees have no equivalent, which is the correct
+  // default (never commission-exempt).
+  const mainOnlyUsersRaw = await User.find({
+    role: { $in: ['employee', 'admin', 'super_admin'] },
+  }).select('fullName name email personalInfo lastActive updatedAt').lean();
+  const mainOnlyUsers = dedupeUsersByEmail(mainOnlyUsersRaw);
+
+  type OvertimeReportPerson = {
+    _id: any;
+    fullName: string;
+    username?: string;
+    department?: string;
+    payrollLocation?: 'Utah' | 'Philippines';
+    email?: string;
+  };
+
+  const users: OvertimeReportPerson[] = [
+    ...crmUsersRaw.map((u): OvertimeReportPerson => ({
+      _id: u._id, fullName: u.fullName, username: u.username,
+      department: u.department, payrollLocation: u.payrollLocation, email: u.email,
+    })),
+    ...mainOnlyUsers.map((u): OvertimeReportPerson => ({
+      _id: u._id,
+      fullName: (u as any).name || (u as any).fullName || u.email || 'Employee',
+      department: (u.personalInfo as any)?.department,
+      email: u.email,
+    })),
+  ];
   const userIds = users.map((u) => u._id);
 
   const logs = await TimeLog.find({ userId: { $in: userIds }, timestamp: { $gte: weekStartDate, $lt: weekEndExclusive } })
@@ -2076,17 +2146,35 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
       username: u.username,
       department: u.department,
       payrollLocation: u.payrollLocation,
+      email: u.email,
       totalWorkedSeconds,
       overtimeSeconds,
     };
   });
 
-  employees.sort((a, b) => b.totalWorkedSeconds - a.totalWorkedSeconds);
+  // Same dedup as getAllUsersTimeproof — a CrmUser and a User document can share an email
+  // (e.g. a dormant CrmUser record alongside the User account someone actually clocks in
+  // with). Whichever shows real hours this week wins the slot, carrying payrollLocation
+  // forward from whichever side has it, so nobody appears twice or as a zero-hours ghost row.
+  const byEmail = new Map<string, (typeof employees)[number]>();
+  const noEmail: typeof employees = [];
+  for (const e of employees) {
+    if (!e.email) { noEmail.push(e); continue; }
+    const key = e.email.toLowerCase();
+    const existing = byEmail.get(key);
+    if (!existing) { byEmail.set(key, e); continue; }
+    const payrollLocation = e.payrollLocation ?? existing.payrollLocation;
+    const winner = e.totalWorkedSeconds > existing.totalWorkedSeconds ? e : existing;
+    byEmail.set(key, { ...winner, payrollLocation });
+  }
+  const dedupedEmployees = [...byEmail.values(), ...noEmail].map(({ email: _email, ...rest }) => rest);
+
+  dedupedEmployees.sort((a, b) => b.totalWorkedSeconds - a.totalWorkedSeconds);
 
   res.json(new ApiResponse(200, {
     weekStart: weekStartStr,
     weekEnd: toLocalDateStr(new Date(weekEndExclusive.getTime() - 1), COMPANY_TZ_OFFSET_MINUTES),
-    employees,
+    employees: dedupedEmployees,
   }, 'Weekly overtime report generated'));
 });
 
