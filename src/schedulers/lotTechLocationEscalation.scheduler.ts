@@ -17,9 +17,15 @@ export async function runLotTechLocationEscalation(): Promise<{ warned: number; 
   const now = new Date();
   const nowMs = now.getTime();
 
+  // Deliberately does NOT filter out sharingState: 'off_duty' — a mandatory-location employee
+  // who's clocked in but never granted consent this session (e.g. was already on shift when
+  // "Require Location" got turned on for their department) would otherwise sit in off_duty
+  // forever, invisible to every candidate check below, with no warning and no auto-clockout
+  // ever firing despite sharing nothing. The per-row isMandatoryLocationDept/isOnShift checks
+  // further down already filter this down to genuinely relevant cases.
   const candidates = await EmployeeLocation.find({
-    sharingState: { $ne: 'off_duty' },
     $or: [
+      { sharingState: 'off_duty' },
       { lastSeenAt: { $lt: new Date(nowMs - SILENCE_DETECT_MS) } },
       { locationIssueDetectedAt: { $ne: null } },
     ],
@@ -54,7 +60,9 @@ export async function runLotTechLocationEscalation(): Promise<{ warned: number; 
 
     const name = loc.userName || 'A team member';
     const userModel = loc.userModel as 'CrmUser' | 'User';
-    const isCurrentlySilent = nowMs - new Date(loc.lastSeenAt).getTime() >= SILENCE_DETECT_MS;
+    // off_duty counts as silent by definition — this is what catches "never started sharing"
+    // (see the query comment above), not just "started, then went quiet."
+    const isCurrentlySilent = loc.sharingState === 'off_duty' || nowMs - new Date(loc.lastSeenAt).getTime() >= SILENCE_DETECT_MS;
     const isDenied = loc.sharingState === 'declined_permission';
 
     if (!detectedAt) {
