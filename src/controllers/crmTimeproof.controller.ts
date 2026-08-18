@@ -2403,9 +2403,71 @@ export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response)
     devices: subscriptions.map((s: any) => ({
       deviceHint: s.deviceHint || 'unknown',
       createdAt: s.createdAt,
+      // lastSuccessAt/failureCount added alongside the 2026-08-06 push
+      // reliability fix — without these, "subscribed: true" only ever meant
+      // "the browser reported a subscription object," never "push has
+      // actually delivered recently," which is exactly the gap that let the
+      // reinstall-zombie-subscription bug hide in plain sight.
+      lastSuccessAt: s.lastSuccessAt || null,
+      failureCount: s.failureCount || 0,
       endpointFingerprint: crypto.createHash('sha256').update(s.endpoint).digest('hex').slice(0, 12),
     })),
   }, 'Push subscription status'));
+});
+
+/**
+ * GET /api/crm/timeproof/push/org-health
+ * Admin/manager-only. Diagnostic view across every active org user's push
+ * subscriptions — built to answer "is the 2026-08-06 reliability fix (cap +
+ * eviction + failure-based pruning + periodic client resubscribe) actually
+ * working in practice" without needing the affected person on a screenshare,
+ * and without guessing at a new architecture (e.g. a separate dedicated PWA)
+ * before confirming whether the existing fix already covers this.
+ */
+export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can view org push health');
+  }
+
+  const users = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true })
+    .select('fullName username role pushSubscriptions')
+    .sort({ fullName: 1 })
+    .lean();
+
+  const STALE_DAYS = 7;
+  const staleThreshold = Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000;
+
+  const rows = users.map((u: any) => {
+    const subs = u.pushSubscriptions || [];
+    const devices = subs.map((s: any) => {
+      const lastSuccessMs = s.lastSuccessAt ? new Date(s.lastSuccessAt).getTime() : null;
+      const createdMs = s.createdAt ? new Date(s.createdAt).getTime() : null;
+      // "never-confirmed" — subscribed a while ago, never once recorded a
+      // successful send. Distinct from "stale" (was working, hasn't sent
+      // successfully in a while) because the likely cause differs (dead on
+      // arrival vs died later) — collapsing them would hide which is which.
+      const neverConfirmed = !lastSuccessMs && createdMs !== null && createdMs < staleThreshold;
+      const stale = !!lastSuccessMs && lastSuccessMs < staleThreshold;
+      return {
+        deviceHint: s.deviceHint || 'unknown',
+        createdAt: s.createdAt,
+        lastSuccessAt: s.lastSuccessAt || null,
+        failureCount: s.failureCount || 0,
+        status: (s.failureCount || 0) > 0 ? 'failing' : neverConfirmed ? 'never-confirmed' : stale ? 'stale' : 'healthy',
+      };
+    });
+    return {
+      userId: u._id,
+      fullName: u.fullName,
+      username: u.username,
+      role: u.role,
+      subscriptionCount: devices.length,
+      devices,
+    };
+  });
+
+  res.json(new ApiResponse(200, { staleDaysThreshold: STALE_DAYS, users: rows }, 'Org push health'));
 });
 
 /**

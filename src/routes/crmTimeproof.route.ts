@@ -23,6 +23,7 @@ import {
   subscribeCrmPush,
   unsubscribeCrmPush,
   getCrmPushStatus,
+  getOrgPushHealth,
   correctTimeLog,
   getAdminDayLogs,
   adminTimeOverride,
@@ -83,5 +84,6 @@ router.get('/weekly-overtime-report', getWeeklyOvertimeReport); // admin/manager
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);
 router.get('/push/status', getCrmPushStatus);
+router.get('/push/org-health', getOrgPushHealth); // admin/manager-only, role check inside
 
 export default router;
