@@ -414,7 +414,7 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
 
   const isReportRequest = req.query.report === "true";
   const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 20);
-  const maxLimit = isReportRequest ? 5000 : 50;
+  const maxLimit = isReportRequest ? 5000 : 100;
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(maxLimit, Math.max(1, requestedLimit));
   const skip = (page - 1) * limit;

@@ -54,7 +54,7 @@ if (config.redis.enabled) {
             await webpush.sendNotification(
               { endpoint: sub.endpoint, keys: sub.keys },
               stringifiedPayload,
-              topic ? { topic } : undefined
+              { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
             );
             logger.info(`${LOG_PREFIX} Sent to user ${userId} on device ${sub.deviceHint || 'unknown'}`);
             return { endpoint: sub.endpoint, success: true };
@@ -63,6 +63,15 @@ if (config.redis.enabled) {
               logger.info(`${LOG_PREFIX} Pruning expired subscription for user ${userId}: ${sub.endpoint}`);
               return { endpoint: sub.endpoint, success: false, prune: true };
             }
+            logger.warn(
+              {
+                userId,
+                statusCode: error.statusCode,
+                body: (error.body || '').toString().slice(0, 500),
+                message: error.message,
+              },
+              `${LOG_PREFIX} Push failed for user ${userId}`
+            );
             throw error;
           }
         })

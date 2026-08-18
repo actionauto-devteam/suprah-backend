@@ -7,6 +7,14 @@ import { normalizePushPayload } from '../utils/pushPayload';
 
 const LOG_PREFIX = '[UnifiedPushService]';
 
+function safeEndpointHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return 'invalid-endpoint';
+  }
+}
+
 export type PushRecipientModel = 'User' | 'CrmUser';
 
 webpush.setVapidDetails(
@@ -54,7 +62,7 @@ async function sendToSubscriptions(
         await webpush.sendNotification(
           { endpoint: sub.endpoint, keys: sub.keys },
           stringifiedPayload,
-          { TTL: 86400, ...(topic ? { topic } : {}) }
+          { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
         );
         sent += 1;
       } catch (error: any) {
@@ -62,7 +70,17 @@ async function sendToSubscriptions(
           endpointsToPrune.push(sub.endpoint);
         } else {
           failed += 1;
-          logger.warn(`${LOG_PREFIX} Push failed for ${model} ${userId}: ${error.message}`);
+          logger.warn(
+            {
+              userId,
+              model,
+              endpointHost: safeEndpointHost(sub.endpoint),
+              statusCode: error.statusCode,
+              body: (error.body || '').toString().slice(0, 500),
+              message: error.message,
+            },
+            `${LOG_PREFIX} Push failed for ${model} ${userId}`
+          );
         }
       }
     })

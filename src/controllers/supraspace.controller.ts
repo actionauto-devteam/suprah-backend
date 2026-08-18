@@ -233,7 +233,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
-      await CrmPushService.sendToUsers([memberId], {
+      const pushResult = await CrmPushService.sendToUsers([memberId], {
         title,
         body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
         icon: '/icon-192x192.png',
@@ -249,6 +249,12 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           messageId,
         },
       });
+      if (pushResult.sent === 0 && pushResult.subscriptions > 0) {
+        logger.warn(
+          { memberId, conversationId: conv._id?.toString(), pushResult },
+          '[SupraSpace] Message push delivered to NO devices'
+        );
+      }
     }));
   } catch (err) {
     logger.warn({ err }, '[SupraSpace] pushToConversationMembers failed');
@@ -361,6 +367,35 @@ async function notifyMentionedMembers(params: {
     const uniqueRecipients = [...new Set(toNotify)].filter((memberId) =>
       shouldNotifyForPreference(getConversationNotificationPref(params.conversation, memberId), true)
     );
+
+    // Mention delivery has been silently missed for individual members with
+    // no way to tell whether the cause was detection (isUserMentioned found
+    // no match), a per-conversation mute, or the member simply not being in
+    // `members` at all — this makes each step visible so a report like
+    // "Erik tagged me but I got nothing" is diagnosable from logs alone
+    // instead of re-deriving the whole pipeline by hand every time.
+    if (!hasAll) {
+      const missed = members.filter((member: any) => !toNotify.includes(member._id.toString()));
+      if (missed.length) {
+        logger.info(
+          {
+            conversationId: params.conversation._id?.toString(),
+            messageId: params.messageId,
+            text,
+            notMatched: missed.map((m: any) => ({ id: m._id.toString(), fullName: m.fullName, username: m.username })),
+          },
+          '[SupraSpace] Mention text did not match these conversation members — check fullName/username against the @mention text above'
+        );
+      }
+      const mutedOut = toNotify.filter((id) => !uniqueRecipients.includes(id));
+      if (mutedOut.length) {
+        logger.info(
+          { conversationId: params.conversation._id?.toString(), messageId: params.messageId, mutedOut },
+          '[SupraSpace] Mention matched but suppressed by conversation notification preference'
+        );
+      }
+    }
+
     if (!uniqueRecipients.length) return;
 
     const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
@@ -1311,6 +1346,17 @@ const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
     message: messageForClient,
   });
 
+  const dpSenderName = (req.crmUser as any)?.fullName || 'Someone';
+  const dpBody = content.trim() ? truncateWithEllipsis(stripMessageFormatting(content.trim()), 120) : 'Posted a report';
+  pushToConversationMembers(
+    conversation,
+    userId.toString(),
+    DAYPULSE_REPORT_CHANNEL_NAME,
+    `${dpSenderName}: ${dpBody}`,
+    '',
+    message._id.toString()
+  );
+
   res.status(201).json(new ApiResponse(201, { conversationId: conversation._id, message: messageForClient }, 'DayPulse report posted'));
 });
 
@@ -1632,6 +1678,18 @@ const createPoll = asyncHandler(async (req: Request, res: Response) => {
 
   const messageForClient = message.toObject();
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  const pollSenderName = (req.crmUser as any)?.fullName || 'Someone';
+  const convNamePoll = (conversation as any).name;
+  pushToConversationMembers(
+    conversation,
+    userId.toString(),
+    convNamePoll ?? pollSenderName,
+    convNamePoll ? `${pollSenderName}: Started a poll — ${question.trim()}` : `Started a poll: ${question.trim()}`,
+    '',
+    message._id.toString()
+  );
+
   res.status(201).json(new ApiResponse(201, messageForClient, 'Poll created'));
 });
 
@@ -1712,6 +1770,18 @@ const createEvent = asyncHandler(async (req: Request, res: Response) => {
 
   const messageForClient = message.toObject();
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
+
+  const eventSenderName = (req.crmUser as any)?.fullName || 'Someone';
+  const convNameEvent = (conversation as any).name;
+  pushToConversationMembers(
+    conversation,
+    userId.toString(),
+    convNameEvent ?? eventSenderName,
+    convNameEvent ? `${eventSenderName}: Created an event — ${title.trim()}` : `New event: ${title.trim()}`,
+    '',
+    message._id.toString()
+  );
+
   res.status(201).json(new ApiResponse(201, messageForClient, 'Event created'));
 });
 

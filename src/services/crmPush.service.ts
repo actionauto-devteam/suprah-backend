@@ -29,6 +29,14 @@ type CrmPushSendResult = {
   skippedNoMatchingHint: number;
 };
 
+function safeEndpointHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return 'invalid-endpoint';
+  }
+}
+
 function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string[]): boolean {
   if (!allowedHints?.length) return true;
   const normalizedHint = (deviceHint || '').toLowerCase();
@@ -167,7 +175,7 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: 86400, ...(topic ? { topic } : {}) }
+                { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
               );
               stats.sent += 1;
               endpointsSucceeded.push(sub.endpoint);
@@ -176,7 +184,16 @@ export class CrmPushService {
                 endpointsToPrune.push(sub.endpoint);
               } else {
                 stats.failed += 1;
-                logger.warn(`${LOG_PREFIX} Push failed for user ${user._id}: ${error.message}`);
+                logger.warn(
+                  {
+                    userId: user._id,
+                    endpointHost: safeEndpointHost(sub.endpoint),
+                    statusCode: error.statusCode,
+                    body: (error.body || '').toString().slice(0, 500),
+                    message: error.message,
+                  },
+                  `${LOG_PREFIX} Push failed for user ${user._id}`
+                );
                 const newFailureCount = (sub.failureCount || 0) + 1;
                 if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
                   logger.warn(`${LOG_PREFIX} Pruning endpoint for user ${user._id} after ${newFailureCount} consecutive non-410/404 failures.`);
@@ -239,14 +256,23 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: 86400, ...(topic ? { topic } : {}) }
+                { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
               );
               endpointsSucceeded.push(sub.endpoint);
             } catch (error: any) {
               if (error.statusCode === 410 || error.statusCode === 404) {
                 endpointsToPrune.push(sub.endpoint);
               } else {
-                logger.warn(`${LOG_PREFIX} Push failed for admin ${admin.fullName}: ${error.message}`);
+                logger.warn(
+                  {
+                    adminId: admin._id,
+                    endpointHost: safeEndpointHost(sub.endpoint),
+                    statusCode: error.statusCode,
+                    body: (error.body || '').toString().slice(0, 500),
+                    message: error.message,
+                  },
+                  `${LOG_PREFIX} Push failed for admin ${admin.fullName}`
+                );
                 const newFailureCount = (sub.failureCount || 0) + 1;
                 if (newFailureCount >= STALE_FAILURE_THRESHOLD) {
                   endpointsToPrune.push(sub.endpoint);

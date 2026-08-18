@@ -59,7 +59,7 @@ const VALID_NOTIFICATION_TYPES = [
   'delivery_confirmed', 'proof_submitted',
   'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
   'location_share_requested',
-  'agent_idle', 'agent_idle_escalation',
+  'agent_idle', 'agent_idle_escalation', 'agent_screen_recording_missing',
   'customer_call_requested',
 ] as const;
 
@@ -89,7 +89,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   crm_task_assigned: 'crm', crm_task_due: 'crm', crm_biometric: 'crm', crm_timeproof: 'crm',
   reminder: 'crm', location_share_requested: 'crm',
   aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
-  agent_idle: 'crm', agent_idle_escalation: 'crm', customer_call_requested: 'crm',
+  customer_call_requested: 'crm',
 
   feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
 
@@ -122,6 +122,16 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   admin_system_alert: 'adminSystemAlerts',
   admin_staff_activity: 'adminStaffActivity',
   admin_security_audit: 'adminSecurityAudit',
+
+  // Admin-only staff-monitoring alerts — every recipient is always an
+  // admin/manager watching another agent's activity (see
+  // crmTimeproof.controller.ts), never the agent themselves. Previously
+  // mapped to 'crm', which meant the "Staff Activity" admin toggle had no
+  // effect on them at all (reported by Erik: turning off Staff Activity
+  // didn't stop Agent Idle alerts) — they belong here instead.
+  agent_idle: 'adminStaffActivity',
+  agent_idle_escalation: 'adminStaffActivity',
+  agent_screen_recording_missing: 'adminStaffActivity',
 };
 
 // These always deliver (in-app + push) regardless of preference toggles.
