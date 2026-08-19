@@ -21,6 +21,25 @@ const router = express.Router();
 // Public — Google redirect target (state-verified).
 router.get('/oauth/callback', mailController.oauthCallback);
 
+// Suprah One Desk mail data is private, dynamic account state. Do not let
+// browser conditional requests turn a successful JSON GET into HTTP 304 with
+// no response body. Axios treats 304 as a rejected request, which was causing
+// Next.js development overlays even when the backend considered the request
+// successfully handled.
+router.use((req, res, next) => {
+  res.setHeader(
+    'Cache-Control',
+    'private, no-store, no-cache, must-revalidate, proxy-revalidate',
+  );
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  delete req.headers['if-none-match'];
+  delete req.headers['if-modified-since'];
+
+  next();
+});
+
 router.use(crmAuth());
 
 // Connection
@@ -31,6 +50,7 @@ router.post('/sync',       mailController.triggerSync);
 
 // Inbox
 router.get('/labels',                                mailController.getLabels);
+router.get('/mailbox-summary',                       mailController.getMailboxSummary);
 router.get('/messages',                              mailController.getMessages);
 router.post('/messages/send', attachmentUpload.array('files', 10), mailController.sendMessage);
 router.get('/messages/:id',                          mailController.getMessageDetail);
@@ -40,6 +60,7 @@ router.get('/threads/:id',                           mailController.getThreadDet
 
 // Drafts
 router.get('/drafts',                    mailController.getDrafts);
+router.get('/drafts/:draftId',           mailController.getDraftDetail);
 router.post('/drafts',   attachmentUpload.array('files', 10), mailController.createDraft);
 router.patch('/drafts/:draftId', attachmentUpload.array('files', 10), mailController.updateDraft);
 router.delete('/drafts/:draftId',        mailController.deleteDraft);

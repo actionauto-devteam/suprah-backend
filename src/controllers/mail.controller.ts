@@ -8,10 +8,12 @@ import MailConversation from '../models/MailConversation.model';
 import MailMessage from '../models/MailMessage.model';
 import gmailService, { OutgoingAttachment } from '../services/gmail.service';
 import mailSyncService from '../services/mailSync.service';
+import gmailMailboxIndexService from '../services/gmailMailboxIndex.service';
 import { storageService, BucketType } from '../services/storage.service';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
 const MAIL_PAGE_PATH = '/crm/suprah-mail';
+const INDEXED_MESSAGE_MAILBOXES = new Set(['INBOX', 'STARRED', 'SENT', 'TRASH']);
 
 const filesFromReq = (req: Request): Express.Multer.File[] =>
   ((req as any).files as Express.Multer.File[] | undefined) || [];
@@ -20,6 +22,27 @@ const toOutgoingAttachments = (files: Express.Multer.File[]): OutgoingAttachment
   files.map((f) => ({ filename: f.originalname, mimeType: f.mimetype, content: f.buffer }));
 
 const isValidEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+
+const escapeRegex = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The Stage 2 index is a read accelerator, never the source of truth. A local
+ * indexing failure must not turn an already-successful Gmail send/mutation
+ * into an HTTP failure that encourages the user to repeat the Gmail action.
+ */
+const mirrorIndexBestEffort = async (
+  userId: string,
+  label: string,
+  operation: () => Promise<unknown>,
+) => {
+  try {
+    await operation();
+  } catch (error: any) {
+    console.error(`[MailIndex] ${label} for ${userId} failed:`, error?.message);
+    void gmailMailboxIndexService.ensureUserIndexed(userId);
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Connection / status
@@ -59,8 +82,14 @@ const oauthCallback = asyncHandler(async (req: Request, res: Response) => {
 
   try {
     const { userId } = await gmailService.handleOAuthCallback(code, state);
-    // Warm the first sync so the inbox is populated the moment the tab loads.
+    // Warm both Gmail history and the Stage 2 local mailbox index. Neither
+    // background task blocks the OAuth redirect.
     mailSyncService.requestImmediateSync(userId).catch(() => { });
+    void gmailMailboxIndexService
+      .bootstrapUser(userId, { force: true })
+      .catch((err: any) =>
+        console.error(`[MailIndex] OAuth bootstrap for ${userId} failed:`, err?.message),
+      );
     return res.redirect(`${FRONTEND_URL}${MAIL_PAGE_PATH}?mail=connected`);
   } catch (err: any) {
     console.error('[Mail] OAuth callback failed:', err?.message);
@@ -71,7 +100,13 @@ const oauthCallback = asyncHandler(async (req: Request, res: Response) => {
 /** POST /api/mail/disconnect */
 const disconnect = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  await gmailService.disconnect(user._id.toString());
+  const userId = user._id.toString();
+  await gmailService.disconnect(userId);
+  // Local metadata belongs to that Gmail connection. Removing it prevents a
+  // later re-connect from ever displaying rows from the previous account.
+  await mirrorIndexBestEffort(userId, 'disconnect cleanup', () =>
+    gmailMailboxIndexService.clearUser(userId),
+  );
   res.json(new ApiResponse(200, null, 'Gmail disconnected'));
 });
 
@@ -93,16 +128,68 @@ const getLabels = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { labels }, 'Labels fetched'));
 });
 
+/**
+ * GET /api/mail/mailbox-summary
+ *
+ * Lightweight system-mailbox metadata for the Suprah One Desk left rail.
+ * This deliberately does not preload the first 25 messages of every folder.
+ */
+const getMailboxSummary = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const mailboxes = await gmailService.getMailboxSummaries(
+    user._id.toString(),
+  );
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        mailboxes,
+        generatedAt: Date.now(),
+      },
+      'Mailbox summary fetched',
+    ),
+  );
+});
+
 /** GET /api/mail/messages?label=INBOX&q=&pageToken= */
 const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
+  const userId = user._id.toString();
   const { label = 'INBOX', q, pageToken } = req.query as Record<string, string>;
-  const result = await gmailService.listMessages(user._id.toString(), {
+
+  // Stage 2 fast path: ordinary system-mailbox browsing reads lightweight
+  // MongoDB metadata. Gmail remains authoritative for advanced q= search,
+  // custom labels and any mailbox whose initial index is not ready yet.
+  if (!q && INDEXED_MESSAGE_MAILBOXES.has(label)) {
+    try {
+      const indexed = await gmailMailboxIndexService.listMessages(userId, {
+        label: label as 'INBOX' | 'STARRED' | 'SENT' | 'TRASH',
+        pageToken: pageToken || undefined,
+        maxResults: 25,
+      });
+
+      if (indexed) {
+        res.setHeader('X-Suprah-Mail-Source', 'local-index');
+        res.json(new ApiResponse(200, indexed, 'Messages fetched'));
+        return;
+      }
+    } catch (error: any) {
+      console.error(`[MailIndex] local ${label} read failed:`, error?.message);
+    }
+
+    // Do not make the user wait for bootstrap. The frozen Stage 1 path remains
+    // a correctness fallback while the local index warms in the background.
+    void gmailMailboxIndexService.ensureUserIndexed(userId);
+  }
+
+  const result = await gmailService.listMessages(userId, {
     labelIds: label ? [label] : undefined,
     q: q || undefined,
     pageToken: pageToken || undefined,
     maxResults: 25,
   });
+  res.setHeader('X-Suprah-Mail-Source', q ? 'gmail-search' : 'gmail-fallback');
   res.json(new ApiResponse(200, result, 'Messages fetched'));
 });
 
@@ -173,7 +260,11 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     references: references || undefined,
   });
 
-  // Instant echo — sent mail appears in the Sent list without waiting a tick.
+  // Stage 2 instant local echo: Sent can display this row immediately without
+  // waiting for the next Gmail history poll.
+  await mirrorIndexBestEffort(user._id.toString(), 'sent-message mirror', () =>
+    gmailMailboxIndexService.upsertParsedMessage(user._id.toString(), sent),
+  );
   mailSyncService.requestImmediateSync(user._id.toString()).catch(() => { });
 
   res.status(201).json(new ApiResponse(201, { message: sent }, 'Email sent'));
@@ -198,6 +289,12 @@ const updateMessage = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(400, 'action must be one of: read, unread, star, unstar, archive, trash, untrash');
   }
 
+  // Gmail succeeded first; now mirror the known label/state change locally.
+  // History sync later reconciles the exact Gmail label set.
+  await mirrorIndexBestEffort(userId, `message ${action} mirror`, () =>
+    gmailMailboxIndexService.applyMessageAction(userId, id, action),
+  );
+
   res.json(new ApiResponse(200, { id, action }, 'Message updated'));
 });
 
@@ -206,9 +303,38 @@ const updateMessage = asyncHandler(async (req: Request, res: Response) => {
 /** GET /api/mail/drafts */
 const getDrafts = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
+  const userId = user._id.toString();
   const { pageToken } = req.query as Record<string, string>;
-  const result = await gmailService.listDrafts(user._id.toString(), pageToken || undefined);
+
+  try {
+    const indexed = await gmailMailboxIndexService.listDrafts(
+      userId,
+      pageToken || undefined,
+    );
+
+    if (indexed) {
+      res.setHeader('X-Suprah-Mail-Source', 'local-index');
+      res.json(new ApiResponse(200, indexed, 'Drafts fetched'));
+      return;
+    }
+  } catch (error: any) {
+    console.error('[MailIndex] local DRAFTS read failed:', error?.message);
+  }
+
+  void gmailMailboxIndexService.ensureUserIndexed(userId);
+  const result = await gmailService.listDrafts(userId, pageToken || undefined);
+  res.setHeader('X-Suprah-Mail-Source', 'gmail-fallback');
   res.json(new ApiResponse(200, result, 'Drafts fetched'));
+});
+
+/** GET /api/mail/drafts/:draftId — full draft body loaded only on edit */
+const getDraftDetail = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const draft = await gmailService.getDraft(
+    user._id.toString(),
+    req.params.draftId,
+  );
+  res.json(new ApiResponse(200, { draft }, 'Draft fetched'));
 });
 
 /** POST /api/mail/drafts  (multipart) */
@@ -216,13 +342,17 @@ const createDraft = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { to = '', cc, bcc, subject = '', text = '', html, threadId } = req.body;
   const fresh = await CrmUser.findById(user._id).select('fullName email googleMail.gmailAddress').lean();
-  const draftId = await gmailService.createDraft(user._id.toString(), {
+  const userId = user._id.toString();
+  const draftId = await gmailService.createDraft(userId, {
     fromEmail: fresh?.googleMail?.gmailAddress || fresh?.email || user.email,
     fromName: fresh?.fullName || user.fullName,
     to, cc, bcc, subject, text, html,
     attachments: toOutgoingAttachments(filesFromReq(req)),
     threadId: threadId || undefined,
   });
+  await mirrorIndexBestEffort(userId, 'draft-create mirror', () =>
+    gmailMailboxIndexService.refreshDraftById(userId, draftId),
+  );
   res.status(201).json(new ApiResponse(201, { draftId }, 'Draft saved'));
 });
 
@@ -231,28 +361,41 @@ const updateDraft = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { to = '', cc, bcc, subject = '', text = '', html, threadId } = req.body;
   const fresh = await CrmUser.findById(user._id).select('fullName email googleMail.gmailAddress').lean();
-  const draftId = await gmailService.updateDraft(user._id.toString(), req.params.draftId, {
+  const userId = user._id.toString();
+  const draftId = await gmailService.updateDraft(userId, req.params.draftId, {
     fromEmail: fresh?.googleMail?.gmailAddress || fresh?.email || user.email,
     fromName: fresh?.fullName || user.fullName,
     to, cc, bcc, subject, text, html,
     attachments: toOutgoingAttachments(filesFromReq(req)),
     threadId: threadId || undefined,
   });
+  await mirrorIndexBestEffort(userId, 'draft-update mirror', () =>
+    gmailMailboxIndexService.refreshDraftById(userId, draftId),
+  );
   res.json(new ApiResponse(200, { draftId }, 'Draft updated'));
 });
 
 /** DELETE /api/mail/drafts/:draftId */
 const deleteDraft = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  await gmailService.deleteDraft(user._id.toString(), req.params.draftId);
+  const userId = user._id.toString();
+  await gmailService.deleteDraft(userId, req.params.draftId);
+  await mirrorIndexBestEffort(userId, 'draft-delete mirror', () =>
+    gmailMailboxIndexService.removeDraft(userId, req.params.draftId),
+  );
   res.json(new ApiResponse(200, null, 'Draft deleted'));
 });
 
 /** POST /api/mail/drafts/:draftId/send */
 const sendDraft = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const sent = await gmailService.sendDraft(user._id.toString(), req.params.draftId);
-  mailSyncService.requestImmediateSync(user._id.toString()).catch(() => { });
+  const userId = user._id.toString();
+  const sent = await gmailService.sendDraft(userId, req.params.draftId);
+  await mirrorIndexBestEffort(userId, 'draft-send mirror', async () => {
+    await gmailMailboxIndexService.removeDraft(userId, req.params.draftId);
+    await gmailMailboxIndexService.upsertParsedMessage(userId, sent);
+  });
+  mailSyncService.requestImmediateSync(userId).catch(() => { });
   res.json(new ApiResponse(200, { message: sent }, 'Draft sent'));
 });
 
@@ -263,15 +406,147 @@ const sendDraft = asyncHandler(async (req: Request, res: Response) => {
 /** GET /api/mail/conversations */
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const { archived } = req.query as Record<string, string>;
+  const { archived, q = '' } = req.query as Record<string, string>;
+  const archivedValue = archived === 'true';
+  const searchQuery = String(q || '').trim();
+
+  // Keep the normal Email Chat list path exactly as before.
+  if (!searchQuery) {
+    const conversations = await MailConversation.find({
+      ownerCrmUserId: user._id,
+      isArchived: archivedValue,
+    })
+      .sort({ lastMessageAt: -1, updatedAt: -1 })
+      .limit(200)
+      .lean();
+
+    res.json(
+      new ApiResponse(
+        200,
+        { conversations, messageMatches: [] },
+        'Conversations fetched',
+      ),
+    );
+    return;
+  }
+
+  // Avoid broad one-character scans while the user is still typing.
+  if (searchQuery.length < 2) {
+    res.json(
+      new ApiResponse(
+        200,
+        { conversations: [], messageMatches: [] },
+        'Conversation search requires at least 2 characters',
+      ),
+    );
+    return;
+  }
+
+  const regex = new RegExp(escapeRegex(searchQuery), 'i');
+
+  /**
+   * Search Email Chat's LOCAL persisted MailMessage collection rather than
+   * Gmail. This keeps Gmail/API quota completely out of this UI search.
+   *
+   * Group by conversation and retain the newest matching bubble from each
+   * conversation so one very active thread cannot consume the entire result
+   * set with dozens of duplicate hits.
+   */
+  const messageMatchesRaw = await MailMessage.aggregate([
+    {
+      $match: {
+        ownerCrmUserId: user._id,
+        $or: [
+          { bodyText: regex },
+          { fromName: regex },
+          { fromEmail: regex },
+          { 'attachments.originalName': regex },
+        ],
+      },
+    },
+    { $sort: { sentAt: -1 } },
+    {
+      $group: {
+        _id: '$conversationId',
+        messageId: { $first: '$_id' },
+        bodyText: { $first: '$bodyText' },
+        fromName: { $first: '$fromName' },
+        fromEmail: { $first: '$fromEmail' },
+        sentAt: { $first: '$sentAt' },
+        attachmentNames: { $first: '$attachments.originalName' },
+      },
+    },
+    { $limit: 200 },
+  ]);
+
+  const messageConversationIds = messageMatchesRaw.map(
+    (match: any) => match._id,
+  );
+
+  // A single search field now covers:
+  // - contact / group name
+  // - subject
+  // - participant email/name
+  // - latest preview/sender
+  // - any persisted Email Chat message text / attachment filename
   const conversations = await MailConversation.find({
     ownerCrmUserId: user._id,
-    isArchived: archived === 'true',
+    isArchived: archivedValue,
+    $or: [
+      ...(messageConversationIds.length > 0
+        ? [{ _id: { $in: messageConversationIds } }]
+        : []),
+      { title: regex },
+      { subject: regex },
+      { 'participants.name': regex },
+      { 'participants.email': regex },
+      { lastMessagePreview: regex },
+      { lastMessageFromName: regex },
+    ],
   })
     .sort({ lastMessageAt: -1, updatedAt: -1 })
     .limit(200)
     .lean();
-  res.json(new ApiResponse(200, { conversations }, 'Conversations fetched'));
+
+  const allowedConversationIds = new Set(
+    conversations.map((conversation: any) =>
+      String(conversation._id),
+    ),
+  );
+
+  const messageMatches = messageMatchesRaw
+    .filter((match: any) =>
+      allowedConversationIds.has(String(match._id)),
+    )
+    .map((match: any) => {
+      const attachmentNames = Array.isArray(match.attachmentNames)
+        ? match.attachmentNames.map((name: unknown) => String(name || ''))
+        : [];
+      const attachmentMatch = attachmentNames.find((name: string) =>
+        regex.test(name),
+      );
+
+      return {
+        conversationId: String(match._id),
+        messageId: String(match.messageId),
+        snippet:
+          String(match.bodyText || '').trim().slice(0, 240) ||
+          (attachmentMatch
+            ? `Attachment: ${attachmentMatch}`
+            : 'Matching message'),
+        fromName: match.fromName || undefined,
+        fromEmail: match.fromEmail || undefined,
+        sentAt: match.sentAt,
+      };
+    });
+
+  res.json(
+    new ApiResponse(
+      200,
+      { conversations, messageMatches },
+      'Conversation search fetched',
+    ),
+  );
 });
 
 /**
@@ -499,6 +774,10 @@ const sendConversationMessage = asyncHandler(async (req: Request, res: Response)
       references: lastThreaded?.rfc822MessageId || undefined,
     });
 
+    await mirrorIndexBestEffort(user._id.toString(), 'conversation-sent mirror', () =>
+      gmailMailboxIndexService.upsertParsedMessage(user._id.toString(), sent),
+    );
+
     message.status = 'sent';
     message.gmailMessageId = sent.id;
     message.gmailThreadId = sent.threadId;
@@ -629,6 +908,7 @@ export default {
   triggerSync,
   // inbox
   getLabels,
+  getMailboxSummary,
   getMessages,
   getMessageDetail,
   getThreadDetail,
@@ -637,6 +917,7 @@ export default {
   updateMessage,
   // drafts
   getDrafts,
+  getDraftDetail,
   createDraft,
   updateDraft,
   deleteDraft,

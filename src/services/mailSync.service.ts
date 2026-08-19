@@ -3,6 +3,8 @@ import CrmUser from '../models/CrmUser.model';
 import MailConversation from '../models/MailConversation.model';
 import MailMessage, { IMailMessage } from '../models/MailMessage.model';
 import gmailService from './gmail.service';
+import gmailMailboxIndexService from './gmailMailboxIndex.service';
+import mailActivityService from './mailActivity.service';
 import { getSocketIO } from '../utils/socketEmitter';
 
 /**
@@ -29,52 +31,313 @@ import { getSocketIO } from '../utils/socketEmitter';
  * gmail.service.syncHistory). Nothing here can take the server down.
  */
 
-const SYNC_INTERVAL_MS = Number(process.env.MAIL_SYNC_INTERVAL_MS || 20_000);
+// Existing universal safety-net interval. Stage 2.1 deliberately preserves
+// the proven 20-second fallback for every connected account so Email Chat,
+// background mail and missed active signals do not regress.
+const SYNC_INTERVAL_MS = Number(
+  process.env.MAIL_SYNC_INTERVAL_MS || 20_000,
+);
+
+const ACTIVE_SYNC_INTERVAL_MS = Math.max(
+  5_000,
+  Number(process.env.MAIL_ACTIVE_SYNC_INTERVAL_MS || 8_000),
+);
+
+const ACTIVE_MAILBOX_WINDOW_MS = Math.max(
+  ACTIVE_SYNC_INTERVAL_MS * 2,
+  Number(process.env.MAIL_ACTIVE_MAILBOX_WINDOW_MS || 150_000),
+);
+
+const ACTIVE_SCHEDULER_TICK_MS = Math.max(
+  1_000,
+  Math.min(
+    ACTIVE_SYNC_INTERVAL_MS,
+    Number(process.env.MAIL_ACTIVE_SCHEDULER_TICK_MS || 2_000),
+  ),
+);
+
+const SYNC_MAX_CONCURRENT_USERS = Math.min(
+  8,
+  Math.max(
+    1,
+    Number(process.env.MAIL_SYNC_MAX_CONCURRENT_USERS || 3),
+  ),
+);
+const INVALID_GRANT_BACKOFF_MS = Math.max(
+  60_000,
+  Number(
+    process.env.MAIL_SYNC_INVALID_GRANT_BACKOFF_MS ||
+      15 * 60_000,
+  ),
+);
 
 class MailSyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private activeTimer: ReturnType<typeof setInterval> | null = null;
   private inFlight = new Set<string>();
+  private backgroundBackoffUntil = new Map<string, number>();
+  private lastSyncFinishedAt = new Map<string, number>();
+  private tickInFlight = false;
+  private activeTickInFlight = false;
   private started = false;
 
   start() {
     if (this.started) return;
     this.started = true;
+
     this.timer = setInterval(() => this.tick(), SYNC_INTERVAL_MS);
-    console.log(`[MailSync] Started — polling Gmail history every ${SYNC_INTERVAL_MS / 1000}s`);
+    this.activeTimer = setInterval(
+      () => this.activeTick(),
+      ACTIVE_SCHEDULER_TICK_MS,
+    );
+
+    console.log(
+      `[MailSync] Started — adaptive Gmail history sync: ` +
+        `active mailbox ~${ACTIVE_SYNC_INTERVAL_MS / 1000}s, ` +
+        `fallback ${SYNC_INTERVAL_MS / 1000}s`,
+    );
+
+    // Stage 2 — build the lightweight local mailbox index only after the
+    // server bootstrap has already confirmed MongoDB is connected. This work
+    // is deliberately background-only and never delays the HTTP listener.
+    void gmailMailboxIndexService
+      .bootstrapConnectedUsers()
+      .catch((err: any) => {
+        console.error('[MailIndex] startup bootstrap failed:', err?.message);
+      });
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    if (this.activeTimer) clearInterval(this.activeTimer);
     this.timer = null;
+    this.activeTimer = null;
+    this.lastSyncFinishedAt.clear();
     this.started = false;
   }
 
+  private isInvalidGrant(error: any): boolean {
+    const responseError =
+      error?.response?.data?.error;
+    const responseDescription =
+      error?.response?.data?.error_description;
+
+    const text = [
+      error?.message,
+      typeof responseError === 'string'
+        ? responseError
+        : responseError?.message,
+      responseDescription,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    return text.includes('invalid_grant');
+  }
+
+  private async runWithConcurrency<T>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T) => Promise<void>,
+  ): Promise<void> {
+    let cursor = 0;
+
+    const runWorker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= items.length) return;
+        await worker(items[index]);
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(
+            concurrency,
+            Math.max(1, items.length),
+          ),
+        },
+        () => runWorker(),
+      ),
+    );
+  }
+
   private async tick() {
+    if (this.tickInFlight) return;
+    this.tickInFlight = true;
+
     try {
-      const users = await CrmUser.find({ 'googleMail.connected': true, isActive: true })
+      const users = await CrmUser.find({
+        'googleMail.connected': true,
+        isActive: true,
+      })
         .select('_id')
         .lean();
-      for (const u of users) {
-        // Fire-and-forget per user; the lock prevents overlap between ticks.
-        this.syncUser(String(u._id)).catch(() => { /* logged inside */ });
+
+      const now = Date.now();
+      const connectedIds = new Set(
+        users.map((user) => String(user._id)),
+      );
+
+      for (const userId of this.lastSyncFinishedAt.keys()) {
+        if (!connectedIds.has(userId)) {
+          this.lastSyncFinishedAt.delete(userId);
+        }
       }
+
+      const userIds = [...connectedIds].filter((userId) => {
+        const retryAt =
+          this.backgroundBackoffUntil.get(userId) || 0;
+
+        if (retryAt > now) return false;
+
+        if (retryAt > 0) {
+          this.backgroundBackoffUntil.delete(userId);
+        }
+
+        if (
+          mailActivityService.isMailboxActive(
+            userId,
+            ACTIVE_MAILBOX_WINDOW_MS,
+          )
+        ) {
+          const lastFinishedAt =
+            this.lastSyncFinishedAt.get(userId) || 0;
+
+          if (
+            now - lastFinishedAt <
+            ACTIVE_SYNC_INTERVAL_MS
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      await this.runWithConcurrency(
+        userIds,
+        SYNC_MAX_CONCURRENT_USERS,
+        async (userId) => {
+          await this.syncUserInternal(
+            userId,
+            true,
+          );
+        },
+      );
     } catch (err: any) {
-      console.error('[MailSync] tick failed:', err?.message);
+      console.error(
+        '[MailSync] tick failed:',
+        err?.message,
+      );
+    } finally {
+      this.tickInFlight = false;
+    }
+  }
+
+  /**
+   * Stage 2.1 adaptive fast lane.
+   *
+   * A normal Stage 2 local-index mailbox read marks that CRM user active.
+   * While that signal stays fresh, Gmail history is checked approximately
+   * every ACTIVE_SYNC_INTERVAL_MS. No extra HTTP endpoint, browser heartbeat,
+   * cloud notification service or alternate mail protocol is involved.
+   *
+   * The existing 20-second tick() remains active for every account and is
+   * therefore still the recovery path if the activity signal expires.
+   */
+  private async activeTick() {
+    if (this.activeTickInFlight) return;
+    this.activeTickInFlight = true;
+
+    try {
+      const now = Date.now();
+      const candidates =
+        mailActivityService.getActiveMailboxUserIds(
+          ACTIVE_MAILBOX_WINDOW_MS,
+        );
+
+      const dueUserIds = candidates.filter((userId) => {
+        const retryAt =
+          this.backgroundBackoffUntil.get(userId) || 0;
+        if (retryAt > now) return false;
+
+        const lastFinishedAt =
+          this.lastSyncFinishedAt.get(userId) || 0;
+
+        return (
+          now - lastFinishedAt >=
+          ACTIVE_SYNC_INTERVAL_MS
+        );
+      });
+
+      await this.runWithConcurrency(
+        dueUserIds,
+        SYNC_MAX_CONCURRENT_USERS,
+        async (userId) => {
+          await this.syncUserInternal(
+            userId,
+            true,
+          );
+        },
+      );
+    } catch (err: any) {
+      console.error(
+        '[MailSync] active tick failed:',
+        err?.message,
+      );
+    } finally {
+      this.activeTickInFlight = false;
     }
   }
 
   async requestImmediateSync(userId: string) {
-    return this.syncUser(userId);
+    // User-driven/manual operations must not be held behind a background
+    // invalid_grant backoff. Reconnect/manual sync can immediately prove that
+    // the account credentials are healthy again.
+    this.backgroundBackoffUntil.delete(userId);
+    return this.syncUserInternal(userId, false);
   }
 
+  /**
+   * Public direct sync remains immediate for compatibility with any existing
+   * callers. The scheduled ticker is the only path that observes backoff.
+   */
   async syncUser(userId: string): Promise<void> {
+    this.backgroundBackoffUntil.delete(userId);
+    return this.syncUserInternal(userId, false);
+  }
+
+  private async syncUserInternal(
+    userId: string,
+    background: boolean,
+  ): Promise<void> {
     if (this.inFlight.has(userId)) return;
+
+    if (background) {
+      const retryAt =
+        this.backgroundBackoffUntil.get(userId) || 0;
+      if (retryAt > Date.now()) return;
+    }
+
     this.inFlight.add(userId);
+
     try {
-      const result = await gmailService.syncHistory(userId);
+      const result =
+        await gmailService.syncHistory(userId);
 
       if (result.fullResync) {
-        this.emitToUser(userId, 'mail:inbox:update', { fullResync: true });
+        // The history cursor no longer proves local index completeness. Mark
+        // the index unavailable immediately and rebuild it in the background;
+        // API reads safely fall back to the frozen Stage 1 Gmail path meanwhile.
+        await gmailMailboxIndexService.scheduleRebuild(userId);
+        this.emitToUser(
+          userId,
+          'mail:inbox:update',
+          { fullResync: true },
+        );
         return;
       }
 
@@ -83,26 +346,91 @@ class MailSyncService {
         result.labelChangedMessageIds.length > 0 ||
         result.deletedMessageIds.length > 0;
 
-      // Route new messages into Conversation-tab threads.
+      if (hasInboxChanges) {
+        // Reconcile the local metadata BEFORE the socket event. When the
+        // browser reacts to mail:inbox:update, /messages can therefore return
+        // the already-updated MongoDB rows instead of hitting Gmail again.
+        try {
+          await gmailMailboxIndexService.reconcileMessageIds(
+            userId,
+            [
+              ...result.addedMessageIds,
+              ...result.labelChangedMessageIds,
+            ],
+          );
+          await gmailMailboxIndexService.removeMessages(
+            userId,
+            result.deletedMessageIds,
+          );
+        } catch (err: any) {
+          console.error(
+            `[MailIndex] incremental reconcile for ${userId} failed:`,
+            err?.message,
+          );
+          // Keep mail delivery functional. The next bootstrap/history cycle
+          // can repair the index, while the HTTP layer can still fall back to
+          // Gmail if a mailbox is not marked ready.
+          void gmailMailboxIndexService.ensureUserIndexed(userId);
+        }
+      } else {
+        // First deploy / first reconnect may have no history delta at all.
+        // Ensure the index still begins warming for this connected account.
+        void gmailMailboxIndexService.ensureUserIndexed(userId);
+      }
+
       for (const messageId of result.addedMessageIds) {
         try {
-          await this.ingestConversationMessage(userId, messageId);
+          await this.ingestConversationMessage(
+            userId,
+            messageId,
+          );
         } catch (err: any) {
-          console.error(`[MailSync] ingest ${messageId} for ${userId} failed:`, err?.message);
+          console.error(
+            `[MailSync] ingest ${messageId} for ${userId} failed:`,
+            err?.message,
+          );
         }
       }
 
       if (hasInboxChanges) {
-        this.emitToUser(userId, 'mail:inbox:update', {
-          added: result.addedMessageIds,
-          changed: result.labelChangedMessageIds,
-          deleted: result.deletedMessageIds,
-        });
+        this.emitToUser(
+          userId,
+          'mail:inbox:update',
+          {
+            added: result.addedMessageIds,
+            changed:
+              result.labelChangedMessageIds,
+            deleted:
+              result.deletedMessageIds,
+          },
+        );
       }
     } catch (err: any) {
-      // Already persisted to googleMail.lastSyncError by gmail.service.
-      console.error(`[MailSync] sync for ${userId} failed:`, err?.message);
+      if (
+        background &&
+        this.isInvalidGrant(err)
+      ) {
+        const retryAt =
+          Date.now() + INVALID_GRANT_BACKOFF_MS;
+
+        this.backgroundBackoffUntil.set(
+          userId,
+          retryAt,
+        );
+
+        console.error(
+          `[MailSync] sync for ${userId} failed: invalid_grant; background retries paused for ${Math.round(
+            INVALID_GRANT_BACKOFF_MS / 60_000,
+          )} minute(s)`,
+        );
+      } else {
+        console.error(
+          `[MailSync] sync for ${userId} failed:`,
+          err?.message,
+        );
+      }
     } finally {
+      this.lastSyncFinishedAt.set(userId, Date.now());
       this.inFlight.delete(userId);
     }
   }
