@@ -2471,6 +2471,40 @@ export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response)
 });
 
 /**
+ * POST /api/crm/timeproof/push/nudge/:userId
+ * Admin/manager-only. One-click reminder for someone whose push looks dead
+ * on the org-health view — goes through the persisted notification pipeline
+ * (not a raw webpush) specifically so it still surfaces in their bell/inbox
+ * next time they open the app even if push itself never delivers, which is
+ * exactly the failure mode this is meant to catch someone in.
+ */
+export const nudgeEnableNotifications = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Only admins/managers can send this reminder');
+  }
+
+  const { userId } = req.params;
+  const target = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId, isActive: true })
+    .select('fullName')
+    .lean();
+  if (!target) throw new ApiError(404, 'User not found in your organization');
+
+  await notificationService.createNotification({
+    userId,
+    organizationId: requestor.organizationId.toString(),
+    type: 'reminder',
+    title: 'Please check your notification settings',
+    message: `Hi ${target.fullName}, we noticed you may not be receiving push notifications. Please check your device/browser notification permissions and re-enable them so you don't miss important messages.`,
+    metadata: { route: '/crm/settings', pushSource: 'Suprah' },
+    dedupeKey: `push-nudge:${userId}`,
+    groupWindowMinutes: 60,
+  });
+
+  res.json(new ApiResponse(200, { sent: true }, `Reminder sent to ${target.fullName}`));
+});
+
+/**
  * POST /api/crm/timeproof/activity-interval
  * Tray app posts a completed active period when the user goes idle.
  */
