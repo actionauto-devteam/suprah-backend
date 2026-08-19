@@ -589,12 +589,14 @@ const createConversation = asyncHandler(async (req: Request, res: Response) => {
 
   // Only DIRECT conversations are de-duplicated/reused. Groups are always new,
   // since two groups can legitimately share a subject with different members.
+  // Matched by participant only (not subject) — a direct conversation with
+  // someone is one ongoing thread regardless of what subject line either
+  // attempt happened to use.
   if (!isGroup) {
     const existing = await MailConversation.findOne({
       ownerCrmUserId: user._id,
       type: 'direct',
       'participants.email': cleaned[0].email,
-      subject: finalSubject,
       isArchived: false,
     });
     if (existing) {
@@ -843,6 +845,24 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * DELETE /api/mail/conversations/:id
+ * Permanently removes the conversation wrapper and its persisted chat
+ * bubbles from Suprah — the underlying Gmail thread/messages are untouched.
+ */
+const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const { id } = req.params;
+
+  const conversation = await MailConversation.findOne({ _id: id, ownerCrmUserId: user._id });
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+
+  await MailMessage.deleteMany({ conversationId: conversation._id });
+  await conversation.deleteOne();
+
+  res.json(new ApiResponse(200, null, 'Conversation deleted'));
+});
+
+/**
  * GET /api/mail/conversations/:id/attachments/:messageId/:index
  * Streams a conversation attachment: R2-stored files come straight from
  * storage; inbound Gmail attachments are fetched on demand and cached to R2
@@ -931,5 +951,6 @@ export default {
   sendConversationMessage,
   markConversationRead,
   updateConversation,
+  deleteConversation,
   downloadConversationAttachment,
 };

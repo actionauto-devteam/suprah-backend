@@ -75,6 +75,7 @@ router.get('/conversations/:id/messages',     mailController.getConversationMess
 router.post('/conversations/:id/messages', attachmentUpload.array('files', 10), mailController.sendConversationMessage);
 router.post('/conversations/:id/read',        mailController.markConversationRead);
 router.patch('/conversations/:id',            mailController.updateConversation);
+router.delete('/conversations/:id',           mailController.deleteConversation);
 router.get('/conversations/:id/attachments/:messageId/:index', mailController.downloadConversationAttachment);
 
 export default router;

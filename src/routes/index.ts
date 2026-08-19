@@ -74,6 +74,7 @@ import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
 import communicationRoute from "./communication.routes";
+import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import youtubeRoute from "./youtube.route";
 
@@ -182,6 +183,13 @@ const defaultRoutes = [
   {
     path: "/crm/communications",
     route: communicationRoute,
+  },
+  // Suprah One Desk Contacts (org-shared phonebook) — same shadowing rule:
+  // must stay ABOVE "/crm" so crm.route's dynamic "/:id"-style routes don't
+  // capture "/crm/contacts".
+  {
+    path: "/crm/contacts",
+    route: contactRoute,
   },
   // Telnyx webhooks — PUBLIC (signature-verified in controller, no crmAuth).
   {
