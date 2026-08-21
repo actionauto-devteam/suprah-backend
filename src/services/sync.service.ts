@@ -501,6 +501,11 @@ export class SyncService {
         // Pre-generate the _id so the CREATE audit entry can reference the
         // real document even though the insert happens in the bulk batch.
         const newId = new mongoose.Types.ObjectId();
+        const initialPrice =
+          row.data.price !== undefined && row.data.price !== null
+            ? Number(row.data.price)
+            : undefined;
+
         bulkOps.push({
           insertOne: {
             document: {
@@ -510,6 +515,19 @@ export class SyncService {
               isArchived: false,
               archivedAt: null,
               lastSeenInFeedAt: now,
+              ...(initialPrice !== undefined && Number.isFinite(initialPrice)
+                ? {
+                    priceUpdatedAt: now,
+                    priceHistory: [
+                      {
+                        previousPrice: null,
+                        newPrice: initialPrice,
+                        changedAt: now,
+                        source: "DealersCloud",
+                      },
+                    ],
+                  }
+                : {}),
             },
           },
         });
@@ -540,6 +558,23 @@ export class SyncService {
         !existing.manualStatusLock &&
         existing.status === "Sold";
 
+      const existingPrice =
+        existing.price !== undefined && existing.price !== null
+          ? Number(existing.price)
+          : undefined;
+      const incomingPrice =
+        row.data.price !== undefined && row.data.price !== null
+          ? Number(row.data.price)
+          : undefined;
+      const priceChanged =
+        incomingPrice !== undefined &&
+        Number.isFinite(incomingPrice) &&
+        incomingPrice !== existingPrice;
+
+      if (priceChanged) {
+        update.priceUpdatedAt = now;
+      }
+
       if (reactivate) {
         update.status = "Ready for Sale";
         update.dateSold = null;
@@ -561,10 +596,25 @@ export class SyncService {
       const changes = diff(oldData, newData);
 
       if (changes || reactivate || wasArchived) {
+        const updateOperations: Record<string, any> = {
+          $set: update,
+        };
+
+        if (priceChanged && incomingPrice !== undefined) {
+          updateOperations.$push = {
+            priceHistory: {
+              previousPrice: existingPrice ?? null,
+              newPrice: incomingPrice,
+              changedAt: now,
+              source: "DealersCloud",
+            },
+          };
+        }
+
         bulkOps.push({
           updateOne: {
             filter: { _id: existing._id },
-            update: { $set: update },
+            update: updateOperations,
           },
         });
         auditDocs.push({
@@ -575,7 +625,9 @@ export class SyncService {
             ? "Vehicle returned to DealersCloud feed — restored from Archive"
             : reactivate
               ? "Vehicle returned to DealersCloud feed — re-activated"
-              : "Data updated from DealersCloud feed",
+              : priceChanged
+                ? "Vehicle price updated from DealersCloud feed"
+                : "Data updated from DealersCloud feed",
           changes: changes || { status: "Ready for Sale", isArchived: false },
           organizationId: ACTION_AUTO_ORG_ID,
         });
@@ -859,10 +911,49 @@ export class SyncService {
         }
       }
 
+      // Price history is also part of the vehicle's retained history. When
+      // legacy duplicate VIN documents are merged, keep audit entries from all
+      // copies instead of silently discarding the loser's pricing log.
+      const mergedPriceHistory: any[] = [];
+      const seenPriceHistory = new Set<string>();
+      for (const doc of [keeper, ...losers]) {
+        for (const entry of doc.priceHistory ?? []) {
+          const changedAtMs = new Date(entry.changedAt || 0).getTime();
+          const sig = [
+            entry.previousPrice ?? "null",
+            entry.newPrice ?? "null",
+            changedAtMs,
+            entry.source ?? "",
+          ].join("|");
+          if (!seenPriceHistory.has(sig)) {
+            seenPriceHistory.add(sig);
+            mergedPriceHistory.push(entry);
+          }
+        }
+      }
+      mergedPriceHistory.sort(
+        (a: any, b: any) =>
+          new Date(a.changedAt || 0).getTime() -
+          new Date(b.changedAt || 0).getTime(),
+      );
+
+      const latestTrackedPriceAt = mergedPriceHistory.length
+        ? mergedPriceHistory[mergedPriceHistory.length - 1]?.changedAt
+        : keeper.priceUpdatedAt;
+
       bulkOps.push({
         updateOne: {
           filter: { _id: keeper._id },
-          update: { $set: { vin: normVin, notes: keeperNotes } },
+          update: {
+            $set: {
+              vin: normVin,
+              notes: keeperNotes,
+              priceHistory: mergedPriceHistory,
+              ...(latestTrackedPriceAt
+                ? { priceUpdatedAt: latestTrackedPriceAt }
+                : {}),
+            },
+          },
         },
       });
 

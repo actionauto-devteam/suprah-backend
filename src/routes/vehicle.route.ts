@@ -36,6 +36,8 @@ router
     .post(vehicleController.createVehicle)
     .get(vehicleController.getVehicles);
 
+router.get('/:id/price-history', vehicleController.getVehiclePriceHistory);
+
 router
     .route('/:id')
     .get(vehicleController.getVehicleById)

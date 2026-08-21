@@ -23,6 +23,30 @@ const getUserId = (req: Request): string | undefined => {
   return (req.user as IUser)?._id?.toString();
 };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const getVehicleAgeDays = (vehicle: any) => {
+  const storedDays = Number(vehicle.daysOnLot);
+  if (Number.isFinite(storedDays) && storedDays > 0) {
+    return Math.max(0, Math.floor(storedDays));
+  }
+
+  const startValue = vehicle.dateAdded || vehicle.createdAt;
+  const startMs = startValue ? new Date(startValue).getTime() : Number.NaN;
+  if (!Number.isFinite(startMs)) return 0;
+
+  const endValue =
+    vehicle.isArchived === true
+      ? vehicle.archivedAt || vehicle.dateSold || new Date()
+      : new Date();
+  const endMs = new Date(endValue).getTime();
+
+  return Math.max(0, Math.floor((endMs - startMs) / DAY_MS));
+};
+
+const getPriceUpdatedAt = (vehicle: any) =>
+  vehicle.priceUpdatedAt || undefined;
+
 const normalizeVehicle = (vehicle: any) => ({
   id: vehicle._id.toString(),
   vin: vehicle.vin,
@@ -67,6 +91,8 @@ const normalizeVehicle = (vehicle: any) => ({
   reconStartDate: vehicle.reconStartDate,
   stepEnteredAt: vehicle.stepEnteredAt,
   daysOnLot: vehicle.daysOnLot || 0,
+  ageDays: getVehicleAgeDays(vehicle),
+  priceUpdatedAt: getPriceUpdatedAt(vehicle),
   dateAdded: vehicle.dateAdded,
   dateSold: vehicle.dateSold,
   assignedTo: vehicle.assignedTo,
@@ -175,9 +201,31 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
 
+  const initialPrice =
+    req.body?.price !== undefined && req.body?.price !== null
+      ? Number(req.body.price)
+      : undefined;
+  const createdAt = new Date();
+
   const vehicle = await Vehicle.create({
     ...req.body,
     organizationId: orgId,
+    priceUpdatedAt:
+      initialPrice !== undefined && Number.isFinite(initialPrice)
+        ? createdAt
+        : undefined,
+    priceHistory:
+      initialPrice !== undefined && Number.isFinite(initialPrice)
+        ? [
+            {
+              previousPrice: null,
+              newPrice: initialPrice,
+              changedAt: createdAt,
+              ...(userId ? { changedBy: userId } : {}),
+              source: "Suprah AI",
+            },
+          ]
+        : [],
   });
 
   const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
@@ -362,6 +410,9 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     case "updated":
       sortObj.updatedAt = order;
       break;
+    case "priceUpdated":
+      sortObj.priceUpdatedAt = order;
+      break;
     case "created":
     case "recent":
       sortObj.dateAdded = order;
@@ -543,6 +594,7 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
         "assignedTo.otp": 0,
         "assignedTo.otpExpires": 0,
         _leadData: 0,
+        priceHistory: 0,
       },
     },
   );
@@ -591,10 +643,9 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
     query.organizationId = orgId;
   }
 
-  const vehicle = await Vehicle.findOne(query).populate(
-    "assignedTo",
-    "email name",
-  );
+  const vehicle = await Vehicle.findOne(query)
+    .select("-priceHistory")
+    .populate("assignedTo", "email name");
 
   if (!vehicle) {
     throw new ApiError(404, "Vehicle not found");
@@ -630,7 +681,7 @@ const getPublicVehicleById = asyncHandler(
       _id: req.params.id,
       isDeleted: false,
     }).select(
-      "-cost -notes -assignedTo -organizationId -dealerEmail -isDeleted -manualStatusLock",
+      "-cost -notes -assignedTo -organizationId -dealerEmail -isDeleted -manualStatusLock -priceHistory",
     );
 
     if (!vehicle) {
@@ -662,8 +713,30 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(404, "Vehicle not found");
   }
 
-  const updateData = { ...req.body };
+  const updateData: Record<string, any> = { ...req.body };
   const oldStatus = existingVehicle.status;
+
+  // Price audit fields are server-managed so clients cannot rewrite history.
+  delete updateData.priceHistory;
+  delete updateData.priceUpdatedAt;
+
+  const requestedPrice =
+    updateData.price !== undefined && updateData.price !== null
+      ? Number(updateData.price)
+      : undefined;
+  const existingPrice =
+    existingVehicle.price !== undefined && existingVehicle.price !== null
+      ? Number(existingVehicle.price)
+      : undefined;
+  const priceChanged =
+    requestedPrice !== undefined &&
+    Number.isFinite(requestedPrice) &&
+    requestedPrice !== existingPrice;
+  const priceChangedAt = priceChanged ? new Date() : undefined;
+
+  if (priceChanged && priceChangedAt) {
+    updateData.priceUpdatedAt = priceChangedAt;
+  }
 
   if (
     updateData.currentStep &&
@@ -676,9 +749,25 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     updateData.manualStatusLock = true;
   }
 
+  const updateOperations: Record<string, any> = {
+    $set: updateData,
+  };
+
+  if (priceChanged && priceChangedAt && requestedPrice !== undefined) {
+    updateOperations.$push = {
+      priceHistory: {
+        previousPrice: existingPrice ?? null,
+        newPrice: requestedPrice,
+        changedAt: priceChangedAt,
+        ...(userId ? { changedBy: userId } : {}),
+        source: "Suprah AI",
+      },
+    };
+  }
+
   const vehicle = await Vehicle.findOneAndUpdate(
     { _id: req.params.id, organizationId: orgId },
-    updateData,
+    updateOperations,
     { new: true, runValidators: true },
   ).populate("assignedTo", "email name");
 
@@ -827,6 +916,74 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   // Invalidate vehicle cache on delete
   await cacheService.invalidateByPrefix("veh:");
 });
+
+const getVehiclePriceHistory = asyncHandler(
+  async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+
+    const vehicle = await Vehicle.findOne({
+      _id: req.params.id,
+      organizationId: orgId,
+      isDeleted: false,
+    })
+      .select(
+        "year make modelName trim stockNumber price priceUpdatedAt dateAdded isArchived archivedAt dateSold priceHistory",
+      )
+      .populate("priceHistory.changedBy", "name email")
+      .lean();
+
+    if (!vehicle) {
+      throw new ApiError(404, "Vehicle not found");
+    }
+
+    const rawHistory = Array.isArray((vehicle as any).priceHistory)
+      ? (vehicle as any).priceHistory
+      : [];
+
+    const history = rawHistory
+      .map((entry: any, index: number) => ({
+        id: entry._id?.toString?.() || `${vehicle._id.toString()}-${index}`,
+        previousPrice:
+          entry.previousPrice === null || entry.previousPrice === undefined
+            ? null
+            : Number(entry.previousPrice),
+        newPrice: Number(entry.newPrice || 0),
+        changedAt: entry.changedAt,
+        source: entry.source || "Suprah AI",
+        changedBy: entry.changedBy
+          ? {
+              id: entry.changedBy._id?.toString?.(),
+              name: entry.changedBy.name || "",
+              email: entry.changedBy.email || "",
+            }
+          : null,
+      }))
+      .sort(
+        (a: any, b: any) =>
+          new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime(),
+      );
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          vehicle: {
+            id: vehicle._id.toString(),
+            year: vehicle.year,
+            make: vehicle.make,
+            model: vehicle.modelName,
+            trim: vehicle.trim || "",
+            stockNumber: vehicle.stockNumber || "",
+            currentPrice: Number(vehicle.price || 0),
+            priceUpdatedAt: getPriceUpdatedAt(vehicle),
+          },
+          history,
+        },
+        "Vehicle pricing log fetched successfully",
+      ),
+    );
+  },
+);
 
 const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   const { text } = req.body;
@@ -1765,7 +1922,11 @@ const getMarketplaceVehicles = asyncHandler(
     pipeline.push({
       $facet: {
         metadata: [{ $count: "total" }],
-        data: [{ $skip: skip }, { $limit: limitNum > 0 ? limitNum : 100 }],
+        data: [
+          { $skip: skip },
+          { $limit: limitNum > 0 ? limitNum : 100 },
+          { $project: { priceHistory: 0 } },
+        ],
       },
     });
 
@@ -1880,6 +2041,7 @@ export default {
   updateVehicle,
   deleteVehicle,
   addVehicleNote,
+  getVehiclePriceHistory,
   getFilters,
   getStats,
   getDashboardGraphs,

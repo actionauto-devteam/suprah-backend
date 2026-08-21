@@ -13,6 +13,16 @@ export interface IVehicle extends Document {
     bodyStyle?: string;
 
     price?: number;
+    /** Exact timestamp of the most recently detected price change. */
+    priceUpdatedAt?: Date;
+    /** Persistent price audit trail; populated lazily by the pricing-log endpoint. */
+    priceHistory?: Array<{
+        previousPrice?: number | null;
+        newPrice: number;
+        changedAt: Date;
+        changedBy?: mongoose.Types.ObjectId;
+        source?: string;
+    }>;
     msrp?: number;
     cost?: number;
 
@@ -93,6 +103,18 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         bodyStyle: { type: String, trim: true },
 
         price: { type: Number },
+        // No default: legacy vehicles must not be given a fake "last price update"
+        // date just because this field was introduced later.
+        priceUpdatedAt: { type: Date },
+        priceHistory: [
+            {
+                previousPrice: { type: Number, default: null },
+                newPrice: { type: Number, required: true },
+                changedAt: { type: Date, default: Date.now },
+                changedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+                source: { type: String, trim: true, default: 'Suprah AI' },
+            },
+        ],
         msrp: { type: Number },
         cost: { type: Number },
 
