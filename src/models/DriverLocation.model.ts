@@ -4,7 +4,8 @@ export type DriverStatus = "on-route" | "idle" | "on-break" | "waiting" | "offli
 
 export interface IDriverLocation extends Document {
   userId: mongoose.Types.ObjectId;
-  organizationId: mongoose.Types.ObjectId;
+  /** Historical only — drivers are a shared pool, not org-owned. Never filtered on. */
+  organizationId?: mongoose.Types.ObjectId;
   status: DriverStatus;
   coords: {
     lat: number;
@@ -32,7 +33,7 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     organizationId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
-      required: true,
+      required: false,
       index: true,
     },
     status: {

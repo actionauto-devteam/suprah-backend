@@ -256,10 +256,8 @@ export async function getDriverLoadCompatibility(
   load: any,
 ): Promise<DriverLoadCompatibility> {
   const [profile, location] = await Promise.all([
-    DriverProfile.findOne({
-      userId: driverId,
-      organizationId,
-    }).lean(),
+    // A driver has one profile, not one per org (shared pool).
+    DriverProfile.findOne({ userId: driverId }).lean(),
     getDriverLocationForMatching(driverId, organizationId),
   ]);
 
@@ -296,10 +294,8 @@ export async function assertDriverLoadCompatibility(params: {
   // mutation path so a slow external geocoder can never delay assigning a
   // load. Recommendation signals are resolved by the read-only preview/list
   // endpoints instead.
-  const profile = await DriverProfile.findOne({
-    userId: driverId,
-    organizationId,
-  }).lean();
+  // A driver has one profile, not one per org (shared pool).
+  const profile = await DriverProfile.findOne({ userId: driverId }).lean();
   const compatibility = evaluateDriverLoadCompatibility(profile, load);
 
   if (actor === "driver") {

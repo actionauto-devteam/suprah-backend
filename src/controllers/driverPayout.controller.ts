@@ -172,7 +172,8 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   const duplicate = await DriverPayout.findOne({ organizationId: orgId, loadId, status: { $in: ['paid', 'processing'] } });
   if (duplicate) throw new ApiError(400, 'Payout already processing or paid for this load');
 
-  const driver = await User.findOne({ _id: driverId, role: 'driver', organizationId: orgId });
+  // Drivers are a shared platform-wide pool — payable by any org that had them on a load.
+  const driver = await User.findOne({ _id: driverId, role: 'driver' });
   if (!driver) throw new ApiError(404, 'Driver not found');
   if (!driver.stripeConnectAccountId) throw new ApiError(400, 'Driver has no Stripe Connect account');
 

@@ -92,7 +92,9 @@ export async function getDriverStatusContext(
   organizationId: string,
 ) {
   const [profile, request] = await Promise.all([
-    DriverProfile.findOne({ userId: driverId, organizationId }).lean(),
+    // A driver has one profile, not one per org (shared pool) — org here is
+    // only for the DriverStatusChangeRequest lookup below.
+    DriverProfile.findOne({ userId: driverId }).lean(),
     DriverStatusChangeRequest.findOne({
       organizationId,
       driverId,
@@ -314,7 +316,7 @@ export async function applyDriverOperationalStatus(params: {
   const profile = await DriverProfile.findOneAndUpdate(
     { userId: driverId },
     {
-      $set: { operationalStatus: status, organizationId },
+      $set: { operationalStatus: status },
       $setOnInsert: { userId: driverId },
     },
     { new: true, upsert: true },
@@ -331,8 +333,9 @@ export async function applyDriverOperationalStatus(params: {
   if (status === "maintenance") forcedLiveStatus = "waiting";
 
   if (forcedLiveStatus) {
+    // A driver has one location record, not one per org (shared pool).
     location = await DriverLocation.findOneAndUpdate(
-      { userId: driverId, organizationId },
+      { userId: driverId },
       {
         $set: {
           status: forcedLiveStatus,

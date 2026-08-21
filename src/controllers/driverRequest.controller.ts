@@ -4,7 +4,6 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import DriverRequest from "../models/DriverRequest.model";
 import User, { IUser } from "../models/User.model";
-import Organization from "../models/Organization.model";
 import DriverProfile from "../models/DriverProfile.model";
 import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
@@ -44,18 +43,12 @@ const createDriverRequest = asyncHandler(
 
     const driverRequest = await DriverRequest.create({
       driverUserId: userId,
-      organizationId: currentUser.organizationId,
       status: "pending",
     });
 
-    // Notify the driver's own org admins; fall back to all super_admins
-    // only if no org has been resolved for this driver yet.
-    const recipients = currentUser.organizationId
-      ? await User.find({
-          organizationId: currentUser.organizationId,
-          $or: [{ role: "admin" }, { organizationRole: "admin" }],
-        })
-      : await User.find({ role: "super_admin" });
+    // Drivers are a shared platform-wide pool — only the SUPRAH.AI
+    // super_admin reviews and approves new driver applications.
+    const recipients = await User.find({ role: "super_admin" });
 
     for (const admin of recipients) {
       try {
@@ -117,23 +110,13 @@ const getMyDriverRequestStatus = asyncHandler(
 
 const getDriverRequests = asyncHandler(
   async (req: Request, res: Response) => {
-    const user = req.user as IUser;
-    const orgRole = req.orgRole;
-
-    if (!orgRole && user.role !== 'super_admin' && user.role !== 'admin') {
-      throw new ApiError(403, "You do not have permission to view driver requests");
-    }
-
+    // Route is super_admin-only (see driverRequest.routes.ts) — drivers are a
+    // shared platform-wide pool, so there's no org to scope this list by.
     const { status } = req.query;
 
     const filter: any = {};
     if (status && status !== "all") {
       filter.status = status;
-    }
-
-    // super_admin sees every org; a plain org admin only sees their own org's requests.
-    if (user.role !== "super_admin") {
-      filter.organizationId = user.organizationId;
     }
 
     const requests = await DriverRequest.find(filter)
@@ -145,24 +128,12 @@ const getDriverRequests = asyncHandler(
   },
 );
 
-// GET /api/driver-requests/by-driver/:userId — org-scoped lookup used by the
-// admin driver-detail review page to show that driver's request status inline.
+// GET /api/driver-requests/by-driver/:userId — used by the super-admin
+// driver-detail review page to show that driver's request status inline.
+// Route is super_admin-only (see driverRequest.routes.ts).
 const getDriverRequestByDriver = asyncHandler(
   async (req: Request, res: Response) => {
-    const adminUser = req.user as IUser;
-    const orgRole = req.orgRole;
-
-    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
-    if (!isAdmin) {
-      throw new ApiError(403, "You do not have permission to view driver requests");
-    }
-
-    const filter: any = { driverUserId: req.params.userId };
-    if (adminUser.role !== "super_admin") {
-      filter.organizationId = adminUser.organizationId;
-    }
-
-    const request = await DriverRequest.findOne(filter).sort({ createdAt: -1 });
+    const request = await DriverRequest.findOne({ driverUserId: req.params.userId }).sort({ createdAt: -1 });
 
     res.json(new ApiResponse(200, request, "Driver request fetched"));
   },
@@ -170,14 +141,8 @@ const getDriverRequestByDriver = asyncHandler(
 
 const approveDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
+    // Route is super_admin-only (see driverRequest.routes.ts).
     const adminUser = req.user as IUser;
-    const orgRole = req.orgRole;
-
-    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
-
-    if (!isAdmin) {
-      throw new ApiError(403, "Only administrators can approve driver requests");
-    }
 
     const request = await DriverRequest.findOne({
       _id: req.params.id,
@@ -196,10 +161,8 @@ const approveDriverRequest = asyncHandler(
     driverUser.role = "driver";
     driverUser.isApproved = true;
     driverUser.onboardingCompleted = true;
-    const orgToAssign = request.organizationId || adminUser.organizationId;
-    if (orgToAssign) {
-      driverUser.organizationId = orgToAssign as any;
-    }
+    // Drivers are a shared platform-wide pool — approval does not assign
+    // them to any organization.
     await driverUser.save();
 
     request.status = "approved";
@@ -285,7 +248,7 @@ const approveDriverRequest = asyncHandler(
 
     await activityService.createActivity({
       userId: driverUser._id.toString(),
-      organizationId: (orgToAssign as any)?.toString() || 'global',
+      organizationId: 'global',
       type: 'profile_update',
       title: 'Driver Approved',
       description: `Account upgraded to Driver role by admin ${adminUser.name}`,
@@ -300,14 +263,8 @@ const approveDriverRequest = asyncHandler(
 
 const rejectDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
+    // Route is super_admin-only (see driverRequest.routes.ts).
     const adminUser = req.user as IUser;
-    const orgRole = req.orgRole;
-
-    const isAdmin = adminUser.role === 'super_admin' || adminUser.role === 'admin' || orgRole === 'admin';
-
-    if (!isAdmin) {
-      throw new ApiError(403, "Only administrators can reject driver requests");
-    }
 
     const request = await DriverRequest.findOne({
       _id: req.params.id,

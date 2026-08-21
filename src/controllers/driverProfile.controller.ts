@@ -21,10 +21,12 @@ const getUserId = (req: Request): string => {
   return user._id.toString();
 };
 
-const getOrCreateProfile = async (userId: string, organizationId: string) => {
+// A driver has exactly one profile — not org-owned, since drivers are a
+// shared pool across every organization.
+const getOrCreateProfile = async (userId: string) => {
   let profile = await DriverProfile.findOne({ userId });
   if (!profile) {
-    profile = await DriverProfile.create({ userId, organizationId });
+    profile = await DriverProfile.create({ userId });
   }
   return profile;
 };
@@ -34,13 +36,12 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
-  const orgId = user.organizationId?.toString() || "";
-  let profile = await getOrCreateProfile(user._id.toString(), orgId);
+  let profile = await getOrCreateProfile(user._id.toString());
 
   // Lazy finalization covers delivery flows that may complete outside the
   // Driver Tracking controller. Once the driver has zero active loads, an
   // approved transition becomes effective automatically.
-  await finalizeDriverStatusChangeIfClear(user._id.toString(), orgId);
+  await finalizeDriverStatusChangeIfClear(user._id.toString(), "global");
   profile = (await DriverProfile.findOne({ userId: user._id })) || profile;
 
   const profileObj = profile.toJSON();
@@ -70,8 +71,7 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
-  const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  const profile = await getOrCreateProfile(user._id.toString());
 
   const {
     trailerType,
@@ -127,7 +127,7 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
 
   await activityService.createActivity({
     userId: user._id.toString(),
-    organizationId: orgId,
+    organizationId: 'global',
     type: 'other',
     title: 'Equipment Updated',
     description: `Driver ${user.name} updated equipment details`,
@@ -140,8 +140,7 @@ const updateCompliance = asyncHandler(async (req: Request, res: Response) => {
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
-  const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  const profile = await getOrCreateProfile(user._id.toString());
 
   const {
     driversLicenseNumber,
@@ -169,7 +168,7 @@ const updateCompliance = asyncHandler(async (req: Request, res: Response) => {
 
   await activityService.createActivity({
     userId: user._id.toString(),
-    organizationId: orgId,
+    organizationId: 'global',
     type: 'other',
     title: 'Compliance Updated',
     description: `Driver ${user.name} updated license/insurance details`,
@@ -201,8 +200,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, `Expiration date is required for ${type.replace(/_/g, " ")}`);
   }
 
-  const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  const profile = await getOrCreateProfile(user._id.toString());
 
   if (profile.documents.length >= 20) {
     throw new ApiError(400, "Maximum of 20 documents allowed");
@@ -231,7 +229,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
   // Log activity
   await activityService.logComplianceActivity(
     user._id.toString(),
-    orgId,
+    'global',
     'compliance_uploaded',
     label,
     'Pending Review'
@@ -274,7 +272,7 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
 
   await activityService.createActivity({
     userId: user._id.toString(),
-    organizationId: profile.organizationId.toString(),
+    organizationId: profile.organizationId?.toString() || 'global',
     type: 'other',
     title: 'Document Deleted',
     description: `Driver ${user.name} removed a compliance document`,
@@ -287,9 +285,8 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
-  const orgId = user.organizationId?.toString() || "";
-  let profile = await getOrCreateProfile(user._id.toString(), orgId);
-  await finalizeDriverStatusChangeIfClear(user._id.toString(), orgId);
+  let profile = await getOrCreateProfile(user._id.toString());
+  await finalizeDriverStatusChangeIfClear(user._id.toString(), "global");
   profile = (await DriverProfile.findOne({ userId: user._id })) || profile;
 
   const {
@@ -338,7 +335,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
       ) {
         const openRequest = await getOpenDriverStatusRequest(
           user._id.toString(),
-          orgId,
+          "global",
         );
         if (openRequest) {
           throw new ApiError(
@@ -347,8 +344,8 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
           );
         }
 
+        // Shared-pool driver: count active loads across every org, not just one.
         const activeLoadCount = await Load.countDocuments({
-          organizationId: orgId,
           assignedDriverId: user._id,
           status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
         });
@@ -363,7 +360,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
 
       profile = await applyDriverOperationalStatus({
         driverId: user._id.toString(),
-        organizationId: orgId,
+        organizationId: "global",
         status: nextStatus,
       });
     }
@@ -375,7 +372,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
 
   await activityService.createActivity({
     userId: user._id.toString(),
-    organizationId: orgId,
+    organizationId: 'global',
     type: 'other',
     title: 'Logistics Updated',
     description: `Driver ${user.name} updated service area/routes or Dispatch Status`,
@@ -383,175 +380,12 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
-const getOrgDriverProfiles = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId as string;
-  if (!orgId) throw new ApiError(403, "Organization context required");
-
-  const profiles = await DriverProfile.find({ organizationId: orgId })
-    .select("userId trailerType maxVehicleCapacity operationalStatus profileCompletionScore isComplianceExpired truckMake truckModel specialFeatures homeBase serviceRadius verificationStatus")
-    .populate("userId", "name email avatar")
-    .lean();
-
-  const profilesWithSignedDocs = await Promise.all(profiles.map(async (p: any) => {
-    if (p.documents) {
-      for (const doc of p.documents) {
-        if (doc.fileUrl && !doc.fileUrl.startsWith('http')) {
-          const signed = await storageService.getSignedUrl(doc.fileUrl);
-          if (signed) doc.fileUrl = signed;
-        }
-      }
-    }
-    return p;
-  }));
-
-  res.json(new ApiResponse(200, profilesWithSignedDocs, "Organization driver profiles fetched"));
-});
-
-const getDriverProfileById = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = req.orgId as string;
-  if (!orgId) throw new ApiError(403, "Organization context required");
-
-  const profile = await DriverProfile.findOne({
-    userId: req.params.driverId,
-    organizationId: orgId,
-  }).populate("userId", "name email avatar");
-
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  const profileObj = profile.toJSON();
-  if (profileObj.documents) {
-    for (const doc of profileObj.documents) {
-      if (doc.fileUrl && !doc.fileUrl.startsWith('http')) {
-        const signed = await storageService.getSignedUrl(doc.fileUrl);
-        if (signed) doc.fileUrl = signed;
-      }
-    }
-  }
-
-  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
-  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
-  const complianceSummary = {
-    uploadedCount,
-    totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
-    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
-    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter(t => !uploadedTypes.has(t))
-  };
-
-  res.json(new ApiResponse(200, { ...profileObj, complianceSummary }, "Driver profile fetched"));
-});
-
-const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
-  const user = req.user as IUser;
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
-  if (!["admin", "super_admin"].includes(user.role)) {
-    throw new ApiError(403, "Only admins can verify documents");
-  }
-
-  const orgId = req.orgId as string;
-  if (!orgId) throw new ApiError(403, "Organization context required");
-
-  const { driverId, documentId } = req.params;
-  const { verified } = req.body;
-
-  if (typeof verified !== "boolean") {
-    throw new ApiError(400, "verified field must be a boolean");
-  }
-
-  const profile = await DriverProfile.findOne({
-    userId: driverId,
-    organizationId: orgId,
-  });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  const doc = profile.documents.find(
-    (d: any) => d._id?.toString() === documentId,
-  );
-  if (!doc) throw new ApiError(404, "Document not found");
-
-  doc.verified = verified;
-  if (verified) {
-    doc.verifiedBy = user._id as any;
-    doc.verifiedAt = new Date();
-  } else {
-    doc.verifiedBy = undefined;
-    doc.verifiedAt = undefined;
-  }
-
-  await profile.save();
-
-  // Log activity (Persona: Admin acting on Driver)
-  await activityService.logComplianceActivity(
-    driverId,
-    orgId,
-    'doc_verified',
-    doc.label,
-    verified ? 'Verified' : 'Unverified'
-  );
-
-  res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
-
-  logger.info({ profileId: profile._id, driverId, documentId, verified }, 'Document verification status changed');
-});
-
-const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
-  const user = req.user as IUser;
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
-  if (!["admin", "super_admin"].includes(user.role)) {
-    throw new ApiError(403, "Only admins can reject documents");
-  }
-
-  const orgId = req.orgId as string;
-  if (!orgId) throw new ApiError(403, "Organization context required");
-
-  const { driverId, documentId } = req.params;
-  const { reason } = req.body;
-
-  if (!reason || typeof reason !== "string" || reason.trim().length < 3) {
-    throw new ApiError(400, "A rejection reason is required (min 3 chars)");
-  }
-
-  const profile = await DriverProfile.findOne({
-    userId: driverId,
-    organizationId: orgId,
-  });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  const doc = profile.documents.find(
-    (d: any) => d._id?.toString() === documentId,
-  );
-  if (!doc) throw new ApiError(404, "Document not found");
-
-  doc.verified = false;
-  doc.verifiedBy = undefined;
-  doc.verifiedAt = undefined;
-  doc.rejectionReason = reason.trim();
-  doc.rejectedAt = new Date();
-  (doc as any).reviewStatus = "rejected";
-
-  await profile.save();
-
-  // Log activity (Persona: Admin acting on Driver)
-  await activityService.createActivity({
-    userId: driverId,
-    organizationId: orgId,
-    type: 'other',
-    title: 'Document Rejected',
-    description: `Document ${doc.label} was rejected: ${reason.trim()}`,
-    metadata: { documentId, reason: reason.trim(), adminId: user._id.toString() }
-  });
-
-  res.json(new ApiResponse(200, profile, "Document rejected"));
-
-  logger.warn({ profileId: profile._id, driverId, documentId, reason }, 'Compliance document rejected');
-});
-
 const updateIdentityVerification = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   if (user.role !== "driver") throw new ApiError(403, "Only drivers can access this");
 
-  const orgId = user.organizationId?.toString() || "";
-  const profile = await getOrCreateProfile(user._id.toString(), orgId);
+  const profile = await getOrCreateProfile(user._id.toString());
 
   const { ssnLast4, backgroundCheckConsent, verificationAgreement } = req.body;
 
@@ -601,47 +435,12 @@ const updateIdentityVerification = asyncHandler(async (req: Request, res: Respon
 
   await activityService.createActivity({
     userId: user._id.toString(),
-    organizationId: orgId,
+    organizationId: 'global',
     type: 'other',
     title: 'Identity Verification Update',
     description: `Driver ${user.name} updated tax/identity info`,
     metadata: { profileId: profile._id.toString(), status: profile.verificationStatus }
   });
-});
-
-const approveDriverProfile = asyncHandler(async (req: Request, res: Response) => {
-  const user = req.user as IUser;
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
-  if (!["admin", "super_admin"].includes(user.role)) {
-    throw new ApiError(403, "Only admins can approve driver profiles");
-  }
-
-  const orgId = req.orgId as string;
-  if (!orgId) throw new ApiError(403, "Organization context required");
-
-  const { driverId } = req.params;
-
-  const profile = await DriverProfile.findOne({
-    userId: driverId,
-    organizationId: orgId,
-  });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  profile.verificationStatus = "verified";
-  await profile.save();
-
-  await activityService.createActivity({
-    userId: driverId,
-    organizationId: orgId,
-    type: 'other',
-    title: 'Driver Profile Approved',
-    description: `Driver profile was approved by admin ${user.name}`,
-    metadata: { profileId: profile._id.toString(), approvedBy: user._id.toString() }
-  });
-
-  logger.info({ profileId: profile._id, driverId, approvedBy: user._id }, 'Driver profile approved by admin');
-
-  res.json(new ApiResponse(200, profile, "Driver profile approved"));
 });
 
 export default {
@@ -651,10 +450,5 @@ export default {
   uploadDocument,
   deleteDocument,
   updateLogistics,
-  getOrgDriverProfiles,
-  getDriverProfileById,
-  verifyDocument,
-  rejectDocument,
   updateIdentityVerification,
-  approveDriverProfile,
 };

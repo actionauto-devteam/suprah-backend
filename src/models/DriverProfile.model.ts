@@ -61,7 +61,8 @@ export type DriverOperationalStatus = (typeof DRIVER_OPERATIONAL_STATUSES)[numbe
 export interface IDriverProfile extends Document {
   _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
-  organizationId: string;
+  // Historical only — drivers are a shared pool, not org-owned.
+  organizationId?: string;
 
   // ── Equipment ──
   trailerType?: string;
@@ -172,9 +173,12 @@ const driverProfileSchema = new Schema<IDriverProfile>(
       unique: true,
       index: true,
     },
+    // Historical only — drivers are a shared pool across all organizations,
+    // not owned by the org they originally signed up under. Never filtered
+    // on for access control; kept for reference.
     organizationId: {
       type: String,
-      required: true,
+      required: false,
       index: true,
     },
 

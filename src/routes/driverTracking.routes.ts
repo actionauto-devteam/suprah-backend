@@ -115,6 +115,11 @@ router.post(
   staffOnly,
   driverTrackingController.sendDriverAlert,
 );
+router.get(
+  "/drivers/:driverId/profile",
+  staffOnly,
+  driverTrackingController.getDriverComplianceProfile,
+);
 router.post(
   "/alerts/:alertId/respond",
   driverTrackingController.respondToDriverAlert,

@@ -4,8 +4,12 @@ export type InviteAccountType = 'customer' | 'driver';
 
 export interface ICustomerInviteToken extends Document {
   shortCode: string;
-  organizationId: mongoose.Types.ObjectId;
-  createdBy: mongoose.Types.ObjectId;
+  // Unset for driver invites — drivers are a shared pool, not tied to one org.
+  organizationId?: mongoose.Types.ObjectId;
+  // Set for org-admin-generated (customer) invites.
+  createdBy?: mongoose.Types.ObjectId;
+  // Set for super_admin-generated (driver) invites.
+  createdByUser?: mongoose.Types.ObjectId;
   expiresAt: Date;
   isUsed: boolean;
   multiUse: boolean;
@@ -26,12 +30,17 @@ const CustomerInviteTokenSchema = new Schema<ICustomerInviteToken>(
     organizationId: {
       type: Schema.Types.ObjectId,
       ref: 'Organization',
-      required: true,
+      required: false,
     },
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: 'CrmUser',
-      required: true,
+      required: false,
+    },
+    createdByUser: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: false,
     },
     expiresAt: {
       type: Date,

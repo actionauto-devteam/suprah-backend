@@ -5,8 +5,9 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
 import User, { IUser } from "../models/User.model";
-import DriverProfile from "../models/DriverProfile.model";
+import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
+import storageService from "../services/storage.service";
 import DriverPayout from "../models/DriverPayout.model";
 import logger from "../utils/logger";
 import { getSocketIO, emitToOrg, emitToUser } from "../utils/socketEmitter";
@@ -398,7 +399,6 @@ const markLocationOffline = asyncHandler(
     const now = new Date();
     const existing: any = await DriverLocation.findOne({
       userId: user._id,
-      organizationId,
     });
 
     let location: any = existing;
@@ -477,7 +477,14 @@ const markLocationOffline = asyncHandler(
 const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
 
-  const locations = await DriverLocation.find({ organizationId }).lean();
+  // Drivers are a shared pool, so the live map only shows drivers currently
+  // working THIS org's active loads — not every driver on the platform.
+  const activeDriverIds = await Load.distinct("assignedDriverId", {
+    organizationId,
+    status: { $in: ACTIVE_LOAD_STATUSES },
+  });
+
+  const locations = await DriverLocation.find({ userId: { $in: activeDriverIds } }).lean();
   const userIds = locations.map((l: any) => l.userId);
 
   const [users, profiles, loads] = await Promise.all([
@@ -600,11 +607,12 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
 
   const [load, driver] = await Promise.all([
     Load.findOne({ _id: loadId, organizationId }),
-    User.findOne({ _id: driverId, organizationId, role: "driver", isActive: true }).lean(),
+    // Drivers are a shared platform-wide pool — assignable regardless of org.
+    User.findOne({ _id: driverId, role: "driver", isActive: true }).lean(),
   ]);
 
   if (!load) throw new ApiError(404, "Load not found");
-  if (!driver) throw new ApiError(404, "Driver not found in this organization");
+  if (!driver) throw new ApiError(404, "Driver not found");
   await assertDriverCanTakeNewWork(driverId, organizationId, "assign");
 
   // Normal assignment owns only Posted + unassigned loads. Already-assigned
@@ -698,11 +706,12 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
 
   const [load, driver] = await Promise.all([
     Load.findOne({ _id: loadId, organizationId }),
-    User.findOne({ _id: driverId, organizationId, role: "driver", isActive: true }).lean(),
+    // Drivers are a shared platform-wide pool — assignable regardless of org.
+    User.findOne({ _id: driverId, role: "driver", isActive: true }).lean(),
   ]);
 
   if (!load) throw new ApiError(404, "Load not found");
-  if (!driver) throw new ApiError(404, "Driver not found in this organization");
+  if (!driver) throw new ApiError(404, "Driver not found");
   await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
   if (["Delivered", "Cancelled"].includes(load.status)) {
     throw new ApiError(400, `Cannot reassign a load in ${load.status} status`);
@@ -908,7 +917,6 @@ const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
       // able to load the dashboard with safe defaults.
       DriverProfile.findOne({
         userId: user._id,
-        organizationId,
       })
         .select("profileCompletionScore isComplianceExpired")
         .lean(),
@@ -1100,10 +1108,10 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
     throw new ApiError(400, "No valid loads were supplied for compatibility preview");
   }
 
+  // Drivers are a shared platform-wide pool — not restricted to this org.
   const [drivers, profiles, locations] = await Promise.all([
     User.find({
       _id: { $in: requestedDriverIds },
-      organizationId,
       role: "driver",
       isActive: true,
     })
@@ -1111,11 +1119,9 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
       .lean(),
     DriverProfile.find({
       userId: { $in: requestedDriverIds },
-      organizationId,
     }).lean(),
     DriverLocation.find({
       userId: { $in: requestedDriverIds },
-      organizationId,
     })
       .select("userId coords isSharing lastSeenAt")
       .lean(),
@@ -1201,8 +1207,8 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const [loads, total, profile, location] = await Promise.all([
     Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     Load.countDocuments(filter),
-    DriverProfile.findOne({ userId: user._id, organizationId }).lean(),
-    DriverLocation.findOne({ userId: user._id, organizationId })
+    DriverProfile.findOne({ userId: user._id }).lean(),
+    DriverLocation.findOne({ userId: user._id })
       .select("coords isSharing lastSeenAt")
       .lean(),
   ]);
@@ -1283,11 +1289,8 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const [profile, location] = await Promise.all([
-    DriverProfile.findOne({
-      userId: user._id,
-      organizationId,
-    }).lean(),
-    DriverLocation.findOne({ userId: user._id, organizationId })
+    DriverProfile.findOne({ userId: user._id }).lean(),
+    DriverLocation.findOne({ userId: user._id })
       .select("coords isSharing lastSeenAt")
       .lean(),
   ]);
@@ -1559,16 +1562,16 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
     ),
   ];
 
+  // Drivers are a shared platform-wide pool — not restricted to this org.
   const [drivers, profiles, locations, eligibilityPairs] = await Promise.all([
     User.find({
       _id: { $in: driverIds },
-      organizationId,
       role: "driver",
     })
       .select("name email avatar")
       .lean(),
-    DriverProfile.find({ userId: { $in: driverIds }, organizationId }).lean(),
-    DriverLocation.find({ userId: { $in: driverIds }, organizationId })
+    DriverProfile.find({ userId: { $in: driverIds } }).lean(),
+    DriverLocation.find({ userId: { $in: driverIds } })
       .select("userId coords isSharing lastSeenAt")
       .lean(),
     Promise.all(
@@ -2285,10 +2288,44 @@ const dropLoad = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, load, "Load released"));
 });
 
+// GET /api/driver-tracking/drivers/:driverId/profile
+// Read-only compliance profile lookup for any org's dispatch staff. Drivers
+// are a shared platform-wide pool, so this is not org-scoped, but it stays
+// staff-gated (not public) and returns no mutation actions.
+const getDriverComplianceProfile = asyncHandler(async (req: Request, res: Response) => {
+  const profile = await DriverProfile.findOne({
+    userId: req.params.driverId,
+  }).populate("userId", "name email avatar");
+
+  if (!profile) throw new ApiError(404, "Driver profile not found");
+
+  const profileObj = profile.toJSON();
+  if (profileObj.documents) {
+    for (const doc of profileObj.documents) {
+      if (doc.fileUrl && !doc.fileUrl.startsWith("http")) {
+        const signed = await storageService.getSignedUrl(doc.fileUrl);
+        if (signed) doc.fileUrl = signed;
+      }
+    }
+  }
+
+  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
+  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter((t) => uploadedTypes.has(t)).length;
+  const complianceSummary = {
+    uploadedCount,
+    totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
+    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
+    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter((t) => !uploadedTypes.has(t)),
+  };
+
+  res.json(new ApiResponse(200, { ...profileObj, complianceSummary }, "Driver profile fetched"));
+});
+
 export default {
   heartbeat,
   markLocationOffline,
   getActiveDrivers,
+  getDriverComplianceProfile,
   getDashboardStats,
   getPendingLoadRequests,
   previewDriverLoadCompatibility,

@@ -103,7 +103,9 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
   const includeInactive = req.query.includeInactive === "true";
 
-  const userFilter: Record<string, unknown> = { organizationId, role: "driver" };
+  // Drivers are a shared platform-wide pool — every org's dispatchers see
+  // the same driver directory, not just drivers who signed up under them.
+  const userFilter: Record<string, unknown> = { role: "driver" };
   if (!includeInactive) userFilter.isActive = true;
 
   const users: any[] = await User.find(userFilter)

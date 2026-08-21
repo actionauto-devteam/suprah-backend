@@ -1,10 +1,11 @@
 import express from "express";
 import auth from "../middleware/auth.middleware";
-import authorize from "../middleware/role.middleware";
+import { requireSuperAdmin } from "../middleware/rbac.middleware";
 import driverRequestController from "../controllers/driverRequest.controller";
 
 const router = express.Router();
 
+// Driver self-service — any authenticated driver.
 router.post("/", auth(), driverRequestController.createDriverRequest);
 router.get(
   "/my-status",
@@ -12,22 +13,25 @@ router.get(
   driverRequestController.getMyDriverRequestStatus,
 );
 
-router.get("/", auth(), driverRequestController.getDriverRequests);
+// Admin review — drivers are a shared platform-wide pool, so only the
+// SUPRAH.AI super_admin reviews/approves/rejects applications.
+router.get("/", auth(), requireSuperAdmin, driverRequestController.getDriverRequests);
 router.get(
   "/by-driver/:userId",
   auth(),
+  requireSuperAdmin,
   driverRequestController.getDriverRequestByDriver,
 );
 router.patch(
   "/:id/approve",
   auth(),
-  authorize(['super_admin', 'admin']),
+  requireSuperAdmin,
   driverRequestController.approveDriverRequest,
 );
 router.patch(
   "/:id/reject",
   auth(),
-  authorize(['super_admin', 'admin']),
+  requireSuperAdmin,
   driverRequestController.rejectDriverRequest,
 );
 
