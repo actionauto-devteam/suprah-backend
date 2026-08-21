@@ -458,9 +458,10 @@ export async function evaluateDriverRouteCompatibility(
 
 export async function getDriverLocationForMatching(
   driverId: string,
-  organizationId: string,
+  _organizationId: string,
 ) {
-  return DriverLocation.findOne({ userId: driverId, organizationId })
+  // A driver has one location record, not one per org (shared pool).
+  return DriverLocation.findOne({ userId: driverId })
     .select("coords isSharing lastSeenAt")
     .lean();
 }

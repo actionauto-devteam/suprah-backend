@@ -56,10 +56,10 @@ class AuthService {
 
             if (roleToAssign === 'driver' && !inviteToken) {
                 isApproved = false;
-                // The dedicated /sign-up/driver form already collects role +
-                // organization together, so there's no separate role-selection
-                // step needed — treat registration itself as onboarding-complete
-                // (approval is a distinct, separate gate handled by isApproved).
+                // The dedicated /sign-up/driver form already collects everything
+                // needed, so there's no separate role-selection step needed —
+                // treat registration itself as onboarding-complete (approval is
+                // a distinct, separate gate handled by isApproved).
                 onboardingCompleted = true;
             }
 
@@ -68,7 +68,10 @@ class AuthService {
                 finalGlobalRole = 'employee';
             }
 
-            if (!orgId && finalGlobalRole !== 'customer') {
+            // Drivers are a shared pool across every organization, not owned by
+            // one dealership — never resolve/assign an org for them, even via
+            // the single-org fallback in resolveCustomerOrgId.
+            if (!orgId && finalGlobalRole !== 'customer' && finalGlobalRole !== 'driver') {
                 orgId = await this.resolveCustomerOrgId({ organizationId, dealershipSlug });
             }
 
@@ -518,24 +521,20 @@ class AuthService {
         return undefined;
     }
 
-    private async ensureDriverRequest(user: IUser) {
+    // Public so other creation paths (e.g. driver invite-link registration)
+    // can reuse the same DriverRequest + super_admin notification flow.
+    async ensureDriverRequest(user: IUser) {
         try {
             const existingRequest = await DriverRequest.findOne({ driverUserId: user._id, status: 'pending' });
             if (!existingRequest) {
                 const driverRequest = await DriverRequest.create({
                     driverUserId: user._id,
-                    organizationId: user.organizationId,
                     status: 'pending'
                 });
 
-                // Notify the driver's own org admins so the right people see it.
-                // Fall back to all super_admins only if no org was resolved yet.
-                const recipients = user.organizationId
-                    ? await User.find({
-                        organizationId: user.organizationId,
-                        $or: [{ role: 'admin' }, { organizationRole: 'admin' }],
-                    })
-                    : await User.find({ role: 'super_admin' });
+                // Drivers are a shared platform-wide pool — only the SUPRAH.AI
+                // super_admin reviews and approves new driver applications.
+                const recipients = await User.find({ role: 'super_admin' });
 
                 for (const admin of recipients) {
                     await notificationService.createNotification({

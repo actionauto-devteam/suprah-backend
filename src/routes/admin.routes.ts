@@ -1,6 +1,7 @@
 import express from "express";
 import adminController from "../controllers/admin.controller";
 import adminReferralController from "../controllers/admin.referral.controller";
+import driverAdminController from "../controllers/driverAdmin.controller";
 import { adminAdjustPoints } from "../controllers/membership.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
@@ -61,5 +62,14 @@ router.post(
 );
 
 router.post("/membership/adjust-points", adminAdjustPoints);
+
+// Drivers are a shared platform-wide pool — administered here, not per org.
+router.post("/drivers/invite-link", driverAdminController.generateDriverInviteLink);
+router.post("/drivers/invite-link/bulk", driverAdminController.bulkGenerateDriverInviteLinks);
+router.get("/drivers", driverAdminController.getAllDrivers);
+router.get("/drivers/:driverId", driverAdminController.getDriverById);
+router.patch("/drivers/:driverId/approve", driverAdminController.approveDriverProfile);
+router.patch("/drivers/:driverId/documents/:documentId/verify", driverAdminController.verifyDocument);
+router.patch("/drivers/:driverId/documents/:documentId/reject", driverAdminController.rejectDocument);
 
 export default router;
