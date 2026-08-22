@@ -170,7 +170,7 @@ async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
 
 
 function buildSystemPrompt(module: string, contextData: any, user: any): string {
-  const baseIdentity = `You are Suprah Autrix, the intelligent AI assistant embedded in the Action Auto CRM system. You are sharp, warm, confident, and deeply knowledgeable about automotive sales, lead management, and CRM workflows. You always address the user respectfully and helpfully.
+  const baseIdentity = `You are Suprah Autrix, the intelligent AI assistant embedded in the Suprah.AI CRM system. You are sharp, warm, confident, and deeply knowledgeable about automotive sales, lead management, and CRM workflows. You always address the user respectfully and helpfully.
 
 Current user: ${user?.fullName || 'Agent'} (Role: ${user?.role || 'employee'})
 Current module context: ${module}
@@ -883,7 +883,7 @@ export const meetingChat = asyncHandler(async (req: Request, res: Response) => {
     ? `\n\nLIVE CALL TRANSCRIPT (use this as context for all responses):\n"""\n${transcript.trim().slice(0, 10000)}\n"""`
     : '\n\n(No transcript available yet — the call may have just started or transcription is not running.)';
 
-  const systemPrompt = `You are Suprah Autrix, the AI assistant for Action Auto CRM, embedded inside the tray-app during a live call or meeting.
+  const systemPrompt = `You are Suprah Autrix, the AI assistant for Suprah.AI CRM, embedded inside the tray-app during a live call or meeting.
 
 Current user: ${user.fullName || 'Agent'} (Role: ${user.role || 'employee'})
 Meeting: ${callTitle}

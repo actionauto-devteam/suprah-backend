@@ -97,7 +97,7 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
     try {
         await emailService.sendEmail({
             to: email,
-            subject: `You've been invited to join ${org?.name} on Action Auto`,
+            subject: `You've been invited to join ${org?.name} on Suprah.AI`,
             text: `You have been invited to join the organization ${org?.name}. Click here to accept: ${inviteLink}`,
             html: `
                 <div style="font-family: Arial, sans-serif; padding: 20px;">
@@ -379,7 +379,7 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
 
             await emailService.sendEmail({
                 to: email,
-                subject: `You've been invited to join ${org.name} on Action Auto`,
+                subject: `You've been invited to join ${org.name} on Suprah.AI`,
                 text: `You have been invited to join the organization ${org.name}. Accept here: ${inviteLink}`,
                 html: `
                     <div style="font-family: Arial, sans-serif; padding: 20px;">

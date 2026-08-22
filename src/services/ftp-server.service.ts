@@ -65,7 +65,7 @@ export class ActionFtpServer {
                 pasv_url: ftpServerConfig.passiveUrl,
                 pasv_min: ftpServerConfig.pasv_min,
                 pasv_max: ftpServerConfig.pasv_max,
-                greeting: ['Welcome to ActionAuto FTP Server'],
+                greeting: ['Welcome to Suprah.AI FTP Server'],
                 anonymous: false,
                 tls: tls,
             });

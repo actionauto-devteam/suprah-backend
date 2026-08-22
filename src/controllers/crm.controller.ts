@@ -890,7 +890,7 @@ const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
   user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
   await user.save({ validateModifiedOnly: true });
 
-  await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp);
+  await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp, user.organizationId?.toString());
 
   res.json(
     new ApiResponse(

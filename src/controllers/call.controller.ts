@@ -15,7 +15,13 @@ import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '..
 import config from '../config';
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
-const DEFAULT_MEETING_DOMAIN = 'actionautoutah.com';
+// No default email-domain auto-approval for meetings — this used to be
+// hardcoded to the original single-tenant client's ('actionautoutah.com')
+// domain, which meant on a multi-tenant deployment ANY user with that email
+// domain would auto-join every org's meetings (see hasAllowedDomain below).
+// Leaving this empty makes domain-based auto-approval opt-in per meeting
+// instead of silently defaulting to a stale, unrelated tenant's domain.
+const DEFAULT_MEETING_DOMAIN = '';
 const SUPRA_MEETING_DEPARTMENTS = [
   'SalesAndFinance',
   'Accounting',

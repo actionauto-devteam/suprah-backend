@@ -103,7 +103,7 @@ export function generateInquiryADF(data: {
         price: data.vehicle.price?.toString(),
       },
       provider: {
-        name: 'ActionAuto Digital Retail',
+        name: 'Suprah.AI Digital Retail',
       },
     },
   });

@@ -67,6 +67,7 @@ interface CRMData {
 interface ReferralData {
   referredName: string;
   amount?: number;
+  dealerName?: string;
 }
 
 interface FeedData {
@@ -397,7 +398,7 @@ export const notificationTemplates = {
   // ==================== REFERRALS ====================
   referral_joined: (data: ReferralData) => ({
     title: 'New Referral Signup!',
-    message: `${data.referredName} just joined Action Auto using your referral code. You'll earn $100 when they purchase their first vehicle!`,
+    message: `${data.referredName} just joined ${data.dealerName || 'Your Dealership'} using your referral code. You'll earn $100 when they purchase their first vehicle!`,
   }),
 
   referral_rewarded: (data: ReferralData) => ({

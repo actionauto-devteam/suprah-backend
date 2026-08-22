@@ -27,7 +27,7 @@ const SHIFT_ALERT_SOUND_FILE = '/sounds/warning_sound.wav';
  * its own, not a generic one two unrelated features both mutate).
  */
 async function getOrCreateShiftAlertsSender(organizationId: string) {
-  const email = `shift-alerts.${organizationId}@system.actionautoutah.com`;
+  const email = `shift-alerts.${organizationId}@system.suprah.ai`;
   const existing = await CrmUser.findOne({
     organizationId,
     isSystem: true,

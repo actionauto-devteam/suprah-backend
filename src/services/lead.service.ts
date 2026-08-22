@@ -92,10 +92,15 @@ class LeadService {
           price: vehicle.price?.toString(),
         },
         vendor: {
-          name: org.name || 'Action Auto Sales and Finance LLC',
+          name: org.name || 'Your Dealership',
           contact: {
             name: org.name,
             email: config.gmailAddress,
+            // NOTE: street/city/regioncode/postalcode below are still the
+            // original single-tenant client's business address, hardcoded
+            // for every org's ADF lead. Organization has no address field
+            // today, so making this per-tenant needs a schema addition —
+            // flagged rather than guessed at here.
             address: {
               street: '170 West State Road',
               city: 'Lehi',
@@ -105,9 +110,9 @@ class LeadService {
           }
         },
         provider: {
-          name: 'ActionAuto Digital Retail',
+          name: 'Suprah.AI Digital Retail',
           service: 'Website Inquiry',
-          url: 'https://www.actionautoutah.com'
+          url: 'https://www.suprah.ai'
         },
       },
     };
@@ -115,7 +120,7 @@ class LeadService {
     const adfXml = generateADF(adfData);
 
     const vehicleFull = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
-    const subject = `vehicle lead for ${org.name}-${vehicleFull} (www.actionautoutah.com)`;
+    const subject = `vehicle lead for ${org.name}-${vehicleFull} (www.suprah.ai)`;
 
     // 6. Send Email (The "Bounce" Flow)
     await orgGmailService.sendEmail(

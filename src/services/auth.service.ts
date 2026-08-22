@@ -13,6 +13,22 @@ import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
 
 class AuthService {
+    /**
+     * Resolve a tenant's display name for account-related email copy.
+     * Falls back to the platform brand when there's no org context yet
+     * (e.g. a customer verifying their account before being linked to a
+     * dealership) — never to a specific dealership name.
+     */
+    private async resolveDealerName(organizationId?: mongoose.Types.ObjectId | string | null): Promise<string> {
+        if (!organizationId) return 'Suprah.AI';
+        try {
+            const org = await Organization.findById(organizationId).select('name').lean();
+            return org?.name || 'Suprah.AI';
+        } catch {
+            return 'Suprah.AI';
+        }
+    }
+
     async register(userData: {
         name: string;
         email: string;
@@ -98,11 +114,12 @@ class AuthService {
 
             let emailSent = true;
             try {
+                const dealerName = await this.resolveDealerName(orgId);
                 await emailService.sendEmail({
                     to: user.email,
-                    subject: 'Verify Your Action Auto Account',
+                    subject: `Verify Your ${dealerName} Account`,
                     text: `Your verification code is: ${otp}`,
-                    html: `<h1>Account Verification</h1><p>Welcome to Action Auto! Your verification code is: <strong>${otp}</strong></p>`
+                    html: `<h1>Account Verification</h1><p>Welcome to ${dealerName}! Your verification code is: <strong>${otp}</strong></p>`
                 });
             } catch (emailErr) {
                 console.error('[AuthService] Failed to send verification email:', emailErr);
@@ -153,9 +170,10 @@ class AuthService {
         await user.save();
 
         try {
+            const dealerName = await this.resolveDealerName(user.organizationId);
             await emailService.sendEmail({
                 to: user.email,
-                subject: 'Your Action Auto Verification Code',
+                subject: `Your ${dealerName} Verification Code`,
                 text: `Your verification code is: ${otp}`,
                 html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code will expire in 15 minutes.</p>`
             });
@@ -299,9 +317,10 @@ class AuthService {
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
 
+        const upgradeDealerName = await this.resolveDealerName(user.organizationId);
         await emailService.sendEmail({
             to: user.email,
-            subject: 'Your Action Auto Security Code',
+            subject: `Your ${upgradeDealerName} Security Code`,
             text: `Your upgrade code is: ${otp}. This code expires in 15 minutes.`,
             html: `<h1>Security Upgrade</h1><p>Your security code is: <strong>${otp}</strong></p><p>Use this to set your new account password.</p>`
         });
@@ -408,9 +427,10 @@ class AuthService {
         user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await user.save();
 
+        const resetDealerName = await this.resolveDealerName(user.organizationId);
         await emailService.sendEmail({
             to: user.email,
-            subject: 'Reset Your Action Auto Password',
+            subject: `Reset Your ${resetDealerName} Password`,
             text: `Your password reset code is: ${otp}. This code expires in 15 minutes.`,
             html: `<h1>Reset Password</h1><p>Your password reset code is: <strong>${otp}</strong></p><p>Use this to set a new password for your account.</p>`
         });

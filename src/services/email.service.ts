@@ -6,6 +6,7 @@ import { IUser } from '../models/User.model';
 import ical, { ICalAttendeeStatus, ICalAttendeeRole, ICalEventStatus, ICalAlarmType, ICalCalendarMethod } from 'ical-generator';
 import { google } from 'googleapis';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
+import Organization from '../models/Organization.model';
 import { decrypt } from '../utils/crypto';
 
 interface EmailOptions {
@@ -37,6 +38,21 @@ class EmailService {
         });
     }
 
+    /**
+     * Resolve a tenant's display name for use in dealer-facing copy
+     * (email templates, calendar invites, etc). Falls back when no
+     * organizationId is provided or the org/name can't be found.
+     */
+    private async resolveDealerName(organizationId?: string, fallback: string = 'Your Dealership'): Promise<string> {
+        if (!organizationId) return fallback;
+        try {
+            const org = await Organization.findById(organizationId).select('name').lean();
+            return org?.name || fallback;
+        } catch {
+            return fallback;
+        }
+    }
+
     private async getOrgOAuth2Client(organizationId: string) {
         const orgConfig = await OrgLeadConfig.findOne({ organizationId, isActive: true });
         if (!orgConfig || !orgConfig.refreshToken || !orgConfig.gmailConnected) {
@@ -64,7 +80,7 @@ class EmailService {
     private async sendEmailViaGmailApi(oauth2Client: any, options: EmailOptions): Promise<void> {
         const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
         
-        const boundary = "__action_auto_boundary__";
+        const boundary = "__suprah_boundary__";
         const parts = [
             `To: ${options.to}`,
             `Subject: ${options.subject}`,
@@ -126,8 +142,13 @@ class EmailService {
         }
 
         // Fallback to SMTP
+        // Service-wide default sender name: resolve the tenant's dealership
+        // name when we know which org this email is for, otherwise fall
+        // back to the platform brand (there's no single dealership to
+        // attribute a generic/system email to).
+        const dealerName = await this.resolveDealerName(options.organizationId, 'Suprah.AI');
         const mailOptions: any = {
-            from: `Action Auto <${config.email.user}>`,
+            from: `${dealerName} <${config.email.user}>`,
             to: options.to,
             subject: options.subject,
             text: options.text,
@@ -163,10 +184,11 @@ class EmailService {
         appointment: IAppointment,
         organizer: IEmailOrganizer,
         guestEmail: string,
-        method: 'REQUEST' | 'CANCEL' = 'REQUEST'
+        method: 'REQUEST' | 'CANCEL' = 'REQUEST',
+        dealerName: string = 'Your Dealership'
     ): any {
         const calendar = ical({
-            name: 'Action Auto Appointment',
+            name: `${dealerName} Appointment`,
             method: method === 'REQUEST' ? ICalCalendarMethod.REQUEST : ICalCalendarMethod.CANCEL
         });
 
@@ -174,7 +196,7 @@ class EmailService {
             start: appointment.startTime,
             end: appointment.endTime,
             summary: appointment.title,
-            description: this.buildEventDescription(appointment),
+            description: this.buildEventDescription(appointment, dealerName),
             location: appointment.location || '',
             url: appointment.meetingLink || undefined,
             organizer: {
@@ -200,7 +222,7 @@ class EmailService {
             ]
         });
 
-        event.uid(`appointment-${appointment._id}@actionauto.com`);
+        event.uid(`appointment-${appointment._id}@suprah.ai`);
         event.sequence(0);
 
         return calendar;
@@ -209,7 +231,7 @@ class EmailService {
     /**
      * Build rich event description
      */
-    private buildEventDescription(appointment: IAppointment): string {
+    private buildEventDescription(appointment: IAppointment, dealerName: string = 'Your Dealership'): string {
         let description = appointment.description || '';
 
         if (appointment.notes) {
@@ -224,7 +246,7 @@ class EmailService {
             description += `\n\nJoin Meeting: ${appointment.meetingLink}`;
         }
 
-        description += `\n\nOrganized by Action Auto Utah`;
+        description += `\n\nOrganized by ${dealerName}`;
 
         return description.trim();
     }
@@ -254,8 +276,10 @@ class EmailService {
             minute: '2-digit'
         });
 
+        const dealerName = await this.resolveDealerName(organizationId);
+
         // Generate ICS file
-        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'REQUEST');
+        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'REQUEST', dealerName);
 
         const html = `
             <!DOCTYPE html>
@@ -381,7 +405,7 @@ class EmailService {
             <body>
                 <div class="container">
                     <div class="header">
-                        <div class="logo">ACTION AUTO UTAH</div>
+                        <div class="logo">${dealerName.toUpperCase()}</div>
                         <h1>You're Invited!</h1>
                         <p style="margin: 8px 0 0 0; opacity: 0.9;">Calendar Invitation</p>
                     </div>
@@ -445,7 +469,7 @@ class EmailService {
                     </div>
                     
                     <div class="footer">
-                        <p><strong>Action Auto - Appointment System</strong></p>
+                        <p><strong>${dealerName} - Appointment System</strong></p>
                         <p>Questions? Contact ${organizer.email}</p>
                         <p style="margin-top: 12px; color: #9ca3af; font-size: 11px;">
                             This is an automated calendar invitation. Your RSVP via your calendar app will notify the organizer.
@@ -481,7 +505,7 @@ YOUR RESPONSE WILL AUTOMATICALLY NOTIFY THE ORGANIZER
 When you click Yes or No in your calendar app, ${organizer.name} will be notified instantly.
 
 ---
-Action Auto - Appointment System
+${dealerName} - Appointment System
 Questions? Contact ${organizer.email}
         `;
 
@@ -515,8 +539,10 @@ Questions? Contact ${organizer.email}
             minute: '2-digit'
         });
 
+        const dealerName = await this.resolveDealerName(organizationId);
+
         // Generate updated ICS file (same UID, incremented sequence)
-        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'REQUEST');
+        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'REQUEST', dealerName);
 
         const html = `
             <!DOCTYPE html>
@@ -600,7 +626,7 @@ Questions? Contact ${organizer.email}
                     </div>
                     
                     <div class="footer">
-                        <p><strong>Action Auto - Appointment System</strong></p>
+                        <p><strong>${dealerName} - Appointment System</strong></p>
                         <p>Questions? Contact ${organizer.email}</p>
                     </div>
                 </div>
@@ -645,8 +671,10 @@ Questions? Contact ${organizer.email}
         guestEmail: string,
         organizationId?: string
     ): Promise<void> {
+        const dealerName = await this.resolveDealerName(organizationId);
+
         // Generate cancellation ICS file
-        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'CANCEL');
+        const icsCalendar = this.generateICS(appointment, organizer, guestEmail, 'CANCEL', dealerName);
 
         const html = `
             <!DOCTYPE html>
@@ -718,7 +746,7 @@ Questions? Contact ${organizer.email}
                     </div>
                     
                     <div class="footer">
-                        <p><strong>Action Auto - Appointment System</strong></p>
+                        <p><strong>${dealerName} - Appointment System</strong></p>
                         <p>Questions? Contact ${organizer.email}</p>
                     </div>
                 </div>
@@ -769,29 +797,31 @@ Questions? Contact ${organizer.email}
             minute: '2-digit'
         });
 
+        const dealerName = await this.resolveDealerName(organizationId);
+
         const html = `
             <!DOCTYPE html>
             <html>
             <head>
                 <style>
-                    body { 
-                        font-family: Arial, sans-serif; 
-                        line-height: 1.6; 
-                        color: #333; 
+                    body {
+                        font-family: Arial, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
                         background-color: #f4f4f4;
                         margin: 0;
                         padding: 0;
                     }
-                    .container { 
-                        max-width: 600px; 
-                        margin: 20px auto; 
+                    .container {
+                        max-width: 600px;
+                        margin: 20px auto;
                         background: white;
                         border-radius: 8px;
                         overflow: hidden;
                         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                     }
-                    .header { 
-                        background: #8b5cf6; 
+                    .header {
+                        background: #8b5cf6;
                         color: white; 
                         padding: 30px 20px; 
                         text-align: center;
@@ -841,7 +871,7 @@ Questions? Contact ${organizer.email}
                     </div>
                     
                     <div class="footer">
-                        <p><strong>Action Auto - Appointment System</strong></p>
+                        <p><strong>${dealerName} - Appointment System</strong></p>
                     </div>
                 </div>
             </body>
@@ -875,7 +905,8 @@ See you there!
     /**
      * Send CRM password reset OTP email
      */
-    async sendCrmPasswordResetEmail(to: string, fullName: string, otp: string): Promise<void> {
+    async sendCrmPasswordResetEmail(to: string, fullName: string, otp: string, organizationId?: string): Promise<void> {
+        const dealerName = await this.resolveDealerName(organizationId);
         const html = `
             <!DOCTYPE html>
             <html>
@@ -898,7 +929,7 @@ See you there!
                 <div class="container">
                     <div class="header">
                         <h1>Password Reset</h1>
-                        <p>Action Auto CRM System</p>
+                        <p>${dealerName} CRM System</p>
                     </div>
                     <div class="content">
                         <p style="font-size:15px;">Hi <strong>${fullName}</strong>,</p>
@@ -912,7 +943,7 @@ See you there!
                         </div>
                     </div>
                     <div class="footer">
-                        <p><strong>Action Auto CRM</strong> &middot; Do not share this code with anyone</p>
+                        <p><strong>${dealerName} CRM</strong> &middot; Do not share this code with anyone</p>
                     </div>
                 </div>
             </body>
@@ -922,8 +953,9 @@ See you there!
         await this.sendEmail({
             to,
             subject: `Your CRM Password Reset Code: ${otp}`,
-            text: `Hi ${fullName},\n\nYour CRM password reset code is: ${otp}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, ignore this email.\n\n— Action Auto CRM`,
+            text: `Hi ${fullName},\n\nYour CRM password reset code is: ${otp}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, ignore this email.\n\n— ${dealerName} CRM`,
             html,
+            organizationId,
         });
     }
 }
