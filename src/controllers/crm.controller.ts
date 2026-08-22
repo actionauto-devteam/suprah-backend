@@ -23,6 +23,7 @@ import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExempt
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
+import { resolveNextEmployeeId } from "../utils/employeeId.util";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -448,23 +449,6 @@ const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
     new ApiResponse(200, { logs, total: logs.length }, "Time logs fetched"),
   );
 });
-
-const resolveNextEmployeeId = async (
-  organizationId: string | undefined,
-): Promise<string> => {
-  const year = new Date().getFullYear();
-
-  const lastUser = await CrmUser.findOne(
-    { username: new RegExp(`^${year}-`) },
-    { username: 1 },
-    { sort: { username: -1 } },
-  );
-
-  if (!lastUser) return `${year}-00001`;
-
-  const seq = parseInt(lastUser.username.split("-")[1], 10);
-  return `${year}-${String(seq + 1).padStart(5, "0")}`;
-};
 
 const getNextEmployeeId = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;

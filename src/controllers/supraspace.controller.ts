@@ -20,6 +20,7 @@ import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
+import { resolveNextEmployeeId } from '../utils/employeeId.util';
 
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
@@ -140,17 +141,13 @@ async function ensureCrmIdentityForMainUser(
   crmUser = await validateExisting(crmUser);
   if (crmUser) return crmUser;
 
-  const idSuffix = String(mainUser._id ?? '').slice(-8) || randomBytes(4).toString('hex');
-  const usernameBase =
-    (email.split('@')[0] || 'driver')
-      .replace(/[^a-z0-9._-]/gi, '')
-      .slice(0, 40) || 'driver';
+  const employeeId = await resolveNextEmployeeId(organizationId);
 
   try {
     const created = await CrmUser.create({
       organizationId,
       fullName: String(mainUser.name ?? '').trim() || email,
-      username: `${usernameBase}-${idSuffix}`,
+      username: employeeId,
       email,
       // This identity is SSO-only. The random value is hashed by CrmUser's
       // pre-save hook and is never disclosed or used as a driver password.
