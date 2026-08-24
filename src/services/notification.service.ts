@@ -155,6 +155,74 @@ const CATEGORY_PUSH_LABELS: Record<NotificationCategory, string> = {
   adminStaffActivity: 'Admin', adminSecurityAudit: 'Admin',
 };
 
+// Project Management notification navigation is intentionally normalized here
+// because this service also owns the URL embedded in web/PWA push payloads.
+// Preserve any future/custom PM route, but repair obsolete Project Management
+// aliases and provide a task deep link when taskId is available.
+const PROJECT_MANAGEMENT_NOTIFICATION_TYPES = new Set([
+  'pm_task_assigned',
+  'pm_task_comment',
+  'pm_task_status',
+  'pm_task_updated',
+  'pm_group_added',
+  'pm_task_mention',
+  'pm_task_deadline',
+]);
+
+const LEGACY_PROJECT_MANAGEMENT_PATHS = new Set([
+  '/crm/project',
+  '/crm/project/',
+  '/projects',
+  '/projects/',
+]);
+
+function parseInternalRoute(route: string): URL | null {
+  try {
+    return new URL(route, 'http://suprah.local');
+  } catch {
+    return null;
+  }
+}
+
+function getProjectManagementTargetUrl(metadata?: any): string {
+  const metadataTaskId = String(metadata?.taskId ?? '').trim();
+  const metadataGroupId = String(metadata?.groupId ?? '').trim();
+  const route = typeof metadata?.route === 'string' ? metadata.route.trim() : '';
+  const parsedRoute = route ? parseInternalRoute(route) : null;
+  const routeTaskId = String(parsedRoute?.searchParams.get('task') ?? '').trim();
+  const routeGroupId = String(parsedRoute?.searchParams.get('group') ?? '').trim();
+  const taskId = metadataTaskId || routeTaskId;
+  const groupId = metadataGroupId || routeGroupId;
+
+  const params = new URLSearchParams();
+  if (groupId) params.set('group', groupId);
+  if (taskId) params.set('task', taskId);
+
+  const query = params.toString();
+  return query ? `/project?${query}` : '/project';
+}
+
+function resolveMetadataRoute(type: string, metadata?: any): string | undefined {
+  const route = typeof metadata?.route === 'string' ? metadata.route : '';
+
+  // Non-PM notification routing is intentionally untouched.
+  if (!PROJECT_MANAGEMENT_NOTIFICATION_TYPES.has(type)) {
+    return route || undefined;
+  }
+
+  const normalizedRoute = route.trim();
+  const parsedRoute = normalizedRoute ? parseInternalRoute(normalizedRoute) : null;
+  const routePathname = parsedRoute?.pathname ?? '';
+
+  // Normalize legacy PM aliases even when they carry query params such as
+  // `/projects?task=...`. Comparing the full route string would miss them.
+  if (!normalizedRoute || LEGACY_PROJECT_MANAGEMENT_PATHS.has(routePathname)) {
+    return getProjectManagementTargetUrl(metadata);
+  }
+
+  return route;
+}
+
 const createNotification = async (params: CreateNotificationParams) => {
   const { userId, organizationId, type, title, message, metadata, dedupeKey, groupWindowMinutes } = params;
 
@@ -218,6 +286,9 @@ const createNotification = async (params: CreateNotificationParams) => {
   emitToUser(userId, isGroupedUpdate ? 'notification:updated' : 'notification:new', notification);
 
   try {
+    const resolvedMetadataRoute = resolveMetadataRoute(type, metadata);
+    const projectManagementTargetUrl = getProjectManagementTargetUrl(metadata);
+
     const urlMap: Record<string, string> = {
       shipment_assigned: '/driver/loads',
       message_received: '/driver/notifications',
@@ -265,13 +336,13 @@ const createNotification = async (params: CreateNotificationParams) => {
       feed_comment_on_post: metadata?.route || '/crm/feeds',
       feed_announcement: metadata?.route || '/crm/feeds',
       // ── Project Management ──
-      pm_task_assigned: metadata?.route || '/crm/project',
-      pm_task_comment: metadata?.route || '/crm/project',
-      pm_task_status: metadata?.route || '/crm/project',
-      pm_task_updated: metadata?.route || '/crm/project',
-      pm_group_added: metadata?.route || '/crm/project',
-      pm_task_mention: metadata?.route || '/crm/project',
-      pm_task_deadline: metadata?.route || '/crm/project',
+      pm_task_assigned: projectManagementTargetUrl,
+      pm_task_comment: projectManagementTargetUrl,
+      pm_task_status: projectManagementTargetUrl,
+      pm_task_updated: projectManagementTargetUrl,
+      pm_group_added: projectManagementTargetUrl,
+      pm_task_mention: projectManagementTargetUrl,
+      pm_task_deadline: projectManagementTargetUrl,
       // ── Calendar ──
       calendar_event_reminder: metadata?.route || '/crm/suprah-calendar',
       calendar_event_today: metadata?.route || '/crm/suprah-calendar',
@@ -297,7 +368,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       admin_security_audit: metadata?.route || '/notifications',
     };
 
-    const targetUrl = metadata?.route || urlMap[type] || '/notifications';
+    const targetUrl = resolvedMetadataRoute || urlMap[type] || '/notifications';
 
     const pushPayload: any = {
       title: notification.title,

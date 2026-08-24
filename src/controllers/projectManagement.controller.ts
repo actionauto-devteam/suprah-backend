@@ -239,7 +239,9 @@ async function notifyUsers({ recipients, actor, type, groupId, taskId, commentId
             groupId: groupId?.toString(),
             taskId: taskId ? taskId.toString() : undefined,
             commentId: commentId ? commentId.toString() : undefined,
-            route: '/crm/project',
+            route: taskId
+              ? `/project?group=${encodeURIComponent(groupId.toString())}&task=${encodeURIComponent(taskId.toString())}`
+              : `/project?group=${encodeURIComponent(groupId.toString())}`,
           },
         }).catch((error) => logger.error(error, `[PM] Unified notification failed for recipient ${userId}`))
       ),

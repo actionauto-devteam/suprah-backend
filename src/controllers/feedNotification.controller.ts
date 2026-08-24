@@ -7,6 +7,7 @@ import Feed from '../models/Feed.model';
 import FeedNotification from '../models/FeedNotification.model';
 import FeedReadState, { IFeedReadState } from '../models/FeedReadState.model';
 import CrmUser from '../models/CrmUser.model';
+import { stripMentionTokens } from '../utils/feedMentions';
 
 
 const DEFAULT_LIMIT = 20;
@@ -15,6 +16,49 @@ const MAX_LIMIT = 50;
 function parsePositiveInt(val: unknown, fallback: number): number {
   const n = parseInt(val as string, 10);
   return isNaN(n) || n < 1 ? fallback : n;
+}
+
+
+interface ActivityCursor {
+  createdAt: string;
+  id: string;
+}
+
+function encodeActivityCursor(createdAt: Date | string, id: mongoose.Types.ObjectId | string): string {
+  return Buffer.from(
+    JSON.stringify({ createdAt: new Date(createdAt).toISOString(), id: id.toString() }),
+  ).toString('base64url');
+}
+
+function decodeActivityCursor(raw: unknown): ActivityCursor | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as ActivityCursor;
+    const date = new Date(parsed.createdAt);
+    if (Number.isNaN(date.getTime()) || !mongoose.Types.ObjectId.isValid(parsed.id)) {
+      throw new Error('invalid cursor payload');
+    }
+    return { createdAt: date.toISOString(), id: parsed.id };
+  } catch {
+    throw new ApiError(400, 'Invalid activity cursor');
+  }
+}
+
+function buildCursorFilter(cursor: ActivityCursor | null): Record<string, unknown> {
+  if (!cursor) return {};
+  const createdAt = new Date(cursor.createdAt);
+  const id = new mongoose.Types.ObjectId(cursor.id);
+  return {
+    $or: [
+      { createdAt: { $lt: createdAt } },
+      { createdAt, _id: { $lt: id } },
+    ],
+  };
+}
+
+function activitySnippet(content?: string): string {
+  const visible = stripMentionTokens(content || '').replace(/\s+/g, ' ').trim();
+  return visible.slice(0, 200);
 }
 
 function requireActor(req: Request) {
@@ -114,6 +158,96 @@ export const listNotifications = asyncHandler(async (req: Request, res: Response
 
   res.json(
     new ApiResponse(200, { notifications: items, total, page, limit, hasMore }, 'Notifications fetched'),
+  );
+});
+
+
+/**
+ * GET /api/crm/feeds/activity?limit=30&cursor=<opaque>
+ *
+ * Unified, newest-first Activity timeline for the current organisation:
+ *   - ordinary live Team Feed posts from every org member
+ *   - this user's targeted mentions / comments / @Everyone notifications
+ *
+ * Uses a cursor instead of page/skip so loading older activity stays stable as
+ * new posts arrive. The query is intentionally lightweight: no attachment URL
+ * signing and no reaction/comment hydration are needed for the Activity panel.
+ */
+export const listActivity = asyncHandler(async (req: Request, res: Response) => {
+  const actor = requireActor(req);
+  const limit = Math.min(parsePositiveInt(req.query.limit, 30), MAX_LIMIT);
+  const cursor = decodeActivityCursor(req.query.cursor);
+  const cursorFilter = buildCursorFilter(cursor);
+
+  const [posts, notifications] = await Promise.all([
+    Feed.find({
+      organizationId: actor.organizationId,
+      deletedAt: null,
+      ...cursorFilter,
+    })
+      .select('_id userId authorName content createdAt')
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean(),
+    FeedNotification.find({
+      organizationId: actor.organizationId,
+      recipientId: actor._id,
+      ...cursorFilter,
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean(),
+  ]);
+
+  const postItems = posts.map((post: any) => ({
+    activityId: `post:${post._id.toString()}`,
+    source: 'post' as const,
+    sourceId: post._id.toString(),
+    type: 'post' as const,
+    postId: post._id.toString(),
+    commentId: null,
+    actorId: post.userId?.toString() || '',
+    actorName: post.authorName || 'Team member',
+    snippet: activitySnippet(post.content),
+    readAt: null,
+    createdAt: post.createdAt,
+    sortId: post._id.toString(),
+  }));
+
+  const notificationItems = notifications.map((notification: any) => ({
+    activityId: `notification:${notification._id.toString()}`,
+    source: 'notification' as const,
+    sourceId: notification._id.toString(),
+    type: notification.type,
+    postId: notification.postId?.toString() || '',
+    commentId: notification.commentId?.toString() || null,
+    actorId: notification.actorId?.toString() || '',
+    actorName: notification.actorName || 'Team member',
+    snippet: notification.snippet || '',
+    readAt: notification.readAt || null,
+    createdAt: notification.createdAt,
+    sortId: notification._id.toString(),
+  }));
+
+  const combined = [...postItems, ...notificationItems].sort((a, b) => {
+    const timeDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    if (timeDiff !== 0) return timeDiff;
+    return b.sortId.localeCompare(a.sortId);
+  });
+
+  const items = combined.slice(0, limit).map(({ sortId, ...item }) => item);
+  const hasMore = combined.length > limit;
+  const lastRaw = combined[Math.min(limit, combined.length) - 1];
+  const nextCursor = hasMore && lastRaw
+    ? encodeActivityCursor(lastRaw.createdAt, lastRaw.sortId)
+    : null;
+
+  res.json(
+    new ApiResponse(
+      200,
+      { items, hasMore, nextCursor },
+      'Feed activity fetched',
+    ),
   );
 });
 
@@ -231,6 +365,7 @@ export const getMentionCandidates = asyncHandler(async (req: Request, res: Respo
 export default {
   getUnreadCount,
   listNotifications,
+  listActivity,
   markNotificationsRead,
   getReadState,
   advanceReadState,

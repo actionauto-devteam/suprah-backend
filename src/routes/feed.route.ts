@@ -64,6 +64,7 @@ router.use(crmAuth());
 
 // ── Notifications, read-state & mentions (STATIC — must stay before /:id) ──
 router.get('/notifications/unread-count', feedNotificationController.getUnreadCount);
+router.get('/activity', feedNotificationController.listActivity);
 router.get('/notifications', feedNotificationController.listNotifications);
 router.patch('/notifications/read', feedNotificationController.markNotificationsRead);
 router.get('/read-state', feedNotificationController.getReadState);
