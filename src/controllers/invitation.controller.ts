@@ -25,6 +25,10 @@ export const createInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(403, 'Only admins can invite members');
     }
 
+    if (role === 'driver') {
+        throw new ApiError(400, 'Drivers cannot be invited through team invitations. Driver approval goes through the platform driver-request queue.');
+    }
+
     if (!req.user) {
         throw new ApiError(401, 'User context missing');
     }
@@ -218,6 +222,14 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
         throw new ApiError(400, 'Invitation has expired');
     }
 
+    // Driver invitations through this path are no longer supported (a stray
+    // pre-existing pending invite could still carry role: 'driver' even
+    // though creation is now blocked) — reject explicitly rather than
+    // silently falling through and leaving the user un-promoted.
+    if ((invite.role as string) === 'driver') {
+        throw new ApiError(410, 'Driver invitations are no longer supported. Please use the driver application form instead.');
+    }
+
     // Verify email matches (optional security measure, but good practice)
     // If the logged in user's email doesn't match the invite string, strictly speaking we should block or warn.
     // But often people invite personal emails and accept on work emails. 
@@ -237,9 +249,6 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
     if (user.role === 'customer') {
         if (invite.role === 'admin' || invite.role === 'member') {
             user.role = 'employee';
-        } else if (invite.role === 'driver') {
-            user.role = 'driver';
-            user.isApproved = true; // Invited drivers are trusted by the dealership that invited them
         }
     }
 
@@ -321,6 +330,10 @@ export const bulkCreateInvitations = asyncHandler(async (req: Request, res: Resp
     const isAdmin = req.orgRole === 'admin' || req.user?.role === 'admin' || req.user?.role === 'super_admin';
     if (!isAdmin) {
         throw new ApiError(403, 'Only admins can invite members');
+    }
+
+    if (role === 'driver') {
+        throw new ApiError(400, 'Drivers cannot be invited through team invitations. Driver approval goes through the platform driver-request queue.');
     }
 
     if (!emails || !Array.isArray(emails)) {

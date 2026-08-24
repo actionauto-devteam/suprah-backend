@@ -4,7 +4,10 @@ export interface IInvitation extends Document {
     email: string;
     organizationId: mongoose.Types.ObjectId;
     inviterId?: mongoose.Types.ObjectId;
-    role: 'admin' | 'member';
+    // 'driver' is deliberately not allowed here — all driver approval goes
+    // through the platform-wide DriverRequest queue, never a dealership's
+    // own team invitations.
+    role: 'admin' | 'member' | 'customer';
     token: string;
     expiresAt: Date;
     status: 'pending' | 'accepted' | 'expired';
@@ -32,7 +35,7 @@ const InvitationSchema = new Schema<IInvitation>(
         },
         role: {
             type: String,
-            enum: ['admin', 'member', 'customer', 'driver'],
+            enum: ['admin', 'member', 'customer'],
             default: 'member',
         },
         token: {

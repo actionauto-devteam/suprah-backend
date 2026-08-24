@@ -6,6 +6,7 @@ import config from '../config';
 import authMiddleware from '../middleware/auth.middleware';
 import { isDbOutageError } from '../utils/dbOutage';
 import { validateInviteLink, registerViaInvite } from '../controllers/customerInvite.controller';
+import { submitDealershipInquiry } from '../controllers/dealershipInquiry.controller';
 
 const router = express.Router();
 
@@ -99,5 +100,8 @@ router.get('/crm-sso', authMiddleware(), authController.getCrmSsoToken);
 // Customer invite link (public — no auth required)
 router.get('/invite/:shortCode', validateInviteLink);
 router.post('/invite/:shortCode/register', authLimiter, registerViaInvite);
+
+// Dealership inquiry (public — no auth required)
+router.post('/dealership-inquiries', authLimiter, submitDealershipInquiry);
 
 export default router;

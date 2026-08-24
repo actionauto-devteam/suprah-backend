@@ -8,6 +8,7 @@ import Organization from '../models/Organization.model';
 import User from '../models/User.model';
 import emailService from '../services/email.service';
 import authService from '../services/auth.service';
+import DealershipInquiry from '../models/DealershipInquiry.model';
 import config from '../config';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -24,13 +25,18 @@ function nameFromEmail(email: string): string {
 }
 
 // Normalize + validate the requested account type. Anything other than an
-// explicit 'driver' falls back to 'customer' so existing callers are unaffected.
+// explicit 'driver'/'dealership' falls back to 'customer' so existing
+// callers are unaffected.
 function resolveAccountType(raw: unknown): InviteAccountType {
-  return raw === 'driver' ? 'driver' : 'customer';
+  if (raw === 'driver') return 'driver';
+  if (raw === 'dealership') return 'dealership';
+  return 'customer';
 }
 
 function accountTypeLabel(t: InviteAccountType): string {
-  return t === 'driver' ? 'driver' : 'customer';
+  if (t === 'driver') return 'driver';
+  if (t === 'dealership') return 'dealership';
+  return 'customer';
 }
 
 /**
@@ -212,6 +218,17 @@ export const validateInviteLink = asyncHandler(async (req: Request, res: Respons
     }, 'Invite link is valid'));
   }
 
+  // Dealership setup links are email-bound and have no Organization yet —
+  // that's what completing this flow creates.
+  if (accountType === 'dealership') {
+    return res.json(new ApiResponse(200, {
+      valid: true,
+      email: token.email,
+      expiresAt: token.expiresAt,
+      accountType,
+    }, 'Invite link is valid'));
+  }
+
   const org = await Organization.findById(token.organizationId).select('name logoUrl').lean();
   if (!org) {
     return res.json(new ApiResponse(200, { valid: false, reason: 'not_found' }, 'Organization not found'));
@@ -234,7 +251,7 @@ export const validateInviteLink = asyncHandler(async (req: Request, res: Respons
  */
 export const registerViaInvite = asyncHandler(async (req: Request, res: Response) => {
   const { shortCode } = req.params;
-  const { name, email, password } = req.body;
+  const { name, email, password, dealershipName, dealershipSlug } = req.body;
 
   if (!name?.trim() || !email?.trim() || !password) {
     throw new ApiError(400, 'name, email, and password are required');
@@ -252,6 +269,37 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   const label = accountTypeLabel(accountType);
 
   const normalizedEmail = email.trim().toLowerCase();
+
+  if (accountType === 'dealership') {
+    if (token.email && token.email.toLowerCase() !== normalizedEmail) {
+      throw new ApiError(403, 'This setup link is bound to a different email address');
+    }
+    if (!dealershipName?.trim() || !dealershipSlug?.trim()) {
+      throw new ApiError(400, 'dealershipName and dealershipSlug are required');
+    }
+
+    const result = await authService.createDealershipOrgAndAdmin({
+      name: name.trim(),
+      email: normalizedEmail,
+      password,
+      dealershipName: dealershipName.trim(),
+      dealershipSlug: dealershipSlug.trim(),
+    });
+
+    token.isUsed = true;
+    token.usedAt = new Date();
+    token.usedBy = (result.user as any)._id;
+    await token.save();
+
+    await DealershipInquiry.findOneAndUpdate(
+      { inviteTokenId: token._id },
+      { status: 'registered', registeredOrganizationId: result.organization._id },
+    );
+
+    res.status(201).json(new ApiResponse(201, result, 'Dealership registered. Please verify your email.'));
+    return;
+  }
+
   const existing = await User.findOne({ email: normalizedEmail });
   if (existing) throw new ApiError(400, 'An account with this email already exists');
 
