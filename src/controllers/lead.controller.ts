@@ -425,6 +425,30 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(500).json({ message: 'Internal server error: No administrative context' });
     }
 
+    // ADF senders (Cars.com, dealer.com, etc.) commonly redeliver the same
+    // webhook call on a timeout/no-ack, with no stable message id to key off
+    // of. Treat the same email + vehicle landing again within a short window
+    // as a redelivery of the same lead rather than a brand-new inquiry.
+    const dedupWindowMs = 15 * 60 * 1000;
+    const duplicateLead = adfData.email
+      ? await Lead.findOne({
+        organizationId: orgId,
+        email: adfData.email,
+        'vehicle.year': adfData.vehicle?.year,
+        'vehicle.make': adfData.vehicle?.make,
+        'vehicle.model': adfData.vehicle?.model,
+        createdAt: { $gte: new Date(Date.now() - dedupWindowMs) },
+      })
+      : null;
+
+    if (duplicateLead) {
+      logger.info(
+        { leadId: duplicateLead._id, orgId, email: adfData.email },
+        'Duplicate ADF webhook delivery ignored',
+      );
+      return res.status(200).send('Lead already processed');
+    }
+
     const newLead = new Lead({
       organizationId: orgId,
       createdBy: systemUserId,
