@@ -2,6 +2,7 @@ import cron from "node-cron";
 import crypto from "crypto";
 import CrmUser from "../models/CrmUser.model";
 import Feed from "../models/Feed.model";
+import Organization from "../models/Organization.model";
 import SupraSpaceConversation from "../models/SupraSpaceConversation.model";
 import SupraSpaceMessage from "../models/SupraSpaceMessage.model";
 import { getIO as getFeedIO } from "../socket/feedSocket";
@@ -10,8 +11,16 @@ import logger from "../utils/logger";
 
 const CRON_SCHEDULE = process.env.MILESTONE_CRON_SCHEDULE || "0 8 * * *";
 const GENERAL_CHAT_GREETINGS_ENABLED = process.env.MILESTONE_GENERAL_GREETINGS_ENABLED === "true";
-const SYSTEM_SENDER_NAME = "Action Auto Team";
+// Kept as-is (not renamed) — this is a stored CrmUser.username value used to
+// look up the existing per-org "system sender" record; changing it would
+// orphan already-created system accounts instead of finding them.
 const SYSTEM_SENDER_USERNAME = "action-auto-team";
+
+/** Resolve "<Dealership Name> Team" for the org's milestone-greeting sender. */
+async function resolveDealerTeamName(organizationId: string): Promise<string> {
+  const org = await Organization.findById(organizationId).select("name").lean();
+  return `${org?.name || "Your Dealership"} Team`;
+}
 
 function isTodayAnniversary(date: Date): boolean {
   const now = new Date();
@@ -47,7 +56,8 @@ async function alreadyPostedToday(
 }
 
 async function getActionAutoTeamSender(organizationId: string) {
-  const email = `action-auto-team.${organizationId}@system.actionautoutah.com`;
+  const senderName = await resolveDealerTeamName(organizationId);
+  const email = `dealer-team.${organizationId}@system.suprah.ai`;
   const existing = await CrmUser.findOne({
     organizationId,
     isSystem: true,
@@ -57,8 +67,8 @@ async function getActionAutoTeamSender(organizationId: string) {
   if (existing) {
     let changed = false;
 
-    if (existing.fullName !== SYSTEM_SENDER_NAME) {
-      existing.fullName = SYSTEM_SENDER_NAME;
+    if (existing.fullName !== senderName) {
+      existing.fullName = senderName;
       changed = true;
     }
 
@@ -85,7 +95,7 @@ async function getActionAutoTeamSender(organizationId: string) {
   try {
     return await CrmUser.create({
       organizationId,
-      fullName: SYSTEM_SENDER_NAME,
+      fullName: senderName,
       username: SYSTEM_SENDER_USERNAME,
       email,
       password: crypto.randomBytes(24).toString("hex"),
@@ -229,9 +239,9 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
 
     const systemSender = await getActionAutoTeamSender(orgId);
     const content = names.length === 1
-      ? `🎂 Happy Birthday to ${formatCelebrantNames(names)}! Wishing you a wonderful day filled with joy and good vibes. 🥳\n\nGreetings from Action Auto Team ✨`
-      : `🎂 Happy Birthday to these wonderful people: ${formatCelebrantNames(names)}! Wishing you all a day full of joy, laughter, and good vibes. 🥳🎉\n\nGreetings from Action Auto Team ✨`;
-    const posted = await postFeedAnnouncement(systemSender._id.toString(), orgId, content, SYSTEM_SENDER_NAME);
+      ? `🎂 Happy Birthday to ${formatCelebrantNames(names)}! Wishing you a wonderful day filled with joy and good vibes. 🥳\n\nGreetings from ${systemSender.fullName} ✨`
+      : `🎂 Happy Birthday to these wonderful people: ${formatCelebrantNames(names)}! Wishing you all a day full of joy, laughter, and good vibes. 🥳🎉\n\nGreetings from ${systemSender.fullName} ✨`;
+    const posted = await postFeedAnnouncement(systemSender._id.toString(), orgId, content, systemSender.fullName);
 
     if (posted) {
       await postSupraSpaceAnnouncement(orgId, content);
@@ -253,8 +263,9 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
       const years = new Date().getFullYear() - user.hireDate.getFullYear();
 
       if (years > 0) {
-        const content = `🎉 Happy ${years}-year work anniversary to **${user.fullName}**! Thank you for your continued dedication. 🥳\n\nGreetings from Action Auto Team ✨`;
-        const posted = await postFeedAnnouncement(userId, orgId, content, SYSTEM_SENDER_NAME);
+        const dealerTeamName = await resolveDealerTeamName(orgId);
+        const content = `🎉 Happy ${years}-year work anniversary to **${user.fullName}**! Thank you for your continued dedication. 🥳\n\nGreetings from ${dealerTeamName} ✨`;
+        const posted = await postFeedAnnouncement(userId, orgId, content, dealerTeamName);
 
         if (posted) {
           await postSupraSpaceAnnouncement(orgId, content);

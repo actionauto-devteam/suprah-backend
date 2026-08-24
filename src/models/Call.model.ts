@@ -85,7 +85,10 @@ const CallSchema = new Schema<ICall>(
     scheduledAt: { type: Date, default: null },
     optionalMessage: { type: String, default: '' },
     meetingLink: { type: String, default: '' },
-    allowedDomain: { type: String, default: 'actionautoutah.com' },
+    // Empty by default (was hardcoded to the original client's domain,
+    // which cross-tenant auto-approved that domain's emails into every
+    // org's meetings — see DEFAULT_MEETING_DOMAIN in call.controller.ts).
+    allowedDomain: { type: String, default: '' },
     approvedUsers: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
     admissionRequests: { type: [AdmissionRequestSchema], default: [] },
     recordingAllowedUsers: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],

@@ -15,7 +15,7 @@ interface WebAuthnConfig {
 }
 
 const config: WebAuthnConfig = {
-  rpName: process.env.WEBAUTHN_RP_NAME || 'Action Auto CRM',
+  rpName: process.env.WEBAUTHN_RP_NAME || 'Suprah.AI CRM',
   rpId: process.env.WEBAUTHN_RP_ID || 'localhost',
   origin: process.env.WEBAUTHN_ORIGIN || 'http://localhost:3000',
   challengeTTL: 5 * 60 * 1000,

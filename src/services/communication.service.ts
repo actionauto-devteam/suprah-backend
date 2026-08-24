@@ -8,6 +8,7 @@ import {
 } from "../models/communication.model";
 import * as telnyx from "./telnyx.service";
 import { getSocketIO } from "../utils/socketEmitter";
+import Organization from "../models/Organization.model";
 
 /** Emit through the platform's existing Socket.io instance (same one the
  *  lead:new / lead:update events use). Payload always carries orgId so the
@@ -23,8 +24,21 @@ function emitToOrg(orgId: any, event: string, payload: any) {
 }
 
 const RING_TIMEOUT_MS = 35_000;
-const MISSED_CALL_MESSAGE =
-  "Thank you for calling Action Auto. All of our team members are currently unavailable. Please send us a text message and we will get back to you as soon as possible.";
+
+/** Resolve the tenant dealership's display name for voice/SMS copy. */
+async function resolveDealerName(organizationId: any): Promise<string> {
+  if (!organizationId) return "Your Dealership";
+  try {
+    const org = await Organization.findById(organizationId).select("name").lean();
+    return org?.name || "Your Dealership";
+  } catch {
+    return "Your Dealership";
+  }
+}
+
+function buildMissedCallMessage(dealerName: string): string {
+  return `Thank you for calling ${dealerName}. All of our team members are currently unavailable. Please send us a text message and we will get back to you as soon as possible.`;
+}
 
 /** Customer phone fields to match inbound numbers against.
  *  Adjust to your Customer schema if needed. */
@@ -258,7 +272,7 @@ export async function handleInboundSms(payload: any) {
   }
 
   // Which org owns this number? Single-number setup: resolve org from env or
-  // the first conversation. For Action Auto (single org) set COMM_ORG_ID.
+  // the first conversation. For a single-org deployment set COMM_ORG_ID.
   const orgId = await resolveOrgForNumber(to);
   if (!orgId) {
     console.error("[comm] inbound SMS but COMM_ORG_ID is not configured");
@@ -410,7 +424,8 @@ export async function handleCallInitiated(payload: any) {
     );
     if (still) {
       emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
-      await telnyx.playMissedAndHangup(callControlId, MISSED_CALL_MESSAGE).catch(() => {});
+      const dealerName = await resolveDealerName(orgId);
+      await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
     }
   }, RING_TIMEOUT_MS);
   ringTimers.set(String(call._id), timer);

@@ -176,7 +176,7 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
       meetingLink: { type: String, default: '' },
       title: { type: String, default: '' },
       scheduledAt: { type: Date, default: null },
-      allowedDomain: { type: String, default: 'actionautoutah.com' },
+      allowedDomain: { type: String, default: '' },
     },
   },
   { _id: false }

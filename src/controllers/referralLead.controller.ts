@@ -6,6 +6,7 @@ import { ApiError } from '../utils/ApiError';
 import ReferralLead from '../models/ReferralLead.model';
 import User from '../models/User.model';
 import Referral from '../models/referral.model';
+import Organization from '../models/Organization.model';
 import membershipService from '../services/membership.service';
 import { emitToOrg } from '../utils/socketEmitter';
 import config from '../config';
@@ -243,11 +244,15 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
   lead.convertedUserId = newUser._id as any;
   await lead.save();
 
+  // Resolve the tenant dealership's display name for the outgoing email copy
+  const org        = await Organization.findById(orgId).select('name').lean();
+  const dealerName = org?.name || 'Your Dealership';
+
   // Send welcome email with credentials directly to the customer (fire and forget)
   emailService.sendEmail({
     to:      newUser.email,
-    subject: `Your Action Auto ${typeLabel} Account is Ready`,
-    text: `Hi ${newUser.name},\n\nOne of our representatives has created a ${typeLabel.toLowerCase()} account for you at Action Auto Utah.\n\nYour Login Credentials:\nEmail: ${newUser.email}\nTemporary Password: ${tempPassword}\n\nPlease log in and change your password as soon as possible to keep your account secure.\n\nAction Auto Utah`,
+    subject: `Your ${dealerName} ${typeLabel} Account is Ready`,
+    text: `Hi ${newUser.name},\n\nOne of our representatives has created a ${typeLabel.toLowerCase()} account for you at ${dealerName}.\n\nYour Login Credentials:\nEmail: ${newUser.email}\nTemporary Password: ${tempPassword}\n\nPlease log in and change your password as soon as possible to keep your account secure.\n\n${dealerName}`,
     html: `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -259,7 +264,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
         <!-- Header -->
         <tr>
           <td style="background:${accentColor};padding:32px 40px;text-align:center;">
-            <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">Action Auto Utah</p>
+            <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">${dealerName}</p>
             <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">Your ${typeLabel} Account is Ready!</h1>
           </td>
         </tr>
@@ -269,7 +274,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
           <td style="padding:36px 40px;">
             <p style="margin:0 0 8px;font-size:15px;color:#18181b;font-weight:600;">Hi ${newUser.name},</p>
             <p style="margin:0 0 24px;font-size:14px;color:#52525b;line-height:1.6;">
-              One of our representatives has created a <strong style="color:#18181b;">${typeLabel.toLowerCase()} account</strong> for you at Action Auto Utah. Use the credentials below to sign in.
+              One of our representatives has created a <strong style="color:#18181b;">${typeLabel.toLowerCase()} account</strong> for you at ${dealerName}. Use the credentials below to sign in.
             </p>
 
             <!-- Credentials box -->
@@ -301,7 +306,7 @@ export const convertLead = asyncHandler(async (req: Request, res: Response) => {
         <!-- Footer -->
         <tr>
           <td style="background:#f4f4f5;padding:20px 40px;text-align:center;border-top:1px solid #e4e4e7;">
-            <p style="margin:0;font-size:11px;color:#a1a1aa;">© ${new Date().getFullYear()} Action Auto Utah &middot; Powered by Suprah AI</p>
+            <p style="margin:0;font-size:11px;color:#a1a1aa;">© ${new Date().getFullYear()} ${dealerName} &middot; Powered by Suprah.AI</p>
           </td>
         </tr>
 
@@ -367,11 +372,15 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
     const callTypeLabel = lead.requestType === 'voice' ? 'Voice Call' : 'Video Call';
     const accentColor   = lead.requestType === 'voice' ? '#10b981' : '#3b82f6';
 
+    // Resolve the tenant dealership's display name for the outgoing email copy
+    const org        = await Organization.findById(orgId).select('name').lean();
+    const dealerName = org?.name || 'Your Dealership';
+
     console.log(`[ReferralCall] Sending invitation email to ${lead.email} for lead ${lead._id}`);
     emailService.sendEmail({
       to:      lead.email,
-      subject: `${repName} is inviting you to a ${callTypeLabel} — Action Auto`,
-      text:           `Hi ${lead.name},\n\nYour Action Auto representative, ${repName}, has started a ${callTypeLabel} and is ready to speak with you.\n\nJoin the call here:\n${publicJoinUrl}\n\nOpen the link, enter your email address (${lead.email}), and you'll be connected instantly.\n\nAction Auto Utah`,
+      subject: `${repName} is inviting you to a ${callTypeLabel} — ${dealerName}`,
+      text:           `Hi ${lead.name},\n\nYour ${dealerName} representative, ${repName}, has started a ${callTypeLabel} and is ready to speak with you.\n\nJoin the call here:\n${publicJoinUrl}\n\nOpen the link, enter your email address (${lead.email}), and you'll be connected instantly.\n\n${dealerName}`,
       html: `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -383,7 +392,7 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
         <!-- Header -->
         <tr>
           <td style="background:${accentColor};padding:32px 40px;text-align:center;">
-            <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">Action Auto Utah</p>
+            <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.75);">${dealerName}</p>
             <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;">${callTypeLabel} Invitation</h1>
           </td>
         </tr>
@@ -393,7 +402,7 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
           <td style="padding:36px 40px;">
             <p style="margin:0 0 8px;font-size:15px;color:#18181b;font-weight:600;">Hi ${lead.name},</p>
             <p style="margin:0 0 24px;font-size:14px;color:#52525b;line-height:1.6;">
-              <strong style="color:#18181b;">${repName}</strong>, your Action Auto representative, has started a
+              <strong style="color:#18181b;">${repName}</strong>, your ${dealerName} representative, has started a
               <strong style="color:${accentColor};">${callTypeLabel}</strong> and is ready to speak with you right now.
             </p>
 
@@ -420,7 +429,7 @@ export const startLeadCall = asyncHandler(async (req: Request, res: Response) =>
         <!-- Footer -->
         <tr>
           <td style="background:#f4f4f5;padding:20px 40px;text-align:center;border-top:1px solid #e4e4e7;">
-            <p style="margin:0;font-size:11px;color:#a1a1aa;">© ${new Date().getFullYear()} Action Auto Utah · Powered by Suprah AI</p>
+            <p style="margin:0;font-size:11px;color:#a1a1aa;">© ${new Date().getFullYear()} ${dealerName} · Powered by Suprah.AI</p>
           </td>
         </tr>
 

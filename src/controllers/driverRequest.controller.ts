@@ -199,8 +199,8 @@ const approveDriverRequest = asyncHandler(
     try {
       await emailService.sendEmail({
         to: driverUser.email,
-        subject: "Your Driver Account Has Been Approved - Action Auto",
-        text: `Hi ${driverUser.name},\n\nGreat news! Your driver account has been approved.\n\nYou can now log in to your Driver Dashboard and start receiving load assignments.\n\nLog in at: ${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in\n\nWelcome aboard!\n— Action Auto Team`,
+        subject: "Your Driver Account Has Been Approved - Suprah.AI",
+        text: `Hi ${driverUser.name},\n\nGreat news! Your driver account has been approved.\n\nYou can now log in to your Driver Dashboard and start receiving load assignments.\n\nLog in at: ${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in\n\nWelcome aboard!\n— Suprah.AI Team`,
         html: `
           <!DOCTYPE html>
           <html>
@@ -220,7 +220,7 @@ const approveDriverRequest = asyncHandler(
             <div class="container">
               <div class="header">
                 <h1>Account Approved!</h1>
-                <p style="margin: 8px 0 0 0; opacity: 0.9;">Welcome to Action Auto Driver Portal</p>
+                <p style="margin: 8px 0 0 0; opacity: 0.9;">Welcome to Suprah.AI Driver Portal</p>
               </div>
               <div class="content">
                 <p style="font-size: 16px;">Hi <strong>${driverUser.name}</strong>,</p>
@@ -234,7 +234,7 @@ const approveDriverRequest = asyncHandler(
                 <p style="margin-top: 24px; color: #6b7280; font-size: 14px;">If you have any questions, reach out to your administrator.</p>
               </div>
               <div class="footer">
-                <p><strong>Action Auto - Driver Portal</strong></p>
+                <p><strong>Suprah.AI - Driver Portal</strong></p>
                 <p>This is an automated notification.</p>
               </div>
             </div>
@@ -298,8 +298,8 @@ const rejectDriverRequest = asyncHandler(
         try {
           await emailService.sendEmail({
             to: driverUser.email,
-            subject: "Update on Your Driver Application - Action Auto",
-            text: `Hi ${driverUser.name},\n\nThank you for applying to join Action Auto as a driver. After review, we're unable to approve your application at this time.\n\nIf you believe this was a mistake or would like more information, please contact your administrator.\n\n— Action Auto Team`,
+            subject: "Update on Your Driver Application - Suprah.AI",
+            text: `Hi ${driverUser.name},\n\nThank you for applying to join Suprah.AI as a driver. After review, we're unable to approve your application at this time.\n\nIf you believe this was a mistake or would like more information, please contact your administrator.\n\n— Suprah.AI Team`,
             html: `
               <!DOCTYPE html>
               <html>
@@ -318,7 +318,7 @@ const rejectDriverRequest = asyncHandler(
                 <div class="container">
                   <div class="header">
                     <h1>Application Update</h1>
-                    <p style="margin: 8px 0 0 0; opacity: 0.9;">Action Auto Driver Portal</p>
+                    <p style="margin: 8px 0 0 0; opacity: 0.9;">Suprah.AI Driver Portal</p>
                   </div>
                   <div class="content">
                     <p style="font-size: 16px;">Hi <strong>${driverUser.name}</strong>,</p>
@@ -328,7 +328,7 @@ const rejectDriverRequest = asyncHandler(
                     </div>
                   </div>
                   <div class="footer">
-                    <p>Action Auto Team</p>
+                    <p>Suprah.AI Team</p>
                   </div>
                 </div>
               </body>

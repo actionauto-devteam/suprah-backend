@@ -1,4 +1,5 @@
 import User from '../models/User.model';
+import Organization from '../models/Organization.model';
 import Referral from '../models/referral.model';
 import Transaction from '../models/transaction.model';
 import AuditLog from '../models/AuditLog.model';
@@ -166,8 +167,13 @@ export class ReferralService {
 
         try {
             if ((notificationTemplates as any).referral_joined) {
+                const org = referrer.organizationId
+                    ? await Organization.findById(referrer.organizationId).select('name').lean()
+                    : null;
+
                 const { title, message } = (notificationTemplates as any).referral_joined({
-                    referredName: referredUser.name || referredUser.email
+                    referredName: referredUser.name || referredUser.email,
+                    dealerName: org?.name || 'Your Dealership'
                 });
 
                 await notificationService.createNotification({
