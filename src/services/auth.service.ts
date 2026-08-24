@@ -79,6 +79,21 @@ class AuthService {
                 onboardingCompleted = true;
             }
 
+            // Driver is the only role that may self-register without an
+            // invite (they're a shared pool, gated by superadmin approval
+            // instead — see isApproved above). Every other role — customer,
+            // dealership/admin, employee, member — must come from a valid
+            // inviteToken (Invitation-based, handled above) or, for
+            // dealerships, the superadmin-issued setup link (a completely
+            // separate path — see registerViaInvite's 'dealership' branch,
+            // which never calls this method). A general check here — rather
+            // than special-casing individual role strings — also closes off
+            // posting an arbitrary role value (e.g. 'admin' directly instead
+            // of 'dealership') to route around the intent of this gate.
+            if (!inviteToken && roleToAssign !== 'driver') {
+                throw new ApiError(403, 'This account type requires an invite to sign up.');
+            }
+
             let finalGlobalRole = roleToAssign;
             if (roleToAssign === 'member') {
                 finalGlobalRole = 'employee';
@@ -186,9 +201,30 @@ class AuthService {
     }
 
     /**
-     * Register a new dealership (User + Organization)
+     * Register a new dealership (User + Organization). No longer reachable
+     * publicly — self-serve dealership signup is closed. This method now
+     * exists only as the shared implementation behind the superadmin-issued
+     * setup-link flow (customerInvite.controller's 'dealership' branch calls
+     * createDealershipOrgAndAdmin directly). The route that used to call this
+     * unconditionally now always hits the guard below.
      */
-    async registerDealership(data: any) {
+    async registerDealership(_data: any): Promise<never> {
+        throw new ApiError(403, 'Dealership self-registration is no longer available. Request an invite from the dealership sign-up page.');
+    }
+
+    /**
+     * Shared org+admin creation transaction, used by both the (now-guarded)
+     * direct registerDealership path and the invite-gated setup-link flow in
+     * customerInvite.controller.ts. Keeping this in one place means a future
+     * fix to org-creation logic can't drift between two copies.
+     */
+    async createDealershipOrgAndAdmin(data: {
+        name: string;
+        email: string;
+        password: string;
+        dealershipName: string;
+        dealershipSlug: string;
+    }) {
         const { name, email, password, dealershipName, dealershipSlug } = data;
 
         const session = await mongoose.startSession();
@@ -483,6 +519,14 @@ class AuthService {
         // Block true re-entry where onboarding is already fully complete.
         if (user.onboardingCompleted) {
             throw new ApiError(400, 'Onboarding already completed');
+        }
+
+        // Dealership accounts are invite-only now (see registerViaInvite's
+        // 'dealership' branch) — this onboarding step must not be a second,
+        // ungated way to become an org-less admin who then self-creates an
+        // Organization from /org-selection.
+        if (role === 'dealership') {
+            throw new ApiError(403, 'Dealership signup now requires an invite. Request one at the dealership sign-up page.');
         }
 
         const roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');

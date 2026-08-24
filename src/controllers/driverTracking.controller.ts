@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 // t
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
@@ -963,34 +964,61 @@ const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
 // GET /api/driver-tracking/my-loads
 const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
-  await finalizeDriverStatusChangeIfClear(user._id.toString(), organizationId);
-
-  const [loads, statusContext] = await Promise.all([
-    Load.find({
-      organizationId,
-      assignedDriverId: user._id,
-      status: { $nin: ["Cancelled"] },
-    })
-      .sort({ createdAt: -1 })
-      .lean(),
-    getDriverStatusContext(user._id.toString(), organizationId),
-  ]);
+  // Drivers are a shared pool and can carry loads from more than one
+  // dealership, so this can no longer be scoped by a single req.orgId.
+  const loads = await Load.find({
+    assignedDriverId: user._id,
+    status: { $nin: ["Cancelled"] },
+  })
+    .sort({ createdAt: -1 })
+    .lean();
 
   const activeLoadIds = (loads as any[])
     .filter((load) => ACTIVE_LOAD_STATUSES.includes(String(load.status)))
     .map((load) => String(load._id));
 
-  const locationRequirement = await getDriverLocationRequirement(
-    user._id.toString(),
-    organizationId,
-    {
-      operationalStatus: statusContext.operationalStatus,
-      emergencyReleaseActive: statusContext.emergencyReleaseActive,
-      activeLoadIds,
-    },
+  // Dispatch-Status GPS policy (DriverStatusChangeRequest) is still tracked
+  // per dealership. In the common case a driver has an active load with at
+  // most one dealership at a time, so resolve that dealership's context; if
+  // they somehow carry active loads across multiple orgs at once, fall back
+  // to the first one — a narrow edge case the shared-pool model doesn't fully
+  // generalize yet, but strictly no worse than before (which resolved none).
+  const activeLoad = (loads as any[]).find((load) =>
+    ACTIVE_LOAD_STATUSES.includes(String(load.status)),
   );
+  const contextOrgId = activeLoad
+    ? String(activeLoad.organizationId)
+    : loads.length > 0
+      ? String((loads as any[])[0].organizationId)
+      : undefined;
+
+  let locationRequirement: Awaited<ReturnType<typeof getDriverLocationRequirement>> = {
+    required: false,
+    reason: null,
+    activeLoadIds,
+    retainedLoadIds: [],
+    policyRequestId: null,
+  };
+
+  if (contextOrgId) {
+    await finalizeDriverStatusChangeIfClear(user._id.toString(), contextOrgId);
+
+    const statusContext = await getDriverStatusContext(
+      user._id.toString(),
+      contextOrgId,
+    );
+
+    locationRequirement = await getDriverLocationRequirement(
+      user._id.toString(),
+      contextOrgId,
+      {
+        operationalStatus: statusContext.operationalStatus,
+        emergencyReleaseActive: statusContext.emergencyReleaseActive,
+        activeLoadIds,
+      },
+    );
+  }
 
   const retainedRequiredIds = new Set(locationRequirement.retainedLoadIds);
   const data = (loads as any[]).map((load) => ({
@@ -1192,17 +1220,21 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
 // .select() has been removed.
 const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
   const skip = (page - 1) * limit;
 
-  const filter = {
-    organizationId,
+  // Drivers are a shared platform-wide pool, not tied to one org — default to
+  // loads across every dealership. An explicit ?organizationId= narrows to one.
+  const requestedOrgId = req.query.organizationId as string | undefined;
+  const filter: any = {
     status: "Posted",
     $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
   };
+  if (requestedOrgId && mongoose.isValidObjectId(requestedOrgId)) {
+    filter.organizationId = requestedOrgId;
+  }
 
   const [loads, total, profile, location] = await Promise.all([
     Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -1253,10 +1285,8 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
 // inherently pending.
 const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
   const loads = await Load.find({
-    organizationId,
     status: "Posted",
     "driverRequests.driverId": user._id,
   })
@@ -1277,9 +1307,16 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
 // returned. maskLoadForDriver is no longer used anywhere.
 const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId })
+  // Staff callers still need org isolation (a dispatcher shouldn't see
+  // another dealership's load) — drivers are a shared pool with no org to
+  // scope by, so the constraint only applies when the caller is staff.
+  const lookup: any = { _id: req.params.id };
+  if (user.role !== "driver") {
+    lookup.organizationId = req.orgId as string;
+  }
+
+  const load = await Load.findOne(lookup)
     .populate("assignedDriverId", "name email phone avatar")
     .lean();
   if (!load) throw new ApiError(404, "Load not found");
@@ -1319,7 +1356,6 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/driver-tracking/loads/:id/request
 const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
   const {
     note,
     overrideAvailability = false,
@@ -1329,17 +1365,20 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
   };
   const signature = parseDriverSignature(req.body);
 
+  // Drivers are a shared pool with no org of their own — the load being
+  // requested determines which dealership's rules apply, not req.orgId.
+  const load = await Load.findOne({ _id: req.params.id });
+  if (!load) throw new ApiError(404, "Load not found");
+  if (load.status !== "Posted" || load.assignedDriverId) {
+    throw new ApiError(400, "This load is no longer available");
+  }
+  const organizationId = load.organizationId as unknown as string;
+
   await assertDriverCanTakeNewWork(
     user._id.toString(),
     organizationId,
     "request",
   );
-
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-  if (load.status !== "Posted" || load.assignedDriverId) {
-    throw new ApiError(400, "This load is no longer available");
-  }
 
   // Vehicle capacity is a per-load equipment constraint. It must never be
   // compared with the number of active load records. Existing active loads are
@@ -1817,7 +1856,6 @@ const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/driver-tracking/alerts/:alertId/respond
 const respondToDriverAlert = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
   const { alertId } = req.params;
   const { response } = req.body as {
     response?: "acknowledged" | "on_my_way" | "unable";
@@ -1828,14 +1866,17 @@ const respondToDriverAlert = asyncHandler(async (req: Request, res: Response) =>
     throw new ApiError(400, "A valid response is required");
   }
 
+  // Drivers have no org of their own — userId+alertId is already a unique,
+  // secure lookup, so the alert's own organizationId is used for the
+  // dispatcher-side notify below instead of req.orgId.
   const notification: any = await Notification.findOne({
     _id: alertId,
     userId: user._id,
-    organizationId,
     type: "driver_dispatch_alert",
   });
 
   if (!notification) throw new ApiError(404, "Driver alert not found");
+  const organizationId = notification.organizationId as string;
 
   const respondedAt = new Date();
   notification.metadata = {
@@ -1999,11 +2040,11 @@ const requireAssignedDriver = (load: any, userId: string) => {
 // POST /api/driver-tracking/loads/:id/accept  { signatureDataUrl, signerName }
 const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
   const signature = parseDriverSignature(req.body);
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  const load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
+  const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Assigned") {
     throw new ApiError(400, `Cannot accept a load in ${load.status} status`);
@@ -2060,10 +2101,10 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/driver-tracking/loads/:id/pickup
 const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  const load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
+  const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Accepted") {
     throw new ApiError(400, `Cannot mark pickup from ${load.status} status`);
@@ -2096,10 +2137,10 @@ const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/driver-tracking/loads/:id/start-route
 const startRoute = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  const load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
+  const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Picked Up") {
     throw new ApiError(400, `Cannot start route from ${load.status} status`);
@@ -2140,10 +2181,10 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
 // available to Dispatch through the existing confirm-delivery workflow.
 const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  const load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
+  const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
 
   // Make delivery completion safe to retry if the browser lost the first
@@ -2228,11 +2269,11 @@ const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
 // Driver releases an assigned load → returns the same Transportation load to the available pool
 const dropLoad = asyncHandler(async (req: Request, res: Response) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
   const { reason } = req.body as { reason?: string };
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  const load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
+  const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (!["Assigned", "Accepted"].includes(load.status)) {
     throw new ApiError(

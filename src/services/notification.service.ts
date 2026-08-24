@@ -43,6 +43,7 @@ const VALID_NOTIFICATION_TYPES = [
   'pm_group_added', 'pm_task_mention', 'pm_task_deadline',
   'calendar_event_reminder', 'calendar_event_today', 'calendar_event_assigned',
   'driver_request', 'driver_request_approved', 'driver_request_rejected',
+  'dealership_inquiry',
   'driver_assigned', 'driver_location_update', 'driver_payout',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'driver_dispatch_alert',
@@ -122,6 +123,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   admin_system_alert: 'adminSystemAlerts',
   admin_staff_activity: 'adminStaffActivity',
   admin_security_audit: 'adminSecurityAudit',
+  dealership_inquiry: 'adminSystemAlerts',
 
   // Admin-only staff-monitoring alerts — every recipient is always an
   // admin/manager watching another agent's activity (see
@@ -295,6 +297,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       admin_system_alert: metadata?.route || '/notifications',
       admin_staff_activity: metadata?.route || '/notifications',
       admin_security_audit: metadata?.route || '/notifications',
+      dealership_inquiry: metadata?.route || '/admin/dealership-inquiries',
     };
 
     const targetUrl = metadata?.route || urlMap[type] || '/notifications';

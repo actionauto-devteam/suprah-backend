@@ -2,6 +2,12 @@ import express from "express";
 import adminController from "../controllers/admin.controller";
 import adminReferralController from "../controllers/admin.referral.controller";
 import driverAdminController from "../controllers/driverAdmin.controller";
+import {
+  listDealershipInquiries,
+  getDealershipInquiry,
+  sendDealershipSetupLink,
+  dismissDealershipInquiry,
+} from "../controllers/dealershipInquiry.controller";
 import { adminAdjustPoints } from "../controllers/membership.controller";
 import auth from "../middleware/auth.middleware";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
@@ -62,6 +68,13 @@ router.post(
 );
 
 router.post("/membership/adjust-points", adminAdjustPoints);
+
+// Dealership inquiries — public email capture reviewed here, superadmin
+// triggers the private setup link.
+router.get("/dealership-inquiries", listDealershipInquiries);
+router.get("/dealership-inquiries/:id", getDealershipInquiry);
+router.post("/dealership-inquiries/:id/send-link", sendDealershipSetupLink);
+router.post("/dealership-inquiries/:id/dismiss", dismissDealershipInquiry);
 
 // Drivers are a shared platform-wide pool — administered here, not per org.
 router.post("/drivers/invite-link", driverAdminController.generateDriverInviteLink);
