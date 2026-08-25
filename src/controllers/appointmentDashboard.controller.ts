@@ -16,25 +16,203 @@ interface DashboardRange {
   label: string;
 }
 
+// Service Hub is a Mountain Time business view. Keep the calendar-day/month
+// interpretation anchored to America/Denver, then convert those boundaries to
+// UTC for MongoDB. Using the IANA zone (rather than a fixed -6 offset) keeps
+// both MDT and MST dates correct across daylight-saving transitions.
+const DASHBOARD_TIME_ZONE = "America/Denver";
+
+const dashboardTimePartsFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: DASHBOARD_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+const dashboardCalendarDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: DASHBOARD_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function calendarDateLabel(year: number, month: number, day: number): string {
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function parseCalendarDate(value: string): {
+  year: number;
+  month: number;
+  day: number;
+} | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    !Number.isInteger(year) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return { year, month, day };
+}
+
+function parseCalendarMonth(value: string): { year: number; month: number } | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isInteger(year) || month < 1 || month > 12) return null;
+
+  return { year, month };
+}
+
+/**
+ * Resolve a Mountain Time wall-clock midnight to a UTC timestamp without a
+ * fixed offset. Iterating against Intl's formatted wall clock makes this work
+ * for both MDT (UTC-6) and MST (UTC-7), including DST boundary dates.
+ */
+function mountainMidnightUtcMs(year: number, month: number, day: number): number {
+  const desiredWallClockAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  let guess = desiredWallClockAsUtc;
+
+  for (let i = 0; i < 4; i += 1) {
+    const parts = dashboardTimePartsFormatter.formatToParts(new Date(guess));
+    const values: Record<string, string> = {};
+    for (const part of parts) {
+      if (part.type !== "literal") values[part.type] = part.value;
+    }
+
+    const representedWallClockAsUtc = Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute),
+      Number(values.second),
+      0,
+    );
+
+    const correction = desiredWallClockAsUtc - representedWallClockAsUtc;
+    if (correction === 0) break;
+    guess += correction;
+  }
+
+  return guess;
+}
+
+function mountainCalendarDateFromInstant(value: Date): {
+  year: number;
+  month: number;
+  day: number;
+} {
+  const parts = dashboardCalendarDateFormatter.formatToParts(value);
+  const values: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+  };
+}
+
+function currentMountainCalendarDate(): { year: number; month: number; day: number } {
+  return mountainCalendarDateFromInstant(new Date());
+}
+
+function dayRangeInMountainTime(year: number, month: number, day: number): DashboardRange {
+  const startMs = mountainMidnightUtcMs(year, month, day);
+
+  // Advance the calendar date in UTC only as a calendar arithmetic helper, then
+  // independently resolve the next Mountain midnight. This preserves 23/25-hour
+  // days around DST changes.
+  const nextCalendarDay = new Date(Date.UTC(year, month - 1, day + 1));
+  const nextStartMs = mountainMidnightUtcMs(
+    nextCalendarDay.getUTCFullYear(),
+    nextCalendarDay.getUTCMonth() + 1,
+    nextCalendarDay.getUTCDate(),
+  );
+
+  return {
+    start: new Date(startMs),
+    end: new Date(nextStartMs - 1),
+    isMonth: false,
+    label: calendarDateLabel(year, month, day),
+  };
+}
+
+function monthRangeInMountainTime(year: number, month: number): DashboardRange {
+  const startMs = mountainMidnightUtcMs(year, month, 1);
+  const nextMonth = new Date(Date.UTC(year, month, 1));
+  const nextStartMs = mountainMidnightUtcMs(
+    nextMonth.getUTCFullYear(),
+    nextMonth.getUTCMonth() + 1,
+    1,
+  );
+
+  return {
+    start: new Date(startMs),
+    end: new Date(nextStartMs - 1),
+    isMonth: true,
+    label: `${year}-${pad2(month)}`,
+  };
+}
+
 function resolveDashboardRange(query: any): DashboardRange {
   const isMonth = query.view === "month" || !!query.month;
 
   if (isMonth) {
-    const monthStr: string =
-      (query.month as string) ||
-      (query.date ? String(query.date).slice(0, 7) : "") ||
-      new Date().toISOString().slice(0, 7);
+    let monthStr = typeof query.month === "string" ? query.month.trim() : "";
 
-    const [y, m] = monthStr.split("-").map((n: string) => parseInt(n, 10));
+    if (!monthStr && query.date) {
+      const dateValue = String(query.date).trim();
+      const plainDate = parseCalendarDate(dateValue);
+      if (plainDate) {
+        monthStr = `${plainDate.year}-${pad2(plainDate.month)}`;
+      } else {
+        const instant = new Date(dateValue);
+        if (!Number.isNaN(instant.getTime())) {
+          const mountainDate = mountainCalendarDateFromInstant(instant);
+          monthStr = `${mountainDate.year}-${pad2(mountainDate.month)}`;
+        }
+      }
+    }
 
-    if (!y || !m || m < 1 || m > 12) {
+    if (!monthStr) {
+      const now = currentMountainCalendarDate();
+      monthStr = `${now.year}-${pad2(now.month)}`;
+    }
+
+    const parsedMonth = parseCalendarMonth(monthStr);
+    if (!parsedMonth) {
       throw new ApiError(400, "Invalid month format. Use YYYY-MM");
     }
 
-    const start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
-    const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
-
-    return { start, end, isMonth: true, label: monthStr };
+    return monthRangeInMountainTime(parsedMonth.year, parsedMonth.month);
   }
 
   const dateRaw = query.date;
@@ -45,35 +223,28 @@ function resolveDashboardRange(query: any): DashboardRange {
     );
   }
 
-  let dateObj: Date;
-  try {
-    const dateStr = String(dateRaw).trim();
-    dateObj = dateStr.includes("T")
-      ? new Date(dateStr)
-      : new Date(`${dateStr}T00:00:00Z`);
+  const dateStr = String(dateRaw).trim();
+  const plainDate = parseCalendarDate(dateStr);
+  if (plainDate) {
+    return dayRangeInMountainTime(plainDate.year, plainDate.month, plainDate.day);
+  }
 
-    if (isNaN(dateObj.getTime())) {
-      throw new Error("Invalid date");
-    }
-  } catch (err) {
+  // Backward compatibility: callers may still send a full ISO timestamp. Map
+  // that instant to its Mountain Time calendar day, then query that whole day.
+  const instant = new Date(dateStr);
+  if (Number.isNaN(instant.getTime())) {
     throw new ApiError(
       400,
       "Invalid date format. Use ISO string or YYYY-MM-DD",
     );
   }
 
-  const start = new Date(dateObj);
-  start.setUTCHours(0, 0, 0, 0);
-
-  const end = new Date(dateObj);
-  end.setUTCHours(23, 59, 59, 999);
-
-  return {
-    start,
-    end,
-    isMonth: false,
-    label: dateObj.toISOString().split("T")[0],
-  };
+  const mountainDate = mountainCalendarDateFromInstant(instant);
+  return dayRangeInMountainTime(
+    mountainDate.year,
+    mountainDate.month,
+    mountainDate.day,
+  );
 }
 
 /**
@@ -331,10 +502,11 @@ export const exportAppointmentsDashboard = asyncHandler(
         `${apt.customerBooking?.firstName} ${apt.customerBooking?.lastName}`.trim(),
         apt.customerBooking?.email,
         apt.customerBooking?.phone,
-        new Date(apt.startTime).toLocaleDateString("en-US"),
+        new Date(apt.startTime).toLocaleDateString("en-US", { timeZone: DASHBOARD_TIME_ZONE }),
         new Date(apt.startTime).toLocaleTimeString("en-US", {
           hour: "2-digit",
           minute: "2-digit",
+          timeZone: DASHBOARD_TIME_ZONE,
         }),
         `${(new Date(apt.endTime).getTime() - new Date(apt.startTime).getTime()) / 60000} min`,
         apt.type || "appointment",

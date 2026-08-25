@@ -7,6 +7,7 @@ import { ApiError } from '../utils/ApiError';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceSpace from '../models/SupraSpaceSpace.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
+import DayPulse from '../models/Daypulse.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
@@ -458,6 +459,206 @@ async function getOrCreateDayPulseReportConversation(organizationId: string, cre
   }
 
   return canonical;
+}
+
+const DAYPULSE_DEPARTMENT_LABELS: Record<string, string> = {
+  SalesAndFinance: 'Sales & Finance',
+  Accounting: 'Accounting',
+  Recon: 'Recon',
+  Marketing: 'Marketing',
+  OnlineTeam: 'Online Team',
+  WebDevTeam: 'Web Dev',
+  WholesaleTeam: 'Wholesale',
+  BuyingTeam: 'Buying',
+  OperationsTeam: 'Operations',
+  LotTechTeam: 'Lot Tech',
+  FundingTeam: 'Funding',
+  ProspectsTeam: 'Prospects',
+  PriceCheckTeam: 'Price Check',
+};
+
+function dayPulseBullets(text: string): string {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => `- ${line.replace(/^[-•]\s+/, '')}`)
+    .join('\n');
+}
+
+function dayPulseDateLabel(value: Date | string): string {
+  const date = new Date(value);
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+function dayPulseMountainTimeLabel(value: Date | string): string {
+  // Preserve the existing DayPulse display contract exactly: the current UI
+  // labels this as MDT and applies a fixed UTC-6 offset. Matching that format
+  // also lets stale frontend bundles be deduplicated against backend-generated
+  // messages during rollout.
+  const mdt = new Date(new Date(value).getTime() - 6 * 60 * 60 * 1000);
+  return mdt.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  });
+}
+
+function buildDayPulseSupraSpaceContent(report: any): string {
+  const department = DAYPULSE_DEPARTMENT_LABELS[report.department] || report.department || 'Team';
+  const dateLabel = dayPulseDateLabel(report.reportDate);
+  const timeLabel = dayPulseMountainTimeLabel(report.createdAt || new Date());
+
+  return (
+    `Department - ${department}\n` +
+    `Name - ${report.authorName}\n\n` +
+    `**Accomplishments**\n${dayPulseBullets(report.accomplishment)}\n\n` +
+    `**Blockers**\n${dayPulseBullets(report.blockers)}\n\n` +
+    `**In Progress**\n${dayPulseBullets(report.inProgress)}` +
+    `\n\nDaily Report - Generated on ${dateLabel} at ${timeLabel}`
+  );
+}
+
+function normalizeDayPulseSupraSpaceAttachments(report: any): any[] {
+  if (!Array.isArray(report?.attachments)) return [];
+
+  return report.attachments.map((attachment: any) => {
+    const key = attachment.fileKey || attachment.url;
+    return {
+      // Store the durable private-object key, not a temporary signed URL. The
+      // normal Suprah Space message fetch/signing path creates a fresh URL.
+      url: key,
+      fileKey: key,
+      originalName: attachment.originalName,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      thumbnailUrl: attachment.thumbnailUrl ? key : null,
+    };
+  });
+}
+
+/**
+ * Persist one DayPulse report into the canonical Suprah Space DayPulse Reports
+ * channel. This is intentionally idempotent: browser retries, request retries,
+ * and duplicate backend calls all resolve to the same message.
+ */
+export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
+  conversationId: string;
+  messageId: string;
+  created: boolean;
+}> {
+  if (!report?._id) throw new ApiError(400, 'DayPulse report id is required');
+  if (!report?.organizationId) throw new ApiError(400, 'DayPulse organization is required');
+  if (!report?.userId) throw new ApiError(400, 'DayPulse author is required');
+
+  const reportId = new mongoose.Types.ObjectId(report._id.toString());
+  const organizationId = report.organizationId.toString();
+  const senderId = report.userId;
+  const conversation = await getOrCreateDayPulseReportConversation(organizationId, senderId);
+
+  const existing = await SupraSpaceMessage.findOne({
+    'metadata.source': 'daypulse',
+    'metadata.dayPulseReportId': reportId,
+  });
+
+  if (existing) {
+    return {
+      conversationId: conversation._id.toString(),
+      messageId: existing._id.toString(),
+      created: false,
+    };
+  }
+
+  const content = buildDayPulseSupraSpaceContent(report);
+  const attachments = normalizeDayPulseSupraSpaceAttachments(report);
+  const hasImage = attachments.some((attachment: any) => attachment.mimeType?.startsWith('image/'));
+  const msgType: any = attachments.length
+    ? hasImage && attachments.length === 1 ? 'image' : 'file'
+    : 'system';
+
+  let message: any;
+  try {
+    message = await SupraSpaceMessage.create({
+      conversationId: conversation._id,
+      sender: senderId,
+      content,
+      type: msgType,
+      attachments,
+      readBy: [senderId],
+      metadata: {
+        source: 'daypulse',
+        dayPulseReportId: reportId,
+      },
+    });
+  } catch (error: any) {
+    // The unique partial index closes the race between simultaneous retries.
+    // If another request created the message first, reuse it rather than
+    // surfacing a duplicate-key error to the DayPulse submit flow.
+    if (error?.code === 11000) {
+      const raced = await SupraSpaceMessage.findOne({
+        'metadata.source': 'daypulse',
+        'metadata.dayPulseReportId': reportId,
+      });
+      if (raced) {
+        return {
+          conversationId: conversation._id.toString(),
+          messageId: raced._id.toString(),
+          created: false,
+        };
+      }
+    }
+    throw error;
+  }
+
+  await message.populate('sender', 'fullName username avatar');
+
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  conversation.deletedFor = [];
+  await conversation.save({ validateModifiedOnly: true });
+
+  let messageForClient = message.toObject() as any;
+  try {
+    messageForClient = await signAttachments(messageForClient);
+  } catch (error) {
+    // Message persistence is the source of truth. Attachment signing can be
+    // retried naturally when clients fetch the conversation again.
+    logger.warn({ error, messageId: message._id.toString() }, '[DayPulse] Suprah Space attachment signing failed');
+  }
+
+  emitToConversation(conversation, 'conversation:updated', {
+    _id: conversation._id.toString(),
+    name: DAYPULSE_REPORT_CHANNEL_NAME,
+    lastMessage: messageForClient,
+    lastMessageAt: message.createdAt,
+  });
+  emitToConversation(conversation, 'message:new', {
+    conversationId: conversation._id.toString(),
+    message: messageForClient,
+  });
+
+  const senderName = report.authorName || 'Someone';
+  const pushBody = truncateWithEllipsis(stripMessageFormatting(content), 120);
+  pushToConversationMembers(
+    conversation,
+    senderId.toString(),
+    DAYPULSE_REPORT_CHANNEL_NAME,
+    `${senderName}: ${pushBody}`,
+    '',
+    message._id.toString(),
+  );
+
+  return {
+    conversationId: conversation._id.toString(),
+    messageId: message._id.toString(),
+    created: true,
+  };
 }
 
 async function signAttachments(message: any) {
@@ -1306,12 +1507,73 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const orgId = (req.crmUser!.organizationId as any)?.toString();
-  const { content, attachments } = req.body;
+  const { content, attachments, dayPulseReportId } = req.body || {};
 
   if (!orgId) throw new ApiError(403, 'Your account is not linked to an organization');
+
+  // New/current clients can retry synchronization by report id. The server
+  // reloads the report from MongoDB, so attachment keys/content remain trusted
+  // backend data instead of round-tripping temporary signed URLs through the
+  // browser.
+  if (dayPulseReportId) {
+    if (!mongoose.Types.ObjectId.isValid(dayPulseReportId)) {
+      throw new ApiError(400, 'Invalid DayPulse report id');
+    }
+
+    const report = await DayPulse.findOne({
+      _id: dayPulseReportId,
+      organizationId: req.crmUser!.organizationId,
+      deletedAt: null,
+    }).lean();
+    if (!report) throw new ApiError(404, 'DayPulse report not found');
+
+    const isOwner = report.userId.toString() === userId.toString();
+    const isAdmin = (req.crmUser as any)?.role === 'admin';
+    if (!isOwner && !isAdmin) {
+      throw new ApiError(403, 'Only the report owner or an admin can retry report synchronization');
+    }
+
+    const synced = await syncDayPulseReportToSupraSpace(report);
+    const message = await SupraSpaceMessage.findById(synced.messageId)
+      .populate('sender', 'fullName username avatar')
+      .lean();
+    const messageForClient = message ? await signAttachments({ ...message } as any) : null;
+
+    return res.status(synced.created ? 201 : 200).json(
+      new ApiResponse(
+        synced.created ? 201 : 200,
+        { conversationId: synced.conversationId, message: messageForClient, created: synced.created },
+        synced.created ? 'DayPulse report posted' : 'DayPulse report already synchronized',
+      ),
+    );
+  }
+
+  // Legacy compatibility: older frontend bundles sent rendered content and
+  // attachments directly. Keep that contract intact while preventing a stale
+  // client from duplicating a report the new backend already synchronized.
   if (!content?.trim()) throw new ApiError(400, 'Report content is required');
 
   const conversation = await getOrCreateDayPulseReportConversation(orgId, userId);
+
+  const recentBackendSync = await SupraSpaceMessage.findOne({
+    conversationId: conversation._id,
+    sender: userId,
+    content: content.trim(),
+    'metadata.source': 'daypulse',
+    createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) },
+  }).populate('sender', 'fullName username avatar');
+
+  if (recentBackendSync) {
+    const existingForClient = await signAttachments(recentBackendSync.toObject() as any);
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { conversationId: conversation._id, message: existingForClient, created: false },
+        'DayPulse report already synchronized',
+      ),
+    );
+  }
+
   const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
   const hasImage = normalizedAttachments.some((a: any) => a.mimeType?.startsWith('image/'));
   const msgType: any = normalizedAttachments.length
@@ -1337,6 +1599,8 @@ const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
   emitToConversation(conversation, 'conversation:updated', {
     _id: conversation._id.toString(),
     name: DAYPULSE_REPORT_CHANNEL_NAME,
+    lastMessage: messageForClient,
+    lastMessageAt: message.createdAt,
   });
   emitToConversation(conversation, 'message:new', {
     conversationId: conversation._id.toString(),
@@ -1354,7 +1618,7 @@ const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
     message._id.toString()
   );
 
-  res.status(201).json(new ApiResponse(201, { conversationId: conversation._id, message: messageForClient }, 'DayPulse report posted'));
+  res.status(201).json(new ApiResponse(201, { conversationId: conversation._id, message: messageForClient, created: true }, 'DayPulse report posted'));
 });
 
 const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {

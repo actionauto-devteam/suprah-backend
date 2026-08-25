@@ -53,7 +53,13 @@ const resolveOrganizer = async (userId: string) => {
   return null;
 };
 
-const checkUserAvailability = async (userId: string, startTime: Date, endTime: Date, excludeAppointmentId?: string) => {
+const checkUserAvailability = async (
+  userId: string,
+  startTime: Date,
+  endTime: Date,
+  excludeAppointmentId?: string,
+  organizationId?: string
+) => {
   const filter: any = {
     participants: new mongoose.Types.ObjectId(userId),
     status: { $ne: 'cancelled' },
@@ -69,6 +75,13 @@ const checkUserAvailability = async (userId: string, startTime: Date, endTime: D
       ]
     }
   };
+
+  // Keep the availability check tenant-scoped when the caller knows the org.
+  // organizationId is optional and appended to the existing signature so any
+  // older direct callers of checkUserAvailability remain compatible.
+  if (organizationId) {
+    filter.organizationId = organizationId;
+  }
 
   if (excludeAppointmentId) {
     filter._id = { $ne: new mongoose.Types.ObjectId(excludeAppointmentId) };
@@ -89,8 +102,8 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
     throw new ApiError(400, 'End time must be after start time');
   }
 
-  // Double-Booking Prevention
-  await checkUserAvailability(userId, start, end);
+  // Double-Booking Prevention — scope conflicts to the active organization.
+  await checkUserAvailability(userId, start, end, undefined, orgId);
 
   if (start < new Date()) {
     throw new ApiError(400, 'Cannot schedule appointments in the past');
@@ -347,7 +360,11 @@ const getCustomerBookings = async (
   }
 
   const appointments = await Appointment.find(filter)
-    .populate('createdBy', 'name email avatar')
+    // Customer-booking records are also opened by the shared appointment
+    // details modal. Populate both refPath-backed identities so this endpoint
+    // returns the same participant shape as the regular appointment flow.
+    .populate({ path: 'participants', select: 'name fullName email avatar' })
+    .populate({ path: 'createdBy', select: 'name fullName email avatar' })
     .sort({ startTime: -1 });
 
   return { appointments, total: appointments.length };

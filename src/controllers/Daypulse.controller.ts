@@ -8,6 +8,8 @@ import FeedComment from '../models/FeedComment.model';
 import FeedReaction from '../models/FeedReaction.model';
 import { getIO } from '../socket/feedSocket';
 import { BucketType, storageService } from '../services/storage.service';
+import { syncDayPulseReportToSupraSpace } from './supraspace.controller';
+import logger from '../utils/logger';
 
 
 const DEFAULT_LIMIT = 20;
@@ -140,6 +142,34 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
       isEdited: false,
     });
 
+    // DayPulse is the source of truth. Synchronize the newly-persisted report
+    // into the canonical Suprah Space "DayPulse Reports" channel from the
+    // backend so success no longer depends on a second browser request.
+    //
+    // IMPORTANT: keep this failure isolated from the outer upload rollback. If
+    // Suprah Space is temporarily unavailable, the DayPulse report already
+    // exists and its uploaded files must NOT be deleted. The endpoint returns
+    // the sync status so the current frontend can perform one idempotent retry.
+    let supraSpaceSync: {
+      synced: boolean;
+      conversationId?: string;
+      messageId?: string;
+    } = { synced: false };
+
+    try {
+      const synced = await syncDayPulseReportToSupraSpace(report.toObject());
+      supraSpaceSync = {
+        synced: true,
+        conversationId: synced.conversationId,
+        messageId: synced.messageId,
+      };
+    } catch (syncError) {
+      logger.error(
+        { syncError, reportId: report._id.toString(), organizationId: actor.organizationId.toString() },
+        '[DayPulse] Suprah Space report sync failed',
+      );
+    }
+
     const reportForClient = await signAttachments(report.toObject());
 
     try {
@@ -148,7 +178,7 @@ export const createReport = asyncHandler(async (req: Request, res: Response) => 
         .emit('daypulse:new', { report: reportForClient });
     } catch { /* Socket.IO not yet initialised — REST response unaffected */ }
 
-    res.status(201).json(new ApiResponse(201, { report: reportForClient }, 'DayPulse report created'));
+    res.status(201).json(new ApiResponse(201, { report: reportForClient, supraSpaceSync }, 'DayPulse report created'));
   } catch (error) {
     await Promise.all(uploadedKeys.map((key) => storageService.delete(key, BucketType.PRIVATE).catch(() => undefined)));
     throw error;
