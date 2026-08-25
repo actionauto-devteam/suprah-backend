@@ -123,6 +123,15 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
 
     logger.info({ userId, fullName: user.fullName }, '[SupraSpace] User connected');
 
+    // Conversations this socket has an outstanding typing:start for, with no
+    // typing:stop yet. If the tab closes/crashes/loses connection mid-type,
+    // the client's own inactivity timer never fires and other participants
+    // are stuck seeing "is typing..." forever — cleaned up on disconnect
+    // below. Scoped to this socket, not the user, since one user can have
+    // multiple connections (page socket + popup socket) and closing one
+    // must not clear typing state still legitimately active on another.
+    const activeTypingConversations = new Set<string>();
+
     // ── Suprah YapLine (PTT voice + screen share) ─────────────────────────
     registerYapLineHandlers(io, socket);
 
@@ -174,6 +183,7 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
         logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized typing:start');
         return;
       }
+      activeTypingConversations.add(conversationId);
       socket.to(`conv:${conversationId}`).emit('typing:start', {
         conversationId,
         userId,
@@ -187,6 +197,7 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
         logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized typing:stop');
         return;
       }
+      activeTypingConversations.delete(conversationId);
       socket.to(`conv:${conversationId}`).emit('typing:stop', {
         conversationId,
         userId,
@@ -256,6 +267,14 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       } catch (err: any) {
         logger.error(err, '[YapLine] disconnect cleanup error');
       }
+
+      // Tell every conversation this socket was mid-typing in to clear the
+      // indicator — otherwise a crashed/closed tab leaves other viewers
+      // staring at a permanently stuck "is typing..." for this user.
+      activeTypingConversations.forEach((conversationId) => {
+        socket.to(`conv:${conversationId}`).emit('typing:stop', { conversationId, userId });
+      });
+      activeTypingConversations.clear();
 
       const remaining = (onlineUsers.get(userId) || 1) - 1;
       if (remaining <= 0) {
