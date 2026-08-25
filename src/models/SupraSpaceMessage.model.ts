@@ -60,6 +60,10 @@ export interface ISupraSpaceMessageMetadata {
   customerAvatar?: string | null;
   crmUserName?: string | null;
   crmUserRole?: string | null;
+  // Source linkage for system-generated messages. DayPulse uses this pair to
+  // guarantee that retries map one report to one Suprah Space message.
+  source?: string | null;
+  dayPulseReportId?: mongoose.Types.ObjectId | null;
   meeting?: {
     meetingId: string;
     meetingLink: string;
@@ -171,6 +175,8 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
     customerAvatar:    { type: String, default: null },
     crmUserName:       { type: String, default: null },
     crmUserRole:       { type: String, default: null },
+    source:            { type: String, default: null },
+    dayPulseReportId:  { type: Schema.Types.ObjectId, ref: 'DayPulse', default: null },
     meeting: {
       meetingId: { type: String, default: '' },
       meetingLink: { type: String, default: '' },
@@ -226,6 +232,19 @@ SupraSpaceMessageSchema.index({ conversationId: 1, createdAt: -1 });
 SupraSpaceMessageSchema.index({ scheduledStatus: 1, scheduledAt: 1 });
 SupraSpaceMessageSchema.index({ content: 'text' });
 SupraSpaceMessageSchema.index({ conversationId: 1, 'metadata.isCustomerMessage': 1 });
+// One DayPulse report can create at most one Suprah Space message. The partial
+// index leaves every existing/manual message untouched and only applies to
+// messages explicitly generated from DayPulse.
+SupraSpaceMessageSchema.index(
+  { 'metadata.source': 1, 'metadata.dayPulseReportId': 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      'metadata.source': 'daypulse',
+      'metadata.dayPulseReportId': { $type: 'objectId' },
+    },
+  },
+);
 
 
 const SupraSpaceMessage = mongoose.model<ISupraSpaceMessage>(
