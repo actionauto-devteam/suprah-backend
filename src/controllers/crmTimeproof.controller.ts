@@ -1285,13 +1285,19 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
 
   if (!req.file) throw new ApiError(400, 'Screenshot file is required');
 
-  const { capturedAt, shiftDate, idleDetected = 'false' } = req.body;
+  const { capturedAt, shiftDate, idleDetected = 'false', breakEvent } = req.body;
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
     throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
   }
+  if (breakEvent !== undefined && breakEvent !== 'break-in' && breakEvent !== 'break-out') {
+    throw new ApiError(400, 'breakEvent must be break-in or break-out');
+  }
 
   const capturedAtDate = capturedAt ? new Date(capturedAt) : new Date();
-  const flag = idleDetected === 'true' ? 'idle' : 'active';
+  // A break-event proof shot uses its own flag instead of idle/active — taken
+  // specifically to show what was on screen (and the real time) the moment a
+  // break started/ended, independent of idle state.
+  const flag = breakEvent ? breakEvent : (idleDetected === 'true' ? 'idle' : 'active');
   // Override the multer file name so storageService.upload puts the key in our
   // structured layout. We don't need a hash suffix because capturedAtMs is unique.
   const customFileName = `${capturedAtDate.getTime()}-${flag}.jpg`;
@@ -1404,9 +1410,12 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
   const parsed = objects
     .filter((obj) => !excludedKeys.has(obj.key))
     .map((obj) => {
-      // key suffix after prefix is "{capturedAtMs}-{flag}.jpg" — anything else is ignored
+      // key suffix after prefix is "{capturedAtMs}-{flag}.jpg" — anything else is ignored.
+      // Split on the FIRST '-', not the last: capturedAtMs is purely numeric (never
+      // contains a hyphen), but flag can (e.g. "break-in"/"break-out"), so lastIndexOf
+      // would wrongly split those flags themselves instead of the ms/flag boundary.
       const tail = obj.key.slice(prefix.length).replace(/\.jpg$/i, '');
-      const dashIdx = tail.lastIndexOf('-');
+      const dashIdx = tail.indexOf('-');
       if (dashIdx < 0) return null;
       const msStr = tail.slice(0, dashIdx);
       const flag = tail.slice(dashIdx + 1);
@@ -1421,6 +1430,10 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
         // not a real screenshot, so the frontend needs to know to render it
         // differently instead of showing it as if it were one.
         isPlaceholder: flag === 'noaccess',
+        // Proof-of-work shot taken automatically by the tray at the exact moment
+        // a break started/ended (see captureAndUploadOnce's breakEvent param) —
+        // distinct from idle/active captures.
+        breakEvent: (flag === 'break-in' || flag === 'break-out') ? flag as 'break-in' | 'break-out' : null,
       };
     })
     .filter((x): x is NonNullable<typeof x> => !!x)
@@ -1432,6 +1445,7 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
       isPlaceholder: s.isPlaceholder,
+      breakEvent: s.breakEvent,
       isBlurred: shouldBlur,
       url: shouldBlur
         ? `/api/crm/timeproof/screenshot-blurred?key=${encodeURIComponent(s.r2Key)}&t=${encodeURIComponent(requestToken)}`

@@ -3,9 +3,12 @@
 // fix in lead.controller.ts's receiveADF. This finds leads that are almost
 // certainly redelivery duplicates (same org + email + vehicle, created within
 // 15 minutes of an earlier one) and removes them, but ONLY when the duplicate
-// is still untouched (status New, unread, no notes/status history) — if a rep
-// already worked a "duplicate" copy, it's left alone for manual review instead
-// of being auto-deleted.
+// is still untouched (status still New, no notes/status history) — if a rep
+// already worked a "duplicate" copy (replied, changed status, left a note),
+// it's left alone for manual review instead of being auto-deleted. isRead is
+// deliberately NOT part of this check — a lead gets marked read just by
+// being opened/viewed in the inbox list, which happens passively and doesn't
+// mean anyone actually worked it.
 //
 // Defaults to a DRY RUN that just prints what it would delete. Pass --confirm
 // to actually delete.
@@ -19,9 +22,26 @@ const CONFIRM = process.argv.includes('--confirm');
 
 const isUntouched = (lead: any) =>
   lead.status === 'New' &&
-  !lead.isRead &&
   (!lead.notes || lead.notes.length === 0) &&
   (!lead.statusHistory || lead.statusHistory.length === 0);
+
+// Internal QA/staff leads created to test the lead-ingestion pipeline itself
+// (e.g. "Test Email - AutoTrader 8.20", "ReTest Chat - KBB 8.20") — always
+// closed out immediately by whoever created them, with every note/status
+// reason self-labeled as a test. Safe to remove even though they technically
+// have "activity," since that activity is the test run itself, not real
+// customer work.
+const TEST_PREFIX_RE = /^(re)?test\b/i;
+const isTestArtifact = (lead: any) => {
+  if (lead.status !== 'Closed') return false;
+  const notes = lead.notes || [];
+  const history = lead.statusHistory || [];
+  if (notes.length === 0 && history.length === 0) return false;
+  return (
+    notes.every((n: any) => TEST_PREFIX_RE.test((n.text || '').trim())) &&
+    history.every((h: any) => !h.reason || TEST_PREFIX_RE.test((h.reason || '').trim()))
+  );
+};
 
 const run = async () => {
   const databaseUri = config.mongoose?.url || process.env.MONGODB_URI || '';
@@ -73,6 +93,9 @@ const run = async () => {
       if (isUntouched(candidate)) {
         toDelete.push(String(candidate._id));
         console.log(`✓  DELETE  ${name} (${candidate.email}) — ${candidate.vehicle?.year} ${candidate.vehicle?.make} ${candidate.vehicle?.model} — dup of ${anchor._id}, ${Math.round(gapMs / 1000)}s apart`);
+      } else if (isTestArtifact(candidate)) {
+        toDelete.push(String(candidate._id));
+        console.log(`✓  DELETE  ${name} (${candidate.email}) — ${candidate.vehicle?.year} ${candidate.vehicle?.make} ${candidate.vehicle?.model} — dup of ${anchor._id}, test-data artifact`);
       } else {
         needsReview.push(String(candidate._id));
         console.log(`?  REVIEW  ${name} (${candidate.email}) — ${candidate.vehicle?.year} ${candidate.vehicle?.make} ${candidate.vehicle?.model} — looks like a dup of ${anchor._id} but has activity, skipping`);

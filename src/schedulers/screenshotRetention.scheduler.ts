@@ -36,7 +36,9 @@ async function purgeOldScreenshots(): Promise<{ deleted: number; failures: numbe
       ? new Date(dateStr + 'T12:00:00.000Z').getTime()
       : (() => {
           const fileName = parts[parts.length - 1] ?? '';
-          const dashIdx = fileName.lastIndexOf('-');
+          // First '-', not last: capturedAtMs is numeric-only, but the flag suffix
+          // can itself contain a hyphen (e.g. "break-in"/"break-out").
+          const dashIdx = fileName.indexOf('-');
           const ms = dashIdx >= 0 ? parseInt(fileName.slice(0, dashIdx), 10) : NaN;
           return Number.isFinite(ms) ? ms : (obj.lastModified?.getTime() ?? Date.now());
         })();
