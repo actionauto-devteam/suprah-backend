@@ -611,7 +611,7 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
   }
 
-  const targetUser = await CrmUser.findById(userId).select('_id department organizationId');
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('_id department organizationId');
   if (!targetUser) throw new ApiError(404, 'User not found');
 
   const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
@@ -1116,16 +1116,6 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   }
 
   // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
-  // TEMP diagnostic — pinpoints exactly which value is wrong when the
-  // escalation doesn't fire as expected (e.g. tray never getting
-  // breakDurationSeconds past the threshold, or lastBreakNotifiedAt stuck
-  // set from an earlier test). Remove once confirmed working.
-  if (isOnBreak) {
-    logger.info(
-      { userId: user._id.toString(), isOnBreak, isOnShift, breakDurationSeconds, BREAK_ADMIN_NOTIFY_SECONDS, lastBreakNotifiedAt },
-      '[break-escalation] heartbeat check'
-    );
-  }
   if (isOnBreak && isOnShift && breakDurationSeconds >= BREAK_ADMIN_NOTIFY_SECONDS && !lastBreakNotifiedAt) {
     logger.info({ userId: user._id.toString() }, '[break-escalation] threshold crossed — firing Shift Alert');
     await AgentHeartbeat.updateOne(
@@ -1390,10 +1380,14 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
   // If someone OTHER than the account owner is viewing (an admin/manager),
   // and that account has screenshotBlurUntilPayout set, serve blurred proxy
   // URLs instead of the real signed URLs, except in the payout window.
+  // Also enforces org scoping here — without it, an admin/manager could view
+  // another organization's screenshots just by knowing/guessing their userId.
   const isSelf = targetId === requestor._id.toString();
   let shouldBlur = false;
   if (!isSelf) {
-    const targetUser = await CrmUser.findById(targetId).select('screenshotBlurUntilPayout').lean();
+    const targetUser = await CrmUser.findOne({ _id: targetId, organizationId: requestor.organizationId })
+      .select('screenshotBlurUntilPayout').lean();
+    if (!targetUser) throw new ApiError(404, 'User not found');
     shouldBlur = !!targetUser?.screenshotBlurUntilPayout && !isPayoutUnblurWindow(new Date());
   }
   const requestToken = req.cookies?.['crm_token']
@@ -1490,8 +1484,14 @@ export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Respo
 
   const targetUserId = key.split('/')[1];
   const isSelf = targetUserId === requestor._id.toString();
-  if (!isSelf && !['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Access denied');
+  if (!isSelf) {
+    if (!['admin', 'manager'].includes(requestor.role)) {
+      throw new ApiError(403, 'Access denied');
+    }
+    // Org-scope the admin/manager path too — otherwise anyone with admin/manager
+    // role could pull another organization's screenshot just by knowing its key.
+    const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
+    if (!targetUser) throw new ApiError(404, 'Screenshot not found');
   }
 
   const file = await storageService.streamPrivateFile(key);
@@ -1531,8 +1531,14 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
 
   const [, targetUserId, date] = key.split('/');
   const isSelf = targetUserId === requestor._id.toString();
-  if (!isSelf && !['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'You can only delete your own screenshots');
+  if (!isSelf) {
+    if (!['admin', 'manager'].includes(requestor.role)) {
+      throw new ApiError(403, 'You can only delete your own screenshots');
+    }
+    // Org-scope the admin/manager path — otherwise any admin/manager could delete
+    // (and apply an hours deduction to) another organization's screenshot.
+    const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
+    if (!targetUser) throw new ApiError(404, 'User not found');
   }
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     throw new ApiError(400, 'Invalid screenshot key');
@@ -2628,6 +2634,9 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
     throw new ApiError(400, 'date is required (YYYY-MM-DD)');
   }
 
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('department organizationId').lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
   const { start, end } = getCompanyDayRange(dateStr as string);
 
   // Includes both the "flagged idle" events AND the unconditional periodic
@@ -2657,8 +2666,7 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
   // Web Dev is exempt from idle detection — the panel should show nothing at
   // all for them, including historical rows written before this exemption
   // existed (both event types queried above are idle-diagnostic only).
-  const targetUser = await CrmUser.findById(userId).select('department organizationId').lean();
-  const idleExempt = targetUser ? await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department) : false;
+  const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
   const filteredEntries = idleExempt ? [] : entries;
 
   res.json(new ApiResponse(200, { entries: filteredEntries }, 'Idle diagnostics fetched'));
