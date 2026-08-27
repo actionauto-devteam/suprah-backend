@@ -10,6 +10,11 @@ import { NOTIFICATION_CATEGORIES, NotificationCategory } from './Notification.mo
 // UI grouping of CRM's types specifically.
 export type NotificationPreferences = Record<NotificationCategory, boolean> & {
   mutedTypes: string[];
+  // CrmUser ids whose messages always notify this user, even in a
+  // conversation (group or DM) they've muted/set to none/foryou, and even
+  // with the "Messages" category off — see pushToConversationMembers and
+  // notifyMentionedMembers in supraspace.controller.ts for the bypass.
+  prioritySenders: string[];
 };
 
 const defaultNotificationPreferences: NotificationPreferences = {
@@ -21,6 +26,7 @@ const defaultNotificationPreferences: NotificationPreferences = {
     {} as Record<NotificationCategory, boolean>
   ),
   mutedTypes: [],
+  prioritySenders: [],
 };
 
 export { defaultNotificationPreferences };
@@ -34,6 +40,7 @@ export const notificationPreferencesSchemaDefinition = {
     {} as Record<NotificationCategory, { type: BooleanConstructor; default: boolean }>
   ),
   mutedTypes: { type: [String], default: [] },
+  prioritySenders: { type: [String], default: [] },
 };
 
 export const notificationPreferencesSchema = new Schema(notificationPreferencesSchemaDefinition, { _id: false });

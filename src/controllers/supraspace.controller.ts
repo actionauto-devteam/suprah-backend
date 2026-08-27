@@ -206,7 +206,14 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       const recipient = recipients.find((user: any) => user._id.toString() === memberId);
       const pref = getConversationNotificationPref(conv, memberId);
       const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|[^\w@])@all(?=$|[^\w])/i.test(textForMention);
-      if (!shouldNotifyForPreference(pref, mentioned)) return;
+      const notifPrefs = (recipient as any)?.notificationPreferences;
+
+      // A recipient can mark specific people as "always notify me" — bypasses
+      // both the per-conversation mute/none/foryou setting and the global
+      // "Messages" mute below, in any conversation (group or DM) they share.
+      const isPrioritySender = Array.isArray(notifPrefs?.prioritySenders) && notifPrefs.prioritySenders.includes(senderId);
+
+      if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
 
       // Mentioned members get a separate, more specific "X mentioned you" push
       // via notifyMentionedMembers() (goes through the unified notification
@@ -219,10 +226,11 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       // previously had no effect here at all — this function bypassed the
       // unified preference gate entirely, so muting "Messages" silently did
       // nothing for regular (non-mention) SupraSpace pushes.
-      const notifPrefs = (recipient as any)?.notificationPreferences;
-      const crmCategoryOff = notifPrefs?.crm === false;
-      const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
-      if (crmCategoryOff || messagesMuted) return;
+      if (!isPrioritySender) {
+        const crmCategoryOff = notifPrefs?.crm === false;
+        const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
+        if (crmCategoryOff || messagesMuted) return;
+      }
 
       const unreadCount = await SupraSpaceMessage.countDocuments({
         conversationId: conv._id,
@@ -355,15 +363,23 @@ async function notifyMentionedMembers(params: {
       .filter((x: string) => x !== params.senderId.toString());
     if (!memberIds.length) return;
 
-    const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName username').lean();
+    const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName username notificationPreferences').lean();
     const toNotify = hasAll
       ? members.map((x: any) => x._id.toString())
       : members
           .filter((member: any) => isUserMentioned(text, member))
           .map((x: any) => x._id.toString());
 
+    // A recipient can mark specific people as "always notify me" — bypasses
+    // the per-conversation mute/none setting even for @mentions.
+    const isPrioritySender = (memberId: string) => {
+      const member = members.find((m: any) => m._id.toString() === memberId);
+      const list = (member as any)?.notificationPreferences?.prioritySenders;
+      return Array.isArray(list) && list.includes(params.senderId.toString());
+    };
+
     const uniqueRecipients = [...new Set(toNotify)].filter((memberId) =>
-      shouldNotifyForPreference(getConversationNotificationPref(params.conversation, memberId), true)
+      isPrioritySender(memberId) || shouldNotifyForPreference(getConversationNotificationPref(params.conversation, memberId), true)
     );
 
     // Mention delivery has been silently missed for individual members with

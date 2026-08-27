@@ -6,7 +6,8 @@ import notificationService from '../services/notification.service';
 import CrmUser from '../models/CrmUser.model';
 import { NOTIFICATION_CATEGORIES } from '../models/Notification.model';
 
-const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes']);
+const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes', 'prioritySenders']);
+const ARRAY_PREFERENCE_KEYS = new Set(['mutedTypes', 'prioritySenders']);
 
 // CRM-identity-scoped mirror of notification.controller.ts. Reuses the same
 // underlying notification.service.ts functions (they're already polymorphic
@@ -101,7 +102,7 @@ const updatePreferences = asyncHandler(async (req: Request, res: Response) => {
   Object.keys(updates).forEach((key) => {
     if (!VALID_PREFERENCE_KEYS.has(key)) return;
     const value = updates[key];
-    if (key === 'mutedTypes') {
+    if (ARRAY_PREFERENCE_KEYS.has(key)) {
       if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return;
     } else if (typeof value !== 'boolean') {
       return;
