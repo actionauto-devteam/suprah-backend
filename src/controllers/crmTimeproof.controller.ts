@@ -2474,6 +2474,13 @@ export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response)
       const stale = !!lastSuccessMs && lastSuccessMs < staleThreshold;
       return {
         deviceHint: s.deviceHint || 'unknown',
+        // Which app registered this — 'main' | 'supraspace' | null (predates
+        // the field). Surfaced here so a duplicate-notification report is
+        // diagnosable from this page alone: e.g. two mobile devices, neither
+        // tagged 'supraspace' despite a dedicated-app install, means the
+        // subscribe call never actually reached the appSource-aware code.
+        appSource: s.appSource || null,
+        endpointHost: (() => { try { return new URL(s.endpoint).host; } catch { return 'invalid'; } })(),
         createdAt: s.createdAt,
         lastSuccessAt: s.lastSuccessAt || null,
         failureCount: s.failureCount || 0,
