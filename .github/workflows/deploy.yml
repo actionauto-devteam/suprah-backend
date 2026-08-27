@@ -70,6 +70,12 @@ jobs:
 
             cd /opt/actionauto/deploy
 
+            # Free disk space BEFORE pulling — the old prune-after-deploy-only order meant
+            # a disk that was already full from a prior deploy's leftovers had no chance to
+            # recover before the next pull, so the pull itself failed with "no space left on
+            # device" (2026-08-27 incident) and the cleanup step below never even ran.
+            sudo docker image prune -a -f
+
             # Pull latest images for all services defined in prod manifest
             sudo docker compose --env-file /opt/actionauto/.env -f docker-compose.prod.yml pull
 
