@@ -198,8 +198,20 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
     if (!recipientIds.length) return;
 
+    // Show who/what actually messaged them right in the notification —
+    // the sender's own avatar for a DM, or the group's avatar for a group
+    // chat — instead of always the generic app icon. One lookup, not one
+    // per recipient below.
+    let iconUrl = '/icon-192x192.png';
+    if (conv.type === 'group') {
+      if (conv.avatar) iconUrl = conv.avatar;
+    } else {
+      const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
+      if ((senderDoc as any)?.avatar) iconUrl = (senderDoc as any).avatar;
+    }
+
     const recipients = await CrmUser.find({ _id: { $in: recipientIds } })
-      .select('_id fullName username notificationPreferences')
+      .select('_id fullName username notificationPreferences pushSubscriptions')
       .lean();
 
     await Promise.allSettled(recipientIds.map(async (memberId: string) => {
@@ -210,7 +222,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
       // A recipient can mark specific people as "always notify me" — bypasses
       // both the per-conversation mute/none/foryou setting and the global
-      // "Messages" mute below, in any conversation (group or DM) they share.a
+      // "Messages" mute below, in any conversation (group or DM) they share.
       const isPrioritySender = Array.isArray(notifPrefs?.prioritySenders) && notifPrefs.prioritySenders.includes(senderId);
 
       if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
@@ -221,15 +233,34 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       // double-pushed for the same message.
       if (mentioned) return;
 
+      // Once a device has the dedicated SupraSpace app installed (an
+      // appSource: 'supraspace' subscription with a mobile deviceHint — see
+      // useCrmWebPush.ts), that device's copy of the main app's embedded
+      // SupraSpace view should stop pushing too, or the same message
+      // arrives twice on the same phone. Scoped to mobile specifically: a
+      // 'main' subscription from a DESKTOP browser is a genuinely different
+      // surface someone may still actively use, so it's left alone even
+      // when a mobile dedicated app exists.
+      const allSubs: any[] = Array.isArray((recipient as any)?.pushSubscriptions) ? (recipient as any).pushSubscriptions : [];
+      const isMobileHint = (hint?: string) => !!hint && hint.toLowerCase().includes('mobile');
+      const hasDedicatedMobileApp = allSubs.some((s) => s.appSource === 'supraspace' && isMobileHint(s.deviceHint));
+      const excludeEndpoints = hasDedicatedMobileApp
+        ? allSubs.filter((s) => s.appSource !== 'supraspace' && isMobileHint(s.deviceHint)).map((s) => s.endpoint)
+        : undefined;
+
       // The global "Messages" mute (notificationPreferences.mutedTypes
       // including 'crm_message', or the whole `crm` category switched off)
-      // previously had no effect here at all — this function bypassed the
-      // unified preference gate entirely, so muting "Messages" silently did
-      // nothing for regular (non-mention) SupraSpace pushes.
+      // lives entirely on the CrmUser account — it isn't, and never was,
+      // specific to the main Suprah AI app. Muting it there used to also
+      // silence the dedicated SupraSpace subdomain app, which has its own
+      // separate install identity and no way to offer its own mute control.
+      // Restricting delivery to that app's own subscriptions instead of
+      // skipping the push outright keeps the two independent.
+      let restrictToAppSources: string[] | undefined;
       if (!isPrioritySender) {
         const crmCategoryOff = notifPrefs?.crm === false;
         const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
-        if (crmCategoryOff || messagesMuted) return;
+        if (crmCategoryOff || messagesMuted) restrictToAppSources = ['supraspace'];
       }
 
       const unreadCount = await SupraSpaceMessage.countDocuments({
@@ -242,7 +273,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       const pushResult = await CrmPushService.sendToUsers([memberId], {
         title,
         body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
-        icon: '/icon-192x192.png',
+        icon: iconUrl,
         tag: conv._id?.toString() ?? 'supraspace',
         // Multiple messages in the SAME conversation while offline should
         // collapse to one delivered push (already correctly summarized above
@@ -254,7 +285,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           conversationId: conv._id.toString(),
           messageId,
         },
-      });
+      }, (restrictToAppSources || excludeEndpoints) ? { appSources: restrictToAppSources, excludeEndpoints } : undefined);
       if (pushResult.sent === 0 && pushResult.subscriptions > 0) {
         logger.warn(
           { memberId, conversationId: conv._id?.toString(), pushResult },

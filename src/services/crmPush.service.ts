@@ -17,6 +17,16 @@ const STALE_FAILURE_THRESHOLD = 5;
 
 type CrmPushSendOptions = {
   deviceHints?: string[];
+  // Restricts delivery to subscriptions registered from these app origins
+  // ('main' | 'supraspace' — see ICrmPushSubscription.appSource). Undefined/
+  // empty matches everything, same leniency as deviceHints, so subscriptions
+  // predating this field (no appSource at all) are never silently dropped.
+  appSources?: string[];
+  // Endpoints to skip outright regardless of the filters above — used to
+  // avoid double-pushing the same message to a phone that has both the
+  // main app's embedded SupraSpace view and the dedicated SupraSpace app
+  // installed (see pushToConversationMembers's hasDedicatedMobileApp).
+  excludeEndpoints?: string[];
 };
 
 type CrmPushSendResult = {
@@ -46,6 +56,17 @@ function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string
   // still appears online.
   if (!normalizedHint || normalizedHint === 'unknown') return true;
   return allowedHints.some((hint) => normalizedHint.includes(hint.toLowerCase()));
+}
+
+function matchesAppSource(appSource: string | undefined, allowedSources?: string[]): boolean {
+  if (!allowedSources?.length) return true;
+  // Opposite leniency from matchesDeviceHint on purpose: a subscription with
+  // no appSource predates this field, meaning it genuinely came from the
+  // main-app flow (SupraSpace's own subdomain didn't exist yet) — treating
+  // it as 'main' preserves the mute it was always subject to, rather than
+  // accidentally exempting it.
+  const normalized = appSource || 'main';
+  return allowedSources.includes(normalized);
 }
 
 function rememberLatestOwner(
@@ -148,7 +169,8 @@ export class CrmPushService {
             );
             return false;
           }
-          return matchesDeviceHint(sub.deviceHint, options.deviceHints);
+          if (options.excludeEndpoints?.includes(sub.endpoint)) return false;
+          return matchesDeviceHint(sub.deviceHint, options.deviceHints) && matchesAppSource((sub as any).appSource, options.appSources);
         });
         stats.subscriptions += targetSubscriptions.length;
         if (!targetSubscriptions.length) {

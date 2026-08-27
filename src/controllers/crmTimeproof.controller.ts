@@ -2324,10 +2324,11 @@ export const excludeScreenshots = asyncHandler(async (req: Request, res: Respons
 export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
-  const { subscription, deviceHint } = req.body;
+  const { subscription, deviceHint, appSource } = req.body;
   if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
     throw new ApiError(400, 'Invalid push subscription object');
   }
+  const safeAppSource = appSource === 'supraspace' ? 'supraspace' : 'main';
 
   // A push endpoint belongs to the current installed browser/PWA instance.
   // Remove it from any previous account first so shared devices or account
@@ -2357,6 +2358,7 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
           endpoint: subscription.endpoint,
           keys: subscription.keys,
           deviceHint: deviceHint ?? 'unknown',
+          appSource: safeAppSource,
           createdAt: new Date(),
         },
       },
@@ -2377,6 +2379,7 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
             endpoint: subscription.endpoint,
             keys: subscription.keys,
             deviceHint: deviceHint ?? 'unknown',
+            appSource: safeAppSource,
             createdAt: new Date(),
           }],
           $sort: { createdAt: -1 },

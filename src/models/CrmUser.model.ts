@@ -9,6 +9,14 @@ export interface ICrmPushSubscription {
     auth: string;
   };
   deviceHint?: string;
+  // Which origin registered this subscription's service worker — the
+  // dedicated SupraSpace subdomain app, or the main Suprah AI app (which
+  // includes SupraSpace's own embedded /crm/supra-space view). Lets the
+  // dedicated app's notifications stay independent of the main app's
+  // "Messages" mute toggle — see pushToConversationMembers's use of this.
+  // Missing on subscriptions created before this field existed; treated as
+  // 'main' there (that's genuinely what they were, historically).
+  appSource?: 'main' | 'supraspace';
   createdAt?: Date;
   lastSuccessAt?: Date;
   failureCount?: number;
@@ -206,6 +214,7 @@ const CrmUserSchema = new Schema<ICrmUser>(
           auth: { type: String, required: true },
         },
         deviceHint: { type: String },
+        appSource: { type: String, enum: ['main', 'supraspace'] },
         createdAt: { type: Date, default: Date.now },
         lastSuccessAt: { type: Date },
         failureCount: { type: Number, default: 0 },
