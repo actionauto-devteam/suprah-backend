@@ -702,7 +702,26 @@ class GmailMailboxIndexService {
       ownerCrmUserId: userId,
       gmailMessageId,
     });
-    if (!item) return;
+
+    if (!item) {
+      // No local mirror row yet (e.g. served via the Stage-1 Gmail-fallback
+      // path before background indexing created it) — the Gmail-side action
+      // already succeeded by the time we get here, so pull the authoritative
+      // post-action state straight from Gmail instead of silently no-op'ing,
+      // which would leave a stale INBOX label in the local index.
+      try {
+        const parsed = await gmailService.getMessageMetadata(userId, gmailMessageId);
+        await this.upsertParsedMessage(userId, parsed);
+      } catch (error: any) {
+        const status = error?.statusCode ?? error?.status ?? error?.response?.status;
+        if (status === 404) {
+          await this.removeMessage(userId, gmailMessageId);
+        } else {
+          throw error;
+        }
+      }
+      return;
+    }
 
     const labels = new Set(item.labelIds || []);
 

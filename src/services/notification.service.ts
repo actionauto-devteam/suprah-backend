@@ -368,7 +368,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       admin_system_alert: metadata?.route || '/notifications',
       admin_staff_activity: metadata?.route || '/notifications',
       admin_security_audit: metadata?.route || '/notifications',
-      dealership_inquiry: metadata?.route || '/admin/dealership-inquiries',
+      dealership_inquiry: metadata?.route || '/admin/organizations',
     };
 
     const targetUrl = resolvedMetadataRoute || urlMap[type] || '/notifications';
