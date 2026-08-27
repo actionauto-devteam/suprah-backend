@@ -7,7 +7,7 @@ import { NOTIFICATION_CATEGORIES, NotificationCategory } from './Notification.mo
 // messages, `crm_message`) is individually silenced. See TYPE_CATEGORY_MAP in
 // notification.service.ts for which types belong to which category, and
 // CRM_TYPE_GROUPS (frontend, notification-preference-categories.tsx) for the
-// UI grouping of CRM's types specifically.
+// UI grouping of CRM's types specifically.a
 export type NotificationPreferences = Record<NotificationCategory, boolean> & {
   mutedTypes: string[];
   // CrmUser ids whose messages always notify this user, even in a

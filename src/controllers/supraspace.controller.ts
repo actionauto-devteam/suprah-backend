@@ -210,7 +210,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
       // A recipient can mark specific people as "always notify me" — bypasses
       // both the per-conversation mute/none/foryou setting and the global
-      // "Messages" mute below, in any conversation (group or DM) they share.
+      // "Messages" mute below, in any conversation (group or DM) they share.a
       const isPrioritySender = Array.isArray(notifPrefs?.prioritySenders) && notifPrefs.prioritySenders.includes(senderId);
 
       if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
