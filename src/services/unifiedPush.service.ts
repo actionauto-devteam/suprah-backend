@@ -32,12 +32,27 @@ async function pruneEndpoints(model: PushRecipientModel, userId: string, endpoin
   }
 }
 
-async function resolveRecipient(userId: string): Promise<{ model: PushRecipientModel; pushSubscriptions: any[] } | null> {
+async function resolveRecipient(
+  userId: string,
+  includeSupraSpaceApp = false,
+): Promise<{ model: PushRecipientModel; pushSubscriptions: any[] } | null> {
   const user = await User.findById(userId).select('pushSubscriptions').lean();
   if (user) return { model: 'User', pushSubscriptions: user.pushSubscriptions || [] };
 
   const crmUser = await CrmUser.findById(userId).select('pushSubscriptions').lean();
-  if (crmUser) return { model: 'CrmUser', pushSubscriptions: crmUser.pushSubscriptions || [] };
+  if (crmUser) {
+    // Everything routed through this generic service (transportation, leads,
+    // driver requests, general admin broadcasts — anything that isn't a
+    // SupraSpace chat message or @mention) must never reach the dedicated
+    // SupraSpace app's own subscription. That app is meant to be a focused,
+    // message-only surface. Callers that ARE SupraSpace-related (see
+    // notification.service.ts's includeSupraSpaceApp for 'crm_message') opt
+    // back in explicitly instead.
+    const subs = includeSupraSpaceApp
+      ? (crmUser.pushSubscriptions || [])
+      : (crmUser.pushSubscriptions || []).filter((s: any) => s.appSource !== 'supraspace');
+    return { model: 'CrmUser', pushSubscriptions: subs };
+  }
 
   return null;
 }
@@ -93,9 +108,9 @@ async function sendToSubscriptions(
   return { sent, failed, pruned: endpointsToPrune.length };
 }
 
-const sendToUser = async (userId: string, payload: object) => {
+const sendToUser = async (userId: string, payload: object, includeSupraSpaceApp = false) => {
   try {
-    const recipient = await resolveRecipient(userId);
+    const recipient = await resolveRecipient(userId, includeSupraSpaceApp);
     if (!recipient) {
       logger.debug(`${LOG_PREFIX} No User/CrmUser found for id ${userId}.`);
       return { sent: 0, failed: 0, pruned: 0 };

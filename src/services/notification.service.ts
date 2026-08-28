@@ -387,7 +387,12 @@ const createNotification = async (params: CreateNotificationParams) => {
       // when it knows a more precise one (e.g. an @mention is technically
       // `crm`-categorized but is more usefully labeled "SupraSpace").
       source: metadata?.pushSource || CATEGORY_PUSH_LABELS[category],
-      data: { url: targetUrl, notificationId: notification._id },
+      // conversationId/messageId (present on SupraSpace @mentions — see
+      // notifyMentionedMembers' metadata) let sw.ts's notificationclick
+      // handler resolve the correct path itself at click time, same as a
+      // regular SupraSpace message push — without these, a mention notification
+      // could only ever fall back to the generic targetUrl above.
+      data: { url: targetUrl, notificationId: notification._id, conversationId: metadata?.conversationId, messageId: metadata?.messageId },
     };
 
     if (type === 'driver_request') {
@@ -413,7 +418,11 @@ const createNotification = async (params: CreateNotificationParams) => {
       if (metadata.soundFile) pushPayload.data.soundFile = metadata.soundFile;
     }
 
-    UnifiedPushService.sendToUser(userId, pushPayload).catch(err =>
+    // 'crm_message' is SupraSpace's own type (an @mention — see
+    // notifyMentionedMembers in supraspace.controller.ts) — the one
+    // notification type from this generic pipeline that the dedicated
+    // SupraSpace app subscription should actually receive.
+    UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message').catch(err =>
       logger.error(err, `[UnifiedPushService] Failed to send push for user ${userId}`)
     );
   } catch (error: any) {

@@ -248,6 +248,15 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         ? allSubs.filter((s) => s.appSource !== 'supraspace' && isMobileHint(s.deviceHint)).map((s) => s.endpoint)
         : undefined;
 
+      // Baseline: unlike every OTHER CRM push (transportation, leads, driver
+      // requests, general admin broadcasts — see crmPush.service.ts's
+      // matchesAppSource and unifiedPush.service.ts's resolveRecipient,
+      // which both exclude 'supraspace' subscriptions by default), this IS
+      // a SupraSpace chat message — the one thing the dedicated app's
+      // subscription is actually meant to receive. Explicitly including
+      // both sources here is what opts back in.
+      let restrictToAppSources: string[] = ['main', 'supraspace'];
+
       // The global "Messages" mute (notificationPreferences.mutedTypes
       // including 'crm_message', or the whole `crm` category switched off)
       // lives entirely on the CrmUser account — it isn't, and never was,
@@ -256,7 +265,6 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       // separate install identity and no way to offer its own mute control.
       // Restricting delivery to that app's own subscriptions instead of
       // skipping the push outright keeps the two independent.
-      let restrictToAppSources: string[] | undefined;
       if (!isPrioritySender) {
         const crmCategoryOff = notifPrefs?.crm === false;
         const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
@@ -285,7 +293,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           conversationId: conv._id.toString(),
           messageId,
         },
-      }, (restrictToAppSources || excludeEndpoints) ? { appSources: restrictToAppSources, excludeEndpoints } : undefined);
+      }, { appSources: restrictToAppSources, excludeEndpoints });
       if (pushResult.sent === 0 && pushResult.subscriptions > 0) {
         logger.warn(
           { memberId, conversationId: conv._id?.toString(), pushResult },
