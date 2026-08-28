@@ -59,13 +59,21 @@ function matchesDeviceHint(deviceHint: string | undefined, allowedHints?: string
 }
 
 function matchesAppSource(appSource: string | undefined, allowedSources?: string[]): boolean {
-  if (!allowedSources?.length) return true;
   // Opposite leniency from matchesDeviceHint on purpose: a subscription with
   // no appSource predates this field, meaning it genuinely came from the
   // main-app flow (SupraSpace's own subdomain didn't exist yet) — treating
   // it as 'main' preserves the mute it was always subject to, rather than
   // accidentally exempting it.
   const normalized = appSource || 'main';
+  if (!allowedSources?.length) {
+    // No explicit filter = every OTHER CRM notification type (transportation,
+    // leads, driver requests, general admin broadcasts, etc.) — none of them
+    // pass appSources at all. The dedicated SupraSpace app is meant to be a
+    // focused, chat-only surface (see pushToConversationMembers, the ONE
+    // caller that explicitly opts back in with appSources including
+    // 'supraspace'), so it's excluded by default here rather than included.
+    return normalized !== 'supraspace';
+  }
   return allowedSources.includes(normalized);
 }
 
@@ -268,12 +276,18 @@ export class CrmPushService {
       admins.map(async (admin) => {
         if (!admin.pushSubscriptions?.length) return;
 
+        // General admin broadcasts (this function) are never SupraSpace chat
+        // messages — the dedicated SupraSpace app must not receive them, same
+        // default as matchesAppSource above.
+        const targetSubscriptions = admin.pushSubscriptions.filter((sub: any) => sub.appSource !== 'supraspace');
+        if (!targetSubscriptions.length) return;
+
         const endpointsToPrune: string[] = [];
         const endpointsSucceeded: string[] = [];
         const endpointsFailedSoft: string[] = [];
 
         await Promise.allSettled(
-          admin.pushSubscriptions.map(async (sub) => {
+          targetSubscriptions.map(async (sub) => {
             try {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
