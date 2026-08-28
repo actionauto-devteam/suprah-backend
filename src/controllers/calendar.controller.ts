@@ -1,16 +1,11 @@
 import { NextFunction, Request, Response } from "express";
 import { Types } from "mongoose";
 import { CalendarEvent } from "../models/calendarEvent.model";
+import Appointment from "../models/Appointment.model";
 import {
   emitCalendarChange,
 } from "../services/calendarSocket.service";
 import notificationService from "../services/notification.service";
-
-// ── INTEGRATION ───────────────────────────────────────────────────────────
-// 1. Appointment merge: import your Appointment model, uncomment the queries
-//    in getFeed/getMySchedule, and align mapAppointment with its fields.
-// TODO(integration): import { Appointment } from "../models/appointment.model";
-// ──────────────────────────────────────────────────────────────────────────
 
 /** Route async errors into the Express error pipeline (ApiError-compatible). */
 const asyncHandler =
@@ -101,27 +96,32 @@ const mapCalendarEvent = (doc: any, viewerId?: string): FeedItem => ({
       : undefined,
 });
 
-/**
- * TODO(integration): align with your real Appointment schema field names.
- * Exported so the Appointment controller can reuse it in its emit hooks.
- */
+/** Appointment statuses that don't exist on CalendarEvent collapse into the closest bucket the frontend's stricter union expects — appointments render read-only, so this only affects display grouping, never edit logic. */
+const mapAppointmentStatus = (status: string | undefined): FeedItem["status"] => {
+  if (status === "completed") return "completed";
+  if (status === "cancelled" || status === "no-show") return "cancelled";
+  return "scheduled";
+};
+
+/** Exported so the Appointment controller can reuse it in its emit hooks. */
 export const mapAppointment = (doc: any): FeedItem => {
-  const start = doc.scheduledAt ?? doc.start ?? doc.date;
-  const durationMs = (doc.durationMinutes ?? 60) * 60_000;
+  const customerName = doc.customerBooking
+    ? [doc.customerBooking.firstName, doc.customerBooking.lastName].filter(Boolean).join(" ")
+    : undefined;
   return {
     id: String(doc._id),
     source: "appointment",
     type: "appointment",
-    title: doc.title ?? `Appointment — ${doc.customerName ?? "Customer"}`,
+    title: doc.title ?? `Appointment — ${customerName || "Customer"}`,
     description: doc.notes ?? doc.description,
-    start,
-    end: doc.end ?? new Date(new Date(start).getTime() + durationMs),
+    start: doc.startTime,
+    end: doc.endTime,
     allDay: false,
     repeatsDailyWindow: false,
-    status: doc.status ?? "scheduled",
+    status: mapAppointmentStatus(doc.status),
     color: "appointment",
     createdBy: doc.createdBy,
-    assignees: doc.assignedTo ? [doc.assignedTo] : doc.assignees ?? [],
+    assignees: doc.participants ?? [],
   };
 };
 
@@ -174,7 +174,7 @@ export const getFeed = asyncHandler(async (req, res) => {
 
   const organizationId = new Types.ObjectId(auth.orgId);
 
-  const [events /*, appointments */] = await Promise.all([
+  const [events, appointments] = await Promise.all([
     CalendarEvent.find({
       organizationId,
       status: { $ne: "cancelled" },
@@ -182,13 +182,20 @@ export const getFeed = asyncHandler(async (req, res) => {
     })
       .populate(POPULATE_USERS)
       .lean(),
-    // TODO(integration):
-    // Appointment.find({ organizationId, scheduledAt: { $gte: from, $lt: to } }).lean(),
+    // Appointment.organizationId is a plain String field, unlike CalendarEvent's ObjectId.
+    Appointment.find({
+      organizationId: auth.orgId,
+      status: { $ne: "cancelled" },
+      startTime: { $lt: to },
+      endTime: { $gt: from },
+    })
+      .populate("participants", "fullName username email")
+      .lean(),
   ]);
 
   const items: FeedItem[] = [
     ...events.map((e) => mapCalendarEvent(e, auth.userId)),
-    // ...appointments.map(mapAppointment),
+    ...appointments.map(mapAppointment),
   ].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
   res.json({ items });
@@ -211,7 +218,7 @@ export const getMySchedule = asyncHandler(async (req, res) => {
   const organizationId = new Types.ObjectId(auth.orgId);
   const me = new Types.ObjectId(auth.userId);
 
-  const [events /*, appointments */] = await Promise.all([
+  const [events, appointments] = await Promise.all([
     CalendarEvent.find({
       organizationId,
       status: { $ne: "cancelled" },
@@ -221,13 +228,21 @@ export const getMySchedule = asyncHandler(async (req, res) => {
       .populate(POPULATE_USERS)
       .sort({ start: 1 })
       .lean(),
-    // TODO(integration):
-    // Appointment.find({ organizationId, assignedTo: me, scheduledAt: { $gte: from, $lt: to } }).lean(),
+    Appointment.find({
+      organizationId: auth.orgId,
+      status: { $ne: "cancelled" },
+      $or: [{ createdBy: me }, { participants: me }],
+      startTime: { $lt: to },
+      endTime: { $gt: from },
+    })
+      .populate("participants", "fullName username email")
+      .sort({ startTime: 1 })
+      .lean(),
   ]);
 
   const items = [
     ...events.map((e) => mapCalendarEvent(e, auth.userId)),
-    // ...appointments.map(mapAppointment),
+    ...appointments.map(mapAppointment),
   ];
 
   res.json({

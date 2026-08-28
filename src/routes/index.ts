@@ -39,6 +39,7 @@ import activityRoute from "./activity.routes";
 import customerRoute from "./customer.route";
 import customerLeadRoute from "./customerLead.route";
 import dayPulseRoute from "./dayPulse.routes";
+import employeeOfMonthRoute from "./employeeOfMonth.route";
 import feedRoute from "./feed.route";
 import feedReactionRoute from "./feedReaction.routes";
 import crmCalendarRoute from "./crmCalendar.routes";
@@ -316,6 +317,10 @@ const defaultRoutes = [
   {
     path: "/crm/feeds",
     route: feedRoute,
+  },
+  {
+    path: "/employee-of-month",
+    route: employeeOfMonthRoute,
   },
   {
     path: "/crm/biometric",
