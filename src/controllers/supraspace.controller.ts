@@ -1093,13 +1093,14 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
 
   const isAdmin = idIn(conversation.admins as any, userId) || conversation.createdBy.toString() === userId.toString();
 
+  // Name/emoji are open to any member now, same as the group photo
+  // (updateAvatar below never required admin either) — isAdmin is still
+  // computed above and still gates add/removeMembers further down.
   if (name !== undefined) {
-    if (!isAdmin) throw new ApiError(403, 'Only admins can rename the group');
     conversation.name = (name || '').trim();
   }
 
   if (emoji !== undefined) {
-    if (!isAdmin) throw new ApiError(403, 'Only admins can update the group emoji');
     conversation.emoji = (emoji || '').trim() || null;
   }
 
