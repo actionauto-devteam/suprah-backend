@@ -198,6 +198,17 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
     if (!recipientIds.length) return;
 
+    // A custom icon per notification isn't reliable across platforms (iOS
+    // Web Push doesn't support one at all — see pushToConversationMembers's
+    // icon comment below), but the notification TITLE is plain text, which
+    // both platforms render identically. Prefixing a group's own custom
+    // emoji (already an existing, admin-settable identity — see
+    // updateAvatar's sibling updateConversation/getConvEmoji on the
+    // frontend) onto the title gives every group a recognizable, at-a-glance
+    // marker in the notification banner regardless of platform — including
+    // iOS, where this is the only real lever left for that.
+    const pushTitle = conv.type === 'group' && conv.emoji ? `${conv.emoji} ${title}` : title;
+
     // Show who/what actually messaged them right in the notification —
     // the sender's own avatar for a DM, or the group's avatar for a group
     // chat — instead of always the generic app icon. One lookup, not one
@@ -214,7 +225,21 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
     const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
     const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
     if (conv.type === 'group') {
-      if (conv.avatar) iconUrl = conv.avatar;
+      // conv.avatar is a signed URL that expires after AVATAR_SIGN_TTL (7
+      // days) — whatever's still on the passed-in `conv` document could be
+      // long stale by the time a message is sent (other read paths re-sign
+      // fresh via avatarKey; this push path never did, so the OS silently
+      // failed to fetch an expired URL and showed no icon at all — this is
+      // the exact "works for DMs, never for groups" report, since a
+      // CrmUser's own avatar isn't a signed/expiring URL the same way).
+      // Re-signs into a local var rather than mutating `conv` itself — some
+      // callers pass a live (non-lean) Mongoose document that gets saved
+      // later in the same request; overwriting its .avatar here could leak
+      // this temporary signed URL into a save that has nothing to do with it.
+      const freshGroupAvatar = conv.avatarKey
+        ? await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL)
+        : conv.avatar;
+      if (freshGroupAvatar) iconUrl = freshGroupAvatar;
       if (senderAvatar) imageUrl = senderAvatar;
     } else if (senderAvatar) {
       iconUrl = senderAvatar;
@@ -323,7 +348,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           : lines.join('\n');
       }
       const pushResult = await CrmPushService.sendToUsers([memberId], {
-        title,
+        title: pushTitle,
         body: previewBody,
         icon: iconUrl,
         image: imageUrl,
