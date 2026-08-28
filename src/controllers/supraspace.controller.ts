@@ -287,7 +287,12 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         // collapse to one delivered push (already correctly summarized above
         // as "N new messages") instead of machine-gunning on reconnect.
         topic: conv._id?.toString(),
-        source: 'SupraSpace',
+        // No `source` here on purpose — normalizePushPayload (pushPayload.ts)
+        // would prepend it to the title ("SupraSpace • Devs Team PH"), which
+        // is redundant noise on the dedicated app: its OS-level notification
+        // header already reads "SupraSpace · space.suprah-app.com" from the
+        // subscription's own origin. What should be most visible is the
+        // sender/group name — `title` is already exactly that.
         data: {
           url: supraSpaceMessageUrl(conv._id.toString(), messageId),
           conversationId: conv._id.toString(),
