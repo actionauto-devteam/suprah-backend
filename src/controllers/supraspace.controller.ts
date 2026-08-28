@@ -203,12 +203,44 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
     // chat — instead of always the generic app icon. One lookup, not one
     // per recipient below.
     let iconUrl = '/icon-192x192.png';
+    // Android's native chat notifications (MessagingStyle — Google Chat,
+    // Messenger, etc.) show BOTH the group's icon and the sender's own
+    // avatar per message. That API is native-Android-only, unavailable to a
+    // PWA's Web Push notifications — this is the closest approximation the
+    // platform allows: `icon` carries the group's photo, `image` (the large
+    // banner Web Push also supports) carries the sender's, so a group
+    // message notification still shows both, just laid out differently.
+    let imageUrl: string | undefined;
+    const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
+    const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
     if (conv.type === 'group') {
       if (conv.avatar) iconUrl = conv.avatar;
-    } else {
-      const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
-      if ((senderDoc as any)?.avatar) iconUrl = (senderDoc as any).avatar;
+      if (senderAvatar) imageUrl = senderAvatar;
+    } else if (senderAvatar) {
+      iconUrl = senderAvatar;
     }
+
+    // A few of the most recent messages, oldest-first, so a burst of unread
+    // messages reads as an actual preview of the conversation instead of
+    // just "N new messages" — as close as a single Web Push body string can
+    // get to a real per-message thread (again, true per-message rendering
+    // is MessagingStyle-only). Fetched once, shared by every recipient below
+    // — the content doesn't differ per person, only how many of these lines
+    // apply to THEIR unread count does.
+    const recentMessages = await SupraSpaceMessage.find({
+      conversationId: conv._id,
+      isDeleted: false,
+      scheduledStatus: { $ne: 'pending' },
+    })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate('sender', 'fullName')
+      .lean();
+    const recentPreviewLines = recentMessages.reverse().map((m: any) => {
+      const name = m.sender?.fullName || 'Someone';
+      const text = m.content?.trim() || (m.attachments?.length ? 'Sent an attachment' : m.gif ? 'Sent a GIF' : '...');
+      return `${name}: ${text}`;
+    });
 
     const recipients = await CrmUser.find({ _id: { $in: recipientIds } })
       .select('_id fullName username notificationPreferences pushSubscriptions')
@@ -278,14 +310,27 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
+      // A real preview of what was actually said, not just a bare count —
+      // as many of the last few messages as this recipient actually has
+      // unread, oldest-first; if they're behind by more than we fetched
+      // above, say so rather than pretending the list is complete.
+      let previewBody = body;
+      if (unreadCount >= 2) {
+        const n = Math.min(unreadCount, recentPreviewLines.length);
+        const lines = recentPreviewLines.slice(-n);
+        previewBody = unreadCount > recentPreviewLines.length
+          ? `${lines.join('\n')}\n+${unreadCount - recentPreviewLines.length} more`
+          : lines.join('\n');
+      }
       const pushResult = await CrmPushService.sendToUsers([memberId], {
         title,
-        body: unreadCount >= 2 ? `${unreadCount} new messages` : body,
+        body: previewBody,
         icon: iconUrl,
+        image: imageUrl,
         tag: conv._id?.toString() ?? 'supraspace',
         // Multiple messages in the SAME conversation while offline should
         // collapse to one delivered push (already correctly summarized above
-        // as "N new messages") instead of machine-gunning on reconnect.
+        // as a real preview) instead of machine-gunning on reconnect.
         topic: conv._id?.toString(),
         // No `source` here on purpose — normalizePushPayload (pushPayload.ts)
         // would prepend it to the title ("SupraSpace • Devs Team PH"), which
@@ -293,6 +338,16 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         // header already reads "SupraSpace · space.suprah-app.com" from the
         // subscription's own origin. What should be most visible is the
         // sender/group name — `title` is already exactly that.
+        // Reply/Mark as Read run entirely in the background (sw.ts's
+        // notificationclick handler) via the same authenticated-fetch
+        // pattern already used for driver-request actions — no page needs
+        // to open. 'reply' declares a text input; browsers that don't
+        // support inline notification replies just show it as a plain
+        // button that opens the conversation instead of silently breaking.
+        actions: [
+          { action: 'mark_read', title: 'Mark as Read' },
+          { action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type a message…' },
+        ],
         data: {
           url: supraSpaceMessageUrl(conv._id.toString(), messageId),
           conversationId: conv._id.toString(),
