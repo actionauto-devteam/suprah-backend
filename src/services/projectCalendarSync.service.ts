@@ -73,7 +73,7 @@ export async function syncTaskToCalendar(
     // ── Update the existing linked event ──
     if (task.calendarEventId) {
       const doc = await CalendarEvent.findOneAndUpdate(
-        { _id: task.calendarEventId },
+        { _id: task.calendarEventId, deletedAt: null },
         { $set: fields },
         { new: true },
       )

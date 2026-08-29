@@ -5,6 +5,7 @@ import ProjectNotification from '../models/ProjectNotification.model';
 import { emitToUsers } from './calendarSocket.service';
 import { getSocketIO } from '../utils/socketEmitter';
 import notificationService from './notification.service';
+import { CALENDAR_TZ } from '../constants/calendarTimezone';
 
 /**
  * projectDeadlineReminder — proactive deadline notifications.
@@ -31,10 +32,9 @@ import notificationService from './notification.service';
  */
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
-const TZ = 'America/Denver';
 
 /** Calendar-day string (YYYY-MM-DD) for an instant, in Mountain Time. */
-const dayKey = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: TZ });
+const dayKey = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: CALENDAR_TZ });
 
 /** Whole-day difference between two instants in Mountain Time. */
 function daysUntil(deadline: Date, now: Date): number {

@@ -1,8 +1,11 @@
-import { NextFunction, Request, Response } from "express";
+import { Request, Response } from "express";
 import { Types } from "mongoose";
 import { CalendarEvent } from "../models/calendarEvent.model";
 import ProjectTask from "../models/ProjectTask.model";
 import ProjectGroup from "../models/ProjectGroup.model";
+import { asyncHandler } from "../utils/asyncHandler";
+import { ApiError } from "../utils/ApiError";
+import { CALENDAR_TZ } from "../constants/calendarTimezone";
 
 /**
  * Calendar notification center backend.
@@ -22,32 +25,50 @@ import ProjectGroup from "../models/ProjectGroup.model";
  *   router.get("/notifications-summary", getNotificationsSummary);
  */
 
-const TZ = "America/Denver";
-
-const asyncHandler =
-  (fn: (req: Request, res: Response) => Promise<void>) =>
-  (req: Request, res: Response, next: NextFunction): void => {
-    fn(req, res).catch(next);
-  };
+/** MT UTC offset (minutes) in effect at a given instant, via Intl's longOffset part. */
+function mtOffsetMinutesAt(instant: Date): number {
+  const offsetPart = new Intl.DateTimeFormat("en-US", {
+    timeZone: CALENDAR_TZ,
+    timeZoneName: "longOffset",
+  })
+    .formatToParts(instant)
+    .find((p) => p.type === "timeZoneName")?.value; // "GMT-06:00" / "GMT-07:00"
+  const match = offsetPart?.match(/GMT([+-])(\d{2}):(\d{2})/);
+  return match
+    ? (match[1] === "-" ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3]))
+    : -420; // fallback: MST
+}
 
 /** Start of "today" and "tomorrow" as instants, using Mountain Time dates. */
 function mtDayBounds(now: Date): { dayStart: Date; dayEnd: Date } {
-  const key = now.toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
-  // Offset of MT at this moment (handles MST/MDT automatically).
-  const offsetMin =
-    (new Date(now.toLocaleString("en-US", { timeZone: TZ })).getTime() -
-      new Date(now.toLocaleString("en-US", { timeZone: "UTC" })).getTime()) /
-    60000;
-  const dayStart = new Date(Date.parse(`${key}T00:00:00Z`) - offsetMin * 60000);
+  const key = now.toLocaleDateString("en-CA", { timeZone: CALENDAR_TZ }); // YYYY-MM-DD
+  const utcMidnight = Date.parse(`${key}T00:00:00Z`);
+
+  // First pass: offset "around now" gives a candidate midnight instant that's
+  // correct on ~363 days a year.
+  const roughOffset = mtOffsetMinutesAt(now);
+  const candidate = new Date(utcMidnight - roughOffset * 60000);
+
+  // Second pass: re-read the offset AT that candidate instant itself, not at
+  // `now` or at noon — on the two annual DST-transition days, the offset
+  // sampled elsewhere in the day can differ from the offset actually
+  // governing local midnight (transitions happen at 2am local, not
+  // midnight), so probing the candidate instant directly is what makes this
+  // exact rather than approximate.
+  const refinedOffset = mtOffsetMinutesAt(candidate);
+  const dayStart =
+    refinedOffset === roughOffset
+      ? candidate
+      : new Date(utcMidnight - refinedOffset * 60000);
+
   return { dayStart, dayEnd: new Date(dayStart.getTime() + 86_400_000) };
 }
 
-export const getNotificationsSummary = asyncHandler(async (req, res) => {
+export const getNotificationsSummary = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = (req as any).crmUser;
   const orgId = (req as any).orgId as string | undefined;
   if (!crmUser?._id || !orgId) {
-    res.status(401).json({ message: "Not authenticated." });
-    return;
+    throw new ApiError(401, "Not authenticated.");
   }
 
   const organizationId = new Types.ObjectId(orgId);
@@ -62,6 +83,7 @@ export const getNotificationsSummary = asyncHandler(async (req, res) => {
     CalendarEvent.find({
       organizationId,
       status: "scheduled",
+      deletedAt: null,
       $or: [{ createdBy: me }, { assignees: me }],
       start: { $lt: dayEnd },
       end: { $gt: dayStart },
@@ -73,10 +95,11 @@ export const getNotificationsSummary = asyncHandler(async (req, res) => {
     CalendarEvent.find({
       organizationId,
       status: "scheduled",
+      deletedAt: null,
       $or: [{ createdBy: me }, { assignees: me }],
       start: { $gte: dayEnd, $lt: in24h },
     })
-      .select("type title start end allDay")
+      .select("type title start end allDay meetingLink")
       .sort({ start: 1 })
       .lean(),
     ProjectGroup.find({ organizationId, memberIds: me, deletedAt: null })
@@ -94,7 +117,7 @@ export const getNotificationsSummary = asyncHandler(async (req, res) => {
     $or: [{ assigneeIds: me }, { createdBy: me }],
   };
 
-  const [overdue, approaching] = await Promise.all([
+  const [overdue, approaching, overdueTotal, dueTodayTotal] = await Promise.all([
     ProjectTask.find({ ...myTaskFilter, deadline: { $lt: now } })
       .select("title deadline groupId status")
       .sort({ deadline: 1 })
@@ -105,6 +128,13 @@ export const getNotificationsSummary = asyncHandler(async (req, res) => {
       .sort({ deadline: 1 })
       .limit(20)
       .lean(),
+    // Unbounded counts for badgeCount — the arrays above are capped at 20 for
+    // display, but the badge must reflect the true total, not the capped page.
+    ProjectTask.countDocuments({ ...myTaskFilter, deadline: { $lt: now } }),
+    ProjectTask.countDocuments({
+      ...myTaskFilter,
+      deadline: { $gte: now, $lte: in3d, $lt: dayEnd },
+    }),
   ]);
 
   const decorate = (t: any) => ({
@@ -116,14 +146,13 @@ export const getNotificationsSummary = asyncHandler(async (req, res) => {
   });
 
   const todayRemaining = todayEvents.filter((e: any) => new Date(e.end) > now);
-  const dueToday = approaching.filter((t: any) => new Date(t.deadline) < dayEnd);
 
   res.json({
     todayItems: todayEvents.map((e: any) => ({ ...e, id: String(e._id) })),
     upcoming24h: upcomingEvents.map((e: any) => ({ ...e, id: String(e._id) })),
     overdueTasks: overdue.map(decorate),
     approachingTasks: approaching.map(decorate),
-    badgeCount: todayRemaining.length + overdue.length + dueToday.length,
+    badgeCount: todayRemaining.length + overdueTotal + dueTodayTotal,
     generatedAt: now,
   });
 });

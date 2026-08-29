@@ -1,5 +1,6 @@
 import { CalendarEvent } from '../models/calendarEvent.model';
 import notificationService from './notification.service';
+import { CALENDAR_TZ } from '../constants/calendarTimezone';
 
 /**
  * calendarReminderSweep — proactive "your event starts today" notifications.
@@ -20,10 +21,9 @@ import notificationService from './notification.service';
  */
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
-const TZ = 'America/Denver';
 
 /** Calendar-day string (YYYY-MM-DD) for an instant, in Mountain Time. */
-const dayKey = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: TZ });
+const dayKey = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: CALENDAR_TZ });
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
@@ -53,6 +53,7 @@ export async function sweep(): Promise<void> {
     // would be wrong across the MT/UTC offset near midnight).
     const events = await CalendarEvent.find({
       status: 'scheduled',
+      deletedAt: null,
       start: {
         $gte: new Date(now.getTime() - 2 * 86_400_000),
         $lte: new Date(now.getTime() + 2 * 86_400_000),
@@ -68,8 +69,10 @@ export async function sweep(): Promise<void> {
       if (dayKey(new Date(event.start)) !== today) continue;
 
       // Claim the day atomically first — duplicate-proof across instances.
+      // deletedAt: null re-checked here too (not just in the initial find) in
+      // case the event was soft-deleted in the gap between fetch and claim.
       const claimed = await CalendarEvent.updateOne(
-        { _id: event._id, lastReminderSentDay: { $ne: today } },
+        { _id: event._id, lastReminderSentDay: { $ne: today }, deletedAt: null },
         { $set: { lastReminderSentDay: today } },
       );
       if (claimed.modifiedCount === 0) continue;
@@ -80,7 +83,7 @@ export async function sweep(): Promise<void> {
       if (recipients.length === 0) continue;
 
       const startTime = new Date(event.start).toLocaleTimeString('en-US', {
-        timeZone: TZ,
+        timeZone: CALENDAR_TZ,
         hour: 'numeric',
         minute: '2-digit',
       });
