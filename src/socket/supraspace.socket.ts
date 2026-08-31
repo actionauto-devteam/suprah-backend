@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
+import Notification from '../models/Notification.model';
 import config from '../config';
 import logger from '../utils/logger';
 import { setSupraSpaceSocketIO } from '../utils/socketEmitter';
@@ -219,6 +220,15 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
           { _id: conversationId, manualUnreadBy: user._id },
           { $pull: { manualUnreadBy: user._id } }
         );
+        // Same gap as getMessages (supraspace.controller.ts) had — a
+        // conversation you're already viewing when a message arrives gets
+        // marked read entirely through this socket path (no GET request at
+        // all), so the Notifications tab needs the sync here too, not just
+        // there.
+        Notification.updateMany(
+          { userId: user._id, type: 'crm_message', 'metadata.conversationId': conversationId, isRead: false },
+          { $set: { isRead: true } }
+        ).catch(() => {});
         socket.to(`conv:${conversationId}`).emit('messages:read', {
           conversationId,
           userId,
@@ -249,6 +259,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
           { $pull: { manualUnreadBy: user._id } }
         );
         const idStrings = convIds.map((id) => id.toString());
+        Notification.updateMany(
+          { userId: user._id, type: 'crm_message', 'metadata.conversationId': { $in: idStrings }, isRead: false },
+          { $set: { isRead: true } }
+        ).catch(() => {});
         idStrings.forEach((conversationId) => {
           socket.to(`conv:${conversationId}`).emit('messages:read', { conversationId, userId });
         });

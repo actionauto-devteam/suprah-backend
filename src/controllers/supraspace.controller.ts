@@ -285,21 +285,29 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       // "Messages" mute below, in any conversation (group or DM) they share.
       const isPrioritySender = Array.isArray(notifPrefs?.prioritySenders) && notifPrefs.prioritySenders.includes(senderId);
 
-      if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
-
       // Mentioned members get a separate, more specific "X mentioned you" push
       // via notifyMentionedMembers() (goes through the unified notification
       // pipeline, persisted + mutedTypes-aware) — without this, they'd be
-      // double-pushed for the same message.
+      // double-pushed (and double-persisted) for the same message.
       if (mentioned) return;
 
       // Persist a record for SupraSpace's own in-app Notifications tab —
       // deliberately a PLAIN insert, not notificationService.createNotification(),
-      // which also sends its own push. This recipient's push is already being
-      // sent below via CrmPushService; routing this through createNotification
-      // too would fire a second, duplicate push (exactly today's earlier bug).
-      // Fire-and-forget: this tab is a nice-to-have log, never worth blocking
-      // or failing the actual push over.
+      // which also sends its own push. This recipient's push (if any) is
+      // handled entirely below via CrmPushService; routing this through
+      // createNotification too would fire a second, duplicate push (exactly
+      // an earlier bug).
+      //
+      // Unconditional — NOT gated behind shouldNotifyForPreference below.
+      // The Notifications tab's own Muted/None filters exist specifically to
+      // still show messages from conversations you've muted or set to
+      // "None" (see NotificationsPanel/ss4NotifBucket, frontend) — gating
+      // this on the same check that suppresses the actual OS push meant a
+      // muted/None conversation's messages never got a Notification record
+      // at all, so a busy muted channel (e.g. an automated alerts channel)
+      // could rack up dozens of real unread messages that never appeared
+      // under "All" either. Persisting is now fully decoupled from whether
+      // a push actually goes out.
       if ((recipient as any)?.organizationId) {
         Notification.create({
           userId: memberId,
@@ -311,6 +319,8 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
         }).catch((err) => logger.warn({ err, memberId }, '[SupraSpace] Failed to persist notification log entry'));
       }
+
+      if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
 
       // Once a device has the dedicated SupraSpace app installed (an
       // appSource: 'supraspace' subscription with a mobile deviceHint — see
