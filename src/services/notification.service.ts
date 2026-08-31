@@ -444,15 +444,19 @@ const createNotificationBatch = async (notifications: CreateNotificationParams[]
 const getUserNotifications = async (
   userId: string,
   orgId: string,
-  options: { limit?: number; skip?: number; isRead?: boolean; userRole?: string } = {}
+  // types: e.g. SupraSpace's own Notifications tab passes ['crm_message'] so
+  // it only ever shows chat messages/mentions, never gets crowded out by
+  // unrelated types (shift alerts, leads, etc.) sharing the same limit.
+  options: { limit?: number; skip?: number; isRead?: boolean; userRole?: string; types?: string[] } = {}
 ) => {
-  const { limit = 50, skip = 0, isRead, userRole } = options;
+  const { limit = 50, skip = 0, isRead, userRole, types } = options;
   const normalizedLimit = Number.isFinite(limit) ? Math.max(limit, 0) : 50;
   const normalizedSkip = Number.isFinite(skip) ? Math.max(skip, 0) : 0;
   const shouldFetchAll = normalizedLimit === 0;
 
   const personalFilter: any = { userId };
   if (isRead !== undefined) personalFilter.isRead = isRead;
+  if (types?.length) personalFilter.type = { $in: types };
 
   const broadcastFilter: any = {
     organizationId: orgId,
@@ -461,6 +465,7 @@ const getUserNotifications = async (
   };
   if (userRole) broadcastFilter.roleTargets = { $in: [userRole] };
   if (isRead !== undefined) broadcastFilter.isRead = isRead;
+  if (types?.length) broadcastFilter.type = { $in: types };
 
   const fetchLimit = shouldFetchAll ? undefined : normalizedLimit + normalizedSkip;
   const personalQuery = Notification.find(personalFilter).sort({ createdAt: -1 });

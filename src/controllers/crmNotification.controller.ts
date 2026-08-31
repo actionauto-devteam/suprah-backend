@@ -18,7 +18,13 @@ const ARRAY_PREFERENCE_KEYS = new Set(['mutedTypes', 'prioritySenders']);
 const getNotifications = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
   const orgId = req.orgId as string;
-  const { limit, skip, isRead } = req.query;
+  const { limit, skip, isRead, type } = req.query;
+  // ?type=crm_message or ?type=crm_message,crm_task_assigned — SupraSpace's
+  // own Notifications tab uses this to scope the feed to its own events
+  // instead of the whole org-wide bell.
+  const types = typeof type === 'string' && type.length
+    ? type.split(',').map((t) => t.trim()).filter(Boolean)
+    : undefined;
 
   const result = await notificationService.getUserNotifications(
     crmUser._id.toString(),
@@ -28,6 +34,7 @@ const getNotifications = asyncHandler(async (req: Request, res: Response) => {
       skip: skip ? parseInt(skip as string) : undefined,
       isRead: isRead !== undefined ? isRead === 'true' : undefined,
       userRole: crmUser.role,
+      types,
     },
   );
 
