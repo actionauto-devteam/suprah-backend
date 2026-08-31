@@ -83,6 +83,7 @@ router.use(crmAuth());
 
 router.get('/users',  supraSpaceController.getCrmUsers);
 router.get('/active', supraSpaceController.getActiveUsers);
+router.patch('/me/status', supraSpaceController.updateMyStatus);
 
 // ─── Global message search ───────────────────────────────────────────────────
 

@@ -12,9 +12,12 @@ import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { getIO } from '../socket/supraspace.socket';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
+import { emitPresenceUpdate } from '../utils/socketEmitter';
+import profileService from '../services/profile.service';
 import { storageService, BucketType } from '../services/storage.service';
 import { getCachedSignedUrl } from '../utils/signedUrlCache';
 import { CrmPushService } from '../services/crmPush.service';
+import Notification from '../models/Notification.model';
 import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
@@ -268,7 +271,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
     });
 
     const recipients = await CrmUser.find({ _id: { $in: recipientIds } })
-      .select('_id fullName username notificationPreferences pushSubscriptions')
+      .select('_id fullName username notificationPreferences pushSubscriptions organizationId')
       .lean();
 
     await Promise.allSettled(recipientIds.map(async (memberId: string) => {
@@ -289,6 +292,25 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       // pipeline, persisted + mutedTypes-aware) — without this, they'd be
       // double-pushed for the same message.
       if (mentioned) return;
+
+      // Persist a record for SupraSpace's own in-app Notifications tab —
+      // deliberately a PLAIN insert, not notificationService.createNotification(),
+      // which also sends its own push. This recipient's push is already being
+      // sent below via CrmPushService; routing this through createNotification
+      // too would fire a second, duplicate push (exactly today's earlier bug).
+      // Fire-and-forget: this tab is a nice-to-have log, never worth blocking
+      // or failing the actual push over.
+      if ((recipient as any)?.organizationId) {
+        Notification.create({
+          userId: memberId,
+          organizationId: (recipient as any).organizationId.toString(),
+          type: 'crm_message',
+          category: 'crm',
+          title,
+          message: body,
+          metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
+        }).catch((err) => logger.warn({ err, memberId }, '[SupraSpace] Failed to persist notification log entry'));
+      }
 
       // Once a device has the dedicated SupraSpace app installed (an
       // appSource: 'supraspace' subscription with a mobile deviceHint — see
@@ -552,6 +574,7 @@ async function notifyMentionedMembers(params: {
           messageId: params.messageId,
           route: params.route || supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
           pushSource: 'SupraSpace',
+          kind: 'mention',
         },
       })
     ));
@@ -2301,6 +2324,51 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { token }, 'Session token issued'));
 });
 
+const ONLINE_STATUS_VALUES = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'] as const;
+
+// SupraSpace's own CRM token doesn't resolve against the main auth() middleware
+// (CrmUser._id and User._id are different documents), so it can't call the main
+// site's PATCH /api/profile/online-status directly — this mirrors that endpoint's
+// logic (same profileService.updateOnlineStatus + emitPresenceUpdate calls) but
+// resolves the target User via the CrmUser's email, the same link
+// presenceBridge.ts already uses to read presence back into SupraSpace.
+const updateMyStatus = asyncHandler(async (req: Request, res: Response) => {
+  const crmUser = req.crmUser!;
+  const orgId = req.orgId as string;
+  const { status, customStatus } = req.body as { status?: string; customStatus?: string | null };
+
+  if (!status || !ONLINE_STATUS_VALUES.includes(status as any)) {
+    throw new ApiError(400, 'Invalid status value');
+  }
+  if (!crmUser.email) {
+    throw new ApiError(400, 'No linked account email for this identity.');
+  }
+
+  const mainUser = await User.findOne({ email: crmUser.email.toLowerCase() }).select('_id');
+  if (!mainUser) {
+    throw new ApiError(404, 'No linked Suprah AI account found for this identity.');
+  }
+
+  const updated = await profileService.updateOnlineStatus(
+    mainUser._id.toString(),
+    status as any,
+    customStatus ?? undefined,
+    null,
+  );
+
+  if (orgId) {
+    await emitPresenceUpdate(orgId, {
+      userId: mainUser._id.toString(),
+      email: crmUser.email,
+      onlineStatus: status,
+      customStatus: customStatus ?? null,
+      lastActive: new Date().toISOString(),
+    });
+  }
+
+  res.json(new ApiResponse(200, { onlineStatus: updated.onlineStatus, customStatus: updated.customStatus }, 'Status updated'));
+});
+
 // ─── Spaces ───────────────────────────────────────────────────────────────────
 
 /** GET /api/supraspace/spaces */
@@ -2467,6 +2535,7 @@ const streamVoiceMessage = asyncHandler(async (req: Request, res: Response) => {
 
 const supraSpaceController = {
   getSessionToken,
+  updateMyStatus,
   getConversations,
   getOrCreateDirect,
   createGroup,
