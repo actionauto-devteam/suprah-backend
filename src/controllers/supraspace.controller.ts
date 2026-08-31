@@ -1407,6 +1407,18 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     { _id: id, manualUnreadBy: userId },
     { $pull: { manualUnreadBy: userId } }
   ).catch(() => {});
+  // Also clear this conversation's entries out of the Notifications tab —
+  // getMessages runs on every path that actually reads a conversation
+  // (opening it from Home, a push tap, a deep link, already having it open
+  // when a message arrives), not just tapping the notification itself. The
+  // in-app Notifications tab (a separate Notification collection — see
+  // pushToConversationMembers) was previously only ever marked read by that
+  // one explicit tap, so a message read any other way left its notification
+  // stuck there indefinitely.
+  Notification.updateMany(
+    { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
+    { $set: { isRead: true } }
+  ).catch(() => {});
 
   // Customer messages use a synthetic sentinel ObjectId for `sender` that doesn't
   // correspond to any CrmUser document, so populate() returns null for them.
