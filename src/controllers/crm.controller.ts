@@ -1024,7 +1024,7 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
 // accounts listed here may ever have screenshotBlurUntilPayout set to true.
 // Add more emails here (lowercase) to extend access — no code changes needed
 // beyond this list.
-const SCREENSHOT_PRIVACY_ALLOWED_EMAILS = ["charl@actionautoutah.com"];
+const SCREENSHOT_PRIVACY_ALLOWED_EMAILS = ["charl@suprahai.com"];
 
 /**
  * PATCH /api/crm/me/screenshot-privacy
