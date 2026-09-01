@@ -56,18 +56,22 @@ class AuthService {
                 const InvitationModel = mongoose.model('Invitation');
                 const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
 
-                if (invite) {
-                    roleToAssign = invite.role;
-                    orgId = invite.organizationId;
-                    orgRole = invite.role;
-                    onboardingCompleted = true;
-                    isApproved = true;
-
-                    invite.status = 'accepted';
-                    await invite.save();
-                } else {
-                    console.error('[AuthService] Invitation not found or already accepted:', inviteToken);
+                if (!invite) {
+                    throw new ApiError(410, 'This invitation link is no longer valid. Please ask for a new invite.');
                 }
+
+                if (invite.email.toLowerCase().trim() !== email.toLowerCase().trim()) {
+                    throw new ApiError(403, 'This invitation was sent to a different email address.');
+                }
+
+                roleToAssign = invite.role;
+                orgId = invite.organizationId;
+                orgRole = invite.role;
+                onboardingCompleted = true;
+                isApproved = true;
+
+                invite.status = 'accepted';
+                await invite.save();
             }
 
             if (roleToAssign === 'driver' && !inviteToken) {

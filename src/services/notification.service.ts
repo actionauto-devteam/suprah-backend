@@ -53,6 +53,7 @@ const VALID_NOTIFICATION_TYPES = [
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
   'team_invite_sent', 'team_member_joined', 'team_member_left', 'role_changed', 'board_note_posted',
+  'eotm_winner_announced',
   'password_changed', 'email_changed', 'profile_updated', 'login_alert',
   'system_announcement', 'message_received', 'reminder', 'general', 'ping',
   'referral_joined', 'referral_rewarded',
@@ -112,6 +113,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
 
   team_invite_sent: 'team', team_member_joined: 'team', team_member_left: 'team', role_changed: 'team',
   board_note_posted: 'team', absence_requested: 'team', absence_approved: 'team', absence_rejected: 'team', ping: 'team',
+  eotm_winner_announced: 'team',
 
   password_changed: 'account', email_changed: 'account', profile_updated: 'account', login_alert: 'account',
 

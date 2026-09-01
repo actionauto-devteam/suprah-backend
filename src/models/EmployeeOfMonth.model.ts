@@ -1,10 +1,8 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-export type EmployeeOfMonthTeam = 'Philippines' | 'Utah';
-
 export interface IEmployeeOfMonth extends Document {
   organizationId: mongoose.Types.ObjectId;
-  team: EmployeeOfMonthTeam;
+  teamId: mongoose.Types.ObjectId;
   month: string;
   employeeId: mongoose.Types.ObjectId;
   note?: string;
@@ -23,10 +21,11 @@ const EmployeeOfMonthSchema = new Schema<IEmployeeOfMonth>(
       required: true,
       index: true,
     },
-    team: {
-      type: String,
-      enum: ['Philippines', 'Utah'],
+    teamId: {
+      type: Schema.Types.ObjectId,
+      ref: 'EotmTeam',
       required: true,
+      index: true,
     },
     month: {
       type: String,
@@ -53,7 +52,7 @@ const EmployeeOfMonthSchema = new Schema<IEmployeeOfMonth>(
   }
 );
 
-EmployeeOfMonthSchema.index({ organizationId: 1, team: 1, month: 1 }, { unique: true });
+EmployeeOfMonthSchema.index({ organizationId: 1, teamId: 1, month: 1 }, { unique: true });
 
 const EmployeeOfMonth = mongoose.model<IEmployeeOfMonth, IEmployeeOfMonthModel>(
   'EmployeeOfMonth',

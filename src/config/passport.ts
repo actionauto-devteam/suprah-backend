@@ -34,12 +34,21 @@ passport.use(
                 let onboardingCompleted = !!requestedRole;
                 let isApproved = roleToAssign !== 'driver';
 
-                // 3. Process Invitation if present
+                const email = profile.emails?.[0].value;
+                if (!email) {
+                    console.error('[Google Auth] No email found in profile');
+                    return done(new Error('No email found in Google profile'), undefined);
+                }
+
+                // 3. Process Invitation if present. An invite only applies if it
+                // was actually sent to the Google account that's signing in —
+                // otherwise anyone holding a still-pending invite link could get
+                // promoted into (or create an account inside) someone else's org.
                 if (inviteToken) {
                     const InvitationModel = mongoose.model('Invitation');
                     const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });
 
-                    if (invite) {
+                    if (invite && invite.email.toLowerCase().trim() === email.toLowerCase().trim()) {
                         // Normalize roles
                         if (invite.role === 'admin' || invite.role === 'member') {
                             roleToAssign = invite.role === 'admin' ? 'admin' : 'employee';
@@ -56,12 +65,6 @@ passport.use(
                         invite.status = 'accepted';
                         await invite.save();
                     }
-                }
-
-                const email = profile.emails?.[0].value;
-                if (!email) {
-                    console.error('[Google Auth] No email found in profile');
-                    return done(new Error('No email found in Google profile'), undefined);
                 }
 
                 let user = await User.findOne({
