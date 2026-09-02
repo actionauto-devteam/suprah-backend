@@ -9,13 +9,6 @@ export interface ICrmPushSubscription {
     auth: string;
   };
   deviceHint?: string;
-  // Which origin registered this subscription's service worker — the
-  // dedicated SupraSpace subdomain app, or the main Suprah AI app (which
-  // includes SupraSpace's own embedded /crm/supra-space view). Lets the
-  // dedicated app's notifications stay independent of the main app's
-  // "Messages" mute toggle — see pushToConversationMembers's use of this.
-  // Missing on subscriptions created before this field existed; treated as
-  // 'main' there (that's genuinely what they were, historically).
   appSource?: 'main' | 'supraspace';
   createdAt?: Date;
   lastSuccessAt?: Date;
@@ -50,22 +43,11 @@ export interface ICrmUser extends Document {
   notificationPreferences: NotificationPreferences;
   department?: string;
   screenshotExempt?: boolean;
-  /** Commission-based roles (sales, finance managers, etc.) excluded from hourly/payroll reports — per Erik's directive. */
   hourlyTrackingExempt?: boolean;
-  /** Suppresses only the 43h "OT Watch" warning badge for this person — their overtime pay still computes normally. For valued employees whose extra hours are already known/approved. */
   otWarningExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
-  /**
-   * Admin-set hourly pay rate — shared across every admin's view (previously
-   * stored client-side only, in each admin's own browser localStorage, so
-   * different admins on different devices saw different or blank values for
-   * the same employee). Every change is also recorded in
-   * HourlyRateChangeLog for accountability; this field always holds just the
-   * current value for fast payslip/payroll-status calculations.
-   */
   hourlyRate?: number;
-  /** Utah (ADP payroll) vs Philippines/Online (PayPal) — drives Live Shift Board team tabs and payroll reporting split. Unset until an admin classifies the account. */
   payrollLocation?: 'Utah' | 'Philippines';
   googleCalendar?: {
     calendarConnected: boolean;
@@ -76,27 +58,17 @@ export interface ICrmUser extends Document {
     lastSyncAt?: Date;
     syncToken?: string;
   };
-  /**
-   * Suprah Mail — Gmail account connection. Separate from googleCalendar so
-   * mail scopes can be granted/revoked independently of calendar scopes.
-   * Tokens are select:false and must be explicitly selected by gmail.service.
-   */
   googleMail?: {
     connected: boolean;
     gmailAddress?: string;
     accessToken?: string;
     refreshToken?: string;
     expiryDate?: number;
-    historyId?: string;        // Gmail incremental-sync cursor (users.history.list)
+    historyId?: string;
     lastSyncAt?: Date;
     lastSyncError?: string;
     connectedAt?: Date;
   };
-  /**
-   * Spotify account connection for the dashboard player. Tokens are select:false
-   * and are only read by spotify.service. `product` ("premium"/"free") gates the
-   * in-browser Web Playback SDK, which requires Premium.
-   */
   spotify?: {
     connected: boolean;
     spotifyUserId?: string;
@@ -230,9 +202,6 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: null,
     },
     screenshotExempt: {
-      // Per-account exemption from tray screenshot capture, set by an admin
-      // for an individual user (e.g. a role that shouldn't be screen-monitored)
-      // — distinct from department-level monitoring rules.
       type: Boolean,
       default: false,
     },
@@ -245,20 +214,10 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: false,
     },
     screenshotBlurUntilPayout: {
-      // Per-account privacy setting: this account's screenshots are still
-      // captured normally, but any OTHER admin/manager viewing them in the
-      // TimeProof calendar sees them blurred except in the 2-day window
-      // before/through each payout date (see isPayoutUnblurWindow). The
-      // account owner always sees their own screenshots unblurred.
       type: Boolean,
       default: false,
     },
     locationRequiredOverride: {
-      // Per-account exception on top of the department-level "Require
-      // Location for TimeProof" toggle — 'default' follows whatever the
-      // user's department is set to; 'required'/'exempt' force the outcome
-      // for this one person regardless of their department's setting. See
-      // isLocationRequiredForUser in config/departmentMonitoring.ts.
       type: String,
       enum: ['default', 'required', 'exempt'],
       default: 'default',

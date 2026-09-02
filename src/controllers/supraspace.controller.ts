@@ -526,8 +526,6 @@ async function notifyMentionedMembers(params: {
           .filter((member: any) => isUserMentioned(text, member))
           .map((x: any) => x._id.toString());
 
-    // A recipient can mark specific people as "always notify me" — bypasses
-    // the per-conversation mute/none setting even for @mentions.
     const isPrioritySender = (memberId: string) => {
       const member = members.find((m: any) => m._id.toString() === memberId);
       const list = (member as any)?.notificationPreferences?.prioritySenders;
@@ -538,12 +536,6 @@ async function notifyMentionedMembers(params: {
       isPrioritySender(memberId) || shouldNotifyForPreference(getConversationNotificationPref(params.conversation, memberId), true)
     );
 
-    // Mention delivery has been silently missed for individual members with
-    // no way to tell whether the cause was detection (isUserMentioned found
-    // no match), a per-conversation mute, or the member simply not being in
-    // `members` at all — this makes each step visible so a report like
-    // "Erik tagged me but I got nothing" is diagnosable from logs alone
-    // instead of re-deriving the whole pipeline by hand every time.
     if (!hasAll) {
       const missed = members.filter((member: any) => !toNotify.includes(member._id.toString()));
       if (missed.length) {
@@ -589,7 +581,6 @@ async function notifyMentionedMembers(params: {
       })
     ));
   } catch {
-    // Mention notifications are best-effort and should not block sending.
   }
 }
 
@@ -671,10 +662,6 @@ function dayPulseDateLabel(value: Date | string): string {
 }
 
 function dayPulseMountainTimeLabel(value: Date | string): string {
-  // Preserve the existing DayPulse display contract exactly: the current UI
-  // labels this as MDT and applies a fixed UTC-6 offset. Matching that format
-  // also lets stale frontend bundles be deduplicated against backend-generated
-  // messages during rollout.
   const mdt = new Date(new Date(value).getTime() - 6 * 60 * 60 * 1000);
   return mdt.toLocaleTimeString('en-US', {
     hour: '2-digit',
@@ -704,8 +691,6 @@ function normalizeDayPulseSupraSpaceAttachments(report: any): any[] {
   return report.attachments.map((attachment: any) => {
     const key = attachment.fileKey || attachment.url;
     return {
-      // Store the durable private-object key, not a temporary signed URL. The
-      // normal Suprah Space message fetch/signing path creates a fresh URL.
       url: key,
       fileKey: key,
       originalName: attachment.originalName,
@@ -716,11 +701,6 @@ function normalizeDayPulseSupraSpaceAttachments(report: any): any[] {
   });
 }
 
-/**
- * Persist one DayPulse report into the canonical Suprah Space DayPulse Reports
- * channel. This is intentionally idempotent: browser retries, request retries,
- * and duplicate backend calls all resolve to the same message.
- */
 export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
   conversationId: string;
   messageId: string;
@@ -770,9 +750,6 @@ export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
       },
     });
   } catch (error: any) {
-    // The unique partial index closes the race between simultaneous retries.
-    // If another request created the message first, reuse it rather than
-    // surfacing a duplicate-key error to the DayPulse submit flow.
     if (error?.code === 11000) {
       const raced = await SupraSpaceMessage.findOne({
         'metadata.source': 'daypulse',
@@ -800,8 +777,6 @@ export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
   try {
     messageForClient = await signAttachments(messageForClient);
   } catch (error) {
-    // Message persistence is the source of truth. Attachment signing can be
-    // retried naturally when clients fetch the conversation again.
     logger.warn({ error, messageId: message._id.toString() }, '[DayPulse] Suprah Space attachment signing failed');
   }
 
@@ -836,11 +811,6 @@ export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
 
 async function signAttachments(message: any) {
   if (Array.isArray(message?.attachments)) {
-    // Attachments within one message are signed in parallel (was sequential
-    // await-per-file) and cached — was unconditionally re-signed on every
-    // single fetch of this message (e.g. every conversation open/refetch),
-    // even though nothing about the file or its key ever changes between
-    // fetches within the URL's own TTL window.
     await Promise.all(message.attachments.map(async (a: any) => {
       if (a.url && !a.url.startsWith('http')) {
         const signed = await getCachedSignedUrl('supraspace-attachment', a.fileKey || a.url);
@@ -895,13 +865,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userIdStr = userId.toString();
   const signed = await Promise.all(conversations.map((c: any) => withFreshAvatar(c)));
 
-  // For conversations the user has cleared, hide the old lastMessage so the
-  // preview doesn't show stale content. Only null it when no new messages have
-  // arrived since the clear (lastMessageAt is still <= clearedAt timestamp).
   const filtered = await Promise.all(signed.map(async (c: any) => {
-    // Strip null member entries that can appear when a CrmUser is hard-deleted
-    // after being added to a conversation. Keeping nulls causes the frontend to
-    // crash on member._id access, triggering the "Something went wrong" error page.
     const safeConv = withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) });
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
@@ -1026,9 +990,6 @@ const getOrCreateDirect = asyncHandler(async (req: Request, res: Response) => {
       .lean();
 
     if (mainUser?.email) {
-      // Driver Tracker passes the main User id. Provision the driver's
-      // Suprah Space identity on demand when older onboarding did not create
-      // one, then continue through the normal direct-message flow.
       target = await ensureCrmIdentityForMainUser(
         mainUser as MainUserForCrmIdentity,
         organizationId.toString(),
@@ -1405,10 +1366,6 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .limit(parseInt(limit as string))
     .lean();
 
-  // Fire-and-forget: mark messages read without blocking the response.
-  // Awaiting this on large channels (e.g. 27 members, hundreds of messages)
-  // can time out or throw, which would return a 500 and leave the client
-  // showing an empty chat even though messages exist.
   SupraSpaceMessage.updateMany(
     { conversationId: id, readBy: { $ne: userId } },
     { $addToSet: { readBy: userId } }
@@ -1417,22 +1374,11 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     { _id: id, manualUnreadBy: userId },
     { $pull: { manualUnreadBy: userId } }
   ).catch(() => {});
-  // Also clear this conversation's entries out of the Notifications tab —
-  // getMessages runs on every path that actually reads a conversation
-  // (opening it from Home, a push tap, a deep link, already having it open
-  // when a message arrives), not just tapping the notification itself. The
-  // in-app Notifications tab (a separate Notification collection — see
-  // pushToConversationMembers) was previously only ever marked read by that
-  // one explicit tap, so a message read any other way left its notification
-  // stuck there indefinitely.
   Notification.updateMany(
     { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
     { $set: { isRead: true } }
   ).catch(() => {});
 
-  // Customer messages use a synthetic sentinel ObjectId for `sender` that doesn't
-  // correspond to any CrmUser document, so populate() returns null for them.
-  // Replace null senders using the customer info stored in message metadata.
   const fallbackSender = (m: any) => ({
     _id: m.metadata?.customerUserId || 'unknown',
     fullName: m.metadata?.customerName || 'Customer',
@@ -1450,13 +1396,6 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
 });
 
-/**
- * GET /api/supraspace/conversations/:id/attachments?type=media|files&before=&limit=
- * Lists attachments across the *entire* conversation directly from the DB, independent
- * of whichever page of messages the client currently has loaded. The Files/Media tab
- * previously filtered only the last ~40 loaded messages, so anything shared further
- * back (very common in low-traffic DMs) never showed up even though it still exists.
- */
 const getConversationAttachments = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -1532,12 +1471,6 @@ const searchInConversation = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, messages, 'Search results'));
 });
 
-/**
- * GET /api/supraspace/search?q=&conversationId=  — message search across the user's
- * conversations, or (with conversationId) scoped to just that one — used by the
- * in-conversation search in the info panel, so searching "in this DM/channel" doesn't
- * also surface hits from every other conversation.
- */
 const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const q = (req.query.q as string) || '';
@@ -1636,12 +1569,6 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   conversation.lastMessage = message._id as any;
   conversation.lastMessageAt = message.createdAt;
 
-  // Capture members who had this conversation hidden before we clear deletedFor.
-  // We emit conversation:new only to them so their sidebar updates immediately.
-  // We clear ALL deletedFor entries (not just the sender) so the backend DB is
-  // consistent with what we tell the frontend — otherwise the next getConversations
-  // call would re-hide the conversation for resurrected members, causing the
-  // disappear-then-reappear flicker the user reported.
   const resurrectedFor = (conversation.deletedFor as any[])
     .map(String)
     .filter(id => id !== userId.toString());
@@ -1661,8 +1588,6 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
   pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '', message._id.toString());
 
-  // Notify previously-hidden members so their sidebar shows the conversation
-  // without waiting for a manual refresh or page reload.
   if (resurrectedFor.length > 0) {
     try {
       const io = getIO();
@@ -1697,10 +1622,6 @@ const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
 
   if (!orgId) throw new ApiError(403, 'Your account is not linked to an organization');
 
-  // New/current clients can retry synchronization by report id. The server
-  // reloads the report from MongoDB, so attachment keys/content remain trusted
-  // backend data instead of round-tripping temporary signed URLs through the
-  // browser.
   if (dayPulseReportId) {
     if (!mongoose.Types.ObjectId.isValid(dayPulseReportId)) {
       throw new ApiError(400, 'Invalid DayPulse report id');
@@ -1734,9 +1655,6 @@ const postDayPulseReport = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  // Legacy compatibility: older frontend bundles sent rendered content and
-  // attachments directly. Keep that contract intact while preventing a stale
-  // client from duplicating a report the new backend already synchronized.
   if (!content?.trim()) throw new ApiError(400, 'Report content is required');
 
   const conversation = await getOrCreateDayPulseReportConversation(orgId, userId);
@@ -2339,8 +2257,6 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
     organizationId,
   );
 
-  // Routed through generateCrmToken so the token carries type:'crm' and uses the
-  // same secret chain as the SupraSpace socket. (Fixes "Invalid CRM token type".)
   const token = generateCrmToken(crmUser._id.toString(), '30d');
 
   res.json(new ApiResponse(200, { token }, 'Session token issued'));
@@ -2348,12 +2264,6 @@ const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
 
 const ONLINE_STATUS_VALUES = ['online', 'idle', 'away', 'busy', 'offline', 'do_not_disturb'] as const;
 
-// SupraSpace's own CRM token doesn't resolve against the main auth() middleware
-// (CrmUser._id and User._id are different documents), so it can't call the main
-// site's PATCH /api/profile/online-status directly — this mirrors that endpoint's
-// logic (same profileService.updateOnlineStatus + emitPresenceUpdate calls) but
-// resolves the target User via the CrmUser's email, the same link
-// presenceBridge.ts already uses to read presence back into SupraSpace.
 const updateMyStatus = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
   const orgId = req.orgId as string;
