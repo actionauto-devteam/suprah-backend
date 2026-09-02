@@ -118,43 +118,23 @@ export async function resolveDriverReviewAccess({
 
   const hasActiveLoadRelationship = activeLoads.length > 0;
 
-  // Organization admins can review only drivers that have an existing load
-  // relationship with that organization. This prevents an org admin from
-  // browsing the shared platform-wide driver pool with full verification access.
-  if (orgRole === "admin" || viewerRole === "admin") {
-    const hasAdministrativeScope = Boolean(
-      await Load.exists({
-        organizationId: orgId,
-        assignedDriverId: driverId,
-      }),
-    );
-
-    if (hasAdministrativeScope) {
-      return {
-        level: "ADMIN_REVIEW",
-        canOpenReviewCenter: true,
-        canReviewDocuments: true,
-        canViewDocumentContents: true,
-        canViewReviewHistory: true,
-        canFinalizeVerification: true,
-        hasActiveLoadRelationship,
-        organizationId: orgId,
-        activeLoads,
-        reason: "Organization Admin with an existing organization-driver load relationship",
-      };
-    }
-
+  // Main-platform Admins are the authorized verification reviewers for the
+  // shared driver pool. Admin review does not depend on a prior load
+  // relationship. Keep this check tied to the authoritative global User.role
+  // so an employee/member cannot gain full review privileges merely from an
+  // organizationRole value. Super Admin is handled above.
+  if (viewerRole === "admin") {
     return {
-      level: "NONE",
-      canOpenReviewCenter: false,
-      canReviewDocuments: false,
-      canViewDocumentContents: false,
-      canViewReviewHistory: false,
-      canFinalizeVerification: false,
-      hasActiveLoadRelationship: false,
+      level: "ADMIN_REVIEW",
+      canOpenReviewCenter: true,
+      canReviewDocuments: true,
+      canViewDocumentContents: true,
+      canViewReviewHistory: true,
+      canFinalizeVerification: true,
+      hasActiveLoadRelationship,
       organizationId: orgId,
-      activeLoads: [],
-      reason: "The driver is outside this administrator's organization scope",
+      activeLoads,
+      reason: "Main-platform Admin verification responsibility",
     };
   }
 
