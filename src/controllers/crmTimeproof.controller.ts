@@ -807,6 +807,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     isOnShift = false,
     currentIntervalStartAt,
     screenRecordingGranted = null,
+    appVersion = null,
   } = req.body;
 
   // Web Dev is exempt from idle detection entirely — force isIdle false
@@ -863,6 +864,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       platform,
       screenRecordingGranted,
       lastScreenRecordingNotifiedAt,
+      appVersion,
       lastSeenAt: new Date(),
       ...(currentIntervalStartAt !== undefined && {
         currentIntervalStartAt: currentIntervalStartAt ? new Date(currentIntervalStartAt) : null,
@@ -1087,6 +1089,10 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
       breakStartedAt: isOnBreak ? (hb?.breakStartedAt?.toISOString() ?? null) : null,
       platform: hb?.platform ?? null,
       lastSeenAt: hb?.lastSeenAt ?? null,
+      // From the tray's own heartbeat payload — lets admins spot who's on an
+      // old/stale build without digging through diagnostic logs. null for
+      // Lot Tech/mobile (no tray) or a tray build old enough to predate this field.
+      appVersion: hb?.appVersion ?? null,
     };
   });
 
@@ -1112,6 +1118,7 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
       breakStartedAt: null,
       platform: 'mobile',
       lastSeenAt: (u as any).lastActive ?? null,
+      appVersion: null,
     };
   }));
 

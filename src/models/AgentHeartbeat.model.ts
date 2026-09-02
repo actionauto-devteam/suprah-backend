@@ -20,6 +20,10 @@ export interface IAgentHeartbeat extends Document {
   // across auto-updates — see screenRecordingLastNotifiedAt below.
   screenRecordingGranted: boolean | null;
   lastScreenRecordingNotifiedAt: Date | null;
+  // Tray app version (from app.getVersion()) as of the last heartbeat — lets admins
+  // see who's still on an old/stale build without digging through diagnostic logs.
+  // null on old tray builds that predate this field.
+  appVersion: string | null;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -76,6 +80,10 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
     },
     lastScreenRecordingNotifiedAt: {
       type: Date,
+      default: null,
+    },
+    appVersion: {
+      type: String,
       default: null,
     },
     lastSeenAt: {
