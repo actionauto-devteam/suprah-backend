@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -21,9 +22,126 @@ import { getSocketIO } from "../utils/socketEmitter";
 import activityService from "../services/activity.service";
 import emailService from "../services/email.service";
 import Quote from "../models/Quote.model";
+import {
+  buildLoadMaterialChanges,
+  getLoadAcceptanceMaterialVersion,
+} from "../services/loadAcceptanceMaterial.service";
 
 
 const getUser = (req: Request) => req.user as IUser;
+
+const TRANSPORTATION_TIME_ZONE = "America/Denver";
+
+const mountainDatePartsFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: TRANSPORTATION_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function partsToDateKey(parts: Intl.DateTimeFormatPart[]) {
+  const values: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function mountainTodayDateKey() {
+  return partsToDateKey(
+    mountainDatePartsFormatter.formatToParts(new Date()),
+  );
+}
+
+/** Preserve date-only Load schedule fields as YYYY-MM-DD business dates. */
+function scheduleDateKey(value: unknown): string | null {
+  if (!value) return null;
+
+  const raw =
+    value instanceof Date
+      ? value.toISOString()
+      : String(value).trim();
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function formatScheduleDate(value: unknown) {
+  const key = scheduleDateKey(value);
+  if (!key) return "N/A";
+  const [year, month, day] = key.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(Date.UTC(year, month - 1, day, 12, 0, 0)));
+}
+
+/**
+ * Convert an America/Denver wall-clock boundary to its UTC instant without
+ * depending on the API server's local timezone. The second pass corrects for
+ * MDT/MST offset differences.
+ */
+function mountainWallTimeToUtc(
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+) {
+  const targetWallUtc = Date.UTC(
+    year,
+    monthIndex,
+    day,
+    hour,
+    minute,
+    second,
+  );
+  let instant = new Date(targetWallUtc);
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: TRANSPORTATION_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+
+  for (let index = 0; index < 2; index += 1) {
+    const values: Record<string, string> = {};
+    for (const part of formatter.formatToParts(instant)) {
+      if (part.type !== "literal") values[part.type] = part.value;
+    }
+
+    const renderedWallUtc = Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute),
+      Number(values.second),
+    );
+
+    instant = new Date(
+      instant.getTime() + (targetWallUtc - renderedWallUtc),
+    );
+  }
+
+  return instant;
+}
+
+function mountainMonthUtcRange(year: number, month: number) {
+  return {
+    start: mountainWallTimeToUtc(year, month - 1, 1),
+    end: mountainWallTimeToUtc(year, month, 1),
+  };
+}
 
 // ── Inspect step: sign each vehicle's private-bucket inspection photo key
 // the same way proofOfDelivery.imageUrl is signed — an unsigned key is not
@@ -272,13 +390,13 @@ const createLoad = asyncHandler(async (req: Request, res: Response) => {
     capacityWarning = `This load has ${vehicleCount} vehicles but the selected trailer (${trailerType.replace(/_/g, ' ')}) is rated for ${ratedCapacity}. Multiple trips or a larger trailer may be required.`;
   }
 
-  // Validation 3: Check for past dates
+  // Validation 3: Check against the Transportation business calendar
+  // (America/Denver), never the API server's local date.
   if (dates?.firstAvailable) {
-    const selectedDate = new Date(dates.firstAvailable);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const selectedDateKey = scheduleDateKey(dates.firstAvailable);
+    const todayDateKey = mountainTodayDateKey();
 
-    if (selectedDate < today) {
+    if (selectedDateKey && selectedDateKey < todayDateKey) {
       return res.status(400).json({
         success: false,
         error: 'Cannot select a date in the past',
@@ -441,8 +559,10 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const month = Number(req.query.month ?? dateMatch?.[2]);
 
   if (Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
-    const startDate = new Date(Date.UTC(year, month - 1, 1));
-    const endDate = new Date(Date.UTC(year, month, 1));
+    // Monthly reports follow the same America/Denver dealership calendar as
+    // the Transportation UI, including MDT/MST boundary changes.
+    const { start: startDate, end: endDate } =
+      mountainMonthUtcRange(year, month);
     filter.createdAt = { $gte: startDate, $lt: endDate };
   }
 
@@ -611,6 +731,27 @@ const getLoadById = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
 });
 
+const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set([
+  "Accepted",
+  "Picked Up",
+  "In-Transit",
+]);
+
+function canOverrideActiveLoadMaterial(req: Request, load: any) {
+  const user = getUser(req);
+  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+  if (
+    user.role === "super_admin" ||
+    ["admin", "super_admin"].includes(effectiveRole)
+  ) {
+    return true;
+  }
+  return (
+    String(load?.dispatchOwnerId ?? "").trim() !== "" &&
+    String(load.dispatchOwnerId) === user._id.toString()
+  );
+}
+
 /**
  * Update Load
  * PUT /api/loads/:id
@@ -724,24 +865,140 @@ const updateLoad = asyncHandler(async (req: Request, res: Response) => {
     updateData.pricing.balanceAmount = pay - cod;
   }
 
+  const beforeMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+  const beforeObject = load.toObject({ depopulate: true });
+  const afterCandidate = {
+    ...beforeObject,
+    ...updateData,
+  };
+  const afterMaterialVersion = getLoadAcceptanceMaterialVersion(afterCandidate);
+  const materialChanges = buildLoadMaterialChanges(load, afterCandidate);
+  const requiresDriverAcknowledgement =
+    DRIVER_ACK_REQUIRED_LOAD_STATUSES.has(load.status) &&
+    materialChanges.length > 0;
+
+  if (requiresDriverAcknowledgement) {
+    if (!load.assignedDriverId) {
+      throw new ApiError(
+        409,
+        "This active load has no assigned driver. Correct the assignment before changing driver-facing load terms.",
+      );
+    }
+
+    if (!canOverrideActiveLoadMaterial(req, load)) {
+      throw new ApiError(
+        403,
+        "Only the dispatcher responsible for this active load or an organization administrator can change driver-facing load terms.",
+      );
+    }
+  }
+
+  const amendment = requiresDriverAcknowledgement
+    ? {
+        _id: new mongoose.Types.ObjectId(),
+        driverId: load.assignedDriverId,
+        createdBy: user._id,
+        createdAt: new Date(),
+        loadStatusAtChange: load.status,
+        materialVersionBefore: beforeMaterialVersion,
+        materialVersionAfter: afterMaterialVersion,
+        changes: materialChanges,
+        status: "pending" as const,
+      }
+    : null;
+
+  const atomicUpdate: any = { $set: updateData };
+  if (amendment) {
+    atomicUpdate.$push = {
+      driverAmendments: {
+        $each: [amendment],
+        // Prevent an accidental unbounded embedded history while preserving a
+        // substantial audit window in the Load itself.
+        $slice: -100,
+      },
+    };
+  }
+
   const updatedLoad = await Load.findOneAndUpdate(
-    { _id: loadId, organizationId },
-    { $set: updateData },
-    { new: true, runValidators: true }
+    {
+      _id: loadId,
+      organizationId,
+      updatedAt: load.updatedAt,
+    },
+    atomicUpdate,
+    { new: true, runValidators: true },
   );
 
+  if (!updatedLoad) {
+    throw new ApiError(
+      409,
+      "This load changed while you were editing it. Refresh the load and apply your changes again.",
+    );
+  }
+
   const _io = getSocketIO();
-  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId });
+  if (_io) {
+    _io.to(`org:${organizationId}`).emit("load:change", {
+      action: "updated",
+      loadId,
+    });
+  }
+
+  if (amendment && load.assignedDriverId) {
+    try {
+      await safeCreateNotification({
+        userId: load.assignedDriverId.toString(),
+        organizationId,
+        type: "load_amendment_required",
+        title: "Load Updated by Dispatch",
+        message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          amendmentId: amendment._id.toString(),
+          changedFields: materialChanges.map((change) => change.field),
+          route: "/driver",
+          pushSource: "Driver Tracker",
+        },
+      });
+    } catch (error) {
+      logger.error(
+        { error, loadId, amendmentId: amendment._id.toString() },
+        "Non-fatal: failed to notify driver about active Load amendment",
+      );
+    }
+
+    if (_io) {
+      _io.to(`user:${load.assignedDriverId.toString()}`).emit(
+        "driver:loads_updated",
+        {
+          loadId,
+          amendmentId: amendment._id.toString(),
+          amendmentStatus: "pending",
+        },
+      );
+    }
+  }
 
   await activityService.logLoadActivity(
     user._id.toString(),
     organizationId,
-    'load_updated',
+    "load_updated",
     loadId,
-    `Updated load ${load.loadNumber}`
+    amendment
+      ? `Updated active load ${load.loadNumber}; driver acknowledgement required`
+      : `Updated load ${load.loadNumber}`,
   );
 
-  return res.json(new ApiResponse(200, updatedLoad, "Load updated successfully"));
+  return res.json(
+    new ApiResponse(
+      200,
+      updatedLoad,
+      amendment
+        ? "Load updated — driver acknowledgement required"
+        : "Load updated successfully",
+    ),
+  );
 });
 
 const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
@@ -1016,7 +1273,7 @@ const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
     `Vehicles: ${vehicles}`,
     `Origin: ${pickup.city}, ${pickup.state} ${pickup.zip}`,
     `Destination: ${delivery.city}, ${delivery.state} ${delivery.zip}`,
-    `Pickup: ${load.dates?.firstAvailable ? new Date(load.dates.firstAvailable).toLocaleDateString() : 'N/A'}`,
+    `Pickup: ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}`,
   ].join("\n");
 
   const html = `
@@ -1027,7 +1284,7 @@ const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
       <p><strong>Vehicles:</strong> ${vehicles}</p>
       <p><strong>Origin:</strong> ${pickup.city}, ${pickup.state} ${pickup.zip}</p>
       <p><strong>Destination:</strong> ${delivery.city}, ${delivery.state} ${delivery.zip}</p>
-      <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? new Date(load.dates.firstAvailable).toLocaleDateString() : 'N/A'}</p>
+      <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}</p>
     </div>
   `;
 

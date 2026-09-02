@@ -7,6 +7,8 @@ import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import Load from "../models/Load.model";
 import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
+import LoadReleaseRequest from "../models/LoadReleaseRequest.model";
+import { GPS_TRACKING_LOAD_STATUSES } from "../services/driverLocationAccess.service";
 import {
   finalizeDriverStatusChangeIfClear,
   isStatusRequestBlockingNewWork,
@@ -20,7 +22,6 @@ interface OrgDriver {
   id: string;
   name: string;
   email: string;
-  phone: string;
   avatar: string | null;
   isActive: boolean;
   memberSince: Date | null;
@@ -43,7 +44,7 @@ interface OrgDriver {
       city: string | null;
       state: string | null;
       zip: string | null;
-      coordinates: { lat: number; lng: number } | null;
+      coordinates: null;
     };
   };
   presence: {
@@ -72,6 +73,15 @@ interface OrgDriver {
       state: string | null;
       zip: string | null;
     };
+    releaseRequest: {
+      id: string;
+      status: "pending";
+      priority: "standard" | "emergency";
+      reason: string;
+      message?: string | null;
+      requestedAt?: Date | null;
+      dispatcherId?: string | null;
+    } | null;
   }>;
   activeLoadCount: number;
   // Deprecated compatibility field. Vehicle capacity is per load, so there is
@@ -101,6 +111,19 @@ interface OrgDriver {
  */
 const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
+  const dispatcherId = String(req.user?._id ?? "");
+  const effectiveRole = String((req as any).orgRole ?? req.user?.role ?? "");
+  const canAdminReviewReleaseRequests =
+    req.user?.role === "super_admin" || ["admin", "super_admin"].includes(effectiveRole);
+
+  // The shared driver directory is live identity/availability data. Do not
+  // reuse a stale browser copy after driver account, organization, or active
+  // status changes.
+  res.setHeader(
+    "Cache-Control",
+    "private, no-store, max-age=0",
+  );
+
   const includeInactive = req.query.includeInactive === "true";
 
   // Drivers are a shared platform-wide pool — every org's dispatchers see
@@ -109,7 +132,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
   if (!includeInactive) userFilter.isActive = true;
 
   const users: any[] = await User.find(userFilter)
-    .select("name email personalInfo.phone avatar isActive createdAt")
+    .select("name email avatar isActive createdAt")
     .lean();
 
   if (users.length === 0) {
@@ -123,18 +146,15 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     .map((u: any) => String(u.email ?? "").trim().toLowerCase())
     .filter(Boolean);
 
-  const [profiles, locations, loads, crmUsers, statusRequests] = await Promise.all([
+  const [profiles, loads, crmUsers, statusRequests, releaseRequests] = await Promise.all([
     DriverProfile.find({ userId: { $in: ids } }).lean(),
-    DriverLocation.find({ userId: { $in: ids } })
-      .select("userId status lastSeenAt coords isSharing")
-      .lean(),
     Load.find({
       organizationId,
       assignedDriverId: { $in: ids },
       status: { $in: ACTIVE_LOAD_STATUSES },
     })
       .select(
-        "assignedDriverId loadNumber status pickupLocation deliveryLocation vehicles trailerType dates",
+        "assignedDriverId dispatchOwnerId loadNumber status pickupLocation deliveryLocation vehicles trailerType dates",
       )
       .sort({ createdAt: -1 })
       .lean(),
@@ -154,7 +174,36 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     })
       .sort({ createdAt: -1 })
       .lean(),
+    LoadReleaseRequest.find({
+      organizationId,
+      driverId: { $in: ids },
+      status: "pending",
+    })
+      .sort({ createdAt: -1 })
+      .lean(),
   ]);
+
+  // Exact live GPS is private to the dispatcher who owns an accepted active
+  // load. Assigned-only loads and another dispatcher's loads do not grant
+  // location visibility, even inside the same organization.
+  const gpsVisibleDriverIds = [
+    ...new Set(
+      (loads as any[])
+        .filter(
+          (load) =>
+            GPS_TRACKING_LOAD_STATUSES.includes(load.status as any) &&
+            dispatcherId &&
+            String(load.dispatchOwnerId ?? "") === dispatcherId,
+        )
+        .map((load) => String(load.assignedDriverId ?? ""))
+        .filter(Boolean),
+    ),
+  ];
+  const locations = gpsVisibleDriverIds.length
+    ? await DriverLocation.find({ userId: { $in: gpsVisibleDriverIds } })
+        .select("userId status lastSeenAt coords isSharing")
+        .lean()
+    : [];
 
   const profileByUser = new Map(profiles.map((p: any) => [String(p.userId), p]));
   const statusRequestByUser = new Map<string, any>();
@@ -163,6 +212,11 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     if (!statusRequestByUser.has(key)) statusRequestByUser.set(key, request);
   }
   const locationByUser = new Map(locations.map((l: any) => [String(l.userId), l]));
+  const releaseRequestByLoadId = new Map<string, any>();
+  for (const request of releaseRequests as any[]) {
+    const key = String(request.loadId);
+    if (!releaseRequestByLoadId.has(key)) releaseRequestByLoadId.set(key, request);
+  }
   const crmUsersByEmail = new Map<string, any[]>();
   for (const crmUser of crmUsers as any[]) {
     const email = String(crmUser.email ?? "").trim().toLowerCase();
@@ -265,7 +319,8 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     if (!u.isActive) warnings.push("inactive_account");
     if (!profile) warnings.push("no_driver_profile");
     if (profile?.isComplianceExpired) warnings.push("compliance_expired");
-    if (operationalStatus === "active" && !isSharing) warnings.push("offline_or_stale_location");
+    const canViewExactGps = gpsVisibleDriverIds.includes(key);
+    if (canViewExactGps && operationalStatus === "active" && !isSharing) warnings.push("offline_or_stale_location");
     if (operationalStatus === "on_leave") warnings.push("on_leave");
     if (operationalStatus === "maintenance") warnings.push("in_shop");
     if (requestBlocksNewWork) {
@@ -286,7 +341,6 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       id: key,
       name: u.name ?? "",
       email: u.email ?? "",
-      phone: u.personalInfo?.phone ?? "",
       avatar: u.avatar ?? null,
       isActive: Boolean(u.isActive),
       memberSince: u.createdAt ?? null,
@@ -318,14 +372,9 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
           city: profile?.homeBase?.city ?? null,
           state: profile?.homeBase?.state ?? null,
           zip: profile?.homeBase?.zip ?? null,
-          coordinates:
-            Array.isArray(profile?.homeBase?.coordinates) &&
-            profile.homeBase.coordinates.length >= 2
-              ? {
-                  lat: Number(profile.homeBase.coordinates[1]),
-                  lng: Number(profile.homeBase.coordinates[0]),
-                }
-              : null,
+          // Exact home-base coordinates are not needed by the directory UI.
+          // Compatibility calculations stay server-side.
+          coordinates: null,
         },
       },
       presence: {
@@ -370,6 +419,24 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
           state: load.deliveryLocation?.state ?? null,
           zip: load.deliveryLocation?.zip ?? null,
         },
+        releaseRequest: (() => {
+          const request: any = releaseRequestByLoadId.get(String(load._id));
+          if (!request) return null;
+          const requestDispatcherId = String(request.dispatcherId ?? "").trim();
+          const canViewRequest =
+            canAdminReviewReleaseRequests ||
+            Boolean(requestDispatcherId && requestDispatcherId === dispatcherId);
+          if (!canViewRequest) return null;
+          return {
+            id: String(request._id),
+            status: "pending" as const,
+            priority: request.priority,
+            reason: request.reason,
+            message: request.message ?? null,
+            requestedAt: request.requestedAt ?? request.createdAt ?? null,
+            dispatcherId: requestDispatcherId || null,
+          };
+        })(),
       })),
       activeLoadCount,
       remainingCapacity: null,

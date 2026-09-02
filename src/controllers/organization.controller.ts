@@ -224,6 +224,13 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         return;
     }
 
+    const affectedUserIds = await User.find({
+        $or: [
+            { organizationId: id },
+            { dispatcherOrganizationIds: id },
+        ],
+    }).distinct('_id');
+
     await Organization.findByIdAndDelete(id);
 
     await activityService.createActivity({
@@ -239,8 +246,21 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
     // Detach all members
     await User.updateMany(
         { organizationId: id },
-        { $unset: { organizationId: 1, organizationRole: 1 } }
+        {
+            $unset: { organizationId: 1, organizationRole: 1 },
+            $pull: { dispatcherOrganizationIds: id },
+        }
     );
+
+    // A user can be associated with more than one organization while only one
+    // organizationId is active. Remove this deleted org from the scoped
+    // Dispatcher capability even when it is not the user's current org.
+    await User.updateMany(
+        { dispatcherOrganizationIds: id },
+        { $pull: { dispatcherOrganizationIds: id } }
+    );
+
+    affectedUserIds.forEach((userId: any) => invalidateUserCache(String(userId)));
 
     res.status(200).json({
         success: true,
@@ -268,7 +288,7 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     const [members, total] = await Promise.all([
         User.find({ organizationId: id })
-            .select('name email avatar role organizationRole createdAt')
+            .select('name email avatar role organizationRole dispatcherOrganizationIds createdAt')
             .sort({ [sortBy]: sortOrder })
             .skip(skip)
             .limit(limit),
@@ -277,10 +297,18 @@ export const getMembers = asyncHandler(async (req: Request, res: Response) => {
 
     // Ensure global admins are displayed as organization admins
     const results = members.map(m => {
-        const member = m.toObject();
+        const member: any = m.toObject();
         if (member.role === 'admin' || member.role === 'super_admin') {
             member.organizationRole = 'admin';
         }
+
+        const dispatcherOrganizationIds = Array.isArray(member.dispatcherOrganizationIds)
+            ? member.dispatcherOrganizationIds
+            : [];
+        member.isDispatcher = dispatcherOrganizationIds.some(
+            (organizationId: any) => String(organizationId) === String(id),
+        );
+        delete member.dispatcherOrganizationIds;
         return member;
     });
 
@@ -342,8 +370,10 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     }
 
     await User.findByIdAndUpdate(userId, {
-        $unset: { organizationId: 1, organizationRole: 1 }
+        $unset: { organizationId: 1, organizationRole: 1 },
+        $pull: { dispatcherOrganizationIds: id },
     });
+    invalidateUserCache(userId);
 
     await activityService.createActivity({
         userId: (req.user?._id as any).toString(),
@@ -368,6 +398,116 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     });
 });
 
+
+/**
+ * PATCH /api/organizations/:id/members/:userId/dispatcher-access
+ *
+ * Grants or removes only the Transportation / Driver Review dispatcher
+ * capability for this organization. It deliberately does not change the
+ * user's global role or organizationRole, so unrelated module access keeps
+ * using the existing employee/member authorization model.
+ */
+export const updateMemberDispatcherAccess = asyncHandler(async (req: Request, res: Response) => {
+    const { id, userId } = req.params;
+    const enabled = req.body?.enabled;
+
+    if (typeof enabled !== 'boolean') {
+        throw new ApiError(400, 'enabled must be a boolean');
+    }
+
+    const org = await Organization.findById(id);
+    if (!org) {
+        throw new ApiError(404, 'Organization not found');
+    }
+
+    const isOwner = req.user?._id && org.ownerId.toString() === req.user._id.toString();
+    const isAdmin = req.orgRole === 'admin' && req.orgId === id;
+    const isSuperAdmin = req.user?.role === 'super_admin';
+    if (!isOwner && !isAdmin && !isSuperAdmin) {
+        throw new ApiError(403, 'Only the owner or admins can manage Dispatcher access');
+    }
+
+    if (org.ownerId.toString() === userId) {
+        throw new ApiError(400, 'The organization owner already has administrative Driver Review access');
+    }
+
+    // Match the same active membership source used by getMembers. Do not allow
+    // an admin to grant a capability to a user outside this organization.
+    const target = await User.findOne({ _id: userId, organizationId: id });
+    if (!target) {
+        throw new ApiError(404, 'User is not a member of this organization');
+    }
+
+    if (target.role !== 'employee') {
+        throw new ApiError(400, 'Dispatcher access can only be assigned to an employee member');
+    }
+
+    const currentlyEnabled = Array.isArray((target as any).dispatcherOrganizationIds) &&
+        (target as any).dispatcherOrganizationIds.some(
+            (organizationId: any) => String(organizationId) === String(id),
+        );
+
+    if (enabled !== currentlyEnabled) {
+        if (enabled) {
+            await User.updateOne(
+                { _id: target._id },
+                { $addToSet: { dispatcherOrganizationIds: id } },
+            );
+        } else {
+            await User.updateOne(
+                { _id: target._id },
+                { $pull: { dispatcherOrganizationIds: id } },
+            );
+        }
+        invalidateUserCache(target._id.toString());
+
+        try {
+            await activityService.createActivity({
+                userId: (req.user?._id as any).toString(),
+                organizationId: id,
+                type: 'settings_change',
+                title: enabled ? 'Dispatcher Access Granted' : 'Dispatcher Access Removed',
+                description: `${target.name || target.email} ${enabled ? 'was granted Transportation Dispatcher access' : 'had Transportation Dispatcher access removed'}`,
+                metadata: {
+                    targetUserId: target._id.toString(),
+                    dispatcherAccess: enabled,
+                },
+            });
+        } catch (error) {
+            logger.error(
+                { error, orgId: id, targetUserId: target._id },
+                'Non-fatal: failed to log Dispatcher access activity',
+            );
+        }
+
+        await safeCreateNotification({
+            userId: target._id.toString(),
+            organizationId: id,
+            type: 'admin_broadcast',
+            title: enabled ? 'Dispatcher Access Granted' : 'Dispatcher Access Updated',
+            message: enabled
+                ? `You now have Dispatcher access for Transportation in ${org.name}. Your other organization permissions are unchanged.`
+                : `Your Dispatcher access for Transportation in ${org.name} was removed. Your other organization permissions are unchanged.`,
+            metadata: { dispatcherAccess: enabled },
+        });
+    }
+
+    logger.info(
+        { orgId: id, targetUserId: target._id, dispatcherAccess: enabled },
+        'Organization member Dispatcher access updated',
+    );
+
+    res.status(200).json({
+        success: true,
+        data: {
+            userId: target._id,
+            organizationRole: target.organizationRole,
+            isDispatcher: enabled,
+        },
+        message: enabled ? 'Dispatcher access granted' : 'Dispatcher access removed',
+    });
+});
+
 export default {
     listPublicOrganizations,
     createOrganization,
@@ -376,5 +516,6 @@ export default {
     updateOwnOrganizationSubscription,
     deleteOrganization,
     getMembers,
-    removeMember
+    removeMember,
+    updateMemberDispatcherAccess
 };

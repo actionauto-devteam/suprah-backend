@@ -4,7 +4,8 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
-import User from "../models/User.model";
+import User, { IUser } from "../models/User.model";
+import Organization from "../models/Organization.model";
 import TimeLog from "../models/TimeLog.model";
 import {
   generateCrmToken,
@@ -24,6 +25,7 @@ import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
 import { resolveNextEmployeeId } from "../utils/employeeId.util";
+import { invalidateUserCache } from "../utils/cache.util";
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -711,6 +713,14 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   });
   if (!user) throw new ApiError(404, "User not found");
 
+  // Capture the pre-edit email so a simultaneous email change does not make us
+  // accidentally link the role update to a different main User account.
+  const linkedCoreEmail = normalizeEmail(user.email);
+  const requestedRole =
+    typeof role === "string" && ["employee", "manager", "admin"].includes(role)
+      ? (role as "employee" | "manager" | "admin")
+      : undefined;
+
   if (fullName?.trim()) user.fullName = fullName.trim();
 
   if (email?.trim()) {
@@ -723,8 +733,8 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     user.email = email.trim().toLowerCase();
   }
 
-  if (role && ["employee", "manager", "admin"].includes(role)) {
-    user.role = role;
+  if (requestedRole) {
+    user.role = requestedRole;
   }
 
   if (birthday !== undefined) {
@@ -770,7 +780,91 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     user.payrollLocation = payrollLocation ?? undefined;
   }
 
-  await user.save({ validateModifiedOnly: true });
+  // Validate the CRM document before touching the main User record. This keeps
+  // ordinary validation failures from partially changing the user's main-app
+  // authorization state.
+  await user.validate();
+
+  let linkedCoreUser: IUser | null = null;
+  let previousCoreRole: IUser["role"] | undefined;
+  let previousOrganizationRole: string | undefined;
+  let coreAuthorizationChanged = false;
+
+  // CRM roles and main-app roles are separate models. The security-sensitive
+  // case is a CRM downgrade (Admin -> Employee/Manager) leaving the linked main
+  // User as admin. Reconcile only that downgrade here. We intentionally DO NOT
+  // allow this CRM endpoint to promote an employee into a main-app/global admin;
+  // that broader privilege grant must continue through the main admin workflow.
+  if (requestedRole && requestedRole !== "admin" && linkedCoreEmail && user.organizationId) {
+    linkedCoreUser = await User.findOne({
+      email: linkedCoreEmail,
+      organizationId: user.organizationId,
+    });
+
+    if (linkedCoreUser) {
+      if (linkedCoreUser.role === "super_admin") {
+        throw new ApiError(
+          409,
+          "This CRM account is linked to a Super Admin and cannot be downgraded here.",
+        );
+      }
+
+      const hasAdminAuthority =
+        linkedCoreUser.role === "admin" ||
+        linkedCoreUser.organizationRole === "admin";
+
+      if (hasAdminAuthority) {
+        const isOrganizationOwner = await Organization.exists({
+          _id: user.organizationId,
+          ownerId: linkedCoreUser._id,
+        });
+
+        if (isOrganizationOwner) {
+          throw new ApiError(
+            409,
+            "The organization owner cannot be downgraded to Employee or Manager from CRM User Management.",
+          );
+        }
+
+        previousCoreRole = linkedCoreUser.role;
+        previousOrganizationRole = linkedCoreUser.organizationRole;
+
+        if (linkedCoreUser.role === "admin") {
+          linkedCoreUser.role = "employee";
+          coreAuthorizationChanged = true;
+        }
+
+        if (linkedCoreUser.organizationRole === "admin") {
+          linkedCoreUser.organizationRole = "member";
+          coreAuthorizationChanged = true;
+        }
+      }
+    }
+  }
+
+  if (coreAuthorizationChanged && linkedCoreUser) {
+    await linkedCoreUser.save({ validateModifiedOnly: true });
+    invalidateUserCache(linkedCoreUser._id.toString());
+  }
+
+  try {
+    await user.save({ validateModifiedOnly: true });
+  } catch (error) {
+    // Best-effort compensation: if the CRM save fails after the main User was
+    // downgraded, restore the previous main-app authorization values so this
+    // endpoint does not silently leave the two account records inconsistent.
+    if (coreAuthorizationChanged && linkedCoreUser && previousCoreRole) {
+      try {
+        linkedCoreUser.role = previousCoreRole;
+        linkedCoreUser.organizationRole = previousOrganizationRole;
+        await linkedCoreUser.save({ validateModifiedOnly: true });
+        invalidateUserCache(linkedCoreUser._id.toString());
+      } catch (rollbackError) {
+        console.error("Failed to roll back linked main User role after CRM update failure", rollbackError);
+      }
+    }
+    throw error;
+  }
 
   if (department !== undefined) {
     await cascadeDepartmentToLinkedUser({

@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+import type { Request as ExpressRequest, Response as ExpressResponse } from "express";
 import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
@@ -39,7 +39,23 @@ const TIMELINE_NOTIFICATION_TYPES = [
 // intentionally absent. Their Dispatch Chat copies are persisted as exact
 // private-thread DispatchChatMessage system events by the load controller.
 
-const getUser = (req: Request) => req.user as IUser;
+const getUser = (req: ExpressRequest) => req.user as IUser;
+
+function dispatchChatUnreadPredicate(
+  actorId: mongoose.Types.ObjectId | string,
+) {
+  const actorIdString = String(actorId);
+  return {
+    readBy: { $ne: actorId },
+    $or: [
+      { senderId: { $ne: actorId } },
+      {
+        messageType: "system",
+        "systemEvent.metadata.unreadForParticipantIds": actorIdString,
+      },
+    ],
+  };
+}
 
 type AuthorizedChat = {
   actor: IUser;
@@ -63,16 +79,94 @@ type ResolvedPrivateThread = AuthorizedChat & {
   };
 };
 
+type PopulatedDispatchChatUser = {
+  _id?: mongoose.Types.ObjectId;
+  organizationId?: string | mongoose.Types.ObjectId;
+  role?: string;
+  isActive?: boolean;
+  name?: string;
+  email?: string;
+  avatar?: string;
+};
+
+function isActiveDriverReference(
+  user: PopulatedDispatchChatUser | null | undefined,
+): boolean {
+  return Boolean(
+    user?._id &&
+      String(user.role ?? "") === "driver" &&
+      user.isActive === true,
+  );
+}
+
+function isValidDispatcherReferenceForThread(
+  user: PopulatedDispatchChatUser | null | undefined,
+  threadOrganizationId: string,
+): boolean {
+  if (
+    !user?._id ||
+    !STAFF_ROLES.includes(String(user.role ?? ""))
+  ) {
+    return false;
+  }
+
+  // A super-admin can legitimately own a thread while impersonating another
+  // organization. Normal staff must belong to the organization that owns the
+  // private thread.
+  if (String(user.role) === "super_admin") {
+    return true;
+  }
+
+  return (
+    String(user.organizationId ?? "") === String(threadOrganizationId)
+  );
+}
+
+function isVisibleDispatchChatThread(
+  thread: any,
+  actor: IUser,
+  requestOrganizationId?: string,
+): boolean {
+  const driver = thread?.driverId as PopulatedDispatchChatUser | null;
+  const dispatcher =
+    thread?.dispatcherId as PopulatedDispatchChatUser | null;
+  const threadOrganizationId = String(thread?.organizationId ?? "");
+
+  if (
+    !threadOrganizationId ||
+    !isActiveDriverReference(driver) ||
+    !isValidDispatcherReferenceForThread(
+      dispatcher,
+      threadOrganizationId,
+    )
+  ) {
+    return false;
+  }
+
+  if (actor.role === "driver") {
+    // Drivers can read only threads that explicitly name their own User id.
+    // Their home organization does not have to equal the dispatcher's
+    // organization because Driver Tracker intentionally uses a shared driver
+    // pool across organizations.
+    return String(driver?._id ?? "") === String(actor._id);
+  }
+
+  // Staff retain the existing strict privacy boundary: the thread must belong
+  // to the staff member, and to the organization context they are currently
+  // operating in.
+  return (
+    String(dispatcher?._id ?? "") === String(actor._id) &&
+    Boolean(requestOrganizationId) &&
+    threadOrganizationId === String(requestOrganizationId)
+  );
+}
+
 async function authorizeDispatchChat(
-  req: Request,
+  req: ExpressRequest,
   driverId: string,
 ): Promise<AuthorizedChat> {
   const actor = getUser(req);
-  const organizationId = req.orgId as string;
-
-  if (!organizationId) {
-    throw new ApiError(403, "Organization access is required");
-  }
+  const requestOrganizationId = String(req.orgId ?? "");
 
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
     throw new ApiError(400, "A valid driverId is required");
@@ -80,39 +174,60 @@ async function authorizeDispatchChat(
 
   const actorRole = actor.role;
   const actorId = actor._id.toString();
+  const actorIsDriver = actorRole === "driver";
 
-  if (actorRole === "driver") {
+  if (actorIsDriver) {
     if (actorId !== driverId) {
-      throw new ApiError(403, "Drivers can only access their own Dispatch Chat");
+      throw new ApiError(
+        403,
+        "Drivers can only access their own Dispatch Chat",
+      );
     }
-  } else if (!STAFF_ROLES.includes(String(actorRole))) {
-    throw new ApiError(
-      403,
-      "Dispatch Chat is limited to drivers and dispatch staff",
-    );
+  } else {
+    if (!STAFF_ROLES.includes(String(actorRole))) {
+      throw new ApiError(
+        403,
+        "Dispatch Chat is limited to drivers and dispatch staff",
+      );
+    }
+
+    if (!requestOrganizationId) {
+      throw new ApiError(403, "Organization access is required");
+    }
   }
 
+  // The Driver Tracker directory is intentionally a shared platform-wide
+  // driver pool. Staff may therefore start a private thread with any active
+  // Driver User. We still require the exact User id, active state and driver
+  // role; only the driver.organizationId equality check is removed.
   const driver = await User.findOne({
     _id: driverId,
-    organizationId,
     role: "driver",
     isActive: true,
   })
-    .select("_id name email avatar")
+    .select("_id name email avatar organizationId role isActive")
     .lean();
 
   if (!driver) {
-    throw new ApiError(404, "Driver not found in this organization");
+    throw new ApiError(
+      404,
+      actorIsDriver
+        ? "Driver account is unavailable for Suprah Dispatch Chat"
+        : "Driver is no longer available for Suprah Dispatch Chat",
+    );
   }
 
   return {
     actor,
-    organizationId,
+    // For staff this is the organization that owns a newly-created thread.
+    // For drivers, resolvePrivateThread replaces this value with the
+    // organization stored on the exact selected private thread.
+    organizationId: requestOrganizationId,
     driver: driver as AuthorizedChat["driver"],
   };
 }
 
-function getRequestedThreadId(req: Request): string | null {
+function getRequestedThreadId(req: ExpressRequest): string | null {
   const candidate =
     (typeof req.query.threadId === "string" ? req.query.threadId : null) ??
     (typeof req.body?.threadId === "string" ? req.body.threadId : null);
@@ -126,13 +241,16 @@ function getRequestedThreadId(req: Request): string | null {
 }
 
 async function resolvePrivateThread(
-  req: Request,
+  req: ExpressRequest,
   driverId: string,
   options: { createForDispatcher?: boolean; requireActiveDispatcher?: boolean } = {},
 ): Promise<ResolvedPrivateThread> {
   const authorized = await authorizeDispatchChat(req, driverId);
-  const { actor, organizationId, driver } = authorized;
-  const actorId = actor._id.toString();
+  const {
+    actor,
+    organizationId: requestOrganizationId,
+    driver,
+  } = authorized;
   const actorIsDriver = actor.role === "driver";
   const requestedThreadId = getRequestedThreadId(req);
 
@@ -146,90 +264,178 @@ async function resolvePrivateThread(
       );
     }
 
+    // Critical shared-pool rule:
+    // The driver's HOME organization must not be used as the thread privacy
+    // boundary. The exact thread id + exact driver membership is the boundary.
     thread = await DispatchChatThread.findOne({
       _id: requestedThreadId,
-      organizationId,
       driverId: actor._id,
     }).lean();
 
     if (!thread) {
-      throw new ApiError(404, "Dispatch Chat conversation not found");
+      throw new ApiError(
+        404,
+        "Dispatch Chat conversation not found",
+      );
     }
   } else if (requestedThreadId) {
-    // Staff cannot use another dispatcher's thread id, even inside the same org.
+    // Staff still cannot use another dispatcher's thread id, even when the
+    // selected driver comes from the shared platform-wide driver pool.
     thread = await DispatchChatThread.findOne({
       _id: requestedThreadId,
-      organizationId,
+      organizationId: requestOrganizationId,
       driverId: driver._id,
       dispatcherId: actor._id,
     }).lean();
 
     if (!thread) {
-      throw new ApiError(403, "You do not have access to this Dispatch Chat conversation");
+      throw new ApiError(
+        403,
+        "You do not have access to this Dispatch Chat conversation",
+      );
     }
   } else if (options.createForDispatcher !== false) {
     thread = await ensureDispatchChatThread({
-      organizationId,
+      organizationId: requestOrganizationId,
       dispatcherId: actor._id,
       driverId: driver._id,
     });
   } else {
     thread = await DispatchChatThread.findOne({
-      organizationId,
+      organizationId: requestOrganizationId,
       dispatcherId: actor._id,
       driverId: driver._id,
     }).lean();
 
     if (!thread) {
-      // An unread check for a never-started conversation is simply zero.
-      throw new ApiError(404, "Dispatch Chat conversation not found");
+      throw new ApiError(
+        404,
+        "Dispatch Chat conversation not found",
+      );
     }
   }
 
-  const dispatcherId = String(thread.dispatcherId);
-  const dispatcher = await User.findOne({
-    _id: dispatcherId,
-    organizationId,
-    role: { $in: STAFF_ROLES },
-  })
-    .select("_id name email avatar isActive")
-    .lean();
+  const conversationOrganizationId = String(
+    thread.organizationId ?? "",
+  );
 
-  if (!dispatcher) {
-    throw new ApiError(404, "Dispatcher for this conversation is no longer available");
+  if (!conversationOrganizationId) {
+    throw new ApiError(
+      409,
+      "Dispatch Chat conversation has invalid organization ownership",
+    );
   }
 
-  if (options.requireActiveDispatcher && dispatcher.isActive === false) {
-    throw new ApiError(409, "This dispatcher is no longer active");
+  const dispatcherId = String(thread.dispatcherId);
+  const dispatcher: any = await User.findOne({
+    _id: dispatcherId,
+    role: { $in: STAFF_ROLES },
+  })
+    .select(
+      "_id name email avatar isActive role organizationId",
+    )
+    .lean();
+
+  if (
+    !dispatcher ||
+    !isValidDispatcherReferenceForThread(
+      dispatcher,
+      conversationOrganizationId,
+    )
+  ) {
+    throw new ApiError(
+      404,
+      "Dispatcher for this conversation is no longer available",
+    );
+  }
+
+  if (
+    options.requireActiveDispatcher &&
+    dispatcher.isActive === false
+  ) {
+    throw new ApiError(
+      409,
+      "This dispatcher is no longer active",
+    );
   }
 
   return {
     ...authorized,
+    // All message/history/read operations use the organization stored on the
+    // selected private thread. This lets a shared-pool driver participate in a
+    // thread owned by another organization without exposing any other thread.
+    organizationId: conversationOrganizationId,
     thread,
-    dispatcher: dispatcher as ResolvedPrivateThread["dispatcher"],
+    dispatcher:
+      dispatcher as ResolvedPrivateThread["dispatcher"],
   };
 }
 
 async function signAttachment(attachment: any) {
-  const rawUrl = attachment?.url || "";
-  const key = attachment?.fileKey || rawUrl;
-  let url = rawUrl;
+  const rawUrl = String(attachment?.url ?? "").trim();
+  const explicitFileKey = String(attachment?.fileKey ?? "").trim();
+  const originalName = attachment?.originalName || "Attachment";
+  const mimeType =
+    attachment?.mimeType || "application/octet-stream";
+  const size = Number(attachment?.size || 0);
 
-  if (key && !String(key).startsWith("http")) {
-    try {
-      const signed = await storageService.getSignedUrl(String(key), 3600);
-      if (signed) url = signed;
-    } catch {
-      // Leave the persisted key untouched. A temporary signing failure must
-      // not make the entire chat history fail to load.
+  let safeUrl = "";
+
+  // Legacy records may contain an already-public/external URL and no private
+  // fileKey. Keep those working. New Dispatch Chat attachments always persist
+  // a private key because upload() uses BucketType.PRIVATE.
+  if (/^https?:\/\//i.test(rawUrl) && !explicitFileKey) {
+    safeUrl = rawUrl;
+  } else {
+    const privateKey = explicitFileKey || rawUrl;
+
+    if (privateKey) {
+      try {
+        const signed = await storageService.getSignedUrl(
+          privateKey,
+          3600,
+        );
+
+        // getSignedUrl() should return either an expiring HTTPS URL or the
+        // explicit local-development /uploads/ path. Never return an unsigned
+        // private object key if signing returns null or an unexpected value.
+        if (
+          signed &&
+          (
+            /^https?:\/\//i.test(signed) ||
+            signed.startsWith("/uploads/")
+          )
+        ) {
+          safeUrl = signed;
+        } else {
+          logger.warn(
+            { attachmentName: originalName },
+            "[DispatchChat] Private attachment URL signing was unavailable",
+          );
+        }
+      } catch (error) {
+        logger.warn(
+          {
+            attachmentName: originalName,
+            error:
+              error instanceof Error
+                ? error.message
+                : "unknown signing error",
+          },
+          "[DispatchChat] Private attachment URL signing failed",
+        );
+      }
     }
   }
 
   return {
-    url,
-    originalName: attachment?.originalName || "Attachment",
-    mimeType: attachment?.mimeType || "application/octet-stream",
-    size: Number(attachment?.size || 0),
+    // Empty string is deliberate: the persisted private key remains
+    // server-side and cannot leak through history, socket or upload responses.
+    url: safeUrl,
+    available: Boolean(safeUrl),
+    originalName,
+    mimeType,
+    size,
   };
 }
 
@@ -253,7 +459,7 @@ async function resolveParticipantAvatar(
   }
 }
 
-async function serializeMessage(message: any) {
+async function serializeMessage(message: any, viewer?: IUser) {
   const sender = message?.senderId;
   const attachments = await Promise.all(
     (Array.isArray(message?.attachments) ? message.attachments : []).map(
@@ -261,21 +467,77 @@ async function serializeMessage(message: any) {
     ),
   );
 
+  let serializedSender = {
+    id: String(sender?._id ?? message.senderId),
+    name: sender?.name ?? "User",
+    email: sender?.email ?? "",
+    role: sender?.role ?? message.senderRole,
+  };
+  let serializedSystemEvent = message.systemEvent ?? null;
+  let serializedContent = message.content || "";
+
+  const hidePerformerIdentityFromDriver = Boolean(
+    viewer?.role === "driver" &&
+      message?.messageType === "system" &&
+      message?.systemEvent?.metadata?.hidePerformerIdentityFromDriver === true,
+  );
+
+  if (hidePerformerIdentityFromDriver) {
+    const driverSafeMessage = String(
+      message.systemEvent?.metadata?.audienceMessages?.driver ??
+        message.systemEvent?.message ??
+        message.content ??
+        "Dispatch updated your load",
+    );
+    const safeMetadata = {
+      ...(message.systemEvent?.metadata ?? {}),
+    } as Record<string, any>;
+
+    // A same-organization support member is authorized to perform the action,
+    // but the affected driver has no direct relationship with that staff user.
+    // Do not merely hide the name in React: remove the identity from the API
+    // payload too so it is not recoverable through DevTools/network inspection.
+    for (const key of [
+      "actorId",
+      "actorName",
+      "performedByUserId",
+      "performedByName",
+      "sentByUserId",
+      "sentByName",
+      "newDriverId",
+      "newDriverName",
+    ]) {
+      delete safeMetadata[key];
+    }
+    safeMetadata.audienceMessages = {
+      driver: driverSafeMessage,
+    };
+    safeMetadata.privacyRedacted = true;
+
+    serializedSender = {
+      id: "organization-dispatch",
+      name: "Another dispatcher",
+      email: "",
+      role: "dispatcher",
+    };
+    serializedSystemEvent = {
+      ...(message.systemEvent ?? {}),
+      message: driverSafeMessage,
+      metadata: safeMetadata,
+    };
+    serializedContent = driverSafeMessage;
+  }
+
   return {
     id: String(message._id),
     threadId: message.threadId ? String(message.threadId) : null,
     dispatcherId: message.dispatcherId ? String(message.dispatcherId) : null,
     driverId: String(message.driverId),
-    sender: {
-      id: String(sender?._id ?? message.senderId),
-      name: sender?.name ?? "User",
-      email: sender?.email ?? "",
-      role: sender?.role ?? message.senderRole,
-    },
+    sender: serializedSender,
     senderRole: message.senderRole,
     messageType: message.messageType || "message",
-    systemEvent: message.systemEvent ?? null,
-    content: message.content || "",
+    systemEvent: serializedSystemEvent,
+    content: serializedContent,
     attachments,
     readBy: Array.isArray(message.readBy)
       ? message.readBy.map((id: any) => String(id))
@@ -501,14 +763,9 @@ async function backfillSafeDriverThreads(
 // so a driver cannot use this route to open arbitrary staff conversations.
 // ensureDispatchChatThread reuses the same exact dispatcher↔driver thread when
 // one already exists, preserving the previous Suprah Dispatch Chat history.
-const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) => {
+const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const actor = getUser(req);
-  const organizationId = req.orgId as string;
   const loadId = String(req.params.loadId ?? '').trim();
-
-  if (!organizationId) {
-    throw new ApiError(403, 'Organization access is required');
-  }
   if (actor.role !== 'driver') {
     throw new ApiError(403, 'Only drivers can open a load creator conversation');
   }
@@ -521,18 +778,22 @@ const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) =
   // card render and the click, do not open a stale load-board conversation.
   const load: any = await Load.findOne({
     _id: loadId,
-    organizationId,
     status: 'Posted',
     $or: [
       { assignedDriverId: null },
       { assignedDriverId: { $exists: false } },
     ],
   })
-    .select('_id loadNumber createdBy')
+    .select('_id loadNumber createdBy organizationId')
     .lean();
 
   if (!load) {
     throw new ApiError(409, 'This load is no longer available on the Load Board');
+  }
+
+  const organizationId = String(load.organizationId ?? '').trim();
+  if (!organizationId) {
+    throw new ApiError(409, 'This load has invalid organization ownership');
   }
 
   const creatorId = String(load.createdBy ?? '').trim();
@@ -554,7 +815,6 @@ const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) =
       .lean(),
     User.findOne({
       _id: actor._id,
-      organizationId,
       role: 'driver',
       isActive: true,
     })
@@ -582,8 +842,7 @@ const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) =
   const unreadCount = await DispatchChatMessage.countDocuments({
     organizationId,
     threadId: thread._id,
-    senderId: { $ne: actor._id },
-    readBy: { $ne: actor._id },
+    ...dispatchChatUnreadPredicate(actor._id),
   });
 
   return res.status(200).json(
@@ -622,113 +881,261 @@ const openLoadCreatorThread = asyncHandler(async (req: Request, res: Response) =
 });
 
 // GET /api/driver-tracking/dispatch-chat/threads
-const getThreads = asyncHandler(async (req: Request, res: Response) => {
+const getThreads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const actor = getUser(req);
-  const organizationId = req.orgId as string;
+  const requestOrganizationId = String(req.orgId ?? "");
 
-  if (!organizationId) throw new ApiError(403, "Organization access is required");
+  res.setHeader(
+    "Cache-Control",
+    "private, no-store, max-age=0",
+  );
+
   const actorIsDriver = actor.role === "driver";
   const actorIsStaff = STAFF_ROLES.includes(String(actor.role));
+
   if (!actorIsDriver && !actorIsStaff) {
-    throw new ApiError(403, "Dispatch Chat is limited to drivers and dispatch staff");
+    throw new ApiError(
+      403,
+      "Dispatch Chat is limited to drivers and dispatch staff",
+    );
   }
 
-  if (actorIsDriver) {
-    await backfillSafeDriverThreads(organizationId, actor._id);
+  if (actorIsStaff && !requestOrganizationId) {
+    throw new ApiError(403, "Organization access is required");
+  }
+
+  // Legacy private data can only be backfilled safely inside the driver's
+  // current/home organization. New cross-organization private threads already
+  // carry explicit threadId + dispatcherId ownership and need no backfill.
+  if (actorIsDriver && requestOrganizationId) {
+    await backfillSafeDriverThreads(
+      requestOrganizationId,
+      actor._id,
+    );
   }
 
   const threadFilter = actorIsDriver
-    ? { organizationId, driverId: actor._id, lastMessageAt: { $ne: null } }
-    : { organizationId, dispatcherId: actor._id, lastMessageAt: { $ne: null } };
+    ? {
+        driverId: actor._id,
+        lastMessageAt: { $ne: null },
+      }
+    : {
+        organizationId: requestOrganizationId,
+        dispatcherId: actor._id,
+        lastMessageAt: { $ne: null },
+      };
 
-  const threads: any[] = await DispatchChatThread.find(threadFilter)
-    .populate("dispatcherId", "_id name email avatar isActive role")
-    .populate("driverId", "_id name email avatar isActive role")
-    .sort({ lastMessageAt: -1, updatedAt: -1 })
-    .lean();
+  const candidateThreads: any[] =
+    await DispatchChatThread.find(threadFilter)
+      .populate(
+        "dispatcherId",
+        "_id name email avatar isActive role organizationId",
+      )
+      .populate(
+        "driverId",
+        "_id name email avatar isActive role organizationId",
+      )
+      .sort({ lastMessageAt: -1, updatedAt: -1 })
+      .lean();
 
-  const threadIds = threads.map((thread) => thread._id);
-  const unreadRows = threadIds.length
+  const threads = candidateThreads.filter(
+    (thread: any) => {
+      const visible = isVisibleDispatchChatThread(
+        thread,
+        actor,
+        requestOrganizationId || undefined,
+      );
+
+      if (!visible) {
+        logger.warn(
+          {
+            threadId: String(thread?._id ?? ""),
+            driverId: String(
+              thread?.driverId?._id ??
+                thread?.driverId ??
+                "",
+            ),
+            dispatcherId: String(
+              thread?.dispatcherId?._id ??
+                thread?.dispatcherId ??
+                "",
+            ),
+            threadOrganizationId: String(
+              thread?.organizationId ?? "",
+            ),
+            requestOrganizationId,
+          },
+          "Skipping stale Dispatch Chat thread with invalid current membership",
+        );
+      }
+
+      return visible;
+    },
+  );
+
+  const threadPairs = threads.map((thread: any) => ({
+    organizationId: String(thread.organizationId),
+    threadId: thread._id,
+  }));
+
+  const unreadRows = threadPairs.length
     ? await DispatchChatMessage.aggregate([
         {
           $match: {
-            organizationId,
-            threadId: { $in: threadIds },
-            senderId: { $ne: actor._id },
-            readBy: { $ne: actor._id },
+      $and: [
+        { $or: threadPairs },
+        dispatchChatUnreadPredicate(actor._id),
+      ],
+    },
+        },
+        {
+          $group: {
+            _id: "$threadId",
+            unreadCount: { $sum: 1 },
           },
         },
-        { $group: { _id: "$threadId", unreadCount: { $sum: 1 } } },
       ])
     : [];
 
   const unreadByThread = new Map(
-    unreadRows.map((row: any) => [String(row._id), Number(row.unreadCount || 0)]),
+    unreadRows.map((row: any) => [
+      String(row._id),
+      Number(row.unreadCount || 0),
+    ]),
   );
 
   const data = await Promise.all(
     threads.map(async (thread: any) => {
       const dispatcher: any = thread.dispatcherId;
       const driver: any = thread.driverId;
+
       return {
         id: String(thread._id),
         dispatcher: {
           id: String(dispatcher?._id ?? ""),
           name: dispatcher?.name || "Dispatcher",
           email: dispatcher?.email || "",
-          avatar: await resolveParticipantAvatar(dispatcher?.avatar),
+          avatar: await resolveParticipantAvatar(
+            dispatcher?.avatar,
+          ),
           isActive: dispatcher?.isActive !== false,
         },
         driver: {
           id: String(driver?._id ?? ""),
           name: driver?.name || "Driver",
           email: driver?.email || "",
-          avatar: await resolveParticipantAvatar(driver?.avatar),
-          isActive: driver?.isActive !== false,
+          avatar: await resolveParticipantAvatar(
+            driver?.avatar,
+          ),
+          isActive: driver?.isActive === true,
         },
-        unreadCount: unreadByThread.get(String(thread._id)) ?? 0,
+        unreadCount:
+          unreadByThread.get(String(thread._id)) ?? 0,
         lastMessageAt: thread.lastMessageAt ?? null,
-        lastMessagePreview: thread.lastMessagePreview || "",
+        lastMessagePreview:
+          thread.lastMessagePreview || "",
         lastMessageType: thread.lastMessageType ?? null,
       };
     }),
   );
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, { threads: data }, "Dispatch Chat conversations fetched"));
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      { threads: data },
+      "Dispatch Chat conversations fetched",
+    ),
+  );
 });
 
 // GET /api/driver-tracking/dispatch-chat/unread-total
-const getUnreadTotal = asyncHandler(async (req: Request, res: Response) => {
+const getUnreadTotal = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const actor = getUser(req);
-  const organizationId = req.orgId as string;
+  const requestOrganizationId = String(req.orgId ?? "");
 
-  if (!organizationId) throw new ApiError(403, "Organization access is required");
+  res.setHeader(
+    "Cache-Control",
+    "private, no-store, max-age=0",
+  );
 
   const actorIsDriver = actor.role === "driver";
   const actorIsStaff = STAFF_ROLES.includes(String(actor.role));
+
   if (!actorIsDriver && !actorIsStaff) {
-    throw new ApiError(403, "Dispatch Chat is limited to drivers and dispatch staff");
+    throw new ApiError(
+      403,
+      "Dispatch Chat is limited to drivers and dispatch staff",
+    );
   }
 
-  const unreadTotal = await DispatchChatMessage.countDocuments({
-    organizationId,
-    threadId: { $exists: true },
-    ...(actorIsDriver
-      ? { driverId: actor._id }
-      : { dispatcherId: actor._id }),
-    senderId: { $ne: actor._id },
-    readBy: { $ne: actor._id },
-  });
+  if (actorIsStaff && !requestOrganizationId) {
+    throw new ApiError(403, "Organization access is required");
+  }
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, { unreadTotal }, "Dispatch Chat unread total fetched"));
+  const threadFilter = actorIsDriver
+    ? { driverId: actor._id }
+    : {
+        organizationId: requestOrganizationId,
+        dispatcherId: actor._id,
+      };
+
+  const candidateThreads: any[] =
+    await DispatchChatThread.find(threadFilter)
+      .populate(
+        "dispatcherId",
+        "_id isActive role organizationId",
+      )
+      .populate(
+        "driverId",
+        "_id isActive role organizationId",
+      )
+      .lean();
+
+  const visibleThreads = candidateThreads.filter(
+    (thread: any) =>
+      isVisibleDispatchChatThread(
+        thread,
+        actor,
+        requestOrganizationId || undefined,
+      ),
+  );
+
+  if (visibleThreads.length === 0) {
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { unreadTotal: 0 },
+        "Dispatch Chat unread total fetched",
+      ),
+    );
+  }
+
+  const threadPairs = visibleThreads.map(
+    (thread: any) => ({
+      organizationId: String(thread.organizationId),
+      threadId: thread._id,
+    }),
+  );
+
+  const unreadTotal =
+    await DispatchChatMessage.countDocuments({
+      $and: [
+        { $or: threadPairs },
+        dispatchChatUnreadPredicate(actor._id),
+      ],
+    });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      { unreadTotal },
+      "Dispatch Chat unread total fetched",
+    ),
+  );
 });
 
 // GET /api/driver-tracking/dispatch-chat/:driverId/messages
-const getMessages = asyncHandler(async (req: Request, res: Response) => {
+const getMessages = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const { actor, organizationId, driver, dispatcher, thread: rawThread } =
     await resolvePrivateThread(req, req.params.driverId, {
       createForDispatcher: true,
@@ -813,8 +1220,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
       DispatchChatMessage.countDocuments({
         organizationId,
         threadId: thread._id,
-        senderId: { $ne: actor._id },
-        readBy: { $ne: actor._id },
+        ...dispatchChatUnreadPredicate(actor._id),
       }),
 
       Notification.find({
@@ -844,7 +1250,9 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .slice(0, limit);
 
   const chronologicalRows = rows.reverse();
-  const messages = await Promise.all(chronologicalRows.map(serializeMessage));
+  const messages = await Promise.all(
+    chronologicalRows.map((row) => serializeMessage(row, actor)),
+  );
 
   const persistedAlertIds = new Set<string>();
   for (const row of chronologicalRows as any[]) {
@@ -896,43 +1304,78 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // GET /api/driver-tracking/dispatch-chat/:driverId/unread
-const getUnreadCount = asyncHandler(async (req: Request, res: Response) => {
-  const authorized = await authorizeDispatchChat(req, req.params.driverId);
-  const { actor, organizationId, driver } = authorized;
+const getUnreadCount = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const actor = getUser(req);
 
-  let thread: any;
   if (actor.role === "driver") {
-    ({ thread } = await resolvePrivateThread(req, req.params.driverId, {
-      createForDispatcher: false,
-    }));
-  } else {
-    thread = await DispatchChatThread.findOne({
+    const {
       organizationId,
-      dispatcherId: actor._id,
-      driverId: driver._id,
-    }).lean();
+      thread,
+    } = await resolvePrivateThread(
+      req,
+      req.params.driverId,
+      { createForDispatcher: false },
+    );
 
-    if (!thread) {
-      return res
-        .status(200)
-        .json(new ApiResponse(200, { unreadCount: 0 }, "Unread count fetched"));
-    }
+    const unreadCount =
+      await DispatchChatMessage.countDocuments({
+        organizationId,
+        threadId: thread._id,
+        ...dispatchChatUnreadPredicate(actor._id),
+      });
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { unreadCount },
+        "Unread count fetched",
+      ),
+    );
   }
 
-  const unreadCount = await DispatchChatMessage.countDocuments({
+  const {
     organizationId,
-    threadId: thread._id,
-    senderId: { $ne: actor._id },
-    readBy: { $ne: actor._id },
-  });
+    driver,
+  } = await authorizeDispatchChat(
+    req,
+    req.params.driverId,
+  );
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, { unreadCount }, "Unread count fetched"));
+  const thread = await DispatchChatThread.findOne({
+    organizationId,
+    dispatcherId: actor._id,
+    driverId: driver._id,
+  }).lean();
+
+  if (!thread) {
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { unreadCount: 0 },
+        "Unread count fetched",
+      ),
+    );
+  }
+
+  const unreadCount =
+    await DispatchChatMessage.countDocuments({
+      organizationId,
+      threadId: thread._id,
+      senderId: { $ne: actor._id },
+      readBy: { $ne: actor._id },
+    });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      { unreadCount },
+      "Unread count fetched",
+    ),
+  );
 });
 
 // POST /api/driver-tracking/dispatch-chat/:driverId/messages
-const sendMessage = asyncHandler(async (req: Request, res: Response) => {
+const sendMessage = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const { actor, organizationId, thread } = await resolvePrivateThread(
     req,
     req.params.driverId,
@@ -974,7 +1417,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   });
 
   await message.populate("senderId", "name email role");
-  const payload = await serializeMessage(message.toObject());
+  const payload = await serializeMessage(message.toObject(), actor);
 
   emitToDispatchChatThreadParticipants(
     thread,
@@ -989,7 +1432,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
 // POST /api/driver-tracking/dispatch-chat/:driverId/attachments
 const uploadAttachments = asyncHandler(
-  async (req: Request, res: Response) => {
+  async (req: ExpressRequest, res: ExpressResponse) => {
     const { actor, organizationId, thread } = await resolvePrivateThread(
       req,
       req.params.driverId,
@@ -1086,7 +1529,7 @@ const uploadAttachments = asyncHandler(
     });
 
     await message.populate("senderId", "name email role");
-    const payload = await serializeMessage(message.toObject());
+    const payload = await serializeMessage(message.toObject(), actor);
 
     emitToDispatchChatThreadParticipants(
       thread,
@@ -1101,7 +1544,7 @@ const uploadAttachments = asyncHandler(
 );
 
 // POST /api/driver-tracking/dispatch-chat/:driverId/read
-const markRead = asyncHandler(async (req: Request, res: Response) => {
+const markRead = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const { actor, organizationId, thread } = await resolvePrivateThread(
     req,
     req.params.driverId,
@@ -1112,8 +1555,7 @@ const markRead = asyncHandler(async (req: Request, res: Response) => {
     {
       organizationId,
       threadId: thread._id,
-      senderId: { $ne: actor._id },
-      readBy: { $ne: actor._id },
+      ...dispatchChatUnreadPredicate(actor._id),
     },
     {
       $addToSet: { readBy: actor._id },

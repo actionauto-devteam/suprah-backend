@@ -9,6 +9,7 @@ import {
     getMembers,
     getOrganization,
     removeMember,
+    updateMemberDispatcherAccess,
     updateOrganization,
     updateOwnOrganizationSubscription,
 } from '../controllers/organization.controller';
@@ -26,6 +27,7 @@ router.patch('/:id/subscription', requireAdmin, updateOwnOrganizationSubscriptio
 router.delete('/:id', authorize(['super_admin']), deleteOrganization);
 
 router.get('/:id/members', getMembers);
+router.patch('/:id/members/:userId/dispatcher-access', requireAdmin, updateMemberDispatcherAccess);
 router.delete('/:id/members/:userId', requireAdmin, removeMember);
 
 export default router;

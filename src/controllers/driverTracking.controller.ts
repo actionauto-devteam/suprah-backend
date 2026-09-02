@@ -1,12 +1,21 @@
-import { Request, Response } from "express";
+import type { Request as ExpressRequest, Response as ExpressResponse } from "express";
 import mongoose from "mongoose";
+import { createHash } from "crypto";
 // t
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
+import {
+  getLoadAcceptanceMaterialVersion,
+} from "../services/loadAcceptanceMaterial.service";
+import {
+  assertNoDriverCommitmentConflict,
+  withDriverCommitmentLock,
+} from "../services/driverWorkCommitment.service";
 import User, { IUser } from "../models/User.model";
 import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
+import DriverRequest from "../models/DriverRequest.model";
 import DriverLocation from "../models/DriverLocation.model";
 import storageService from "../services/storage.service";
 import DriverPayout from "../models/DriverPayout.model";
@@ -16,6 +25,10 @@ import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotificati
 import activityService from "../services/activity.service";
 import Notification from "../models/Notification.model";
 import DispatchChatMessage from "../models/DispatchChatMessage.model";
+import LoadReleaseRequest, {
+  LOAD_RELEASE_REQUEST_REASONS,
+  LoadReleaseRequestReason,
+} from "../models/LoadReleaseRequest.model";
 import {
   emitToDispatchChatThreadParticipants,
   ensureDispatchChatThread,
@@ -35,6 +48,32 @@ import {
   evaluateDriverLoadCompatibilityWithRecommendations,
 } from "../services/driverLoadCompatibility.service";
 import { getCoordinatesFromZip } from "../utils/calculations";
+import {
+  GPS_TRACKING_LOAD_STATUSES,
+  emitDriverLocationToResponsibleDispatchers,
+  getDriverGpsTrackingLoads,
+} from "../services/driverLocationAccess.service";
+import {
+  clearDriverExactLocationIfUnneeded,
+} from "../services/driverLocationRetention.service";
+import {
+  appendLoadLifecycleOutbox,
+  createLoadLifecycleOutboxEvent,
+  processLoadLifecycleOutboxForLoad,
+} from "../services/loadLifecycleOutbox.service";
+import {
+  DRIVER_ACTIVE_LOAD_STATUSES,
+  assertDriverReviewCenterAccess,
+  assertDriverReviewMutationAccess,
+  resolveDriverReviewAccess,
+} from "../services/driverReviewAccess.service";
+import {
+  approveDriverVerification,
+  evaluateDriverVerificationEligibility,
+  listDriverReviewEvents,
+  recordDriverReviewEvent,
+  reviewDriverDocument,
+} from "../services/driverVerificationReview.service";
 
 // ── Driver contract signature — required on both accept and request; a
 // driver cannot take a load without agreeing to terms and signing. ──
@@ -48,10 +87,258 @@ function parseDriverSignature(body: unknown) {
   return result.data;
 }
 
-const getUser = (req: Request) => req.user as IUser;
+const getUser = (req: ExpressRequest) => req.user as IUser;
 
-// Statuses that count against a driver's active workload
-const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
+
+function assignmentCompatibilityOverrides(load: any) {
+  const stored = load?.assignmentCompatibilityOverrides;
+  if (
+    stored &&
+    typeof stored.overrideAvailability === "boolean" &&
+    typeof stored.overrideCapacity === "boolean"
+  ) {
+    return {
+      overrideAvailability: stored.overrideAvailability,
+      overrideCapacity: stored.overrideCapacity,
+      legacyFallback: false,
+    };
+  }
+
+  // Legacy Assigned loads predate persisted override decisions. Preserve their
+  // existing ability to accept when no material edit is detected; all newly
+  // assigned loads persist the exact override decisions and are fully rechecked.
+  return {
+    overrideAvailability: true,
+    overrideCapacity: true,
+    legacyFallback: true,
+  };
+}
+
+
+/**
+ * Remove staff-only/internal fields before a Load leaves a driver-facing API.
+ * Drivers still receive the operational route, contacts, vehicles, dates,
+ * instructions and compensation they need to evaluate or execute the load.
+ */
+function sanitizeLoadForDriver(load: any, driverId: string) {
+  const source = load?.toJSON ? load.toJSON() : { ...(load ?? {}) };
+  const requests = Array.isArray(source.driverRequests)
+    ? source.driverRequests
+    : [];
+  const myRequest = requests.find(
+    (request: any) => String(request?.driverId ?? "") === String(driverId),
+  );
+
+  const vehicles = Array.isArray(source.vehicles)
+    ? source.vehicles.map((vehicle: any) => {
+        const { inspectionPhotoUrl: _privateInspectionKey, ...safeVehicle } =
+          vehicle ?? {};
+        return safeVehicle;
+      })
+    : [];
+
+  const contract = source.contract
+    ? {
+        agreedToTerms: Boolean(source.contract.agreedToTerms),
+        signedAt: source.contract.signedAt ?? null,
+        signerName: source.contract.signerName ?? "",
+      }
+    : undefined;
+
+  const driverContract = source.driverContract
+    ? {
+        agreedToTerms: Boolean(source.driverContract.agreedToTerms),
+        signedAt: source.driverContract.signedAt ?? null,
+        signerName: source.driverContract.signerName ?? "",
+      }
+    : undefined;
+
+  const proofOfDelivery = source.proofOfDelivery
+    ? {
+        submittedAt: source.proofOfDelivery.submittedAt ?? null,
+        note: source.proofOfDelivery.note ?? "",
+        confirmedAt: source.proofOfDelivery.confirmedAt ?? null,
+      }
+    : undefined;
+
+  const {
+    orgId: _legacyOrgId,
+    createdBy: _createdBy,
+    quoteId: _quoteId,
+    dispatchOwnerId: _dispatchOwnerId,
+    assignmentMaterialFingerprint: _assignmentMaterialFingerprint,
+    assignmentCompatibilityOverrides: _assignmentCompatibilityOverrides,
+    driverAmendments: _driverAmendments,
+    driverRequests: _driverRequests,
+    notes: _staffNotes,
+    ...rest
+  } = source;
+
+  return {
+    ...rest,
+    vehicles,
+    ...(contract ? { contract } : {}),
+    ...(driverContract ? { driverContract } : {}),
+    ...(proofOfDelivery ? { proofOfDelivery } : {}),
+    // Opaque material version only; internal assignment fingerprints and
+    // dispatcher override decisions never leave the server.
+    acceptanceMaterialVersion: getLoadAcceptanceMaterialVersion(source),
+    pendingDriverAmendments: Array.isArray(_driverAmendments)
+      ? _driverAmendments
+          .filter(
+            (amendment: any) =>
+              amendment?.status === "pending" &&
+              String(amendment?.driverId ?? "") === driverId,
+          )
+          .map((amendment: any) => ({
+            id: String(amendment._id),
+            createdAt: amendment.createdAt ?? null,
+            loadStatusAtChange: amendment.loadStatusAtChange ?? null,
+            materialVersionBefore: amendment.materialVersionBefore ?? null,
+            materialVersionAfter: amendment.materialVersionAfter ?? null,
+            changes: Array.isArray(amendment.changes)
+              ? amendment.changes.map((change: any) => ({
+                  field: String(change.field ?? ""),
+                  label: String(change.label ?? "Load Details"),
+                  before: String(change.before ?? ""),
+                  after: String(change.after ?? ""),
+                }))
+              : [],
+          }))
+      : [],
+    hasRequested: Boolean(myRequest),
+    myRequestedAt: myRequest?.requestedAt ?? null,
+  };
+}
+
+
+/**
+ * Staged disclosure for the shared Available Loads board.
+ *
+ * A Posted/unassigned Load can be browsed by drivers from across the platform.
+ * Before assignment they receive enough information to make a work decision,
+ * but not customer/contact identifiers or exact operational access details.
+ *
+ * Requesting a Load does NOT unlock these fields. Full operational details are
+ * returned only after this exact driver is assigned to the Load.
+ */
+function sanitizeAvailableLoadForDriver(load: any, driverId: string) {
+  const source = load?.toJSON ? load.toJSON() : { ...(load ?? {}) };
+  const requests = Array.isArray(source.driverRequests)
+    ? source.driverRequests
+    : [];
+  const myRequest = requests.find(
+    (request: any) => String(request?.driverId ?? "") === String(driverId),
+  );
+
+  const redactLocation = (location: any) => ({
+    // Coarse route information is sufficient for evaluating geography.
+    city: String(location?.city ?? ""),
+    state: String(location?.state ?? ""),
+    zip: String(location?.zip ?? ""),
+    country: String(location?.country ?? ""),
+    locationType: location?.locationType ?? undefined,
+
+    // Preserve the normal frontend object shape without exposing PII.
+    name: "",
+    address: "Available after assignment",
+    phone: "",
+    phoneExt: "",
+    email: "",
+    contactName: "",
+    notes: "",
+  });
+
+  const vehicles = Array.isArray(source.vehicles)
+    ? source.vehicles.map((vehicle: any) => {
+        const vin = String(vehicle?.vin ?? "").trim();
+        return {
+          year: vehicle?.year ?? undefined,
+          make: String(vehicle?.make ?? ""),
+          model: String(vehicle?.model ?? ""),
+          color: String(vehicle?.color ?? ""),
+          condition: vehicle?.condition ?? "Operable",
+          // A full VIN is an exact asset identifier. Show only a recognizable
+          // suffix until Dispatch actually assigns this driver.
+          vin: vin
+            ? `••••••${vin.slice(-6).toUpperCase()}`
+            : "",
+        };
+      })
+    : [];
+
+  const publicInfo =
+    source.additionalInfo?.visibility === "public"
+      ? {
+          visibility: "public",
+          notes: String(source.additionalInfo?.notes ?? ""),
+          instructions: String(source.additionalInfo?.instructions ?? ""),
+          // Reference numbers can identify a customer/order in another org.
+          referenceNumber: "",
+        }
+      : {
+          visibility: source.additionalInfo?.visibility ?? "private",
+          notes: "",
+          instructions: "",
+          referenceNumber: "",
+        };
+
+  const dates = source.dates
+    ? {
+        firstAvailable: source.dates.firstAvailable ?? null,
+        pickupDeadline: source.dates.pickupDeadline ?? null,
+        deliveryDeadline: source.dates.deliveryDeadline ?? null,
+        // Date notes often contain appointment/contact/gate instructions.
+        notes: "",
+      }
+    : undefined;
+
+  const pricing = source.pricing
+    ? {
+        // These are the driver's decision-making fields.
+        miles: source.pricing.miles ?? null,
+        pricePerMile: source.pricing.pricePerMile ?? null,
+        carrierPayAmount: source.pricing.carrierPayAmount ?? null,
+
+        // Internal estimate, cash-collection and balance details unlock only
+        // after assignment.
+        estimatedRate: undefined,
+        copCodAmount: undefined,
+        balanceAmount: undefined,
+      }
+    : undefined;
+
+  return {
+    _id: source._id,
+    loadNumber: source.loadNumber,
+    postType: source.postType,
+    status: source.status,
+    pickupLocation: redactLocation(source.pickupLocation),
+    deliveryLocation: redactLocation(source.deliveryLocation),
+    vehicles,
+    trailerType: source.trailerType,
+    ...(dates ? { dates } : {}),
+    ...(pricing ? { pricing } : {}),
+    additionalInfo: publicInfo,
+    createdAt: source.createdAt ?? null,
+    updatedAt: source.updatedAt ?? null,
+
+    // Explicit UI/API contract: this is intentionally a limited Load view.
+    detailsDisclosure: {
+      stage: "available",
+      exactLocationsAvailableAfterAssignment: true,
+      contactDetailsAvailableAfterAssignment: true,
+      fullVinAvailableAfterAssignment: true,
+      privateInstructionsAvailableAfterAssignment: true,
+    },
+
+    hasRequested: Boolean(myRequest),
+    myRequestedAt: myRequest?.requestedAt ?? null,
+  };
+}
+
+// The active workload statuses are centralized in driverReviewAccess.service
+// so Driver Tracking and Review Center cannot drift on relationship state.
 
 // ─── Loosely-typed service aliases ───────────────────────────────────────────
 // activityService and the notification utils type their `type` param as
@@ -144,6 +431,25 @@ async function persistDispatcherLoadChatEvent(params: {
       driverId,
     });
 
+    const explicitUnreadParticipantIds = new Set(
+      Array.isArray((metadata as any)?.unreadForParticipantIds)
+        ? ((metadata as any).unreadForParticipantIds as unknown[])
+            .map((value) => String(value ?? "").trim())
+            .filter(Boolean)
+        : [],
+    );
+    const participantIds = [
+      dispatcher._id.toString(),
+      String(driverId),
+    ];
+    const readBy =
+      explicitUnreadParticipantIds.size > 0
+        ? participantIds.filter(
+            (participantId) =>
+              !explicitUnreadParticipantIds.has(participantId),
+          )
+        : [dispatcher._id.toString()];
+
     const chatMessage: any = await DispatchChatMessage.create({
       organizationId,
       threadId: thread._id,
@@ -164,9 +470,10 @@ async function persistDispatcherLoadChatEvent(params: {
       },
       content: message,
       attachments: [],
-      // The dispatcher performed the action and has already seen it. The
-      // driver remains unread so their private Dispatch Chat badge updates.
-      readBy: [dispatcher._id],
+      // Existing events preserve their previous semantics. Test-14
+      // lifecycle events opt in through unreadForParticipantIds so the same
+      // durable system row can surface to both participants.
+      readBy,
     });
 
     await touchDispatchChatThread({
@@ -197,7 +504,7 @@ async function persistDispatcherLoadChatEvent(params: {
         systemEvent: chatMessage.systemEvent,
         content: message,
         attachments: [],
-        readBy: [dispatcher._id.toString()],
+        readBy: readBy.map((id) => String(id)),
         createdAt: chatMessage.createdAt,
         updatedAt: chatMessage.updatedAt,
       },
@@ -260,16 +567,355 @@ async function resolveExplicitDispatchOwnerFromAssignmentHistory(params: {
   return dispatcher?._id ?? null;
 }
 
+
+const RELEASE_REQUEST_ELIGIBLE_STATUSES = [
+  "Assigned",
+  "Accepted",
+  "Picked Up",
+  "In-Transit",
+] as const;
+
+function releaseRequestSummary(request: any) {
+  if (!request) return null;
+  return {
+    id: String(request._id),
+    status: request.status,
+    priority: request.priority,
+    reason: request.reason,
+    message: request.message ?? null,
+    requestedAt: request.requestedAt ?? request.createdAt ?? null,
+    dispatcherId: request.dispatcherId ? String(request.dispatcherId) : null,
+  };
+}
+
+function compatibilityNoticeMessages(compatibility: any): string[] {
+  if (!compatibility) return [];
+  const messages: string[] = [];
+  const pickupDay = compatibility.availability?.pickupDay;
+  if (compatibility.availability?.status === "off_schedule") {
+    messages.push(
+      `Pickup is outside your regular Work Availability${pickupDay ? ` (${pickupDay})` : ""}.`,
+    );
+  }
+  if (compatibility.capacity?.status === "exceeded") {
+    messages.push(
+      `This load has ${compatibility.capacity.requiredVehicles} vehicle(s), above your configured capacity of ${compatibility.capacity.maxVehicles}.`,
+    );
+  } else if (compatibility.capacity?.status === "unknown") {
+    messages.push("Your vehicle capacity could not be verified for this load.");
+  }
+  if (compatibility.trailer?.status === "mismatch") {
+    messages.push(
+      `Trailer mismatch: load requires ${compatibility.trailer.requiredTrailerType || "another trailer type"}, while your profile lists ${compatibility.trailer.driverTrailerType || "a different trailer"}.`,
+    );
+  }
+  if (compatibility.serviceArea?.status === "outside") {
+    messages.push("Pickup is outside your configured service radius.");
+  }
+  if (compatibility.preferredRoute?.status === "not_preferred") {
+    messages.push("This route is outside your saved route preferences.");
+  }
+  return messages;
+}
+
+async function findActiveDispatcherForLoad(
+  load: any,
+  candidateId: string,
+) {
+  const normalizedId = String(candidateId ?? "").trim();
+  if (!normalizedId || !mongoose.Types.ObjectId.isValid(normalizedId)) {
+    return null;
+  }
+
+  const dispatcher: any = await User.findOne({
+    _id: normalizedId,
+    role: { $in: ["employee", "admin", "super_admin"] },
+    isActive: true,
+  })
+    .select("_id role organizationId name email")
+    .lean();
+
+  if (!dispatcher) return null;
+
+  // Normal organization staff must belong to the Load's organization.
+  // A global super_admin remains a valid explicit owner when they performed
+  // the assignment through the organization context.
+  if (
+    dispatcher.role !== "super_admin" &&
+    String(dispatcher.organizationId ?? "") !==
+      String(load.organizationId ?? "")
+  ) {
+    return null;
+  }
+
+  return dispatcher;
+}
+
+async function resolveActiveDispatcherForLoad(load: any, driverId: string) {
+  let dispatcher = await findActiveDispatcherForLoad(
+    load,
+    String((load as any).dispatchOwnerId ?? ""),
+  );
+  if (dispatcher) return dispatcher;
+
+  const recovered = await resolveExplicitDispatchOwnerFromAssignmentHistory({
+    organizationId: String(load.organizationId),
+    driverId,
+    loadId: String(load._id),
+  });
+
+  dispatcher = await findActiveDispatcherForLoad(
+    load,
+    String(recovered ?? ""),
+  );
+  if (!dispatcher) return null;
+
+  // Repair legacy ownership without calling load.save(), which could write a
+  // stale in-memory Load over a newer concurrent state. The repair is
+  // best-effort; callers still receive the exact validated dispatcher.
+  const repairResult = await Load.updateOne(
+    expectedLoadRevisionFilter(load, {
+      organizationId: load.organizationId,
+    }),
+    { $set: { dispatchOwnerId: dispatcher._id } },
+  );
+
+  if (repairResult.modifiedCount > 0) {
+    (load as any).dispatchOwnerId = dispatcher._id;
+  }
+
+  return dispatcher;
+}
+
+function assertNoPendingLoadAmendments(load: any, driverId: string) {
+  const pending = Array.isArray((load as any)?.driverAmendments)
+    ? (load as any).driverAmendments.find(
+        (amendment: any) =>
+          amendment?.status === "pending" &&
+          String(amendment?.driverId ?? "") === driverId,
+      )
+    : null;
+
+  if (!pending) return;
+
+  throw new ApiError(
+    409,
+    "Dispatch changed material details on this active load. Review and acknowledge the Load Update before continuing the load lifecycle.",
+    [
+      {
+        type: "load_amendment_acknowledgement_required",
+        amendmentId: String(pending._id),
+        loadId: String(load._id),
+      },
+    ],
+  );
+}
+
+async function requireDispatchOwnerBeforeAcceptance(
+  load: any,
+  driverId: string,
+) {
+  const existingOwner = await findActiveDispatcherForLoad(
+    load,
+    String((load as any).dispatchOwnerId ?? ""),
+  );
+  if (existingOwner) {
+    return {
+      dispatcher: existingOwner,
+      recoveredFromHistory: false,
+    };
+  }
+
+  const recoveredId =
+    await resolveExplicitDispatchOwnerFromAssignmentHistory({
+      organizationId: String(load.organizationId),
+      driverId,
+      loadId: String(load._id),
+    });
+
+  const recoveredOwner = await findActiveDispatcherForLoad(
+    load,
+    String(recoveredId ?? ""),
+  );
+  if (recoveredOwner) {
+    return {
+      dispatcher: recoveredOwner,
+      recoveredFromHistory: true,
+    };
+  }
+
+  throw new ApiError(
+    409,
+    "This load does not currently have a valid responsible dispatcher. Dispatch must reconfirm the assignment before you can accept it.",
+    [
+      {
+        type: "dispatch_owner_required_before_acceptance",
+        requiresDispatchOwnerReconfirmation: true,
+        loadId: String(load._id),
+      },
+    ],
+  );
+}
+
+function canReviewReleaseRequest(req: ExpressRequest, load: any, request: any) {
+  const user = getUser(req);
+  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+  if (user.role === "super_admin" || ["admin", "super_admin"].includes(effectiveRole)) {
+    return true;
+  }
+  const ownerId = String(request?.dispatcherId ?? (load as any).dispatchOwnerId ?? "");
+  return Boolean(ownerId && ownerId === user._id.toString());
+}
+
+function assertCanReviewReleaseRequest(req: ExpressRequest, load: any, request: any) {
+  if (canReviewReleaseRequest(req, load, request)) return;
+  throw new ApiError(
+    403,
+    "This release request must be reviewed by the dispatcher responsible for the load or an organization administrator.",
+  );
+}
+
+
+const DISPATCH_OWNER_PROTECTED_LOAD_STATUSES = new Set<string>([
+  "Accepted",
+  "Picked Up",
+  "In-Transit",
+]);
+
+function isOrganizationAdminOverride(req: ExpressRequest) {
+  const user = getUser(req);
+  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+  return (
+    user.role === "super_admin" ||
+    ["admin", "super_admin"].includes(effectiveRole)
+  );
+}
+
+function getActiveLoadControlContext(
+  req: ExpressRequest,
+  load: any,
+) {
+  const user = getUser(req);
+  const actorId = user._id.toString();
+  const originalDispatcherId = String(load?.dispatchOwnerId ?? "").trim() || null;
+  const protectedActiveLoad = DISPATCH_OWNER_PROTECTED_LOAD_STATUSES.has(
+    String(load?.status ?? ""),
+  );
+
+  // Remove/Reassign are organization-support actions. The controller already
+  // scopes the Load lookup to req.orgId, so another organization cannot use
+  // these actions. A different member of the SAME organization may step in
+  // when the responsible dispatcher is unavailable; that intervention is
+  // recorded durably in the original dispatcher↔driver private chat.
+  return {
+    protectedActiveLoad,
+    adminOverride: protectedActiveLoad && isOrganizationAdminOverride(req),
+    originalDispatcherId,
+    supportMemberAction: Boolean(
+      originalDispatcherId && originalDispatcherId !== actorId,
+    ),
+  };
+}
+
+async function resolveOriginalDispatcherIdForSupportAudit(
+  load: any,
+  driverId: string | null,
+) {
+  const stored = String(load?.dispatchOwnerId ?? "").trim();
+  if (stored && mongoose.Types.ObjectId.isValid(stored)) return stored;
+  if (!driverId) return null;
+
+  const recovered = await resolveExplicitDispatchOwnerFromAssignmentHistory({
+    organizationId: String(load.organizationId),
+    driverId,
+    loadId: String(load._id),
+  });
+  return recovered ? String(recovered) : null;
+}
+
+async function getDriverGpsPolicyAcrossOrganizations(
+  driverId: string,
+  fallbackOrganizationId?: string,
+) {
+  const trackingLoads = await getDriverGpsTrackingLoads(driverId);
+  const byOrg = new Map<string, string[]>();
+  for (const load of trackingLoads) {
+    const orgId = String(load.organizationId ?? "").trim();
+    if (!orgId) continue;
+    const ids = byOrg.get(orgId) ?? [];
+    ids.push(String(load._id));
+    byOrg.set(orgId, ids);
+  }
+
+  let operationalStatus: "active" | "on_leave" | "maintenance" = "active";
+  let required = false;
+  let reason: "active_load" | "dispatch_retained_load" | null = null;
+  const requiredLoadIds = new Set<string>();
+  const retainedLoadIds = new Set<string>();
+
+  for (const [organizationId, activeLoadIds] of byOrg.entries()) {
+    await finalizeDriverStatusChangeIfClear(driverId, organizationId);
+    const statusContext = await getDriverStatusContext(driverId, organizationId);
+    operationalStatus = statusContext.operationalStatus;
+    const requirement = await getDriverLocationRequirement(
+      driverId,
+      organizationId,
+      {
+        operationalStatus: statusContext.operationalStatus,
+        emergencyReleaseActive: statusContext.emergencyReleaseActive,
+        activeLoadIds,
+      },
+    );
+
+    if (!requirement.required) continue;
+    required = true;
+    if (requirement.reason === "dispatch_retained_load") {
+      reason = "dispatch_retained_load";
+      for (const loadId of requirement.retainedLoadIds) {
+        retainedLoadIds.add(loadId);
+        requiredLoadIds.add(loadId);
+      }
+    } else {
+      if (!reason) reason = "active_load";
+      for (const loadId of activeLoadIds) requiredLoadIds.add(loadId);
+    }
+  }
+
+  if (byOrg.size === 0) {
+    if (fallbackOrganizationId) {
+      const statusContext = await getDriverStatusContext(driverId, fallbackOrganizationId);
+      operationalStatus = statusContext.operationalStatus;
+    } else {
+      const profile: any = await DriverProfile.findOne({ userId: driverId })
+        .select("operationalStatus")
+        .lean();
+      operationalStatus =
+        profile?.operationalStatus === "on_leave" || profile?.operationalStatus === "maintenance"
+          ? profile.operationalStatus
+          : "active";
+    }
+  }
+
+  return {
+    trackingLoads,
+    operationalStatus,
+    required,
+    reason,
+    requiredLoadIds: [...requiredLoadIds],
+    retainedLoadIds: [...retainedLoadIds],
+  };
+}
+
 // ─── Location Heartbeat ───────────────────────────────────────────────────────
 // POST /api/driver-tracking/heartbeat  { lat, lng, status? }
 
-const heartbeat = asyncHandler(async (req: Request, res: Response) => {
+const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
-  const { lat, lng, status } = req.body as {
+  const { lat, lng, status, manualSharingEnabled = false } = req.body as {
     lat?: number;
     lng?: number;
     status?: string;
+    manualSharingEnabled?: boolean;
   };
 
   if (user.role !== "driver") {
@@ -289,44 +935,64 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "A valid latitude and longitude are required");
   }
 
+  const driverId = user._id.toString();
+  const policy = await getDriverGpsPolicyAcrossOrganizations(
+    driverId,
+    req.orgId as string | undefined,
+  );
+  const hasTrackingRelationship = policy.trackingLoads.length > 0;
+  const manualSharingOptIn = manualSharingEnabled === true;
+
+  // A stale browser watcher can send one more heartbeat immediately after the
+  // last Load relationship disappears. Without an explicit Manual GPS opt-in,
+  // do not recreate exact coordinates that lifecycle cleanup just removed.
+  if (!hasTrackingRelationship && !manualSharingOptIn) {
+    await clearDriverExactLocationIfUnneeded(
+      driverId,
+      "heartbeat_without_tracking_relationship",
+    );
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          ok: true,
+          locationAccepted: false,
+          exactLocationRetained: false,
+          isSharing: false,
+          visibleToResponsibleDispatch: false,
+        },
+        "GPS is not retained because there is no active tracking relationship or Manual GPS opt-in",
+      ),
+    );
+  }
+
   const allowedStatuses = ["on-route", "idle", "on-break", "waiting", "offline"];
   const requestedStatus =
     status && allowedStatuses.includes(status) ? status : undefined;
-
-  // Dispatch Status controls the Live Status label, but it does NOT control
-  // whether GPS may be shared. On Leave drivers may voluntarily share their
-  // coordinates while remaining Live: Offline; In Shop drivers may voluntarily
-  // share while remaining Live: Waiting.
-  const statusContext = await getDriverStatusContext(
-    user._id.toString(),
-    organizationId,
-  );
   const nextStatus =
-    statusContext.operationalStatus === "on_leave"
+    policy.operationalStatus === "on_leave"
       ? "offline"
-      : statusContext.operationalStatus === "maintenance"
+      : policy.operationalStatus === "maintenance"
         ? "waiting"
         : requestedStatus;
 
-  const locationUpdate: Record<string, any> = {
-    $set: {
-      organizationId,
-      coords: { lat, lng },
-      lastSeenAt: new Date(),
-      isSharing: true,
-
-      // Any successful coordinate heartbeat ends the previous GPS-silence
-      // incident. This remains relevant only to Active drivers that are under
-      // the existing active-load monitoring policy.
-      offlineAlertSentAt: null,
-
-      ...(nextStatus ? { status: nextStatus } : {}),
-    },
+  // DriverLocation is a platform-wide driver record. organizationId remains a
+  // legacy hint only and is never used to authorize who may read coordinates.
+  const contextOrganizationId =
+    String(policy.trackingLoads[0]?.organizationId ?? req.orgId ?? "").trim() || undefined;
+  const locationSet: Record<string, any> = {
+    coords: { lat, lng },
+    lastSeenAt: new Date(),
+    isSharing: true,
+    manualSharingOptIn,
+    offlineAlertSentAt: null,
+    ...(nextStatus ? { status: nextStatus } : {}),
   };
+  if (contextOrganizationId) locationSet.organizationId = contextOrganizationId;
 
-  if (!nextStatus) {
-    locationUpdate.$setOnInsert = { status: "idle" };
-  }
+  const locationUpdate: Record<string, any> = { $set: locationSet };
+  if (!nextStatus) locationUpdate.$setOnInsert = { status: "idle" };
 
   const location = await DriverLocation.findOneAndUpdate(
     { userId: user._id },
@@ -334,16 +1000,15 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
     { new: true, upsert: true },
   );
 
-  const io = getSocketIO();
-  if (io) {
-    io.to(`org:${organizationId}`).emit("driver:location", {
-      driverId: user._id.toString(),
-      coords: location.coords,
-      status: location.status,
-      isSharing: true,
-      lastSeenAt: location.lastSeenAt,
-    });
-  }
+  // A heartbeat may be stored for the driver's own portal/manual sharing, but
+  // exact coordinates are emitted only to dispatchers who own an Accepted,
+  // Picked Up, or In-Transit load for this driver.
+  await emitDriverLocationToResponsibleDispatchers(driverId, {
+    coords: location.coords,
+    status: location.status,
+    isSharing: true,
+    lastSeenAt: location.lastSeenAt,
+  });
 
   return res.status(200).json(
     new ApiResponse(
@@ -352,11 +1017,14 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
         ok: true,
         locationAccepted: true,
         isSharing: true,
+        exactLocationRetained: true,
+        manualSharingOptIn,
         status: location.status,
+        visibleToResponsibleDispatch: hasTrackingRelationship,
       },
-      statusContext.operationalStatus === "maintenance"
+      policy.operationalStatus === "maintenance"
         ? "Location shared while driver remains In Shop"
-        : statusContext.operationalStatus === "on_leave"
+        : policy.operationalStatus === "on_leave"
           ? "Location shared while driver remains On Leave"
           : "Location updated",
     ),
@@ -365,9 +1033,8 @@ const heartbeat = asyncHandler(async (req: Request, res: Response) => {
 
 // POST /api/driver-tracking/location-offline
 const markLocationOffline = asyncHandler(
-  async (req: Request, res: Response) => {
+  async (req: ExpressRequest, res: ExpressResponse) => {
     const user = getUser(req);
-    const organizationId = req.orgId as string;
 
     if (user.role !== "driver") {
       throw new ApiError(
@@ -376,33 +1043,41 @@ const markLocationOffline = asyncHandler(
       );
     }
 
-    const statusContext = await getDriverStatusContext(
-      user._id.toString(),
-      organizationId,
+    const driverId = user._id.toString();
+    const policy = await getDriverGpsPolicyAcrossOrganizations(
+      driverId,
+      req.orgId as string | undefined,
     );
-    const locationRequirement = await getDriverLocationRequirement(
-      user._id.toString(),
-      organizationId,
-      {
-        operationalStatus: statusContext.operationalStatus,
-        emergencyReleaseActive: statusContext.emergencyReleaseActive,
-      },
-    );
-
     const forcedStatus =
-      statusContext.operationalStatus === "maintenance" ? "waiting" : "offline";
-
-    // GPS can be required for either the normal Active + active-load policy or
-    // an explicit dispatcher decision to keep loads assigned while On Leave /
-    // In Shop with GPS required. Emergency Release remains non-blocking.
-    const locationRequired = locationRequirement.required;
+      policy.operationalStatus === "maintenance" ? "waiting" : "offline";
+    const locationRequired = policy.required;
 
     const now = new Date();
-    const existing: any = await DriverLocation.findOne({
-      userId: user._id,
-    });
-
+    const existing: any = await DriverLocation.findOne({ userId: user._id });
     let location: any = existing;
+
+    if (!locationRequired) {
+      await DriverLocation.deleteOne({ userId: user._id });
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          {
+            ok: true,
+            required: false,
+            requirementReason: null,
+            status: forcedStatus,
+            isSharing: false,
+            exactLocationRetained: false,
+            silenceStartedAt: null,
+          },
+          policy.operationalStatus === "maintenance"
+            ? "GPS sharing turned off while driver remains In Shop"
+            : policy.operationalStatus === "on_leave"
+              ? "GPS sharing turned off while driver remains On Leave"
+              : "GPS sharing turned off",
+        ),
+      );
+    }
     let silenceStartedAt: Date | null =
       existing?.lastSeenAt ? new Date(existing.lastSeenAt) : null;
 
@@ -410,38 +1085,28 @@ const markLocationOffline = asyncHandler(
       const update: Record<string, any> = {
         status: forcedStatus,
         isSharing: false,
+        manualSharingOptIn: false,
         offlineAlertSentAt: null,
       };
-
-      // For a required active-load GPS stop, start the 10-minute silence window
-      // at the moment sharing becomes unavailable, preserving existing behavior.
-      // Optional stops keep the last actual coordinate timestamp untouched.
       if (locationRequired) {
         update.lastSeenAt = now;
         silenceStartedAt = now;
       }
-
       location = await DriverLocation.findOneAndUpdate(
         { _id: existing._id },
         { $set: update },
         { new: true },
       );
     } else if (locationRequired) {
-      // A location row cannot be created without coordinates. The monitor
-      // already handles active-load drivers who have never sent a heartbeat.
       silenceStartedAt = now;
     }
 
-    const io = getSocketIO();
-    if (io) {
-      io.to(`org:${organizationId}`).emit("driver:location", {
-        driverId: user._id.toString(),
-        coords: location?.coords ?? null,
-        status: forcedStatus,
-        isSharing: false,
-        lastSeenAt: location?.lastSeenAt ?? silenceStartedAt,
-      });
-    }
+    await emitDriverLocationToResponsibleDispatchers(driverId, {
+      coords: location?.coords ?? null,
+      status: forcedStatus,
+      isSharing: false,
+      lastSeenAt: location?.lastSeenAt ?? silenceStartedAt,
+    });
 
     return res.status(200).json(
       new ApiResponse(
@@ -449,7 +1114,7 @@ const markLocationOffline = asyncHandler(
         {
           ok: true,
           required: locationRequired,
-          requirementReason: locationRequirement.reason,
+          requirementReason: policy.reason,
           status: forcedStatus,
           isSharing: false,
           silenceStartedAt: locationRequired
@@ -457,12 +1122,12 @@ const markLocationOffline = asyncHandler(
             : null,
         },
         locationRequired
-          ? locationRequirement.reason === "dispatch_retained_load"
+          ? policy.reason === "dispatch_retained_load"
             ? "GPS is required by Dispatch while retained loads remain assigned"
             : "Driver location marked offline; required GPS silence monitoring remains active"
-          : statusContext.operationalStatus === "maintenance"
+          : policy.operationalStatus === "maintenance"
             ? "GPS sharing turned off while driver remains In Shop"
-            : statusContext.operationalStatus === "on_leave"
+            : policy.operationalStatus === "on_leave"
               ? "GPS sharing turned off while driver remains On Leave"
               : "GPS sharing turned off",
       ),
@@ -475,40 +1140,48 @@ const markLocationOffline = asyncHandler(
 // Identity always comes from the User record (Driver's Account is the
 // source of truth); equipment from DriverProfile; presence from tracker.
 
-const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
+const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
   const organizationId = req.orgId as string;
+  const dispatcherId = user._id.toString();
 
-  // Drivers are a shared pool, so the live map only shows drivers currently
-  // working THIS org's active loads — not every driver on the platform.
-  const activeDriverIds = await Load.distinct("assignedDriverId", {
+  // Exact GPS is a dispatcher↔driver relationship, not an organization-wide
+  // permission. Assigned-only loads do not qualify because tracking begins
+  // only after the driver accepts.
+  const loads: any[] = await Load.find({
     organizationId,
-    status: { $in: ACTIVE_LOAD_STATUSES },
-  });
+    dispatchOwnerId: user._id,
+    assignedDriverId: { $ne: null },
+    status: { $in: GPS_TRACKING_LOAD_STATUSES },
+  })
+    .select(
+      "loadNumber status pickupLocation deliveryLocation assignedDriverId dispatchOwnerId vehicles trailerType dates",
+    )
+    .lean();
 
-  const locations = await DriverLocation.find({ userId: { $in: activeDriverIds } }).lean();
-  const userIds = locations.map((l: any) => l.userId);
+  const activeDriverIds = [
+    ...new Set(loads.map((load: any) => String(load.assignedDriverId ?? "")).filter(Boolean)),
+  ];
+  if (!activeDriverIds.length) {
+    return res.status(200).json(new ApiResponse(200, [], "Active drivers fetched"));
+  }
 
-  const [users, profiles, loads] = await Promise.all([
-    User.find({ _id: { $in: userIds }, role: "driver", isActive: true })
+  const [locations, users, profiles] = await Promise.all([
+    DriverLocation.find({ userId: { $in: activeDriverIds } }).lean(),
+    User.find({ _id: { $in: activeDriverIds }, role: "driver", isActive: true })
       .select("name email avatar phone")
       .lean(),
-    DriverProfile.find({ userId: { $in: userIds } }).lean(),
-    Load.find({
-      organizationId,
-      assignedDriverId: { $in: userIds },
-      status: { $in: ACTIVE_LOAD_STATUSES },
-    })
-      .select("loadNumber status pickupLocation deliveryLocation assignedDriverId vehicles trailerType dates")
-      .lean(),
+    DriverProfile.find({ userId: { $in: activeDriverIds } }).lean(),
   ]);
 
   const userById = new Map(users.map((u: any) => [String(u._id), u]));
   const profileByUser = new Map(profiles.map((p: any) => [String(p.userId), p]));
   const loadsByDriver = new Map<string, any[]>();
-  for (const l of loads as any[]) {
-    const key = String(l.assignedDriverId);
-    if (!loadsByDriver.has(key)) loadsByDriver.set(key, []);
-    loadsByDriver.get(key)!.push(l);
+  for (const load of loads) {
+    const key = String(load.assignedDriverId);
+    const current = loadsByDriver.get(key) ?? [];
+    current.push(load);
+    loadsByDriver.set(key, current);
   }
 
   const data = locations
@@ -518,12 +1191,9 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
       const u: any = userById.get(key);
       const p: any = profileByUser.get(key) ?? null;
       const driverLoads = loadsByDriver.get(key) ?? [];
-
       const operationalStatus = p?.operationalStatus ?? "active";
       const persistedSharing =
-        typeof loc.isSharing === "boolean"
-          ? loc.isSharing
-          : loc.status !== "offline";
+        typeof loc.isSharing === "boolean" ? loc.isSharing : loc.status !== "offline";
       const locationIsFresh =
         Boolean(loc.lastSeenAt) &&
         Date.now() - new Date(loc.lastSeenAt).getTime() <= 5 * 60 * 1000;
@@ -541,9 +1211,10 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
       return {
         id: key,
         status: effectiveStatus,
-        coords: loc.coords ?? null,
+        coords: effectiveSharing ? (loc.coords ?? null) : null,
         lastSeenAt: loc.lastSeenAt ?? null,
         isSharing: effectiveSharing,
+        dispatcherId,
         driver: {
           id: key,
           name: u.name ?? "",
@@ -553,12 +1224,8 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
         equipment: p
           ? {
               trailerType: p.trailerType ?? null,
-              // maxVehicleCapacity is a per-load VEHICLE count. Never invent a
-              // large fallback or mix it with the number of active load records.
               maxVehicleCapacity:
-                typeof p.maxVehicleCapacity === "number"
-                  ? p.maxVehicleCapacity
-                  : null,
+                typeof p.maxVehicleCapacity === "number" ? p.maxVehicleCapacity : null,
               operationalStatus: p.operationalStatus ?? "active",
               truckMake: p.truckMake ?? undefined,
               truckModel: p.truckModel ?? undefined,
@@ -568,28 +1235,354 @@ const getActiveDrivers = asyncHandler(async (req: Request, res: Response) => {
         availability: {
           availableDays: Array.isArray(p?.availableDays) ? p.availableDays : [],
         },
-        shipments: driverLoads.map((l: any) => ({
-          id: String(l._id),
-          trackingNumber: l.loadNumber,
-          status: l.status,
-          origin: `${l.pickupLocation?.city ?? ""}, ${l.pickupLocation?.state ?? ""}`,
-          destination: `${l.deliveryLocation?.city ?? ""}, ${l.deliveryLocation?.state ?? ""}`,
-          vehicleCount: Array.isArray(l.vehicles) ? l.vehicles.length : 0,
-          trailerType: l.trailerType ?? null,
-          pickupDate: l.dates?.firstAvailable ?? l.dates?.pickupDeadline ?? null,
+        shipments: driverLoads.map((load: any) => ({
+          id: String(load._id),
+          trackingNumber: load.loadNumber,
+          status: load.status,
+          origin: `${load.pickupLocation?.city ?? ""}, ${load.pickupLocation?.state ?? ""}`,
+          destination: `${load.deliveryLocation?.city ?? ""}, ${load.deliveryLocation?.state ?? ""}`,
+          vehicleCount: Array.isArray(load.vehicles) ? load.vehicles.length : 0,
+          trailerType: load.trailerType ?? null,
+          pickupDate: load.dates?.firstAvailable ?? load.dates?.pickupDeadline ?? null,
         })),
       };
     });
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, data, "Active drivers fetched"));
+  return res.status(200).json(new ApiResponse(200, data, "Active drivers fetched"));
 });
+
+
+function lifecycleSyncEvent(
+  organizationId: string,
+  driverIds: Array<string | null | undefined>,
+  loadId: string,
+) {
+  return createLoadLifecycleOutboxEvent("load_sync", {
+    organizationId,
+    driverIds: driverIds.filter(Boolean),
+    loadId,
+  });
+}
+
+function lifecycleUserNotificationEvent(params: {
+  userId: string;
+  organizationId: string;
+  type: string;
+  title: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return createLoadLifecycleOutboxEvent("user_notification", params);
+}
+
+function lifecycleAdminNotificationEvent(params: {
+  organizationId: string;
+  type: string;
+  title: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  excludeUserId?: string;
+}) {
+  return createLoadLifecycleOutboxEvent("org_admin_notification", params);
+}
+
+function lifecycleActivityEvent(params: {
+  userId: string;
+  organizationId: string;
+  type: string;
+  title: string;
+  description: string;
+  loadId: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return createLoadLifecycleOutboxEvent("activity", params);
+}
+
+function lifecycleDispatchChatEvent(params: {
+  organizationId: string;
+  dispatcherId: string;
+  driverId: string;
+  eventType: string;
+  title: string;
+  message: string;
+  metadata: Record<string, unknown>;
+  // Optional actor lets a same-org support member write an auditable system
+  // event into the ORIGINAL dispatcher's private thread without pretending
+  // that the original dispatcher performed the action.
+  performedByUserId?: string;
+  performedByName?: string;
+  performedByRole?: "driver" | "dispatcher";
+  notifyThreadOwner?: boolean;
+}) {
+  return createLoadLifecycleOutboxEvent("dispatch_chat_system", params);
+}
+
+function releaseRequestSnapshot(request: any) {
+  return {
+    dispatcherId: request?.dispatcherId
+      ? String(request.dispatcherId)
+      : null,
+    priority: request?.priority ?? "standard",
+    reason: request?.reason ?? "other",
+    message: request?.message ?? "",
+    loadStatusAtRequest:
+      request?.loadStatusAtRequest ?? "Assigned",
+    requestedAt: request?.requestedAt ?? null,
+  };
+}
+
+function lifecycleReleaseResolutionEvent(params: {
+  request: any;
+  organizationId: string;
+  loadId: string;
+  driverId: string;
+  status: "approved" | "cancelled";
+  decision:
+    | "reassign"
+    | "return_available"
+    | "delivery_completed";
+  reviewedBy?: string;
+  replacementDriverId?: string;
+}) {
+  return createLoadLifecycleOutboxEvent(
+    "release_request_resolution",
+    {
+      requestId: String(params.request._id),
+      organizationId: params.organizationId,
+      loadId: params.loadId,
+      driverId: params.driverId,
+      status: params.status,
+      decision: params.decision,
+      reviewedAt: new Date(),
+      reviewedBy: params.reviewedBy,
+      replacementDriverId: params.replacementDriverId,
+      requestSnapshot: releaseRequestSnapshot(params.request),
+    },
+  );
+}
+
+async function flushLifecycleOutbox(loadId: string) {
+  // Preserve immediate UX. Any failed effect remains durably queued and the
+  // worker retries it later; lifecycle requests never become 500s because a
+  // notification/socket/audit service is temporarily unavailable.
+  try {
+    await processLoadLifecycleOutboxForLoad(loadId);
+  } catch (error) {
+    logger.error(
+      { error, loadId },
+      "Non-fatal: immediate Load lifecycle outbox flush failed",
+    );
+  }
+}
+
+// ─── Atomic Load transition helpers ──────────────────────────────────────────
+//
+// Driver Tracker actions frequently need to perform compatibility/permission
+// checks before changing a Load. Those checks operate on a snapshot. The final
+// write must therefore prove that the same Load state is still current; without
+// this guard, two concurrent actions can both validate an old snapshot and the
+// later save can overwrite the earlier winner.
+function expectedLoadRevisionFilter(
+  load: any,
+  expected: Record<string, unknown> = {},
+) {
+  const filter: Record<string, any> = {
+    _id: load._id,
+    ...expected,
+  };
+
+  const rawUpdatedAt = load?.updatedAt;
+  if (rawUpdatedAt) {
+    const updatedAt =
+      rawUpdatedAt instanceof Date ? rawUpdatedAt : new Date(rawUpdatedAt);
+    if (!Number.isNaN(updatedAt.getTime())) {
+      filter.updatedAt = updatedAt;
+    }
+  }
+
+  return filter;
+}
+
+async function updateLoadIfCurrent(params: {
+  load: any;
+  expected: Record<string, unknown>;
+  update: Record<string, unknown>;
+  action: string;
+}) {
+  const updated = await Load.findOneAndUpdate(
+    expectedLoadRevisionFilter(params.load, params.expected),
+    params.update as any,
+    { new: true, runValidators: true },
+  );
+
+  if (!updated) {
+    throw new ApiError(
+      409,
+      `This load changed while ${params.action}. Refresh the load and try again.`,
+    );
+  }
+
+  return updated;
+}
+
+
+type PendingLoadRequestAssignmentRequester = {
+  driverId: string;
+  driverName: string;
+  requestedAt: string | null;
+  selected: boolean;
+};
+
+type PendingLoadRequestAssignmentConflict = {
+  type: "pending_load_request_assignment_confirmation";
+  loadId: string;
+  loadNumber: string;
+  fingerprint: string;
+  selectedDriverId: string;
+  selectedDriverName: string;
+  selectedDriverRequested: boolean;
+  creatorDispatcherId: string | null;
+  creatorDispatcherName: string | null;
+  pendingRequesters: PendingLoadRequestAssignmentRequester[];
+};
+
+function pendingLoadRequestSnapshot(load: any) {
+  const requests = Array.isArray(load?.driverRequests)
+    ? load.driverRequests
+    : [];
+
+  return requests
+    .map((request: any) => {
+      const driverId = String(request?.driverId ?? "").trim();
+      if (!driverId) return null;
+
+      const rawRequestedAt = request?.requestedAt;
+      const date = rawRequestedAt ? new Date(rawRequestedAt) : null;
+      const requestedAt =
+        date && !Number.isNaN(date.getTime())
+          ? date.toISOString()
+          : rawRequestedAt
+            ? String(rawRequestedAt)
+            : "";
+
+      return {
+        requestId: String(request?._id ?? ""),
+        driverId,
+        requestedAt,
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) =>
+      `${a.driverId}:${a.requestedAt}:${a.requestId}`.localeCompare(
+        `${b.driverId}:${b.requestedAt}:${b.requestId}`,
+      ),
+    );
+}
+
+function pendingLoadRequestFingerprint(load: any) {
+  return createHash("sha256")
+    .update(JSON.stringify(pendingLoadRequestSnapshot(load)))
+    .digest("hex");
+}
+
+async function buildPendingLoadRequestAssignmentConflict(params: {
+  load: any;
+  selectedDriverId: string;
+  selectedDriverName: string;
+}): Promise<PendingLoadRequestAssignmentConflict> {
+  const { load, selectedDriverId, selectedDriverName } = params;
+  const pendingRequests = Array.isArray(load?.driverRequests)
+    ? load.driverRequests
+    : [];
+  const requesterIds = [
+    ...new Set(
+      pendingRequests
+        .map((request: any) => String(request?.driverId ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  const creatorDispatcherId = String(load?.createdBy ?? "").trim();
+  const [requesters, creatorDispatcher] = await Promise.all([
+    requesterIds.length > 0
+      ? User.find({
+          _id: { $in: requesterIds },
+          role: "driver",
+        })
+          .select("_id name")
+          .lean()
+      : Promise.resolve([]),
+    creatorDispatcherId
+      ? findActiveDispatcherForLoad(load, creatorDispatcherId)
+      : Promise.resolve(null),
+  ]);
+
+  const nameByDriverId = new Map(
+    (requesters as any[]).map((requester: any) => [
+      String(requester._id),
+      String(requester.name || "Driver").trim() || "Driver",
+    ]),
+  );
+
+  const pendingRequesters: PendingLoadRequestAssignmentRequester[] =
+    pendingRequests
+      .map((request: any) => {
+        const requestDriverId = String(request?.driverId ?? "").trim();
+        if (!requestDriverId) return null;
+        const rawRequestedAt = request?.requestedAt;
+        const date = rawRequestedAt ? new Date(rawRequestedAt) : null;
+        return {
+          driverId: requestDriverId,
+          driverName:
+            nameByDriverId.get(requestDriverId) ||
+            (requestDriverId === selectedDriverId
+              ? selectedDriverName
+              : "Driver"),
+          requestedAt:
+            date && !Number.isNaN(date.getTime())
+              ? date.toISOString()
+              : null,
+          selected: requestDriverId === selectedDriverId,
+        };
+      })
+      .filter(Boolean) as PendingLoadRequestAssignmentRequester[];
+
+  return {
+    type: "pending_load_request_assignment_confirmation",
+    loadId: String(load._id),
+    loadNumber: String(load.loadNumber || load._id),
+    fingerprint: pendingLoadRequestFingerprint(load),
+    selectedDriverId,
+    selectedDriverName,
+    selectedDriverRequested: pendingRequesters.some(
+      (requester) => requester.driverId === selectedDriverId,
+    ),
+    creatorDispatcherId: creatorDispatcher
+      ? String((creatorDispatcher as any)._id)
+      : null,
+    creatorDispatcherName: creatorDispatcher
+      ? String((creatorDispatcher as any).name || "Dispatch").trim() ||
+        "Dispatch"
+      : null,
+    pendingRequesters,
+  };
+}
+
+function pendingLoadRequestAssignmentMessage(
+  conflict: PendingLoadRequestAssignmentConflict,
+) {
+  const requestCount = conflict.pendingRequesters.length;
+  const requestLabel = requestCount === 1 ? "request" : "requests";
+
+  return conflict.selectedDriverRequested
+    ? `Load ${conflict.loadNumber} has ${requestCount} pending driver ${requestLabel}. Confirm the assignment to fulfill ${conflict.selectedDriverName}'s request and resolve the remaining requests.`
+    : `Load ${conflict.loadNumber} has ${requestCount} pending driver ${requestLabel}. Confirm the assignment to ${conflict.selectedDriverName}; the pending requests will be marked not selected.`;
+}
 
 // ─── Assign / Reassign / Remove (dispatcher actions) ─────────────────────────
 
 // POST /api/driver-tracking/assign-load  { loadId, driverId }
-const assignLoad = asyncHandler(async (req: Request, res: Response) => {
+const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
   const {
@@ -597,16 +1590,20 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     driverId,
     overrideAvailability = false,
     overrideCapacity = false,
+    pendingRequestFingerprint,
   } = req.body as {
     loadId?: string;
     driverId?: string;
     overrideAvailability?: boolean;
     overrideCapacity?: boolean;
+    pendingRequestFingerprint?: string;
   };
 
-  if (!loadId || !driverId) throw new ApiError(400, "loadId and driverId are required");
+  if (!loadId || !driverId) {
+    throw new ApiError(400, "loadId and driverId are required");
+  }
 
-  const [load, driver] = await Promise.all([
+  let [load, driver] = await Promise.all([
     Load.findOne({ _id: loadId, organizationId }),
     // Drivers are a shared platform-wide pool — assignable regardless of org.
     User.findOne({ _id: driverId, role: "driver", isActive: true }).lean(),
@@ -628,6 +1625,42 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
+  const dispatcherId = user._id.toString();
+  const dispatcherName =
+    String(user.name || "Dispatch").trim() || "Dispatch";
+  const assignedDriverName =
+    String((driver as any).name || "Driver").trim() || "Driver";
+  const pendingRequests = Array.isArray((load as any).driverRequests)
+    ? ((load as any).driverRequests as any[])
+    : [];
+
+  // A pending driver request is a real workflow state. Direct assignment is
+  // still allowed, but it can no longer erase that state silently. Dispatch
+  // must confirm the exact request snapshot it reviewed before assignment.
+  let pendingRequestConflict: PendingLoadRequestAssignmentConflict | null = null;
+  if (pendingRequests.length > 0) {
+    pendingRequestConflict =
+      await buildPendingLoadRequestAssignmentConflict({
+        load,
+        selectedDriverId: driverId,
+        selectedDriverName: assignedDriverName,
+      });
+
+    if (
+      !pendingRequestFingerprint ||
+      pendingRequestFingerprint !== pendingRequestConflict.fingerprint
+    ) {
+      throw new ApiError(
+        409,
+        pendingLoadRequestAssignmentMessage(pendingRequestConflict),
+        [pendingRequestConflict],
+      );
+    }
+  }
+
+  // Preserve the existing compatibility gate after Dispatch has acknowledged
+  // the pending-request consequences. The confirmation fingerprint travels
+  // through the compatibility review so both protections remain active.
   await assertDriverLoadCompatibility({
     driverId,
     organizationId,
@@ -636,59 +1669,461 @@ const assignLoad = asyncHandler(async (req: Request, res: Response) => {
     overrides: { overrideAvailability, overrideCapacity },
   });
 
-  load.assignedDriverId = driver._id as any;
-  (load as any).dispatchOwnerId = user._id;
-  load.status = "Assigned";
-  (load as any).assignedAt = new Date();
-  (load as any).driverRequests = [];
-  await load.save();
+  const validatedLoad = load;
+  const requestDispatcherId = String((load as any).createdBy ?? "").trim();
+  const actorIsLoadRequestDispatcher = Boolean(
+    requestDispatcherId && requestDispatcherId === dispatcherId,
+  );
+  const creatorDispatcherId =
+    pendingRequestConflict?.creatorDispatcherId ?? null;
+  const creatorDispatcherName =
+    pendingRequestConflict?.creatorDispatcherName ?? "Dispatch";
+  const selectedDriverRequested = Boolean(
+    pendingRequestConflict?.selectedDriverRequested,
+  );
+  const pendingRequesters =
+    pendingRequestConflict?.pendingRequesters ?? [];
+  const affectedDriverIds = [
+    ...new Set([
+      driverId,
+      ...pendingRequesters.map((requester) => requester.driverId),
+    ]),
+  ];
 
-  emitLoadSync(organizationId, [driverId], load._id.toString());
-
-  await safeCreateNotificationLoose({
-    userId: driverId,
-    organizationId,
-    type: "driver_assigned",
-    title: "New Load Assigned",
-    message: `You've been assigned load ${load.loadNumber}`,
-    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
-  });
-
-  await persistDispatcherLoadChatEvent({
-    dispatcher: user,
-    organizationId,
-    driverId,
-    eventType: "driver_load_assigned",
-    title: "New Load Assigned",
-    message: `Dispatch assigned load ${load.loadNumber} to you.`,
-    metadata: {
-      loadId: load._id.toString(),
-      loadNumber: load.loadNumber,
-      action: "assigned",
-    },
-  });
-
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await logLoadActivityLoose(
-      user._id.toString(),
+  const assignmentOutbox: any[] = [
+    lifecycleSyncEvent(
       organizationId,
-      "load_assigned",
+      affectedDriverIds,
       load._id.toString(),
-      `Assigned load ${load.loadNumber} to ${(driver as any).name}`,
+    ),
+  ];
+
+  if (selectedDriverRequested) {
+    assignmentOutbox.push(
+      lifecycleUserNotificationEvent({
+        userId: driverId,
+        organizationId,
+        type: "driver_request_approved",
+        title: "Load Request Fulfilled",
+        message: `Your request for load ${load.loadNumber} was fulfilled and the load was assigned to you.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          driverId,
+          assignmentResolution: "fulfilled",
+          route: "/driver",
+        },
+      }),
     );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
+
+    if (actorIsLoadRequestDispatcher) {
+      assignmentOutbox.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId,
+          eventType: "driver_load_request_fulfilled",
+          title: "Load Request Fulfilled",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled the pending request.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_fulfilled_by_load_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            driverId,
+            driverName: assignedDriverName,
+            dispatcherId,
+            dispatcherName,
+            originalDispatcherId: requestDispatcherId || dispatcherId,
+            unreadForParticipantIds: [dispatcherId, driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled their pending request.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled their pending request.`,
+              driver: `${dispatcherName} assigned load ${load.loadNumber} to you and fulfilled your pending request.`,
+            },
+          },
+        }),
+      );
+    } else {
+      // B ↔ X is a separate private thread. B sees their own identity; X sees
+      // only "another dispatcher" because B is not the dispatcher tied to
+      // THIS requested load, regardless of any unrelated B ↔ X relationship.
+      assignmentOutbox.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId,
+          eventType: "driver_load_request_fulfilled_by_support_dispatcher",
+          title: "Load Request Fulfilled",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled the pending request.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_fulfilled_by_support_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            dispatcherId,
+            dispatcherName,
+            driverId,
+            driverName: assignedDriverName,
+            originalDispatcherId: requestDispatcherId || null,
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            hidePerformerIdentityFromDriver: true,
+            unreadForParticipantIds: [dispatcherId, driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled their pending request.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled their pending request.`,
+              driver: `Another dispatcher assigned load ${load.loadNumber} to you and fulfilled your pending request.`,
+            },
+          },
+          performedByUserId: dispatcherId,
+          performedByName: dispatcherName,
+        }),
+      );
+
+      if (creatorDispatcherId && creatorDispatcherId !== dispatcherId) {
+        assignmentOutbox.push(
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: creatorDispatcherId,
+            driverId,
+            eventType: "driver_load_request_fulfilled_by_org_member",
+            title: "Load Request Fulfilled",
+            message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}, fulfilling ${assignedDriverName}'s pending request.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "request_fulfilled_by_org_member",
+              actorId: dispatcherId,
+              actorName: dispatcherName,
+              actorRole: "dispatcher",
+              dispatcherId: creatorDispatcherId,
+              dispatcherName: creatorDispatcherName,
+              driverId,
+              driverName: assignedDriverName,
+              originalDispatcherId: creatorDispatcherId,
+              performedByUserId: dispatcherId,
+              performedByName: dispatcherName,
+              hidePerformerIdentityFromDriver: true,
+              unreadForParticipantIds: [creatorDispatcherId],
+              audienceMessages: {
+                actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName} and fulfilled their pending request.`,
+                threadDispatcher: `${assignedDriverName}'s request for load ${load.loadNumber} was fulfilled by ${dispatcherName}, who assigned the load to ${assignedDriverName}.`,
+                dispatcher: `${assignedDriverName}'s request for load ${load.loadNumber} was fulfilled by ${dispatcherName}, who assigned the load to ${assignedDriverName}.`,
+                driver: `Your request for load ${load.loadNumber} was fulfilled by another dispatcher.`,
+              },
+            },
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            notifyThreadOwner: true,
+          }),
+        );
+      }
+    }
+  } else {
+    // No request from the selected driver: preserve the normal direct
+    // assignment notification. This newly assigned driver now has a direct
+    // relationship to the acting dispatcher for this specific load.
+    assignmentOutbox.push(
+      lifecycleUserNotificationEvent({
+        userId: driverId,
+        organizationId,
+        type: "driver_assigned",
+        title: "New Load Assigned",
+        message: `You've been assigned load ${load.loadNumber}`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+        },
+      }),
+      lifecycleDispatchChatEvent({
+        organizationId,
+        dispatcherId,
+        driverId,
+        eventType: "driver_load_assigned",
+        title: "New Load Assigned",
+        message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          action: "assigned",
+          actorId: dispatcherId,
+          actorName: dispatcherName,
+          actorRole: "dispatcher",
+          driverId,
+          driverName: assignedDriverName,
+          dispatcherId,
+          dispatcherName,
+          unreadForParticipantIds: [dispatcherId, driverId],
+          audienceMessages: {
+            dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}.`,
+            driver: `${dispatcherName} assigned load ${load.loadNumber} to you.`,
+          },
+        },
+      }),
+    );
   }
 
-  logger.info({ loadId, driverId, orgId: organizationId }, "Load assigned to driver");
+  // Resolve every outstanding requester. The selected requester (if any) was
+  // handled above as fulfilled; every other requester receives an explicit
+  // Not Selected outcome rather than disappearing from driverRequests.
+  for (const requester of pendingRequesters) {
+    if (requester.driverId === driverId) continue;
 
-  return res.status(200).json(new ApiResponse(200, load, "Load assigned successfully"));
+    assignmentOutbox.push(
+      lifecycleUserNotificationEvent({
+        userId: requester.driverId,
+        organizationId,
+        type: "driver_request_rejected",
+        title: "Load Request Not Selected",
+        message: `Your request for load ${load.loadNumber} was not selected because the load was assigned to another driver.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          driverId: requester.driverId,
+          selectedDriverId: driverId,
+          assignmentResolution: "not_selected",
+          route: "/driver",
+        },
+      }),
+    );
+
+    if (actorIsLoadRequestDispatcher) {
+      assignmentOutbox.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId: requester.driverId,
+          eventType: "driver_load_request_not_selected",
+          title: "Load Request Not Selected",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_not_selected_by_load_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            dispatcherId,
+            dispatcherName,
+            driverId: requester.driverId,
+            driverName: requester.driverName,
+            selectedDriverId: driverId,
+            selectedDriverName: assignedDriverName,
+            originalDispatcherId: requestDispatcherId || dispatcherId,
+            unreadForParticipantIds: [dispatcherId, requester.driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              driver: `${dispatcherName} assigned load ${load.loadNumber} to another driver. Your request was not selected.`,
+            },
+          },
+        }),
+      );
+    } else {
+      assignmentOutbox.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId: requester.driverId,
+          eventType: "driver_load_request_not_selected",
+          title: "Load Request Not Selected",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_not_selected_by_support_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            dispatcherId,
+            dispatcherName,
+            driverId: requester.driverId,
+            driverName: requester.driverName,
+            selectedDriverId: driverId,
+            selectedDriverName: assignedDriverName,
+            originalDispatcherId: requestDispatcherId || null,
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            hidePerformerIdentityFromDriver: true,
+            unreadForParticipantIds: [dispatcherId, requester.driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
+            },
+          },
+          performedByUserId: dispatcherId,
+          performedByName: dispatcherName,
+        }),
+      );
+
+      if (creatorDispatcherId && creatorDispatcherId !== dispatcherId) {
+        assignmentOutbox.push(
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: creatorDispatcherId,
+            driverId: requester.driverId,
+            eventType: "driver_load_request_not_selected_by_org_member",
+            title: "Load Request Not Selected",
+            message: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "request_not_selected_by_org_member",
+              actorId: dispatcherId,
+              actorName: dispatcherName,
+              actorRole: "dispatcher",
+              dispatcherId: creatorDispatcherId,
+              dispatcherName: creatorDispatcherName,
+              driverId: requester.driverId,
+              driverName: requester.driverName,
+              selectedDriverId: driverId,
+              selectedDriverName: assignedDriverName,
+              originalDispatcherId: creatorDispatcherId,
+              performedByUserId: dispatcherId,
+              performedByName: dispatcherName,
+              hidePerformerIdentityFromDriver: true,
+              unreadForParticipantIds: [creatorDispatcherId],
+              audienceMessages: {
+                actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+                threadDispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+                dispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+                driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
+              },
+            },
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            notifyThreadOwner: true,
+          }),
+        );
+      }
+    }
+  }
+
+  assignmentOutbox.push(
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_assigned",
+      title: "Load Assigned",
+      description: pendingRequesters.length
+        ? `Assigned load ${load.loadNumber} to ${assignedDriverName} and resolved ${pendingRequesters.length} pending driver request${pendingRequesters.length === 1 ? "" : "s"}`
+        : `Assigned load ${load.loadNumber} to ${assignedDriverName}`,
+      loadId: load._id.toString(),
+      metadata: {
+        driverId,
+        pendingRequestCount: pendingRequesters.length,
+        selectedDriverRequested,
+      },
+    }),
+  );
+
+  load = await withDriverCommitmentLock(driverId, async () => {
+    // Re-read eligibility while holding the global driver lock so a concurrent
+    // cross-org Work Availability transition cannot slip between checks.
+    await assertDriverCanTakeNewWork(driverId, organizationId, "assign");
+    await assertNoDriverCommitmentConflict({
+      driverId,
+      targetLoad: validatedLoad,
+      excludeLoadId: validatedLoad._id.toString(),
+      actor: "dispatcher",
+    });
+
+    const updated = await Load.findOneAndUpdate(
+      expectedLoadRevisionFilter(validatedLoad, {
+        organizationId,
+        status: "Posted",
+        assignedDriverId: null,
+      }),
+      appendLoadLifecycleOutbox(
+        {
+          $set: {
+            assignedDriverId: driver._id,
+            dispatchOwnerId: user._id,
+            status: "Assigned",
+            assignedAt: new Date(),
+            // Safe only after every request in this exact confirmed snapshot
+            // has received a durable fulfilled/not-selected resolution above.
+            driverRequests: [],
+            assignmentMaterialFingerprint:
+              getLoadAcceptanceMaterialVersion(validatedLoad),
+            assignmentCompatibilityOverrides: {
+              overrideAvailability: Boolean(overrideAvailability),
+              overrideCapacity: Boolean(overrideCapacity),
+            },
+          },
+        },
+        assignmentOutbox,
+      ) as any,
+      { new: true, runValidators: true },
+    );
+
+    if (updated) return updated;
+
+    // The revision guard protects the gap between confirmation and commit. If
+    // another driver requested the load during that gap, return a NEW
+    // confirmation snapshot instead of silently resolving a request Dispatch
+    // never saw.
+    const latest = await Load.findOne({ _id: loadId, organizationId });
+    if (latest && latest.status === "Posted" && !latest.assignedDriverId) {
+      const latestPendingRequests = Array.isArray(
+        (latest as any).driverRequests,
+      )
+        ? ((latest as any).driverRequests as any[])
+        : [];
+      const latestFingerprint = latestPendingRequests.length
+        ? pendingLoadRequestFingerprint(latest)
+        : "";
+
+      if (
+        latestPendingRequests.length > 0 &&
+        latestFingerprint !== String(pendingRequestFingerprint ?? "")
+      ) {
+        const latestConflict =
+          await buildPendingLoadRequestAssignmentConflict({
+            load: latest,
+            selectedDriverId: driverId,
+            selectedDriverName: assignedDriverName,
+          });
+        throw new ApiError(
+          409,
+          "The pending request list changed before assignment. Review the updated requests and confirm again.",
+          [latestConflict],
+        );
+      }
+    }
+
+    throw new ApiError(
+      409,
+      "This load changed while assigning it. Refresh the load and try again.",
+    );
+  });
+
+  await flushLifecycleOutbox(load._id.toString());
+
+  logger.info(
+    {
+      loadId,
+      driverId,
+      orgId: organizationId,
+      resolvedPendingRequests: pendingRequesters.length,
+      selectedDriverRequested,
+    },
+    "Load assigned to driver",
+  );
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, load, "Load assigned successfully"));
 });
 
 // POST /api/driver-tracking/reassign-load  { loadId, driverId }
-const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
+const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
   const {
@@ -705,18 +2140,52 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
 
   if (!loadId || !driverId) throw new ApiError(400, "loadId and driverId are required");
 
-  const [load, driver] = await Promise.all([
-    Load.findOne({ _id: loadId, organizationId }),
-    // Drivers are a shared platform-wide pool — assignable regardless of org.
-    User.findOne({ _id: driverId, role: "driver", isActive: true }).lean(),
-  ]);
-
+  let load = await Load.findOne({ _id: loadId, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
-  if (!driver) throw new ApiError(404, "Driver not found");
-  await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
   if (["Delivered", "Cancelled"].includes(load.status)) {
     throw new ApiError(400, `Cannot reassign a load in ${load.status} status`);
   }
+
+  const previousDriverId = load.assignedDriverId
+    ? load.assignedDriverId.toString()
+    : null;
+  let pendingReleaseRequest = previousDriverId
+    ? await LoadReleaseRequest.findOne({
+        loadId: load._id,
+        driverId: previousDriverId,
+        status: "pending",
+      })
+    : null;
+  const originalDispatcherId =
+    await resolveOriginalDispatcherIdForSupportAudit(load, previousDriverId);
+  const activeAuthority = {
+    ...getActiveLoadControlContext(req, load),
+    originalDispatcherId,
+    supportMemberAction: Boolean(
+      originalDispatcherId && originalDispatcherId !== user._id.toString(),
+    ),
+  };
+
+  // Reassign/Remove are intentionally available to any authenticated member
+  // of the same organization so another dispatcher can support the trip when
+  // the original dispatcher is unavailable. If a release request is pending,
+  // the actual reassignment resolves it and records reviewedBy = this actor;
+  // the dedicated approve/reject review endpoints retain their stricter rules.
+
+  const [driver, previousDriver] = await Promise.all([
+    User.findOne({
+      _id: driverId,
+      role: "driver",
+      isActive: true,
+    }).lean(),
+    previousDriverId
+      ? User.findOne({ _id: previousDriverId, role: "driver" })
+          .select("_id name")
+          .lean()
+      : Promise.resolve(null),
+  ]);
+  if (!driver) throw new ApiError(404, "Driver not found");
+  await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
 
   await assertDriverLoadCompatibility({
     driverId,
@@ -726,92 +2195,339 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
     overrides: { overrideAvailability, overrideCapacity },
   });
 
-  const previousDriverId = load.assignedDriverId
-    ? load.assignedDriverId.toString()
-    : null;
+  const previousStatus = load.status;
+  const previousAssignedDriver = load.assignedDriverId ?? null;
+  const validatedLoad = load;
+  const actorName = String(user.name || "Organization member").trim();
+  const previousDriverName = String(
+    (previousDriver as any)?.name || "the assigned driver",
+  ).trim();
+  const newDriverName = String(
+    (driver as any)?.name || "the replacement driver",
+  ).trim();
 
-  load.assignedDriverId = driver._id as any;
-  (load as any).dispatchOwnerId = user._id;
-  load.status = "Assigned";
-  (load as any).assignedAt = new Date();
-  await load.save();
-
-  emitLoadSync(organizationId, [previousDriverId, driverId], load._id.toString());
-
-  if (previousDriverId && previousDriverId !== driverId) {
-    await safeCreateNotificationLoose({
-      userId: previousDriverId,
+  const reassignmentOutbox = [
+    lifecycleSyncEvent(
+      organizationId,
+      [previousDriverId, driverId],
+      load._id.toString(),
+    ),
+    ...(previousDriverId && previousDriverId !== driverId
+      ? [
+          lifecycleUserNotificationEvent({
+            userId: previousDriverId,
+            organizationId,
+            type: "driver_assigned",
+            title: pendingReleaseRequest ? "Release Request Approved" : "Load Reassigned",
+            message: pendingReleaseRequest
+              ? `Dispatch approved your release request for load ${load.loadNumber} and reassigned the load to another driver. Location sharing for this load is no longer required.`
+              : `Load ${load.loadNumber} has been reassigned to another driver`,
+            metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+          }),
+          ...(!activeAuthority.supportMemberAction
+            ? [
+                lifecycleDispatchChatEvent({
+                  organizationId,
+                  dispatcherId: user._id.toString(),
+                  driverId: previousDriverId,
+                  eventType: "driver_load_reassigned",
+                  title: "Load Reassigned",
+                  message: `${actorName} reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                  metadata: {
+                    loadId: load._id.toString(),
+                    loadNumber: load.loadNumber,
+                    action: "reassigned_away",
+                    actorId: user._id.toString(),
+                    actorName,
+                    actorRole: "dispatcher",
+                    driverId: previousDriverId,
+                    driverName: previousDriverName,
+                    dispatcherId: user._id.toString(),
+                    dispatcherName: actorName,
+                    previousDriverId,
+                    previousDriverName,
+                    newDriverId: driverId,
+                    newDriverName,
+                    unreadForParticipantIds: [
+                      user._id.toString(),
+                      previousDriverId,
+                    ],
+                    audienceMessages: {
+                      actorDispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      threadDispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      dispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      driver: `${actorName} reassigned load ${load.loadNumber} from you to another driver.`,
+                    },
+                  },
+                }),
+              ]
+            : []),
+        ]
+      : []),
+    ...(activeAuthority.supportMemberAction &&
+    activeAuthority.originalDispatcherId &&
+    previousDriverId
+      ? [
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: activeAuthority.originalDispatcherId,
+            driverId: previousDriverId,
+            eventType: "driver_load_reassigned_by_org_member",
+            title: "Load Reassigned",
+            message:
+              previousDriverId === driverId
+                ? `${actorName} reassigned load ${load.loadNumber} for ${previousDriverName} and became the responsible dispatcher.`
+                : `${actorName} reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "organization_member_reassigned",
+              actorId: user._id.toString(),
+              actorName,
+              actorRole: "dispatcher",
+              driverId: previousDriverId,
+              driverName: previousDriverName,
+              dispatcherId: activeAuthority.originalDispatcherId,
+              previousDriverId,
+              previousDriverName,
+              newDriverId: driverId,
+              newDriverName,
+              originalDispatcherId: activeAuthority.originalDispatcherId,
+              performedByUserId: user._id.toString(),
+              performedByName: actorName,
+              hidePerformerIdentityFromDriver: true,
+              unreadForParticipantIds: [
+                activeAuthority.originalDispatcherId,
+              ],
+              audienceMessages: {
+                actorDispatcher:
+                  previousDriverId === driverId
+                    ? `You took over load ${load.loadNumber} for ${previousDriverName}.`
+                    : `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                threadDispatcher:
+                  previousDriverId === driverId
+                    ? `Load ${load.loadNumber} for ${previousDriverName} was taken over by ${actorName}.`
+                    : `Load ${load.loadNumber} was reassigned from ${previousDriverName} to ${newDriverName} by ${actorName}.`,
+                dispatcher:
+                  previousDriverId === driverId
+                    ? `Load ${load.loadNumber} for ${previousDriverName} was taken over by ${actorName}.`
+                    : `Load ${load.loadNumber} was reassigned from ${previousDriverName} to ${newDriverName} by ${actorName}.`,
+                driver:
+                  previousDriverId === driverId
+                    ? `Your load ${load.loadNumber} is now managed by another dispatcher.`
+                    : `Your load ${load.loadNumber} was reassigned by another dispatcher.`,
+              },
+            },
+            performedByUserId: user._id.toString(),
+            performedByName: actorName,
+            notifyThreadOwner: true,
+          }),
+          ...(previousDriverId !== driverId
+            ? [
+                lifecycleDispatchChatEvent({
+                  organizationId,
+                  dispatcherId: user._id.toString(),
+                  driverId: previousDriverId,
+                  eventType: "driver_load_reassigned_by_support_dispatcher",
+                  title: "Load Reassigned",
+                  message: `${actorName} reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                  metadata: {
+                    loadId: load._id.toString(),
+                    loadNumber: load.loadNumber,
+                    action: "support_dispatcher_reassigned_away",
+                    actorId: user._id.toString(),
+                    actorName,
+                    actorRole: "dispatcher",
+                    dispatcherId: user._id.toString(),
+                    dispatcherName: actorName,
+                    driverId: previousDriverId,
+                    driverName: previousDriverName,
+                    previousDriverId,
+                    previousDriverName,
+                    newDriverId: driverId,
+                    newDriverName,
+                    originalDispatcherId: activeAuthority.originalDispatcherId,
+                    performedByUserId: user._id.toString(),
+                    performedByName: actorName,
+                    hidePerformerIdentityFromDriver: true,
+                    threadPreview: `Load ${load.loadNumber} reassigned.`,
+                    unreadForParticipantIds: [
+                      user._id.toString(),
+                      previousDriverId,
+                    ],
+                    audienceMessages: {
+                      actorDispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      threadDispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      dispatcher: `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`,
+                      driver: `Your load ${load.loadNumber} was reassigned by another dispatcher.`,
+                    },
+                  },
+                  performedByUserId: user._id.toString(),
+                  performedByName: actorName,
+                }),
+              ]
+            : []),
+        ]
+      : []),
+    lifecycleUserNotificationEvent({
+      userId: driverId,
       organizationId,
       type: "driver_assigned",
-      title: "Load Reassigned",
-      message: `Load ${load.loadNumber} has been reassigned to another driver`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
-    });
-
-    await persistDispatcherLoadChatEvent({
-      dispatcher: user,
-      organizationId,
-      driverId: previousDriverId,
-      eventType: "driver_load_reassigned",
-      title: "Load Reassigned",
-      message: `Load ${load.loadNumber} has been reassigned to another driver by Dispatch.`,
+      title: previousDriverId && previousDriverId !== driverId
+        ? "Load Reassigned to You"
+        : "New Load Assigned",
+      message: previousDriverId && previousDriverId !== driverId
+        ? `${actorName} reassigned load ${load.loadNumber} to you.`
+        : `${actorName} assigned load ${load.loadNumber} to you.`,
       metadata: {
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
+        driverId,
+        driverName: newDriverName,
+        dispatcherId: user._id.toString(),
+        dispatcherName: actorName,
         previousDriverId,
-        newDriverId: driverId,
-        action: "reassigned_away",
-      },
-    });
-  }
-
-  await safeCreateNotificationLoose({
-    userId: driverId,
-    organizationId,
-    type: "driver_assigned",
-    title: "New Load Assigned",
-    message: `You've been assigned load ${load.loadNumber}`,
-    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
-  });
-
-  await persistDispatcherLoadChatEvent({
-    dispatcher: user,
-    organizationId,
-    driverId,
-    eventType: "driver_load_assigned",
-    title: previousDriverId && previousDriverId !== driverId
-      ? "Load Reassigned to You"
-      : "New Load Assigned",
-    message: previousDriverId && previousDriverId !== driverId
-      ? `Dispatch reassigned load ${load.loadNumber} to you.`
-      : `Dispatch assigned load ${load.loadNumber} to you.`,
-    metadata: {
-      loadId: load._id.toString(),
-      loadNumber: load.loadNumber,
-      previousDriverId,
-      newDriverId: driverId,
-      action:
-        previousDriverId && previousDriverId !== driverId
+        previousDriverName,
+        action: previousDriverId && previousDriverId !== driverId
           ? "reassigned_to"
           : "assigned_to",
-    },
+        route: "/driver",
+      },
+    }),
+    lifecycleDispatchChatEvent({
+      organizationId,
+      dispatcherId: user._id.toString(),
+      driverId,
+      eventType: "driver_load_assigned",
+      title: previousDriverId && previousDriverId !== driverId
+        ? "Load Reassigned to You"
+        : "New Load Assigned",
+      message: previousDriverId && previousDriverId !== driverId
+        ? `${actorName} reassigned load ${load.loadNumber} to ${newDriverName}.`
+        : `${actorName} assigned load ${load.loadNumber} to ${newDriverName}.`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        action: previousDriverId && previousDriverId !== driverId
+          ? "reassigned_to"
+          : "assigned_to",
+        actorId: user._id.toString(),
+        actorName,
+        actorRole: "dispatcher",
+        driverId,
+        driverName: newDriverName,
+        dispatcherId: user._id.toString(),
+        dispatcherName: actorName,
+        previousDriverId,
+        previousDriverName,
+        newDriverId: driverId,
+        newDriverName,
+        unreadForParticipantIds: [
+          user._id.toString(),
+          driverId,
+        ],
+        audienceMessages: {
+          actorDispatcher: previousDriverId && previousDriverId !== driverId
+            ? `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`
+            : `You assigned load ${load.loadNumber} to ${newDriverName}.`,
+          threadDispatcher: previousDriverId && previousDriverId !== driverId
+            ? `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`
+            : `You assigned load ${load.loadNumber} to ${newDriverName}.`,
+          dispatcher: previousDriverId && previousDriverId !== driverId
+            ? `You reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}.`
+            : `You assigned load ${load.loadNumber} to ${newDriverName}.`,
+          driver: previousDriverId && previousDriverId !== driverId
+            ? `${actorName} reassigned load ${load.loadNumber} to you.`
+            : `${actorName} assigned load ${load.loadNumber} to you.`,
+        },
+      },
+    }),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_reassigned",
+      title: "Load Reassigned",
+      description: activeAuthority.supportMemberAction
+        ? `${actorName} supported the transaction by reassigning load ${load.loadNumber} from ${previousDriverName} to ${newDriverName}`
+        : activeAuthority.adminOverride
+          ? `Administrator override: reassigned active load ${load.loadNumber} to ${newDriverName}`
+          : `Reassigned load ${load.loadNumber} to ${newDriverName}`,
+      loadId: load._id.toString(),
+      metadata: {
+        previousDriverId,
+        newDriverId: driverId,
+        originalDispatcherId: activeAuthority.originalDispatcherId,
+        performedByUserId: user._id.toString(),
+        supportMemberAction: activeAuthority.supportMemberAction,
+      },
+    }),
+    ...(pendingReleaseRequest
+      ? [
+          lifecycleReleaseResolutionEvent({
+            request: pendingReleaseRequest,
+            organizationId,
+            loadId: load._id.toString(),
+            driverId: previousDriverId as string,
+            status: "approved",
+            decision: "reassign",
+            reviewedBy: user._id.toString(),
+            replacementDriverId: driverId,
+          }),
+        ]
+      : []),
+  ];
+
+  load = await withDriverCommitmentLock(driverId, async () => {
+    await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
+    await assertNoDriverCommitmentConflict({
+      driverId,
+      targetLoad: validatedLoad,
+      excludeLoadId: validatedLoad._id.toString(),
+      actor: "dispatcher",
+    });
+
+    return updateLoadIfCurrent({
+      load: validatedLoad,
+      expected: {
+        organizationId,
+        status: previousStatus,
+        assignedDriverId: previousAssignedDriver,
+      },
+      update: appendLoadLifecycleOutbox(
+        {
+          $set: {
+            assignedDriverId: driver._id,
+            dispatchOwnerId: user._id,
+            status: "Assigned",
+            assignedAt: new Date(),
+            assignmentMaterialFingerprint: getLoadAcceptanceMaterialVersion(validatedLoad),
+            assignmentCompatibilityOverrides: {
+              overrideAvailability: Boolean(overrideAvailability),
+              overrideCapacity: Boolean(overrideCapacity),
+            },
+          },
+        },
+        reassignmentOutbox,
+      ),
+      action: "reassigning it",
+    });
   });
 
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await logLoadActivityLoose(
-      user._id.toString(),
-      organizationId,
-      "load_reassigned",
-      load._id.toString(),
-      `Reassigned load ${load.loadNumber} to ${(driver as any).name}`,
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
-  }
+  await flushLifecycleOutbox(load._id.toString());
 
   if (previousDriverId && previousDriverId !== driverId) {
+    try {
+      await clearDriverExactLocationIfUnneeded(
+        previousDriverId,
+        "load_reassigned_away",
+      );
+    } catch (err) {
+      logger.error(
+        { err, previousDriverId },
+        "Non-fatal: failed to clear exact GPS after reassignment",
+      );
+    }
+
     try {
       await finalizeDriverStatusChangeIfClear(previousDriverId, organizationId);
     } catch (err) {
@@ -824,14 +2540,14 @@ const reassignLoad = asyncHandler(async (req: Request, res: Response) => {
 
 // POST /api/driver-tracking/remove-load  { loadId }
 // Dispatcher pulls a load back from a driver → returns to the available pool
-const removeLoad = asyncHandler(async (req: Request, res: Response) => {
+const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
   const { loadId } = req.body as { loadId?: string };
 
   if (!loadId) throw new ApiError(400, "loadId is required");
 
-  const load = await Load.findOne({ _id: loadId, organizationId });
+  let load = await Load.findOne({ _id: loadId, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
   if (!load.assignedDriverId) throw new ApiError(400, "Load has no assigned driver");
   if (["Delivered", "Cancelled"].includes(load.status)) {
@@ -839,35 +2555,245 @@ const removeLoad = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const previousDriverId = load.assignedDriverId.toString();
+  let pendingReleaseRequest = await LoadReleaseRequest.findOne({
+    loadId: load._id,
+    driverId: previousDriverId,
+    status: "pending",
+  });
+  const originalDispatcherId =
+    await resolveOriginalDispatcherIdForSupportAudit(load, previousDriverId);
+  const activeAuthority = {
+    ...getActiveLoadControlContext(req, load),
+    originalDispatcherId,
+    supportMemberAction: Boolean(
+      originalDispatcherId && originalDispatcherId !== user._id.toString(),
+    ),
+  };
+  const previousDriver: any = await User.findOne({
+    _id: previousDriverId,
+    role: "driver",
+  })
+    .select("_id name")
+    .lean();
+  const actorName = String(user.name || "Organization member").trim();
+  const previousDriverName = String(
+    previousDriver?.name || "the assigned driver",
+  ).trim();
 
-  load.assignedDriverId = undefined as any;
-  (load as any).dispatchOwnerId = undefined;
-  load.status = "Posted";
-  await load.save();
-
-  emitLoadSync(organizationId, [previousDriverId], load._id.toString());
-
-  await safeCreateNotificationLoose({
-    userId: previousDriverId,
-    organizationId,
-    type: "general",
-    title: "Load Removed",
-    message: `Load ${load.loadNumber} has been removed from your assignments`,
-    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+  const previousStatus = load.status;
+  const removalOutbox = [
+    lifecycleSyncEvent(organizationId, [previousDriverId], load._id.toString()),
+    lifecycleUserNotificationEvent({
+      userId: previousDriverId,
+      organizationId,
+      type: "general",
+      title: pendingReleaseRequest ? "Release Request Approved" : "Load Removed",
+      message: pendingReleaseRequest
+        ? `Dispatch approved your release request for load ${load.loadNumber}. The load has returned to Available Loads and location sharing for it is no longer required.`
+        : `Load ${load.loadNumber} has been removed from your assignments`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+    }),
+    ...(!activeAuthority.supportMemberAction
+      ? [
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: user._id.toString(),
+            driverId: previousDriverId,
+            eventType: "driver_load_removed",
+            title: "Load Removed",
+            message: `${actorName} removed load ${load.loadNumber} from ${previousDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "removed",
+              actorId: user._id.toString(),
+              actorName,
+              actorRole: "dispatcher",
+              driverId: previousDriverId,
+              driverName: previousDriverName,
+              dispatcherId: user._id.toString(),
+              dispatcherName: actorName,
+              previousDriverId,
+              previousDriverName,
+              unreadForParticipantIds: [
+                user._id.toString(),
+                previousDriverId,
+              ],
+              audienceMessages: {
+                actorDispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                threadDispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                dispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                driver: `${actorName} removed load ${load.loadNumber} from you.`,
+              },
+            },
+          }),
+        ]
+      : []),
+    ...(activeAuthority.supportMemberAction &&
+    activeAuthority.originalDispatcherId
+      ? [
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: activeAuthority.originalDispatcherId,
+            driverId: previousDriverId,
+            eventType: "driver_load_removed_by_org_member",
+            title: "Load Removed",
+            message: `${actorName} removed load ${load.loadNumber} from ${previousDriverName} and returned it to Available Loads.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "organization_member_removed",
+              actorId: user._id.toString(),
+              actorName,
+              actorRole: "dispatcher",
+              driverId: previousDriverId,
+              driverName: previousDriverName,
+              dispatcherId: activeAuthority.originalDispatcherId,
+              previousDriverId,
+              previousDriverName,
+              originalDispatcherId: activeAuthority.originalDispatcherId,
+              performedByUserId: user._id.toString(),
+              performedByName: actorName,
+              hidePerformerIdentityFromDriver: true,
+              unreadForParticipantIds: [
+                activeAuthority.originalDispatcherId,
+              ],
+              audienceMessages: {
+                actorDispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                threadDispatcher: `Load ${load.loadNumber} was removed from ${previousDriverName} by ${actorName}.`,
+                dispatcher: `Load ${load.loadNumber} was removed from ${previousDriverName} by ${actorName}.`,
+                driver: `Your load ${load.loadNumber} was removed by another dispatcher.`,
+              },
+            },
+            performedByUserId: user._id.toString(),
+            performedByName: actorName,
+            notifyThreadOwner: true,
+          }),
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: user._id.toString(),
+            driverId: previousDriverId,
+            eventType: "driver_load_removed_by_support_dispatcher",
+            title: "Load Removed",
+            message: `${actorName} removed load ${load.loadNumber} from ${previousDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "support_dispatcher_removed",
+              actorId: user._id.toString(),
+              actorName,
+              actorRole: "dispatcher",
+              dispatcherId: user._id.toString(),
+              dispatcherName: actorName,
+              driverId: previousDriverId,
+              driverName: previousDriverName,
+              previousDriverId,
+              previousDriverName,
+              originalDispatcherId: activeAuthority.originalDispatcherId,
+              performedByUserId: user._id.toString(),
+              performedByName: actorName,
+              hidePerformerIdentityFromDriver: true,
+              threadPreview: `Load ${load.loadNumber} removed.`,
+              unreadForParticipantIds: [
+                user._id.toString(),
+                previousDriverId,
+              ],
+              audienceMessages: {
+                actorDispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                threadDispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                dispatcher: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+                driver: `Your load ${load.loadNumber} was removed by another dispatcher.`,
+              },
+            },
+            performedByUserId: user._id.toString(),
+            performedByName: actorName,
+          }),
+          // Keep the existing Notification Center self-audit as a second,
+          // durable confirmation for the support dispatcher. The new private
+          // B ↔ X system row above is the Dispatch Chat notification.
+          lifecycleUserNotificationEvent({
+            userId: user._id.toString(),
+            organizationId,
+            type: "general",
+            title: "Load Removed",
+            message: `You removed load ${load.loadNumber} from ${previousDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              driverId: previousDriverId,
+              driverName: previousDriverName,
+              action: "organization_member_removed",
+              route: "/driver-tracker",
+            },
+          }),
+        ]
+      : []),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_removed",
+      title: "Driver Removed from Load",
+      description: activeAuthority.supportMemberAction
+        ? `${actorName} supported the transaction by removing load ${load.loadNumber} from ${previousDriverName}`
+        : activeAuthority.adminOverride
+          ? `Administrator override: removed driver from active load ${load.loadNumber}`
+          : `Removed driver from load ${load.loadNumber}`,
+      loadId: load._id.toString(),
+      metadata: {
+        previousDriverId,
+        originalDispatcherId: activeAuthority.originalDispatcherId,
+        performedByUserId: user._id.toString(),
+        supportMemberAction: activeAuthority.supportMemberAction,
+      },
+    }),
+    ...(pendingReleaseRequest
+      ? [
+          lifecycleReleaseResolutionEvent({
+            request: pendingReleaseRequest,
+            organizationId,
+            loadId: load._id.toString(),
+            driverId: previousDriverId,
+            status: "approved",
+            decision: "return_available",
+            reviewedBy: user._id.toString(),
+          }),
+        ]
+      : []),
+  ];
+  load = await updateLoadIfCurrent({
+    load,
+    expected: {
+      organizationId,
+      status: previousStatus,
+      assignedDriverId: previousDriverId,
+    },
+    update: appendLoadLifecycleOutbox(
+      {
+        $set: { status: "Posted" },
+        $unset: {
+          assignedDriverId: "",
+          dispatchOwnerId: "",
+          assignmentMaterialFingerprint: "",
+          assignmentCompatibilityOverrides: "",
+        },
+      },
+      removalOutbox,
+    ),
+    action: "returning it to Available Loads",
   });
 
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
+  await flushLifecycleOutbox(load._id.toString());
+
   try {
-    await logLoadActivityLoose(
-      user._id.toString(),
-      organizationId,
-      "load_removed",
-      load._id.toString(),
-      `Removed driver from load ${load.loadNumber}`,
+    await clearDriverExactLocationIfUnneeded(
+      previousDriverId,
+      "load_returned_available",
     );
   } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
+    logger.error(
+      { err, previousDriverId },
+      "Non-fatal: failed to clear exact GPS after returning load to Available",
+    );
   }
 
   try {
@@ -884,12 +2810,12 @@ const removeLoad = asyncHandler(async (req: Request, res: Response) => {
 //
 // Read-only summary used by the /driver Command Center.
 // IMPORTANT:
+// - Drivers are a shared platform-wide pool and may work with multiple orgs.
+// - These metrics therefore follow the authenticated driver across orgs.
 // - Total earnings come from PAID DriverPayout records, not quoted/carrier pay.
-// - Every query is scoped to both the authenticated driver and organization.
 // - No load, payout, profile, notification, GPS, or messaging records are changed.
-const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
+const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  const organizationId = req.orgId as string;
 
   if (user.role !== "driver") {
     throw new ApiError(403, "Only driver accounts can view driver dashboard statistics");
@@ -897,37 +2823,35 @@ const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
 
   const [pendingRequests, completedLoads, profile, payoutTotals] =
     await Promise.all([
-      // A request is pending only while the load is still Posted and the
-      // driver's request entry still exists. Approved/rejected requests are
-      // removed by the existing workflow, so this mirrors getMyRequests().
+      // A request is pending only while the load is still Posted and this
+      // authenticated driver's request entry still exists. The driver may
+      // have pending requests with more than one organization.
       Load.countDocuments({
-        organizationId,
         status: "Posted",
         "driverRequests.driverId": user._id,
       }),
 
-      // Completed means a Delivered load that is actually assigned to this
-      // authenticated driver in this organization.
+      // Completed Loads follow the driver across every organization where
+      // they performed transportation work.
       Load.countDocuments({
-        organizationId,
         assignedDriverId: user._id,
         status: "Delivered",
       }),
 
-      // Profile data is optional; a driver without a profile should still be
-      // able to load the dashboard with safe defaults.
+      // DriverProfile is already platform-wide/shared. A missing profile must
+      // not prevent a valid driver account from loading the dashboard.
       DriverProfile.findOne({
         userId: user._id,
       })
         .select("profileCompletionScore isComplianceExpired")
         .lean(),
 
-      // Earnings are authoritative only after the payout reached "paid".
-      // Pending/processing/failed payouts are intentionally excluded.
+      // Earnings are authoritative only after a payout reaches paid. Because
+      // the payout belongs to the exact authenticated driver, organization
+      // membership is intentionally not used as the dashboard filter.
       DriverPayout.aggregate<{ _id: null; total: number }>([
         {
           $match: {
-            organizationId,
             driverId: user._id,
             status: "paid",
           },
@@ -962,11 +2886,10 @@ const getDashboardStats = asyncHandler(async (req: Request, res: Response) => {
 // ─── Driver's Account: my loads / available loads / detail ───────────────────
 
 // GET /api/driver-tracking/my-loads
-const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
+const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
+  const driverId = user._id.toString();
 
-  // Drivers are a shared pool and can carry loads from more than one
-  // dealership, so this can no longer be scoped by a single req.orgId.
   const loads = await Load.find({
     assignedDriverId: user._id,
     status: { $nin: ["Cancelled"] },
@@ -974,61 +2897,40 @@ const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
     .sort({ createdAt: -1 })
     .lean();
 
-  const activeLoadIds = (loads as any[])
-    .filter((load) => ACTIVE_LOAD_STATUSES.includes(String(load.status)))
-    .map((load) => String(load._id));
-
-  // Dispatch-Status GPS policy (DriverStatusChangeRequest) is still tracked
-  // per dealership. In the common case a driver has an active load with at
-  // most one dealership at a time, so resolve that dealership's context; if
-  // they somehow carry active loads across multiple orgs at once, fall back
-  // to the first one — a narrow edge case the shared-pool model doesn't fully
-  // generalize yet, but strictly no worse than before (which resolved none).
-  const activeLoad = (loads as any[]).find((load) =>
-    ACTIVE_LOAD_STATUSES.includes(String(load.status)),
+  // Work Availability and retained-GPS policy are evaluated across every
+  // organization for a shared driver. No first-organization fallback is used.
+  const gpsPolicy = await getDriverGpsPolicyAcrossOrganizations(
+    driverId,
+    req.orgId as string | undefined,
   );
-  const contextOrgId = activeLoad
-    ? String(activeLoad.organizationId)
-    : loads.length > 0
-      ? String((loads as any[])[0].organizationId)
-      : undefined;
+  const retainedRequiredIds = new Set(gpsPolicy.retainedLoadIds);
 
-  let locationRequirement: Awaited<ReturnType<typeof getDriverLocationRequirement>> = {
-    required: false,
-    reason: null,
-    activeLoadIds,
-    retainedLoadIds: [],
-    policyRequestId: null,
-  };
+  const [profile, pendingReleaseRequests] = await Promise.all([
+    DriverProfile.findOne({ userId: user._id }).lean(),
+    LoadReleaseRequest.find({
+      driverId: user._id,
+      loadId: { $in: (loads as any[]).map((load) => load._id) },
+      status: "pending",
+    }).lean(),
+  ]);
+  const releaseByLoadId = new Map(
+    (pendingReleaseRequests as any[]).map((request) => [String(request.loadId), request]),
+  );
 
-  if (contextOrgId) {
-    await finalizeDriverStatusChangeIfClear(user._id.toString(), contextOrgId);
-
-    const statusContext = await getDriverStatusContext(
-      user._id.toString(),
-      contextOrgId,
-    );
-
-    locationRequirement = await getDriverLocationRequirement(
-      user._id.toString(),
-      contextOrgId,
-      {
-        operationalStatus: statusContext.operationalStatus,
-        emergencyReleaseActive: statusContext.emergencyReleaseActive,
-        activeLoadIds,
-      },
-    );
-  }
-
-  const retainedRequiredIds = new Set(locationRequirement.retainedLoadIds);
-  const data = (loads as any[]).map((load) => ({
-    ...load,
-    // Frontend GPS enforcement reads this policy from the same load refresh it
-    // already performs. No extra endpoint or competing policy source is needed.
-    dispatchGpsRequired:
-      locationRequirement.reason === "dispatch_retained_load" &&
-      retainedRequiredIds.has(String(load._id)),
-  }));
+  const data = await Promise.all(
+    (loads as any[]).map(async (load) => ({
+      ...sanitizeLoadForDriver(load, driverId),
+      compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
+        profile,
+        load,
+        null,
+      ),
+      releaseRequest: releaseRequestSummary(releaseByLoadId.get(String(load._id))),
+      // Only retained On Leave/In Shop policy needs this explicit flag. Normal
+      // Accepted/Picked Up/In-Transit GPS enforcement still comes from status.
+      dispatchGpsRequired: retainedRequiredIds.has(String(load._id)),
+    })),
+  );
 
   return res.status(200).json(new ApiResponse(200, data, "My loads fetched"));
 });
@@ -1037,7 +2939,7 @@ const getMyLoads = asyncHandler(async (req: Request, res: Response) => {
 // Staff-only compatibility preview used by Create Load and Driver Tracker.
 // It supports one load or a small load matrix and never mutates assignments,
 // profiles, Dispatch Status, or GPS state.
-const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Response) => {
+const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const organizationId = req.orgId as string;
   const body = (req.body ?? {}) as {
     driverIds?: string[];
@@ -1137,7 +3039,7 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
   }
 
   // Drivers are a shared platform-wide pool — not restricted to this org.
-  const [drivers, profiles, locations] = await Promise.all([
+  const [drivers, profiles] = await Promise.all([
     User.find({
       _id: { $in: requestedDriverIds },
       role: "driver",
@@ -1148,11 +3050,6 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
     DriverProfile.find({
       userId: { $in: requestedDriverIds },
     }).lean(),
-    DriverLocation.find({
-      userId: { $in: requestedDriverIds },
-    })
-      .select("userId coords isSharing lastSeenAt")
-      .lean(),
   ]);
 
   const allowedDriverIds = new Set(
@@ -1160,9 +3057,6 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
   );
   const profileById = new Map(
     profiles.map((profile: any) => [String(profile.userId), profile]),
-  );
-  const locationById = new Map(
-    locations.map((location: any) => [String(location.userId), location]),
   );
 
   const compatibilityByLoadKey: Record<string, Record<string, any>> = {};
@@ -1185,7 +3079,12 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
             await evaluateDriverLoadCompatibilityWithRecommendations(
               profileById.get(driverId) ?? null,
               entry.load,
-              locationById.get(driverId) ?? null,
+              // Pre-assignment compatibility must not use the driver's live
+              // GPS. Dispatch can evaluate equipment, availability, home base,
+              // service radius, preferred routes, and the load route without
+              // gaining location visibility before an accepted relationship
+              // exists.
+              null,
             );
         }),
       );
@@ -1214,11 +3113,11 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: Request, res: Re
 });
 
 // GET /api/driver-tracking/available-loads
-// BUSINESS RULE CHANGE: drivers see the COMPLETE load record for available
-// loads — pickup/delivery contacts, dates, notes, pricing, trailer type and
-// every other field captured during Create Load. The previous restrictive
-// .select() has been removed.
-const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
+// Drivers receive the operational load data needed to evaluate a Posted load
+// (route/contact details, dates, instructions, pricing, trailer and vehicles),
+// while staff-only notes, other drivers' requests, private file keys and raw
+// signatures are stripped by sanitizeLoadForDriver().
+const getAvailableLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -1248,10 +3147,7 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
   const myId = user._id.toString();
   const data = await Promise.all(
     (loads as any[]).map(async (l) => ({
-      ...l,
-      hasRequested: Array.isArray(l.driverRequests)
-        ? l.driverRequests.some((r: any) => String(r.driverId) === myId)
-        : false,
+      ...sanitizeAvailableLoadForDriver(l, myId),
       compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
         profile,
         l,
@@ -1283,7 +3179,7 @@ const getAvailableLoads = asyncHandler(async (req: Request, res: Response) => {
 // decision. There's no persisted "rejected" state — rejectLoadRequest
 // removes the entry outright — so every driverRequests match here is
 // inherently pending.
-const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
+const getMyRequests = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
   const loads = await Load.find({
@@ -1296,16 +3192,20 @@ const getMyRequests = asyncHandler(async (req: Request, res: Response) => {
   const myId = user._id.toString();
   const data = (loads as any[]).map((l) => {
     const mine = (l.driverRequests ?? []).find((r: any) => String(r.driverId) === myId);
-    return { ...l, myRequestStatus: "pending", myRequestedAt: mine?.requestedAt ?? null };
+    return {
+      ...sanitizeAvailableLoadForDriver(l, myId),
+      myRequestStatus: "pending",
+      myRequestedAt: mine?.requestedAt ?? null,
+    };
   });
 
   return res.status(200).json(new ApiResponse(200, data, "My requests fetched"));
 });
 
 // GET /api/driver-tracking/loads/:id
-// BUSINESS RULE CHANGE: no driver masking — the full load record is
-// returned. maskLoadForDriver is no longer used anywhere.
-const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
+// Driver-facing detail keeps the operational Load shape but enforces exact
+// object-level access and strips staff-only/internal fields before returning.
+const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
   // Staff callers still need org isolation (a dispatcher shouldn't see
@@ -1325,6 +3225,25 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
     return res.status(200).json(new ApiResponse(200, load, "Load fetched"));
   }
 
+  const driverId = user._id.toString();
+  const isAssignedDriver =
+    String((load as any).assignedDriverId?._id ?? (load as any).assignedDriverId ?? "") === driverId;
+  const hasRequested =
+    Array.isArray((load as any).driverRequests) &&
+    (load as any).driverRequests.some(
+      (request: any) => String(request?.driverId ?? "") === driverId,
+    );
+  const isAvailableBoardLoad =
+    load.status === "Posted" && !(load as any).assignedDriverId;
+
+  // Object-level authorization: knowing a Load id is never enough. A driver
+  // can read a load only when they are the assigned participant, have an
+  // existing request on it, or the load is legitimately visible on the shared
+  // Available Loads board.
+  if (!isAssignedDriver && !hasRequested && !isAvailableBoardLoad) {
+    throw new ApiError(404, "Load not found");
+  }
+
   const [profile, location] = await Promise.all([
     DriverProfile.findOne({ userId: user._id }).lean(),
     DriverLocation.findOne({ userId: user._id })
@@ -1339,11 +3258,15 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
       location,
     );
 
+  const driverLoadView = isAssignedDriver
+    ? sanitizeLoadForDriver(load, driverId)
+    : sanitizeAvailableLoadForDriver(load, driverId);
+
   return res.status(200).json(
     new ApiResponse(
       200,
       {
-        ...load,
+        ...driverLoadView,
         compatibility,
       },
       "Load fetched",
@@ -1354,7 +3277,7 @@ const getLoadDetail = asyncHandler(async (req: Request, res: Response) => {
 // ─── Available-load request / approval flow ──────────────────────────────────
 
 // POST /api/driver-tracking/loads/:id/request
-const requestLoad = asyncHandler(async (req: Request, res: Response) => {
+const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const {
     note,
@@ -1367,7 +3290,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
 
   // Drivers are a shared pool with no org of their own — the load being
   // requested determines which dealership's rules apply, not req.orgId.
-  const load = await Load.findOne({ _id: req.params.id });
+  let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
   if (load.status !== "Posted" || load.assignedDriverId) {
     throw new ApiError(400, "This load is no longer available");
@@ -1390,25 +3313,126 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
     actor: "driver",
     overrides: { overrideAvailability },
   });
+  await assertNoDriverCommitmentConflict({
+    driverId: user._id.toString(),
+    targetLoad: load,
+    excludeLoadId: load._id.toString(),
+    actor: "driver",
+  });
 
-  const requests: any[] = (load as any).driverRequests ?? [];
-  if (requests.some((r) => String(r.driverId) === user._id.toString())) {
-    throw new ApiError(400, "You have already requested this load");
+  const driverId = user._id.toString();
+  const driverName =
+    String(user.name || "Driver").trim() || "Driver";
+  const creatorDispatcher = await findActiveDispatcherForLoad(
+    load,
+    String((load as any).createdBy ?? ""),
+  );
+  const creatorDispatcherId = creatorDispatcher
+    ? String(creatorDispatcher._id)
+    : "";
+  const creatorDispatcherName = creatorDispatcher
+    ? String(creatorDispatcher.name || "Dispatch").trim() || "Dispatch"
+    : "";
+
+  const requestChatEvents = creatorDispatcher
+    ? [
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId: creatorDispatcherId,
+          driverId,
+          eventType: "driver_load_requested",
+          title: "Load Request",
+          message: `${driverName} requested load ${load.loadNumber}.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_created",
+            actorId: driverId,
+            actorName: driverName,
+            actorRole: "driver",
+            driverId,
+            driverName,
+            dispatcherId: creatorDispatcherId,
+            dispatcherName: creatorDispatcherName,
+            unreadForParticipantIds: [
+              creatorDispatcherId,
+              driverId,
+            ],
+            audienceMessages: {
+              dispatcher: `${driverName} requested load ${load.loadNumber}.`,
+              driver: `You requested load ${load.loadNumber}.`,
+            },
+          },
+          performedByUserId: driverId,
+          performedByName: driverName,
+          performedByRole: "driver",
+        }),
+      ]
+    : [];
+
+  if (!creatorDispatcher) {
+    logger.warn(
+      {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        createdBy: String((load as any).createdBy ?? ""),
+        driverId,
+      },
+      "Load request has no safe active creator dispatcher for a private Dispatch Chat event",
+    );
   }
 
-  requests.push({
-    driverId: user._id,
-    requestedAt: new Date(),
-    note: (note ?? "").slice(0, 500),
-  });
-  (load as any).driverRequests = requests;
-  (load as any).driverContract = {
-    agreedToTerms: true,
-    signedAt: new Date(),
-    signatureDataUrl: signature.signatureDataUrl,
-    signerName: signature.signerName || user.name || "",
-  };
-  await load.save();
+  const requestedAt = new Date();
+  const requestedLoad = await Load.findOneAndUpdate(
+    {
+      _id: load._id,
+      organizationId,
+      status: "Posted",
+      assignedDriverId: null,
+      "driverRequests.driverId": { $ne: user._id },
+    },
+    appendLoadLifecycleOutbox(
+      {
+        $push: {
+          driverRequests: {
+            driverId: user._id,
+            requestedAt,
+            note: (note ?? "").slice(0, 500),
+          },
+        },
+        $set: {
+          driverContract: {
+            agreedToTerms: true,
+            signedAt: requestedAt,
+            signatureDataUrl: signature.signatureDataUrl,
+            signerName: signature.signerName || user.name || "",
+          },
+        },
+      },
+      requestChatEvents,
+    ) as any,
+    { new: true, runValidators: true },
+  );
+
+  if (!requestedLoad) {
+    const alreadyRequested = await Load.exists({
+      _id: load._id,
+      status: "Posted",
+      assignedDriverId: null,
+      "driverRequests.driverId": user._id,
+    });
+    throw new ApiError(
+      409,
+      alreadyRequested
+        ? "You have already requested this load"
+        : "This load changed while your request was being submitted. Refresh Available Loads and try again.",
+    );
+  }
+  load = requestedLoad;
+
+  if (requestChatEvents.length > 0) {
+    await flushLifecycleOutbox(load._id.toString());
+  }
 
   emitLoadSync(organizationId, [], load._id.toString());
 
@@ -1435,7 +3459,7 @@ const requestLoad = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // POST /api/driver-tracking/loads/:id/approve-request  { driverId }
-const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
+const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const organizationId = req.orgId as string;
   const {
@@ -1450,7 +3474,7 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
 
   if (!driverId) throw new ApiError(400, "driverId is required");
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  let load = await Load.findOne({ _id: req.params.id, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
   if (load.status !== "Posted" || load.assignedDriverId) {
     throw new ApiError(400, "This load is no longer available");
@@ -1470,71 +3494,152 @@ const approveLoadRequest = asyncHandler(async (req: Request, res: Response) => {
     overrides: { overrideAvailability, overrideCapacity },
   });
 
-  load.assignedDriverId = driverId as any;
-  (load as any).dispatchOwnerId = user._id;
-  load.status = "Assigned";
-  (load as any).assignedAt = new Date();
-  (load as any).driverRequests = [];
-  await load.save();
+  const validatedLoad = load;
+  const requestingDriver: any = await User.findOne({
+    _id: driverId,
+    role: "driver",
+  })
+    .select("_id name")
+    .lean();
+  const requestingDriverName =
+    String(requestingDriver?.name || "Driver").trim() || "Driver";
+  const approvingDispatcherId = user._id.toString();
+  const approvingDispatcherName =
+    String(user.name || "Dispatch").trim() || "Dispatch";
 
-  emitLoadSync(organizationId, [driverId], load._id.toString());
-
-  await safeCreateNotificationLoose({
-    userId: driverId,
-    organizationId,
-    type: "driver_request_approved",
-    title: "Load Request Approved",
-    message: `Your request for load ${load.loadNumber} was approved`,
-    metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
-  });
-
-  await persistDispatcherLoadChatEvent({
-    dispatcher: user,
-    organizationId,
-    driverId,
-    eventType: "driver_load_request_approved",
-    title: "Load Request Approved",
-    message: `Dispatch approved your request and assigned load ${load.loadNumber} to you.`,
-    metadata: {
-      loadId: load._id.toString(),
-      loadNumber: load.loadNumber,
-      action: "request_approved_assigned",
-    },
-  });
-
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await logLoadActivityLoose(
-      user._id.toString(),
+  const approvalOutbox = [
+    lifecycleSyncEvent(organizationId, [driverId], load._id.toString()),
+    lifecycleUserNotificationEvent({
+      userId: driverId,
       organizationId,
-      "load_assigned",
-      load._id.toString(),
-      `Approved driver request for load ${load.loadNumber}`,
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
-  }
+      type: "driver_request_approved",
+      title: "Load Request Approved",
+      message: `Your request for load ${load.loadNumber} was approved`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+    }),
+    lifecycleDispatchChatEvent({
+      organizationId,
+      dispatcherId: approvingDispatcherId,
+      driverId,
+      eventType: "driver_load_request_approved",
+      title: "Load Request Approved",
+      message: `${approvingDispatcherName} approved ${requestingDriverName}'s request and assigned load ${load.loadNumber}.`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        action: "request_approved_assigned",
+        actorId: approvingDispatcherId,
+        actorName: approvingDispatcherName,
+        actorRole: "dispatcher",
+        driverId,
+        driverName: requestingDriverName,
+        dispatcherId: approvingDispatcherId,
+        dispatcherName: approvingDispatcherName,
+        unreadForParticipantIds: [
+          approvingDispatcherId,
+          driverId,
+        ],
+        audienceMessages: {
+          dispatcher: `You approved ${requestingDriverName}'s request and assigned load ${load.loadNumber} to ${requestingDriverName}.`,
+          driver: `${approvingDispatcherName} approved your request and assigned load ${load.loadNumber} to you.`,
+        },
+      },
+    }),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_assigned",
+      title: "Driver Request Approved",
+      description: `Approved driver request for load ${load.loadNumber}`,
+      loadId: load._id.toString(),
+      metadata: { driverId },
+    }),
+  ];
+
+  load = await withDriverCommitmentLock(driverId, async () => {
+    await assertDriverCanTakeNewWork(driverId, organizationId, "approve");
+    await assertNoDriverCommitmentConflict({
+      driverId,
+      targetLoad: validatedLoad,
+      excludeLoadId: validatedLoad._id.toString(),
+      actor: "dispatcher",
+    });
+
+    return updateLoadIfCurrent({
+      load: validatedLoad,
+      expected: {
+        organizationId,
+        status: "Posted",
+        assignedDriverId: null,
+        "driverRequests.driverId": driverId,
+      },
+      update: appendLoadLifecycleOutbox(
+        {
+          $set: {
+            assignedDriverId: driverId,
+            dispatchOwnerId: user._id,
+            status: "Assigned",
+            assignedAt: new Date(),
+            driverRequests: [],
+            assignmentMaterialFingerprint: getLoadAcceptanceMaterialVersion(validatedLoad),
+            assignmentCompatibilityOverrides: {
+              overrideAvailability: Boolean(overrideAvailability),
+              overrideCapacity: Boolean(overrideCapacity),
+            },
+          },
+        },
+        approvalOutbox,
+      ),
+      action: "approving the driver request",
+    });
+  });
+
+  await flushLifecycleOutbox(load._id.toString());
 
   return res.status(200).json(new ApiResponse(200, load, "Request approved"));
 });
 
 // POST /api/driver-tracking/loads/:id/reject-request  { driverId }
-const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
+const rejectLoadRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const dispatcher = getUser(req);
   const organizationId = req.orgId as string;
   const { driverId } = req.body as { driverId?: string };
 
   if (!driverId) throw new ApiError(400, "driverId is required");
 
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
+  let load = await Load.findOne({ _id: req.params.id, organizationId });
   if (!load) throw new ApiError(404, "Load not found");
 
-  const requests: any[] = (load as any).driverRequests ?? [];
-  (load as any).driverRequests = requests.filter(
-    (r) => String(r.driverId) !== driverId,
+  const updatedLoad = await Load.findOneAndUpdate(
+    {
+      _id: load._id,
+      organizationId,
+      status: "Posted",
+      assignedDriverId: null,
+      "driverRequests.driverId": driverId,
+    },
+    { $pull: { driverRequests: { driverId } } } as any,
+    { new: true, runValidators: true },
   );
-  await load.save();
+  if (!updatedLoad) {
+    throw new ApiError(
+      409,
+      "This driver request is no longer pending on an available load. Refresh the request list and try again.",
+    );
+  }
+  load = updatedLoad;
+
+  const rejectedDriver: any = await User.findOne({
+    _id: driverId,
+    role: "driver",
+  })
+    .select("_id name")
+    .lean();
+  const rejectedDriverName =
+    String(rejectedDriver?.name || "Driver").trim() || "Driver";
+  const rejectingDispatcherId = dispatcher._id.toString();
+  const rejectingDispatcherName =
+    String(dispatcher.name || "Dispatch").trim() || "Dispatch";
 
   emitLoadSync(organizationId, [driverId], load._id.toString());
 
@@ -1566,11 +3671,26 @@ const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
     driverId,
     eventType: "driver_load_request_rejected",
     title: "Load Request Declined",
-    message: `Dispatch declined your request for load ${load.loadNumber}.`,
+    message: `${rejectingDispatcherName} declined ${rejectedDriverName}'s request for load ${load.loadNumber}.`,
     metadata: {
       loadId: load._id.toString(),
       loadNumber: load.loadNumber,
       action: "request_rejected",
+      actorId: rejectingDispatcherId,
+      actorName: rejectingDispatcherName,
+      actorRole: "dispatcher",
+      driverId,
+      driverName: rejectedDriverName,
+      dispatcherId: rejectingDispatcherId,
+      dispatcherName: rejectingDispatcherName,
+      unreadForParticipantIds: [
+        rejectingDispatcherId,
+        driverId,
+      ],
+      audienceMessages: {
+        dispatcher: `You declined ${rejectedDriverName}'s request for load ${load.loadNumber}.`,
+        driver: `${rejectingDispatcherName} declined your request for load ${load.loadNumber}.`,
+      },
     },
   });
 
@@ -1581,7 +3701,7 @@ const rejectLoadRequest = asyncHandler(async (req: Request, res: Response) => {
 // ─── Pending Load Requests (dispatcher view) ─────────────────────────────────
 // GET /api/driver-tracking/load-requests
 
-const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) => {
+const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const organizationId = req.orgId as string;
 
   const loads = await Load.find({
@@ -1602,7 +3722,9 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
   ];
 
   // Drivers are a shared platform-wide pool — not restricted to this org.
-  const [drivers, profiles, locations, eligibilityPairs] = await Promise.all([
+  // P1 #14: pending requests are still pre-assignment, so this endpoint must
+  // not fetch or use exact DriverLocation coordinates for compatibility.
+  const [drivers, profiles, eligibilityPairs] = await Promise.all([
     User.find({
       _id: { $in: driverIds },
       role: "driver",
@@ -1610,9 +3732,6 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
       .select("name email avatar")
       .lean(),
     DriverProfile.find({ userId: { $in: driverIds } }).lean(),
-    DriverLocation.find({ userId: { $in: driverIds } })
-      .select("userId coords isSharing lastSeenAt")
-      .lean(),
     Promise.all(
       driverIds.map(async (driverId) => [
         driverId,
@@ -1623,7 +3742,6 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
 
   const driverById = new Map(drivers.map((driver: any) => [String(driver._id), driver]));
   const profileById = new Map(profiles.map((profile: any) => [String(profile.userId), profile]));
-  const locationById = new Map(locations.map((location: any) => [String(location.userId), location]));
   const eligibilityById = new Map<string, any>(eligibilityPairs as any);
 
   const requestRows = loads.flatMap((load: any) =>
@@ -1635,7 +3753,6 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
       const driverId = String(request.driverId);
       const driver: any = driverById.get(driverId);
       const profile: any = profileById.get(driverId) ?? null;
-      const location: any = locationById.get(driverId) ?? null;
       const eligibility = eligibilityById.get(driverId);
       return {
         id: `${load._id}:${request.driverId}`,
@@ -1659,7 +3776,10 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
         compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
           profile,
           load,
-          location,
+          // P1 #14: a request does not create an active tracking relationship.
+          // Compatibility may use profile/schedule/equipment data, but never
+          // the driver's exact live GPS before assignment/acceptance.
+          null,
         ),
         equipment: profile
           ? {
@@ -1691,7 +3811,7 @@ const getPendingLoadRequests = asyncHandler(async (req: Request, res: Response) 
 // ─── Dispatcher → Driver Alert ───────────────────────────────────────────────
 // POST /api/driver-tracking/drivers/:driverId/alert
 
-const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
+const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const sender = getUser(req);
   const organizationId = req.orgId as string;
   const { driverId } = req.params;
@@ -1710,16 +3830,46 @@ const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "destinationName is required");
   }
 
-  const driver = await User.findOne({
-    _id: driverId,
-    organizationId,
-    role: "driver",
-    isActive: true,
-  })
-    .select("name email")
-    .lean();
+  if (!organizationId) {
+    throw new ApiError(403, "Organization access is required");
+  }
+  if (!mongoose.Types.ObjectId.isValid(driverId)) {
+    // Keep the response indistinguishable from an inaccessible shared driver.
+    throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+  }
 
-  if (!driver) throw new ApiError(404, "Driver not found in this organization");
+  // P1 #15 — shared-driver-safe authorization.
+  //
+  // Driver Users are a platform-wide pool, so their home organization is not
+  // an authorization boundary. A Dispatch Alert is an operational instruction,
+  // though, so merely knowing a global driver id (or having an old chat thread)
+  // is not enough. The sender must currently be the exact responsible
+  // dispatcher on this organization's active assignment.
+  const [driver, alertRelationship] = await Promise.all([
+    User.findOne({
+      _id: driverId,
+      role: "driver",
+      isActive: true,
+    })
+      .select("name email")
+      .lean(),
+    Load.findOne({
+      organizationId,
+      assignedDriverId: driverId,
+      dispatchOwnerId: sender._id,
+      status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
+    })
+      .select("_id loadNumber status dispatchOwnerId")
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean(),
+  ]);
+
+  // Deliberately use one generic 404 for both cases. Staff who do not own an
+  // active relationship must not be able to probe whether a global driver id
+  // exists on the platform.
+  if (!driver || !alertRelationship) {
+    throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+  }
 
   const cleanDestinationName = destinationName.trim().slice(0, 160);
   const cleanAddress = address?.trim().slice(0, 300) || "";
@@ -1737,6 +3887,10 @@ const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
     metadata: {
       driverId,
       driverName: driver.name,
+      loadId: String(alertRelationship._id),
+      loadNumber: alertRelationship.loadNumber,
+      loadStatus: alertRelationship.status,
+      dispatchOwnerId: sender._id.toString(),
       destinationType,
       destinationName: cleanDestinationName,
       address: cleanAddress,
@@ -1854,7 +4008,7 @@ const sendDriverAlert = asyncHandler(async (req: Request, res: Response) => {
 });
 
 // POST /api/driver-tracking/alerts/:alertId/respond
-const respondToDriverAlert = asyncHandler(async (req: Request, res: Response) => {
+const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const { alertId } = req.params;
   const { response } = req.body as {
@@ -2037,17 +4191,54 @@ const requireAssignedDriver = (load: any, userId: string) => {
   }
 };
 
+// A pending release request temporarily pauses forward lifecycle progression.
+// The driver is still assigned to the load, but Dispatch must either resolve
+// the request or the driver must explicitly cancel it before Accept/Pickup/
+// Start Route can continue. Complete Delivery remains a deliberate terminal
+// exception: the existing delivery flow closes a still-pending release request
+// as delivery_completed after proof of delivery is submitted.
+async function assertNoPendingReleaseRequestForProgression(
+  load: any,
+  driverId: string,
+  actionLabel: string,
+) {
+  const pendingReleaseRequest = await LoadReleaseRequest.exists({
+    loadId: load._id,
+    driverId,
+    status: "pending",
+  });
+
+  if (pendingReleaseRequest) {
+    throw new ApiError(
+      409,
+      `Your release request is still awaiting Dispatch. Cancel the release request or wait for Dispatch before ${actionLabel}.`,
+    );
+  }
+}
+
 // POST /api/driver-tracking/loads/:id/accept  { signatureDataUrl, signerName }
-const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
+const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const signature = parseDriverSignature(req.body);
 
-  const load = await Load.findOne({ _id: req.params.id });
+  let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Assigned") {
     throw new ApiError(400, `Cannot accept a load in ${load.status} status`);
+  }
+
+  const pendingReleaseRequest = await LoadReleaseRequest.findOne({
+    loadId: load._id,
+    driverId: user._id,
+    status: "pending",
+  }).lean();
+  if (pendingReleaseRequest) {
+    throw new ApiError(
+      409,
+      "Your release request is still awaiting Dispatch. The load cannot be accepted until Dispatch resolves that request.",
+    );
   }
 
   await assertDriverCanTakeNewWork(
@@ -2056,53 +4247,229 @@ const acceptLoad = asyncHandler(async (req: Request, res: Response) => {
     "accept",
   );
 
-  if (!(load as any).dispatchOwnerId) {
-    const explicitOwner =
-      await resolveExplicitDispatchOwnerFromAssignmentHistory({
-        organizationId,
-        driverId: user._id.toString(),
-        loadId: load._id.toString(),
-      });
-    if (explicitOwner) {
-      (load as any).dispatchOwnerId = explicitOwner;
+  const currentMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+  const assignmentMaterialFingerprint = String(
+    (load as any).assignmentMaterialFingerprint ?? "",
+  ).trim();
+
+  if (
+    assignmentMaterialFingerprint &&
+    assignmentMaterialFingerprint !== currentMaterialVersion
+  ) {
+    throw new ApiError(
+      409,
+      "This load's route, vehicles, schedule, compensation, or instructions changed after Dispatch assigned it. Dispatch must reconfirm the assignment before you can accept it.",
+      [
+        {
+          type: "load_assignment_material_changed",
+          requiresDispatchReconfirmation: true,
+          loadId: load._id.toString(),
+        },
+      ],
+    );
+  }
+
+  // Backward-compatible safety for legacy Assigned rows created before P1 #5.
+  // If no assignment fingerprint exists, a later Load update means we cannot
+  // prove that the current material terms are the terms Dispatch validated.
+  if (!assignmentMaterialFingerprint) {
+    const assignedAtMs = (load as any).assignedAt
+      ? new Date((load as any).assignedAt).getTime()
+      : Number.NaN;
+    const updatedAtMs = (load as any).updatedAt
+      ? new Date((load as any).updatedAt).getTime()
+      : Number.NaN;
+
+    if (
+      Number.isFinite(assignedAtMs) &&
+      Number.isFinite(updatedAtMs) &&
+      updatedAtMs > assignedAtMs + 2000
+    ) {
+      throw new ApiError(
+        409,
+        "This legacy assignment was updated after it was assigned. Dispatch must reconfirm the assignment before you can accept it.",
+        [
+          {
+            type: "legacy_load_assignment_changed",
+            requiresDispatchReconfirmation: true,
+            loadId: load._id.toString(),
+          },
+        ],
+      );
     }
   }
 
-  load.status = "Accepted";
-  (load as any).acceptedAt = new Date();
-  (load as any).driverContract = {
-    agreedToTerms: true,
-    signedAt: new Date(),
-    signatureDataUrl: signature.signatureDataUrl,
-    signerName: signature.signerName || user.name || "",
-  };
-  await load.save();
+  const reviewedMaterialVersion = String(
+    (req.body as any)?.reviewedMaterialVersion ?? "",
+  ).trim();
 
-  emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
+  if (
+    reviewedMaterialVersion &&
+    !/^[a-f0-9]{64}$/i.test(reviewedMaterialVersion)
+  ) {
+    throw new ApiError(400, "The reviewed load version is invalid. Refresh the load and try again.");
+  }
 
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await notifyOrgAdminsLoose(
-      organizationId,
-      "load_accepted",
-      "Load Accepted",
-      `${user.name} accepted load ${load.loadNumber}`,
-      { loadId: load._id.toString(), loadNumber: load.loadNumber },
-      user._id.toString(),
+  if (
+    reviewedMaterialVersion &&
+    reviewedMaterialVersion !== currentMaterialVersion
+  ) {
+    throw new ApiError(
+      409,
+      "This load changed since you reviewed it. Your signature was not accepted. Review the latest route, vehicles, schedule, compensation, and instructions before accepting.",
+      [
+        {
+          type: "load_reviewed_material_version_mismatch",
+          requiresFreshReview: true,
+          loadId: load._id.toString(),
+        },
+      ],
     );
+  }
+
+  // Acceptance starts the exact dispatcher↔driver operational/GPS
+  // relationship. Do not allow an Accepted load to exist without a valid,
+  // active responsible dispatcher.
+  const dispatchOwnership = await requireDispatchOwnerBeforeAcceptance(
+    load,
+    user._id.toString(),
+  );
+  const dispatchOwner = dispatchOwnership.dispatcher;
+  const dispatchOwnerId = dispatchOwner._id;
+
+  const storedOverrides = assignmentCompatibilityOverrides(load);
+  await assertDriverLoadCompatibility({
+    driverId: user._id.toString(),
+    organizationId,
+    load,
+    actor: "dispatcher",
+    overrides: {
+      overrideAvailability: storedOverrides.overrideAvailability,
+      overrideCapacity: storedOverrides.overrideCapacity,
+    },
+  });
+
+  const acceptedAt = new Date();
+  const acceptSet: Record<string, unknown> = {
+    status: "Accepted",
+    acceptedAt,
+    driverContract: {
+      agreedToTerms: true,
+      signedAt: acceptedAt,
+      signatureDataUrl: signature.signatureDataUrl,
+      signerName: signature.signerName || user.name || "",
+    },
+  };
+  acceptSet.dispatchOwnerId = dispatchOwnerId;
+
+  const validatedLoad = load;
+
+
+  const acceptanceOutbox = [
+    lifecycleSyncEvent(
+      organizationId,
+      [user._id.toString()],
+      load._id.toString(),
+    ),
+    lifecycleUserNotificationEvent({
+      userId: dispatchOwner._id.toString(),
+      organizationId,
+      type: "load_accepted",
+      title: "Load Accepted",
+      message: `${user.name} accepted load ${load.loadNumber}. Live GPS sharing is now required for this load.`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        driverId: user._id.toString(),
+        route: `/driver-tracker?driverId=${encodeURIComponent(user._id.toString())}`,
+      },
+    }),
+    lifecycleUserNotificationEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "general",
+      title: "Location Sharing Required",
+      message: `Load ${load.loadNumber} is accepted. Location sharing is now required until this load is delivered, released by Dispatch, cancelled, or reassigned. Only the dispatcher responsible for your accepted active load can view your live location.`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: "/driver",
+        requiresLocationSharing: true,
+      },
+    }),
+  ];
+
+  load = await withDriverCommitmentLock(user._id.toString(), async () => {
+    await assertDriverCanTakeNewWork(
+      user._id.toString(),
+      organizationId,
+      "accept",
+    );
+    await assertNoDriverCommitmentConflict({
+      driverId: user._id.toString(),
+      targetLoad: validatedLoad,
+      excludeLoadId: validatedLoad._id.toString(),
+      actor: "driver",
+    });
+
+    return updateLoadIfCurrent({
+      load: validatedLoad,
+      expected: {
+        organizationId,
+        status: "Assigned",
+        assignedDriverId: user._id,
+        ...(dispatchOwnership.recoveredFromHistory
+          ? {}
+          : { dispatchOwnerId }),
+      },
+      update: appendLoadLifecycleOutbox(
+        { $set: acceptSet },
+        acceptanceOutbox,
+      ),
+      action: "accepting it",
+    });
+  });
+
+  await flushLifecycleOutbox(load._id.toString());
+
+  // Compatibility warnings are derived informational notices rather than the
+  // authoritative lifecycle event. Keep them best-effort; the durable outbox
+  // above owns the acceptance/GPS-required notifications.
+  try {
+    const profile = await DriverProfile.findOne({ userId: user._id }).lean();
+    const compatibility = await evaluateDriverLoadCompatibilityWithRecommendations(
+      profile,
+      load,
+      null,
+    );
+    const notices = compatibilityNoticeMessages(compatibility);
+    if (notices.length) {
+      await safeCreateNotificationLoose({
+        userId: user._id.toString(),
+        organizationId,
+        type: "general",
+        title: "Load Compatibility Notice",
+        message: notices.join(" ").slice(0, 1200),
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          route: "/driver",
+          compatibilityWarnings: compatibility.warnings,
+        },
+      });
+    }
   } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
+    logger.error({ err }, "Non-fatal: driver acceptance notice failed");
   }
 
   return res.status(200).json(new ApiResponse(200, load, "Load accepted"));
 });
 
 // POST /api/driver-tracking/loads/:id/pickup
-const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
+const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
-  const load = await Load.findOne({ _id: req.params.id });
+  let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
@@ -2110,35 +4477,58 @@ const markPickedUp = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, `Cannot mark pickup from ${load.status} status`);
   }
 
-  load.status = "Picked Up";
-  (load as any).pickedUpAt = new Date();
-  await load.save();
+  assertNoPendingLoadAmendments(load, user._id.toString());
+  await assertNoPendingReleaseRequestForProgression(
+    load,
+    user._id.toString(),
+    "recording pickup",
+  );
 
-  emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
-
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await notifyOrgAdminsLoose(
+  const pickupOutbox = [
+    lifecycleSyncEvent(
       organizationId,
-      "load_picked_up",
-      "Vehicles Picked Up",
-      `${user.name} picked up load ${load.loadNumber}`,
-      { loadId: load._id.toString(), loadNumber: load.loadNumber },
-      user._id.toString(),
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
-  }
+      [user._id.toString()],
+      load._id.toString(),
+    ),
+    lifecycleAdminNotificationEvent({
+      organizationId,
+      type: "load_picked_up",
+      title: "Vehicles Picked Up",
+      message: `${user.name} picked up load ${load.loadNumber}`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      excludeUserId: user._id.toString(),
+    }),
+  ];
+
+  load = await updateLoadIfCurrent({
+    load,
+    expected: {
+      organizationId,
+      status: "Accepted",
+      assignedDriverId: user._id,
+    },
+    update: appendLoadLifecycleOutbox(
+      {
+        $set: {
+          status: "Picked Up",
+          pickedUpAt: new Date(),
+        },
+      },
+      pickupOutbox,
+    ),
+    action: "recording pickup",
+  });
+
+  await flushLifecycleOutbox(load._id.toString());
 
   return res.status(200).json(new ApiResponse(200, load, "Pickup recorded"));
 });
 
 // POST /api/driver-tracking/loads/:id/start-route
-const startRoute = asyncHandler(async (req: Request, res: Response) => {
+const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
-  const load = await Load.findOne({ _id: req.params.id });
+  let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
@@ -2146,31 +4536,54 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, `Cannot start route from ${load.status} status`);
   }
 
-  load.status = "In-Transit";
-  (load as any).inTransitAt = new Date();
-  await load.save();
+  assertNoPendingLoadAmendments(load, user._id.toString());
+  await assertNoPendingReleaseRequestForProgression(
+    load,
+    user._id.toString(),
+    "starting the route",
+  );
+
+  const routeOutbox = [
+    lifecycleSyncEvent(
+      organizationId,
+      [user._id.toString()],
+      load._id.toString(),
+    ),
+    lifecycleAdminNotificationEvent({
+      organizationId,
+      type: "load_in_transit",
+      title: "Load In Transit",
+      message: `${user.name} started the route for load ${load.loadNumber}`,
+      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      excludeUserId: user._id.toString(),
+    }),
+  ];
+
+  load = await updateLoadIfCurrent({
+    load,
+    expected: {
+      organizationId,
+      status: "Picked Up",
+      assignedDriverId: user._id,
+    },
+    update: appendLoadLifecycleOutbox(
+      {
+        $set: {
+          status: "In-Transit",
+          inTransitAt: new Date(),
+        },
+      },
+      routeOutbox,
+    ),
+    action: "starting the route",
+  });
 
   await DriverLocation.findOneAndUpdate(
     { userId: user._id },
     { $set: { status: "on-route", lastSeenAt: new Date() } },
   );
 
-  emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
-
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await notifyOrgAdminsLoose(
-      organizationId,
-      "load_in_transit",
-      "Load In Transit",
-      `${user.name} started the route for load ${load.loadNumber}`,
-      { loadId: load._id.toString(), loadNumber: load.loadNumber },
-      user._id.toString(),
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
-  }
+  await flushLifecycleOutbox(load._id.toString());
 
   return res.status(200).json(new ApiResponse(200, load, "Route started"));
 });
@@ -2179,10 +4592,10 @@ const startRoute = asyncHandler(async (req: Request, res: Response) => {
 // Driver completes an in-transit load only after the existing proof-of-delivery
 // upload flow has successfully stored a proof image. Proof verification remains
 // available to Dispatch through the existing confirm-delivery workflow.
-const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
+const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
-  const load = await Load.findOne({ _id: req.params.id });
+  let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
@@ -2209,45 +4622,111 @@ const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  load.status = "Delivered";
-  (load as any).deliveredAt = new Date();
-  await load.save();
+  assertNoPendingLoadAmendments(load, user._id.toString());
 
-  emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
+  const pendingReleaseRequest = await LoadReleaseRequest.findOne({
+    organizationId,
+    loadId: load._id,
+    driverId: user._id,
+    status: "pending",
+  });
+
+  const deliveryOutbox = [
+    lifecycleSyncEvent(
+      organizationId,
+      [user._id.toString()],
+      load._id.toString(),
+    ),
+    lifecycleAdminNotificationEvent({
+      organizationId,
+      type: "load_delivered",
+      title: "Load Delivered",
+      message: `${user.name} completed load ${load.loadNumber} and submitted proof of delivery`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        proofSubmitted: true,
+      },
+      excludeUserId: user._id.toString(),
+    }),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_delivered",
+      title: "Load Delivered",
+      description: `Driver completed load ${load.loadNumber} with proof of delivery`,
+      loadId: load._id.toString(),
+      metadata: { proofSubmitted: true },
+    }),
+    ...(pendingReleaseRequest
+      ? [
+          lifecycleReleaseResolutionEvent({
+            request: pendingReleaseRequest,
+            organizationId,
+            loadId: load._id.toString(),
+            driverId: user._id.toString(),
+            status: "cancelled",
+            decision: "delivery_completed",
+          }),
+        ]
+      : []),
+  ];
+
+  const deliveredLoad = await Load.findOneAndUpdate(
+    expectedLoadRevisionFilter(load, {
+      organizationId,
+      status: "In-Transit",
+      assignedDriverId: user._id,
+      "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
+    }),
+    appendLoadLifecycleOutbox(
+      {
+        $set: {
+          status: "Delivered",
+          deliveredAt: new Date(),
+        },
+      },
+      deliveryOutbox,
+    ) as any,
+    { new: true, runValidators: true },
+  );
+
+  if (!deliveredLoad) {
+    const current = await Load.findOne({ _id: load._id });
+    if (
+      current &&
+      current.status === "Delivered" &&
+      String(current.assignedDriverId ?? "") === user._id.toString()
+    ) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, current, "Load already delivered"));
+    }
+    throw new ApiError(
+      409,
+      "This load changed while delivery was being completed. Refresh the load before trying again.",
+    );
+  }
+  load = deliveredLoad;
+
+  await flushLifecycleOutbox(load._id.toString());
+
+  try {
+    await clearDriverExactLocationIfUnneeded(
+      user._id.toString(),
+      "load_delivered",
+    );
+  } catch (err) {
+    logger.error(
+      { err, driverId: user._id.toString(), loadId: load._id.toString() },
+      "Non-fatal: failed to clear exact GPS after delivery",
+    );
+  }
 
   // Keep the driver's delivery completion separate from Dispatch proof
   // confirmation. We intentionally do not set proofOfDelivery.confirmedAt or
   // confirmedBy here; the existing staff confirmation workflow still owns
   // those fields.
-  try {
-    await notifyOrgAdminsLoose(
-      organizationId,
-      "load_delivered",
-      "Load Delivered",
-      `${user.name} completed load ${load.loadNumber} and submitted proof of delivery`,
-      {
-        loadId: load._id.toString(),
-        loadNumber: load.loadNumber,
-        proofSubmitted: true,
-      },
-      user._id.toString(),
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: delivery notification failed");
-  }
-
-  try {
-    await logLoadActivityLoose(
-      user._id.toString(),
-      organizationId,
-      "load_delivered",
-      load._id.toString(),
-      `Driver completed load ${load.loadNumber} with proof of delivery`,
-    );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: delivery activity logging failed");
-  }
-
   try {
     await finalizeDriverStatusChangeIfClear(
       user._id.toString(),
@@ -2265,101 +4744,1092 @@ const completeDelivery = asyncHandler(async (req: Request, res: Response) => {
     .json(new ApiResponse(200, load, "Delivery completed"));
 });
 
-// POST /api/driver-tracking/loads/:id/drop
-// Driver releases an assigned load → returns the same Transportation load to the available pool
-const dropLoad = asyncHandler(async (req: Request, res: Response) => {
+// POST /api/driver-tracking/loads/:id/release-request
+// POST /api/driver-tracking/loads/:id/drop (compatibility alias)
+// A driver can request release, but only Dispatch can change ownership/state.
+const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  const { reason } = req.body as { reason?: string };
+  const { reason, message, priority } = req.body as {
+    reason?: string;
+    message?: string;
+    priority?: "standard" | "emergency";
+  };
 
-  const load = await Load.findOne({ _id: req.params.id });
+  const load: any = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
-  const organizationId = load.organizationId as unknown as string;
+  const organizationId = String(load.organizationId);
   requireAssignedDriver(load, user._id.toString());
-  if (!["Assigned", "Accepted"].includes(load.status)) {
+
+  if (!RELEASE_REQUEST_ELIGIBLE_STATUSES.includes(load.status as any)) {
     throw new ApiError(
       400,
-      `Cannot release a load in ${load.status} status — contact dispatch`,
+      `A release request cannot be submitted for a load in ${load.status} status`,
     );
   }
 
-  // Release only the current operational assignment. The original creator
-  // (`createdBy`) and the rest of the Transportation load record are preserved.
-  load.assignedDriverId = undefined as any;
-  (load as any).dispatchOwnerId = undefined;
-  load.status = "Posted";
-  await load.save();
+  const normalizedReason = String(reason ?? "").trim() as LoadReleaseRequestReason;
+  if (!LOAD_RELEASE_REQUEST_REASONS.includes(normalizedReason as any)) {
+    throw new ApiError(400, "Select a valid reason for requesting release");
+  }
+
+  const existing = await LoadReleaseRequest.findOne({
+    loadId: load._id,
+    driverId: user._id,
+    status: "pending",
+  });
+  if (existing) {
+    throw new ApiError(
+      409,
+      "A release request for this load is already waiting for Dispatch review.",
+    );
+  }
+
+  const dispatcher = await resolveActiveDispatcherForLoad(
+    load,
+    user._id.toString(),
+  );
+  const emergencyLifecycle = ["Picked Up", "In-Transit"].includes(load.status);
+  const requestPriority = emergencyLifecycle || priority === "emergency"
+    ? "emergency"
+    : "standard";
+
+  let request: any;
+  try {
+    request = await LoadReleaseRequest.create({
+      organizationId,
+      loadId: load._id,
+      driverId: user._id,
+      dispatcherId: dispatcher?._id,
+      priority: requestPriority,
+      reason: normalizedReason,
+      message: String(message ?? "").trim().slice(0, 1500),
+      loadStatusAtRequest: load.status,
+      status: "pending",
+      requestedAt: new Date(),
+    });
+  } catch (error: any) {
+    if (Number(error?.code) === 11000) {
+      throw new ApiError(
+        409,
+        "A release request for this load is already waiting for Dispatch review.",
+      );
+    }
+    throw error;
+  }
+
+  const loadStillMatchesRequest = await Load.exists(
+    expectedLoadRevisionFilter(load, {
+      organizationId,
+      status: load.status,
+      assignedDriverId: user._id,
+    }),
+  );
+  if (!loadStillMatchesRequest) {
+    await LoadReleaseRequest.deleteOne({ _id: request._id, status: "pending" });
+    throw new ApiError(
+      409,
+      "This load changed while the release request was being submitted. Refresh the load and try again.",
+    );
+  }
 
   emitLoadSync(organizationId, [user._id.toString()], load._id.toString());
 
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
+  const reasonLabel = normalizedReason.replace(/_/g, " ");
+  const requestMessage =
+    `${user.name} requested ${requestPriority === "emergency" ? "an emergency " : ""}` +
+    `release from load ${load.loadNumber}. Reason: ${reasonLabel}. ` +
+    "The load remains assigned until Dispatch decides.";
+
   try {
-    await notifyOrgAdminsLoose(
+    if (dispatcher) {
+      await safeCreateNotificationLoose({
+        userId: dispatcher._id.toString(),
+        organizationId,
+        type: "general",
+        title: requestPriority === "emergency"
+          ? "Emergency Load Release Requested"
+          : "Load Release Requested",
+        message: requestMessage,
+        metadata: {
+          releaseRequestId: request._id.toString(),
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          driverId: user._id.toString(),
+          priority: requestPriority,
+          reason: normalizedReason,
+          route:
+            `/driver-tracker?driverId=${encodeURIComponent(user._id.toString())}`,
+          requiresAttention: true,
+        },
+      });
+    } else {
+      await notifyOrgAdminsLoose(
+        organizationId,
+        "general",
+        "Load Release Request Needs Review",
+        `${requestMessage} No active dispatcher owner was available, so an administrator must review it.`,
+        {
+          releaseRequestId: request._id.toString(),
+          loadId: load._id.toString(),
+          driverId: user._id.toString(),
+        },
+        user._id.toString(),
+      );
+    }
+
+    await safeCreateNotificationLoose({
+      userId: user._id.toString(),
       organizationId,
-      "load_dropped",
-      "Load Released",
-      `${user.name} released load ${load.loadNumber} back to Available Loads${reason ? `: ${String(reason).slice(0, 200)}` : ""}`,
-      { loadId: load._id.toString(), loadNumber: load.loadNumber },
-      user._id.toString(),
-    );
+      type: "general",
+      title: "Release Request Sent",
+      message:
+        `Dispatch has been asked to review your release request for load ${load.loadNumber}. ` +
+        "The load remains assigned to you until Dispatch decides. If location sharing is already required for this load, it remains required while the request is pending.",
+      metadata: {
+        releaseRequestId: request._id.toString(),
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: "/driver",
+      },
+    });
   } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
+    logger.error({ err }, "Non-fatal: release-request notification failed");
   }
 
-  // Non-fatal: the state change + socket emit already succeeded —
-  // a logging/notification failure must not turn success into a 500
-  try {
-    await logLoadActivityLoose(
-      user._id.toString(),
+  return res.status(202).json(
+    new ApiResponse(
+      202,
+      releaseRequestSummary(request),
+      "Release request sent to Dispatch. The load remains assigned until a decision is made.",
+    ),
+  );
+};
+
+const requestLoadRelease = asyncHandler(createReleaseRequest);
+const dropLoad = asyncHandler(createReleaseRequest);
+
+// POST /api/driver-tracking/loads/:id/release-request/cancel
+// Driver withdraws only their own still-pending request. This does not mutate
+// the Load assignment/status. The status:"pending" predicate makes the action
+// safe against a dispatcher approval/rejection racing the driver's click.
+const cancelReleaseRequest = asyncHandler(
+  async (req: ExpressRequest, res: ExpressResponse) => {
+    const user = getUser(req);
+    const driverId = user._id.toString();
+
+    const load: any = await Load.findOne({ _id: req.params.id });
+    if (!load) throw new ApiError(404, "Load not found");
+
+    const organizationId = String(load.organizationId);
+    requireAssignedDriver(load, driverId);
+
+    if (!RELEASE_REQUEST_ELIGIBLE_STATUSES.includes(load.status as any)) {
+      throw new ApiError(
+        409,
+        `This load is now in ${load.status} status. Refresh before changing the release request.`,
+      );
+    }
+
+    const request: any = await LoadReleaseRequest.findOne({
       organizationId,
-      "load_dropped",
-      load._id.toString(),
-      `Driver released load ${load.loadNumber} — returned to Transportation Available Loads`,
+      loadId: load._id,
+      driverId,
+      status: "pending",
+    });
+
+    if (!request) {
+      throw new ApiError(
+        409,
+        "This release request is no longer pending. Dispatch or another load action may already have resolved it. Refresh the load before trying again.",
+      );
+    }
+
+    const cancelledAt = new Date();
+    const cancelledRequest: any = await LoadReleaseRequest.findOneAndUpdate(
+      {
+        _id: request._id,
+        organizationId,
+        loadId: load._id,
+        driverId,
+        status: "pending",
+      },
+      {
+        $set: {
+          status: "cancelled",
+          // Reuse the existing, schema-safe keep_assigned outcome: cancelling
+          // the request means the underlying Load remains exactly as it was.
+          decision: "keep_assigned",
+          reviewedAt: cancelledAt,
+          reviewedBy: user._id,
+        },
+        $unset: {
+          decisionReason: "",
+          replacementDriverId: "",
+        },
+      },
+      { new: true, runValidators: true },
     );
-  } catch (err) {
-    logger.error({ err }, "Non-fatal: post-update side effect failed");
+
+    if (!cancelledRequest) {
+      throw new ApiError(
+        409,
+        "This release request was resolved while you were cancelling it. Refresh the load to see the current decision.",
+      );
+    }
+
+    // Re-check the ownership relationship after the request write. Load and
+    // release-request records are separate collections, so this catches the
+    // practical dispatcher-reassign race without pretending they are one DB
+    // transaction. The existing lifecycle outbox remains canonical if a
+    // reassignment committed concurrently.
+    const loadStillAssignedToDriver = await Load.exists({
+      _id: load._id,
+      organizationId,
+      assignedDriverId: user._id,
+      status: { $in: [...RELEASE_REQUEST_ELIGIBLE_STATUSES] },
+    });
+
+    emitLoadSync(organizationId, [driverId], load._id.toString());
+
+    if (!loadStillAssignedToDriver) {
+      throw new ApiError(
+        409,
+        "The load changed while the release request was being cancelled. Refresh the Current Load card to see the final assignment state.",
+      );
+    }
+
+    // Keep the notification private to the dispatcher tied to this exact
+    // release request/load relationship. Never broadcast the request details
+    // to unrelated organization members when an explicit dispatcher exists.
+    let dispatcherId = String(request.dispatcherId ?? "").trim();
+    let dispatcher: any = dispatcherId
+      ? await User.findOne({
+          _id: dispatcherId,
+          organizationId,
+          role: { $in: ["employee", "admin", "super_admin"] },
+          isActive: true,
+        })
+          .select("_id name email role")
+          .lean()
+      : null;
+
+    if (!dispatcher) {
+      dispatcher = await resolveActiveDispatcherForLoad(load, driverId);
+      dispatcherId = dispatcher?._id ? String(dispatcher._id) : "";
+    }
+
+    const dispatcherMessage =
+      `${user.name || "Driver"} cancelled their release request for load ${load.loadNumber}. ` +
+      `The load remains assigned to ${user.name || "the driver"}.`;
+    const driverMessage =
+      `You cancelled your release request for load ${load.loadNumber}. ` +
+      "The load remains assigned to you and its normal workflow is available again.";
+
+    try {
+      if (dispatcherId) {
+        await safeCreateNotificationLoose({
+          userId: dispatcherId,
+          organizationId,
+          type: "general",
+          title: "Release Request Cancelled",
+          message: dispatcherMessage,
+          metadata: {
+            releaseRequestId: cancelledRequest._id.toString(),
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            driverId,
+            route: `/driver-tracker?driverId=${encodeURIComponent(driverId)}`,
+            requiresAttention: false,
+          },
+        });
+
+        // Persist one driver-authored system row in the exact private
+        // dispatcher↔driver thread. The driver has already seen the action, so
+        // only the dispatcher remains unread.
+        const thread: any = await ensureDispatchChatThread({
+          organizationId,
+          dispatcherId,
+          driverId,
+        });
+
+        const chatMessage: any = await DispatchChatMessage.create({
+          organizationId,
+          threadId: thread._id,
+          dispatcherId,
+          driverId,
+          senderId: user._id,
+          senderRole: "driver",
+          messageType: "system",
+          systemEvent: {
+            type: "driver_load_release_cancelled",
+            title: "Release Request Cancelled",
+            message: dispatcherMessage,
+            metadata: {
+              releaseRequestId: cancelledRequest._id.toString(),
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              driverId,
+              driverName: user.name || "Driver",
+              dispatcherId,
+              action: "release_request_cancelled",
+              audienceMessages: {
+                driver: driverMessage,
+                dispatcher: dispatcherMessage,
+                threadDispatcher: dispatcherMessage,
+              },
+            },
+          },
+          content: dispatcherMessage,
+          attachments: [],
+          readBy: [user._id],
+        });
+
+        await touchDispatchChatThread({
+          threadId: thread._id,
+          senderId: user._id,
+          messageType: "system",
+          content: dispatcherMessage,
+          fallbackPreview: "Release Request Cancelled",
+          at: chatMessage.createdAt,
+        });
+
+        emitToDispatchChatThreadParticipants(
+          thread,
+          "dispatch-chat:message",
+          {
+            id: String(chatMessage._id),
+            threadId: String(thread._id),
+            dispatcherId,
+            driverId,
+            sender: {
+              id: driverId,
+              name: user.name || "Driver",
+              email: user.email || "",
+              role: "driver",
+            },
+            senderRole: "driver" as const,
+            messageType: "system" as const,
+            systemEvent: chatMessage.systemEvent,
+            content: dispatcherMessage,
+            attachments: [],
+            readBy: [driverId],
+            createdAt: chatMessage.createdAt,
+            updatedAt: chatMessage.updatedAt,
+          },
+        );
+      } else {
+        await notifyOrgAdminsLoose(
+          organizationId,
+          "general",
+          "Release Request Cancelled",
+          dispatcherMessage,
+          {
+            releaseRequestId: cancelledRequest._id.toString(),
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            driverId,
+          },
+          driverId,
+        );
+      }
+    } catch (err) {
+      logger.error(
+        { err, loadId: load._id.toString(), driverId, dispatcherId },
+        "Non-fatal: failed to publish release-request cancellation notification",
+      );
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        releaseRequestSummary(cancelledRequest),
+        "Release request cancelled. The load remains assigned to you.",
+      ),
+    );
+  },
+);
+
+// POST /api/driver-tracking/loads/:id/release-request/reject
+const rejectReleaseRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  const decisionReason = String(req.body?.decisionReason ?? "").trim().slice(0, 1000);
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+  if (!load.assignedDriverId) throw new ApiError(409, "This load no longer has an assigned driver");
+
+  let request: any = await LoadReleaseRequest.findOne({
+    organizationId,
+    loadId: load._id,
+    driverId: load.assignedDriverId,
+    status: "pending",
+  });
+  if (!request) throw new ApiError(404, "No pending release request was found for this load");
+
+  assertCanReviewReleaseRequest(req, load, request);
+
+  const rejectedRequest = await LoadReleaseRequest.findOneAndUpdate(
+    {
+      _id: request._id,
+      organizationId,
+      loadId: load._id,
+      driverId: load.assignedDriverId,
+      status: "pending",
+    },
+    {
+      $set: {
+        status: "rejected",
+        decision: "keep_assigned",
+        reviewedAt: new Date(),
+        reviewedBy: user._id,
+        decisionReason,
+      },
+    },
+    { new: true },
+  );
+  if (!rejectedRequest) {
+    throw new ApiError(
+      409,
+      "This release request was already resolved by another action. Refresh the load before trying again.",
+    );
   }
+  request = rejectedRequest;
+
+  const driverId = String(load.assignedDriverId);
+  emitLoadSync(organizationId, [driverId], load._id.toString());
 
   try {
-    await finalizeDriverStatusChangeIfClear(user._id.toString(), organizationId);
+    await safeCreateNotificationLoose({
+      userId: driverId,
+      organizationId,
+      type: "general",
+      title: "Release Request Not Approved",
+      message:
+        `Dispatch kept load ${load.loadNumber} assigned to you.` +
+        (decisionReason ? ` ${decisionReason}` : "") +
+        (["Accepted", "Picked Up", "In-Transit"].includes(load.status)
+          ? " Location sharing remains required while this accepted active load is assigned to you."
+          : ""),
+      metadata: {
+        releaseRequestId: request._id.toString(),
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: "/driver",
+      },
+    });
+
+    await persistDispatcherLoadChatEvent({
+      dispatcher: user,
+      organizationId,
+      driverId,
+      eventType: "driver_load_release_rejected",
+      title: "Release Request Not Approved",
+      message: `Dispatch kept load ${load.loadNumber} assigned to you.${decisionReason ? ` ${decisionReason}` : ""}`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        releaseRequestId: request._id.toString(),
+        action: "keep_assigned",
+      },
+    });
   } catch (err) {
-    logger.error({ err, driverId: user._id }, "Non-fatal: failed to finalize driver status transition after load release");
+    logger.error({ err }, "Non-fatal: release rejection notification failed");
   }
 
-  return res.status(200).json(new ApiResponse(200, load, "Load released"));
+  return res.status(200).json(
+    new ApiResponse(200, releaseRequestSummary(request), "Load remains assigned"),
+  );
 });
 
+// POST /api/driver-tracking/loads/:id/amendments/:amendmentId/acknowledge
+const acknowledgeLoadAmendment = asyncHandler(
+  async (req: ExpressRequest, res: ExpressResponse) => {
+    const user = getUser(req);
+    if (user.role !== "driver") {
+      throw new ApiError(403, "Only the assigned driver can acknowledge a Load Update");
+    }
+
+    const { id: loadId, amendmentId } = req.params;
+    if (
+      !mongoose.Types.ObjectId.isValid(loadId) ||
+      !mongoose.Types.ObjectId.isValid(amendmentId)
+    ) {
+      throw new ApiError(400, "Invalid load or amendment identifier");
+    }
+
+    const acknowledgedAt = new Date();
+    const load: any = await Load.findOneAndUpdate(
+      {
+        _id: loadId,
+        assignedDriverId: user._id,
+        driverAmendments: {
+          $elemMatch: {
+            _id: amendmentId,
+            driverId: user._id,
+            status: "pending",
+          },
+        },
+      },
+      {
+        $set: {
+          "driverAmendments.$[amendment].status": "acknowledged",
+          "driverAmendments.$[amendment].acknowledgedAt": acknowledgedAt,
+          "driverAmendments.$[amendment].acknowledgedBy": user._id,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        arrayFilters: [
+          {
+            "amendment._id": new mongoose.Types.ObjectId(amendmentId),
+            "amendment.driverId": user._id,
+            "amendment.status": "pending",
+          },
+        ],
+      },
+    );
+
+    if (!load) {
+      const existing: any = await Load.findOne({
+        _id: loadId,
+        assignedDriverId: user._id,
+        "driverAmendments._id": amendmentId,
+      })
+        .select("driverAmendments")
+        .lean();
+      const amendment = Array.isArray(existing?.driverAmendments)
+        ? existing.driverAmendments.find(
+            (entry: any) => String(entry?._id ?? "") === amendmentId,
+          )
+        : null;
+
+      if (amendment?.status === "acknowledged") {
+        return res.status(200).json(
+          new ApiResponse(
+            200,
+            { amendmentId, acknowledgedAt: amendment.acknowledgedAt ?? null },
+            "Load Update already acknowledged",
+          ),
+        );
+      }
+
+      throw new ApiError(
+        404,
+        "This Load Update is unavailable or is no longer assigned to your account",
+      );
+    }
+
+    const acknowledged = Array.isArray(load.driverAmendments)
+      ? load.driverAmendments.find(
+          (entry: any) => String(entry?._id ?? "") === amendmentId,
+        )
+      : null;
+
+    try {
+      const dispatcher = await resolveActiveDispatcherForLoad(
+        load,
+        user._id.toString(),
+      );
+      if (dispatcher) {
+        await safeCreateNotificationLoose({
+          userId: dispatcher._id.toString(),
+          organizationId: String(load.organizationId),
+          type: "load_amendment_acknowledged",
+          title: "Driver Acknowledged Load Update",
+          message: `${user.name} acknowledged the latest material changes for load ${load.loadNumber}.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            amendmentId,
+            driverId: user._id.toString(),
+            route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+          },
+        });
+      }
+    } catch (error) {
+      logger.error(
+        { error, loadId, amendmentId },
+        "Non-fatal: failed to notify dispatcher about Load Update acknowledgement",
+      );
+    }
+
+    emitToUser(user._id.toString(), "driver:loads_updated", {
+      loadId: load._id.toString(),
+      amendmentId,
+      amendmentStatus: "acknowledged",
+    });
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          amendmentId,
+          acknowledgedAt: acknowledged?.acknowledgedAt ?? acknowledgedAt,
+        },
+        "Load Update acknowledged",
+      ),
+    );
+  },
+);
+
 // GET /api/driver-tracking/drivers/:driverId/profile
-// Read-only compliance profile lookup for any org's dispatch staff. Drivers
-// are a shared platform-wide pool, so this is not org-scoped, but it stays
-// staff-gated (not public) and returns no mutation actions.
-const getDriverComplianceProfile = asyncHandler(async (req: Request, res: Response) => {
-  const profile = await DriverProfile.findOne({
-    userId: req.params.driverId,
-  }).populate("userId", "name email avatar");
+// Permission-aware Driver Review Center projection. The server decides exactly
+// which fields can leave the API for this viewer; React never receives secrets
+// that the viewer is not authorized to access.
+const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const viewer = getUser(req);
+  const driverId = String(req.params.driverId || "").trim();
+  const access = await resolveDriverReviewAccess({
+    viewer,
+    organizationId: req.orgId,
+    organizationRole: req.orgRole,
+    driverId,
+  });
+  assertDriverReviewCenterAccess(access);
+
+  const profile: any = await DriverProfile.findOne({ userId: driverId })
+    .populate("userId", "name email avatar personalInfo.phone")
+    .lean();
 
   if (!profile) throw new ApiError(404, "Driver profile not found");
 
-  const profileObj = profile.toJSON();
-  if (profileObj.documents) {
-    for (const doc of profileObj.documents) {
-      if (doc.fileUrl && !doc.fileUrl.startsWith("http")) {
-        const signed = await storageService.getSignedUrl(doc.fileUrl);
-        if (signed) doc.fileUrl = signed;
-      }
-    }
-  }
-
-  const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
-  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter((t) => uploadedTypes.has(t)).length;
+  const rawDocuments = Array.isArray(profile.documents) ? profile.documents : [];
+  const uploadedTypes = new Set(rawDocuments.map((document: any) => document.type));
+  const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter((type) =>
+    uploadedTypes.has(type),
+  ).length;
   const complianceSummary = {
     uploadedCount,
     totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
-    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
-    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter((t) => !uploadedTypes.has(t)),
+    percentage: Math.round(
+      (uploadedCount / Math.max(1, REQUIRED_COMPLIANCE_DOCS.length)) * 100,
+    ),
+    missingTypes: REQUIRED_COMPLIANCE_DOCS.filter(
+      (type) => !uploadedTypes.has(type),
+    ),
   };
 
-  res.json(new ApiResponse(200, { ...profileObj, complianceSummary }, "Driver profile fetched"));
+  const documentFact = (type: string) => {
+    const candidates = rawDocuments.filter((document: any) => document.type === type);
+    const approved = candidates.find(
+      (document: any) => document.verified || document.reviewStatus === "approved",
+    );
+    const rejected = candidates.find(
+      (document: any) => document.reviewStatus === "rejected",
+    );
+    const document = approved || rejected || candidates[0];
+    if (!document) return { status: "missing" as const, expiresAt: null };
+    return {
+      status: document.verified || document.reviewStatus === "approved"
+        ? ("approved" as const)
+        : document.reviewStatus === "rejected"
+          ? ("rejected" as const)
+          : ("pending" as const),
+      expiresAt: document.expiresAt ?? null,
+    };
+  };
+
+  const daysUntil = (value: unknown) => {
+    if (!value) return null;
+    const time = new Date(String(value)).getTime();
+    if (!Number.isFinite(time)) return null;
+    return Math.ceil((time - Date.now()) / 86_400_000);
+  };
+
+  const expiringSoon = [
+    profile.licenseExpirationDate,
+    profile.medicalCardExpirationDate,
+    profile.insuranceExpirationDate,
+  ].some((value) => {
+    const days = daysUntil(value);
+    return days != null && days >= 0 && days <= 30;
+  });
+
+  const requiredReviewNeedsAttention = REQUIRED_COMPLIANCE_DOCS.some(
+    (type) => documentFact(type).status !== "approved",
+  );
+  const complianceState = profile.isComplianceExpired || requiredReviewNeedsAttention
+    ? "needs_attention"
+    : expiringSoon
+      ? "expiring_soon"
+      : "valid";
+
+  const userObject = profile.userId && typeof profile.userId === "object"
+    ? profile.userId
+    : null;
+  const driverName = userObject?.name || [profile.firstName, profile.lastName].filter(Boolean).join(" ") || "Driver";
+
+  const accessProjection = {
+    level: access.level,
+    canOpenReviewCenter: access.canOpenReviewCenter,
+    canReviewDocuments: access.canReviewDocuments,
+    canViewDocumentContents: access.canViewDocumentContents,
+    canViewReviewHistory: access.canViewReviewHistory,
+    canFinalizeVerification: access.canFinalizeVerification,
+    hasActiveLoadRelationship: access.hasActiveLoadRelationship,
+    activeLoads: access.activeLoads,
+    reason: access.reason,
+  };
+
+  const baseData: Record<string, any> = {
+    access: accessProjection,
+    driver: {
+      id: driverId,
+      name: driverName,
+      avatar: userObject?.avatar ?? null,
+    },
+    verificationStatus: profile.verificationStatus,
+    operationalStatus: profile.operationalStatus,
+    profileCompletionScore: Number(profile.profileCompletionScore ?? 0),
+    isComplianceExpired: Boolean(profile.isComplianceExpired),
+    complianceState,
+    equipment: {
+      trailerType: profile.trailerType,
+      maxVehicleCapacity: profile.maxVehicleCapacity,
+      truckMake: profile.truckMake,
+      truckModel: profile.truckModel,
+      trailerMake: profile.trailerMake,
+      trailerModel: profile.trailerModel,
+      specialFeatures: Array.isArray(profile.specialFeatures) ? profile.specialFeatures : [],
+    },
+  };
+
+  if (access.level === "DISPATCH_LIMITED") {
+    return res.status(200).json(
+      new ApiResponse(200, baseData, "Driver Review Center limited profile fetched"),
+    );
+  }
+
+  if (access.level === "DISPATCH_ACTIVE_LOAD" || access.level === "OPERATIONAL_ONLY") {
+    const protectedData = {
+      ...baseData,
+      contact: {
+        email: userObject?.email || undefined,
+        phone: profile.phone || userObject?.personalInfo?.phone || undefined,
+      },
+      credentialFacts: {
+        cdl: {
+          review: documentFact("drivers_license"),
+          state: profile.licenseState,
+          expiresAt: profile.licenseExpirationDate ?? null,
+        },
+        medicalCard: {
+          review: documentFact("medical_card"),
+          expiresAt: profile.medicalCardExpirationDate ?? null,
+        },
+        insurance: {
+          review: documentFact("insurance_certificate"),
+          provider: profile.insuranceProvider,
+          expiresAt: profile.insuranceExpirationDate ?? null,
+        },
+      },
+      complianceWarnings: [
+        ...(profile.isComplianceExpired ? ["One or more compliance credentials are expired"] : []),
+        ...(requiredReviewNeedsAttention ? ["One or more required compliance documents need review or correction"] : []),
+        ...(expiringSoon ? ["One or more compliance credentials expire within 30 days"] : []),
+      ],
+    };
+
+    const relationshipLoad = access.activeLoads[0];
+    await recordDriverReviewEvent({
+      driverId,
+      actor: viewer,
+      action: "protected_compliance_opened",
+      targetType: "access",
+      organizationId: req.orgId,
+      loadId: relationshipLoad?.id,
+      loadNumber: relationshipLoad?.loadNumber,
+      metadata: { accessLevel: access.level },
+    });
+
+    return res.status(200).json(
+      new ApiResponse(200, protectedData, "Driver Review Center operational profile fetched"),
+    );
+  }
+
+  const documents = rawDocuments.map((document: any) => ({
+    _id: document._id ? String(document._id) : undefined,
+    type: document.type,
+    label: document.label,
+    fileName: document.fileName,
+    fileSize: Number(document.fileSize || 0),
+    mimeType: document.mimeType,
+    uploadedAt: document.uploadedAt ?? null,
+    expiresAt: document.expiresAt ?? null,
+    verified: Boolean(document.verified),
+    reviewStatus: document.reviewStatus,
+    verifiedBy: document.verifiedBy ? String(document.verifiedBy) : undefined,
+    verifiedAt: document.verifiedAt ?? null,
+    rejectionReason: document.rejectionReason ?? undefined,
+    rejectedAt: document.rejectedAt ?? null,
+    fileAvailable: Boolean(document.fileKey || document.fileUrl),
+    fileEndpoint: document._id
+      ? `/api/driver-tracking/drivers/${encodeURIComponent(driverId)}/documents/${encodeURIComponent(String(document._id))}/file`
+      : undefined,
+  }));
+
+  const baseEligibility = evaluateDriverVerificationEligibility(profile);
+  const latestDriverRequest: any = await DriverRequest.findOne({
+    driverUserId: driverId,
+  })
+    .sort({ createdAt: -1 })
+    .select("status reviewedAt")
+    .lean();
+  const accountRequestRejected = latestDriverRequest?.status === "rejected";
+  const eligibility = accountRequestRejected
+    ? {
+        ...baseEligibility,
+        eligible: false,
+        blockers: [
+          ...baseEligibility.blockers,
+          "Latest Driver Account application is rejected; a new pending application is required",
+        ],
+      }
+    : baseEligibility;
+  const reviewHistory = await listDriverReviewEvents(driverId);
+
+  const adminData = {
+    ...baseData,
+    driver: {
+      ...baseData.driver,
+      email: userObject?.email || undefined,
+      phone: profile.phone || userObject?.personalInfo?.phone || undefined,
+    },
+    information: {
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      phone: profile.phone,
+      address: profile.address,
+      city: profile.city,
+      state: profile.state,
+      zipCode: profile.zipCode,
+      ssnLast4: profile.ssnLast4,
+      backgroundCheckConsent: Boolean(profile.backgroundCheckConsent),
+      backgroundCheckConsentDate: profile.backgroundCheckConsentDate ?? null,
+    },
+    agreement: {
+      accepted: Boolean(profile.verificationAgreement),
+      acceptedAt: profile.verificationAgreementDate ?? null,
+    },
+    credentialFacts: {
+      cdl: {
+        review: documentFact("drivers_license"),
+        state: profile.licenseState,
+        expiresAt: profile.licenseExpirationDate ?? null,
+      },
+      medicalCard: {
+        review: documentFact("medical_card"),
+        expiresAt: profile.medicalCardExpirationDate ?? null,
+      },
+      insurance: {
+        review: documentFact("insurance_certificate"),
+        provider: profile.insuranceProvider,
+        expiresAt: profile.insuranceExpirationDate ?? null,
+      },
+    },
+    credentials: {
+      driversLicenseNumber: profile.driversLicenseNumber,
+      licenseState: profile.licenseState,
+      licenseExpirationDate: profile.licenseExpirationDate ?? null,
+      medicalCardExpirationDate: profile.medicalCardExpirationDate ?? null,
+      insuranceProvider: profile.insuranceProvider,
+      insurancePolicyNumber: profile.insurancePolicyNumber,
+      insuranceExpirationDate: profile.insuranceExpirationDate ?? null,
+      dotNumber: profile.dotNumber,
+      mcNumber: profile.mcNumber,
+    },
+    equipment: {
+      ...baseData.equipment,
+      customTrailerName: profile.customTrailerName,
+      truckYear: profile.truckYear,
+      truckColor: profile.truckColor,
+      vin: profile.vin,
+      plateNumber: profile.plateNumber,
+      gvwr: profile.gvwr,
+      engineType: profile.engineType,
+      trailerYear: profile.trailerYear,
+      trailerLength: profile.trailerLength,
+      trailerAxles: profile.trailerAxles,
+      trailerGvwr: profile.trailerGvwr,
+      hitchType: profile.hitchType,
+    },
+    logistics: {
+      serviceRadius: profile.serviceRadius ?? null,
+      preferredRoutes: Array.isArray(profile.preferredRoutes) ? profile.preferredRoutes : [],
+      availableDays: Array.isArray(profile.availableDays) ? profile.availableDays : [],
+      homeBase: profile.homeBase
+        ? {
+            address: profile.homeBase.address || "",
+            city: profile.homeBase.city || "",
+            state: profile.homeBase.state || "",
+            zip: profile.homeBase.zip || "",
+          }
+        : undefined,
+    },
+    complianceSummary,
+    documents,
+    eligibility,
+    accountApplicationStatus: latestDriverRequest?.status ?? null,
+    reviewHistory,
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt,
+  };
+
+  return res.status(200).json(
+    new ApiResponse(200, adminData, "Driver Review Center admin profile fetched"),
+  );
+});
+
+// GET /api/driver-tracking/drivers/:driverId/documents/:documentId/file
+// Document bytes are streamed only after server-side reviewer authorization.
+const getDriverReviewDocumentFile = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const viewer = getUser(req);
+  const driverId = String(req.params.driverId || "").trim();
+  const documentId = String(req.params.documentId || "").trim();
+  const access = await resolveDriverReviewAccess({
+    viewer,
+    organizationId: req.orgId,
+    organizationRole: req.orgRole,
+    driverId,
+  });
+  if (!access.canViewDocumentContents || access.level !== "ADMIN_REVIEW") {
+    throw new ApiError(403, "Document contents are restricted to an authorized Driver Verification reviewer");
+  }
+
+  const profile: any = await DriverProfile.findOne({ userId: driverId });
+  if (!profile) throw new ApiError(404, "Driver profile not found");
+  const document: any = profile.documents.find(
+    (item: any) => item._id?.toString() === documentId,
+  );
+  if (!document) throw new ApiError(404, "Document not found");
+
+  const storageKey = String(document.fileKey || document.fileUrl || "").trim();
+  if (!storageKey) throw new ApiError(404, "Document file is unavailable");
+
+  if (/^https?:\/\//i.test(storageKey)) {
+    await recordDriverReviewEvent({
+      driverId,
+      actor: viewer,
+      action: "document_viewed",
+      targetType: "document",
+      targetId: documentId,
+      organizationId: req.orgId,
+      metadata: { documentType: document.type, documentLabel: document.label },
+    });
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    return res.redirect(storageKey);
+  }
+
+  const file = await storageService.streamPrivateFile(storageKey);
+  if (!file) throw new ApiError(404, "Document file could not be opened");
+
+  await recordDriverReviewEvent({
+    driverId,
+    actor: viewer,
+    action: "document_viewed",
+    targetType: "document",
+    targetId: documentId,
+    organizationId: req.orgId,
+    metadata: { documentType: document.type, documentLabel: document.label },
+  });
+
+  const safeFileName = String(
+    document.fileName || document.label || "driver-document",
+  ).replace(/[\r\n"]/g, "_");
+  res.setHeader(
+    "Content-Type",
+    document.mimeType || file.contentType || "application/octet-stream",
+  );
+  res.setHeader("Content-Disposition", `inline; filename="${safeFileName}"`);
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  file.stream.on("error", (error) => {
+    logger.error(
+      { error, driverId, documentId, viewerId: viewer._id.toString() },
+      "Driver Review document stream failed",
+    );
+    if (!res.headersSent) res.status(500).end();
+    else res.end();
+  });
+  file.stream.pipe(res);
+});
+
+const approveDriverReviewDocument = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const viewer = getUser(req);
+  const driverId = String(req.params.driverId || "").trim();
+  const documentId = String(req.params.documentId || "").trim();
+  const access = await resolveDriverReviewAccess({
+    viewer,
+    organizationId: req.orgId,
+    organizationRole: req.orgRole,
+    driverId,
+  });
+  assertDriverReviewMutationAccess(access);
+
+  const profile = await reviewDriverDocument({
+    driverId,
+    documentId,
+    reviewer: viewer,
+    organizationId: req.orgId,
+    decision: "approved",
+    expectedUploadedAt: req.body?.expectedUploadedAt,
+  });
+  return res.status(200).json(
+    new ApiResponse(200, profile, "Document approved"),
+  );
+});
+
+const rejectDriverReviewDocument = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const viewer = getUser(req);
+  const driverId = String(req.params.driverId || "").trim();
+  const documentId = String(req.params.documentId || "").trim();
+  const access = await resolveDriverReviewAccess({
+    viewer,
+    organizationId: req.orgId,
+    organizationRole: req.orgRole,
+    driverId,
+  });
+  assertDriverReviewMutationAccess(access);
+
+  const reason = String(req.body?.reason || "").trim();
+  const profile = await reviewDriverDocument({
+    driverId,
+    documentId,
+    reviewer: viewer,
+    organizationId: req.orgId,
+    decision: "rejected",
+    reason,
+    expectedUploadedAt: req.body?.expectedUploadedAt,
+  });
+  return res.status(200).json(
+    new ApiResponse(200, profile, "Document rejected"),
+  );
+});
+
+const approveDriverReview = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const viewer = getUser(req);
+  const driverId = String(req.params.driverId || "").trim();
+  const access = await resolveDriverReviewAccess({
+    viewer,
+    organizationId: req.orgId,
+    organizationRole: req.orgRole,
+    driverId,
+  });
+  assertDriverReviewMutationAccess(access);
+
+  const result = await approveDriverVerification({
+    driverId,
+    reviewer: viewer,
+    organizationId: req.orgId,
+    expectedUpdatedAt: req.body?.expectedUpdatedAt,
+  });
+  return res.status(200).json(
+    new ApiResponse(200, result, "Driver Verification approved"),
+  );
 });
 
 export default {
@@ -2367,6 +5837,10 @@ export default {
   markLocationOffline,
   getActiveDrivers,
   getDriverComplianceProfile,
+  getDriverReviewDocumentFile,
+  approveDriverReviewDocument,
+  rejectDriverReviewDocument,
+  approveDriverReview,
   getDashboardStats,
   getPendingLoadRequests,
   previewDriverLoadCompatibility,
@@ -2386,5 +5860,9 @@ export default {
   markPickedUp,
   startRoute,
   completeDelivery,
+  requestLoadRelease,
+  cancelReleaseRequest,
+  rejectReleaseRequest,
+  acknowledgeLoadAmendment,
   dropLoad,
 };

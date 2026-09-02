@@ -1,100 +1,70 @@
-import { Router, Request, Response, NextFunction, RequestHandler } from "express";
-import multer from "multer";
-// c
+import express from "express";
+import type {
+  Request as ExpressRequest,
+  Response as ExpressResponse,
+  NextFunction,
+} from "express";
 // This router serves both dispatchers (staff) and drivers, both of whom are
 // regular User-model accounts authenticated through the main JWT, not CrmUser
 // records. It therefore uses auth(), which sets req.user and req.orgId.
 import auth from "../middleware/auth.middleware";
 import driverTrackingController from "../controllers/driverTracking.controller";
+import loadController from "../controllers/load.controller";
 import driverDirectoryController from "../controllers/driverDirectory.controller";
 import dispatchChatController from "../controllers/dispatchChat.controller";
 import { ApiError } from "../utils/ApiError";
+import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
+import { uploadLimiter } from "../middleware/rate-limit.middleware";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
+import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
+import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
-const staffOnly = (req: Request, res: Response, next: NextFunction) => {
-  const role = (req as any).user?.role;
+const staffOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+  const role = req.user?.role;
   if (role && STAFF_ROLES.includes(role)) return next();
   return res
     .status(403)
-    .json({ success: false, message: "Staff access required" });
+    .json({
+      success: false,
+      code: 403,
+      message:
+        "Driver Tracker management is restricted to authorized staff for the current organization.",
+    });
 };
 
-const router = Router();
-
-const DISPATCH_CHAT_MAX_FILES = 5;
-const DISPATCH_CHAT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
-const BLOCKED_ATTACHMENT_EXTENSIONS =
-  /\.(exe|msi|bat|cmd|com|scr|ps1|vbs|jar)$/i;
-
-const dispatchChatUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    files: DISPATCH_CHAT_MAX_FILES,
-    fileSize: DISPATCH_CHAT_MAX_FILE_SIZE_BYTES,
-  },
-});
-
-const uploadDispatchChatFiles: RequestHandler = (req, res, next) => {
-  dispatchChatUpload.array("files", DISPATCH_CHAT_MAX_FILES)(
-    req,
-    res,
-    (error: any) => {
-      if (error instanceof multer.MulterError) {
-        if (error.code === "LIMIT_FILE_SIZE") {
-          return next(
-            new ApiError(
-              400,
-              "Each Dispatch Chat attachment must be 25 MB or smaller",
-            ),
-          );
-        }
-        if (error.code === "LIMIT_FILE_COUNT") {
-          return next(
-            new ApiError(
-              400,
-              `You can attach up to ${DISPATCH_CHAT_MAX_FILES} files at once`,
-            ),
-          );
-        }
-        return next(new ApiError(400, error.message));
-      }
-
-      if (error) {
-        return next(
-          new ApiError(400, error.message || "Failed to process attachment"),
-        );
-      }
-
-      const files = (req.files || []) as Express.Multer.File[];
-      const blocked = files.find((file) =>
-        BLOCKED_ATTACHMENT_EXTENSIONS.test(file.originalname || ""),
-      );
-      if (blocked) {
-        return next(
-          new ApiError(
-            400,
-            `${blocked.originalname} is not an allowed Dispatch Chat attachment`,
-          ),
-        );
-      }
-
-      return next();
-    },
-  );
+const driverOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+  if (req.user?.role === "driver") return next();
+  return res
+    .status(403)
+    .json({
+      success: false,
+      code: 403,
+      message:
+        "This Driver Portal action is available only to the signed-in driver account.",
+    });
 };
 
+const noStoreSensitive = (_req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  return next();
+};
+
+const router = express.Router();
 
 // Driver Tracker uses the main User identity for both staff and drivers.
 // Everything below requires an authenticated organization member.
 router.use(auth());
 
 // Directory / map
-router.get("/org-drivers", staffOnly, driverDirectoryController.getOrgDrivers);
-router.get("/active-drivers", staffOnly, driverTrackingController.getActiveDrivers);
-router.post("/heartbeat", driverTrackingController.heartbeat);
+router.get("/org-drivers", staffOnly, noStoreSensitive, driverDirectoryController.getOrgDrivers);
+router.get("/active-drivers", staffOnly, noStoreSensitive, driverTrackingController.getActiveDrivers);
+router.post("/heartbeat", driverOnly, driverTrackingController.heartbeat);
 router.post(
   "/location-offline",
+  driverOnly,
   driverTrackingController.markLocationOffline,
 );
 
@@ -118,18 +88,47 @@ router.post(
 router.get(
   "/drivers/:driverId/profile",
   staffOnly,
+  noStoreSensitive,
   driverTrackingController.getDriverComplianceProfile,
+);
+router.get(
+  "/drivers/:driverId/documents/:documentId/file",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.getDriverReviewDocumentFile,
+);
+router.patch(
+  "/drivers/:driverId/documents/:documentId/approve",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.approveDriverReviewDocument,
+);
+router.patch(
+  "/drivers/:driverId/documents/:documentId/reject",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.rejectDriverReviewDocument,
+);
+router.patch(
+  "/drivers/:driverId/approve",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.approveDriverReview,
 );
 router.post(
   "/alerts/:alertId/respond",
+  driverOnly,
   driverTrackingController.respondToDriverAlert,
 );
+
+router.use("/dispatch-chat", noStoreSensitive);
 
 // Suprah Dispatch Chat — isolated from Suprah Space and private per exact
 // dispatcher↔driver pair. The controller enforces the participant boundary on
 // every history, unread, send, attachment, and read operation.
 router.post(
   "/dispatch-chat/load/:loadId/open",
+  driverOnly,
   dispatchChatController.openLoadCreatorThread,
 );
 router.get(
@@ -163,15 +162,15 @@ router.post(
 );
 
 // Driver dashboard summary (read-only)
-router.get("/dashboard-stats", driverTrackingController.getDashboardStats);
+router.get("/dashboard-stats", driverOnly, noStoreSensitive, driverTrackingController.getDashboardStats);
 
 // Driver load lists
-router.get("/my-loads", driverTrackingController.getMyLoads);
-router.get("/my-requests", driverTrackingController.getMyRequests);
-router.get("/available-loads", driverTrackingController.getAvailableLoads);
+router.get("/my-loads", driverOnly, noStoreSensitive, driverTrackingController.getMyLoads);
+router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingController.getMyRequests);
+router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 
-router.get("/loads/:id", driverTrackingController.getLoadDetail);
-router.post("/loads/:id/request", driverTrackingController.requestLoad);
+router.get("/loads/:id", driverOnly, noStoreSensitive, driverTrackingController.getLoadDetail);
+router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
 router.post(
   "/loads/:id/approve-request",
   staffOnly,
@@ -183,15 +182,48 @@ router.post(
   driverTrackingController.rejectLoadRequest,
 );
 
-router.post("/loads/:id/accept", driverTrackingController.acceptLoad);
-router.post("/loads/:id/pickup", driverTrackingController.markPickedUp);
-router.post("/loads/:id/start-route", driverTrackingController.startRoute);
-router.post("/loads/:id/deliver", driverTrackingController.completeDelivery);
-router.post("/loads/:id/drop", driverTrackingController.dropLoad);
+router.post("/loads/:id/accept", driverOnly, driverTrackingController.acceptLoad);
+router.post(
+  "/loads/:id/amendments/:amendmentId/acknowledge",
+  driverOnly,
+  noStoreSensitive,
+  driverTrackingController.acknowledgeLoadAmendment,
+);
+router.post("/loads/:id/pickup", driverOnly, driverTrackingController.markPickedUp);
+router.post("/loads/:id/start-route", driverOnly, driverTrackingController.startRoute);
+router.post(
+  "/loads/:id/submit-proof",
+  driverOnly,
+  noStoreSensitive,
+  uploadLimiter,
+  uploadProofImage,
+  validateUploadedImageContent,
+  loadController.submitProofOfDelivery,
+);
+router.post("/loads/:id/deliver", driverOnly, driverTrackingController.completeDelivery);
+router.post(
+  "/loads/:id/release-request",
+  driverOnly,
+  driverTrackingController.requestLoadRelease,
+);
+router.post(
+  "/loads/:id/release-request/cancel",
+  driverOnly,
+  driverTrackingController.cancelReleaseRequest,
+);
+router.post(
+  "/loads/:id/release-request/reject",
+  staffOnly,
+  driverTrackingController.rejectReleaseRequest,
+);
+// Backward-compatible alias: /drop now creates a release request and never
+// directly changes assignment/status.
+router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
 
 // Start the organization-wide location-silence monitor once when Driver
 // Tracking routes are initialized. The service internally guards against
 // duplicate timers.
 startDriverLocationMonitor();
+startLoadLifecycleOutboxWorker();
 
 export default router;

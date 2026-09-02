@@ -4,11 +4,11 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import DriverRequest from "../models/DriverRequest.model";
 import User, { IUser } from "../models/User.model";
-import DriverProfile from "../models/DriverProfile.model";
 import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
 import logger from "../utils/logger";
 import activityService from "../services/activity.service";
+import { approveDriverVerification } from "../services/driverVerificationReview.service";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -144,7 +144,7 @@ const approveDriverRequest = asyncHandler(
     // Route is super_admin-only (see driverRequest.routes.ts).
     const adminUser = req.user as IUser;
 
-    const request = await DriverRequest.findOne({
+    let request = await DriverRequest.findOne({
       _id: req.params.id,
       status: "pending",
     });
@@ -158,27 +158,21 @@ const approveDriverRequest = asyncHandler(
       throw new ApiError(404, "Driver user not found");
     }
 
-    driverUser.role = "driver";
-    driverUser.isApproved = true;
-    driverUser.onboardingCompleted = true;
-    // Drivers are a shared platform-wide pool — approval does not assign
-    // them to any organization.
-    await driverUser.save();
+    // One final-approval boundary for DriverRequest, User.isApproved and
+    // DriverProfile.verificationStatus. The shared service revalidates every
+    // required item and rejects a stale reviewer screen before changing state.
+    const approvalResult = await approveDriverVerification({
+      driverId: driverUser._id.toString(),
+      reviewer: adminUser,
+      organizationId: "global",
+    });
 
-    request.status = "approved";
-    request.reviewedBy = adminUser._id as any;
-    request.reviewedAt = new Date();
-    await request.save();
-
-    // Keep the compliance-document review in sync with the account-level
-    // decision so admins don't have to separately flip it in two places.
-    try {
-      await DriverProfile.findOneAndUpdate(
-        { userId: driverUser._id },
-        { verificationStatus: "verified" },
-      );
-    } catch (err) {
-      logger.error({ err, driverId: driverUser._id }, "Non-fatal: failed to sync DriverProfile verificationStatus on approve");
+    // Keep a non-null request reference after the shared approval service.
+    // The service either updates the existing pending request or creates the
+    // synchronized approved request required by the driver dashboard gate.
+    const approvedRequest = approvalResult.request ?? request;
+    if (!approvedRequest) {
+      throw new ApiError(500, "Driver approval completed without a DriverRequest record");
     }
 
     try {
@@ -190,7 +184,7 @@ const approveDriverRequest = asyncHandler(
         message:
           "Your driver request has been approved. You can now access your driver dashboard.",
         metadata: {
-          driverRequestId: request._id.toString(),
+          driverRequestId: approvedRequest._id.toString(),
         },
       });
     } catch {
@@ -246,18 +240,25 @@ const approveDriverRequest = asyncHandler(
       logger.error({ err: emailErr, driverId: driverUser._id }, 'Failed to send driver approval email');
     }
 
-    await activityService.createActivity({
-      userId: driverUser._id.toString(),
-      organizationId: 'global',
-      type: 'profile_update',
-      title: 'Driver Approved',
-      description: `Account upgraded to Driver role by admin ${adminUser.name}`,
-      metadata: { driverRequestId: request._id.toString(), adminId: adminUser._id.toString() }
-    });
+    try {
+      await activityService.createActivity({
+        userId: driverUser._id.toString(),
+        organizationId: undefined,
+        type: 'profile_update',
+        title: 'Driver Approved',
+        description: `Account upgraded to Driver role by admin ${adminUser.name}`,
+        metadata: { driverRequestId: approvedRequest._id.toString(), adminId: adminUser._id.toString() }
+      });
+    } catch (error) {
+      logger.error(
+        { error, driverRequestId: approvedRequest._id, driverId: driverUser._id },
+        'Non-fatal: failed to write legacy Driver approval activity',
+      );
+    }
 
-    logger.info({ driverRequestId: request._id, driverId: driverUser._id, adminId: adminUser._id }, 'Driver request approved');
+    logger.info({ driverRequestId: approvedRequest._id, driverId: driverUser._id, adminId: adminUser._id }, 'Driver request approved');
 
-    res.json(new ApiResponse(200, request, "Driver request approved"));
+    res.json(new ApiResponse(200, approvedRequest, "Driver request approved"));
   },
 );
 

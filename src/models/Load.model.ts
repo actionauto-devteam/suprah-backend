@@ -33,6 +33,51 @@ export interface ILoad extends Document {
   assignedDriverId?: mongoose.Types.ObjectId;
   /** Dispatcher currently responsible for this driver assignment. */
   dispatchOwnerId?: mongoose.Types.ObjectId;
+  /**
+   * SHA-256 of the driver-facing material load terms at the moment Dispatch
+   * assigned/reassigned the driver. Used to prevent stale acceptance.
+   */
+  assignmentMaterialFingerprint?: string;
+  /** Compatibility overrides explicitly confirmed by Dispatch at assignment. */
+  assignmentCompatibilityOverrides?: {
+    overrideAvailability: boolean;
+    overrideCapacity: boolean;
+  };
+  /**
+   * Internal durable lifecycle side effects. Stored with the Load so the state
+   * transition and its follow-up work are committed in one document write.
+   * This field is query-hidden and must never be returned through APIs.
+   */
+  lifecycleOutbox?: Array<{
+    eventId: string;
+    kind: string;
+    payload: Record<string, any>;
+    createdAt: Date;
+    nextAttemptAt: Date;
+    attempts: number;
+    processedAt?: Date;
+    lockToken?: string;
+    lockedUntil?: Date;
+    lastError?: string;
+  }>;
+  driverAmendments: Array<{
+    _id: mongoose.Types.ObjectId;
+    driverId: mongoose.Types.ObjectId;
+    createdBy: mongoose.Types.ObjectId;
+    createdAt: Date;
+    loadStatusAtChange: LoadStatus;
+    materialVersionBefore: string;
+    materialVersionAfter: string;
+    changes: Array<{
+      field: string;
+      label: string;
+      before: string;
+      after: string;
+    }>;
+    status: "pending" | "acknowledged";
+    acknowledgedAt?: Date;
+    acknowledgedBy?: mongoose.Types.ObjectId;
+  }>;
   driverRequests: Array<{
     driverId: mongoose.Types.ObjectId;
     requestedAt: Date;
@@ -103,6 +148,71 @@ const driverRequestSchema = new Schema(
     note: { type: String, trim: true, maxlength: 500, default: "" },
   },
   { _id: false },
+);
+
+const loadLifecycleOutboxEventSchema = new Schema(
+  {
+    eventId: { type: String, required: true, trim: true },
+    kind: {
+      type: String,
+      required: true,
+      enum: [
+        "load_sync",
+        "user_notification",
+        "org_admin_notification",
+        "activity",
+        "dispatch_chat_system",
+        "release_request_resolution",
+      ],
+    },
+    payload: { type: Schema.Types.Mixed, required: true },
+    createdAt: { type: Date, required: true, default: Date.now },
+    nextAttemptAt: { type: Date, required: true, default: Date.now },
+    attempts: { type: Number, required: true, default: 0, min: 0 },
+    processedAt: { type: Date },
+    lockToken: { type: String, trim: true },
+    lockedUntil: { type: Date },
+    lastError: { type: String, maxlength: 1200 },
+  },
+  { _id: true },
+);
+
+const loadDriverAmendmentSchema = new Schema(
+  {
+    driverId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    createdAt: { type: Date, default: Date.now, required: true },
+    loadStatusAtChange: {
+      type: String,
+      enum: ["Accepted", "Picked Up", "In-Transit"],
+      required: true,
+    },
+    materialVersionBefore: { type: String, required: true, maxlength: 64 },
+    materialVersionAfter: { type: String, required: true, maxlength: 64 },
+    changes: {
+      type: [
+        new Schema(
+          {
+            field: { type: String, required: true, maxlength: 80 },
+            label: { type: String, required: true, maxlength: 120 },
+            before: { type: String, required: true, maxlength: 12000 },
+            after: { type: String, required: true, maxlength: 12000 },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
+    status: {
+      type: String,
+      enum: ["pending", "acknowledged"],
+      default: "pending",
+      required: true,
+    },
+    acknowledgedAt: { type: Date },
+    acknowledgedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  },
+  { _id: true },
 );
 
 const loadSchema = new Schema<ILoad>(
@@ -196,6 +306,29 @@ const loadSchema = new Schema<ILoad>(
       ref: "User",
       default: null,
     },
+    // Integrity metadata for Driver acceptance. These values are internal and
+    // are stripped from driver-facing DTOs by driverTracking.controller.ts.
+    assignmentMaterialFingerprint: {
+      type: String,
+      trim: true,
+      maxlength: 64,
+      default: null,
+    },
+    assignmentCompatibilityOverrides: {
+      overrideAvailability: { type: Boolean, default: false },
+      overrideCapacity: { type: Boolean, default: false },
+    },
+    // Internal durable side-effect queue. select:false prevents event payloads,
+    // recipient IDs and retry metadata from leaking through ordinary Load APIs.
+    lifecycleOutbox: {
+      type: [loadLifecycleOutboxEventSchema],
+      default: [],
+      select: false,
+    },
+    // Material edits made after the driver has accepted are recorded in the
+    // same Load document as the edit itself. This keeps the edit + amendment
+    // requirement atomic without requiring Mongo multi-document transactions.
+    driverAmendments: { type: [loadDriverAmendmentSchema], default: [] },
     driverRequests: { type: [driverRequestSchema], default: [] },
     notes: [
       {

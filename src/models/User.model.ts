@@ -51,6 +51,10 @@ export interface IUser extends Document {
   isApproved: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
+  // Transportation/Driver Review capability scoped per organization.
+  // This deliberately does NOT change role or organizationRole, so the user's
+  // access to unrelated modules remains unchanged.
+  dispatcherOrganizationIds?: mongoose.Types.ObjectId[];
 
   onlineStatus: OnlineStatus;
   customStatus?: string;
@@ -168,6 +172,10 @@ const UserSchema = new Schema(
     organizationRole: {
       type: String,
     },
+    dispatcherOrganizationIds: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Organization',
+    }],
     onboardingCompleted: {
       type: Boolean,
       default: false,

@@ -1,5 +1,14 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
+export interface IQuoteLocation {
+    name?: string;
+    streetAddress?: string;
+    city: string;
+    state: string;
+    zip: string;
+    country?: string;
+}
+
 export interface IQuote extends Document {
     firstName: string;
     lastName: string;
@@ -23,6 +32,8 @@ export interface IQuote extends Document {
     toZip: string;
     fromAddress: string;
     toAddress: string;
+    fromLocation?: IQuoteLocation | null;
+    toLocation?: IQuoteLocation | null;
     units: number;
     enclosedTrailer: boolean;
     vehicleInoperable: boolean;
@@ -39,6 +50,37 @@ export interface IQuote extends Document {
     createdAt: Date;
     updatedAt: Date;
 }
+
+const quoteLocationSchema = new Schema(
+    {
+        name: { type: String, trim: true, default: "" },
+        // Recommended at Quote stage, not required.
+        streetAddress: { type: String, trim: true, default: "" },
+        city: { type: String, required: true, trim: true },
+        state: {
+            type: String,
+            required: true,
+            trim: true,
+            uppercase: true,
+            minlength: 2,
+            maxlength: 2,
+        },
+        zip: {
+            type: String,
+            required: true,
+            trim: true,
+            match: /^\d{5}(-\d{4})?$/,
+        },
+        country: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            maxlength: 3,
+            default: "US",
+        },
+    },
+    { _id: false },
+);
 
 const QuoteSchema: Schema<IQuote> = new Schema(
     {
@@ -68,6 +110,12 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         toZip: { type: String, required: true, trim: true },
         fromAddress: { type: String, required: true, trim: true },
         toAddress: { type: String, required: true, trim: true },
+
+        // New structured representation. Optional so historical quotes remain
+        // valid without a migration; legacy fields above stay authoritative
+        // for old records.
+        fromLocation: { type: quoteLocationSchema, required: false, default: undefined },
+        toLocation: { type: quoteLocationSchema, required: false, default: undefined },
         units: { type: Number, required: true, min: 1, max: 5, default: 1 },
         enclosedTrailer: { type: Boolean, default: false },
         vehicleInoperable: { type: Boolean, default: false },

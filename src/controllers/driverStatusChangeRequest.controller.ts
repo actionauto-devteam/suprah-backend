@@ -1,4 +1,5 @@
-import { Request, Response } from "express";
+import type { Request as ExpressRequest, Response as ExpressResponse } from "express";
+import { randomUUID } from "crypto";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -23,6 +24,8 @@ import {
   ACTIVE_DRIVER_LOAD_STATUSES,
   applyDriverOperationalStatus,
   finalizeDriverStatusChangeIfClear,
+  finalizeDriverStatusTransitionGroup,
+  finalizeResolvedDriverStatusGroups,
   getDriverStatusContext,
   OPEN_DRIVER_STATUS_REQUEST_STATES,
 } from "../services/driverStatusTransition.service";
@@ -31,7 +34,7 @@ import logger from "../utils/logger";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 
-const getUser = (req: Request) => req.user as IUser;
+const getUser = (req: ExpressRequest) => req.user as IUser;
 
 const assertDriver = (user: IUser) => {
   if (!user?._id) throw new ApiError(401, "User not authenticated");
@@ -58,6 +61,63 @@ const parseOptionalDate = (value: unknown) => {
 
 const statusLabel = (status: RequestedDriverOperationalStatus) =>
   status === "maintenance" ? "In Shop" : "On Leave";
+
+
+function coordinatedStatus(requests: any[]) {
+  if (requests.some((request) => request.status === "rejected")) return "rejected";
+  if (requests.some((request) => request.status === "cancelled")) return "cancelled";
+  if (requests.some((request) => request.status === "pending")) return "pending";
+  if (requests.some((request) => request.status === "approved_awaiting_reassignment")) {
+    return "approved_awaiting_reassignment";
+  }
+  return "completed";
+}
+
+async function getCoordinatedRequests(request: any) {
+  const transitionGroupId = String(request?.transitionGroupId ?? "").trim();
+  if (!transitionGroupId) return [request];
+  return DriverStatusChangeRequest.find({
+    driverId: request.driverId?._id ?? request.driverId,
+    transitionGroupId,
+  }).sort({ createdAt: 1 });
+}
+
+async function addCoordinationSummary(serialized: any, request: any, options: {
+  aggregateStatus?: boolean;
+} = {}) {
+  const transitionGroupId = String(request?.transitionGroupId ?? "").trim();
+  if (!transitionGroupId) return serialized;
+
+  const siblings: any[] = await getCoordinatedRequests(request);
+  const openCount = siblings.filter((row) =>
+    OPEN_DRIVER_STATUS_REQUEST_STATES.includes(row.status as any),
+  ).length;
+
+  serialized.transitionGroupId = transitionGroupId;
+  serialized.coordinatedOrganizationCount = new Set(
+    siblings.map((row) => String(row.organizationId ?? "")).filter(Boolean),
+  ).size;
+  serialized.coordinatedOpenOrganizationCount = openCount;
+  serialized.coordinatedRequests = siblings.map((row) => ({
+    id: String(row._id),
+    organizationId: row.organizationId,
+    status: row.status,
+    loadHandlingDecision: row.loadHandlingDecision ?? null,
+    retainedGpsRequired:
+      row.loadHandlingDecision === "keep_assigned"
+        ? Boolean(row.retainedGpsRequired)
+        : null,
+    affectedLoadCount: Array.isArray(row.affectedLoadIds)
+      ? row.affectedLoadIds.length
+      : 0,
+  }));
+
+  if (options.aggregateStatus) {
+    serialized.status = coordinatedStatus(siblings);
+  }
+
+  return serialized;
+}
 
 /**
  * Persist a dispatcher decision into the exact private dispatcher↔driver chat.
@@ -92,6 +152,7 @@ async function publishStatusDecisionToPrivateDispatchChat(params: {
     const dispatcherId = dispatcher._id.toString();
     const requestedStatusLabel = statusLabel(request.requestedStatus);
     const activeLoadCount = activeLoads.length;
+    const coordinated = Boolean(request.transitionGroupId);
     const awaitingReassignment =
       decision === "approved" &&
       request.status === "approved_awaiting_reassignment" &&
@@ -110,8 +171,11 @@ async function publishStatusDecisionToPrivateDispatchChat(params: {
       .map((load) => String(load.loadNumber || "").trim())
       .filter(Boolean);
 
-    const title =
-      decision === "approved"
+    const title = coordinated
+      ? decision === "approved"
+        ? `${requestedStatusLabel} Request — This Dispatch Team Resolved Its Loads`
+        : `${requestedStatusLabel} Request Not Approved`
+      : decision === "approved"
         ? awaitingReassignment
           ? `${requestedStatusLabel} Request Approved — Reassignment Required`
           : keptAssigned
@@ -121,8 +185,11 @@ async function publishStatusDecisionToPrivateDispatchChat(params: {
               : `${requestedStatusLabel} Request Approved`
         : `${requestedStatusLabel} Request Not Approved`;
 
-    const message =
-      decision === "approved"
+    const message = coordinated
+      ? decision === "approved"
+        ? `This Dispatch team completed its part of your ${requestedStatusLabel} request. Your global Work Availability will update only after every affected Dispatch team resolves its own loads.`
+        : `This Dispatch team did not approve your ${requestedStatusLabel} request.${decisionReason ? ` Reason: ${decisionReason}` : ""} Your global Work Availability will remain unchanged.`
+      : decision === "approved"
         ? awaitingReassignment
           ? `Dispatch approved your ${requestedStatusLabel} request. New work is blocked while Dispatch reassigns your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}. Your Dispatch Status will change automatically after those loads are moved.`
           : keptAssigned
@@ -291,10 +358,13 @@ async function serializeRequest(request: any) {
           : await storageService.getSignedUrl(attachment.fileKey);
 
         return {
-          ...attachment,
           id: String(attachment._id ?? ""),
-          // Never expose a raw private R2 key if signing fails. Local-dev
-          // fallback paths are intentionally returned as-is.
+          fileName: attachment.fileName || "Attachment",
+          fileSize: Number(attachment.fileSize || 0),
+          mimeType: attachment.mimeType || "application/octet-stream",
+          uploadedAt: attachment.uploadedAt ?? null,
+          // Private object keys are server-side implementation details and
+          // must never be exposed to browsers, even when URL signing fails.
           url: localUrl || signedUrl || null,
         };
       }),
@@ -368,34 +438,41 @@ async function notifyDispatchers(params: {
 }
 
 const getMyCurrentRequest = asyncHandler(
-  async (req: Request, res: Response) => {
+  async (req: ExpressRequest, res: ExpressResponse) => {
     const user = getUser(req);
     assertDriver(user);
-    const organizationId = req.orgId as string;
+    const driverId = user._id.toString();
 
-    await finalizeDriverStatusChangeIfClear(
-      user._id.toString(),
-      organizationId,
-    );
+    // Retry a previously-resolved coordinated group if the final global status
+    // apply failed after all organization rows had already completed.
+    await finalizeResolvedDriverStatusGroups(driverId);
 
-    const request = await DriverStatusChangeRequest.findOne({
-      organizationId,
+    const request: any = await DriverStatusChangeRequest.findOne({
       driverId: user._id,
       status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
-    }).sort({ createdAt: -1 });
+    }).sort({ priority: 1, createdAt: -1 });
+
+    if (!request) {
+      return res.status(200).json(
+        new ApiResponse(200, null, "Current driver status request fetched"),
+      );
+    }
+
+    const serialized = await serializeRequest(request);
+    await addCoordinationSummary(serialized, request, { aggregateStatus: true });
+    serialized.coordinatedActiveLoadCount = await Load.countDocuments({
+      assignedDriverId: user._id,
+      status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
+    });
 
     return res.status(200).json(
-      new ApiResponse(
-        200,
-        request ? await serializeRequest(request) : null,
-        "Current driver status request fetched",
-      ),
+      new ApiResponse(200, serialized, "Current driver status request fetched"),
     );
   },
 );
 
 const getOrganizationRequests = asyncHandler(
-  async (req: Request, res: Response) => {
+  async (req: ExpressRequest, res: ExpressResponse) => {
     const user = getUser(req);
     assertStaff(user);
     const organizationId = req.orgId as string;
@@ -430,12 +507,12 @@ const getOrganizationRequests = asyncHandler(
   },
 );
 
-const getRequestById = asyncHandler(async (req: Request, res: Response) => {
+const getRequestById = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   if (!user?._id) throw new ApiError(401, "User not authenticated");
   const organizationId = req.orgId as string;
 
-  const request = await DriverStatusChangeRequest.findOne({
+  const request: any = await DriverStatusChangeRequest.findOne({
     _id: req.params.requestId,
     organizationId,
   })
@@ -454,6 +531,9 @@ const getRequestById = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, "Access denied");
   }
 
+  // Staff may review only this organization's loads. Other organizations'
+  // loads are represented only by coordination counts, never by their private
+  // route/contact details.
   const currentActiveLoads = await Load.find({
     organizationId,
     assignedDriverId: populatedDriverId?._id ?? populatedDriverId,
@@ -465,21 +545,18 @@ const getRequestById = asyncHandler(async (req: Request, res: Response) => {
 
   const serialized = await serializeRequest(request);
   serialized.currentActiveLoads = currentActiveLoads;
+  await addCoordinationSummary(serialized, request);
 
   return res.status(200).json(
-    new ApiResponse(
-      200,
-      serialized,
-      "Driver status request fetched",
-    ),
+    new ApiResponse(200, serialized, "Driver status request fetched"),
   );
 });
 
-const createRequest = asyncHandler(async (req: Request, res: Response) => {
+const createRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   assertDriver(user);
-  const organizationId = req.orgId as string;
   const driverId = user._id.toString();
+  const requestContextOrganizationId = String(req.orgId ?? "").trim();
 
   const requestedStatus = req.body
     .requestedStatus as RequestedDriverOperationalStatus;
@@ -491,7 +568,7 @@ const createRequest = asyncHandler(async (req: Request, res: Response) => {
     ? String(req.body.message).trim().slice(0, 1500)
     : undefined;
 
-  if (!(["on_leave", "maintenance"] as string[]).includes(requestedStatus)) {
+  if (!( ["on_leave", "maintenance"] as string[]).includes(requestedStatus)) {
     throw new ApiError(400, "Requested status must be On Leave or In Shop");
   }
   if (!DRIVER_STATUS_REQUEST_PRIORITIES.includes(priority)) {
@@ -504,227 +581,337 @@ const createRequest = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "A reason is required for a standard status change request");
   }
 
-  const statusContext = await getDriverStatusContext(driverId, organizationId);
+  const statusContext = await getDriverStatusContext(
+    driverId,
+    requestContextOrganizationId || undefined,
+  );
   if (statusContext.operationalStatus !== "active") {
     throw new ApiError(
       409,
-      "Dispatch Status requests can only be submitted while you are Active. Return to Active before requesting On Leave or In Shop.",
+      "Work Availability requests can only be submitted while you are Active. Return to Active before requesting On Leave or In Shop.",
     );
   }
 
+  // Only one global Work Availability transition may be open for a shared
+  // driver, regardless of how many organizations are involved.
   const existing = await DriverStatusChangeRequest.findOne({
-    organizationId,
     driverId,
     status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
   });
   if (existing) {
-    throw new ApiError(409, "You already have an active status change request");
+    throw new ApiError(409, "You already have an active Work Availability request");
   }
 
-  const activeLoads = await Load.find({
-    organizationId,
+  const activeLoads: any[] = await Load.find({
     assignedDriverId: user._id,
     status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
   })
-    .select("_id loadNumber status")
+    .select("_id organizationId loadNumber status")
     .lean();
 
+  // The Driver Command Center normally changes status directly when there are
+  // no active loads. Keep this API safe if it is called directly anyway.
+  if (activeLoads.length === 0) {
+    await applyDriverOperationalStatus({
+      driverId,
+      organizationId: requestContextOrganizationId || undefined,
+      status: requestedStatus,
+    });
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          requestedStatus,
+          priority,
+          status: "completed",
+          coordinatedOrganizationCount: 0,
+          coordinatedActiveLoadCount: 0,
+        },
+        `Work Availability changed to ${statusLabel(requestedStatus)}`,
+      ),
+    );
+  }
+
+  const loadsByOrganization = new Map<string, any[]>();
+  for (const load of activeLoads) {
+    const organizationId = String(load.organizationId ?? "").trim();
+    if (!organizationId) {
+      throw new ApiError(
+        409,
+        `Load ${load.loadNumber || load._id} is missing organization ownership. Dispatch must correct the load before Work Availability can change safely.`,
+      );
+    }
+    const current = loadsByOrganization.get(organizationId) ?? [];
+    current.push(load);
+    loadsByOrganization.set(organizationId, current);
+  }
+
+  const transitionGroupId = randomUUID();
   const files = ((req.files || []) as Express.Multer.File[]).slice(0, 5);
   const attachments = await uploadAttachments(
     files,
-    organizationId,
+    `shared-${transitionGroupId}`,
     driverId,
   );
-
-  const hasActiveLoads = activeLoads.length > 0;
   const immediateSafetyRelease = priority === "emergency";
-  const initialStatus = !hasActiveLoads
-    ? "completed"
-    : immediateSafetyRelease
-      ? "approved_awaiting_reassignment"
-      : "pending";
+  const initialStatus = immediateSafetyRelease
+    ? "approved_awaiting_reassignment"
+    : "pending";
+  const submittedAt = new Date();
 
-  const request = await DriverStatusChangeRequest.create({
-    organizationId,
-    driverId: user._id,
+  const docs = [...loadsByOrganization.entries()].map(
+    ([organizationId, organizationLoads]) => ({
+      organizationId,
+      transitionGroupId,
+      driverId: user._id,
+      requestedStatus,
+      priority,
+      status: initialStatus,
+      reason,
+      message,
+      effectiveAt: parseOptionalDate(req.body.effectiveAt),
+      estimatedReturnAt: parseOptionalDate(req.body.estimatedReturnAt),
+      affectedLoadIds: organizationLoads.map((load: any) => load._id),
+      attachments,
+      submittedAt,
+    }),
+  );
+
+  const requests: any[] = await DriverStatusChangeRequest.create(docs);
+
+  await Promise.all(
+    requests.map(async (request: any) => {
+      const organizationLoads = loadsByOrganization.get(request.organizationId) ?? [];
+      await notifyDispatchers({
+        organizationId: request.organizationId,
+        driverId,
+        driverName: user.name || "Driver",
+        requestId: request._id.toString(),
+        requestedStatus,
+        priority,
+        activeLoadCount: organizationLoads.length,
+      });
+
+      const payload = {
+        requestId: request._id.toString(),
+        transitionGroupId,
+        driverId,
+        requestedStatus,
+        priority,
+        status: request.status,
+        coordinated: true,
+        coordinatedOrganizationCount: requests.length,
+      };
+      emitToOrg(request.organizationId, "driver:status_request_updated", payload);
+    }),
+  );
+
+  const driverPayload = {
+    transitionGroupId,
+    driverId,
     requestedStatus,
     priority,
     status: initialStatus,
-    reason,
-    message,
-    effectiveAt: parseOptionalDate(req.body.effectiveAt),
-    estimatedReturnAt: parseOptionalDate(req.body.estimatedReturnAt),
-    affectedLoadIds: activeLoads.map((load: any) => load._id),
-    attachments,
-    submittedAt: new Date(),
-    ...(initialStatus === "completed" ? { completedAt: new Date() } : {}),
-  });
-
-  if (!hasActiveLoads) {
-    await applyDriverOperationalStatus({
-      driverId,
-      organizationId,
-      status: requestedStatus,
-    });
-  }
-
-  await notifyDispatchers({
-    organizationId,
-    driverId,
-    driverName: user.name || "Driver",
-    requestId: request._id.toString(),
-    requestedStatus,
-    priority,
-    activeLoadCount: activeLoads.length,
-  });
-
-  const payload = {
-    requestId: request._id.toString(),
-    driverId,
-    requestedStatus,
-    priority,
-    status: request.status,
+    coordinated: true,
+    coordinatedOrganizationCount: requests.length,
+    coordinatedActiveLoadCount: activeLoads.length,
   };
-  emitToUser(driverId, "driver:status_request_updated", payload);
-  emitToOrg(organizationId, "driver:status_request_updated", payload);
+  emitToUser(driverId, "driver:status_request_updated", driverPayload);
+
+  const serialized = await serializeRequest(requests[0]);
+  await addCoordinationSummary(serialized, requests[0], { aggregateStatus: true });
+  serialized.coordinatedActiveLoadCount = activeLoads.length;
 
   return res.status(201).json(
     new ApiResponse(
       201,
-      await serializeRequest(request),
-      immediateSafetyRelease && hasActiveLoads
-        ? "Emergency request sent. Dispatch has been notified and new work is blocked immediately."
-        : request.status === "completed"
-          ? `Dispatch Status changed to ${statusLabel(requestedStatus)}`
-          : "Status change request submitted",
+      serialized,
+      immediateSafetyRelease
+        ? `Emergency request sent to ${requests.length} affected Dispatch team${requests.length === 1 ? "" : "s"}. New work is blocked immediately.`
+        : requests.length > 1
+          ? `Work Availability request sent to ${requests.length} affected Dispatch teams. New work is paused until the coordinated transition is resolved.`
+          : "Work Availability request submitted",
     ),
   );
 });
 
 const updateRequestDetails = asyncHandler(
-  async (req: Request, res: Response) => {
+  async (req: ExpressRequest, res: ExpressResponse) => {
     const user = getUser(req);
     assertDriver(user);
-    const organizationId = req.orgId as string;
 
-    const request = await DriverStatusChangeRequest.findOne({
+    const request: any = await DriverStatusChangeRequest.findOne({
       _id: req.params.requestId,
-      organizationId,
       driverId: user._id,
       status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
     });
-    if (!request) throw new ApiError(404, "Active status request not found");
+    if (!request) throw new ApiError(404, "Active Work Availability request not found");
 
+    const siblings: any[] = request.transitionGroupId
+      ? await DriverStatusChangeRequest.find({
+          driverId: user._id,
+          transitionGroupId: request.transitionGroupId,
+          status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
+        })
+      : [request];
+
+    let nextReason: any = undefined;
     if (req.body.reason) {
       const reason = String(req.body.reason);
       if (!DRIVER_STATUS_REQUEST_REASONS.includes(reason as any)) {
         throw new ApiError(400, "Invalid status request reason");
       }
-      request.reason = reason as any;
+      nextReason = reason;
     }
-    if (req.body.message !== undefined) {
-      request.message = String(req.body.message).trim().slice(0, 1500);
-    }
-    if (req.body.effectiveAt !== undefined) {
-      request.effectiveAt = parseOptionalDate(req.body.effectiveAt);
-    }
-    if (req.body.estimatedReturnAt !== undefined) {
-      request.estimatedReturnAt = parseOptionalDate(req.body.estimatedReturnAt);
-    }
+    const nextMessage =
+      req.body.message !== undefined
+        ? String(req.body.message).trim().slice(0, 1500)
+        : undefined;
+    const nextEffectiveAt =
+      req.body.effectiveAt !== undefined
+        ? parseOptionalDate(req.body.effectiveAt)
+        : undefined;
+    const nextEstimatedReturnAt =
+      req.body.estimatedReturnAt !== undefined
+        ? parseOptionalDate(req.body.estimatedReturnAt)
+        : undefined;
 
     const files = ((req.files || []) as Express.Multer.File[]).slice(0, 5);
-    if (files.length) {
-      const remainingSlots = Math.max(0, 5 - request.attachments.length);
-      if (remainingSlots === 0) {
-        throw new ApiError(400, "A status request can have up to 5 attachments");
-      }
-      const attachments = await uploadAttachments(
-        files.slice(0, remainingSlots),
-        organizationId,
-        user._id.toString(),
-      );
-      request.attachments.push(...(attachments as any));
+    const currentAttachmentCount = request.attachments?.length ?? 0;
+    const remainingSlots = Math.max(0, 5 - currentAttachmentCount);
+    if (files.length && remainingSlots === 0) {
+      throw new ApiError(400, "A Work Availability request can have up to 5 attachments");
     }
 
-    await request.save();
+    const newAttachments = files.length
+      ? await uploadAttachments(
+          files.slice(0, remainingSlots),
+          request.transitionGroupId
+            ? `shared-${request.transitionGroupId}`
+            : request.organizationId,
+          user._id.toString(),
+        )
+      : [];
 
-    const payload = {
+    for (const sibling of siblings) {
+      if (nextReason !== undefined) sibling.reason = nextReason;
+      if (nextMessage !== undefined) sibling.message = nextMessage;
+      if (req.body.effectiveAt !== undefined) sibling.effectiveAt = nextEffectiveAt;
+      if (req.body.estimatedReturnAt !== undefined) {
+        sibling.estimatedReturnAt = nextEstimatedReturnAt;
+      }
+      if (newAttachments.length) {
+        sibling.attachments.push(...(newAttachments as any));
+      }
+      await sibling.save();
+
+      emitToOrg(sibling.organizationId, "driver:status_request_updated", {
+        requestId: sibling._id.toString(),
+        transitionGroupId: sibling.transitionGroupId ?? null,
+        driverId: user._id.toString(),
+        status: sibling.status,
+        detailsUpdated: true,
+        coordinated: Boolean(sibling.transitionGroupId),
+      });
+    }
+
+    emitToUser(user._id.toString(), "driver:status_request_updated", {
       requestId: request._id.toString(),
+      transitionGroupId: request.transitionGroupId ?? null,
       driverId: user._id.toString(),
-      status: request.status,
+      status: coordinatedStatus(siblings),
       detailsUpdated: true,
-    };
-    emitToUser(user._id.toString(), "driver:status_request_updated", payload);
-    emitToOrg(organizationId, "driver:status_request_updated", payload);
+      coordinated: Boolean(request.transitionGroupId),
+    });
+
+    const serialized = await serializeRequest(siblings[0]);
+    await addCoordinationSummary(serialized, siblings[0], { aggregateStatus: true });
 
     return res.status(200).json(
-      new ApiResponse(
-        200,
-        await serializeRequest(request),
-        "Status request details updated",
-      ),
+      new ApiResponse(200, serialized, "Work Availability request details updated"),
     );
   },
 );
 
-const cancelRequest = asyncHandler(async (req: Request, res: Response) => {
+const cancelRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   assertDriver(user);
-  const organizationId = req.orgId as string;
 
-  const request = await DriverStatusChangeRequest.findOne({
+  const request: any = await DriverStatusChangeRequest.findOne({
     _id: req.params.requestId,
-    organizationId,
     driverId: user._id,
-    status: "pending",
-    priority: "standard",
   });
+  if (!request) throw new ApiError(404, "Work Availability request not found");
 
-  if (!request) {
+  const siblings: any[] = request.transitionGroupId
+    ? await DriverStatusChangeRequest.find({
+        driverId: user._id,
+        transitionGroupId: request.transitionGroupId,
+      })
+    : [request];
+
+  if (
+    siblings.some(
+      (row) => row.priority !== "standard" || row.status !== "pending",
+    )
+  ) {
     throw new ApiError(
       409,
-      "Only a pending standard status request can be cancelled directly. Contact Dispatch for an active emergency or approved transition.",
+      "A coordinated Work Availability request can be cancelled only while every affected Dispatch team is still pending review. Contact Dispatch after any team has acted.",
     );
   }
 
-  request.status = "cancelled";
-  request.cancelledAt = new Date();
-  await request.save();
+  const cancelledAt = new Date();
+  for (const sibling of siblings) {
+    sibling.status = "cancelled";
+    sibling.cancelledAt = cancelledAt;
+    await sibling.save();
+    emitToOrg(sibling.organizationId, "driver:status_request_updated", {
+      requestId: sibling._id.toString(),
+      transitionGroupId: sibling.transitionGroupId ?? null,
+      driverId: user._id.toString(),
+      status: "cancelled",
+      coordinated: Boolean(sibling.transitionGroupId),
+    });
+  }
 
-  const payload = {
+  emitToUser(user._id.toString(), "driver:status_request_updated", {
     requestId: request._id.toString(),
+    transitionGroupId: request.transitionGroupId ?? null,
     driverId: user._id.toString(),
-    status: request.status,
-  };
-  emitToUser(user._id.toString(), "driver:status_request_updated", payload);
-  emitToOrg(organizationId, "driver:status_request_updated", payload);
+    status: "cancelled",
+    coordinated: Boolean(request.transitionGroupId),
+  });
 
-  return res
-    .status(200)
-    .json(new ApiResponse(200, request, "Status request cancelled"));
+  const serialized = await serializeRequest(siblings[0]);
+  await addCoordinationSummary(serialized, siblings[0], { aggregateStatus: true });
+
+  return res.status(200).json(
+    new ApiResponse(200, serialized, "Work Availability request cancelled"),
+  );
 });
 
-const approveRequest = asyncHandler(async (req: Request, res: Response) => {
+const approveRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   assertStaff(user);
   const organizationId = req.orgId as string;
 
-  const request = await DriverStatusChangeRequest.findOne({
+  const request: any = await DriverStatusChangeRequest.findOne({
     _id: req.params.requestId,
     organizationId,
   });
-  if (!request) throw new ApiError(404, "Status change request not found");
+  if (!request) throw new ApiError(404, "Work Availability request not found");
   if (request.priority === "emergency") {
     throw new ApiError(
       409,
-      "Emergency release requests are active immediately and do not require approval. Clear or reassign the driver's active loads.",
+      "Emergency requests are active immediately and do not require normal approval. Clear or reassign this organization's active loads.",
     );
   }
   if (request.status !== "pending") {
     throw new ApiError(409, `This request is already ${request.status.replace(/_/g, " ")}`);
   }
 
-  const activeLoads = await Load.find({
+  const activeLoads: any[] = await Load.find({
     organizationId,
     assignedDriverId: request.driverId,
     status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
@@ -733,8 +920,6 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
     .lean();
   const activeLoadCount = activeLoads.length;
 
-  // Backward compatibility: older clients that do not send a load-handling
-  // choice keep the previous behavior (approve, then await reassignment).
   const rawLoadHandling = String(req.body?.loadHandling || "reassign");
   if (!DRIVER_STATUS_LOAD_HANDLING_OPTIONS.includes(rawLoadHandling as any)) {
     throw new ApiError(400, "Choose a valid load handling option");
@@ -752,35 +937,21 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
   request.retainedGpsRequired = retainedGpsRequired;
   request.loadHandlingResolvedAt = new Date();
 
-  // Persist the policy before applying the operational status. The GPS context
-  // may refresh immediately from the operational-status socket event, so the
-  // retained-load policy must already be queryable at that point.
-  request.status = "approved_awaiting_reassignment";
-  await request.save();
+  const coordinated = Boolean(request.transitionGroupId);
 
   if (activeLoadCount === 0) {
-    await applyDriverOperationalStatus({
-      driverId: request.driverId.toString(),
-      organizationId,
-      status: request.requestedStatus,
-    });
     request.status = "completed";
     request.completedAt = new Date();
     await request.save();
   } else if (loadHandling === "keep_assigned") {
-    // Keep the exact assignments intact and make the requested status effective
-    // immediately. Work eligibility is then blocked by On Leave / In Shop.
-    await applyDriverOperationalStatus({
-      driverId: request.driverId.toString(),
-      organizationId,
-      status: request.requestedStatus,
-    });
+    // This organization explicitly accepts keeping its own loads with the
+    // driver. The global Work Availability status still waits for all sibling
+    // organizations to resolve their parts.
     request.status = "completed";
     request.completedAt = new Date();
     await request.save();
   } else if (loadHandling === "return_available") {
     const loadIds = activeLoads.map((load: any) => load._id);
-
     await Load.updateMany(
       {
         _id: { $in: loadIds },
@@ -798,7 +969,7 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
       },
     );
 
-    for (const load of activeLoads as any[]) {
+    for (const load of activeLoads) {
       emitToOrg(organizationId, "load:change", {
         action: "updated",
         loadId: String(load._id),
@@ -808,25 +979,51 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
       });
     }
 
-    await applyDriverOperationalStatus({
-      driverId: request.driverId.toString(),
-      organizationId,
-      status: request.requestedStatus,
-    });
     request.status = "completed";
     request.completedAt = new Date();
     await request.save();
+  } else {
+    request.status = "approved_awaiting_reassignment";
+    await request.save();
   }
-  // "reassign" intentionally preserves the existing proven workflow:
-  // request remains approved_awaiting_reassignment and the current per-load
-  // reassignment controls move loads safely. The finalizer applies the status
-  // automatically once no active loads remain with this driver.
 
-  const decisionMessage =
+  if (coordinated) {
+    await finalizeDriverStatusTransitionGroup({
+      driverId: request.driverId.toString(),
+      transitionGroupId: request.transitionGroupId,
+      fallbackOrganizationId: organizationId,
+    });
+  } else {
+    // Preserve the legacy single-org behavior for older request rows.
+    if (
+      request.status === "completed" &&
+      (activeLoadCount === 0 ||
+        loadHandling === "keep_assigned" ||
+        loadHandling === "return_available")
+    ) {
+      await applyDriverOperationalStatus({
+        driverId: request.driverId.toString(),
+        organizationId,
+        status: request.requestedStatus,
+      });
+    }
+  }
+
+  const localDecision =
     activeLoadCount === 0
-      ? `Your request was approved. Your Dispatch Status is now ${statusLabel(request.requestedStatus)}.`
+      ? "This Dispatch team had no remaining active loads."
       : loadHandling === "keep_assigned"
-        ? `Your request for ${statusLabel(request.requestedStatus)} was approved. Dispatch kept your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} assigned to you. ${retainedGpsRequired ? "GPS is required while those retained loads remain active." : "GPS remains optional while you are in this Dispatch Status."}`
+        ? `This Dispatch team kept ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} assigned${retainedGpsRequired ? " with GPS required" : " with optional GPS"}.`
+        : loadHandling === "return_available"
+          ? `This Dispatch team returned ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} to Available.`
+          : `This Dispatch team approved the request and will reassign ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}.`;
+
+  const decisionMessage = coordinated
+    ? `${localDecision} Your global Work Availability will update after every affected Dispatch team resolves its own loads.`
+    : activeLoadCount === 0
+      ? `Your request was approved. Your Work Availability is now ${statusLabel(request.requestedStatus)}.`
+      : loadHandling === "keep_assigned"
+        ? `Your request for ${statusLabel(request.requestedStatus)} was approved. Dispatch kept your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} assigned to you.`
         : loadHandling === "return_available"
           ? `Your request for ${statusLabel(request.requestedStatus)} was approved. Dispatch returned your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} to Available.`
           : `Your request for ${statusLabel(request.requestedStatus)} was approved. Dispatch will reassign your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}; your requested status will take effect automatically after those loads are moved.`;
@@ -835,10 +1032,11 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
     userId: request.driverId.toString(),
     organizationId,
     type: "driver_status_request_approved",
-    title: "Status Change Approved",
+    title: coordinated ? "Dispatch Team Review Completed" : "Work Availability Approved",
     message: decisionMessage,
     metadata: {
       statusRequestId: request._id.toString(),
+      transitionGroupId: request.transitionGroupId ?? null,
       requestedStatus: request.requestedStatus,
       status: request.status,
       loadHandlingDecision: request.loadHandlingDecision,
@@ -847,6 +1045,7 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
           ? Boolean(request.retainedGpsRequired)
           : null,
       activeLoadCount,
+      coordinated,
       route: "/driver",
       pushSource: "Driver Tracker",
     },
@@ -857,11 +1056,12 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
     dispatcher: user,
     request,
     decision: "approved",
-    activeLoads: activeLoads as any[],
+    activeLoads,
   });
 
   const payload = {
     requestId: request._id.toString(),
+    transitionGroupId: request.transitionGroupId ?? null,
     driverId: request.driverId.toString(),
     requestedStatus: request.requestedStatus,
     status: request.status,
@@ -870,29 +1070,28 @@ const approveRequest = asyncHandler(async (req: Request, res: Response) => {
       request.loadHandlingDecision === "keep_assigned"
         ? Boolean(request.retainedGpsRequired)
         : null,
+    coordinated,
   };
   emitToUser(request.driverId.toString(), "driver:status_request_updated", payload);
   emitToOrg(organizationId, "driver:status_request_updated", payload);
 
-  const responseMessage =
-    activeLoadCount === 0
-      ? "Request approved and status updated"
-      : loadHandling === "keep_assigned"
-        ? `Request approved — loads kept assigned${retainedGpsRequired ? " with GPS required" : " with optional GPS"}`
-        : loadHandling === "return_available"
-          ? "Request approved — loads returned to Available"
-          : "Request approved — awaiting load reassignment";
+  const serialized = await serializeRequest(request);
+  await addCoordinationSummary(serialized, request);
 
   return res.status(200).json(
     new ApiResponse(
       200,
-      await serializeRequest(request),
-      responseMessage,
+      serialized,
+      coordinated
+        ? "This Dispatch team completed its part of the coordinated Work Availability request"
+        : request.status === "completed"
+          ? "Request approved and Work Availability updated"
+          : "Request approved — awaiting load reassignment",
     ),
   );
 });
 
-const rejectRequest = asyncHandler(async (req: Request, res: Response) => {
+const rejectRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   assertStaff(user);
   const organizationId = req.orgId as string;
@@ -902,15 +1101,15 @@ const rejectRequest = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "A rejection reason is required");
   }
 
-  const request = await DriverStatusChangeRequest.findOne({
+  const request: any = await DriverStatusChangeRequest.findOne({
     _id: req.params.requestId,
     organizationId,
   });
-  if (!request) throw new ApiError(404, "Status change request not found");
+  if (!request) throw new ApiError(404, "Work Availability request not found");
   if (request.priority === "emergency") {
     throw new ApiError(
       409,
-      "Emergency release requests cannot be rejected from the normal review flow. Coordinate with the driver and clear their active loads.",
+      "Emergency requests cannot be rejected from the normal review flow. Coordinate with the driver and clear this organization's active loads.",
     );
   }
   if (request.status !== "pending") {
@@ -923,16 +1122,44 @@ const rejectRequest = asyncHandler(async (req: Request, res: Response) => {
   request.decisionReason = reason.slice(0, 1000);
   await request.save();
 
+  // One affected organization declining a coordinated standard transition
+  // prevents the global driver status from changing. Cancel only still-open
+  // sibling rows; completed load moves are never silently reversed.
+  if (request.transitionGroupId) {
+    const openSiblings: any[] = await DriverStatusChangeRequest.find({
+      driverId: request.driverId,
+      transitionGroupId: request.transitionGroupId,
+      _id: { $ne: request._id },
+      status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
+    });
+    for (const sibling of openSiblings) {
+      sibling.status = "cancelled";
+      sibling.cancelledAt = new Date();
+      await sibling.save();
+      emitToOrg(sibling.organizationId, "driver:status_request_updated", {
+        requestId: sibling._id.toString(),
+        transitionGroupId: request.transitionGroupId,
+        driverId: request.driverId.toString(),
+        status: "cancelled",
+        coordinated: true,
+      });
+    }
+  }
+
   await notificationService.createNotification({
     userId: request.driverId.toString(),
     organizationId,
     type: "driver_status_request_rejected",
-    title: "Status Change Request Not Approved",
-    message: `Dispatch did not approve your ${statusLabel(request.requestedStatus)} request. Reason: ${request.decisionReason}`,
+    title: "Work Availability Request Not Approved",
+    message: request.transitionGroupId
+      ? `One affected Dispatch team did not approve your ${statusLabel(request.requestedStatus)} request. Your global Work Availability remains Active. Reason: ${request.decisionReason}`
+      : `Dispatch did not approve your ${statusLabel(request.requestedStatus)} request. Reason: ${request.decisionReason}`,
     metadata: {
       statusRequestId: request._id.toString(),
+      transitionGroupId: request.transitionGroupId ?? null,
       requestedStatus: request.requestedStatus,
       decisionReason: request.decisionReason,
+      coordinated: Boolean(request.transitionGroupId),
       route: "/driver",
       pushSource: "Driver Tracker",
     },
@@ -948,19 +1175,20 @@ const rejectRequest = asyncHandler(async (req: Request, res: Response) => {
 
   const payload = {
     requestId: request._id.toString(),
+    transitionGroupId: request.transitionGroupId ?? null,
     driverId: request.driverId.toString(),
     requestedStatus: request.requestedStatus,
     status: request.status,
+    coordinated: Boolean(request.transitionGroupId),
   };
   emitToUser(request.driverId.toString(), "driver:status_request_updated", payload);
   emitToOrg(organizationId, "driver:status_request_updated", payload);
 
+  const serialized = await serializeRequest(request);
+  await addCoordinationSummary(serialized, request);
+
   return res.status(200).json(
-    new ApiResponse(
-      200,
-      await serializeRequest(request),
-      "Status request rejected",
-    ),
+    new ApiResponse(200, serialized, "Work Availability request rejected"),
   );
 });
 

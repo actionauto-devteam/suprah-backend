@@ -57,6 +57,13 @@ export interface IDriverStatusRequestAttachment {
 export interface IDriverStatusChangeRequest extends Document {
   _id: mongoose.Types.ObjectId;
   organizationId: string;
+  /**
+   * Links the per-organization review rows that belong to one global driver
+   * Work Availability transition. Legacy single-org requests may omit it.
+   */
+  transitionGroupId?: string;
+  /** Set after the global DriverProfile operationalStatus was applied. */
+  globalStatusAppliedAt?: Date;
   driverId: mongoose.Types.ObjectId;
   requestedStatus: RequestedDriverOperationalStatus;
   priority: DriverStatusRequestPriority;
@@ -103,6 +110,11 @@ const driverStatusChangeRequestSchema =
         required: true,
         index: true,
       },
+      transitionGroupId: {
+        type: String,
+        index: true,
+      },
+      globalStatusAppliedAt: { type: Date },
       driverId: {
         type: Schema.Types.ObjectId,
         ref: "User",
@@ -172,6 +184,15 @@ driverStatusChangeRequestSchema.index({
   priority: 1,
   status: 1,
   createdAt: -1,
+});
+
+// Coordinated shared-driver transitions create one row per affected
+// organization. This non-unique index keeps group finalization/readback fast
+// without breaking legacy rows that do not have a transitionGroupId.
+driverStatusChangeRequestSchema.index({
+  driverId: 1,
+  transitionGroupId: 1,
+  createdAt: 1,
 });
 
 const DriverStatusChangeRequest: Model<IDriverStatusChangeRequest> =
