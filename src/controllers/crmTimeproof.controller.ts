@@ -30,31 +30,13 @@ import logger from '../utils/logger';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
 
 const BREAK_LIMIT_SECONDS = 3600;
-// The admin notification fires 5 minutes AFTER the official 1h limit, not the
-// instant it's crossed — gives the user a short grace window (matches the
-// tray's own user-facing warning at 1h01m, four minutes earlier) before
-// escalating to their admin/manager. Also matches the web widget's own
-// "Break over" red-state threshold (65 min), which already used this grace.
 const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 
 const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
 
-// Cap on stored push subscriptions per CRM user — see subscribeCrmPush for why.
 const MAX_PUSH_SUBSCRIPTIONS = 6;
 
 const COMPANY_TZ_OFFSET_MINUTES = -360;
-
-/**
- * Collapses duplicate User-model documents that share the same email —
- * a real, confirmed data issue (e.g. a "Cesar Pavon" account re-created at
- * some point, leaving an old ghost document with no presence/activity data
- * alongside the one actually being used) rather than something this query
- * can prevent. Without this, a duplicate silently shows up as a second,
- * always-offline row for the same person and can even win the "which one is
- * canonical" toss-up in list ordering. Keeps whichever document has the more
- * recent lastActive (falling back to updatedAt) — the one that's actually
- * being used right now.
- */
 function dedupeUsersByEmail<T extends { email?: string; lastActive?: Date; updatedAt?: Date }>(users: T[]): T[] {
   const byEmail = new Map<string, T>();
   const noEmail: T[] = [];
@@ -69,11 +51,6 @@ function dedupeUsersByEmail<T extends { email?: string; lastActive?: Date; updat
   return [...byEmail.values(), ...noEmail];
 }
 
-// Shared by getAdminDayLogs/adminTimeOverride/correctTimeLog — mirrors getUserTimeproof's
-// CrmUser-then-User fallback (see its comment) so these admin tools don't 404 for a Lot Tech
-// (or any other User-model, general-timeclock) employee. organizationId is unreliable on User
-// docs, so the User-side lookup isn't gated on it — _id alone is enough since it's only
-// reachable via an already org-scoped admin page.
 type ResolvedTargetUser = {
   _id: any;
   fullName: string;
@@ -108,15 +85,6 @@ async function resolveTargetUserAnyModel(userId: string, requestorOrgId: string 
 
 const MIN_ACTIVITY_COVERAGE = 0.65;
 
-// How long after the last heartbeat to keep trusting the tray's currentIntervalStartAt.
-// Tray heartbeats every 60s with no retry on failure (silent best-effort post),
-// so ordinary blips — brief network loss, laptop sleep/wake, a throttled
-// background tab — can easily produce a 2-10 min gap between heartbeats even
-// though the user never stopped working. A 5 min threshold was flipping the
-// web timer to "stale" during these normal gaps, which (see getShiftState)
-// freezes the timer and shows a false "Paused"/"Resume Shift" state. 15 min
-// gives enough margin to absorb that jitter while still catching a tray that
-// is genuinely offline (laptop closed, app crashed, etc).
 const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -158,21 +126,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     activityByDate[i.shiftDate] = (activityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
   }
 
-  // Calendar totals (today and every past day) are trusted as-is from
-  // buildCalendarMap — pure wall-clock (TimeLog time-in/time-out, minus
-  // breaks), already capped against a forgotten-clock-out inflating a live
-  // session (MAX_LIVE_MS), and already corrected for genuinely-stale opens by
-  // the auto-clockout schedulers, which close at last-known-activity or the
-  // MDT day boundary rather than "now". This used to be "verified" against a
-  // heartbeat/ActivityInterval-derived figure and silently overridden
-  // downward whenever that figure covered 65-99% of the wall-clock total —
-  // but that figure is exactly the fragile mechanism (missed checkpoints,
-  // idle-detection flaps, stale heartbeats) this session's other fixes
-  // address, so the "verification" was actively corrupting correct, already-
-  // closed days after the fact (e.g. a user's Thursday total quietly dropping
-  // from 12h to 8h once Thursday was no longer "today"). Removed entirely —
-  // wall-clock is the authoritative source everywhere now, matching the Time
-  // Clock / tray-app live ticker.
 
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
@@ -187,8 +140,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     }
   }
 
-  // Apply self-deleted-screenshot deductions — must run after every other
-  // total-seconds adjustment above so it's the final word on each day's total.
   const deductions = await ScreenshotDeduction.find({
     userId: user._id,
     date: { $in: Object.keys(calendar) },
@@ -199,10 +150,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     }
   }
 
-  // Re-run now that every correction above has finished mutating totalSeconds —
-  // buildCalendarMap already cached weekTotalSeconds once, on the RAW totals,
-  // so the Saturday week-total badge would otherwise go stale relative to the
-  // corrected daily numbers this same response returns.
   attachWeekTotals(calendar);
 
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
@@ -231,13 +178,6 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
   );
 });
 
-/**
- * GET /api/crm/timeproof/idle-log?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
- * Read-only report of when the authenticated user went idle (tray-detected
- * inactivity), derived from the gaps between committed ActivityIntervals
- * within each clocked-in session. Days the tray never ran are skipped
- * entirely (no data), not reported as "idle the whole day".
- */
 export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { startDate: startDateStr, endDate: endDateStr } = req.query;
@@ -264,18 +204,12 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  // Web Dev is exempt from idle detection — never surface an idle period for
-  // them, regardless of what caused any ActivityInterval gap (sleep, crash, etc).
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
   const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
-/**
- * GET /api/crm/timeproof/users
- * Admin/Manager: leaderboard-style summary for all active users.
- */
 export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
@@ -307,26 +241,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   } catch {
   }
 
-  // Employees who only have a main-site User account (no CrmUser record at
-  // all — e.g. Lot Tech and anyone else clocking in via the general
-  // timeclock, see generalTimeclock.controller.ts) were invisible on this
-  // page entirely, regardless of department filter: this endpoint only ever
-  // queried CrmUser. Merge in User-model employees too — exclude non-staff
-  // roles (customer/driver) but do NOT skip by email overlap with crmUsers:
-  // a CrmUser record existing for the same email doesn't mean it's the one
-  // actually used (Lot Tech in particular may have a dormant CrmUser record
-  // from HR/record-keeping with zero real TimeLog activity, while their
-  // actual clock-ins are on the User account) — excluding by email hid the
-  // one with the real rendered hours in favor of the one showing nothing.
-  // Both are computed below; the dedup step after results are built picks
-  // whichever one shows real activity this month.
-  // organizationId is optional on both User and CrmUser (see their schemas)
-  // and unreliably populated on User specifically — a strict equality match
-  // silently excluded every User-model account whose field was never set,
-  // which in practice was most/all of them. Match the established
-  // call.controller.ts convention: don't gate the User query on
-  // organizationId at all (CrmUser's isActive/organizationId filter above is
-  // the real tenant boundary in this single-org-in-practice setup).
   const mainOnlyUsersRaw = await User.find({
     role: { $in: ['employee', 'admin', 'super_admin'] },
   }).select('fullName name email avatar role personalInfo lastActive updatedAt').lean();
@@ -400,11 +314,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
       const { streak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
-      // Chronological walk over the FULL fetched range (from monthStart), not
-      // just today's window — a shift that started yesterday (forgotten
-      // clock-out carried into today) has no time-in log inside today's
-      // window at all, so a today-only count would always read "not on
-      // shift" even while the user is actively working right now.
       let isOnShift = false;
       let shiftStartedAt: string | null = null;
       for (const log of logs) {
@@ -412,10 +321,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
         else if (log.type === 'time-out') { isOnShift = false; shiftStartedAt = null; }
       }
 
-      // Today's totals come from the same calendar the employee's own page
-      // uses (already midnight-split, break-netted, and deduction-applied
-      // above), so a multi-day-old shift is at least reported consistently
-      // everywhere rather than recomputed a second, different way here.
       const totalBreakSeconds = calendar[todayStr]?.breakSeconds ?? 0;
       const todayTotalWorkedSeconds = (calendar[todayStr]?.totalSeconds ?? 0) + totalBreakSeconds;
       const today = formatHours(calendar[todayStr]?.totalSeconds ?? 0);
@@ -443,13 +348,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     })
   );
 
-  // A CrmUser and a User document can legitimately share the same email —
-  // separate collections, separate unique-email constraints — when the same
-  // person has both (e.g. a dormant CrmUser record with zero real activity
-  // alongside the User account they actually clock in with). Whichever one
-  // actually has this month's hours wins the display slot, so the person
-  // isn't listed twice with one row showing real numbers and a ghost row
-  // showing zero.
   const byEmail = new Map<string, (typeof results)[number]>();
   const noEmail: typeof results = [];
   for (const r of results) {
@@ -457,8 +355,6 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     const key = r.email.toLowerCase();
     const existing = byEmail.get(key);
     if (!existing) { byEmail.set(key, r); continue; }
-    // payrollLocation only ever lives on the CrmUser-sourced record — whichever
-    // record wins on hours, don't let it drop the classification the loser had.
     const payrollLocation = r.user.payrollLocation ?? existing.user.payrollLocation;
     const winner = r.thisMonth.totalSeconds > existing.thisMonth.totalSeconds ? r : existing;
     byEmail.set(key, { ...winner, user: { ...winner.user, payrollLocation } });
@@ -479,9 +375,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const { userId } = req.params;
   const { range = '90' } = req.query;
 
-  // The list this detail page is opened from (getAllUsersTimeproof) now
-  // includes main-site User-model employees too (e.g. Lot Tech) — fall back
-  // to the User collection so clicking into one of them doesn't 404.
   let targetPerson: { _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string; accountModel: 'CrmUser' | 'User'; hourlyRate?: number | null } | null = null;
   const crmTargetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password').lean();
   if (crmTargetUser) {
@@ -496,9 +389,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       hourlyRate: crmTargetUser.hourlyRate ?? null,
     };
   } else {
-    // Same organizationId unreliability as getAllUsersTimeproof — don't gate
-    // the lookup on it, the _id itself (only reachable via the already
-    // org-scoped list this page opened from) is enough.
     const mainTargetUser = await User.findOne({ _id: userId }).lean();
     if (mainTargetUser) {
       targetPerson = {
@@ -536,12 +426,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     userActivityByDate[i.shiftDate] = (userActivityByDate[i.shiftDate] ?? 0) + i.durationSeconds;
   }
 
-  // See getMyTimeproof for the full explanation — calendar totals (today and
-  // every past day) are trusted as-is from buildCalendarMap now. The
-  // heartbeat-derived "verification" that used to run here was silently
-  // corrupting already-closed days after the fact, since it trusted exactly
-  // the fragile mechanism (missed checkpoints, idle-detection flaps, stale
-  // heartbeats) this session's other fixes address. Removed entirely.
 
   for (const dateStr of Object.keys(calendar)) {
     if (dateStr === todayStr) continue;
@@ -557,7 +441,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   }
 
   // Apply self-deleted-screenshot deductions — must run after every other
-  // total-seconds adjustment above so it's the final word on each day's total.
   const userDeductions = await ScreenshotDeduction.find({
     userId,
     date: { $in: Object.keys(calendar) },
@@ -1966,9 +1849,6 @@ export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) 
   res.json(new ApiResponse(200, { lock }, `Unlocked ${targetUser.fullName}'s period for correction`));
 });
 
-// De-minimis cutoff for leftover minutes past a full hour — Erik wants exact-minute
-// payout, but truly negligible remainders (his "butal" example) shouldn't count.
-// 0 = no cutoff (pay every exact minute) until he gives a specific number.
 const PAYROLL_DE_MINIMIS_SECONDS = 0;
 
 function computeExactPayout(totalSeconds: number, hourlyRate: number): number {
@@ -1978,13 +1858,6 @@ function computeExactPayout(totalSeconds: number, hourlyRate: number): number {
   return (payableSeconds / 3600) * hourlyRate;
 }
 
-/**
- * GET /api/crm/timeproof/payroll-status?year=&month=&periodNumber=
- * Dedicated list (separate from the real-time Live Shift Board) of every
- * user's hours/rate/payout and paid/locked status for one pay period, so an
- * admin can track who's been paid without it getting mixed up with
- * moment-to-moment shift/idle/break presence.
- */
 export const getPayrollStatus = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {

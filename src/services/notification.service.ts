@@ -14,12 +14,6 @@ interface CreateNotificationParams {
   title: string;
   message: string;
   metadata?: any;
-  // Repeat-event compiling: when set, a new call within groupWindowMinutes of
-  // the last occurrence sharing the same {userId, dedupeKey} updates that
-  // existing notification (occurrenceCount++, re-surfaced as unread) instead
-  // of creating a new row. Always scope dedupeKey by the event's *subject*
-  // (e.g. `agent-idle:${adminId}:${agentUserId}`), never just recipient+type,
-  // so unrelated people's events never merge together.
   dedupeKey?: string;
   groupWindowMinutes?: number;
 }
@@ -65,11 +59,6 @@ const VALID_NOTIFICATION_TYPES = [
   'customer_call_requested',
 ] as const;
 
-// Single source of truth for both (a) the `category` stored on the Notification
-// doc (used for UI grouping/filter chips) and (b) the preference gate key looked
-// up on the recipient's `notificationPreferences` — every type maps to exactly
-// one category, so the two can never drift apart the way the old parallel
-// VALID_NOTIFICATION_TYPES/schema-enum lists did.
 const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   quote_created: 'transportation', quote_updated: 'transportation', quote_deleted: 'transportation',
   quote_converted: 'transportation', quote_accepted: 'transportation',
@@ -127,19 +116,11 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   admin_security_audit: 'adminSecurityAudit',
   dealership_inquiry: 'adminSystemAlerts',
 
-  // Admin-only staff-monitoring alerts — every recipient is always an
-  // admin/manager watching another agent's activity (see
-  // crmTimeproof.controller.ts), never the agent themselves. Previously
-  // mapped to 'crm', which meant the "Staff Activity" admin toggle had no
-  // effect on them at all (reported by Erik: turning off Staff Activity
-  // didn't stop Agent Idle alerts) — they belong here instead.
   agent_idle: 'adminStaffActivity',
   agent_idle_escalation: 'adminStaffActivity',
   agent_screen_recording_missing: 'adminStaffActivity',
 };
 
-// These always deliver (in-app + push) regardless of preference toggles.
-// Security events and dispatcher safety alerts must not be silently dropped.
 const SECURITY_CRITICAL_TYPES = new Set([
   'password_changed',
   'login_alert',
@@ -147,10 +128,6 @@ const SECURITY_CRITICAL_TYPES = new Set([
   'driver_emergency_request',
 ]);
 
-// Short human label per category, prefixed onto the OS push notification's
-// title (see utils/pushPayload.ts's normalizePushPayload) so the device-level
-// popup itself indicates which part of the system it's from, not just the
-// in-app inbox.
 const CATEGORY_PUSH_LABELS: Record<NotificationCategory, string> = {
   transportation: 'Transportation', inventory: 'Inventory', appointments: 'Appointments',
   crm: 'CRM', feeds: 'Feeds', projectManagement: 'Project Mgmt', calendar: 'Calendar',
@@ -159,10 +136,6 @@ const CATEGORY_PUSH_LABELS: Record<NotificationCategory, string> = {
   adminStaffActivity: 'Admin', adminSecurityAudit: 'Admin',
 };
 
-// Project Management notification navigation is intentionally normalized here
-// because this service also owns the URL embedded in web/PWA push payloads.
-// Preserve any future/custom PM route, but repair obsolete Project Management
-// aliases and provide a task deep link when taskId is available.
 const PROJECT_MANAGEMENT_NOTIFICATION_TYPES = new Set([
   'pm_task_assigned',
   'pm_task_comment',
@@ -218,8 +191,6 @@ function resolveMetadataRoute(type: string, metadata?: any): string | undefined 
   const parsedRoute = normalizedRoute ? parseInternalRoute(normalizedRoute) : null;
   const routePathname = parsedRoute?.pathname ?? '';
 
-  // Normalize legacy PM aliases even when they carry query params such as
-  // `/projects?task=...`. Comparing the full route string would miss them.
   if (!normalizedRoute || LEGACY_PROJECT_MANAGEMENT_PATHS.has(routePathname)) {
     return getProjectManagementTargetUrl(metadata);
   }
@@ -250,9 +221,6 @@ const createNotification = async (params: CreateNotificationParams) => {
     const prefs = (user as any).notificationPreferences as any;
     const isEnabled = prefs[category];
     if (isEnabled === false) return null;
-    // Finer-grained mute on top of the category toggle — e.g. `crm` stays
-    // enabled overall but this specific type (SupraSpace messages, etc.) has
-    // been individually silenced.
     if (Array.isArray(prefs.mutedTypes) && prefs.mutedTypes.includes(type)) return null;
   }
 
@@ -379,21 +347,8 @@ const createNotification = async (params: CreateNotificationParams) => {
       title: notification.title,
       body: notification.message,
       tag: dedupeKey || category,
-      // Only set when dedupeKey is present — collapses repeat pushes for the
-      // SAME subject at the push-service level (fixes the "machine gunned
-      // with notifications" burst-on-reconnect problem), never for the bare
-      // category fallback, which would risk silently dropping genuinely
-      // unrelated notifications that just happen to share a category.
       topic: dedupeKey,
-      // metadata.pushSource lets a caller override the category-derived label
-      // when it knows a more precise one (e.g. an @mention is technically
-      // `crm`-categorized but is more usefully labeled "SupraSpace").
       source: metadata?.pushSource || CATEGORY_PUSH_LABELS[category],
-      // conversationId/messageId (present on SupraSpace @mentions — see
-      // notifyMentionedMembers' metadata) let sw.ts's notificationclick
-      // handler resolve the correct path itself at click time, same as a
-      // regular SupraSpace message push — without these, a mention notification
-      // could only ever fall back to the generic targetUrl above.
       data: { url: targetUrl, notificationId: notification._id, conversationId: metadata?.conversationId, messageId: metadata?.messageId },
     };
 
@@ -413,17 +368,11 @@ const createNotification = async (params: CreateNotificationParams) => {
       pushPayload.data.alertId = notification._id.toString();
     }
 
-    // Lets a caller (e.g. Shift Alerts) request its own distinct notification
-    // sound via metadata rather than every push sharing one generic tone.
     if (metadata?.playSound) {
       pushPayload.data.playSound = true;
       if (metadata.soundFile) pushPayload.data.soundFile = metadata.soundFile;
     }
 
-    // 'crm_message' is SupraSpace's own type (an @mention — see
-    // notifyMentionedMembers in supraspace.controller.ts) — the one
-    // notification type from this generic pipeline that the dedicated
-    // SupraSpace app subscription should actually receive.
     UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message').catch(err =>
       logger.error(err, `[UnifiedPushService] Failed to send push for user ${userId}`)
     );
@@ -446,9 +395,6 @@ const createNotificationBatch = async (notifications: CreateNotificationParams[]
 const getUserNotifications = async (
   userId: string,
   orgId: string,
-  // types: e.g. SupraSpace's own Notifications tab passes ['crm_message'] so
-  // it only ever shows chat messages/mentions, never gets crowded out by
-  // unrelated types (shift alerts, leads, etc.) sharing the same limit.
   options: { limit?: number; skip?: number; isRead?: boolean; userRole?: string; types?: string[] } = {}
 ) => {
   const { limit = 50, skip = 0, isRead, userRole, types } = options;
