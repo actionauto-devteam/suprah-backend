@@ -1,5 +1,5 @@
-import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import Quote from '../models/Quote.model';
 import Load from '../models/Load.model';
@@ -20,12 +20,80 @@ import {
     calculateRate,
     calculateETA
 } from '../utils/calculations';
+import { createLoadSchema } from '../validations/load.validation';
 
 const QUOTE_CACHE_TTL = 60 * 5;
+
+const escapeRegex = (value: string) =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const normalizeSearchQuery = (value: unknown): string => {
+    if (typeof value !== "string") return "";
+    return value.trim().slice(0, 120);
+};
 
 const getUserId = (req: Request): string | undefined => {
     return (req.user as IUser)?._id?.toString();
 };
+
+type QuoteLocationInput = Partial<{
+    name: string;
+    streetAddress: string;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+}>;
+
+const ZIP_RE = /^\d{5}(-\d{4})?$/;
+
+function normalizeStructuredQuoteLocation(
+    raw: QuoteLocationInput | undefined,
+    label: 'Origin' | 'Destination',
+) {
+    if (!raw) return undefined;
+
+    const city = String(raw.city || '').trim();
+    const state = String(raw.state || '').trim().toUpperCase();
+    const zip = String(raw.zip || '').trim();
+
+    if (!city) {
+        throw new ApiError(400, `${label} city is required`);
+    }
+    if (!state) {
+        throw new ApiError(400, `${label} state is required`);
+    }
+    if (!/^[A-Z]{2}$/.test(state)) {
+        throw new ApiError(400, `${label} state must use a 2-letter code`);
+    }
+    if (!ZIP_RE.test(zip)) {
+        throw new ApiError(400, `${label} ZIP code must be 5 digits`);
+    }
+
+    return {
+        name: String(raw.name || '').trim(),
+        streetAddress: String(raw.streetAddress || '').trim(),
+        city,
+        state,
+        zip,
+        country: String(raw.country || 'US').trim().toUpperCase(),
+    };
+}
+
+function formatLegacyQuoteAddress(
+    location: {
+        streetAddress?: string;
+        city: string;
+        state: string;
+    },
+) {
+    return [
+        String(location.streetAddress || '').trim(),
+        [location.city, location.state].filter(Boolean).join(', '),
+    ]
+        .filter(Boolean)
+        .join(', ');
+}
 
 const createQuote = asyncHandler(async (req: Request, res: Response) => {
     const userId = getUserId(req);
@@ -48,6 +116,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         toZip,
         fromAddress,
         toAddress,
+        fromLocation,
+        toLocation,
         units = 1,
         enclosedTrailer = false,
         vehicleInoperable = false
@@ -58,12 +128,40 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Customer information is required');
     }
 
-    if (!fromZip || !toZip || !fromAddress || !toAddress) {
-        throw new ApiError(400, 'Shipping addresses are required');
+    const normalizedFromLocation = normalizeStructuredQuoteLocation(
+        fromLocation as QuoteLocationInput | undefined,
+        'Origin',
+    );
+    const normalizedToLocation = normalizeStructuredQuoteLocation(
+        toLocation as QuoteLocationInput | undefined,
+        'Destination',
+    );
+
+    const resolvedFromZip =
+        normalizedFromLocation?.zip || String(fromZip || '').trim();
+    const resolvedToZip =
+        normalizedToLocation?.zip || String(toZip || '').trim();
+
+    const resolvedFromAddress = normalizedFromLocation
+        ? formatLegacyQuoteAddress(normalizedFromLocation)
+        : String(fromAddress || '').trim();
+
+    const resolvedToAddress = normalizedToLocation
+        ? formatLegacyQuoteAddress(normalizedToLocation)
+        : String(toAddress || '').trim();
+
+    // Legacy clients are still supported. New clients send structured
+    // locations, where Street is optional but City/State/ZIP are required.
+    if (
+        !resolvedFromZip ||
+        !resolvedToZip ||
+        !resolvedFromAddress ||
+        !resolvedToAddress
+    ) {
+        throw new ApiError(400, 'Shipping route information is required');
     }
 
-    const zipRegex = /^\d{5}(-\d{4})?$/;
-    if (!zipRegex.test(fromZip) || !zipRegex.test(toZip)) {
+    if (!ZIP_RE.test(resolvedFromZip) || !ZIP_RE.test(resolvedToZip)) {
         throw new ApiError(400, 'Invalid ZIP code format');
     }
 
@@ -141,12 +239,12 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
-    const fromCoords = await getCoordinatesFromZip(fromZip);
+    const fromCoords = await getCoordinatesFromZip(resolvedFromZip);
     if (!fromCoords) {
         throw new ApiError(400, 'Invalid origin ZIP code');
     }
 
-    const toCoords = await getCoordinatesFromZip(toZip);
+    const toCoords = await getCoordinatesFromZip(resolvedToZip);
     if (!toCoords) {
         throw new ApiError(400, 'Invalid destination ZIP code');
     }
@@ -166,10 +264,16 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         email,
         phone,
         ...vehicleData,
-        fromZip,
-        toZip,
-        fromAddress,
-        toAddress,
+        fromZip: resolvedFromZip,
+        toZip: resolvedToZip,
+        fromAddress: resolvedFromAddress,
+        toAddress: resolvedToAddress,
+        ...(normalizedFromLocation && {
+            fromLocation: normalizedFromLocation,
+        }),
+        ...(normalizedToLocation && {
+            toLocation: normalizedToLocation,
+        }),
         units,
         enclosedTrailer,
         vehicleInoperable,
@@ -257,17 +361,19 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     if (status && status !== 'all') {
         filter.status = status;
     }
-    if (search) {
+    const safeSearch = normalizeSearchQuery(search);
+    if (safeSearch) {
+        const escapedSearch = escapeRegex(safeSearch);
         filter.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { vin: { $regex: search, $options: 'i' } },
-            { stockNumber: { $regex: search, $options: 'i' } },
+            { firstName: { $regex: escapedSearch, $options: 'i' } },
+            { lastName: { $regex: escapedSearch, $options: 'i' } },
+            { email: { $regex: escapedSearch, $options: 'i' } },
+            { vin: { $regex: escapedSearch, $options: 'i' } },
+            { stockNumber: { $regex: escapedSearch, $options: 'i' } },
         ];
     }
 
-    const isCacheable = !search;
+    const isCacheable = !safeSearch;
     const cacheKey = `quotes:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {
@@ -343,6 +449,8 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         toZip,
         fromAddress,
         toAddress,
+        fromLocation,
+        toLocation,
         units,
         enclosedTrailer,
         vehicleInoperable,
@@ -357,6 +465,21 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     } = req.body;
 
     const updateData: any = {};
+    const normalizedFromLocation =
+        fromLocation !== undefined
+            ? normalizeStructuredQuoteLocation(
+                  fromLocation as QuoteLocationInput,
+                  'Origin',
+              )
+            : undefined;
+
+    const normalizedToLocation =
+        toLocation !== undefined
+            ? normalizeStructuredQuoteLocation(
+                  toLocation as QuoteLocationInput,
+                  'Destination',
+              )
+            : undefined;
 
     if (firstName !== undefined) updateData.firstName = firstName;
     if (lastName !== undefined) updateData.lastName = lastName;
@@ -366,10 +489,37 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (vin !== undefined) updateData.vin = vin;
     if (stockNumber !== undefined) updateData.stockNumber = stockNumber;
     if (vehicleLocation !== undefined) updateData.vehicleLocation = vehicleLocation;
-    if (fromZip !== undefined) updateData.fromZip = fromZip;
-    if (toZip !== undefined) updateData.toZip = toZip;
-    if (fromAddress !== undefined) updateData.fromAddress = fromAddress;
-    if (toAddress !== undefined) updateData.toAddress = toAddress;
+    if (normalizedFromLocation) {
+        updateData.fromLocation = normalizedFromLocation;
+        updateData.fromZip = normalizedFromLocation.zip;
+        updateData.fromAddress = formatLegacyQuoteAddress(
+            normalizedFromLocation,
+        );
+    } else {
+        if (fromZip !== undefined) updateData.fromZip = fromZip;
+        if (fromAddress !== undefined) updateData.fromAddress = fromAddress;
+
+        // A legacy route edit cannot safely keep an older structured object,
+        // so null it and let conversion fall back to the updated legacy fields.
+        if (fromZip !== undefined || fromAddress !== undefined) {
+            updateData.fromLocation = null;
+        }
+    }
+
+    if (normalizedToLocation) {
+        updateData.toLocation = normalizedToLocation;
+        updateData.toZip = normalizedToLocation.zip;
+        updateData.toAddress = formatLegacyQuoteAddress(
+            normalizedToLocation,
+        );
+    } else {
+        if (toZip !== undefined) updateData.toZip = toZip;
+        if (toAddress !== undefined) updateData.toAddress = toAddress;
+
+        if (toZip !== undefined || toAddress !== undefined) {
+            updateData.toLocation = null;
+        }
+    }
     if (units !== undefined) updateData.units = units;
     if (enclosedTrailer !== undefined) updateData.enclosedTrailer = enclosedTrailer;
     if (vehicleInoperable !== undefined) updateData.vehicleInoperable = vehicleInoperable;
@@ -385,14 +535,21 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         updateData.status = status;
     }
 
-    if ((fromZip && toZip) || (updateData.fromZip && updateData.toZip)) {
+    if (
+        fromZip !== undefined ||
+        toZip !== undefined ||
+        normalizedFromLocation ||
+        normalizedToLocation
+    ) {
         const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
         if (!quote) {
             throw new ApiError(404, 'Quote not found');
         }
 
-        const finalFromZip = fromZip || quote.fromZip;
-        const finalToZip = toZip || quote.toZip;
+        const finalFromZip =
+            updateData.fromZip || fromZip || quote.fromZip;
+        const finalToZip =
+            updateData.toZip || toZip || quote.toZip;
         const finalUnits = units !== undefined ? units : quote.units;
         const finalEnclosed = enclosedTrailer !== undefined ? enclosedTrailer : quote.enclosedTrailer;
         const finalInoperable = vehicleInoperable !== undefined ? vehicleInoperable : quote.vehicleInoperable;
@@ -761,41 +918,192 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         );
     }
 
-    // Parse city/state from address strings such as:
-    // "Salt Lake City, UT 84101"
-    const parseAddress = (address: string, zip: string) => {
-        const normalizedAddress = (address || '').trim();
-        const normalizedZip = (zip || '').trim();
-        const parts = normalizedAddress
+    /*
+     * Quotes intentionally keep route entry lightweight and flexible.
+     * Load records, however, need a structured location for dispatch,
+     * driver routing, editing, and reporting.
+     *
+     * The frontend may therefore send optional structured route details:
+     *   {
+     *     pickupLocation: { address, city, state, zip },
+     *     deliveryLocation: { address, city, state, zip }
+     *   }
+     *
+     * If those overrides are absent, make a best-effort inference from the
+     * quote's free-form address. Missing structure is left empty and the SAME
+     * createLoadSchema used by normal Load creation remains the authority.
+     */
+    const US_STATE_CODES = new Set<string>(["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"]);
+
+    type ConversionLocationOverride = Partial<{
+        name: string;
+        address: string;
+        city: string;
+        state: string;
+        zip: string;
+        country: string;
+    }>;
+
+    const inferQuoteLocation = (
+        address: string,
+        zip: string,
+    ) => {
+        const normalizedAddress = String(address || '').trim();
+        const normalizedZip = String(zip || '').trim();
+
+        const inferred = {
+            name: '',
+            address: normalizedAddress,
+            city: '',
+            state: '',
+            zip: normalizedZip,
+            country: 'US',
+        };
+
+        if (!normalizedAddress) return inferred;
+
+        const withoutTrailingZip = normalizedAddress
+            .replace(/\s+\d{5}(?:-\d{4})?\s*$/, '')
+            .trim();
+
+        const stateMatch = withoutTrailingZip.match(
+            /(,\s*|\s)([A-Za-z]{2})\s*$/
+        );
+
+        // Loose quote text such as "123 MABIN ST" is valid. Do not confuse a
+        // street suffix with a state code or invent a city/state.
+        if (!stateMatch || stateMatch.index == null) return inferred;
+
+        const stateCandidate = stateMatch[2].toUpperCase();
+        if (!US_STATE_CODES.has(stateCandidate)) return inferred;
+
+        const beforeState = withoutTrailingZip
+            .slice(0, stateMatch.index)
+            .replace(/,\s*$/, '')
+            .trim();
+
+        // "Orem UT" can be inferred, but "123 Main CT" should not be treated
+        // as City=123 Main / State=CT just because CT is a valid state code.
+        const delimiter = stateMatch[1];
+        if (!delimiter.includes(',') && /\d/.test(beforeState)) {
+            return inferred;
+        }
+
+        inferred.state = stateCandidate;
+
+        if (!beforeState) return inferred;
+
+        const commaParts = beforeState
             .split(',')
             .map((part) => part.trim())
             .filter(Boolean);
 
-        const city = parts[0] || normalizedAddress || 'Unknown';
-        const stateAndZip = parts[1] || '';
+        let city = commaParts[commaParts.length - 1] || '';
 
-        const stateMatch = stateAndZip.match(/\b([A-Za-z]{2})\b/);
-        const state = stateMatch?.[1]?.toUpperCase() || 'XX';
+        if (commaParts.length === 1 && city.includes(' - ')) {
+            const dashParts = city
+                .split(/\s+-\s+/)
+                .map((part) => part.trim())
+                .filter(Boolean);
+
+            if (dashParts.length >= 2) {
+                city = dashParts[dashParts.length - 1];
+                inferred.name = dashParts.slice(0, -1).join(' - ');
+            }
+        }
+
+        inferred.city = city;
+        return inferred;
+    };
+
+    const mergeConversionLocation = (
+        quoteAddress: string,
+        quoteZip: string,
+        storedLocation:
+            | {
+                  name?: string;
+                  streetAddress?: string;
+                  city?: string;
+                  state?: string;
+                  zip?: string;
+                  country?: string;
+              }
+            | null
+            | undefined,
+        override?: ConversionLocationOverride,
+    ) => {
+        const inferred = inferQuoteLocation(quoteAddress, quoteZip);
 
         return {
-            city,
-            state,
-            zip: normalizedZip,
-            country: 'US',
+            name: String(
+                override?.name ??
+                    storedLocation?.name ??
+                    inferred.name ??
+                    ''
+            ).trim(),
+            address: String(
+                override?.address ??
+                    storedLocation?.streetAddress ??
+                    inferred.address ??
+                    ''
+            ).trim(),
+            city: String(
+                override?.city ??
+                    storedLocation?.city ??
+                    inferred.city ??
+                    ''
+            ).trim(),
+            state: String(
+                override?.state ??
+                    storedLocation?.state ??
+                    inferred.state ??
+                    ''
+            ).trim().toUpperCase(),
+            zip: String(
+                override?.zip ??
+                    storedLocation?.zip ??
+                    inferred.zip ??
+                    ''
+            ).trim(),
+            country: String(
+                override?.country ??
+                    storedLocation?.country ??
+                    inferred.country ??
+                    'US'
+            ).trim().toUpperCase(),
         };
     };
 
-    const pickupLocation = parseAddress(
+    const requestedPickup =
+        (req.body?.pickupLocation ?? undefined) as
+            | ConversionLocationOverride
+            | undefined;
+
+    const requestedDelivery =
+        (req.body?.deliveryLocation ?? undefined) as
+            | ConversionLocationOverride
+            | undefined;
+
+    const pickupLocation = mergeConversionLocation(
         quote.fromAddress,
-        quote.fromZip
+        quote.fromZip,
+        quote.fromLocation as any,
+        requestedPickup,
     );
 
-    const deliveryLocation = parseAddress(
+    const deliveryLocation = mergeConversionLocation(
         quote.toAddress,
-        quote.toZip
+        quote.toZip,
+        quote.toLocation as any,
+        requestedDelivery,
     );
 
-    const trailerType = quote.enclosedTrailer ? 'enclosed' : 'open';
+    // Quote only stores open/enclosed. Map that choice to an existing,
+    // canonical Load trailer type so converted loads behave like manually
+    // created loads in validation, editing, cards, and driver compatibility.
+    const trailerType = quote.enclosedTrailer
+        ? 'enclosed_2car'
+        : 'open_2car';
 
     const vehicleNameParts = (quote.vehicleName || '')
         .trim()
@@ -807,55 +1115,83 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         ? undefined
         : possibleYear;
 
+    const convertedVehicle = {
+        ...(quote.vehicleId && {
+            vehicleId: quote.vehicleId.toString(),
+        }),
+        ...(quote.vin && { vin: quote.vin }),
+        condition: quote.vehicleInoperable
+            ? 'Inoperable' as const
+            : 'Operable' as const,
+        ...(quote.vehicleName
+            ? {
+                year: vehicleYear,
+                make: vehicleNameParts[1] || undefined,
+                model:
+                    vehicleNameParts.slice(2).join(' ') ||
+                    undefined,
+            }
+            : {}),
+    };
+
+    /*
+     * Validate the generated Load-shaped data with the SAME schema used by
+     * normal Create Load. This prevents the conversion endpoint from drifting
+     * into a second, less strict Load format.
+     *
+     * Miles/estimatedRate are intentionally added after this validation because
+     * normal createLoadSchema accepts dispatcher-entered pricing only; the
+     * normal load controller computes those two server-side.
+     */
+    const conversionPayload = {
+        postType: 'load-board' as const,
+        pickupLocation,
+        deliveryLocation,
+        vehicles: [convertedVehicle],
+        trailerType,
+        additionalInfo: {
+            visibility: 'public' as const,
+            notes: `Converted from quote for ${quote.firstName} ${quote.lastName}`,
+        },
+        contract: {
+            agreedToTerms: false,
+        },
+        pricing: {
+            carrierPayAmount: quote.rate,
+            copCodAmount: 0,
+        },
+    };
+
+    const parsedConversion = createLoadSchema.safeParse(conversionPayload);
+
+    if (!parsedConversion.success) {
+        const messages = parsedConversion.error.issues
+            .map((issue) => issue.message)
+            .join(', ');
+
+        throw new ApiError(
+            400,
+            `Additional route details are required before this quote can become a load: ${messages}`
+        );
+    }
+
     const load = await Load.create({
         organizationId: orgId,
         orgId: (req as Request & { orgObjectId?: unknown }).orgObjectId,
         createdBy: userId,
         quoteId: quote._id,
 
-        postType: 'load-board',
+        ...parsedConversion.data,
+
+        // A converted quote remains a Draft until dispatch intentionally posts
+        // or assigns it; preserve the existing conversion workflow.
         status: 'Draft',
-
-        // trailerType is required at the top level of the Load schema.
-        trailerType,
-
-        pickupLocation,
-        deliveryLocation,
-
-        vehicles: [
-            {
-                vehicleId: quote.vehicleId,
-                hasVin: Boolean(quote.vin),
-                vin: quote.vin,
-                vehicleType: 'sedan',
-                condition: quote.vehicleInoperable
-                    ? 'Inoperable'
-                    : 'Operable',
-                ...(quote.vehicleName
-                    ? {
-                        year: vehicleYear,
-                        make: vehicleNameParts[1] || undefined,
-                        model:
-                            vehicleNameParts.slice(2).join(' ') ||
-                            undefined,
-                    }
-                    : {}),
-            },
-        ],
 
         pricing: {
             miles: quote.miles,
             estimatedRate: quote.rate,
             carrierPayAmount: quote.rate,
-        },
-
-        additionalInfo: {
-            visibility: 'public',
-            notes: `Converted from quote for ${quote.firstName} ${quote.lastName}`,
-        },
-
-        contract: {
-            agreedToTerms: false,
+            copCodAmount: 0,
         },
     });
 

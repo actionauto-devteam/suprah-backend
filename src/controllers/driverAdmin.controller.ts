@@ -8,11 +8,16 @@ import User from "../models/User.model";
 import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import CustomerInviteToken from "../models/CustomerInviteToken.model";
-import storageService from "../services/storage.service";
 import activityService from "../services/activity.service";
 import emailService from "../services/email.service";
 import logger from "../utils/logger";
 import config from "../config";
+import {
+  approveDriverVerification,
+  evaluateDriverVerificationEligibility,
+  listDriverReviewEvents,
+  reviewDriverDocument,
+} from "../services/driverVerificationReview.service";
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_INVITE_COUNT = 50;
@@ -110,42 +115,57 @@ const getAllDrivers = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getDriverById = asyncHandler(async (req: Request, res: Response) => {
-  const driverUser = await User.findOne({ _id: req.params.driverId, role: "driver" }).select("_id");
+  const driverId = String(req.params.driverId || "").trim();
+  const driverUser = await User.findOne({ _id: driverId, role: "driver" }).select("_id");
   if (!driverUser) throw new ApiError(404, "Driver not found");
 
   // A driver may not have created a DriverProfile yet (e.g. mid-application) —
-  // vivify one so the admin detail view always has a full profile shape,
-  // matching the driver-self getOrCreateProfile behavior.
-  let profile = await DriverProfile.findOne({ userId: req.params.driverId });
+  // vivify one so the existing Super Admin detail page preserves its current
+  // full-profile shape. Private document bytes are no longer signed into this
+  // JSON response; they are opened through an authenticated Review endpoint.
+  let profile: any = await DriverProfile.findOne({ userId: driverId });
   if (!profile) {
-    profile = await DriverProfile.create({ userId: req.params.driverId });
+    profile = await DriverProfile.create({ userId: driverId });
   }
   await profile.populate("userId", "name email avatar");
 
-  const profileObj = profile.toJSON();
-  if (profileObj.documents) {
-    for (const doc of profileObj.documents) {
-      if (doc.fileUrl && !doc.fileUrl.startsWith("http")) {
-        const signed = await storageService.getSignedUrl(doc.fileUrl);
-        if (signed) doc.fileUrl = signed;
-      }
-    }
-  }
+  const profileObj: any = profile.toJSON();
+  profileObj.documents = (Array.isArray(profileObj.documents) ? profileObj.documents : []).map(
+    (doc: any) => {
+      const { fileUrl: _fileUrl, fileKey: _fileKey, ...safeDocument } = doc;
+      const documentId = doc?._id ? String(doc._id) : "";
+      return {
+        ...safeDocument,
+        fileAvailable: Boolean(doc?.fileKey || doc?.fileUrl),
+        fileEndpoint: documentId
+          ? `/api/driver-tracking/drivers/${encodeURIComponent(driverId)}/documents/${encodeURIComponent(documentId)}/file`
+          : undefined,
+      };
+    },
+  );
 
   const uploadedTypes = new Set(profile.documents.map((d: any) => d.type));
   const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
   const complianceSummary = {
     uploadedCount,
     totalRequired: REQUIRED_COMPLIANCE_DOCS.length,
-    percentage: Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100),
+    percentage: Math.round((uploadedCount / Math.max(REQUIRED_COMPLIANCE_DOCS.length, 1)) * 100),
     missingTypes: REQUIRED_COMPLIANCE_DOCS.filter(t => !uploadedTypes.has(t)),
   };
 
-  const driverRequest = await DriverRequest.findOne({ driverUserId: req.params.driverId })
-    .sort({ createdAt: -1 })
-    .lean();
+  const [driverRequest, reviewHistory] = await Promise.all([
+    DriverRequest.findOne({ driverUserId: driverId }).sort({ createdAt: -1 }).lean(),
+    listDriverReviewEvents(driverId),
+  ]);
+  const eligibility = evaluateDriverVerificationEligibility(profile);
 
-  res.json(new ApiResponse(200, { ...profileObj, complianceSummary, driverRequest }, "Driver profile fetched"));
+  res.json(
+    new ApiResponse(
+      200,
+      { ...profileObj, complianceSummary, driverRequest, eligibility, reviewHistory },
+      "Driver profile fetched",
+    ),
+  );
 });
 
 const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -157,75 +177,76 @@ const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "verified field must be a boolean");
   }
 
-  const profile = await DriverProfile.findOne({ userId: driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  const doc = profile.documents.find(
+  const profile: any = await reviewDriverDocument({
+    driverId,
+    documentId,
+    reviewer: user,
+    organizationId: "global",
+    decision: verified ? "approved" : "pending",
+    expectedUploadedAt: req.body?.expectedUploadedAt,
+  });
+  const doc: any = profile.documents.find(
     (d: any) => d._id?.toString() === documentId,
   );
-  if (!doc) throw new ApiError(404, "Document not found");
 
-  doc.verified = verified;
-  if (verified) {
-    doc.verifiedBy = user._id as any;
-    doc.verifiedAt = new Date();
-  } else {
-    doc.verifiedBy = undefined;
-    doc.verifiedAt = undefined;
+  try {
+    await activityService.logComplianceActivity(
+      driverId,
+      undefined,
+      "doc_verified",
+      doc?.label || "Driver document",
+      verified ? "Verified" : "Unverified",
+    );
+  } catch (error) {
+    logger.error(
+      { error, driverId, documentId },
+      "Non-fatal: failed to write legacy document verification activity",
+    );
   }
 
-  await profile.save();
-
-  await activityService.logComplianceActivity(
-    driverId,
-    "global",
-    "doc_verified",
-    doc.label,
-    verified ? "Verified" : "Unverified",
-  );
-
   res.json(new ApiResponse(200, profile, `Document ${verified ? "verified" : "unverified"}`));
-
   logger.info({ profileId: profile._id, driverId, documentId, verified }, "Document verification status changed");
 });
 
 const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   const { driverId, documentId } = req.params;
-  const { reason } = req.body;
+  const reason = String(req.body?.reason || "").trim();
 
-  if (!reason || typeof reason !== "string" || reason.trim().length < 3) {
+  if (reason.length < 3) {
     throw new ApiError(400, "A rejection reason is required (min 3 chars)");
   }
 
-  const profile = await DriverProfile.findOne({ userId: driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  const doc = profile.documents.find(
+  const profile: any = await reviewDriverDocument({
+    driverId,
+    documentId,
+    reviewer: user,
+    organizationId: "global",
+    decision: "rejected",
+    reason,
+    expectedUploadedAt: req.body?.expectedUploadedAt,
+  });
+  const doc: any = profile.documents.find(
     (d: any) => d._id?.toString() === documentId,
   );
-  if (!doc) throw new ApiError(404, "Document not found");
 
-  doc.verified = false;
-  doc.verifiedBy = undefined;
-  doc.verifiedAt = undefined;
-  doc.rejectionReason = reason.trim();
-  doc.rejectedAt = new Date();
-  (doc as any).reviewStatus = "rejected";
-
-  await profile.save();
-
-  await activityService.createActivity({
-    userId: driverId,
-    organizationId: "global",
-    type: "other",
-    title: "Document Rejected",
-    description: `Document ${doc.label} was rejected: ${reason.trim()}`,
-    metadata: { documentId, reason: reason.trim(), adminId: user._id.toString() },
-  });
+  try {
+    await activityService.createActivity({
+      userId: driverId,
+      organizationId: undefined,
+      type: "other",
+      title: "Document Rejected",
+      description: `Document ${doc?.label || "Driver document"} was rejected: ${reason}`,
+      metadata: { documentId, reason, adminId: user._id.toString() },
+    });
+  } catch (error) {
+    logger.error(
+      { error, driverId, documentId },
+      "Non-fatal: failed to write legacy document rejection activity",
+    );
+  }
 
   res.json(new ApiResponse(200, profile, "Document rejected"));
-
   logger.warn({ profileId: profile._id, driverId, documentId, reason }, "Compliance document rejected");
 });
 
@@ -233,24 +254,31 @@ const approveDriverProfile = asyncHandler(async (req: Request, res: Response) =>
   const user = req.user as IUser;
   const { driverId } = req.params;
 
-  const profile = await DriverProfile.findOne({ userId: driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
-
-  profile.verificationStatus = "verified";
-  await profile.save();
-
-  await activityService.createActivity({
-    userId: driverId,
+  const result = await approveDriverVerification({
+    driverId,
+    reviewer: user,
     organizationId: "global",
-    type: "other",
-    title: "Driver Profile Approved",
-    description: `Driver profile was approved by admin ${user.name}`,
-    metadata: { profileId: profile._id.toString(), approvedBy: user._id.toString() },
+    expectedUpdatedAt: req.body?.expectedUpdatedAt,
   });
 
-  logger.info({ profileId: profile._id, driverId, approvedBy: user._id }, "Driver profile approved by admin");
+  try {
+    await activityService.createActivity({
+      userId: driverId,
+      organizationId: undefined,
+      type: "other",
+      title: "Driver Profile Approved",
+      description: `Driver profile was approved by admin ${user.name}`,
+      metadata: { profileId: result.profile._id.toString(), approvedBy: user._id.toString() },
+    });
+  } catch (error) {
+    logger.error(
+      { error, driverId },
+      "Non-fatal: failed to write legacy Driver Profile approval activity",
+    );
+  }
 
-  res.json(new ApiResponse(200, profile, "Driver profile approved"));
+  logger.info({ profileId: result.profile._id, driverId, approvedBy: user._id }, "Driver profile approved by admin");
+  res.json(new ApiResponse(200, result.profile, "Driver profile approved"));
 });
 
 /**

@@ -25,9 +25,28 @@ export const setupSocket = (io: Server) => {
       let decoded: any;
       try {
         decoded = jwt.verify(token, config.jwt.accessSecret) as any;
-        socket.userId = decoded.sub;
-        socket.organizationId = decoded.orgId;
-        socket.role = decoded.role;
+        const tokenUserId = String(decoded?.sub ?? "").trim();
+        if (!tokenUserId) {
+          throw new Error("Authentication error: Invalid user token");
+        }
+
+        // Socket room membership is derived from the current database user,
+        // not stale role/org claims carried by an older JWT.
+        const currentUser: any = await User.findById(tokenUserId)
+          .select("_id role organizationId isActive")
+          .lean();
+        if (!currentUser || currentUser.isActive === false) {
+          throw new Error("Authentication error: Account unavailable");
+        }
+
+        socket.userId = String(currentUser._id);
+        socket.role = String(currentUser.role || "");
+        socket.organizationId =
+          socket.role === "super_admin" && decoded?.orgId
+            ? String(decoded.orgId)
+            : currentUser.organizationId
+              ? String(currentUser.organizationId)
+              : undefined;
       } catch {
         try {
           const CRM_SECRET = config.jwt.crmJwtSecret || 'crm-secret-key';
@@ -35,7 +54,7 @@ export const setupSocket = (io: Server) => {
           socket.userId = decoded.id;
           socket.role = 'crm';
         } catch (crmErr: any) {
-          if (config.env === 'development') {
+          if (config.env === 'development' && process.env.ALLOW_INSECURE_SOCKET_DEV_FALLBACK === 'true') {
             logger.warn('Socket auth: dev fallback active');
             socket.userId = 'dev-user';
             socket.role = 'super_admin';

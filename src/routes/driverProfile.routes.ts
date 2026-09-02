@@ -3,9 +3,12 @@ import driverProfileController from "../controllers/driverProfile.controller";
 import driverStatusChangeRequestController from "../controllers/driverStatusChangeRequest.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
+import authorize from "../middleware/role.middleware";
 import {
   uploadDriverDocument,
   uploadDriverStatusRequestAttachments,
+  validateDriverDocumentContent,
+  validateDriverStatusRequestAttachmentContent,
 } from "../middleware/upload.middleware";
 import {
   driverDocumentUploadLimiter,
@@ -16,41 +19,81 @@ const router = express.Router();
 
 router.use(auth());
 
-router.get("/", driverProfileController.getProfile);
-router.patch("/equipment", driverProfileController.updateEquipment);
-router.patch("/compliance", driverProfileController.updateCompliance);
-router.post("/documents", driverDocumentUploadLimiter, auth(), uploadDriverDocument, driverProfileController.uploadDocument);
-router.delete("/documents/:documentId", driverProfileController.deleteDocument);
-router.patch("/logistics", driverProfileController.updateLogistics);
-router.patch("/identity-verification", driverProfileController.updateIdentityVerification);
+const driverOnly = authorize("driver");
+const staffOnly = authorize(["super_admin", "admin", "employee"]);
 
-// Driver Dispatch Status requests. These stay under /driver-profile so the
-// existing mounted router handles both driver and dispatcher access without
-// introducing another top-level route registration.
+router.get("/", driverOnly, driverProfileController.getProfile);
+router.patch("/equipment", driverOnly, driverProfileController.updateEquipment);
+router.patch("/personal-info", driverOnly, driverProfileController.updatePersonalInfo);
+router.patch("/compliance", driverOnly, driverProfileController.updateCompliance);
+router.post(
+  "/documents",
+  driverOnly,
+  driverDocumentUploadLimiter,
+  uploadDriverDocument,
+  validateDriverDocumentContent,
+  driverProfileController.uploadDocument,
+);
+
+router.get(
+  "/documents/:documentId/file",
+  driverOnly,
+  driverProfileController.getDocumentFile,
+);
+
+router.post(
+  "/documents/:documentId/replace",
+  driverOnly,
+  driverDocumentUploadLimiter,
+  uploadDriverDocument,
+  validateDriverDocumentContent,
+  driverProfileController.replaceDocument,
+);
+
+router.delete(
+  "/documents/:documentId",
+  driverOnly,
+  driverProfileController.deleteDocument,
+);
+router.patch("/logistics", driverOnly, driverProfileController.updateLogistics);
+router.patch(
+  "/identity-verification",
+  driverOnly,
+  driverProfileController.updateIdentityVerification,
+);
+
+// Driver Dispatch Status requests.
 router.get(
   "/status-requests/my-current",
+  driverOnly,
   driverStatusChangeRequestController.getMyCurrentRequest,
 );
 router.post(
   "/status-requests",
+  driverOnly,
   uploadLimiter,
   uploadDriverStatusRequestAttachments,
+  validateDriverStatusRequestAttachmentContent,
   driverStatusChangeRequestController.createRequest,
 );
 router.patch(
   "/status-requests/:requestId/details",
+  driverOnly,
   uploadLimiter,
   uploadDriverStatusRequestAttachments,
+  validateDriverStatusRequestAttachmentContent,
   driverStatusChangeRequestController.updateRequestDetails,
 );
 router.post(
   "/status-requests/:requestId/cancel",
+  driverOnly,
   driverStatusChangeRequestController.cancelRequest,
 );
 
 router.get(
   "/status-requests/org",
   requireOrg,
+  staffOnly,
   driverStatusChangeRequestController.getOrganizationRequests,
 );
 router.get(
@@ -61,11 +104,13 @@ router.get(
 router.post(
   "/status-requests/:requestId/approve",
   requireOrg,
+  staffOnly,
   driverStatusChangeRequestController.approveRequest,
 );
 router.post(
   "/status-requests/:requestId/reject",
   requireOrg,
+  staffOnly,
   driverStatusChangeRequestController.rejectRequest,
 );
 

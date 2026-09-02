@@ -69,6 +69,15 @@ dispatchChatThreadSchema.index({
   lastMessageAt: -1,
 });
 
+// Drivers can participate in exact private threads owned by different
+// dispatcher organizations because Driver Tracker uses a shared driver pool.
+// This index supports the driver's "all of my private dispatcher threads"
+// query without weakening the unique organization+dispatcher+driver boundary.
+dispatchChatThreadSchema.index({
+  driverId: 1,
+  lastMessageAt: -1,
+});
+
 dispatchChatThreadSchema.index({
   organizationId: 1,
   dispatcherId: 1,

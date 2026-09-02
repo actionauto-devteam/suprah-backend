@@ -1,15 +1,7 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 
-// ─── DriverProfile ────────────────────────────────────────────────────────────
-// Rebuilt against driverProfile.controller.ts as the source of truth: every
-// field this model declares is a field that controller reads or writes
-// (equipment, license/insurance, logistics, identity verification, and the
-// compliance documents subsystem), plus the fields the driver directory and
-// driver tracking controllers consume.
-
-// The compliance meter counts these document types — only the driver's
-// license is mandatory to complete an application; everything else in
-// DOCUMENT_TYPES is optional.
+// The compliance meter currently requires only the driver's license.
+// Keep this synchronized with REQUIRED_DOCUMENTS on the frontend.
 export const REQUIRED_COMPLIANCE_DOCS: readonly string[] = [
   "drivers_license",
 ];
@@ -55,14 +47,28 @@ export interface IHomeBase {
   zip?: string;
 }
 
-export const DRIVER_OPERATIONAL_STATUSES = ["active", "on_leave", "maintenance"] as const;
-export type DriverOperationalStatus = (typeof DRIVER_OPERATIONAL_STATUSES)[number];
+export const DRIVER_OPERATIONAL_STATUSES = [
+  "active",
+  "on_leave",
+  "maintenance",
+] as const;
+export type DriverOperationalStatus =
+  (typeof DRIVER_OPERATIONAL_STATUSES)[number];
 
 export interface IDriverProfile extends Document {
   _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
   // Historical only — drivers are a shared pool, not org-owned.
   organizationId?: string;
+
+  // ── Driver Verification identity/contact snapshot ──
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zipCode?: string;
 
   // ── Equipment ──
   trailerType?: string;
@@ -98,13 +104,20 @@ export interface IDriverProfile extends Document {
 
   // ── Logistics ──
   operationalStatus: DriverOperationalStatus;
+  commitmentLock?: {
+    token: string;
+    acquiredAt: Date;
+    lockedUntil: Date;
+  };
   serviceRadius?: number;
   preferredRoutes: string[];
   availableDays: string[];
   homeBase: IHomeBase;
 
   // ── Compliance documents ──
-  documents: mongoose.Types.DocumentArray<IDriverDocument & mongoose.Types.Subdocument>;
+  documents: mongoose.Types.DocumentArray<
+    IDriverDocument & mongoose.Types.Subdocument
+  >;
 
   // ── Identity verification ──
   ssnLast4?: string;
@@ -129,7 +142,11 @@ export interface IDriverProfile extends Document {
 
 const driverDocumentSchema = new Schema<IDriverDocument>(
   {
-    type: { type: String, enum: DOCUMENT_TYPES as unknown as string[], required: true },
+    type: {
+      type: String,
+      enum: DOCUMENT_TYPES as unknown as string[],
+      required: true,
+    },
     label: { type: String, required: true, maxlength: 100 },
     fileUrl: { type: String, required: true },
     fileKey: { type: String },
@@ -173,19 +190,29 @@ const driverProfileSchema = new Schema<IDriverProfile>(
       unique: true,
       index: true,
     },
-    // Historical only — drivers are a shared pool across all organizations,
-    // not owned by the org they originally signed up under. Never filtered
-    // on for access control; kept for reference.
     organizationId: {
       type: String,
       required: false,
       index: true,
     },
 
+    // ── Driver Verification identity/contact snapshot ──
+    firstName: { type: String, trim: true, maxlength: 120 },
+    lastName: { type: String, trim: true, maxlength: 120 },
+    phone: { type: String, trim: true, maxlength: 40 },
+    address: { type: String, trim: true, maxlength: 300 },
+    city: { type: String, trim: true, maxlength: 120 },
+    state: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 2,
+    },
+    zipCode: { type: String, trim: true, maxlength: 12 },
+
     // ── Equipment ──
     trailerType: { type: String, trim: true },
     customTrailerName: { type: String, trim: true },
-    // Platform-wide vehicle ceiling per load is 20 (Create Load hard cap)
     maxVehicleCapacity: { type: Number, min: 1, max: 20, default: 1 },
     truckMake: { type: String, trim: true },
     truckModel: { type: String, trim: true },
@@ -208,7 +235,12 @@ const driverProfileSchema = new Schema<IDriverProfile>(
 
     // ── License / insurance ──
     driversLicenseNumber: { type: String, trim: true },
-    licenseState: { type: String, trim: true },
+    licenseState: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 2,
+    },
     licenseExpirationDate: { type: Date },
     medicalCardExpirationDate: { type: Date },
     insuranceProvider: { type: String, trim: true },
@@ -222,27 +254,47 @@ const driverProfileSchema = new Schema<IDriverProfile>(
       trim: true,
       default: "active",
     },
+    commitmentLock: {
+      token: { type: String, trim: true },
+      acquiredAt: { type: Date },
+      lockedUntil: { type: Date },
+    },
     serviceRadius: { type: Number, min: 0 },
     preferredRoutes: { type: [String], default: [] },
     availableDays: { type: [String], default: [] },
-    homeBase: { type: homeBaseSchema, default: () => ({ type: "Point" }) },
+    homeBase: {
+      type: homeBaseSchema,
+      default: () => ({ type: "Point" }),
+    },
 
-    // ── Compliance documents (max 20 enforced in controller) ──
     documents: { type: [driverDocumentSchema], default: [] },
 
     // ── Identity verification ──
-    ssnLast4: { type: String, maxlength: 4 },
+    ssnLast4: {
+      type: String,
+      maxlength: 4,
+      validate: {
+        validator: (value?: string) =>
+          value === undefined || /^\d{4}$/.test(value),
+        message: "SSN Last 4 must contain exactly four digits",
+      },
+    },
     backgroundCheckConsent: { type: Boolean, default: false },
     backgroundCheckConsentDate: { type: Date },
     verificationAgreement: { type: Boolean, default: false },
     verificationAgreementDate: { type: Date },
     verificationStatus: {
       type: String,
-      enum: ["unverified", "pending", "in_progress", "under_review", "verified"],
+      enum: [
+        "unverified",
+        "pending",
+        "in_progress",
+        "under_review",
+        "verified",
+      ],
       default: "unverified",
     },
 
-    // ── Scores / flags ──
     profileCompletionScore: { type: Number, min: 0, max: 100, default: 0 },
     isComplianceExpired: { type: Boolean, default: false },
   },
@@ -251,7 +303,7 @@ const driverProfileSchema = new Schema<IDriverProfile>(
 
 driverProfileSchema.index({ organizationId: 1, operationalStatus: 1 });
 
-// Keep the compliance flag current whenever a profile is saved
+// Keep the compliance flag current whenever a profile is saved.
 driverProfileSchema.pre("save", function (next) {
   const now = Date.now();
   const expired = (d?: Date) => d != null && new Date(d).getTime() < now;
@@ -266,4 +318,5 @@ const DriverProfile: Model<IDriverProfile> = mongoose.model<IDriverProfile>(
   "DriverProfile",
   driverProfileSchema,
 );
+
 export default DriverProfile;

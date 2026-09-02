@@ -15,6 +15,11 @@ export interface IDriverLocation extends Document {
   lastSeenAt: Date;
   /** Independent GPS-sharing flag. A driver may share GPS while On Leave/In Shop even though live status stays Offline/Waiting. */
   isSharing: boolean;
+  /**
+   * Explicit driver opt-in to keep Manual GPS active when no qualifying Load
+   * relationship requires tracking. Never inferred from a dispatcher action.
+   */
+  manualSharingOptIn: boolean;
   /** Set when a "went offline" alert has already fired for the current silence gap; cleared on the next location ping. */
   offlineAlertSentAt?: Date | null;
   createdAt: Date;
@@ -56,6 +61,10 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
       default: Date.now,
     },
     isSharing: {
+      type: Boolean,
+      default: false,
+    },
+    manualSharingOptIn: {
       type: Boolean,
       default: false,
     },

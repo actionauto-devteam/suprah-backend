@@ -73,7 +73,7 @@ const updateProfile = asyncHandler(async (req: Request, res: Response) => {
     const sensitiveFields = [
         'password', 'email', 'role', 'googleId', 'emailVerified',
         'isApproved', 'onboardingCompleted', 'otpCode', 'otpExpiresAt',
-        'organizationId', 'organizationRole', 'isActive', 'lastLogin',
+        'organizationId', 'organizationRole', 'dispatcherOrganizationIds', 'isActive', 'lastLogin',
         '_id', '__v', 'createdAt', 'updatedAt'
     ];
 

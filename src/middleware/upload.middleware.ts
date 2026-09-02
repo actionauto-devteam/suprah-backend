@@ -1,6 +1,6 @@
 import multer from 'multer';
 import path from 'path';
-import { Request } from 'express';
+import { Request, NextFunction, RequestHandler } from 'express';
 import { ApiError } from '../utils/ApiError';
 
 const storage = multer.memoryStorage();
@@ -33,7 +33,7 @@ const avatarFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.F
 export const uploadProofImage = multer({
   storage: storage,
   fileFilter: imageFileFilter,
-  limits: { fileSize: 100 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 },
 }).single('proof');
 
 export const uploadAvatarImage = multer({
@@ -93,3 +93,66 @@ export const uploadDriverStatusRequestAttachments = multer({
     fileSize: 10 * 1024 * 1024,
   },
 }).array('attachments', 5);
+
+const startsWithBytes = (buffer: Buffer, bytes: number[]) =>
+  buffer.length >= bytes.length && bytes.every((byte, index) => buffer[index] === byte);
+
+const hasAllowedMagicBytes = (file: Express.Multer.File): boolean => {
+  const buffer = file.buffer;
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
+
+  switch (file.mimetype) {
+    case 'image/jpeg':
+      return startsWithBytes(buffer, [0xff, 0xd8, 0xff]);
+    case 'image/png':
+      return startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case 'image/webp':
+      return (
+        buffer.length >= 12 &&
+        buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+        buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+      );
+    case 'application/pdf':
+      return buffer.subarray(0, 5).toString('ascii') === '%PDF-';
+    default:
+      return false;
+  }
+};
+
+const validateFilesByMagicBytes = (
+  files: Express.Multer.File[],
+  next: NextFunction,
+) => {
+  const invalid = files.find((file) => !hasAllowedMagicBytes(file));
+  if (invalid) {
+    return next(
+      new ApiError(
+        400,
+        `The contents of ${invalid.originalname || 'the uploaded file'} do not match its declared file type`,
+      ),
+    );
+  }
+  return next();
+};
+
+export const validateUploadedImageContent: RequestHandler = (req, _res, next) => {
+  const file = req.file;
+  if (!file) return next();
+  return validateFilesByMagicBytes([file], next);
+};
+
+export const validateDriverDocumentContent: RequestHandler = (req, _res, next) => {
+  const file = req.file;
+  if (!file) return next();
+  return validateFilesByMagicBytes([file], next);
+};
+
+export const validateDriverStatusRequestAttachmentContent: RequestHandler = (
+  req,
+  _res,
+  next,
+) => {
+  const files = (req.files || []) as Express.Multer.File[];
+  if (!files.length) return next();
+  return validateFilesByMagicBytes(files, next);
+};
