@@ -13,7 +13,11 @@ export const setupCORS = (app: Application): void => {
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      if (
+        allowedOrigins.includes(origin)
+        || allowedOrigins.includes('*')
+        || (config.env === 'development' && /^https:\/\/[a-z0-9-]+\.ngrok(-free)?\.(app|dev)$/i.test(origin))
+      ) {
         callback(null, true);
       } else {
         console.log('CORS BLOCKED origin:', origin);
