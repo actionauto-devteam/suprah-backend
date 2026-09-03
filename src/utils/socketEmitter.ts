@@ -61,6 +61,13 @@ export function streamLogToAdmins(log: any) {
   io.to('admin:monitoring').emit('system:log:new', log);
 }
 
+// Unified review-queue claim/release broadcasts — see 'admin:review-queue'
+// room join in socket.ts (mirrors the 'admin:monitoring' pattern above).
+export function emitReviewQueueChange(data: any) {
+  if (!io) return;
+  io.to('admin:review-queue').emit('review-queue:claim-changed', data);
+}
+
 // Emit an event to all admin/manager Live Shift Board watchers
 export function emitToShiftBoard(event: string, data: any) {
   if (!io) return;

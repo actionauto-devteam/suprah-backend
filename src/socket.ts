@@ -135,6 +135,22 @@ export const setupSocket = (io: Server) => {
     });
     // ----------------------------
 
+    // --- Admin Review Queue Room ---
+    socket.on('join_review_queue', () => {
+      if (socket.role === 'super_admin') {
+        socket.join('admin:review-queue');
+        socket.emit('review_queue_status', { joined: true });
+      } else {
+        socket.emit('review_queue_error', { message: 'Unauthorized: Super Admin role required' });
+      }
+    });
+
+    socket.on('leave_review_queue', () => {
+      socket.leave('admin:review-queue');
+      socket.emit('review_queue_status', { joined: false });
+    });
+    // ----------------------------
+
     socket.on('join_shipment_tracking', (shipmentId: string) => {
       if (shipmentId) {
         socket.join(`shipment:${shipmentId}`);

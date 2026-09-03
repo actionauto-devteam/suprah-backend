@@ -2,6 +2,7 @@ import express from "express";
 import adminController from "../controllers/admin.controller";
 import adminReferralController from "../controllers/admin.referral.controller";
 import driverAdminController from "../controllers/driverAdmin.controller";
+import reviewQueueController from "../controllers/reviewQueue.controller";
 import {
   listDealershipInquiries,
   getDealershipInquiry,
@@ -84,5 +85,12 @@ router.get("/drivers/:driverId", driverAdminController.getDriverById);
 router.patch("/drivers/:driverId/approve", driverAdminController.approveDriverProfile);
 router.patch("/drivers/:driverId/documents/:documentId/verify", driverAdminController.verifyDocument);
 router.patch("/drivers/:driverId/documents/:documentId/reject", driverAdminController.rejectDocument);
+
+// Unified review queue — merges driver applications, document review, and
+// work-availability status-change requests into one queue, with claim/release
+// so multiple super_admins can work it concurrently without colliding.
+router.get("/review-queue", reviewQueueController.getReviewQueue);
+router.post("/review-queue/:entityType/:id/claim", reviewQueueController.claimReviewItem);
+router.post("/review-queue/:entityType/:id/release", reviewQueueController.releaseReviewItem);
 
 export default router;
