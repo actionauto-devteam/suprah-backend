@@ -16,6 +16,7 @@ import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
   listDriverReviewEvents,
+  recordDriverReviewEvent,
   reviewDriverDocument,
 } from "../services/driverVerificationReview.service";
 
@@ -232,6 +233,30 @@ const getDriverById = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+const addDriverNote = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.user as IUser;
+  const driverId = String(req.params.driverId || "").trim();
+  const note = String(req.body?.note || "").trim();
+
+  if (note.length < 2) throw new ApiError(400, "A note is required");
+  if (note.length > 1000) throw new ApiError(400, "Notes are limited to 1000 characters");
+
+  const driverUser = await User.findOne({ _id: driverId, role: "driver" }).select("_id");
+  if (!driverUser) throw new ApiError(404, "Driver not found");
+
+  await recordDriverReviewEvent({
+    driverId,
+    actor: user,
+    action: "note_added",
+    targetType: "profile",
+    reason: note,
+    organizationId: "global",
+  });
+
+  const reviewHistory = await listDriverReviewEvents(driverId);
+  res.json(new ApiResponse(201, { reviewHistory }, "Note added"));
+});
+
 const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
   const user = req.user as IUser;
   const { driverId, documentId } = req.params;
@@ -435,6 +460,7 @@ const bulkGenerateDriverInviteLinks = asyncHandler(async (req: Request, res: Res
 export default {
   getAllDrivers,
   getExpiringCompliance,
+  addDriverNote,
   getDriverById,
   verifyDocument,
   rejectDocument,

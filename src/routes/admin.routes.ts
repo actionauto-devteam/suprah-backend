@@ -83,6 +83,7 @@ router.post("/drivers/invite-link/bulk", driverAdminController.bulkGenerateDrive
 router.get("/drivers", driverAdminController.getAllDrivers);
 router.get("/compliance/expiring", driverAdminController.getExpiringCompliance);
 router.get("/drivers/:driverId", driverAdminController.getDriverById);
+router.post("/drivers/:driverId/notes", driverAdminController.addDriverNote);
 router.patch("/drivers/:driverId/approve", driverAdminController.approveDriverProfile);
 router.patch("/drivers/:driverId/documents/:documentId/verify", driverAdminController.verifyDocument);
 router.patch("/drivers/:driverId/documents/:documentId/reject", driverAdminController.rejectDocument);
