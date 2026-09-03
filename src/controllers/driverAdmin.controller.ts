@@ -114,6 +114,70 @@ const getAllDrivers = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { drivers, total: drivers.length }, "Drivers fetched"));
 });
 
+const CREDENTIAL_FIELDS: Array<{ field: string; label: string }> = [
+  { field: "licenseExpirationDate", label: "CDL" },
+  { field: "medicalCardExpirationDate", label: "Medical Card" },
+  { field: "insuranceExpirationDate", label: "Insurance" },
+];
+
+const getExpiringCompliance = asyncHandler(async (req: Request, res: Response) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
+  const horizon = new Date(Date.now() + days * 86400000);
+
+  const profiles: any[] = await DriverProfile.find({
+    $or: [
+      ...CREDENTIAL_FIELDS.map(({ field }) => ({ [field]: { $ne: null, $lte: horizon } })),
+      { "documents.expiresAt": { $ne: null, $lte: horizon } },
+    ],
+  })
+    .populate("userId", "name email avatar")
+    .select("userId documents licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate")
+    .lean();
+
+  const now = Date.now();
+  const items = profiles.flatMap((profile) => {
+    const driverId = profile.userId?._id ? String(profile.userId._id) : String(profile.userId);
+    const driverName = profile.userId?.name ?? "Unknown driver";
+
+    const fromCredentials = CREDENTIAL_FIELDS.flatMap(({ field, label }) => {
+      const value = profile[field];
+      if (!value || new Date(value) > horizon) return [];
+      return [{ kind: label, expiresAt: value }];
+    });
+
+    const fromDocuments = (Array.isArray(profile.documents) ? profile.documents : [])
+      .filter((doc: any) => doc?.expiresAt && new Date(doc.expiresAt) <= horizon)
+      .map((doc: any) => ({ kind: doc.label || doc.type, expiresAt: doc.expiresAt }));
+
+    return [...fromCredentials, ...fromDocuments].map((entry) => {
+      const daysRemaining = Math.ceil((new Date(entry.expiresAt).getTime() - now) / 86400000);
+      return {
+        driverId,
+        driverName,
+        kind: entry.kind,
+        expiresAt: entry.expiresAt,
+        daysRemaining,
+        expired: daysRemaining < 0,
+      };
+    });
+  });
+
+  items.sort((a, b) => a.daysRemaining - b.daysRemaining);
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        items,
+        total: items.length,
+        expired: items.filter((item) => item.expired).length,
+        windowDays: days,
+      },
+      "Expiring compliance fetched",
+    ),
+  );
+});
+
 const getDriverById = asyncHandler(async (req: Request, res: Response) => {
   const driverId = String(req.params.driverId || "").trim();
   const driverUser = await User.findOne({ _id: driverId, role: "driver" }).select("_id");
@@ -370,6 +434,7 @@ const bulkGenerateDriverInviteLinks = asyncHandler(async (req: Request, res: Res
 
 export default {
   getAllDrivers,
+  getExpiringCompliance,
   getDriverById,
   verifyDocument,
   rejectDocument,

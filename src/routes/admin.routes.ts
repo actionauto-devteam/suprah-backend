@@ -81,6 +81,7 @@ router.post("/dealership-inquiries/:id/dismiss", dismissDealershipInquiry);
 router.post("/drivers/invite-link", driverAdminController.generateDriverInviteLink);
 router.post("/drivers/invite-link/bulk", driverAdminController.bulkGenerateDriverInviteLinks);
 router.get("/drivers", driverAdminController.getAllDrivers);
+router.get("/compliance/expiring", driverAdminController.getExpiringCompliance);
 router.get("/drivers/:driverId", driverAdminController.getDriverById);
 router.patch("/drivers/:driverId/approve", driverAdminController.approveDriverProfile);
 router.patch("/drivers/:driverId/documents/:documentId/verify", driverAdminController.verifyDocument);
