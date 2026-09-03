@@ -48,9 +48,15 @@ export async function claimItem<T extends Claimable>(
   );
 
   if (!claimed) {
-    const existing: any = await model.findById(id).select("claimedBy").lean();
+    const existing: any = await model
+      .findById(id)
+      .select("claimedBy")
+      .populate("claimedBy", "name")
+      .lean();
     if (!existing) throw new ApiError(404, "Review item not found");
-    throw new ApiError(409, "This item is already claimed by another reviewer.");
+    throw new ApiError(409, "This item is already claimed by another reviewer.", [
+      { claimedByName: existing.claimedBy?.name || "another reviewer" },
+    ]);
   }
 
   return claimed;
