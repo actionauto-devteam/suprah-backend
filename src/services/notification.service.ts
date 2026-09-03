@@ -43,6 +43,7 @@ const VALID_NOTIFICATION_TYPES = [
   'driver_dispatch_alert',
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
   'driver_status_request_completed', 'driver_emergency_request',
+  'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
@@ -69,6 +70,8 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   proof_submitted: 'transportation', delivery_confirmed: 'transportation',
   driver_request: 'transportation', driver_request_approved: 'transportation',
   driver_request_rejected: 'transportation', driver_assigned: 'transportation', driver_payout: 'transportation',
+  driver_document_verified: 'transportation', driver_document_rejected: 'transportation',
+  driver_profile_approved: 'transportation',
 
   vehicle_added: 'inventory', vehicle_updated: 'inventory', vehicle_sold: 'inventory',
   vehicle_status_changed: 'inventory', inventory_sync: 'inventory', new_inventory_alert: 'inventory',

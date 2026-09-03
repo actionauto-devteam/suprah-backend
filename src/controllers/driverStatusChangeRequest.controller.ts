@@ -317,11 +317,20 @@ async function uploadAttachments(
 
   try {
     for (const file of files) {
-      const fileKey = await storageService.upload(
-        file,
-        `driver-status-requests/${organizationId}/${driverId}`,
-        BucketType.PRIVATE,
-      );
+      let fileKey: string;
+      try {
+        fileKey = await storageService.upload(
+          file,
+          `driver-status-requests/${organizationId}/${driverId}`,
+          BucketType.PRIVATE,
+          { allowLocalFallback: false },
+        );
+      } catch (uploadError) {
+        throw new ApiError(
+          503,
+          "Document storage is not configured. Contact an administrator before uploading attachments.",
+        );
+      }
 
       uploaded.push({
         fileKey,

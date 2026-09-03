@@ -136,6 +136,11 @@ export interface IDriverProfile extends Document {
   profileCompletionScore: number;
   isComplianceExpired: boolean;
 
+  // ── Review claim/ownership (superadmin review queue) ──
+  claimedBy?: mongoose.Types.ObjectId;
+  claimedAt?: Date;
+  claimExpiresAt?: Date;
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -297,6 +302,10 @@ const driverProfileSchema = new Schema<IDriverProfile>(
 
     profileCompletionScore: { type: Number, min: 0, max: 100, default: 0 },
     isComplianceExpired: { type: Boolean, default: false },
+
+    claimedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    claimedAt: { type: Date },
+    claimExpiresAt: { type: Date },
   },
   { timestamps: true },
 );

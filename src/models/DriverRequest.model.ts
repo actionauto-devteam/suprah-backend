@@ -6,6 +6,9 @@ export interface IDriverRequest extends Document {
   status: "pending" | "approved" | "rejected";
   reviewedBy?: mongoose.Types.ObjectId;
   reviewedAt?: Date;
+  claimedBy?: mongoose.Types.ObjectId;
+  claimedAt?: Date;
+  claimExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -32,6 +35,16 @@ const DriverRequestSchema = new Schema<IDriverRequest>(
       ref: "User",
     },
     reviewedAt: {
+      type: Date,
+    },
+    claimedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+    },
+    claimedAt: {
+      type: Date,
+    },
+    claimExpiresAt: {
       type: Date,
     },
   },

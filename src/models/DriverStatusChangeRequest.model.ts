@@ -83,6 +83,9 @@ export interface IDriverStatusChangeRequest extends Document {
   >;
   reviewedBy?: mongoose.Types.ObjectId;
   reviewedAt?: Date;
+  claimedBy?: mongoose.Types.ObjectId;
+  claimedAt?: Date;
+  claimExpiresAt?: Date;
   decisionReason?: string;
   submittedAt: Date;
   completedAt?: Date;
@@ -164,6 +167,12 @@ const driverStatusChangeRequestSchema =
         ref: "User",
       },
       reviewedAt: { type: Date },
+      claimedBy: {
+        type: Schema.Types.ObjectId,
+        ref: "User",
+      },
+      claimedAt: { type: Date },
+      claimExpiresAt: { type: Date },
       decisionReason: { type: String, maxlength: 1000 },
       submittedAt: { type: Date, default: Date.now },
       completedAt: { type: Date },

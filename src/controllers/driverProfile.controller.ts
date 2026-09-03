@@ -370,11 +370,20 @@ const replaceDocument = asyncHandler(async (req: Request, res: Response) => {
 
   // Upload the new object first. Do not remove the currently working document
   // until the replacement metadata is safely committed to MongoDB.
-  const newFileUrl = await storageService.upload(
-    file,
-    "driver-documents",
-    BucketType.PRIVATE,
-  );
+  let newFileUrl: string;
+  try {
+    newFileUrl = await storageService.upload(
+      file,
+      "driver-documents",
+      BucketType.PRIVATE,
+      { allowLocalFallback: false },
+    );
+  } catch (error) {
+    throw new ApiError(
+      503,
+      "Document storage is not configured. Contact an administrator before uploading driver documents.",
+    );
+  }
   const newFileKey =
     storageService.getKeyFromUrl(newFileUrl) || newFileUrl;
   const oldStorageKey = getDriverDocumentStorageKey(document);
@@ -962,11 +971,20 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Maximum of 20 documents allowed");
   }
 
-  const fileUrl = await storageService.upload(
-    file,
-    "driver-documents",
-    BucketType.PRIVATE,
-  );
+  let fileUrl: string;
+  try {
+    fileUrl = await storageService.upload(
+      file,
+      "driver-documents",
+      BucketType.PRIVATE,
+      { allowLocalFallback: false },
+    );
+  } catch (error) {
+    throw new ApiError(
+      503,
+      "Document storage is not configured. Contact an administrator before uploading driver documents.",
+    );
+  }
   const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
   const parsedDocumentExpiration = expiresAt
     ? parseOptionalDate(expiresAt, "Document Expiration")

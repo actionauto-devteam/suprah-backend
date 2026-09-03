@@ -6,6 +6,7 @@ import DriverReviewEvent from "../models/DriverReviewEvent.model";
 import User from "../models/User.model";
 import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
+import notificationService from "./notification.service";
 
 export interface DriverVerificationEligibility {
   eligible: boolean;
@@ -288,6 +289,34 @@ export async function reviewDriverDocument(args: {
     },
   });
 
+  if (args.decision !== "pending") {
+    try {
+      await notificationService.createNotification({
+        userId: args.driverId,
+        organizationId: args.organizationId || "global",
+        type:
+          args.decision === "approved"
+            ? "driver_document_verified"
+            : "driver_document_rejected",
+        title:
+          args.decision === "approved" ? "Document Verified" : "Document Rejected",
+        message:
+          args.decision === "approved"
+            ? `Your ${document.label} has been verified.`
+            : `Your ${document.label} was rejected: ${args.reason}`,
+        metadata: {
+          documentId: args.documentId,
+          documentType: document.type,
+        },
+      });
+    } catch (error) {
+      logger.error(
+        { error, driverId: args.driverId, documentId: args.documentId },
+        "Non-fatal: failed to send document review notification",
+      );
+    }
+  }
+
   return profile;
 }
 
@@ -419,6 +448,24 @@ export async function approveDriverVerification(args: {
       driverRequestId: driverRequest?._id?.toString?.(),
     },
   });
+
+  try {
+    await notificationService.createNotification({
+      userId: args.driverId,
+      organizationId: args.organizationId || "global",
+      type: "driver_profile_approved",
+      title: "Driver Profile Approved",
+      message: "Your driver verification has been fully approved.",
+      metadata: {
+        driverProfileId: String(approvedProfile._id),
+      },
+    });
+  } catch (error) {
+    logger.error(
+      { error, driverId: args.driverId },
+      "Non-fatal: failed to send driver profile approval notification",
+    );
+  }
 
   return {
     profile: approvedProfile,

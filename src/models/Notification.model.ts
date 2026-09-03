@@ -130,6 +130,9 @@ const NotificationSchema = new Schema(
         'driver_status_request_rejected',
         'driver_status_request_completed',
         'driver_emergency_request',
+        'driver_document_verified',
+        'driver_document_rejected',
+        'driver_profile_approved',
 
         'payment_received',
         'payment_pending',
