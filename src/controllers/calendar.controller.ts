@@ -184,20 +184,44 @@ const mapAppointmentStatus = (status: string | undefined): FeedItem["status"] =>
   return "scheduled";
 };
 
+/**
+ * Appointment has no allDay field of its own. A Google Calendar all-day
+ * event (a "date", not a "dateTime") syncs into this collection as UTC
+ * midnight → UTC midnight/23:59:59.999 — a timezone-agnostic date, not an
+ * instant meant to be read in the org's display timezone. Detecting that
+ * shape here (UTC boundaries, ~24h span) is what lets the calendar render
+ * it as a compact all-day item instead of a ~24h timed block that
+ * splitOccurrencesByDay clips across two calendar days in Mountain time
+ * (a "00:00–17:59" remainder on one side, "18:00–midnight" on the other) —
+ * which, multiplied across many such synced items (e.g. recurring
+ * "<name> On Day Off" entries), used to bury the day's real events under a
+ * wall of misclassified timed blocks in Week/Day view.
+ */
+function isUtcAllDaySpan(start: Date, end: Date): boolean {
+  const startsAtUtcMidnight =
+    start.getUTCHours() === 0 &&
+    start.getUTCMinutes() === 0 &&
+    start.getUTCSeconds() === 0;
+  const durationMs = end.getTime() - start.getTime();
+  return startsAtUtcMidnight && durationMs >= 23 * 60 * 60 * 1000;
+}
+
 /** Exported so the Appointment controller can reuse it in its emit hooks. */
 export const mapAppointment = (doc: any): FeedItem => {
   const customerName = doc.customerBooking
     ? [doc.customerBooking.firstName, doc.customerBooking.lastName].filter(Boolean).join(" ")
     : undefined;
+  const start: Date = doc.startTime;
+  const end: Date = doc.endTime;
   return {
     id: String(doc._id),
     source: "appointment",
     type: "appointment",
     title: doc.title ?? `Appointment — ${customerName || "Customer"}`,
     description: doc.notes ?? doc.description,
-    start: doc.startTime,
-    end: doc.endTime,
-    allDay: false,
+    start,
+    end,
+    allDay: isUtcAllDaySpan(start, end),
     repeatsDailyWindow: false,
     status: mapAppointmentStatus(doc.status),
     color: "appointment",
@@ -392,6 +416,7 @@ export const exportIcs = asyncHandler(async (req: Request, res: Response) => {
       id: String(a._id),
       start: a.startTime,
       end: a.endTime,
+      allDay: isUtcAllDaySpan(a.startTime, a.endTime),
       summary: a.title ?? "Appointment",
       description: a.notes,
     });
