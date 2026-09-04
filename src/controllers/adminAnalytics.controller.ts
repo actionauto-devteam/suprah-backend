@@ -9,7 +9,7 @@ import DriverProfile from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import Invitation from "../models/Invitation.model";
 import Vehicle from "../models/Vehicle.model";
-import ActivityLog from "../models/ActivityLog.model";
+import UserActivity from "../models/UserActivity.model";
 import Lead from "../models/lead.model";
 import logger from "../utils/logger";
 
@@ -246,7 +246,7 @@ const getUserDetail = asyncHandler(async (req: Request, res: Response) => {
   if (!user) throw new ApiError(404, "User not found");
 
   const [recentActivity, driverProfile] = await Promise.all([
-    ActivityLog.find({ userId })
+    UserActivity.find({ userId })
       .sort({ createdAt: -1 })
       .limit(10)
       .select("type title description createdAt")
