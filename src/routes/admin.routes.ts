@@ -3,6 +3,7 @@ import adminController from "../controllers/admin.controller";
 import adminReferralController from "../controllers/admin.referral.controller";
 import driverAdminController from "../controllers/driverAdmin.controller";
 import reviewQueueController from "../controllers/reviewQueue.controller";
+import adminAnalyticsController from "../controllers/adminAnalytics.controller";
 import {
   listDealershipInquiries,
   getDealershipInquiry,
@@ -22,6 +23,7 @@ router.get("/organizations", adminController.getAllOrganizations);
 router.get("/users", adminController.getAllUsers);
 router.get("/stats", adminController.getSystemStats);
 router.get("/financials", adminController.getFinancialStats);
+router.get("/analytics/overview", adminAnalyticsController.getPlatformAnalytics);
 
 router.get("/system/stats", adminController.getProcessStats);
 router.get("/system/logs", adminController.getSystemLogs);
@@ -33,6 +35,7 @@ router.get("/audit-logs/stats", adminController.getAuditLogStats);
 router.get("/sync-logs", adminController.getSyncLogs);
 router.get("/sync-logs/stats", adminController.getSyncStats);
 
+router.post("/users/invite", adminAnalyticsController.inviteUser);
 router.post("/users/:id/suspend", adminController.suspendUser);
 router.post("/users/:id/activate", adminController.activateUser);
 router.put("/users/:id/role", adminController.updateUserRole);

@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import Organization from '../models/Organization.model';
 import User from '../models/User.model';
+import DriverProfile from '../models/DriverProfile.model';
 import AuditLog from '../models/AuditLog.model';
 import SyncLog from '../models/SyncLog.model';
 import { ApiError } from '../utils/ApiError';
@@ -354,20 +355,53 @@ export const activateUser = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, user, "User activated successfully"));
 });
 
+const PLATFORM_ROLES = ['customer', 'employee', 'admin', 'super_admin', 'driver'];
+
 export const updateUserRole = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { organizationRole } = req.body;
+  const { organizationRole, role } = req.body;
 
-  if (!organizationRole)
-    throw new ApiError(400, "organizationRole is required");
+  if (!organizationRole && !role) {
+    throw new ApiError(400, "Provide a role or organizationRole to update");
+  }
 
   const user = await User.findById(id);
   if (!user) throw new ApiError(404, "User not found");
 
-  (user as any).organizationRole = organizationRole;
+  const actorId = String((req.user as any)?._id ?? "");
+
+  if (role) {
+    if (!PLATFORM_ROLES.includes(role)) {
+      throw new ApiError(400, `Role must be one of: ${PLATFORM_ROLES.join(", ")}`);
+    }
+    if (actorId === String(user._id) && role !== "super_admin") {
+      throw new ApiError(
+        400,
+        "You cannot remove your own super admin access — ask another super admin to do it.",
+      );
+    }
+    if (user.role === "driver" && role !== "driver") {
+      const activeDriverWork = await DriverProfile.exists({
+        userId: user._id,
+        operationalStatus: { $ne: "terminated" },
+      });
+      if (activeDriverWork) {
+        logger.warn({ targetUserId: user._id }, "Platform role changed away from driver while a driver profile is still active");
+      }
+    }
+    user.role = role;
+  }
+
+  if (organizationRole) {
+    (user as any).organizationRole = organizationRole;
+  }
+
   await user.save();
 
-  logger.info({ adminId: (req.user as any)._id, targetUserId: user._id, newRole: organizationRole }, 'User organization role updated');
+  logger.info(
+    { adminId: actorId, targetUserId: user._id, role, organizationRole },
+    "User role updated",
+  );
 
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
