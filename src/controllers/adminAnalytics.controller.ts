@@ -8,6 +8,8 @@ import Organization from "../models/Organization.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import Invitation from "../models/Invitation.model";
+import Vehicle from "../models/Vehicle.model";
+import Lead from "../models/lead.model";
 import logger from "../utils/logger";
 
 const dayKey = (value: Date | string) => new Date(value).toISOString().slice(0, 10);
@@ -175,4 +177,62 @@ const inviteUser = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-export default { getPlatformAnalytics, inviteUser };
+const getOrganizationDetail = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = String(req.params.id || "").trim();
+
+  const organization: any = await Organization.findById(organizationId).lean();
+  if (!organization) throw new ApiError(404, "Dealership not found");
+
+  const [members, roleRows, vehicleCount, leadCount, pendingInvites] = await Promise.all([
+    User.find({ organizationId })
+      .select("name email role organizationRole isActive avatar createdAt")
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean(),
+    User.aggregate([
+      { $match: { organizationId: organization._id } },
+      { $group: { _id: "$role", count: { $sum: 1 } } },
+    ]),
+    Vehicle.countDocuments({ organizationId }).catch(() => 0),
+    Lead.countDocuments({ organizationId }).catch(() => 0),
+    Invitation.countDocuments({ organizationId, status: "pending" }).catch(() => 0),
+  ]);
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        organization: {
+          id: String(organization._id),
+          name: organization.name,
+          slug: organization.slug,
+          status: organization.status || "active",
+          createdAt: organization.createdAt,
+          subscription: organization.subscription || null,
+          contactEmail: organization.contactEmail || organization.email || null,
+          phone: organization.phone || null,
+        },
+        members: members.map((member: any) => ({
+          id: String(member._id),
+          name: member.name,
+          email: member.email,
+          role: member.role,
+          organizationRole: member.organizationRole || null,
+          isActive: Boolean(member.isActive),
+          avatar: member.avatar || null,
+          joinedAt: member.createdAt,
+        })),
+        counts: {
+          members: members.length,
+          vehicles: vehicleCount,
+          leads: leadCount,
+          pendingInvites,
+          byRole: roleRows.map((row: any) => ({ role: row._id || "unknown", count: row.count })),
+        },
+      },
+      "Dealership detail fetched",
+    ),
+  );
+});
+
+export default { getPlatformAnalytics, inviteUser, getOrganizationDetail };

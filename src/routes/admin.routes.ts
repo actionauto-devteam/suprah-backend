@@ -42,6 +42,7 @@ router.put("/users/:id/role", adminController.updateUserRole);
 router.put("/users/:id/organization", adminController.updateUserOrganization);
 router.delete("/users/:id", adminController.deleteUser);
 
+router.get("/organizations/:id", adminAnalyticsController.getOrganizationDetail);
 router.put("/organizations/:id/status", adminController.suspendOrganization);
 router.put("/organizations/:id/activate", adminController.activateOrganization);
 router.put("/organizations/:id/suspend", adminController.suspendOrganization);
