@@ -209,8 +209,21 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
         return { ...e, referralInfo, loadInfo, paymentInfo };
     }));
 
+    const partner = await User.findById(transaction.userId)
+        .select('name email avatar createdAt')
+        .lean();
+
     res.json(new ApiResponse(200, {
         request: transaction,
+        partner: partner
+            ? {
+                id: String((partner as any)._id),
+                name: (partner as any).name || 'Unknown partner',
+                email: (partner as any).email || '',
+                avatar: (partner as any).avatar || null,
+                joinedAt: (partner as any).createdAt || null,
+            }
+            : null,
         lineage: enrichedEarnings
     }, 'Audit lineage fetched successfully'));
 });
