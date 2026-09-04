@@ -90,6 +90,8 @@ export interface ISupraSpaceMessage extends Document {
   replyTo?: mongoose.Types.ObjectId;
   reactions: ISupraSpaceReaction[];
   readBy: mongoose.Types.ObjectId[];
+  pinnedBy: mongoose.Types.ObjectId[];
+  pinnedAt?: Date | null;
   metadata: ISupraSpaceMessageMetadata;
   scheduledAt?: Date | null;
   scheduledStatus?: 'pending' | 'sent' | 'cancelled' | null;
@@ -211,6 +213,8 @@ const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
     replyTo:     { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
     reactions:   [ReactionSchema],
     readBy:      [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
+    pinnedBy:    [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
+    pinnedAt:    { type: Date, default: null },
     metadata:    { type: MessageMetadataSchema, default: () => ({}) },
     scheduledAt: { type: Date, default: null, index: true },
     scheduledStatus: {

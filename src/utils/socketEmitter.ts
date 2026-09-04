@@ -47,13 +47,13 @@ export async function emitPresenceUpdate(orgId: string, payload: PresenceUpdateP
 }
 
 export function emitToUser(userId: string, event: string, data: any) {
-  if (!io) return;
-  io.to(`user:${userId}`).emit(event, data);
+  io?.to(`user:${userId}`).emit(event, data);
+  supraSpaceIo?.to(`user:${userId}`).emit(event, data);
 }
 
 export function emitToOrg(orgId: string, event: string, data: any) {
-  if (!io) return;
-  io.to(`org:${orgId}`).emit(event, data);
+  io?.to(`org:${orgId}`).emit(event, data);
+  supraSpaceIo?.to(`org:${orgId}`).emit(event, data);
 }
 
 export function streamLogToAdmins(log: any) {

@@ -112,6 +112,7 @@ router.get('/conversations/:id/attachments', supraSpaceController.getConversatio
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
 router.post('/conversations/:id/messages',  supraSpaceController.sendMessage);
 router.post('/messages/:messageId/react',   supraSpaceController.reactToMessage);
+router.post('/messages/:messageId/pin',     supraSpaceController.pinMessage);
 router.patch('/messages/:messageId',        supraSpaceController.editMessage);
 router.patch('/messages/:messageId/attachments', uploadFiles, validateUploadedFiles, supraSpaceController.replaceMessageAttachments);
 router.delete('/messages/:messageId',       supraSpaceController.deleteMessage);
