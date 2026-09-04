@@ -9,6 +9,7 @@ import DriverProfile from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import Invitation from "../models/Invitation.model";
 import Vehicle from "../models/Vehicle.model";
+import ActivityLog from "../models/ActivityLog.model";
 import Lead from "../models/lead.model";
 import logger from "../utils/logger";
 
@@ -235,4 +236,74 @@ const getOrganizationDetail = asyncHandler(async (req: Request, res: Response) =
   );
 });
 
-export default { getPlatformAnalytics, inviteUser, getOrganizationDetail };
+const getUserDetail = asyncHandler(async (req: Request, res: Response) => {
+  const userId = String(req.params.id || "").trim();
+
+  const user: any = await User.findById(userId)
+    .select("name email role organizationRole isActive avatar createdAt lastLogin personalInfo onboardingCompleted")
+    .populate("organizationId", "name slug status")
+    .lean();
+  if (!user) throw new ApiError(404, "User not found");
+
+  const [recentActivity, driverProfile] = await Promise.all([
+    ActivityLog.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .select("type title description createdAt")
+      .lean()
+      .catch(() => []),
+    user.role === "driver"
+      ? DriverProfile.findOne({ userId })
+          .select("verificationStatus operationalStatus profileCompletionScore isComplianceExpired documents")
+          .lean()
+      : Promise.resolve(null),
+  ]);
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        user: {
+          id: String(user._id),
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          organizationRole: user.organizationRole || null,
+          isActive: Boolean(user.isActive),
+          avatar: user.avatar || null,
+          phone: user.personalInfo?.phone || null,
+          createdAt: user.createdAt,
+          lastLogin: user.lastLogin || null,
+          onboardingCompleted: Boolean(user.onboardingCompleted),
+          organization: user.organizationId
+            ? {
+                id: String(user.organizationId._id),
+                name: user.organizationId.name,
+                slug: user.organizationId.slug,
+                status: user.organizationId.status || "active",
+              }
+            : null,
+        },
+        driverProfile: driverProfile
+          ? {
+              verificationStatus: (driverProfile as any).verificationStatus,
+              operationalStatus: (driverProfile as any).operationalStatus,
+              profileCompletionScore: (driverProfile as any).profileCompletionScore ?? 0,
+              isComplianceExpired: Boolean((driverProfile as any).isComplianceExpired),
+              documentCount: ((driverProfile as any).documents || []).length,
+            }
+          : null,
+        recentActivity: (recentActivity as any[]).map((entry) => ({
+          id: String(entry._id),
+          type: entry.type,
+          title: entry.title,
+          description: entry.description,
+          createdAt: entry.createdAt,
+        })),
+      },
+      "User detail fetched",
+    ),
+  );
+});
+
+export default { getPlatformAnalytics, inviteUser, getOrganizationDetail, getUserDetail };

@@ -36,6 +36,7 @@ router.get("/sync-logs", adminController.getSyncLogs);
 router.get("/sync-logs/stats", adminController.getSyncStats);
 
 router.post("/users/invite", adminAnalyticsController.inviteUser);
+router.get("/users/:id", adminAnalyticsController.getUserDetail);
 router.post("/users/:id/suspend", adminController.suspendUser);
 router.post("/users/:id/activate", adminController.activateUser);
 router.put("/users/:id/role", adminController.updateUserRole);
