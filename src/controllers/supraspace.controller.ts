@@ -47,6 +47,14 @@ function emitToConversation(conv: any, event: string, payload: any) {
   }
 }
 
+function emitNotificationToUser(userId: string, notification: any) {
+  try {
+    getIO().to(`user:${userId}`).emit('notification:new', notification?.toObject ? notification.toObject() : notification);
+  } catch (err) {
+    logger.warn({ err, userId }, '[SupraSpace] Socket notification emit failed');
+  }
+}
+
 function crmOrganizationCandidates(organizationId: string) {
   return [
     { organizationId },
@@ -90,18 +98,6 @@ type MainUserForCrmIdentity = {
   avatar?: string | null;
 };
 
-/**
- * Resolves the Suprah Space identity for a main-site User.
- *
- * Driver accounts are first-class app users, but older driver onboarding did
- * not always create the parallel CrmUser used by Suprah Space. That left the
- * driver able to use Transportation/GPS while both session-token creation and
- * Driver Tracker messaging failed. SSO is the source of truth here, so a
- * random unusable password is stored only to satisfy the legacy CrmUser schema.
- *
- * Organization isolation remains strict: an email already owned by another
- * organization is never moved or duplicated.
- */
 async function ensureCrmIdentityForMainUser(
   mainUser: MainUserForCrmIdentity,
   organizationId: string,
@@ -136,8 +132,6 @@ async function ensureCrmIdentityForMainUser(
     return claimed;
   };
 
-  // CrmUser.email is globally unique, so check by email without an org filter
-  // before creating anything. This also prevents cross-organization takeover.
   let crmUser = await CrmUser.findOne({ email })
     .select('_id isActive organizationId email')
     .lean();
@@ -153,8 +147,6 @@ async function ensureCrmIdentityForMainUser(
       fullName: String(mainUser.name ?? '').trim() || email,
       username: employeeId,
       email,
-      // This identity is SSO-only. The random value is hashed by CrmUser's
-      // pre-save hook and is never disclosed or used as a driver password.
       password: randomBytes(32).toString('hex'),
       avatar: mainUser.avatar ?? null,
       role: 'employee',
@@ -168,9 +160,6 @@ async function ensureCrmIdentityForMainUser(
       email: created.email,
     } as any;
   } catch (error: any) {
-    // React/provider startup can request a session token more than once. If
-    // another request won the create race, resolve the just-created identity
-    // instead of surfacing an E11000 error.
     if (error?.code !== 11000) throw error;
 
     const raced = await CrmUser.findOne({ email })
@@ -182,11 +171,6 @@ async function ensureCrmIdentityForMainUser(
   }
 }
 
-// Push Web Push notifications to conversation members. Desktop users who are
-// online already receive the realtime socket event, but mobile/PWA sockets can
-// stay "online" briefly after the app is backgrounded. To keep installed mobile
-// apps reliable, online recipients still get pushes on mobile-like subscriptions.
-// Fire-and-forget — never lets push errors block the HTTP response.
 function supraSpaceMessageUrl(conversationId: string, messageId?: string): string {
   const params = new URLSearchParams({ conversationId });
   if (messageId) params.set('messageId', messageId);
@@ -201,44 +185,13 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
     if (!recipientIds.length) return;
 
-    // A custom icon per notification isn't reliable across platforms (iOS
-    // Web Push doesn't support one at all — see pushToConversationMembers's
-    // icon comment below), but the notification TITLE is plain text, which
-    // both platforms render identically. Prefixing a group's own custom
-    // emoji (already an existing, admin-settable identity — see
-    // updateAvatar's sibling updateConversation/getConvEmoji on the
-    // frontend) onto the title gives every group a recognizable, at-a-glance
-    // marker in the notification banner regardless of platform — including
-    // iOS, where this is the only real lever left for that.
     const pushTitle = conv.type === 'group' && conv.emoji ? `${conv.emoji} ${title}` : title;
 
-    // Show who/what actually messaged them right in the notification —
-    // the sender's own avatar for a DM, or the group's avatar for a group
-    // chat — instead of always the generic app icon. One lookup, not one
-    // per recipient below.
     let iconUrl = '/icon-192x192.png';
-    // Android's native chat notifications (MessagingStyle — Google Chat,
-    // Messenger, etc.) show BOTH the group's icon and the sender's own
-    // avatar per message. That API is native-Android-only, unavailable to a
-    // PWA's Web Push notifications — this is the closest approximation the
-    // platform allows: `icon` carries the group's photo, `image` (the large
-    // banner Web Push also supports) carries the sender's, so a group
-    // message notification still shows both, just laid out differently.
     let imageUrl: string | undefined;
     const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
     const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
     if (conv.type === 'group') {
-      // conv.avatar is a signed URL that expires after AVATAR_SIGN_TTL (7
-      // days) — whatever's still on the passed-in `conv` document could be
-      // long stale by the time a message is sent (other read paths re-sign
-      // fresh via avatarKey; this push path never did, so the OS silently
-      // failed to fetch an expired URL and showed no icon at all — this is
-      // the exact "works for DMs, never for groups" report, since a
-      // CrmUser's own avatar isn't a signed/expiring URL the same way).
-      // Re-signs into a local var rather than mutating `conv` itself — some
-      // callers pass a live (non-lean) Mongoose document that gets saved
-      // later in the same request; overwriting its .avatar here could leak
-      // this temporary signed URL into a save that has nothing to do with it.
       const freshGroupAvatar = conv.avatarKey
         ? await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL)
         : conv.avatar;
@@ -248,13 +201,6 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       iconUrl = senderAvatar;
     }
 
-    // A few of the most recent messages, oldest-first, so a burst of unread
-    // messages reads as an actual preview of the conversation instead of
-    // just "N new messages" — as close as a single Web Push body string can
-    // get to a real per-message thread (again, true per-message rendering
-    // is MessagingStyle-only). Fetched once, shared by every recipient below
-    // — the content doesn't differ per person, only how many of these lines
-    // apply to THEIR unread count does.
     const recentMessages = await SupraSpaceMessage.find({
       conversationId: conv._id,
       isDeleted: false,
@@ -280,34 +226,10 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       const mentioned = recipient ? isUserMentioned(textForMention, recipient as any) : /(^|[^\w@])@all(?=$|[^\w])/i.test(textForMention);
       const notifPrefs = (recipient as any)?.notificationPreferences;
 
-      // A recipient can mark specific people as "always notify me" — bypasses
-      // both the per-conversation mute/none/foryou setting and the global
-      // "Messages" mute below, in any conversation (group or DM) they share.
       const isPrioritySender = Array.isArray(notifPrefs?.prioritySenders) && notifPrefs.prioritySenders.includes(senderId);
 
-      // Mentioned members get a separate, more specific "X mentioned you" push
-      // via notifyMentionedMembers() (goes through the unified notification
-      // pipeline, persisted + mutedTypes-aware) — without this, they'd be
-      // double-pushed (and double-persisted) for the same message.
       if (mentioned) return;
 
-      // Persist a record for SupraSpace's own in-app Notifications tab —
-      // deliberately a PLAIN insert, not notificationService.createNotification(),
-      // which also sends its own push. This recipient's push (if any) is
-      // handled entirely below via CrmPushService; routing this through
-      // createNotification too would fire a second, duplicate push (exactly
-      // an earlier bug).
-      //
-      // Unconditional — NOT gated behind shouldNotifyForPreference below.
-      // The Notifications tab's own Muted/None filters exist specifically to
-      // still show messages from conversations you've muted or set to
-      // "None" (see NotificationsPanel/ss4NotifBucket, frontend) — gating
-      // this on the same check that suppresses the actual OS push meant a
-      // muted/None conversation's messages never got a Notification record
-      // at all, so a busy muted channel (e.g. an automated alerts channel)
-      // could rack up dozens of real unread messages that never appeared
-      // under "All" either. Persisting is now fully decoupled from whether
-      // a push actually goes out.
       if ((recipient as any)?.organizationId) {
         Notification.create({
           userId: memberId,
@@ -317,19 +239,13 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           title,
           message: body,
           metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
-        }).catch((err) => logger.warn({ err, memberId }, '[SupraSpace] Failed to persist notification log entry'));
+        })
+          .then((notification) => emitNotificationToUser(memberId, notification))
+          .catch((err) => logger.warn({ err, memberId }, '[SupraSpace] Failed to persist notification log entry'));
       }
 
       if (!isPrioritySender && !shouldNotifyForPreference(pref, mentioned)) return;
 
-      // Once a device has the dedicated SupraSpace app installed (an
-      // appSource: 'supraspace' subscription with a mobile deviceHint — see
-      // useCrmWebPush.ts), that device's copy of the main app's embedded
-      // SupraSpace view should stop pushing too, or the same message
-      // arrives twice on the same phone. Scoped to mobile specifically: a
-      // 'main' subscription from a DESKTOP browser is a genuinely different
-      // surface someone may still actively use, so it's left alone even
-      // when a mobile dedicated app exists.
       const allSubs: any[] = Array.isArray((recipient as any)?.pushSubscriptions) ? (recipient as any).pushSubscriptions : [];
       const isMobileHint = (hint?: string) => !!hint && hint.toLowerCase().includes('mobile');
       const hasDedicatedMobileApp = allSubs.some((s) => s.appSource === 'supraspace' && isMobileHint(s.deviceHint));
@@ -337,23 +253,8 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         ? allSubs.filter((s) => s.appSource !== 'supraspace' && isMobileHint(s.deviceHint)).map((s) => s.endpoint)
         : undefined;
 
-      // Baseline: unlike every OTHER CRM push (transportation, leads, driver
-      // requests, general admin broadcasts — see crmPush.service.ts's
-      // matchesAppSource and unifiedPush.service.ts's resolveRecipient,
-      // which both exclude 'supraspace' subscriptions by default), this IS
-      // a SupraSpace chat message — the one thing the dedicated app's
-      // subscription is actually meant to receive. Explicitly including
-      // both sources here is what opts back in.
       let restrictToAppSources: string[] = ['main', 'supraspace'];
 
-      // The global "Messages" mute (notificationPreferences.mutedTypes
-      // including 'crm_message', or the whole `crm` category switched off)
-      // lives entirely on the CrmUser account — it isn't, and never was,
-      // specific to the main Suprah AI app. Muting it there used to also
-      // silence the dedicated SupraSpace subdomain app, which has its own
-      // separate install identity and no way to offer its own mute control.
-      // Restricting delivery to that app's own subscriptions instead of
-      // skipping the push outright keeps the two independent.
       if (!isPrioritySender) {
         const crmCategoryOff = notifPrefs?.crm === false;
         const messagesMuted = Array.isArray(notifPrefs?.mutedTypes) && notifPrefs.mutedTypes.includes('crm_message');
@@ -367,10 +268,6 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
-      // A real preview of what was actually said, not just a bare count —
-      // as many of the last few messages as this recipient actually has
-      // unread, oldest-first; if they're behind by more than we fetched
-      // above, say so rather than pretending the list is complete.
       let previewBody = body;
       if (unreadCount >= 2) {
         const n = Math.min(unreadCount, recentPreviewLines.length);
@@ -385,22 +282,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         icon: iconUrl,
         image: imageUrl,
         tag: conv._id?.toString() ?? 'supraspace',
-        // Multiple messages in the SAME conversation while offline should
-        // collapse to one delivered push (already correctly summarized above
-        // as a real preview) instead of machine-gunning on reconnect.
         topic: conv._id?.toString(),
-        // No `source` here on purpose — normalizePushPayload (pushPayload.ts)
-        // would prepend it to the title ("SupraSpace • Devs Team PH"), which
-        // is redundant noise on the dedicated app: its OS-level notification
-        // header already reads "SupraSpace · space.suprah-app.com" from the
-        // subscription's own origin. What should be most visible is the
-        // sender/group name — `title` is already exactly that.
-        // Reply/Mark as Read run entirely in the background (sw.ts's
-        // notificationclick handler) via the same authenticated-fetch
-        // pattern already used for driver-request actions — no page needs
-        // to open. 'reply' declares a text input; browsers that don't
-        // support inline notification replies just show it as a plain
-        // button that opens the conversation instead of silently breaking.
         actions: [
           { action: 'mark_read', title: 'Mark as Read' },
           { action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type a message…' },
@@ -441,9 +323,6 @@ function withMemberNicknames(conv: any): any {
   return { ...conv, members };
 }
 
-// memberSettings carries every member's personal prefs (incl. other users'
-// quickReactions) — never send the raw map to clients. Callers read what they
-// need from it first (viewerQuickReactions, displayNickname) then strip it.
 function omitMemberSettings(conv: any): any {
   const { memberSettings, ...rest } = conv || {};
   return rest;
@@ -453,8 +332,6 @@ function getConversationNotificationPref(conv: any, userId: string): SupraSpaceN
   const raw = conv?.notificationPrefs?.[userId];
   const type = raw?.type === 'main' || raw?.type === 'foryou' || raw?.type === 'none' ? raw.type : 'all';
   const muteUntil: string | null = raw?.muteUntil ? new Date(raw.muteUntil).toISOString() : null;
-  // A timed mute auto-expires — no cron needed, just stop treating it as
-  // muted once the stored expiry has passed.
   const timedMuteActive = !!muteUntil && new Date(muteUntil).getTime() > Date.now();
   return { type, muted: !!raw?.muted || timedMuteActive, muteUntil: raw?.muted ? null : muteUntil };
 }
@@ -462,7 +339,7 @@ function getConversationNotificationPref(conv: any, userId: string): SupraSpaceN
 function mentionBoundaryRegex(alias: string): RegExp | null {
   const normalized = alias.trim().replace(/\s+/g, ' ');
   if (!normalized) return null;
-  return new RegExp(`(^|[^\\w@])@${escapeRegex(normalized)}(?=$|[^\\w])`, 'i');
+  return new RegExp(`(^|[^\\p{L}\\p{N}_@])@\\s*${escapeRegex(normalized).replace(/\\ /g, '\\s+')}(?=$|[^\\p{L}\\p{N}_])`, 'iu');
 }
 
 function mentionAliasesForName(fullName: string): string[] {
@@ -475,17 +352,18 @@ function mentionAliasesForName(fullName: string): string[] {
 }
 
 function isUserMentioned(text: string, user: { fullName?: string | null; username?: string | null }): boolean {
-  if (/(^|[^\w@])@all(?=$|[^\w])/i.test(text)) return true;
+  const mentionText = normalizeMentionText(text);
+  if (/(^|[^\p{L}\p{N}_@])@\s*all(?=$|[^\p{L}\p{N}_])/iu.test(mentionText)) return true;
   const aliases = [
     ...(user.username ? [user.username] : []),
     ...mentionAliasesForName(user.fullName || ''),
   ];
-  return aliases.some((alias) => mentionBoundaryRegex(alias)?.test(text));
+  return aliases.some((alias) => mentionBoundaryRegex(alias)?.test(mentionText));
 }
 
 function mentionContentQueryForUser(user: { fullName?: string | null; username?: string | null }): any[] {
   const mentionPatterns = [
-    /(^|[^\w@])@all(?=$|[^\w])/i,
+    /(^|[^\p{L}\p{N}_@])@\s*all(?=$|[^\p{L}\p{N}_])/iu,
     ...(user.username ? [user.username] : []),
     ...mentionAliasesForName(user.fullName || ''),
   ]
@@ -493,6 +371,16 @@ function mentionContentQueryForUser(user: { fullName?: string | null; username?:
     .filter(Boolean) as RegExp[];
 
   return mentionPatterns.map((rx) => ({ content: rx }));
+}
+
+function normalizeMentionText(value: string): string {
+  return (value || '')
+    .normalize('NFKC')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u00A0\u202F]/g, ' ')
+    .replace(/[*_~`]+/g, '')
+    .replace(/\s+/g, ' ');
 }
 
 function shouldNotifyForPreference(pref: SupraSpaceNotifPref, isMentioned: boolean): boolean {
@@ -510,10 +398,10 @@ async function notifyMentionedMembers(params: {
   route?: string;
 }) {
   try {
-    const text = params.text.trim();
+    const text = normalizeMentionText(params.text).trim();
     if (!text) return;
 
-    const hasAll = /(^|[^\w@])@all(?=$|[^\w])/i.test(text);
+    const hasAll = /(^|[^\p{L}\p{N}_@])@\s*all(?=$|[^\p{L}\p{N}_])/iu.test(text);
     const memberIds = (params.conversation.members as any[])
       .map((x: any) => x.toString())
       .filter((x: string) => x !== params.senderId.toString());
@@ -864,9 +752,62 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
 
   const userIdStr = userId.toString();
   const signed = await Promise.all(conversations.map((c: any) => withFreshAvatar(c)));
+  const signedSafe = signed.map((c: any) => withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) }));
+  const visibleSafe = signedSafe.filter((c: any) => {
+    const clearedAt = c.clearedAt?.[userIdStr];
+    return !(clearedAt && c.lastMessageAt && new Date(c.lastMessageAt) <= new Date(clearedAt));
+  });
+  const visibleIds = visibleSafe.map((c: any) => c._id);
 
-  const filtered = await Promise.all(signed.map(async (c: any) => {
-    const safeConv = withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) });
+  const groupCounts = async (match: any) => {
+    const rows = await SupraSpaceMessage.aggregate([
+      { $match: match },
+      { $group: { _id: '$conversationId', count: { $sum: 1 } } },
+    ]);
+    return new Map(rows.map((row: any) => [row._id.toString(), row.count]));
+  };
+
+  const messageBaseMatch = {
+    conversationId: { $in: visibleIds },
+    sender: { $ne: userId },
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+  };
+
+  const [unreadCounts, mentionCounts, unreadMentionCounts] = await Promise.all([
+    groupCounts({ ...messageBaseMatch, readBy: { $ne: userId } }),
+    mentionContentQuery.length
+      ? groupCounts({ ...messageBaseMatch, $or: mentionContentQuery })
+      : Promise.resolve(new Map<string, number>()),
+    mentionContentQuery.length
+      ? groupCounts({ ...messageBaseMatch, readBy: { $ne: userId }, $or: mentionContentQuery })
+      : Promise.resolve(new Map<string, number>()),
+  ]);
+
+  await Promise.all(visibleSafe
+    .filter((c: any) => c.clearedAt?.[userIdStr])
+    .map(async (c: any) => {
+      const convId = c._id.toString();
+      const createdAt = { $gt: new Date(c.clearedAt[userIdStr]) };
+      const base = {
+        conversationId: c._id,
+        sender: { $ne: userId },
+        isDeleted: false,
+        scheduledStatus: { $ne: 'pending' },
+        createdAt,
+      };
+      const [unread, mentions, unreadMentions] = await Promise.all([
+        SupraSpaceMessage.countDocuments({ ...base, readBy: { $ne: userId } }),
+        mentionContentQuery.length ? SupraSpaceMessage.countDocuments({ ...base, $or: mentionContentQuery }) : Promise.resolve(0),
+        mentionContentQuery.length ? SupraSpaceMessage.countDocuments({ ...base, readBy: { $ne: userId }, $or: mentionContentQuery }) : Promise.resolve(0),
+      ]);
+      unreadCounts.set(convId, unread);
+      mentionCounts.set(convId, mentions);
+      unreadMentionCounts.set(convId, unreadMentions);
+    }));
+
+  const filtered = signedSafe.map((safeConv: any) => {
+    const convId = safeConv._id.toString();
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
       const manualUnreadCleared = idIn(safeConv.manualUnreadBy as any, userId);
@@ -880,34 +821,9 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
         manualUnread: manualUnreadCleared,
       });
     }
-    const unreadFilter: any = {
-      conversationId: safeConv._id,
-      sender: { $ne: userId },
-      readBy: { $ne: userId },
-      isDeleted: false,
-      scheduledStatus: { $ne: 'pending' },
-    };
-    if (clearedAt) unreadFilter.createdAt = { $gt: new Date(clearedAt) };
-    const unreadCount = await SupraSpaceMessage.countDocuments(unreadFilter);
-    const mentionFilter: any = {
-      conversationId: safeConv._id,
-      sender: { $ne: userId },
-      isDeleted: false,
-      scheduledStatus: { $ne: 'pending' },
-    };
-    if (clearedAt) mentionFilter.createdAt = { $gt: new Date(clearedAt) };
-    const mentionCount = mentionContentQuery.length
-      ? await SupraSpaceMessage.countDocuments({
-          ...mentionFilter,
-          $or: mentionContentQuery,
-        })
-      : 0;
-    const unreadMentionCount = mentionContentQuery.length
-      ? await SupraSpaceMessage.countDocuments({
-          ...unreadFilter,
-          $or: mentionContentQuery,
-        })
-      : 0;
+    const unreadCount = unreadCounts.get(convId) || 0;
+    const mentionCount = mentionCounts.get(convId) || 0;
+    const unreadMentionCount = unreadMentionCounts.get(convId) || 0;
     const manualUnread = idIn(safeConv.manualUnreadBy as any, userId);
     return omitMemberSettings({
       ...safeConv,
@@ -918,7 +834,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
       unreadMentionCount,
       manualUnread,
     });
-  }));
+  });
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
 });
@@ -1869,6 +1785,38 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, payload, 'Reaction updated'));
 });
 
+const pinMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { messageId } = req.params;
+  const pinned = req.body?.pinned !== false;
+
+  const message = await SupraSpaceMessage.findById(messageId);
+  if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
+
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const alreadyPinned = idIn(message.pinnedBy as any, userId);
+  if (pinned) {
+    if (!alreadyPinned) message.pinnedBy.push(userId as any);
+    message.pinnedAt = message.pinnedAt || new Date();
+  } else {
+    message.pinnedBy = message.pinnedBy.filter((u) => u.toString() !== userId.toString()) as any;
+    if (message.pinnedBy.length === 0) message.pinnedAt = null;
+  }
+  await message.save();
+
+  const payload = {
+    conversationId: message.conversationId.toString(),
+    messageId,
+    pinned: message.pinnedBy.length > 0,
+    pinnedBy: message.pinnedBy.map(String),
+    pinnedAt: message.pinnedAt,
+  };
+  emitToConversation(conversation, 'message:pinned', payload);
+  res.json(new ApiResponse(200, payload, payload.pinned ? 'Message pinned' : 'Message unpinned'));
+});
+
 /** DELETE /api/supraspace/messages/:messageId  — soft delete (sender only) */
 const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -1936,6 +1884,10 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   const userId = req.crmUser!._id;
   const { messageId } = req.params;
   const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+  const replaceIndexRaw = req.body.replaceIndex;
+  const replaceIndex = replaceIndexRaw === undefined || replaceIndexRaw === null || replaceIndexRaw === ''
+    ? null
+    : Number.parseInt(String(replaceIndexRaw), 10);
   const files = (req.files || []) as Express.Multer.File[];
 
   const message = await SupraSpaceMessage.findById(messageId);
@@ -1944,9 +1896,18 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   if (message.type === 'voice' || message.type === 'poll' || message.type === 'event' || message.type === 'gif') {
     throw new ApiError(400, 'This message type cannot have its attachments replaced');
   }
+  if (replaceIndex !== null && (!Number.isInteger(replaceIndex) || replaceIndex < 0)) {
+    throw new ApiError(400, 'Invalid attachment replacement target');
+  }
+  if (replaceIndex !== null && files.length !== 1) {
+    throw new ApiError(400, 'Choose one file to replace this attachment');
+  }
   if (!content && files.length === 0) throw new ApiError(400, 'A message or attachment is required');
 
   const oldAttachments = [...(message.attachments || [])];
+  if (replaceIndex !== null && replaceIndex >= oldAttachments.length) {
+    throw new ApiError(400, 'Attachment replacement target was not found');
+  }
   const replacements: any[] = [];
   try {
     for (const file of files) {
@@ -1967,10 +1928,17 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   }
 
   message.content = content;
-  message.attachments = replacements;
-  message.type = replacements.some(a => a.mimeType.startsWith('image/')) && replacements.length === 1
+  const nextAttachments = replaceIndex === null
+    ? replacements
+    : oldAttachments.map((attachment, index) => index === replaceIndex ? replacements[0] : attachment);
+  const removedAttachments = replaceIndex === null
+    ? oldAttachments
+    : oldAttachments.filter((_, index) => index === replaceIndex);
+
+  message.attachments = nextAttachments as any;
+  message.type = nextAttachments.some((a: any) => a.mimeType.startsWith('image/')) && nextAttachments.length === 1
     ? 'image'
-    : replacements.length > 0 ? 'file' : 'text';
+    : nextAttachments.length > 0 ? 'file' : 'text';
   message.isEdited = true;
 
   try {
@@ -1980,7 +1948,7 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
     throw err;
   }
 
-  await Promise.all(oldAttachments.map(a => {
+  await Promise.all(removedAttachments.map(a => {
     const key = a.fileKey || a.url;
     return key ? storageService.delete(key).catch(e => logger.warn({ err: e, messageId }, '[SupraSpace] Old attachment cleanup failed')) : Promise.resolve();
   }));
@@ -2488,6 +2456,7 @@ const supraSpaceController = {
   postDayPulseReport,
   uploadAttachment,
   reactToMessage,
+  pinMessage,
   editMessage,
   replaceMessageAttachments,
   deleteMessage,
