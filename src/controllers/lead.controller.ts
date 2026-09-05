@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+ import { Request, Response, NextFunction } from 'express';
 import appointmentService from '../services/appointment.service';
 import googleCalendarService from '../services/googleCalendar.service';
 import Lead from '../models/lead.model';
