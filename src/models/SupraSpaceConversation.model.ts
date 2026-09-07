@@ -120,6 +120,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
 
 
 SupraSpaceConversationSchema.index({ members: 1 });
+SupraSpaceConversationSchema.index({ members: 1, isActive: 1, lastMessageAt: -1 });
 SupraSpaceConversationSchema.index({ lastMessageAt: -1 });
 
 SupraSpaceConversationSchema.index({ 'metadata.type': 1, 'metadata.customerUserId': 1, lastMessageAt: -1 });

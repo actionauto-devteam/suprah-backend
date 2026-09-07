@@ -728,6 +728,11 @@ async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: s
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const mentionContentQuery = mentionContentQueryForUser(req.crmUser as any);
+  const requestedLimit = parseInt(String(req.query.limit || ''), 10);
+  const requestedOffset = parseInt(String(req.query.offset || ''), 10);
+  const hasPagination = Number.isFinite(requestedLimit) && requestedLimit > 0;
+  const limit = hasPagination ? Math.min(Math.max(requestedLimit, 1), 100) : 0;
+  const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? requestedOffset : 0;
 
   // Hide deprecated auto-generated technical/orphan groups (configurable via env).
   const deprecated = (process.env.DEPRECATED_AUTO_GROUPS || '')
@@ -735,7 +740,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const conversations = await SupraSpaceConversation.find({
+  let conversationQuery = SupraSpaceConversation.find({
     members: userId,
     isActive: true,
     deletedFor: { $ne: userId },
@@ -747,11 +752,16 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
       path: 'lastMessage',
       populate: { path: 'sender', select: 'fullName username avatar' },
     })
-    .sort({ lastMessageAt: -1 })
-    .lean();
+    .sort({ lastMessageAt: -1 });
+
+  if (hasPagination) conversationQuery = conversationQuery.skip(offset).limit(limit + 1);
+
+  const conversations = await conversationQuery.lean();
+  const hasMore = hasPagination && conversations.length > limit;
+  const pagedConversations = hasPagination ? conversations.slice(0, limit) : conversations;
 
   const userIdStr = userId.toString();
-  const signed = await Promise.all(conversations.map((c: any) => withFreshAvatar(c)));
+  const signed = await Promise.all(pagedConversations.map((c: any) => withFreshAvatar(c)));
   const signedSafe = signed.map((c: any) => withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) }));
   const visibleSafe = signedSafe.filter((c: any) => {
     const clearedAt = c.clearedAt?.[userIdStr];
@@ -835,6 +845,15 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
       manualUnread,
     });
   });
+
+  if (hasPagination) {
+    res.json(new ApiResponse(200, {
+      conversations: filtered,
+      hasMore,
+      nextOffset: offset + pagedConversations.length,
+    }, 'Conversations fetched'));
+    return;
+  }
 
   res.json(new ApiResponse(200, filtered, 'Conversations fetched'));
 });
@@ -1258,6 +1277,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
   const { before, limit = '40' } = req.query;
+  const requestedLimit = Math.min(Math.max(parseInt(String(limit), 10) || 40, 1), 100);
 
   // Use lean() so clearedAt comes back as a plain JS object — no Mongoose Mixed
   // type accessor wrapping that can silently swallow bracket-notation key access.
@@ -1279,7 +1299,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .populate('sender', 'fullName username avatar')
     .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
     .sort({ createdAt: -1 })
-    .limit(parseInt(limit as string))
+    .limit(requestedLimit)
     .lean();
 
   SupraSpaceMessage.updateMany(

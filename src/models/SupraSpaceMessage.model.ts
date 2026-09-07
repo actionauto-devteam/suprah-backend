@@ -233,6 +233,7 @@ const SupraSpaceMessageSchema = new Schema<ISupraSpaceMessage>(
 
 
 SupraSpaceMessageSchema.index({ conversationId: 1, createdAt: -1 });
+SupraSpaceMessageSchema.index({ conversationId: 1, isDeleted: 1, scheduledStatus: 1, createdAt: -1 });
 SupraSpaceMessageSchema.index({ scheduledStatus: 1, scheduledAt: 1 });
 SupraSpaceMessageSchema.index({ content: 'text' });
 SupraSpaceMessageSchema.index({ conversationId: 1, 'metadata.isCustomerMessage': 1 });
