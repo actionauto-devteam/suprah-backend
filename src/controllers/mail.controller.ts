@@ -474,7 +474,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
         fromEmail: { $first: '$fromEmail' },
         sentAt: { $first: '$sentAt' },
         attachmentNames: { $first: '$attachments.originalName' },
-      },
+      }, 
     },
     { $limit: 200 },
   ]);

@@ -349,7 +349,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
  * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
-    const { status, search } = req.query;
+    const { status, search, origin, destination } = req.query;
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
     const skip = (page - 1) * limit;
@@ -362,18 +362,66 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         filter.status = status;
     }
     const safeSearch = normalizeSearchQuery(search);
+    const safeOrigin = normalizeSearchQuery(origin);
+    const safeDestination = normalizeSearchQuery(destination);
+    const andConditions: any[] = [];
+
     if (safeSearch) {
         const escapedSearch = escapeRegex(safeSearch);
-        filter.$or = [
-            { firstName: { $regex: escapedSearch, $options: 'i' } },
-            { lastName: { $regex: escapedSearch, $options: 'i' } },
-            { email: { $regex: escapedSearch, $options: 'i' } },
-            { vin: { $regex: escapedSearch, $options: 'i' } },
-            { stockNumber: { $regex: escapedSearch, $options: 'i' } },
-        ];
+        andConditions.push({
+            $or: [
+                { firstName: { $regex: escapedSearch, $options: 'i' } },
+                { lastName: { $regex: escapedSearch, $options: 'i' } },
+                { email: { $regex: escapedSearch, $options: 'i' } },
+                { phone: { $regex: escapedSearch, $options: 'i' } },
+                { vin: { $regex: escapedSearch, $options: 'i' } },
+                { stockNumber: { $regex: escapedSearch, $options: 'i' } },
+                { vehicleName: { $regex: escapedSearch, $options: 'i' } },
+                { fromAddress: { $regex: escapedSearch, $options: 'i' } },
+                { toAddress: { $regex: escapedSearch, $options: 'i' } },
+                { 'fromLocation.city': { $regex: escapedSearch, $options: 'i' } },
+                { 'fromLocation.state': { $regex: escapedSearch, $options: 'i' } },
+                { 'toLocation.city': { $regex: escapedSearch, $options: 'i' } },
+                { 'toLocation.state': { $regex: escapedSearch, $options: 'i' } },
+            ],
+        });
     }
 
-    const isCacheable = !safeSearch;
+    if (safeOrigin) {
+        const escapedOrigin = escapeRegex(safeOrigin);
+        andConditions.push({
+            $or: [
+                { fromAddress: { $regex: escapedOrigin, $options: 'i' } },
+                { fromZip: { $regex: escapedOrigin, $options: 'i' } },
+                { 'fromLocation.name': { $regex: escapedOrigin, $options: 'i' } },
+                { 'fromLocation.streetAddress': { $regex: escapedOrigin, $options: 'i' } },
+                { 'fromLocation.city': { $regex: escapedOrigin, $options: 'i' } },
+                { 'fromLocation.state': { $regex: escapedOrigin, $options: 'i' } },
+                { 'fromLocation.zip': { $regex: escapedOrigin, $options: 'i' } },
+            ],
+        });
+    }
+
+    if (safeDestination) {
+        const escapedDestination = escapeRegex(safeDestination);
+        andConditions.push({
+            $or: [
+                { toAddress: { $regex: escapedDestination, $options: 'i' } },
+                { toZip: { $regex: escapedDestination, $options: 'i' } },
+                { 'toLocation.name': { $regex: escapedDestination, $options: 'i' } },
+                { 'toLocation.streetAddress': { $regex: escapedDestination, $options: 'i' } },
+                { 'toLocation.city': { $regex: escapedDestination, $options: 'i' } },
+                { 'toLocation.state': { $regex: escapedDestination, $options: 'i' } },
+                { 'toLocation.zip': { $regex: escapedDestination, $options: 'i' } },
+            ],
+        });
+    }
+
+    if (andConditions.length > 0) {
+        filter.$and = andConditions;
+    }
+
+    const isCacheable = !safeSearch && !safeOrigin && !safeDestination;
     const cacheKey = `quotes:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
 
     if (isCacheable) {

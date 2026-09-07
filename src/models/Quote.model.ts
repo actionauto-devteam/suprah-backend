@@ -54,7 +54,7 @@ export interface IQuote extends Document {
 const quoteLocationSchema = new Schema(
     {
         name: { type: String, trim: true, default: "" },
-        // Recommended at Quote stage, not required.
+        // Recommended at Quote stage, not required. 
         streetAddress: { type: String, trim: true, default: "" },
         city: { type: String, required: true, trim: true },
         state: {

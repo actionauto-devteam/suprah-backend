@@ -30,6 +30,12 @@ import {
 
 const getUser = (req: Request) => req.user as IUser;
 
+const escapeRegex = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const normalizeListQuery = (value: unknown) =>
+  typeof value === "string" ? value.trim().slice(0, 120) : "";
+
 const TRANSPORTATION_TIME_ZONE = "America/Denver";
 
 const mountainDatePartsFormatter = new Intl.DateTimeFormat("en-US", {
@@ -526,6 +532,10 @@ const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) =>
 // GET /api/loads?status=Posted&q=LD-2026&postType=load-board&page=1&limit=20
 
 const LOAD_STATUSES = ["Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"] as const;
+// Draft is queryable for pipeline/history visibility, but remains excluded from
+// the generic update-status allowlist so this visibility fix cannot downgrade
+// an active load back to Draft through PUT /api/loads/:id.
+const LOAD_QUERY_STATUSES = ["Draft", ...LOAD_STATUSES] as const;
 
 const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
@@ -540,7 +550,7 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
   const filter: Record<string, unknown> = { organizationId };
 
   const status = req.query.status as string | undefined;
-  if (status && LOAD_STATUSES.includes(status as typeof LOAD_STATUSES[number])) {
+  if (status && LOAD_QUERY_STATUSES.includes(status as typeof LOAD_QUERY_STATUSES[number])) {
     filter.status = status;
   }
 
@@ -549,8 +559,63 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
     filter.postType = postType;
   }
 
-  const q = (req.query.q as string | undefined)?.trim();
-  if (q) (filter as any).$text = { $search: q };
+  const origin = normalizeListQuery(req.query.origin);
+  const destination = normalizeListQuery(req.query.destination);
+  const visibility = normalizeListQuery(req.query.visibility).toLowerCase();
+  const q = normalizeListQuery(req.query.q);
+
+  const andConditions: Record<string, unknown>[] = [];
+
+  if (visibility === "private") {
+    filter["additionalInfo.visibility"] = "private";
+  } else if (visibility === "public") {
+    // Older Load records may not have an explicit visibility field. The UI
+    // already treats those records as Public, so the server-side filter must
+    // preserve that same backward-compatible meaning.
+    andConditions.push({
+      $or: [
+        { "additionalInfo.visibility": "public" },
+        { "additionalInfo.visibility": { $exists: false } },
+        { "additionalInfo.visibility": null },
+      ],
+    });
+  }
+
+  if (origin) {
+    const pattern = { $regex: escapeRegex(origin), $options: "i" };
+    andConditions.push({
+      $or: [
+        { "pickupLocation.name": pattern },
+        { "pickupLocation.address": pattern },
+        { "pickupLocation.city": pattern },
+        { "pickupLocation.state": pattern },
+        { "pickupLocation.zip": pattern },
+        { "pickupLocation.contactName": pattern },
+      ],
+    });
+  }
+
+  if (destination) {
+    const pattern = { $regex: escapeRegex(destination), $options: "i" };
+    andConditions.push({
+      $or: [
+        { "deliveryLocation.name": pattern },
+        { "deliveryLocation.address": pattern },
+        { "deliveryLocation.city": pattern },
+        { "deliveryLocation.state": pattern },
+        { "deliveryLocation.zip": pattern },
+        { "deliveryLocation.contactName": pattern },
+      ],
+    });
+  }
+
+  if (q) {
+    filter.$text = { $search: q };
+  }
+
+  if (andConditions.length > 0) {
+    filter.$and = andConditions;
+  }
 
   // Report period support. Accepts either month/year or date=YYYY-MM.
   const dateParam = (req.query.date as string | undefined)?.trim();
@@ -643,7 +708,7 @@ const getLoads = asyncHandler(async (req: Request, res: Response) => {
 
 // ─── Get Load Stats (counts per status) ──────────────────────────────────────
 // GET /api/loads/stats
-// Returns { all, Posted, Assigned, In-Transit, Delivered, Cancelled }
+// Returns { all, Draft, Posted, Assigned, Accepted, Picked Up, In-Transit, Delivered, Cancelled }
 
 const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
   const organizationId = req.orgId as string;
@@ -680,6 +745,7 @@ const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
 
   const stats: Record<string, number> = {
     all: 0,
+    Draft: 0,
     Posted: 0,
     Assigned: 0,
     Accepted: 0,
