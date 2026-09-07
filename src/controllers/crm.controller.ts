@@ -18,7 +18,7 @@ import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
-import { cascadeDepartmentToLinkedUser } from "../utils/departmentSync.util";
+import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
 import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept } from "../config/departmentMonitoring";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
@@ -864,6 +864,14 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
       }
     }
     throw error;
+  }
+
+  if (normalizeEmail(user.email) !== linkedCoreEmail) {
+    await cascadeEmailToLinkedUser({
+      previousEmail: linkedCoreEmail,
+      nextEmail: user.email,
+      organizationId: user.organizationId,
+    });
   }
 
   if (department !== undefined) {

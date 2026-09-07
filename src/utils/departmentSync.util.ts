@@ -49,3 +49,43 @@ export async function cascadeDepartmentToLinkedUser(params: CascadeParams): Prom
     console.error('cascadeDepartmentToLinkedUser failed (best-effort, primary write already succeeded):', error);
   }
 }
+
+type EmailCascadeParams = {
+  previousEmail?: string | null;
+  nextEmail?: string | null;
+  organizationId?: unknown;
+};
+
+// Same dual-account problem as cascadeDepartmentToLinkedUser above, but for the email address
+// itself. CrmUser and User are linked ONLY by matching email (see getLocatorActor,
+// getMainPersonalInfoByEmail, crmAuth.middleware's main-token fallback) — there is no schema
+// reference between them. When an admin renames a CrmUser's email, the linked User document
+// keeps the old address unless something pushes the new one onto it, which silently breaks the
+// link: every downstream email-keyed lookup stops finding the account, and anything reading the
+// person's email straight off the main User record (Team Pulse's roster, Locator, personalInfo
+// enrichment) keeps showing the stale address indefinitely. Must run BEFORE
+// cascadeDepartmentToLinkedUser so that call's own lookup-by-new-email succeeds too.
+export async function cascadeEmailToLinkedUser(params: EmailCascadeParams): Promise<void> {
+  const { previousEmail, nextEmail, organizationId } = params;
+  const normalizedPrevious = previousEmail?.trim().toLowerCase();
+  const normalizedNext = nextEmail?.trim().toLowerCase();
+  if (!normalizedPrevious || !normalizedNext || normalizedPrevious === normalizedNext) return;
+
+  try {
+    const linkedUser = await User.findOne({ email: normalizedPrevious, organizationId });
+    if (!linkedUser) return;
+
+    const emailTaken = await User.exists({ email: normalizedNext, _id: { $ne: linkedUser._id } });
+    if (emailTaken) {
+      console.error(
+        `cascadeEmailToLinkedUser: cannot rename linked User ${linkedUser._id} to "${normalizedNext}" — already in use by another main account. The CrmUser and User records will remain unlinked until this is resolved manually.`,
+      );
+      return;
+    }
+
+    await User.findByIdAndUpdate(linkedUser._id, { $set: { email: normalizedNext } });
+    invalidateUserCache((linkedUser._id as any).toString());
+  } catch (error) {
+    console.error('cascadeEmailToLinkedUser failed (best-effort, primary write already succeeded):', error);
+  }
+}
