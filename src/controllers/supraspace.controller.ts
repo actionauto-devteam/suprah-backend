@@ -472,6 +472,43 @@ async function notifyMentionedMembers(params: {
   }
 }
 
+async function notifyMessageReaction(params: {
+  conversation: any;
+  targetUserId: string;
+  reactorId: string;
+  reactorName: string;
+  emoji: string;
+  messageId: string;
+  organizationId: string;
+}) {
+  try {
+    if (!params.targetUserId || params.targetUserId === params.reactorId) return;
+    const pref = getConversationNotificationPref(params.conversation, params.targetUserId);
+    if (!shouldNotifyForPreference(pref, true)) return;
+
+    await notificationService.createNotification({
+      userId: params.targetUserId,
+      organizationId: params.organizationId,
+      type: 'crm_message',
+      title: `${params.reactorName} reacted ${params.emoji}`,
+      message: `${params.emoji} to your message`,
+      metadata: {
+        conversationId: params.conversation._id.toString(),
+        messageId: params.messageId,
+        route: supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
+        pushSource: 'SupraSpace',
+        kind: 'reaction',
+        reaction: params.emoji,
+        reactorId: params.reactorId,
+      },
+      dedupeKey: `supraspace-reaction:${params.targetUserId}:${params.messageId}:${params.reactorId}:${params.emoji}`,
+      groupWindowMinutes: 5,
+    });
+  } catch (err) {
+    logger.warn({ err, messageId: params.messageId }, '[SupraSpace] Failed to notify message reaction');
+  }
+}
+
 async function getOrCreateDayPulseReportConversation(organizationId: string, creatorId: any) {
   const orgMembers = await CrmUser.find({ organizationId, isActive: true }).select('_id').lean();
   const memberIds = orgMembers.map((m) => m._id);
@@ -1779,7 +1816,8 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { messageId } = req.params;
   const { emoji } = req.body;
-  if (!emoji) throw new ApiError(400, 'emoji is required');
+  const emojiValue = typeof emoji === 'string' ? emoji.trim() : '';
+  if (!emojiValue) throw new ApiError(400, 'emoji is required');
 
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
@@ -1787,20 +1825,105 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const existing = message.reactions.find((r) => r.emoji === emoji);
+  let reactionAdded = false;
+  let reactionRemoved = false;
+  const existing = message.reactions.find((r) => r.emoji === emojiValue);
   if (existing) {
     if (idIn(existing.users as any, userId)) {
       existing.users = existing.users.filter((u) => u.toString() !== userId.toString()) as any;
-      if (existing.users.length === 0) message.reactions = message.reactions.filter((r) => r.emoji !== emoji) as any;
+      if (existing.users.length === 0) message.reactions = message.reactions.filter((r) => r.emoji !== emojiValue) as any;
+      reactionRemoved = true;
     } else {
       existing.users.push(userId as any);
+      reactionAdded = true;
     }
   } else {
-    message.reactions.push({ emoji, users: [userId] } as any);
+    message.reactions.push({ emoji: emojiValue, users: [userId] } as any);
+    reactionAdded = true;
   }
+  message.markModified('reactions');
   await message.save();
 
-  const payload = { conversationId: message.conversationId.toString(), messageId, reactions: message.reactions };
+  const messageIdString = message._id.toString();
+  const reactionCreatedAt = new Date();
+  const targetUserId = message.sender.toString();
+  const reactorName = (req.crmUser as any)?.fullName || 'Someone';
+  let reactionActivity: any = undefined;
+  let conversationLastMessageAt: string | null | undefined = undefined;
+
+  if (reactionAdded) {
+    const dbReactionActivity = {
+      messageId: message._id,
+      userId,
+      userName: reactorName,
+      emoji: emojiValue,
+      targetUserId: message.sender,
+      createdAt: reactionCreatedAt,
+    };
+    await SupraSpaceConversation.updateOne(
+      { _id: message.conversationId },
+      { $set: { lastReaction: dbReactionActivity, lastMessageAt: reactionCreatedAt } }
+    );
+    (conversation as any).lastReaction = dbReactionActivity;
+    (conversation as any).lastMessageAt = reactionCreatedAt;
+    reactionActivity = {
+      messageId: messageIdString,
+      userId: userId.toString(),
+      userName: reactorName,
+      emoji: emojiValue,
+      targetUserId,
+      createdAt: reactionCreatedAt.toISOString(),
+    };
+    conversationLastMessageAt = reactionCreatedAt.toISOString();
+    notifyMessageReaction({
+      conversation,
+      targetUserId,
+      reactorId: userId.toString(),
+      reactorName,
+      emoji: emojiValue,
+      messageId: messageIdString,
+      organizationId: (req.crmUser!.organizationId as any).toString(),
+    });
+  } else if (reactionRemoved) {
+    const storedReaction = (conversation as any).lastReaction;
+    const shouldClearLastReaction =
+      storedReaction?.messageId?.toString?.() === messageIdString &&
+      storedReaction?.userId?.toString?.() === userId.toString() &&
+      storedReaction?.emoji === emojiValue;
+
+    if (shouldClearLastReaction) {
+      const lastMessageDoc = (conversation as any).lastMessage
+        ? await SupraSpaceMessage.findById((conversation as any).lastMessage).select('createdAt').lean()
+        : await SupraSpaceMessage.findOne({
+          conversationId: message.conversationId,
+          isDeleted: false,
+          scheduledStatus: { $ne: 'pending' },
+        }).sort({ createdAt: -1 }).select('createdAt').lean();
+      const restoredLastMessageAt = (lastMessageDoc as any)?.createdAt || null;
+      const clearUpdate: any = { $unset: { lastReaction: '' } };
+      if (restoredLastMessageAt) clearUpdate.$set = { lastMessageAt: restoredLastMessageAt };
+      else clearUpdate.$unset.lastMessageAt = '';
+      await SupraSpaceConversation.updateOne(
+        {
+          _id: message.conversationId,
+          'lastReaction.messageId': message._id,
+          'lastReaction.userId': userId,
+          'lastReaction.emoji': emojiValue,
+        },
+        clearUpdate,
+      );
+      reactionActivity = null;
+      conversationLastMessageAt = restoredLastMessageAt ? restoredLastMessageAt.toISOString() : null;
+    }
+  }
+
+  const payload = {
+    conversationId: message.conversationId.toString(),
+    messageId: messageIdString,
+    reactions: message.reactions,
+    reactionActivity,
+    conversationLastMessageAt,
+  };
   emitToConversation(conversation, 'message:reaction', payload);
   res.json(new ApiResponse(200, payload, 'Reaction updated'));
 });

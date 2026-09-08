@@ -32,6 +32,15 @@ export interface ISupraSpaceMemberSettings {
   quickReactions?: string[];
 }
 
+export interface ISupraSpaceLastReaction {
+  messageId?: mongoose.Types.ObjectId | null;
+  userId?: mongoose.Types.ObjectId | null;
+  userName?: string | null;
+  emoji?: string | null;
+  targetUserId?: mongoose.Types.ObjectId | null;
+  createdAt?: Date | null;
+}
+
 export interface ISupraSpaceConversation extends Document {
   type: 'direct' | 'group';
   name?: string;
@@ -52,6 +61,7 @@ export interface ISupraSpaceConversation extends Document {
   memberSettings: Record<string, ISupraSpaceMemberSettings>;
   lastMessage?: mongoose.Types.ObjectId;
   lastMessageAt?: Date;
+  lastReaction?: ISupraSpaceLastReaction | null;
   createdBy: mongoose.Types.ObjectId;
   isActive: boolean;
   deletedAt?: Date | null;
@@ -84,6 +94,18 @@ const MetadataSchema = new Schema<ISupraSpaceConversationMetadata>(
   { _id: false }
 );
 
+const LastReactionSchema = new Schema<ISupraSpaceLastReaction>(
+  {
+    messageId:    { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
+    userId:       { type: Schema.Types.ObjectId, ref: 'CrmUser', default: null },
+    userName:     { type: String, default: null },
+    emoji:        { type: String, default: null },
+    targetUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', default: null },
+    createdAt:    { type: Date, default: null },
+  },
+  { _id: false }
+);
+
 
 const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
   {
@@ -111,6 +133,7 @@ const SupraSpaceConversationSchema = new Schema<ISupraSpaceConversation>(
     memberSettings: { type: Schema.Types.Mixed, default: () => ({}) },
     lastMessage:   { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
     lastMessageAt: { type: Date, default: null },
+    lastReaction:  { type: LastReactionSchema, default: null },
     createdBy:  { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
     isActive:   { type: Boolean, default: true },
     deletedAt:  { type: Date, default: null },
