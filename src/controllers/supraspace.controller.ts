@@ -212,7 +212,8 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
       .lean();
     const recentPreviewLines = recentMessages.reverse().map((m: any) => {
       const name = m.sender?.fullName || 'Someone';
-      const text = m.content?.trim() || (m.attachments?.length ? 'Sent an attachment' : m.gif ? 'Sent a GIF' : '...');
+      const cleanText = m.content?.trim() ? truncateWithEllipsis(stripMessageFormatting(m.content.trim()), 120) : '';
+      const text = cleanText || (m.attachments?.length ? 'Sent an attachment' : m.gif ? 'Sent a GIF' : '...');
       return `${name}: ${text}`;
     });
 
