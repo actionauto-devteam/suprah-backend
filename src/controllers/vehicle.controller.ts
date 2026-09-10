@@ -25,6 +25,14 @@ const getUserId = (req: Request): string | undefined => {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const vehicleImages = (vehicle: any): string[] =>
+  Array.isArray(vehicle.images)
+    ? vehicle.images.filter(
+        (image: unknown): image is string =>
+          typeof image === "string" && image.trim().length > 0,
+      )
+    : [];
+
 const getVehicleAgeDays = (vehicle: any) => {
   const storedDays = Number(vehicle.daysOnLot);
   if (Number.isFinite(storedDays) && storedDays > 0) {
@@ -81,11 +89,8 @@ const normalizeVehicle = (vehicle: any) => ({
     : "Unknown",
   dealerName: vehicle.dealerName || "",
   dealerAddress: vehicle.dealerAddress || "",
-  image:
-    vehicle.images && vehicle.images.length > 0
-      ? vehicle.images[0]
-      : "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop",
-  images: vehicle.images || [],
+  image: vehicleImages(vehicle)[0] || "",
+  images: vehicleImages(vehicle),
   status: vehicle.status,
   currentStep: vehicle.currentStep,
   reconStartDate: vehicle.reconStartDate,
@@ -138,11 +143,8 @@ const normalizePublicVehicle = (vehicle: any) => ({
   location: vehicle.dealerCity
     ? `${vehicle.dealerCity}${vehicle.dealerState ? ", " + vehicle.dealerState : ""}${vehicle.dealerZip ? ", " + vehicle.dealerZip : ""}`
     : "Unknown",
-  image:
-    vehicle.images && vehicle.images.length > 0
-      ? vehicle.images[0]
-      : "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop",
-  images: vehicle.images || [],
+  image: vehicleImages(vehicle)[0] || "",
+  images: vehicleImages(vehicle),
   status: vehicle.status,
   daysOnLot: vehicle.daysOnLot || 0,
   comments: vehicle.comments || "",
@@ -180,14 +182,8 @@ const normalizeCustomerVehicle = (
   location: vehicle.dealerCity
     ? `${vehicle.dealerCity}${vehicle.dealerState ? ", " + vehicle.dealerState : ""}${vehicle.dealerZip ? ", " + vehicle.dealerZip : ""}`
     : "Unknown",
-  image:
-    (Array.isArray(vehicle.images)
-      ? vehicle.images.find((img: string) => typeof img === "string" && img.trim().length > 0)
-      : null) ||
-    "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop",
-  images: Array.isArray(vehicle.images)
-    ? vehicle.images.filter((img: string) => typeof img === "string" && img.trim().length > 0)
-    : [],
+  image: vehicleImages(vehicle)[0] || "",
+  images: vehicleImages(vehicle),
   status: vehicle.status,
   daysOnLot: vehicle.daysOnLot || 0,
   engine: vehicle.engine || "",
