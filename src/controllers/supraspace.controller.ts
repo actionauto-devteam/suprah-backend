@@ -35,6 +35,89 @@ const SHIFT_ALERTS_CHANNEL_NAME_REGEX = /^Shift Alerts$/i;
 type SupraSpaceNotifType = 'all' | 'main' | 'foryou' | 'none';
 type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean; muteUntil?: string | null };
 const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false, muteUntil: null };
+const SUPRA_SPACE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpeg', '.mpg', '.ogv']);
+const SUPRA_SPACE_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.avif']);
+const SUPRA_SPACE_EXTENSION_MIME: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+  '.bmp': 'image/bmp',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.m4v': 'video/x-m4v',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.wmv': 'video/x-ms-wmv',
+  '.flv': 'video/x-flv',
+  '.3gp': 'video/3gpp',
+  '.mpeg': 'video/mpeg',
+  '.mpg': 'video/mpeg',
+  '.ogv': 'video/ogg',
+};
+
+function getSupraSpaceUploadFiles(files: any, field = 'files'): Express.Multer.File[] {
+  if (Array.isArray(files)) return field === 'files' ? files : [];
+  return Array.isArray(files?.[field]) ? files[field] : [];
+}
+
+function getSupraSpaceBodyArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (value === undefined || value === null || value === '') return [];
+  return [String(value)];
+}
+
+function getSupraSpaceFileExtension(name?: string | null): string {
+  if (!name || !name.includes('.')) return '';
+  return name.slice(name.lastIndexOf('.')).toLowerCase();
+}
+
+function normalizeSupraSpaceMimeType(file: Express.Multer.File): string {
+  const extension = getSupraSpaceFileExtension(file.originalname);
+  const inferred = SUPRA_SPACE_EXTENSION_MIME[extension];
+  const current = file.mimetype || '';
+  if (inferred && (!current || current === 'application/octet-stream' || current === 'audio/mp4')) return inferred;
+  return current || inferred || 'application/octet-stream';
+}
+
+function isSupraSpaceImageUpload(file: Express.Multer.File, mimeType = normalizeSupraSpaceMimeType(file)): boolean {
+  return mimeType.startsWith('image/') || SUPRA_SPACE_IMAGE_EXTENSIONS.has(getSupraSpaceFileExtension(file.originalname));
+}
+
+function isSupraSpaceVideoUpload(file: Express.Multer.File, mimeType = normalizeSupraSpaceMimeType(file)): boolean {
+  return mimeType.startsWith('video/') || SUPRA_SPACE_VIDEO_EXTENSIONS.has(getSupraSpaceFileExtension(file.originalname));
+}
+
+function mapSupraSpaceThumbnails(files: any, body: any): Map<number, Express.Multer.File> {
+  const thumbnails = getSupraSpaceUploadFiles(files, 'thumbnails');
+  const indexes = getSupraSpaceBodyArray(body?.thumbnailIndexes).map(value => Number.parseInt(value, 10));
+  const byIndex = new Map<number, Express.Multer.File>();
+  thumbnails.forEach((file, index) => {
+    const target = Number.isInteger(indexes[index]) ? indexes[index] : index;
+    if (target >= 0) byIndex.set(target, file);
+  });
+  return byIndex;
+}
+
+async function uploadSupraSpaceAttachmentThumbnail(file?: Express.Multer.File): Promise<string | undefined> {
+  if (!file) return undefined;
+  return storageService.upload(file, 'chat-attachments/thumbnails', BucketType.PRIVATE, { allowLocalFallback: false });
+}
+
+async function deleteSupraSpaceAttachmentFiles(attachment: any, logContext?: Record<string, unknown>) {
+  const keys = new Set<string>();
+  if (attachment?.fileKey) keys.add(attachment.fileKey);
+  const thumbnailKey = attachment?.thumbnailUrl;
+  if (thumbnailKey && !String(thumbnailKey).startsWith('http') && thumbnailKey !== attachment?.fileKey && thumbnailKey !== attachment?.url) keys.add(thumbnailKey);
+  await Promise.all([...keys].map(key => storageService.delete(key).catch(err => logger.warn({ err, ...logContext }, '[SupraSpace] Attachment cleanup failed'))));
+}
 
 function emitToConversation(conv: any, event: string, payload: any) {
   try {
@@ -742,8 +825,11 @@ async function signAttachments(message: any) {
         const signed = await getCachedSignedUrl('supraspace-attachment', a.fileKey || a.url);
         if (signed) {
           a.url = signed;
-          if (a.thumbnailUrl) a.thumbnailUrl = signed;
         }
+      }
+      if (a.thumbnailUrl && !a.thumbnailUrl.startsWith('http')) {
+        const signedThumbnail = await getCachedSignedUrl('supraspace-attachment-thumbnail', a.thumbnailUrl);
+        if (signedThumbnail) a.thumbnailUrl = signedThumbnail;
       }
     }));
   }
@@ -1413,7 +1499,11 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
   const signed = await Promise.all(items.map(async (item) => {
     if (item.attachment.url && !item.attachment.url.startsWith('http')) {
       const url = await storageService.getSignedUrl(item.attachment.fileKey || item.attachment.url);
-      if (url) item.attachment = { ...item.attachment, url, thumbnailUrl: item.attachment.thumbnailUrl ? url : item.attachment.thumbnailUrl };
+      if (url) item.attachment = { ...item.attachment, url };
+    }
+    if (item.attachment.thumbnailUrl && !item.attachment.thumbnailUrl.startsWith('http')) {
+      const thumbnailUrl = await storageService.getSignedUrl(item.attachment.thumbnailUrl);
+      if (thumbnailUrl) item.attachment = { ...item.attachment, thumbnailUrl };
     }
     return item;
   }));
@@ -1714,23 +1804,37 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
   }
 
-  const files = req.files as Express.Multer.File[];
+  const files = getSupraSpaceUploadFiles(req.files);
   if (!files || files.length === 0) throw new ApiError(400, 'No files uploaded');
+  const thumbnailsByIndex = mapSupraSpaceThumbnails(req.files, req.body);
 
   const attachments: any[] = [];
   let hasImage = false;
   let hasAudio = false;
 
-  for (const file of files) {
-    const isImage = file.mimetype.startsWith('image/');
-    const isAudio = file.mimetype.startsWith('audio/');
+  for (const [index, file] of files.entries()) {
+    const mimeType = normalizeSupraSpaceMimeType(file);
+    file.mimetype = mimeType;
+    const isImage = isSupraSpaceImageUpload(file, mimeType);
+    const isVideo = isSupraSpaceVideoUpload(file, mimeType);
+    const isAudio = mimeType.startsWith('audio/');
     if (isImage) hasImage = true;
     if (isAudio) hasAudio = true;
 
     let fileUrl: string;
+    let thumbnailUrl: string | undefined;
+    const uploadedKeys: string[] = [];
     try {
       fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
+      uploadedKeys.push(storageService.getKeyFromUrl(fileUrl) || fileUrl);
+      if (isImage) thumbnailUrl = fileUrl;
+      else if (isVideo) {
+        thumbnailUrl = await uploadSupraSpaceAttachmentThumbnail(thumbnailsByIndex.get(index));
+        if (thumbnailUrl) uploadedKeys.push(storageService.getKeyFromUrl(thumbnailUrl) || thumbnailUrl);
+      }
     } catch (err: any) {
+      await Promise.all(uploadedKeys.map(key => storageService.delete(key).catch(() => undefined)));
+      await Promise.all(attachments.map(a => deleteSupraSpaceAttachmentFiles(a)));
       logger.error({ err, conversationId: id, fileName: file.originalname }, '[SupraSpace] Attachment upload failed');
       throw new ApiError(503, 'Attachment upload is temporarily unavailable. Please try again.');
     }
@@ -1740,9 +1844,9 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
       url: fileUrl,
       fileKey,
       originalName: file.originalname,
-      mimeType: file.mimetype,
+      mimeType,
       size: file.size,
-      thumbnailUrl: isImage ? fileUrl : undefined,
+      thumbnailUrl,
       duration: isAudio && duration ? Number(duration) : undefined,
     });
   }
@@ -1979,7 +2083,7 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
 
   if (message.attachments && message.attachments.length > 0) {
     for (const a of message.attachments) {
-      if (a.fileKey) await storageService.delete(a.fileKey).catch((e) => console.warn('[SupraSpace] R2 delete:', e.message));
+      await deleteSupraSpaceAttachmentFiles(a, { messageId });
     }
   }
 
@@ -2032,7 +2136,8 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   const replaceIndex = replaceIndexRaw === undefined || replaceIndexRaw === null || replaceIndexRaw === ''
     ? null
     : Number.parseInt(String(replaceIndexRaw), 10);
-  const files = (req.files || []) as Express.Multer.File[];
+  const files = getSupraSpaceUploadFiles(req.files);
+  const thumbnailsByIndex = mapSupraSpaceThumbnails(req.files, req.body);
 
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
@@ -2054,19 +2159,36 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   }
   const replacements: any[] = [];
   try {
-    for (const file of files) {
-      const fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
-      replacements.push({
-        url: fileUrl,
-        fileKey: storageService.getKeyFromUrl(fileUrl) || fileUrl,
-        originalName: file.originalname,
-        mimeType: file.mimetype,
-        size: file.size,
-        thumbnailUrl: file.mimetype.startsWith('image/') ? fileUrl : undefined,
-      });
+    for (const [index, file] of files.entries()) {
+      const mimeType = normalizeSupraSpaceMimeType(file);
+      file.mimetype = mimeType;
+      const isImage = isSupraSpaceImageUpload(file, mimeType);
+      const isVideo = isSupraSpaceVideoUpload(file, mimeType);
+      const uploadedKeys: string[] = [];
+      try {
+        const fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
+        const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
+        uploadedKeys.push(fileKey);
+        let thumbnailUrl: string | undefined = isImage ? fileUrl : undefined;
+        if (isVideo) {
+          thumbnailUrl = await uploadSupraSpaceAttachmentThumbnail(thumbnailsByIndex.get(index));
+          if (thumbnailUrl) uploadedKeys.push(storageService.getKeyFromUrl(thumbnailUrl) || thumbnailUrl);
+        }
+        replacements.push({
+          url: fileUrl,
+          fileKey,
+          originalName: file.originalname,
+          mimeType,
+          size: file.size,
+          thumbnailUrl,
+        });
+      } catch (err) {
+        await Promise.all(uploadedKeys.map(key => storageService.delete(key).catch(() => undefined)));
+        throw err;
+      }
     }
   } catch (err) {
-    await Promise.all(replacements.map(a => storageService.delete(a.fileKey).catch(() => undefined)));
+    await Promise.all(replacements.map(a => deleteSupraSpaceAttachmentFiles(a)));
     logger.error({ err, messageId }, '[SupraSpace] Attachment replacement failed');
     throw new ApiError(503, 'Attachment replacement is temporarily unavailable. Please try again.');
   }
@@ -2088,14 +2210,11 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   try {
     await message.save();
   } catch (err) {
-    await Promise.all(replacements.map(a => storageService.delete(a.fileKey).catch(() => undefined)));
+    await Promise.all(replacements.map(a => deleteSupraSpaceAttachmentFiles(a)));
     throw err;
   }
 
-  await Promise.all(removedAttachments.map(a => {
-    const key = a.fileKey || a.url;
-    return key ? storageService.delete(key).catch(e => logger.warn({ err: e, messageId }, '[SupraSpace] Old attachment cleanup failed')) : Promise.resolve();
-  }));
+  await Promise.all(removedAttachments.map(a => deleteSupraSpaceAttachmentFiles(a, { messageId })));
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   const messageForClient = await signAttachments(message.toObject() as any);

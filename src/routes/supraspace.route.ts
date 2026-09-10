@@ -12,17 +12,24 @@ const SUPRA_SPACE_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const SUPRA_SPACE_MAX_VIDEO_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const SUPRA_SPACE_VIDEO_EXTENSIONS = /\.(mp4|mov|webm|m4v|avi|mkv|wmv|flv|3gp|mpeg|mpg|ogv)$/i;
 
+function getSupraSpaceFiles(files: any, field = 'files'): Express.Multer.File[] {
+  if (Array.isArray(files)) return field === 'files' ? files : [];
+  return Array.isArray(files?.[field]) ? files[field] : [];
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: SUPRA_SPACE_MAX_VIDEO_FILE_SIZE_BYTES,
-    files: SUPRA_SPACE_MAX_UPLOAD_FILES,
+    files: SUPRA_SPACE_MAX_UPLOAD_FILES * 2,
   },
 });
 
 const uploadFiles: RequestHandler = (req, res, next) => {
-  upload.array('files', SUPRA_SPACE_MAX_UPLOAD_FILES)(req, res, (err: any) => {
+  upload.fields([
+    { name: 'files', maxCount: SUPRA_SPACE_MAX_UPLOAD_FILES },
+    { name: 'thumbnails', maxCount: SUPRA_SPACE_MAX_UPLOAD_FILES },
+  ])(req, res, (err: any) => {
     if (!err) return next();
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE')
@@ -53,7 +60,8 @@ const uploadAvatarImage: RequestHandler = (req, res, next) => {
 // ─── Per-file size validation (video vs. non-video) ──────────────────────────
 
 const validateUploadedFiles: RequestHandler = (req, _res, next) => {
-  const files = (req.files || []) as Express.Multer.File[];
+  const files = getSupraSpaceFiles(req.files);
+  const thumbnails = getSupraSpaceFiles(req.files, 'thumbnails');
   for (const file of files) {
     const isVideo =
       file.mimetype?.startsWith('video/') ||
@@ -68,6 +76,11 @@ const validateUploadedFiles: RequestHandler = (req, _res, next) => {
           `${file.originalname} exceeds ${isVideo ? '100 MB (video limit)' : '25 MB'}.`
         )
       );
+    }
+  }
+  for (const file of thumbnails) {
+    if (!file.mimetype?.startsWith('image/') || file.size > 3 * 1024 * 1024) {
+      return next(new ApiError(400, 'Video thumbnail could not be processed.'));
     }
   }
   return next();
