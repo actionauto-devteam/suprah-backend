@@ -80,6 +80,12 @@ router.post("/remove-load", staffOnly, driverTrackingController.removeLoad);
 router.get("/load-requests", staffOnly, driverTrackingController.getPendingLoadRequests);
 
 // Dispatcher alert actions
+router.get(
+  "/drivers/:driverId/alert-context",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.getDriverAlertContext,
+);
 router.post(
   "/drivers/:driverId/alert",
   staffOnly,

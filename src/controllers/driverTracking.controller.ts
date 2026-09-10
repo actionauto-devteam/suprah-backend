@@ -3809,42 +3809,554 @@ const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: Exp
 });
 
 // ─── Dispatcher → Driver Alert ───────────────────────────────────────────────
-// POST /api/driver-tracking/drivers/:driverId/alert
+// The alert system keeps the existing exact dispatcher↔driver authorization
+// boundary while allowing reusable, load-aware alert types. New clients send
+// an alertType/priority/loadId contract; the old destination payload remains
+// accepted during rolling deploys so cached clients do not break.
 
+type DriverDispatchAlertResponse = "acknowledged" | "on_my_way" | "unable";
+type DriverDispatchAlertPriority = "normal" | "important" | "urgent";
+type DriverDispatchAlertMode = "quick_attention" | "operational" | "critical";
+type DriverDispatchAlertSoundProfile = "none" | "attention" | "urgent";
+type DriverDispatchQuickPreset =
+  | "check_dispatch_chat"
+  | "please_respond"
+  | "contact_dispatch"
+  | "custom";
+type DriverDispatchAlertType =
+  | "quick_attention"
+  | "proceed_to_pickup"
+  | "proceed_to_delivery"
+  | "route_changed"
+  | "pickup_instructions_updated"
+  | "delivery_instructions_updated"
+  | "schedule_changed"
+  | "hold_position"
+  | "resume_route"
+  | "return_to_dealership"
+  | "contact_dispatch"
+  | "check_in"
+  | "load_updated"
+  | "load_cancelled"
+  | "safety_warning"
+  | "stop_do_not_proceed"
+  | "custom";
+
+type DriverDispatchAlertConfig = {
+  label: string;
+  mode: DriverDispatchAlertMode;
+  requiresLoad: boolean;
+  defaultPriority: DriverDispatchAlertPriority;
+  allowedResponses: DriverDispatchAlertResponse[];
+};
+
+const DRIVER_DISPATCH_ALERT_CONFIG: Record<
+  DriverDispatchAlertType,
+  DriverDispatchAlertConfig
+> = {
+  quick_attention: {
+    label: "Quick Attention",
+    mode: "quick_attention",
+    requiresLoad: false,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  proceed_to_pickup: {
+    label: "Proceed to Pickup",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "on_my_way", "unable"],
+  },
+  proceed_to_delivery: {
+    label: "Proceed to Delivery",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "on_my_way", "unable"],
+  },
+  route_changed: {
+    label: "Route / Destination Changed",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  pickup_instructions_updated: {
+    label: "Pickup Instructions Updated",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  delivery_instructions_updated: {
+    label: "Delivery Instructions Updated",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  schedule_changed: {
+    label: "Schedule Changed",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  hold_position: {
+    label: "Hold Position",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  resume_route: {
+    label: "Resume Route",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "on_my_way", "unable"],
+  },
+  return_to_dealership: {
+    label: "Return to Dealership",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "on_my_way", "unable"],
+  },
+  contact_dispatch: {
+    label: "Contact Dispatch",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "important",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  check_in: {
+    label: "Check In",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "normal",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  load_updated: {
+    label: "Load Updated",
+    mode: "operational",
+    requiresLoad: true,
+    defaultPriority: "normal",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+  load_cancelled: {
+    label: "Load Cancelled",
+    mode: "critical",
+    requiresLoad: true,
+    defaultPriority: "urgent",
+    allowedResponses: ["acknowledged"],
+  },
+  safety_warning: {
+    label: "Safety Warning",
+    mode: "critical",
+    requiresLoad: false,
+    defaultPriority: "urgent",
+    allowedResponses: ["acknowledged"],
+  },
+  stop_do_not_proceed: {
+    label: "Stop / Do Not Proceed",
+    mode: "critical",
+    requiresLoad: false,
+    defaultPriority: "urgent",
+    allowedResponses: ["acknowledged"],
+  },
+  custom: {
+    label: "Custom Alert",
+    mode: "operational",
+    requiresLoad: false,
+    defaultPriority: "normal",
+    allowedResponses: ["acknowledged", "unable"],
+  },
+};
+
+const DRIVER_DISPATCH_QUICK_PRESET_MESSAGES: Record<
+  DriverDispatchQuickPreset,
+  string
+> = {
+  check_dispatch_chat: "Dispatch needs your attention. Please check your Dispatch Chat.",
+  please_respond: "Dispatch needs your attention. Please respond when it is safe to do so.",
+  contact_dispatch: "Please contact Dispatch when safely parked.",
+  custom: "",
+};
+
+const DRIVER_DISPATCH_ALERT_LOAD_SELECT = [
+  "_id",
+  "loadNumber",
+  "status",
+  "pickupLocation",
+  "deliveryLocation",
+  "vehicles",
+  "trailerType",
+  "dates",
+  "additionalInfo",
+  "createdAt",
+  "updatedAt",
+].join(" ");
+
+function alertContextText(value: unknown, maxLength: number) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+function sanitizeDriverAlertLocation(location: any) {
+  if (!location) return null;
+  return {
+    name: alertContextText(location.name, 160),
+    address: alertContextText(location.address, 300),
+    city: alertContextText(location.city, 100),
+    state: alertContextText(location.state, 80),
+    zip: alertContextText(location.zip, 20),
+    country: alertContextText(location.country, 80),
+    contactName: alertContextText(location.contactName, 160),
+    phone: alertContextText(location.phone, 50),
+    phoneExt: alertContextText(location.phoneExt, 20),
+    email: alertContextText(location.email, 200),
+    locationType: location.locationType ?? null,
+    notes: alertContextText(location.notes, 1000),
+  };
+}
+
+function sanitizeDriverAlertVehicle(vehicle: any) {
+  return {
+    year: vehicle?.year ?? null,
+    make: alertContextText(vehicle?.make, 100),
+    model: alertContextText(vehicle?.model, 100),
+    color: alertContextText(vehicle?.color, 60),
+    vin: alertContextText(vehicle?.vin, 64),
+    condition: vehicle?.condition ?? null,
+  };
+}
+
+function buildDriverAlertLoadContext(load: any) {
+  if (!load) return null;
+  return {
+    id: String(load._id),
+    loadNumber: String(load.loadNumber ?? "").trim(),
+    status: String(load.status ?? "").trim(),
+    trailerType: String(load.trailerType ?? "").trim(),
+    pickup: sanitizeDriverAlertLocation(load.pickupLocation),
+    delivery: sanitizeDriverAlertLocation(load.deliveryLocation),
+    vehicles: Array.isArray(load.vehicles)
+      ? load.vehicles.map(sanitizeDriverAlertVehicle)
+      : [],
+    dates: load.dates
+      ? {
+          firstAvailable: load.dates.firstAvailable ?? null,
+          pickupDeadline: load.dates.pickupDeadline ?? null,
+          deliveryDeadline: load.dates.deliveryDeadline ?? null,
+          notes: alertContextText(load.dates.notes, 1000),
+        }
+      : null,
+    // Intentionally omit pricing, internal staff notes, assignment ownership,
+    // signatures, compatibility overrides, and other non-operational fields.
+    additionalInfo: load.additionalInfo
+      ? {
+          instructions: alertContextText(load.additionalInfo.instructions, 2000),
+          referenceNumber: alertContextText(load.additionalInfo.referenceNumber, 160),
+        }
+      : null,
+  };
+}
+
+function driverAlertLocationLabel(location: any) {
+  if (!location) return "";
+  const named = String(location.name ?? "").trim();
+  if (named) return named;
+  return [location.city, location.state].filter(Boolean).join(", ");
+}
+
+function driverAlertLocationAddress(location: any) {
+  if (!location) return "";
+  const cityStateZip = [
+    [location.city, location.state].filter(Boolean).join(", "),
+    location.zip,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return [location.address, cityStateZip].filter(Boolean).join(", ");
+}
+
+function resolveDriverAlertDestination(
+  alertType: DriverDispatchAlertType,
+  loadContext: any,
+  alertLabel: string,
+) {
+  const pickup = loadContext?.pickup;
+  const delivery = loadContext?.delivery;
+
+  if (
+    alertType === "proceed_to_pickup" ||
+    alertType === "pickup_instructions_updated"
+  ) {
+    return {
+      destinationName: driverAlertLocationLabel(pickup) || "Pickup",
+      address: driverAlertLocationAddress(pickup),
+    };
+  }
+
+  if (
+    alertType === "proceed_to_delivery" ||
+    alertType === "delivery_instructions_updated" ||
+    alertType === "route_changed"
+  ) {
+    return {
+      destinationName: driverAlertLocationLabel(delivery) || "Delivery",
+      address: driverAlertLocationAddress(delivery),
+    };
+  }
+
+  if (alertType === "quick_attention") {
+    return {
+      destinationName: "Attention Request",
+      address: "No destination — attention only.",
+    };
+  }
+
+  return {
+    destinationName: alertLabel,
+    address: loadContext
+      ? "See the related load context and dispatch instruction."
+      : "No destination required for this alert.",
+  };
+}
+
+function buildDriverDispatchAlertMessage(params: {
+  alertType: DriverDispatchAlertType;
+  alertLabel: string;
+  loadNumber?: string;
+  quickPreset?: DriverDispatchQuickPreset;
+  dispatcherMessage: string;
+}) {
+  const {
+    alertType,
+    alertLabel,
+    loadNumber,
+    quickPreset,
+    dispatcherMessage,
+  } = params;
+
+  if (alertType === "quick_attention") {
+    const preset =
+      DRIVER_DISPATCH_QUICK_PRESET_MESSAGES[
+        quickPreset ?? "check_dispatch_chat"
+      ];
+    if (quickPreset === "custom") return dispatcherMessage;
+    return dispatcherMessage ? `${preset} ${dispatcherMessage}` : preset;
+  }
+
+  const loadSuffix = loadNumber ? ` for Load ${loadNumber}` : "";
+  const defaults: Record<DriverDispatchAlertType, string> = {
+    quick_attention: "Dispatch needs your attention.",
+    proceed_to_pickup: `Please proceed to pickup${loadSuffix}.`,
+    proceed_to_delivery: `Please proceed to delivery${loadSuffix}.`,
+    route_changed: `The route or destination has changed${loadSuffix}. Review the updated load details before continuing.`,
+    pickup_instructions_updated: `Pickup instructions were updated${loadSuffix}. Review the current pickup details before continuing.`,
+    delivery_instructions_updated: `Delivery instructions were updated${loadSuffix}. Review the current delivery details before continuing.`,
+    schedule_changed: `The schedule changed${loadSuffix}. Review the current pickup and delivery dates before continuing.`,
+    hold_position: `Hold position and wait for further instructions${loadSuffix}.`,
+    resume_route: `You may resume the route${loadSuffix}.`,
+    return_to_dealership: `Please return to the dealership${loadSuffix}.`,
+    contact_dispatch: "Please contact Dispatch when safely parked.",
+    check_in: "Please check in with Dispatch when it is safe to do so.",
+    load_updated: `Load details were updated${loadSuffix}. Please review the current information.`,
+    load_cancelled: `Stop work on the cancelled load${loadSuffix} and wait for Dispatch instructions.`,
+    safety_warning: `Safety warning${loadSuffix}. Review this alert before continuing.`,
+    stop_do_not_proceed: `Stop and do not proceed${loadSuffix} until Dispatch gives further instructions.`,
+    custom: `${alertLabel}${loadSuffix}.`,
+  };
+
+  const base = defaults[alertType];
+  return dispatcherMessage ? `${base} ${dispatcherMessage}` : base;
+}
+
+function resolveDriverAlertPriority(
+  config: DriverDispatchAlertConfig,
+  requestedPriority: unknown,
+): DriverDispatchAlertPriority {
+  if (config.mode === "critical") return "urgent";
+  if (config.mode === "quick_attention") return "important";
+  return requestedPriority === "normal" ||
+    requestedPriority === "important" ||
+    requestedPriority === "urgent"
+    ? requestedPriority
+    : config.defaultPriority;
+}
+
+function resolveDriverAlertSoundProfile(
+  config: DriverDispatchAlertConfig,
+  priority: DriverDispatchAlertPriority,
+): DriverDispatchAlertSoundProfile {
+  if (config.mode === "quick_attention") return "attention";
+  return priority === "urgent" ? "urgent" : "none";
+}
+
+// GET /api/driver-tracking/drivers/:driverId/alert-context
+const getDriverAlertContext = asyncHandler(
+  async (req: ExpressRequest, res: ExpressResponse) => {
+    const sender = getUser(req);
+    const organizationId = req.orgId as string;
+    const driverId = String(req.params.driverId || "").trim();
+
+    if (!organizationId) {
+      throw new ApiError(403, "Organization access is required");
+    }
+    if (!mongoose.Types.ObjectId.isValid(driverId)) {
+      throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+    }
+
+    const [driver, loads] = await Promise.all([
+      User.findOne({
+        _id: driverId,
+        role: "driver",
+        isActive: true,
+      })
+        .select("_id name")
+        .lean(),
+      Load.find({
+        organizationId,
+        assignedDriverId: driverId,
+        dispatchOwnerId: sender._id,
+        status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
+      })
+        .select(DRIVER_DISPATCH_ALERT_LOAD_SELECT)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .lean(),
+    ]);
+
+    // Match sendDriverAlert's indistinguishable failure behavior. The endpoint
+    // never confirms a platform-wide driver unless this dispatcher currently
+    // owns an active operational relationship with them.
+    if (!driver || loads.length === 0) {
+      throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          driver: {
+            id: String(driver._id),
+            name: driver.name || "Driver",
+          },
+          loads: loads.map(buildDriverAlertLoadContext),
+        },
+        "Driver alert context fetched",
+      ),
+    );
+  },
+);
+
+// POST /api/driver-tracking/drivers/:driverId/alert
 const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const sender = getUser(req);
   const organizationId = req.orgId as string;
-  const { driverId } = req.params;
-  const { destinationType, destinationName, address, message } = req.body as {
-    destinationType?: "site" | "carshop" | "specific-shop";
-    destinationName?: string;
-    address?: string;
-    message?: string;
-  };
-
-  const allowedDestinationTypes = ["site", "carshop", "specific-shop"];
-  if (!destinationType || !allowedDestinationTypes.includes(destinationType)) {
-    throw new ApiError(400, "A valid destinationType is required");
-  }
-  if (!destinationName?.trim()) {
-    throw new ApiError(400, "destinationName is required");
-  }
+  const driverId = String(req.params.driverId || "").trim();
+  const body = (req.body ?? {}) as Record<string, any>;
 
   if (!organizationId) {
     throw new ApiError(403, "Organization access is required");
   }
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
-    // Keep the response indistinguishable from an inaccessible shared driver.
     throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
   }
 
-  // P1 #15 — shared-driver-safe authorization.
-  //
-  // Driver Users are a platform-wide pool, so their home organization is not
-  // an authorization boundary. A Dispatch Alert is an operational instruction,
-  // though, so merely knowing a global driver id (or having an old chat thread)
-  // is not enough. The sender must currently be the exact responsible
-  // dispatcher on this organization's active assignment.
+  const requestedAlertType = String(body.alertType ?? "").trim();
+  const isNewAlertType = Object.prototype.hasOwnProperty.call(
+    DRIVER_DISPATCH_ALERT_CONFIG,
+    requestedAlertType,
+  );
+  const isLegacyDestinationAlert =
+    !requestedAlertType &&
+    typeof body.destinationName === "string" &&
+    typeof body.destinationType === "string";
+
+  if (!isNewAlertType && !isLegacyDestinationAlert) {
+    throw new ApiError(400, "A valid alertType is required");
+  }
+
+  const cleanMessage = String(body.message ?? "").trim().slice(0, 500);
+  const requestedLoadId = String(body.loadId ?? "").trim();
+
+  let alertType: DriverDispatchAlertType | "legacy_destination";
+  let alertLabel: string;
+  let alertMode: DriverDispatchAlertMode;
+  let priority: DriverDispatchAlertPriority;
+  let soundProfile: DriverDispatchAlertSoundProfile;
+  let allowedResponses: DriverDispatchAlertResponse[];
+  let quickPreset: DriverDispatchQuickPreset | undefined;
+  let config: DriverDispatchAlertConfig | null = null;
+
+  if (isLegacyDestinationAlert) {
+    const allowedDestinationTypes = ["site", "carshop", "specific-shop"];
+    if (!allowedDestinationTypes.includes(String(body.destinationType))) {
+      throw new ApiError(400, "A valid destinationType is required");
+    }
+    if (!String(body.destinationName ?? "").trim()) {
+      throw new ApiError(400, "destinationName is required");
+    }
+
+    alertType = "legacy_destination";
+    alertLabel = "Dispatch Alert";
+    alertMode = "critical";
+    priority = "urgent";
+    soundProfile = "urgent";
+    allowedResponses = ["acknowledged", "on_my_way", "unable"];
+  } else {
+    alertType = requestedAlertType as DriverDispatchAlertType;
+    config = DRIVER_DISPATCH_ALERT_CONFIG[alertType];
+    alertLabel = config.label;
+    alertMode = config.mode;
+    priority = resolveDriverAlertPriority(config, body.priority);
+    soundProfile = resolveDriverAlertSoundProfile(config, priority);
+    allowedResponses = [...config.allowedResponses];
+
+    if (config.requiresLoad && !requestedLoadId) {
+      throw new ApiError(400, "A related load is required for this alert type");
+    }
+    if (requestedLoadId && !mongoose.Types.ObjectId.isValid(requestedLoadId)) {
+      throw new ApiError(400, "A valid related load is required");
+    }
+
+    if (alertType === "quick_attention") {
+      const rawPreset = String(body.quickPreset ?? "check_dispatch_chat").trim();
+      const allowedQuickPresets: DriverDispatchQuickPreset[] = [
+        "check_dispatch_chat",
+        "please_respond",
+        "contact_dispatch",
+        "custom",
+      ];
+      quickPreset = allowedQuickPresets.includes(rawPreset as DriverDispatchQuickPreset)
+        ? (rawPreset as DriverDispatchQuickPreset)
+        : "check_dispatch_chat";
+      if (quickPreset === "custom" && !cleanMessage) {
+        throw new ApiError(400, "Enter a message for the custom Quick Attention alert");
+      }
+    }
+
+    if (alertType === "custom" && !cleanMessage) {
+      throw new ApiError(400, "Enter a message for the custom alert");
+    }
+  }
+
+  // Shared-driver-safe authorization. A global driver id or an old chat thread
+  // is never sufficient. For a load-specific alert the exact selected load
+  // must belong to this organization, driver, responsible dispatcher, and an
+  // active status. For a general/quick alert, the latest matching active load
+  // is used only as authorization proof and is not silently attached as alert
+  // context unless the client explicitly selected it.
+  const relationshipQuery: Record<string, any> = {
+    organizationId,
+    assignedDriverId: driverId,
+    dispatchOwnerId: sender._id,
+    status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
+  };
+  if (requestedLoadId) relationshipQuery._id = requestedLoadId;
+
   const [driver, alertRelationship] = await Promise.all([
     User.findOne({
       _id: driverId,
@@ -3853,53 +4365,145 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     })
       .select("name email")
       .lean(),
-    Load.findOne({
-      organizationId,
-      assignedDriverId: driverId,
-      dispatchOwnerId: sender._id,
-      status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
-    })
-      .select("_id loadNumber status dispatchOwnerId")
+    Load.findOne(relationshipQuery)
+      .select(DRIVER_DISPATCH_ALERT_LOAD_SELECT)
       .sort({ updatedAt: -1, createdAt: -1 })
       .lean(),
   ]);
 
-  // Deliberately use one generic 404 for both cases. Staff who do not own an
-  // active relationship must not be able to probe whether a global driver id
-  // exists on the platform.
   if (!driver || !alertRelationship) {
     throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
   }
 
-  const cleanDestinationName = destinationName.trim().slice(0, 160);
-  const cleanAddress = address?.trim().slice(0, 300) || "";
-  const cleanMessage = message?.trim().slice(0, 500) || "";
-  const alertMessage = cleanMessage
-    ? `${cleanMessage} Destination: ${cleanDestinationName}.`
-    : `Please proceed to ${cleanDestinationName}.`;
+  if (isLegacyDestinationAlert) {
+    const cleanDestinationName = String(body.destinationName).trim().slice(0, 160);
+    const cleanAddress = String(body.address ?? "").trim().slice(0, 300);
+    const alertMessage = cleanMessage
+      ? `${cleanMessage} Destination: ${cleanDestinationName}.`
+      : `Please proceed to ${cleanDestinationName}.`;
+
+    const notification: any = await notificationService.createNotification({
+      userId: driverId,
+      organizationId,
+      type: "driver_dispatch_alert",
+      title: alertLabel,
+      message: alertMessage,
+      metadata: {
+        alertSchemaVersion: 1,
+        alertType,
+        alertLabel,
+        alertMode,
+        priority,
+        soundProfile,
+        allowedResponses,
+        driverId,
+        driverName: driver.name,
+        loadId: String(alertRelationship._id),
+        loadNumber: alertRelationship.loadNumber,
+        loadStatus: alertRelationship.status,
+        dispatchOwnerId: sender._id.toString(),
+        destinationType: body.destinationType,
+        destinationName: cleanDestinationName,
+        address: cleanAddress,
+        dispatcherMessage: cleanMessage,
+        sentByUserId: sender._id.toString(),
+        sentByName: sender.name,
+        response: "pending",
+        playSound: true,
+        soundFile: "/sounds/warning_sound.wav",
+        route: "/driver/notifications",
+        pushSource: "Driver Tracker",
+      },
+    });
+
+    if (!notification) {
+      throw new ApiError(409, "The driver has disabled Driver Tracker notifications");
+    }
+
+    await persistDriverDispatchAlertInChat({
+      notification,
+      sender,
+      organizationId,
+      driverId,
+      driverName: driver.name,
+    });
+
+    emitDriverDispatchAlertRealtime({
+      notification,
+      sender,
+      driverId,
+      driverName: driver.name,
+    });
+
+    return res.status(201).json(
+      new ApiResponse(201, notification, "Driver alert sent"),
+    );
+  }
+
+  const selectedLoad = requestedLoadId ? alertRelationship : null;
+  const loadContext = buildDriverAlertLoadContext(selectedLoad);
+  const loadNumber = loadContext?.loadNumber || undefined;
+  const dispatcherMessage = cleanMessage;
+  const { destinationName, address } = resolveDriverAlertDestination(
+    alertType as DriverDispatchAlertType,
+    loadContext,
+    alertLabel,
+  );
+  const alertMessage = buildDriverDispatchAlertMessage({
+    alertType: alertType as DriverDispatchAlertType,
+    alertLabel,
+    loadNumber,
+    quickPreset,
+    dispatcherMessage,
+  });
 
   const notification: any = await notificationService.createNotification({
     userId: driverId,
     organizationId,
     type: "driver_dispatch_alert",
-    title: "Dispatch Alert",
+    title: alertLabel,
     message: alertMessage,
     metadata: {
+      alertSchemaVersion: 2,
+      alertType,
+      alertLabel,
+      alertMode,
+      priority,
+      soundProfile,
+      allowedResponses,
+      quickPreset: quickPreset ?? null,
       driverId,
       driverName: driver.name,
-      loadId: String(alertRelationship._id),
-      loadNumber: alertRelationship.loadNumber,
-      loadStatus: alertRelationship.status,
+      ...(loadContext
+        ? {
+            loadId: loadContext.id,
+            loadNumber: loadContext.loadNumber,
+            loadStatus: loadContext.status,
+            loadContext,
+          }
+        : {}),
+      // Keep these compatibility fields populated because the existing private
+      // Dispatch Chat card and older notification UI understand them. They are
+      // derived only from authoritative server data, never client-posted route
+      // details in schema v2.
+      destinationName,
+      address,
+      // The current Dispatch Chat SystemEventCard renders this field for
+      // driver_dispatch_alert rows. Store the complete resolved instruction so
+      // preset Quick Attention and no-extra-message operational alerts remain
+      // meaningful in both dispatcher and driver chats during rollout.
+      dispatcherMessage: alertMessage,
       dispatchOwnerId: sender._id.toString(),
-      destinationType,
-      destinationName: cleanDestinationName,
-      address: cleanAddress,
-      dispatcherMessage: cleanMessage,
       sentByUserId: sender._id.toString(),
       sentByName: sender.name,
       response: "pending",
-      playSound: true,
-      soundFile: "/sounds/warning_sound.wav",
+      playSound: soundProfile === "urgent",
+      soundFile:
+        soundProfile === "attention"
+          ? "/sounds/ElevenLabs.wav"
+          : soundProfile === "urgent"
+            ? "/sounds/warning_sound.wav"
+            : undefined,
       route: "/driver/notifications",
       pushSource: "Driver Tracker",
     },
@@ -3909,10 +4513,38 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     throw new ApiError(409, "The driver has disabled Driver Tracker notifications");
   }
 
-  // Every manual Dispatch Alert belongs to the exact dispatcher↔driver pair
-  // that created it. This persistence is deliberately non-fatal because the
-  // notification has already been created; a chat-side problem must not turn a
-  // successfully delivered safety alert into an HTTP 500 or duplicate on retry.
+  await persistDriverDispatchAlertInChat({
+    notification,
+    sender,
+    organizationId,
+    driverId,
+    driverName: driver.name,
+  });
+
+  emitDriverDispatchAlertRealtime({
+    notification,
+    sender,
+    driverId,
+    driverName: driver.name,
+  });
+
+  return res
+    .status(201)
+    .json(new ApiResponse(201, notification, "Driver alert sent"));
+});
+
+// Keep private-chat persistence non-fatal after the authoritative notification
+// is created. Retrying the HTTP request because chat storage briefly failed
+// would otherwise risk delivering the driver the same safety alert twice.
+async function persistDriverDispatchAlertInChat(params: {
+  notification: any;
+  sender: IUser;
+  organizationId: string;
+  driverId: string;
+  driverName?: string;
+}) {
+  const { notification, sender, organizationId, driverId } = params;
+
   try {
     const thread: any = await ensureDispatchChatThread({
       organizationId,
@@ -3939,6 +4571,8 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
       },
       content: notification.message,
       attachments: [],
+      // Sender has already seen the action. The driver receives this exact
+      // private chat row as unread.
       readBy: [sender._id],
     });
 
@@ -3947,35 +4581,33 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
       senderId: sender._id,
       messageType: "system",
       content: notification.message,
-      fallbackPreview: "Dispatch Alert",
+      fallbackPreview: notification.title || "Dispatch Alert",
       at: chatAlert.createdAt,
     });
-
-    const dispatchChatPayload = {
-      id: String(chatAlert._id),
-      threadId: String(thread._id),
-      dispatcherId: sender._id.toString(),
-      driverId,
-      sender: {
-        id: sender._id.toString(),
-        name: sender.name || "Dispatcher",
-        email: sender.email || "",
-        role: sender.role,
-      },
-      senderRole: "dispatcher" as const,
-      messageType: "system" as const,
-      systemEvent: chatAlert.systemEvent,
-      content: notification.message,
-      attachments: [],
-      readBy: [sender._id.toString()],
-      createdAt: chatAlert.createdAt,
-      updatedAt: chatAlert.updatedAt,
-    };
 
     emitToDispatchChatThreadParticipants(
       thread,
       "dispatch-chat:message",
-      dispatchChatPayload,
+      {
+        id: String(chatAlert._id),
+        threadId: String(thread._id),
+        dispatcherId: sender._id.toString(),
+        driverId,
+        sender: {
+          id: sender._id.toString(),
+          name: sender.name || "Dispatcher",
+          email: sender.email || "",
+          role: sender.role,
+        },
+        senderRole: "dispatcher" as const,
+        messageType: "system" as const,
+        systemEvent: chatAlert.systemEvent,
+        content: notification.message,
+        attachments: [],
+        readBy: [sender._id.toString()],
+        createdAt: chatAlert.createdAt,
+        updatedAt: chatAlert.updatedAt,
+      },
     );
   } catch (err) {
     logger.error(
@@ -3983,7 +4615,15 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
       "Non-fatal: failed to persist Dispatch Alert into private Dispatch Chat",
     );
   }
+}
 
+function emitDriverDispatchAlertRealtime(params: {
+  notification: any;
+  sender: IUser;
+  driverId: string;
+  driverName?: string;
+}) {
+  const { notification, sender, driverId, driverName } = params;
   const payload = {
     alertId: notification._id.toString(),
     title: notification.title,
@@ -3992,37 +4632,31 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     createdAt: notification.createdAt,
   };
 
-  // Keep the driver's existing alert event and sound path. The sender receives
-  // the corresponding sent event for UI synchronization, but other dispatchers
-  // no longer receive the private alert content.
   emitToUser(driverId, "driver:dispatch_alert", payload);
   emitToUser(sender._id.toString(), "driver:dispatch_alert_sent", {
     ...payload,
     driverId,
-    driverName: driver.name,
+    driverName,
   });
-
-  return res
-    .status(201)
-    .json(new ApiResponse(201, notification, "Driver alert sent"));
-});
+}
 
 // POST /api/driver-tracking/alerts/:alertId/respond
 const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const { alertId } = req.params;
   const { response } = req.body as {
-    response?: "acknowledged" | "on_my_way" | "unable";
+    response?: DriverDispatchAlertResponse;
   };
 
-  const allowedResponses = ["acknowledged", "on_my_way", "unable"];
+  const allowedResponses: DriverDispatchAlertResponse[] = [
+    "acknowledged",
+    "on_my_way",
+    "unable",
+  ];
   if (!response || !allowedResponses.includes(response)) {
     throw new ApiError(400, "A valid response is required");
   }
 
-  // Drivers have no org of their own — userId+alertId is already a unique,
-  // secure lookup, so the alert's own organizationId is used for the
-  // dispatcher-side notify below instead of req.orgId.
   const notification: any = await Notification.findOne({
     _id: alertId,
     userId: user._id,
@@ -4030,8 +4664,17 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
   });
 
   if (!notification) throw new ApiError(404, "Driver alert not found");
-  const organizationId = notification.organizationId as string;
 
+  const configuredResponses = Array.isArray(notification.metadata?.allowedResponses)
+    ? notification.metadata.allowedResponses
+        .map((value: unknown) => String(value))
+        .filter((value: string) => allowedResponses.includes(value as DriverDispatchAlertResponse))
+    : [];
+  if (configuredResponses.length > 0 && !configuredResponses.includes(response)) {
+    throw new ApiError(400, "That response is not available for this alert");
+  }
+
+  const organizationId = notification.organizationId as string;
   const respondedAt = new Date();
   notification.metadata = {
     ...(notification.metadata ?? {}),
@@ -4047,30 +4690,25 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
     response === "on_my_way"
       ? "On My Way"
       : response === "unable"
-        ? "Unable"
+        ? "Unable to Respond"
         : "Acknowledged";
 
-  const destinationName =
-    String(notification.metadata?.destinationName || "").trim();
-
-  const responseMessage =
-    response === "on_my_way"
-      ? destinationName
-        ? `${user.name || "Driver"} is on the way to ${destinationName}.`
-        : `${user.name || "Driver"} is on the way.`
-      : response === "unable"
-        ? destinationName
-          ? `${user.name || "Driver"} is unable to proceed to ${destinationName}.`
-          : `${user.name || "Driver"} is unable to proceed with the dispatch request.`
-        : destinationName
-          ? `${user.name || "Driver"} acknowledged the dispatch request for ${destinationName}.`
-          : `${user.name || "Driver"} acknowledged the dispatch request.`;
+  const alertLabel = String(
+    notification.metadata?.alertLabel || notification.title || "Dispatch Alert",
+  ).trim();
+  const loadNumber = String(notification.metadata?.loadNumber || "").trim();
+  const destinationName = String(
+    notification.metadata?.destinationName || "",
+  ).trim();
+  const responseMessage = `${user.name || "Driver"} responded “${responseLabel}” to ${alertLabel}${
+    loadNumber ? ` for Load ${loadNumber}` : ""
+  }.`;
 
   const dispatcherId = String(notification.metadata?.sentByUserId || "").trim();
 
-  // Older malformed alert records may not identify a dispatcher. Never guess a
-  // private recipient. The alert response is still saved on the notification,
-  // but it is only inserted into Dispatch Chat when ownership is explicit.
+  // Never guess a private recipient. Legacy malformed records can still store
+  // the driver's response, but chat/real-time feedback is sent only when the
+  // original dispatcher is explicit and belongs to this organization.
   if (dispatcherId) {
     const dispatcher = await User.findOne({
       _id: dispatcherId,
@@ -4102,20 +4740,31 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
             message: responseMessage,
             metadata: {
               alertId: notification._id.toString(),
+              alertType: notification.metadata?.alertType ?? null,
+              alertLabel,
+              priority: notification.metadata?.priority ?? null,
+              loadId: notification.metadata?.loadId ?? null,
+              loadNumber: loadNumber || null,
               driverId: user._id.toString(),
               driverName: user.name,
               response,
               responseLabel,
               respondedAt: respondedAt.toISOString(),
-              destinationName:
-                notification.metadata?.destinationName ?? null,
+              destinationName: destinationName || null,
               sentByUserId: dispatcherId,
+              audienceMessages: {
+                driver: `You responded “${responseLabel}” to ${alertLabel}${
+                  loadNumber ? ` for Load ${loadNumber}` : ""
+                }.`,
+                dispatcher: responseMessage,
+                threadDispatcher: responseMessage,
+              },
             },
           },
           content: responseMessage,
           attachments: [],
-          // The responding driver has already seen their own response. Only the
-          // dispatcher who sent the alert remains unread.
+          // Driver has already seen their own response; only the originating
+          // dispatcher receives this exact private response row as unread.
           readBy: [user._id],
         });
 
@@ -4128,33 +4777,30 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
           at: chatResponse.createdAt,
         });
 
-        const dispatchChatPayload = {
-          id: String(chatResponse._id),
-          threadId: String(thread._id),
-          dispatcherId,
-          driverId: user._id.toString(),
-          sender: {
-            id: user._id.toString(),
-            name: user.name ?? "Driver",
-            email: user.email ?? "",
-            role: "driver",
-          },
-          senderRole: "driver" as const,
-          messageType: "system" as const,
-          systemEvent: chatResponse.systemEvent,
-          content: responseMessage,
-          attachments: [],
-          readBy: [user._id.toString()],
-          createdAt: chatResponse.createdAt,
-          updatedAt: chatResponse.updatedAt,
-        };
-
         emitToDispatchChatThreadParticipants(
           thread,
           "dispatch-chat:message",
-          dispatchChatPayload,
+          {
+            id: String(chatResponse._id),
+            threadId: String(thread._id),
+            dispatcherId,
+            driverId: user._id.toString(),
+            sender: {
+              id: user._id.toString(),
+              name: user.name ?? "Driver",
+              email: user.email ?? "",
+              role: "driver",
+            },
+            senderRole: "driver" as const,
+            messageType: "system" as const,
+            systemEvent: chatResponse.systemEvent,
+            content: responseMessage,
+            attachments: [],
+            readBy: [user._id.toString()],
+            createdAt: chatResponse.createdAt,
+            updatedAt: chatResponse.updatedAt,
+          },
         );
-
       } catch (err) {
         logger.error(
           { err, alertId, driverId: user._id.toString(), dispatcherId },
@@ -4162,15 +4808,17 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
         );
       }
 
-      // Preserve the existing acknowledgement feedback even if chat persistence
-      // temporarily fails. Only the dispatcher who sent the alert receives it.
       emitToUser(dispatcherId, "driver:dispatch_alert_acknowledged", {
         alertId: notification._id.toString(),
         driverId: user._id.toString(),
         driverName: user.name,
         response,
         respondedAt: respondedAt.toISOString(),
-        destinationName: notification.metadata?.destinationName,
+        alertType: notification.metadata?.alertType,
+        alertLabel,
+        priority: notification.metadata?.priority,
+        loadNumber: loadNumber || undefined,
+        destinationName: destinationName || undefined,
         sentByUserId: dispatcherId,
       });
     }
@@ -5844,6 +6492,7 @@ export default {
   getDashboardStats,
   getPendingLoadRequests,
   previewDriverLoadCompatibility,
+  getDriverAlertContext,
   sendDriverAlert,
   respondToDriverAlert,
   assignLoad,

@@ -148,16 +148,21 @@ async function loadGroupForMember(groupId: string, actor: any): Promise<IProject
 // ─── Real-time + notifications ────────────────────────────────────────────────
 
 /**
- * Emit an event to each group member's private socket room (`user:{id}`).
- * Uses per-user rooms (already established by the tray/CRM socket handshake)
- * instead of an org-wide room, so events never reach non-members.
+ * Emit an event to each group member's private CRM identity room.
+ * During rollout we target BOTH the historical `user:{CrmUser._id}` room and
+ * the new `crm-user:{CrmUser._id}` room in one Socket.IO union broadcast.
+ * Socket.IO's chained room union de-duplicates sockets that are members of
+ * both rooms, so updated
+ * clients receive one event while older CRM-token clients remain compatible.
+ * No org-wide room is used, so non-members never receive project events.
  */
 function emitToMembers(memberIds: mongoose.Types.ObjectId[], event: string, payload: unknown) {
   try {
     const io = getSocketIO();
     if (!io) return;
     for (const memberId of memberIds) {
-      io.to(`user:${memberId.toString()}`).emit(event, payload);
+      const id = memberId.toString();
+      io.to(`user:${id}`).to(`crm-user:${id}`).emit(event, payload);
     }
   } catch (error) {
     console.error('[PM] socket emit failed:', error);
@@ -211,7 +216,8 @@ async function notifyUsers({ recipients, actor, type, groupId, taskId, commentId
       const io = getSocketIO();
       if (io) {
         for (const doc of docs) {
-          io.to(`user:${doc.userId.toString()}`).emit('pm:notification', {
+          const recipientId = doc.userId.toString();
+          io.to(`user:${recipientId}`).to(`crm-user:${recipientId}`).emit('pm:notification', {
             _id: doc._id,
             type: doc.type,
             title: doc.title,
@@ -982,27 +988,51 @@ export const updateTaskStatus = asyncHandler(async (req: Request, res: Response)
   task.seenBy = [actor._id]; // status change is new activity for everyone else
   await task.save();
 
-  // Reflect the status on the linked calendar event (best-effort).
-  await syncTaskToCalendar(task, actor._id);
-
-  if (previousStatus !== task.status) {
-    await notifyUsers({
-      recipients: [task.createdBy, ...task.assigneeIds],
-      actor,
-      type: 'task_status',
-      groupId: group._id as mongoose.Types.ObjectId,
-      taskId: task._id as mongoose.Types.ObjectId,
-      title: 'Task status changed',
-      message: `${displayNameOf(actor)} moved "${task.title}" to ${task.status}`,
-    });
-  }
-
+  // The database write above is the source of truth. Publish the committed
+  // status immediately so every connected project member can update local UI
+  // without waiting for Calendar sync, notification inserts, push delivery,
+  // or another REST fetch. This event contains no extra private data beyond
+  // what project members already receive from the group tree.
   emitToMembers(group.memberIds, 'pm:task:status', {
     groupId: group._id,
     taskId: task._id,
     status: task.status,
     previousStatus,
     changedBy: actorId,
+  });
+
+  // Preserve all existing side effects, but run independent work in parallel
+  // after the real-time event has already been delivered. The request still
+  // waits for these best-effort operations, preserving the previous durability
+  // contract while avoiding sequential latency.
+  const sideEffects: Promise<unknown>[] = [
+    syncTaskToCalendar(task, actor._id),
+  ];
+
+  if (previousStatus !== task.status) {
+    sideEffects.push(
+      notifyUsers({
+        recipients: [task.createdBy, ...task.assigneeIds],
+        actor,
+        type: 'task_status',
+        groupId: group._id as mongoose.Types.ObjectId,
+        taskId: task._id as mongoose.Types.ObjectId,
+        title: 'Task status changed',
+        message: `${displayNameOf(actor)} moved "${task.title}" to ${task.status}`,
+      }),
+    );
+  }
+
+  const sideEffectResults = await Promise.allSettled(sideEffects);
+  sideEffectResults.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      logger.error(
+        result.reason,
+        index === 0
+          ? '[PM] Calendar sync failed after task status update'
+          : '[PM] Status notification fan-out failed after task status update',
+      );
+    }
   });
 
   res.json(new ApiResponse(200, { taskId: task._id, status: task.status }, 'Status updated'));

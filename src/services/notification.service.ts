@@ -3,7 +3,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { NotificationCategory } from '../models/Notification.model';
 import { ApiError } from '../utils/ApiError';
-import { emitToUser } from '../utils/socketEmitter';
+import { emitToCrmUser, emitToUser } from '../utils/socketEmitter';
 import UnifiedPushService from './unifiedPush.service';
 import logger from '../utils/logger';
 
@@ -215,9 +215,16 @@ const createNotification = async (params: CreateNotificationParams) => {
   if (title.length > 200) throw new ApiError(400, 'Notification title must be less than 200 characters');
   if (message.length > 1000) throw new ApiError(400, 'Notification message must be less than 1000 characters');
 
-  const user = await User.findById(userId) || await CrmUser.findById(userId);
+  // Preserve the historical identity precedence exactly: a matching main User
+  // wins; only fall back to CrmUser when no main User exists for this id.
+  // Keeping the two lookups explicit also tells us which real-time channel to
+  // use without guessing from the ObjectId value.
+  const mainUser = await User.findById(userId);
+  const crmUser = mainUser ? null : await CrmUser.findById(userId);
+  const user = mainUser || crmUser;
   if (!user) throw new ApiError(404, 'Notification target user not found');
 
+  const isCrmTarget = Boolean(crmUser);
   const category = TYPE_CATEGORY_MAP[type] || 'system';
 
   if (!SECURITY_CRITICAL_TYPES.has(type) && (user as any).notificationPreferences) {
@@ -258,7 +265,17 @@ const createNotification = async (params: CreateNotificationParams) => {
     });
   }
 
-  emitToUser(userId, isGroupedUpdate ? 'notification:updated' : 'notification:new', notification);
+  const realtimeEvent = isGroupedUpdate ? 'notification:updated' : 'notification:new';
+
+  // Keep the legacy user:{id} event untouched for existing clients (including
+  // the dedicated SupraSpace socket). Linked CRM identities additionally get
+  // a namespaced event on crm-user:{CrmUser._id}; the dashboard can therefore
+  // receive CRM notifications in real time without the main NotificationContext
+  // accidentally ingesting the same record as a main-account notification.
+  emitToUser(userId, realtimeEvent, notification);
+  if (isCrmTarget) {
+    emitToCrmUser(userId, `crm:${realtimeEvent}`, notification);
+  }
 
   try {
     const resolvedMetadataRoute = resolveMetadataRoute(type, metadata);
@@ -364,11 +381,28 @@ const createNotification = async (params: CreateNotificationParams) => {
     }
 
     if (type === 'driver_dispatch_alert') {
-      pushPayload.actions = [
-        { action: 'acknowledge', title: 'Acknowledge' },
-        { action: 'on-my-way', title: 'On My Way' },
-      ];
+      const allowed = Array.isArray(metadata?.allowedResponses)
+        ? metadata.allowedResponses.map((value: unknown) => String(value))
+        : [];
+      const actionMap: Record<string, { action: string; title: string }> = {
+        acknowledged: { action: 'acknowledge', title: 'Acknowledge' },
+        on_my_way: { action: 'on-my-way', title: 'On My Way' },
+        unable: { action: 'unable', title: 'Unable' },
+      };
+
+      // Web Notification implementations commonly expose at most two actions.
+      // New schema-v2 alerts choose the two actions that fit the alert; legacy
+      // records keep the historical Acknowledge + On My Way behavior.
+      const selectedActions = (allowed.length > 0 ? allowed : ['acknowledged', 'on_my_way'])
+        .map((value: string) => actionMap[value])
+        .filter(Boolean)
+        .slice(0, 2);
+      pushPayload.actions = selectedActions;
       pushPayload.data.alertId = notification._id.toString();
+      if (metadata?.alertType) pushPayload.data.alertType = metadata.alertType;
+      if (metadata?.priority) pushPayload.data.priority = metadata.priority;
+      if (metadata?.soundProfile) pushPayload.data.soundProfile = metadata.soundProfile;
+      if (metadata?.soundFile) pushPayload.data.soundFile = metadata.soundFile;
     }
 
     if (metadata?.playSound) {

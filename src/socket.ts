@@ -11,6 +11,13 @@ interface AuthSocket extends Socket {
   userId?: string;
   organizationId?: string;
   role?: string;
+  /**
+   * CRM identity room authorized for this socket. Main-site users may have a
+   * distinct CrmUser._id, while CRM-token sockets already authenticate as the
+   * CrmUser directly. Keeping this separate from userId prevents cross-identity
+   * notification collisions on the shared socket connection.
+   */
+  crmUserId?: string;
 }
 
 export const setupSocket = (io: Server) => {
@@ -33,7 +40,7 @@ export const setupSocket = (io: Server) => {
         // Socket room membership is derived from the current database user,
         // not stale role/org claims carried by an older JWT.
         const currentUser: any = await User.findById(tokenUserId)
-          .select("_id role organizationId isActive")
+          .select("_id role organizationId isActive email")
           .lean();
         if (!currentUser || currentUser.isActive === false) {
           throw new Error("Authentication error: Account unavailable");
@@ -47,16 +54,50 @@ export const setupSocket = (io: Server) => {
             : currentUser.organizationId
               ? String(currentUser.organizationId)
               : undefined;
+
+        // Project Management and CRM notifications are keyed by CrmUser._id,
+        // while most of the application authenticates this shared socket with
+        // the main User JWT. Resolve the linked CRM identity server-side using
+        // the same trusted email + organization boundary used by crmAuth.
+        //
+        // The main User id is retained as a safe synthetic fallback because
+        // crmAuth deliberately uses that id when no persisted CrmUser exists.
+        socket.crmUserId = socket.userId;
+        if (socket.organizationId && currentUser.email) {
+          try {
+            const linkedCrmUser: any = await CrmUser.findOne({
+              email: String(currentUser.email).toLowerCase(),
+              organizationId: socket.organizationId,
+              isActive: true,
+            })
+              .select("_id")
+              .lean();
+
+            if (linkedCrmUser?._id) {
+              socket.crmUserId = String(linkedCrmUser._id);
+            }
+          } catch (crmLinkError) {
+            // CRM alias resolution is an additive capability. A transient CRM
+            // lookup failure must never reject the user's otherwise-valid main
+            // socket or regress presence/chat/transportation real-time flows.
+            logger.warn(
+              { userId: socket.userId, organizationId: socket.organizationId, err: crmLinkError },
+              'Socket CRM identity alias lookup failed; continuing with main identity',
+            );
+          }
+        }
       } catch {
         try {
           const CRM_SECRET = config.jwt.crmJwtSecret || 'crm-secret-key';
           decoded = jwt.verify(token, CRM_SECRET) as any;
           socket.userId = decoded.id;
+          socket.crmUserId = decoded.id;
           socket.role = 'crm';
         } catch (crmErr: any) {
           if (config.env === 'development' && process.env.ALLOW_INSECURE_SOCKET_DEV_FALLBACK === 'true') {
             logger.warn('Socket auth: dev fallback active');
             socket.userId = 'dev-user';
+            socket.crmUserId = 'dev-user';
             socket.role = 'super_admin';
             return next();
           }
@@ -77,6 +118,14 @@ export const setupSocket = (io: Server) => {
 
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
+    }
+
+    // Dedicated CRM-identity room. This is intentionally separate from the
+    // existing user:{User._id} room so CRM-targeted notification events do
+    // not leak into the general NotificationContext on the same singleton
+    // socket. Project Management uses this room for CrmUser-scoped live data.
+    if (socket.crmUserId) {
+      socket.join(`crm-user:${socket.crmUserId}`);
     }
 
     if (socket.organizationId) {

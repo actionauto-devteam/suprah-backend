@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import notificationService from '../services/notification.service';
 import CrmUser from '../models/CrmUser.model';
 import { NOTIFICATION_CATEGORIES } from '../models/Notification.model';
+import { emitToCrmUser } from '../utils/socketEmitter';
 
 const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes', 'prioritySenders']);
 const ARRAY_PREFERENCE_KEYS = new Set(['mutedTypes', 'prioritySenders']);
@@ -55,7 +56,9 @@ const markAsRead = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const notificationId = req.params.id;
 
-  const notification = await notificationService.markAsRead(notificationId, orgId, crmUser._id.toString());
+  const crmUserId = crmUser._id.toString();
+  const notification = await notificationService.markAsRead(notificationId, orgId, crmUserId);
+  emitToCrmUser(crmUserId, 'crm:notification:read', { notificationId });
 
   res.json(new ApiResponse(200, notification, 'Notification marked as read'));
 });
@@ -64,7 +67,9 @@ const markAllAsRead = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
   const orgId = req.orgId as string;
 
-  const result = await notificationService.markAllAsRead(crmUser._id.toString(), orgId);
+  const crmUserId = crmUser._id.toString();
+  const result = await notificationService.markAllAsRead(crmUserId, orgId);
+  emitToCrmUser(crmUserId, 'crm:notification:readAll', {});
 
   res.json(new ApiResponse(200, result, 'All notifications marked as read'));
 });
@@ -74,7 +79,9 @@ const deleteNotification = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
   const notificationId = req.params.id;
 
-  await notificationService.deleteNotification(notificationId, orgId, crmUser._id.toString());
+  const crmUserId = crmUser._id.toString();
+  await notificationService.deleteNotification(notificationId, orgId, crmUserId);
+  emitToCrmUser(crmUserId, 'crm:notification:deleted', { notificationId });
 
   res.json(new ApiResponse(200, null, 'Notification deleted successfully'));
 });
@@ -83,7 +90,11 @@ const deleteAllRead = asyncHandler(async (req: Request, res: Response) => {
   const crmUser = req.crmUser!;
   const orgId = req.orgId as string;
 
-  const result = await notificationService.deleteAllRead(crmUser._id.toString(), orgId);
+  const crmUserId = crmUser._id.toString();
+  const result = await notificationService.deleteAllRead(crmUserId, orgId);
+  emitToCrmUser(crmUserId, 'crm:notification:deleteAllRead', {
+    deletedCount: result.deletedCount,
+  });
 
   res.json(new ApiResponse(200, result, 'All read notifications deleted'));
 });

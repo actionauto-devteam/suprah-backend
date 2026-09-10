@@ -51,6 +51,20 @@ export function emitToUser(userId: string, event: string, data: any) {
   supraSpaceIo?.to(`user:${userId}`).emit(event, data);
 }
 
+/**
+ * Emit on the main Socket.IO server to the recipient's CRM identity room.
+ * This room is deliberately separate from user:{User._id}: the dashboard's
+ * shared socket can safely join both identities without CRM notifications
+ * being mistaken for main-account notifications.
+ *
+ * SupraSpace keeps its existing user:{CrmUser._id} event contract; callers
+ * that need backward-compatible SupraSpace delivery should continue emitting
+ * the legacy event through emitToUser in addition to this CRM-specific one.
+ */
+export function emitToCrmUser(userId: string, event: string, data: any) {
+  io?.to(`crm-user:${userId}`).emit(event, data);
+}
+
 export function emitToOrg(orgId: string, event: string, data: any) {
   io?.to(`org:${orgId}`).emit(event, data);
   supraSpaceIo?.to(`org:${orgId}`).emit(event, data);
