@@ -24,10 +24,12 @@ const normalizeVehicle = (v: any) => ({
     engine: v.engine || '',
     bodyStyle: v.bodyStyle || '',
     driveTrain: v.driveTrain || '',
-    image: v.images && v.images.length > 0
-        ? v.images[0]
-        : 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop',
-    images: v.images || [],
+    image: Array.isArray(v.images)
+        ? v.images.find((image: unknown): image is string => typeof image === 'string' && image.trim().length > 0) || ''
+        : '',
+    images: Array.isArray(v.images)
+        ? v.images.filter((image: unknown): image is string => typeof image === 'string' && image.trim().length > 0)
+        : [],
     status: v.status,
     location: v.dealerCity
         ? `${v.dealerCity}${v.dealerState ? ', ' + v.dealerState : ''}`

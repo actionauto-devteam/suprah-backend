@@ -85,6 +85,8 @@ export function stripMessageFormatting(content: string): string {
     .replace(/(^|[^\w*])_([^_\n]+)_(?!\w)/g, '$1$2')
     .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
     .replace(/\*{2,}/g, '')
+    .replace(/_{2,}/g, '')
+    .replace(/~{2,}/g, '')
     .replace(FORMAT_ONLY_LINE, '$1')
     .replace(/\s*\n+\s*/g, ' ')
     .replace(/\s{2,}/g, ' ')

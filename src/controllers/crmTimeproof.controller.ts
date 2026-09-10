@@ -451,8 +451,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     }
   }
 
-  // Re-run now that every correction above has finished mutating totalSeconds —
-  // see getMyTimeproof for the full explanation of why this must happen again here.
   attachWeekTotals(calendar);
 
   const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
@@ -475,11 +473,6 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   );
 });
 
-/**
- * GET /api/crm/timeproof/user/:userId/idle-log?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
- * Admin/Manager: read-only idle report for a specific user. Same derivation
- * as getMyIdleLog — see that function's doc comment.
- */
 export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
@@ -513,18 +506,12 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  // Web Dev is exempt from idle detection — never surface an idle period for
-  // them, regardless of what caused any ActivityInterval gap (sleep, crash, etc).
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
   const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
-/**
- * GET /api/crm/timeproof/export?userId=...&range=90
- * Returns a CSV-compatible string for download.
- */
 export const exportTimeproof = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   const { userId, range = '30' } = req.query;
@@ -565,17 +552,9 @@ export const exportTimeproof = asyncHandler(async (req: Request, res: Response) 
   res.send(rows.join('\n'));
 });
 
-/**
- * GET /api/crm/timeproof/shift-state
- * Returns the current shift/break state of the authenticated user.
- * Used by the tray app on startup to sync its initial state.
- */
 export const getShiftState = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
-  // Look back 2 days so sessions that started on a previous UTC date
-  // (e.g. Philippine users whose shift begins on what is "yesterday" UTC)
-  // are still detected as active when no time-out has been recorded.
   const lookbackStart = new Date();
   lookbackStart.setDate(lookbackStart.getDate() - 2);
   lookbackStart.setHours(0, 0, 0, 0);
@@ -588,11 +567,6 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const timeIns  = logs.filter(l => l.type === 'time-in');
   const timeOuts = logs.filter(l => l.type === 'time-out');
 
-  // Walk the logs chronologically and track whether the latest event leaves the
-  // user clocked-in. This is more accurate than counting time-ins vs time-outs,
-  // which breaks if any orphan log exists in the lookback window (e.g. a
-  // time-out without a matching time-in from a prior desync). Orphans caused
-  // the tray to see isOnShift=false even with an active clock-in today.
   let isOnShiftWalk = false;
   let walkShiftStartedAt: string | null = null;
   for (const log of logs) {
@@ -608,9 +582,6 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   }
   const isOnShift = isOnShiftWalk;
 
-  // Scope break detection to the current session only (logs after the most recent
-  // time-in). Without this, a stale unpaired break-in from a previous session in
-  // the 2-day lookback window falsely sets isOnBreak=true and wipes the timer.
   const lastTimeIn = isOnShift && timeIns.length > 0
     ? new Date(timeIns[timeIns.length - 1].timestamp)
     : null;
@@ -625,7 +596,6 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   const shiftStartedAt = isOnShift ? timeIns.at(-1)!.timestamp : null;
   const breakStartedAt = isOnBreak ? breakIns.at(-1)!.timestamp : null;
 
-  // Compute total seconds spent in completed breaks in the CURRENT session only
   const currentSessionStart = isOnShift && shiftStartedAt ? new Date(shiftStartedAt) : null;
   const breakLogs = logs
     .filter(l =>
@@ -645,12 +615,8 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  // Total worked seconds from COMPLETED sessions within TODAY's MDT window only.
-  // The lookback spans 2 days, so we must exclude completed sessions from yesterday
-  // to avoid inflating the tray's running total.
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
   const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  // MDT midnight expressed as a UTC timestamp  (e.g. 2026-05-25 00:00 MDT = 2026-05-25 06:00 UTC)
   const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
     - COMPANY_TZ_OFFSET_MINUTES * 60_000;
 
@@ -659,59 +625,28 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     .filter(s => !s.isLive && new Date(s.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, s) => sum + s.duration, 0);
 
-  // Same wall-clock (TimeLog-based) figure that already powers the Today card
-  // and calendar — INCLUDING the live/open session's elapsed time, unlike
-  // todayTotalWorkedSeconds above. This is why Today/calendar never show the
-  // "resets to zero" bug the live ticker is prone to: they never depended on
-  // ActivityInterval commits or tray heartbeat freshness in the first place.
-  // Exposed here so the frontend/tray can display THIS as their authoritative
-  // running total instead of reconstructing their own fragile one.
   const todayTotalWorkedSecondsIncludingLive = allSessions
     .filter(s => new Date(s.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, s) => sum + s.duration, 0);
 
-  // Sum of ALL break seconds that fall within today's MDT window (across all
-  // sessions today, completed or live). Used to net out break time from the
-  // wall-clock fallback so the time clock matches the calendar's net work time.
   const allBreakSessions = buildBreakSessions(logs);
   const todayBreakTotalSeconds = allBreakSessions
     .filter(b => new Date(b.in).getTime() >= todayMDTStartUTC)
     .reduce((sum, b) => sum + b.duration, 0);
 
-  // a
   const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - todayBreakTotalSeconds);
 
-  // Activity-based tracking: sum of completed ActivityIntervals for today
   const activityIntervals = await ActivityInterval.find({
     userId: user._id,
     shiftDate: todayMDTStr,
   }).lean();
   const activityIntervalTotal = activityIntervals.reduce((sum, i) => sum + i.durationSeconds, 0);
-  // When ActivityIntervals are absent (tray not running, save failed, etc.), the
-  // fallback uses session wall-clock MINUS today's breaks → net work time. Without
-  // the break subtraction the time clock would over-count by the break duration.
-  //
-  // Same 65%-coverage floor as getMyTimeproof's calendar computation — without
-  // it, a long continuous active stretch that never got checkpointed (tray
-  // restarted mid-shift, save failures, etc.) leaves activityIntervalTotal far
-  // below the truth, and this live "Tracking" figure would silently show a
-  // much smaller number than the Today card / calendar (which already guard
-  // against this), confusing the user with two contradicting totals.
   const wallClockNetSeconds = Math.max(0, todayTotalWorkedSeconds - todayBreakTotalSeconds);
   const trustActivityIntervals =
     activityIntervalTotal > 0 &&
     activityIntervalTotal < wallClockNetSeconds &&
     activityIntervalTotal / wallClockNetSeconds >= MIN_ACTIVITY_COVERAGE;
   const todayTotalActiveSeconds = trustActivityIntervals ? activityIntervalTotal : wallClockNetSeconds;
-  // End of the most recently committed interval — the correct anchor to resume
-  // live-ticking from when the heartbeat goes stale (see currentIntervalStartAt
-  // below). Without this, a user with even ONE early checkpoint (e.g. a brief
-  // idle blip at 10am) who then works a long uninterrupted stretch with no
-  // further break/idle would have their live counter permanently FREEZE the
-  // moment the heartbeat goes stale (>15 min gap) — showing only that early
-  // checkpoint's total for the rest of the shift, no matter how much longer
-  // they actually keep working. This was the root cause behind reports like
-  // "worked 8+ hours, TimeProof only shows 3 hours."
   const lastIntervalEndMs = activityIntervals.length
     ? Math.max(...activityIntervals.map((i) => new Date(i.endAt).getTime()))
     : null;
@@ -722,35 +657,12 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     ? new Date(shiftStartedAt).getTime() >= todayMDTStartUTC
     : false;
 
-  // Decide the live-interval start that the CRM timer counts from.
-  //  • On break: always null — the timer must freeze. TimeLogs are authoritative for
-  //    break state; the tray may have missed a break-in socket event and still be
-  //    heartbeating with a live currentIntervalStartAt. Never trust heartbeat over
-  //    TimeLogs for break state.
-  //  • Tray actively reporting (fresh heartbeat, not on break): trust its value —
-  //    including null (idle), which freezes the timer in lock-step with the tray.
-  //  • Tray offline / never ran: fall back to (shiftStartedAt + currentSessionBreaks)
-  //    so (now - fallbackStart) excludes break time. Without this shift, a CRM-only
-  //    user's live counter over-counts every break they took during the current shift.
   const heartbeatFresh = heartbeat
     ? Date.now() - new Date(heartbeat.lastSeenAt).getTime() < HEARTBEAT_FRESH_MS
     : false;
   const fallbackShiftedStart = isOnShift && !isOnBreak && isShiftFromToday && shiftStartedAt
     ? new Date(new Date(shiftStartedAt).getTime() + (totalBreakSeconds * 1000)).toISOString()
     : null;
-  // When the heartbeat is stale, the resume anchor MUST match whichever total
-  // todayTotalActiveSeconds actually used above, or we'd either double-count
-  // or lose time:
-  //  • trustActivityIntervals: todayTotalActiveSeconds already = activityIntervalTotal
-  //    (everything up to the last committed checkpoint), so resume the live
-  //    delta from lastIntervalEndMs — NOT shiftStartedAt, which would double-count
-  //    the already-committed portion. Previously this branch returned null
-  //    (froze the timer forever once heartbeat went stale) — see comment above
-  //    lastIntervalEndMs for why that was wrong.
-  //  • !trustActivityIntervals: todayTotalActiveSeconds = wallClockNetSeconds, which
-  //    excludes the current OPEN session entirely (only completed sessions count),
-  //    so the live delta must cover the whole current session from shiftStartedAt —
-  //    that's exactly what fallbackShiftedStart does.
   const currentIntervalStartAt = isOnBreak
     ? null
     : heartbeatFresh
@@ -773,10 +685,6 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   }, 'Shift state fetched'));
 });
 
-/**
- * GET /api/crm/timeproof/my-agent
- * Returns whether the current user's tray agent is online.
- */
 export const getMyAgentStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
@@ -793,10 +701,6 @@ export const getMyAgentStatus = asyncHandler(async (req: Request, res: Response)
   }, 'Agent status fetched'));
 });
 
-/**
- * POST /api/crm/timeproof/heartbeat
- * Tray app pings every 60s — upserts AgentHeartbeat, emits idle/break alerts to admins.
- */
 export const postHeartbeat = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const {
@@ -810,9 +714,6 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     appVersion = null,
   } = req.body;
 
-  // Web Dev is exempt from idle detection entirely — force isIdle false
-  // server-side regardless of what the tray reports, so a client-side edge
-  // case (old tray version, sleep/resume race) can never flag them anyway.
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
   const isIdle = idleExempt ? false : rawIsIdle;
 
@@ -821,17 +722,11 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   const wasOnBreak = existing?.isOnBreak ?? false;
   const hadBreakNotification = existing?.lastBreakNotifiedAt ?? null;
 
-  // Determine lastBreakNotifiedAt for this upsert
   let lastBreakNotifiedAt = hadBreakNotification;
   if (!isOnBreak && wasOnBreak) {
-    // Break ended — reset so the next break can trigger a notification again
     lastBreakNotifiedAt = null;
   }
 
-  // idleSince marks the start of the CURRENT idle stretch — used to gate the
-  // 15-min admin escalation notification below. lastIdleEscalationNotifiedAt
-  // resets whenever the user comes back from idle, so the next idle stretch
-  // can trigger the escalation again.
   let idleSince = existing?.idleSince ?? null;
   if (isIdle && !wasIdle) idleSince = new Date();
   if (!isIdle) idleSince = null;
@@ -839,14 +734,9 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
   if (!isIdle) lastIdleEscalationNotifiedAt = null;
 
-  // Resets on returning from idle, so the next idle stretch gets a fresh cooldown.
   let lastIdleChannelPostedAt = existing?.lastIdleChannelPostedAt ?? null;
   if (!isIdle) lastIdleChannelPostedAt = null;
 
-  // Reset the notify-cooldown once permission is (re-)granted, so if it's
-  // ever revoked again later (e.g. after another auto-update, since the
-  // build is unsigned) the next loss gets its own fresh notification instead
-  // of staying silenced by an old timestamp from a previous incident.
   const wasScreenRecordingGranted = existing?.screenRecordingGranted ?? null;
   let lastScreenRecordingNotifiedAt = existing?.lastScreenRecordingNotifiedAt ?? null;
   if (screenRecordingGranted === true) lastScreenRecordingNotifiedAt = null;
@@ -874,13 +764,6 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   );
 
   // ── Notify: macOS Screen Recording permission is missing ──────────────────
-  // Unsigned build (no Apple Developer cert) means this permission doesn't
-  // reliably survive an auto-update — the tray keeps running and heartbeating
-  // normally, so nothing else here would ever surface it. Notifies both the
-  // affected user (so they can self-resolve) and admins (as a fallback in
-  // case the user's own notification goes unnoticed), and leaves a record in
-  // the read-only Shift Alerts channel. Re-notifies at most once every 24h
-  // per person while unresolved, rather than once per 60s heartbeat forever.
   if (platform === 'darwin' && screenRecordingGranted === false && isOnShift) {
     const notifyCooldownMs = 24 * 60 * 60 * 1000;
     const dueForNotify = !lastScreenRecordingNotifiedAt
@@ -925,15 +808,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   }
 
   // ── Notify admins: agent went idle ────────────────────────────────────────
-  // Routed through notificationService (persisted, preference-gated, unified
-  // push) with an `agent-idle:{admin}:{agent}` dedupeKey shared with the
-  // 15-min escalation below, so a person flapping idle/active repeatedly —
-  // or escalating from a short idle into a long one — compiles into one
-  // evolving notification instead of spamming admins with a new alert per
-  // transition (see notification.service.ts's createNotification grouping).
   if (!wasIdle && isIdle && isOnShift) {
-    // Org-scoped — an unscoped query here would leak this event to every
-    // other organization's admins too.
     const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
     const idlePayload = { userId: user._id, fullName: user.fullName, isIdle: true, at: new Date() };
     for (const admin of admins) {
@@ -954,11 +829,6 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       }).catch(() => {});
     }
 
-    // Also leaves a record in the read-only Shift Alerts channel — previously
-    // idle events only reached each admin's own notification bell, with no
-    // shared, browsable log of who went idle and when the way connection-loss/
-    // stale-clockout/location alerts already had via fireShiftAlert.
-    // Cooldown so flapping idle/active doesn't spam a new message per flip.
     const idleChannelCooldownMs = 5 * 60 * 1000;
     const dueForIdleChannelPost = !existing?.lastIdleChannelPostedAt
       || Date.now() - new Date(existing.lastIdleChannelPostedAt).getTime() > idleChannelCooldownMs;
@@ -969,9 +839,6 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  // ── Notify admins: agent has been idle 15+ minutes — actionable alert ────
-  // Deep-links straight to this user's manage page, where an admin/manager
-  // can manually clock them out if they've stepped away without logging off.
   if (isIdle && isOnShift && idleSince && !lastIdleEscalationNotifiedAt) {
     const idleDurationSeconds = (Date.now() - idleSince.getTime()) / 1000;
     if (idleDurationSeconds >= IDLE_ESCALATION_THRESHOLD_SECONDS) {
@@ -1038,31 +905,17 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
 });
 
-/**
- * GET /api/crm/timeproof/agent-status
- * Admin/Manager: real-time view of all agents — online, offline, idle.
- */
 export const getAgentStatus = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (!['admin', 'manager'].includes(requestor.role)) {
     throw new ApiError(403, 'Access denied');
   }
 
-  // 5-minute window: tray heartbeats every 60s, so a user needs to miss 4
-  // consecutive heartbeats before appearing offline — resilient to network hiccups.
   const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
   const now = new Date();
 
   const crmUsers = await CrmUser.find({ isActive: true, organizationId: requestor.organizationId }).select('-password').lean();
 
-  // Merge in main-site User-model employees (e.g. Lot Tech) so they show up
-  // in the live agent status view too. NOT excluded by email overlap with
-  // crmUsers here (unlike earlier drafts of this fix) — a CrmUser record
-  // existing for the same email doesn't mean it's the one actually used day
-  // to day (Lot Tech in particular may have a dormant CrmUser record from
-  // HR/record-keeping that never logs in — their real activity is on the
-  // User account). Both are computed, then the dedup step below picks
-  // whichever one actually shows real activity.
   const mainOnlyUsersRaw = await User.find({
     role: { $in: ['employee', 'admin', 'super_admin'] },
   }).select('fullName name email avatar role onlineStatus lastActive updatedAt').lean();
@@ -1075,7 +928,6 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
 
   const crmAgents = crmUsers.map(u => {
     const hb = hbMap.get(u._id.toString());
-    // Online if tray heartbeat is fresh OR CRM tab is open (active socket connection)
     const isOnline = isCrmUserOnline(u._id.toString()) ||
       (hb ? now.getTime() - new Date(hb.lastSeenAt).getTime() < OFFLINE_THRESHOLD_MS : false);
 
@@ -1089,22 +941,10 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
       breakStartedAt: isOnBreak ? (hb?.breakStartedAt?.toISOString() ?? null) : null,
       platform: hb?.platform ?? null,
       lastSeenAt: hb?.lastSeenAt ?? null,
-      // From the tray's own heartbeat payload — lets admins spot who's on an
-      // old/stale build without digging through diagnostic logs. null for
-      // Lot Tech/mobile (no tray) or a tray build old enough to predate this field.
       appVersion: hb?.appVersion ?? null,
     };
   });
 
-  // User-model employees (Lot Tech and anyone else on mobile/PWA, no
-  // tray-app) never hit AgentHeartbeat and never open a CRM-role socket —
-  // both signals the block above relies on are permanently empty for them,
-  // so they'd always read "offline" regardless of actual activity. Derive
-  // presence instead from the general profile heartbeat every web/PWA
-  // session already sends (PATCH /api/profile/heartbeat — see
-  // profile.controller.ts), and break status straight from TimeLog (the
-  // same source getAllUsersTimeproof/getShiftStatusForActor already trust)
-  // rather than a heartbeat record that will never exist for them.
   const mainAgents = await Promise.all(mainOnlyUsers.map(async (u) => {
     const lastActive = (u as any).lastActive ? new Date((u as any).lastActive).getTime() : 0;
     const isOnline = (u as any).onlineStatus === 'online' || (now.getTime() - lastActive < OFFLINE_THRESHOLD_MS);
@@ -1122,13 +962,6 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
     };
   }));
 
-  // A CrmUser and a User document can legitimately share the same email —
-  // separate collections, separate unique-email constraints — when the same
-  // person has both (e.g. a dormant CrmUser record alongside the User
-  // account they actually clock in with). Whichever entry shows real
-  // activity right now (online, or more recently seen) wins the display
-  // slot; the other is dropped so the person isn't listed twice with
-  // conflicting statuses.
   const combined = [...crmAgents, ...mainAgents];
   const byEmail = new Map<string, (typeof combined)[number]>();
   const noEmail: typeof combined = [];
@@ -1151,15 +984,6 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
   res.json(new ApiResponse(200, { agents }, 'Agent status fetched'));
 });
 
-/**
- * POST /api/crm/timeproof/screenshots
- * Tray app uploads a screenshot. Stored ONLY in R2 — no MongoDB metadata.
- * All info needed (userId, shiftDate, capturedAt, idleDetected) is encoded
- * in the R2 object key so we can query by listing with a prefix.
- *
- * Key shape: screenshots/{userId}/{shiftDate}/{capturedAtMs}-{flag}.jpg
- *   flag = "idle" or "active"
- */
 export const submitScreenshot = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
@@ -1174,12 +998,7 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
   }
 
   const capturedAtDate = capturedAt ? new Date(capturedAt) : new Date();
-  // A break-event proof shot uses its own flag instead of idle/active — taken
-  // specifically to show what was on screen (and the real time) the moment a
-  // break started/ended, independent of idle state.
   const flag = breakEvent ? breakEvent : (idleDetected === 'true' ? 'idle' : 'active');
-  // Override the multer file name so storageService.upload puts the key in our
-  // structured layout. We don't need a hash suffix because capturedAtMs is unique.
   const customFileName = `${capturedAtDate.getTime()}-${flag}.jpg`;
   const fileWithName: Express.Multer.File = { ...req.file, originalname: customFileName };
 
@@ -1195,20 +1014,6 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
 
 /**
  * POST /api/crm/timeproof/screenshots/placeholder
- * Separate, dedicated endpoint from submitScreenshot above — deliberately
- * does not touch or share logic with the real upload path, so a bug here
- * can never affect screenshots that ARE capturing successfully. Used only
- * when the tray already knows (via the OS itself, not a failed attempt) a
- * real capture is impossible — currently just macOS's Screen Recording
- * permission being off, which isn't a per-attempt error but a settled state
- * the tray can check up front. Without this, that whole stretch of the day
- * is just a silent gap in the timeline, indistinguishable from the tray not
- * running or the employee not working at all.
- *
- * Generates its own small neutral placeholder image and uploads it through
- * the exact same R2 key convention as a real screenshot, just with a
- * distinct flag ("noaccess") the read path recognizes — no MongoDB record,
- * consistent with how every other screenshot is tracked.
  */
 export const submitScreenshotPlaceholder = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -1245,10 +1050,6 @@ export const submitScreenshotPlaceholder = asyncHandler(async (req: Request, res
 
 /**
  * GET /api/crm/timeproof/screenshots?date=YYYY-MM-DD&userId=...
- * Lists screenshots for a given date directly from R2 — no MongoDB lookup.
- * Employees: own only. Admin/Manager: any userId.
- *
- * Key shape parsed: screenshots/{userId}/{shiftDate}/{capturedAtMs}-{flag}.jpg
  */
 export const getScreenshots = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1267,11 +1068,6 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(403, 'Access denied');
   }
 
-  // If someone OTHER than the account owner is viewing (an admin/manager),
-  // and that account has screenshotBlurUntilPayout set, serve blurred proxy
-  // URLs instead of the real signed URLs, except in the payout window.
-  // Also enforces org scoping here — without it, an admin/manager could view
-  // another organization's screenshots just by knowing/guessing their userId.
   const isSelf = targetId === requestor._id.toString();
   let shouldBlur = false;
   if (!isSelf) {
@@ -1290,14 +1086,9 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
   ]);
   const excludedKeys = new Set(excludedRows.map((r) => r.key));
 
-  // Parse each key into structured screenshot data
   const parsed = objects
     .filter((obj) => !excludedKeys.has(obj.key))
     .map((obj) => {
-      // key suffix after prefix is "{capturedAtMs}-{flag}.jpg" — anything else is ignored.
-      // Split on the FIRST '-', not the last: capturedAtMs is purely numeric (never
-      // contains a hyphen), but flag can (e.g. "break-in"/"break-out"), so lastIndexOf
-      // would wrongly split those flags themselves instead of the ms/flag boundary.
       const tail = obj.key.slice(prefix.length).replace(/\.jpg$/i, '');
       const dashIdx = tail.indexOf('-');
       if (dashIdx < 0) return null;
@@ -1309,14 +1100,7 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
         r2Key: obj.key,
         capturedAt: new Date(ms),
         idleDetected: flag === 'idle',
-        // 'noaccess' = submitScreenshotPlaceholder's stand-in image for a
-        // capture macOS's Screen Recording permission blocked outright —
-        // not a real screenshot, so the frontend needs to know to render it
-        // differently instead of showing it as if it were one.
         isPlaceholder: flag === 'noaccess',
-        // Proof-of-work shot taken automatically by the tray at the exact moment
-        // a break started/ended (see captureAndUploadOnce's breakEvent param) —
-        // distinct from idle/active captures.
         breakEvent: (flag === 'break-in' || flag === 'break-out') ? flag as 'break-in' | 'break-out' : null,
       };
     })
@@ -1325,7 +1109,7 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
 
   const withUrls = await Promise.all(
     parsed.map(async (s) => ({
-      _id: s.r2Key, // use the key as the unique identifier
+      _id: s.r2Key,
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
       isPlaceholder: s.isPlaceholder,
@@ -1337,13 +1121,6 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
     }))
   );
 
-  // Visible record for the account owner (and any admin/manager viewing) when
-  // an admin deleted one of THIS user's screenshots on this date — the push
-  // notification sent at delete-time is easy to miss, so this gives a
-  // persistent, in-app trail. The admin's name is already embedded in
-  // `reason` at write-time (see deleteMyScreenshot) rather than populated,
-  // since performedBy may reference a CrmUser, not the User model this field
-  // is typed against.
   const deletionNotices = await AuditLog.find({
     entityType: 'Screenshot',
     action: 'ADMIN_DELETE_SCREENSHOT',
@@ -1359,10 +1136,6 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
 
 /**
  * GET /api/crm/timeproof/screenshot-blurred?key=...
- * Serves a blurred version of a screenshot for accounts with
- * screenshotBlurUntilPayout set. Re-derives access control from the key path
- * itself (screenshots/{userId}/{date}/{file}) rather than trusting the caller
- * — the account owner always gets access; anyone else needs admin/manager.
  */
 export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1378,8 +1151,6 @@ export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Respo
     if (!['admin', 'manager'].includes(requestor.role)) {
       throw new ApiError(403, 'Access denied');
     }
-    // Org-scope the admin/manager path too — otherwise anyone with admin/manager
-    // role could pull another organization's screenshot just by knowing its key.
     const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
     if (!targetUser) throw new ApiError(404, 'Screenshot not found');
   }
@@ -1399,17 +1170,10 @@ export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Respo
   res.send(blurred);
 });
 
-// Each screenshot represents this much of the 10-min capture interval —
-// deleting one deducts this many seconds from that day's rendered hours.
 const SCREENSHOT_DELETE_DEDUCTION_SECONDS = 10 * 60;
 
 /**
  * DELETE /api/crm/timeproof/screenshots?key=...
- * A user permanently deletes one of their OWN screenshots (no archive/audit
- * trail), and the corresponding time is deducted from that day's rendered
- * hours. TEMPORARY: also allows admin/manager to delete on another user's
- * behalf (same deduction, applied to the target user) — requested for a
- * one-off need; remove the admin/manager allowance again once no longer needed.
  */
 export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1425,8 +1189,6 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
     if (!['admin', 'manager'].includes(requestor.role)) {
       throw new ApiError(403, 'You can only delete your own screenshots');
     }
-    // Org-scope the admin/manager path — otherwise any admin/manager could delete
-    // (and apply an hours deduction to) another organization's screenshot.
     const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
     if (!targetUser) throw new ApiError(404, 'User not found');
   }
@@ -1442,10 +1204,6 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
     { upsert: true }
   );
 
-  // Admin/manager deleting on someone ELSE's behalf must be visible to that
-  // user — unlike a self-delete (intentionally no audit trail, personal use),
-  // silently deleting another person's proof-of-work photo without their
-  // knowledge isn't acceptable. Self-deletes are untouched by this block.
   if (!isSelf) {
     await AuditLog.create({
       entityType: 'Screenshot',
@@ -1457,9 +1215,6 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
       organizationId: requestor.organizationId?.toString(),
     });
 
-    // Persisted (not just a raw push) since this has real payroll impact —
-    // the affected user needs a durable record even if the push is missed
-    // (device off, subscription pruned, notification dismissed unseen).
     notificationService.createNotification({
       userId: targetUserId,
       organizationId: requestor.organizationId?.toString() || '',
@@ -1475,19 +1230,6 @@ export const deleteMyScreenshot = asyncHandler(async (req: Request, res: Respons
 
 /**
  * PATCH /api/crm/timeproof/correct-time
- * Admin/manager-only: corrects an overrun shift (forgotten clock-out) by either
- * updating the existing time-out log for that day or, if the shift is still
- * open, inserting a new time-out at the corrected timestamp. Every correction
- * is written to AuditLog with before/after values — TimeLog is never silently
- * mutated without a trail. Exempt departments (e.g. Web Dev) cannot be corrected.
- */
-/**
- * Whether a given calendar date falls inside a pay period that's closed for
- * corrections — either an admin explicitly marked that user paid for the
- * period ('paid'), or nobody did but the period's fixed payday has already
- * passed ('auto-locked', computed on the fly rather than requiring the
- * scheduler to have already written a row for it). A 'unlocked' record
- * (emergency override) always wins over both, regardless of payday.
  */
 async function getPeriodLockStatus(userId: string, date: Date): Promise<{
   locked: boolean;
@@ -1570,20 +1312,12 @@ export const correctTimeLog = asyncHandler(async (req: Request, res: Response) =
 
 /**
  * GET /api/crm/timeproof/admin/day-logs?userId=&date=
- * Feeds the admin time-override UI's entry picker (Edit/Delete need a real logId, not a
- * timestamp guess) — raw TimeLog rows for one user/date. Same admin-only + exempt-department
- * gating as adminTimeOverride below (including the requestor-must-be-exempt-too restriction);
- * read-only, no audit entry needed for a plain list.
  */
 export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (requestor.role !== 'admin') {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
-  // Confirmed with the user: this is a Web Dev-only POWER, not a Web-Dev-only PROTECTION — a
-  // Web Dev admin can use it on ANY user's records (any department), but no one outside Web
-  // Dev can see/use it at all, even on a Web Dev target. Only the requestor's own department
-  // gates this — the target user's department is irrelevant here.
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
     throw new ApiError(403, 'This tool is only available to admins in an exempt department');
   }
@@ -1605,24 +1339,12 @@ export const getAdminDayLogs = asyncHandler(async (req: Request, res: Response) 
 
 /**
  * POST /api/crm/timeproof/admin/time-override
- * A separate, narrower recovery path from correctTimeLog above (which stays exactly as-is,
- * isTimeEditExempt and all) — this one is the intentional counterpart reserved specifically
- * for departments the standard tool refuses (currently only Web Dev). It only activates when
- * the TARGET user's department is itself exempt from normal time editing — never a general
- * bypass for any department — and only for admins (not managers), per explicit instruction.
- * Also unlike correctTimeLog (time-out only), this can edit/delete/create either a time-in or
- * a time-out, which is what's actually needed to merge an erroneously-split shift back into
- * one continuous session (e.g. edit the second session's time-in back to the true start, then
- * delete the now-redundant first pair). No separate rendered-hours math is needed — the
- * existing hours engine reads TimeLog/breaks generically regardless of how a row was created.
  */
 export const adminTimeOverride = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (requestor.role !== 'admin') {
     throw new ApiError(403, 'Only admins can use the manual time-override tool');
   }
-  // Web Dev-only POWER, not a Web-Dev-only PROTECTION — a Web Dev admin can use this on ANY
-  // user's records, any department. Only the requestor's own department gates access.
   if (!(await isTimeEditExempt(requestor.organizationId?.toString(), requestor.department))) {
     throw new ApiError(403, 'This tool is only available to admins in an exempt department');
   }
@@ -1634,9 +1356,6 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
   if (!userId || !date || !action) {
     throw new ApiError(400, 'userId, date and action are all required');
   }
-  // Reason is optional here (unlike correctTimeLog) — this tool is already restricted to
-  // Web Dev admins, per the user's explicit instruction. Still recorded in AuditLog when
-  // given; falls back to a placeholder when omitted so the audit trail never has a blank reason.
   const auditReason = reason?.trim() || '(no reason provided)';
   const noteSuffix = reason?.trim() ? `: ${reason.trim()}` : '';
 
@@ -1695,10 +1414,6 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
 
 /**
  * PATCH /api/crm/timeproof/user/:userId/hourly-rate
- * Admin/manager sets an employee's hourly pay rate. Previously stored only
- * in the setting admin's own browser localStorage — moved to CrmUser so
- * every admin sees the same value, with every change recorded in
- * HourlyRateChangeLog for accountability.
  */
 export const updateHourlyRate = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1736,8 +1451,6 @@ export const updateHourlyRate = asyncHandler(async (req: Request, res: Response)
  */
 /**
  * GET /api/crm/timeproof/user/:userId/hourly-rate-history
- * Full change history (not just the current value) — lets a rate dispute be
- * settled by seeing exactly who changed it, when, and from what.
  */
 export const getHourlyRateHistory = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1753,10 +1466,6 @@ export const getHourlyRateHistory = asyncHandler(async (req: Request, res: Respo
 
 /**
  * POST /api/crm/timeproof/user/:userId/mark-paid
- * Admin/manager explicitly closes a specific pay period for a specific
- * user — locks it for TimeLog corrections immediately, regardless of
- * whether the period's fixed payday has passed yet. Idempotent: marking an
- * already-paid (or auto-locked) period paid again just refreshes who/when.
  */
 export const markPeriodPaid = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1798,11 +1507,6 @@ export const markPeriodPaid = asyncHandler(async (req: Request, res: Response) =
 
 /**
  * POST /api/crm/timeproof/user/:userId/unlock-period
- * Admin-only emergency override — reopens an already-locked period for
- * correction. Requires a reason (kept on the lock record) since this
- * bypasses the whole point of locking. Stays unlocked until an admin
- * re-locks it via mark-paid; the auto-lock scheduler will never re-close it
- * on its own once explicitly overridden.
  */
 export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1832,8 +1536,6 @@ export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) 
   }
 
   if (!lock) {
-    // Was only auto-locked on the fly (no row existed yet) — create one
-    // directly in the unlocked state so the override is explicit and audited.
     lock = new PayPeriodLock({ organizationId: targetUser.organizationId, userId, periodStart, periodEnd });
   }
   lock.status = 'unlocked';
@@ -1882,8 +1584,6 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
     .lean();
   const userIds = users.map((u) => u._id);
 
-  // Widened 6-day lookback so a Sun-Sat week that started in the previous period still
-  // gets a correct weekTotalSeconds when its Saturday lands inside this period (weekly OT).
   const weeklyLookbackStart = new Date(periodStart.getTime() - 6 * 24 * 60 * 60 * 1000);
 
   const [logs, locks] = await Promise.all([
@@ -1940,11 +1640,6 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
 
 /**
  * GET /api/crm/timeproof/weekly-overtime-report?weekStart=YYYY-MM-DD
- * Admin/manager: one Sun-Sat week's total + overtime hours for every active
- * employee, Utah and Philippines both — for HR's weekly overtime report
- * (previously built by hand). Reporting-only: does not affect payout anywhere.
- * PH gets the same 40h/week threshold as Utah purely for visibility here —
- * their pay (computeExactPayout, no premium) is untouched by this endpoint.
  */
 export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -1956,8 +1651,6 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
   if (!weekStartStr || !/^\d{4}-\d{2}-\d{2}$/.test(weekStartStr)) {
     throw new ApiError(400, 'weekStart is required (YYYY-MM-DD, must be a Sunday)');
   }
-  // Weekday check on the date string itself (noon UTC avoids any boundary ambiguity),
-  // same technique attachWeekTotals uses for its own Saturday-of-week computation.
   if (new Date(weekStartStr + 'T12:00:00Z').getUTCDay() !== 0) {
     throw new ApiError(400, 'weekStart must be a Sunday');
   }
@@ -1969,12 +1662,6 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
     .select('fullName username department payrollLocation email')
     .lean();
 
-  // Merge in User-model employees (Lot Tech, any other general-timeclock account) — same
-  // pattern as getAllUsersTimeproof (see its comment). This endpoint previously only ever
-  // queried CrmUser, so every User-model employee was silently absent from the whole report,
-  // every week, regardless of how much they actually worked. hourlyTrackingExempt is a
-  // CrmUser-only field — User-model employees have no equivalent, which is the correct
-  // default (never commission-exempt).
   const mainOnlyUsersRaw = await User.find({
     role: { $in: ['employee', 'admin', 'super_admin'] },
   }).select('fullName name email personalInfo lastActive updatedAt').lean();
@@ -2033,8 +1720,6 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
         calendar[d.date].totalSeconds = Math.max(0, calendar[d.date].totalSeconds - d.deductedSeconds);
       }
     }
-    // Re-run after the deduction above, same fix as getMyTimeproof/getUserTimeproof —
-    // otherwise the week total stays stale from before the correction.
     attachWeekTotals(calendar);
 
     const totalWorkedSeconds = calendar[saturdayStr]?.weekTotalSeconds ?? 0;
@@ -2052,10 +1737,6 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
     };
   });
 
-  // Same dedup as getAllUsersTimeproof — a CrmUser and a User document can share an email
-  // (e.g. a dormant CrmUser record alongside the User account someone actually clocks in
-  // with). Whichever shows real hours this week wins the slot, carrying payrollLocation
-  // forward from whichever side has it, so nobody appears twice or as a zero-hours ghost row.
   const byEmail = new Map<string, (typeof employees)[number]>();
   const noEmail: typeof employees = [];
   for (const e of employees) {
@@ -2080,10 +1761,6 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
 
 /**
  * POST /api/crm/timeproof/users/:userId/clock-out
- * Admin/manager-only: immediately ends a user's currently open shift (and any
- * open break) right now. No rendered-hours gate — this is a deliberate
- * override for cases like a user stepping away idle without clocking out,
- * unlike the automatic stale-shift/idle clock-out which only fires past 8h.
  */
 export const clockOutUser = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -2140,9 +1817,6 @@ export const clockOutUser = asyncHandler(async (req: Request, res: Response) => 
 
 /**
  * POST /api/crm/timeproof/screenshots/exclude
- * Admin/manager-only: archives (does not delete) screenshots captured after a
- * corrected clock-out so they no longer show in the gallery or count as
- * proof-of-work, while keeping the underlying files and an audit trail.
  */
 export const excludeScreenshots = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -2183,7 +1857,7 @@ export const excludeScreenshots = asyncHandler(async (req: Request, res: Respons
       userId, key: obj.key, reason, excludedBy: requestor._id,
     })),
     { ordered: false },
-  ).catch(() => {}); // duplicate keys (already excluded) are fine to ignore
+  ).catch(() => {});
 
   await AuditLog.create({
     entityType: 'Screenshot',
@@ -2210,15 +1884,6 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
   }
   const safeAppSource = appSource === 'supraspace' ? 'supraspace' : 'main';
 
-  // A push endpoint belongs to the current installed browser/PWA instance.
-  // Remove it from any previous account first so shared devices or account
-  // switches cannot keep receiving another user's private notifications.
-  // Excluded: the main-site User record sharing this CRM user's email — that's
-  // the same person's other account (an employee legitimately holds both a
-  // CrmUser and a User identity on one device), not a stale/foreign session.
-  // Without this exclusion, this CrmUser subscribe and the main-site /api/push
-  // subscribe race on every load of the shared dashboard and silently strip
-  // each other's subscription, breaking push delivery for that person.
   await Promise.all([
     CrmUser.updateMany(
       { _id: { $ne: user._id }, 'pushSubscriptions.endpoint': subscription.endpoint },
@@ -2245,11 +1910,6 @@ export const subscribeCrmPush = asyncHandler(async (req: Request, res: Response)
     }
   );
 
-  // If no existing entry was matched, push a new one. Capped at MAX_PUSH_SUBSCRIPTIONS
-  // via $sort+$slice (atomic, newest-first) so repeated PWA reinstalls — which each
-  // mint a brand-new endpoint on iOS instead of reusing the old one — can't let dead
-  // subscriptions accumulate forever; the oldest (most likely dead) entries get
-  // evicted first, while a handful of genuinely-concurrent devices are unaffected.
   await CrmUser.updateOne(
     { _id: user._id, 'pushSubscriptions.endpoint': { $ne: subscription.endpoint } },
     {
@@ -2292,9 +1952,6 @@ export const unsubscribeCrmPush = asyncHandler(async (req: Request, res: Respons
 
 /**
  * GET /api/crm/timeproof/push/status
- * Self-scoped check so a user (or RJ, over a screenshare) can confirm whether
- * push is actually wired up on the current account without a device debugger.
- * Never returns raw endpoints/keys — only a short fingerprint per device.
  */
 export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -2306,11 +1963,6 @@ export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response)
     devices: subscriptions.map((s: any) => ({
       deviceHint: s.deviceHint || 'unknown',
       createdAt: s.createdAt,
-      // lastSuccessAt/failureCount added alongside the 2026-08-06 push
-      // reliability fix — without these, "subscribed: true" only ever meant
-      // "the browser reported a subscription object," never "push has
-      // actually delivered recently," which is exactly the gap that let the
-      // reinstall-zombie-subscription bug hide in plain sight.
       lastSuccessAt: s.lastSuccessAt || null,
       failureCount: s.failureCount || 0,
       endpointFingerprint: crypto.createHash('sha256').update(s.endpoint).digest('hex').slice(0, 12),
@@ -2320,12 +1972,6 @@ export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response)
 
 /**
  * GET /api/crm/timeproof/push/org-health
- * Admin/manager-only. Diagnostic view across every active org user's push
- * subscriptions — built to answer "is the 2026-08-06 reliability fix (cap +
- * eviction + failure-based pruning + periodic client resubscribe) actually
- * working in practice" without needing the affected person on a screenshare,
- * and without guessing at a new architecture (e.g. a separate dedicated PWA)
- * before confirming whether the existing fix already covers this.
  */
 export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -2346,19 +1992,10 @@ export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response)
     const devices = subs.map((s: any) => {
       const lastSuccessMs = s.lastSuccessAt ? new Date(s.lastSuccessAt).getTime() : null;
       const createdMs = s.createdAt ? new Date(s.createdAt).getTime() : null;
-      // "never-confirmed" — subscribed a while ago, never once recorded a
-      // successful send. Distinct from "stale" (was working, hasn't sent
-      // successfully in a while) because the likely cause differs (dead on
-      // arrival vs died later) — collapsing them would hide which is which.
       const neverConfirmed = !lastSuccessMs && createdMs !== null && createdMs < staleThreshold;
       const stale = !!lastSuccessMs && lastSuccessMs < staleThreshold;
       return {
         deviceHint: s.deviceHint || 'unknown',
-        // Which app registered this — 'main' | 'supraspace' | null (predates
-        // the field). Surfaced here so a duplicate-notification report is
-        // diagnosable from this page alone: e.g. two mobile devices, neither
-        // tagged 'supraspace' despite a dedicated-app install, means the
-        // subscribe call never actually reached the appSource-aware code.
         appSource: s.appSource || null,
         endpointHost: (() => { try { return new URL(s.endpoint).host; } catch { return 'invalid'; } })(),
         createdAt: s.createdAt,
@@ -2382,11 +2019,6 @@ export const getOrgPushHealth = asyncHandler(async (req: Request, res: Response)
 
 /**
  * POST /api/crm/timeproof/push/nudge/:userId
- * Admin/manager-only. One-click reminder for someone whose push looks dead
- * on the org-health view — goes through the persisted notification pipeline
- * (not a raw webpush) specifically so it still surfaces in their bell/inbox
- * next time they open the app even if push itself never delivers, which is
- * exactly the failure mode this is meant to catch someone in.
  */
 export const nudgeEnableNotifications = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -2416,7 +2048,6 @@ export const nudgeEnableNotifications = asyncHandler(async (req: Request, res: R
 
 /**
  * POST /api/crm/timeproof/activity-interval
- * Tray app posts a completed active period when the user goes idle.
  */
 export const postActivityInterval = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -2432,18 +2063,7 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
     return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
   }
 
-  // Unlike screenshots, ActivityIntervals are posted immediately when
-  // committed — there is no offline queue/deferred retry for this endpoint —
-  // so `endAt` should always land within moments of the server's own clock.
-  // A large gap means the tray machine's system clock was wrong at the
-  // moment it stamped this interval (seen in production: a ~12-hour clock
-  // glitch on one machine filed a real, otherwise-normal work segment onto
-  // the wrong calendar day even though it fell in the middle of an
-  // uninterrupted Monday shift). Trust the SERVER's current date for
-  // bucketing when that happens instead of propagating the bad client
-  // timestamp — the segment's duration is still correct either way since
-  // it's a relative (end - start) delta from the same clock.
-  const CLOCK_DRIFT_TOLERANCE_MS = 60 * 60 * 1000; // 1 hour
+  const CLOCK_DRIFT_TOLERANCE_MS = 60 * 60 * 1000;
   const serverNow = new Date();
   const clientClockLooksWrong = Math.abs(serverNow.getTime() - end.getTime()) > CLOCK_DRIFT_TOLERANCE_MS;
   const shiftDate = toLocalDateStr(clientClockLooksWrong ? serverNow : start, COMPANY_TZ_OFFSET_MINUTES);
@@ -2461,13 +2081,6 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
 
 /**
  * POST /api/crm/timeproof/client-diagnostics
- * Tray app reports otherwise-invisible local failures here (e.g.
- * desktopCapturer returning zero screen sources, capture/upload exceptions).
- * The tray runs hidden with no visible console, so without this there is no
- * way to find out WHY a specific user's screenshots silently stopped short
- * of asking them to dig up a log file themselves. Piped through the existing
- * logger, which already persists to SystemLog in Mongo — queryable by
- * userId/organizationId the same way any other server log is.
  */
 export const postClientDiagnostic = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
@@ -2477,9 +2090,6 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
     throw new ApiError(400, 'event is required');
   }
 
-  // Web Dev is exempt from idle detection — no idle-related diagnostic
-  // (flagged or periodic-check) should ever be recorded for them, so the
-  // panel stays completely empty, not just free of flagged events.
   const isIdleDiagnosticEvent = event === 'idle_detected' || event === 'idle_periodic_check';
   if (isIdleDiagnosticEvent && await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department)) {
     res.json(new ApiResponse(200, {}, 'Skipped (idle-detection-exempt department)'));
@@ -2489,11 +2099,6 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
   logger.warn(
     {
       context: 'tray-client-diagnostic',
-      // Nested under req (not top-level) — this is what SystemLog's
-      // indexed req.userId/req.organizationId fields actually key off of;
-      // a top-level userId here would silently be dropped by both Mongo log
-      // transports (mongoDevStream / pino-mongodb-transport), which only
-      // pick out req/res/err/context/event/meta/env from the log line.
       req: { userId: user._id.toString(), organizationId: user.organizationId?.toString() },
       event,
       meta,
@@ -2506,12 +2111,6 @@ export const postClientDiagnostic = asyncHandler(async (req: Request, res: Respo
 
 /**
  * GET /api/crm/timeproof/user/:userId/idle-diagnostics?date=YYYY-MM-DD
- * Admin/Manager: surfaces the raw OS-reported idle-seconds readings behind
- * each "flagged idle" event for a user on a given day, straight from
- * SystemLog — previously only checkable via a direct MongoDB query. Exists
- * so a "but I wasn't idle!" dispute can be settled by looking at what the
- * operating system itself measured, without asking an engineer to look it
- * up each time.
  */
 export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
@@ -2529,11 +2128,6 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
 
   const { start, end } = getCompanyDayRange(dateStr as string);
 
-  // Includes both the "flagged idle" events AND the unconditional periodic
-  // trace (idle_periodic_check, every ~5 min regardless of whether idle ever
-  // fires) — the latter is what proves whether the check loop was even
-  // running at all during a period where no flag ever fired, which the
-  // flagged-only view alone can't distinguish from "genuinely never idle".
   const logs = await SystemLog.find({
     event: { $in: ['idle_detected', 'idle_periodic_check'] },
     'req.userId': userId,
@@ -2553,26 +2147,12 @@ export const getUserIdleDiagnostics = asyncHandler(async (req: Request, res: Res
     wasTracking: l.meta?.wasTracking ?? null,
   }));
 
-  // Web Dev is exempt from idle detection — the panel should show nothing at
-  // all for them, including historical rows written before this exemption
-  // existed (both event types queried above are idle-diagnostic only).
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
   const filteredEntries = idleExempt ? [] : entries;
 
   res.json(new ApiResponse(200, { entries: filteredEntries }, 'Idle diagnostics fetched'));
 });
 
-/**
- * GET /api/crm/timeproof/resumable-shift
- * Returns whether the user has a clock-out today they can resume from.
- * Used by the CRM dashboard to show a "Resume Shift?" prompt on Start Shift.
- */
-/**
- * POST /api/crm/timeproof/screenshots/wipe-all
- * Admin-only one-time operation: deletes ALL screenshots from R2 and MongoDB.
- * TimeLog (clock-in/out history) is preserved. Use to free storage when the
- * archive is full. There is no undo — the binaries are permanently removed.
- */
 export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
   if (requestor.role !== 'admin') {
@@ -2585,9 +2165,6 @@ export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: 
   res.json(new ApiResponse(200, result, `Wiped ${result.deleted} screenshot record(s)`));
 });
 
-// Exact note text the two silence-based branches in staleShiftAutoClockout.scheduler.ts write —
-// only these count as an erroneous auto-close eligible for a seamless resume. A manual/deliberate
-// time-out or the day-boundary closer's note must NOT qualify (see resumeShift below).
 const AUTO_SILENCE_CLOCKOUT_NOTES = [
   'Auto clock-out — device went idle/offline after rendering 8+ hours',
   'Auto clock-out — device went idle/offline for 30+ minutes',
@@ -2609,7 +2186,6 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   const timeIns  = todayLogs.filter(l => l.type === 'time-in');
   const timeOuts = todayLogs.filter(l => l.type === 'time-out');
 
-  // Resumable only if user has clocked in AND clocked out today (not currently on shift)
   const isOnShift = timeIns.length > timeOuts.length;
   const hasClockOutToday = timeOuts.length > 0;
   const resumable = !isOnShift && hasClockOutToday;
@@ -2624,13 +2200,6 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
 });
 
-/**
- * POST /api/crm/timeproof/resume-shift
- * Undoes an erroneous stale-shift auto-clockout — deletes that time-out row so the original
- * time-in is open/continuous again, instead of the old flow's silent, disconnected fresh
- * time-in (which permanently discarded whatever gap was in between). Re-validates everything
- * server-side; never trusts the client's cached canSeamlessResume flag.
- */
 export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
@@ -2659,11 +2228,6 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
 
   const originalTimeIn = timeIns[timeIns.length - 1];
   try {
-    // Mirrors the same event/payload shape the normal time-in path emits (crm.controller.ts's
-    // timeClock) so the tray's existing 'time-in' socket listener needs no special-casing —
-    // shiftStartedAt is the ORIGINAL time-in, not now, so the tray's local clock reflects the
-    // true restored duration. todayTotalWorkedSeconds is left for the next 60s syncShiftState
-    // poll to fill in accurately rather than risk drift here.
     getSocketIO()?.to(`user:${user._id.toString()}`).emit('time-in', {
       _id: originalTimeIn._id,
       type: 'time-in',
