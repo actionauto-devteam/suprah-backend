@@ -2,12 +2,13 @@ import { Server as HttpServer } from 'http';
 import { Server as IOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
 import SupraSpaceConversation from '../models/SupraSpaceConversation.model';
 import SupraSpaceMessage from '../models/SupraSpaceMessage.model';
 import Notification from '../models/Notification.model';
 import config from '../config';
 import logger from '../utils/logger';
-import { setSupraSpaceSocketIO } from '../utils/socketEmitter';
+import { emitPresenceUpdate, setSupraSpaceSocketIO } from '../utils/socketEmitter';
 import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 // Suprah YapLine — PTT voice + screen share signaling rides on this same
 // socket connection (no second WebSocket). Handlers are registered per
@@ -20,6 +21,74 @@ let io: IOServer;
 const onlineUsers = new Map<string, number>();
 
 const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+const SUPRASPACE_AWAY_THRESHOLD_MS = 30 * 60 * 1000;
+
+function normalizeDeviceType(value: unknown): 'mobile' | 'desktop' | undefined {
+  return value === 'mobile' || value === 'desktop' ? value : undefined;
+}
+
+function detectDeviceType(socket: Socket): 'mobile' | 'desktop' | undefined {
+  const userAgent = socket.handshake.headers['user-agent'];
+  if (typeof userAgent !== 'string') return undefined;
+  return /android|iphone|ipad|ipod|mobile|iemobile|opera mini/i.test(userAgent) ? 'mobile' : 'desktop';
+}
+
+async function refreshSocketPresence(
+  crmUser: any,
+  socket: Socket,
+  payload?: { isActive?: boolean; deviceType?: unknown },
+): Promise<void> {
+  const email = typeof crmUser.email === 'string' ? crmUser.email.toLowerCase() : '';
+  const organizationId = crmUser.organizationId?.toString();
+  if (!email || !organizationId) return;
+
+  const current = await User.findOne({ email, organizationId })
+    .select('_id email onlineStatus customStatus statusExpiresAt statusIsManual lastInteractionAt')
+    .lean();
+  if (!current) return;
+
+  const now = new Date();
+  const isActive = payload?.isActive !== false;
+  const deviceType = normalizeDeviceType(payload?.deviceType) ?? detectDeviceType(socket);
+  const updateData: any = { lastActive: now };
+  if (deviceType) updateData.lastDeviceType = deviceType;
+
+  if (current.statusExpiresAt && current.statusExpiresAt < now) {
+    updateData.onlineStatus = 'online';
+    updateData.customStatus = '';
+    updateData.statusExpiresAt = null;
+    updateData.statusIsManual = false;
+    updateData.lastInteractionAt = now;
+  } else if (!current.statusIsManual) {
+    if (isActive) {
+      updateData.lastInteractionAt = now;
+      if (current.onlineStatus !== 'online') updateData.onlineStatus = 'online';
+    } else {
+      const lastInteraction = current.lastInteractionAt ? new Date(current.lastInteractionAt) : now;
+      if (now.getTime() - lastInteraction.getTime() >= SUPRASPACE_AWAY_THRESHOLD_MS && current.onlineStatus !== 'away') {
+        updateData.onlineStatus = 'away';
+      }
+    }
+  }
+
+  const updated = await User.findByIdAndUpdate(
+    current._id,
+    { $set: updateData },
+    { new: true },
+  )
+    .select('email onlineStatus customStatus lastActive lastDeviceType')
+    .lean();
+  if (!updated) return;
+
+  await emitPresenceUpdate(organizationId, {
+    userId: current._id.toString(),
+    email: updated.email ?? email,
+    onlineStatus: updated.onlineStatus,
+    customStatus: updated.customStatus ?? null,
+    lastActive: updated.lastActive?.toISOString(),
+    lastDeviceType: updated.lastDeviceType ?? null,
+  });
+}
 
 async function isConversationMember(conversationId: string, userId: string): Promise<boolean> {
   if (!conversationId || !userId) return false;
@@ -121,6 +190,9 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
       // First connection for this user — announce to everyone
       io.emit('presence:update', { userId, status: 'online' });
     }
+    refreshSocketPresence(user, socket, { isActive: true }).catch((err: any) => {
+      logger.error(err, '[SupraSpace] presence refresh error');
+    });
 
     logger.info({ userId, fullName: user.fullName }, '[SupraSpace] User connected');
 
@@ -156,6 +228,14 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
         );
       } catch (err: any) {
         logger.error(err, '[SupraSpace] presence:status_request error');
+      }
+    });
+
+    socket.on('presence:heartbeat', async (payload: { isActive?: boolean; deviceType?: unknown } = {}) => {
+      try {
+        await refreshSocketPresence(user, socket, payload);
+      } catch (err: any) {
+        logger.error(err, '[SupraSpace] presence:heartbeat error');
       }
     });
 

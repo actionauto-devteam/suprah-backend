@@ -927,6 +927,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const hasPagination = Number.isFinite(requestedLimit) && requestedLimit > 0;
   const limit = hasPagination ? Math.min(Math.max(requestedLimit, 1), 100) : 0;
   const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? requestedOffset : 0;
+  const includeConversationId = String(req.query.includeConversationId || req.query.conversationId || '').trim();
 
   // Hide deprecated auto-generated technical/orphan groups (configurable via env).
   const deprecated = (process.env.DEPRECATED_AUTO_GROUPS || '')
@@ -934,13 +935,15 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  let conversationQuery = SupraSpaceConversation.find({
+  const baseConversationQuery = {
     members: userId,
     isActive: true,
     deletedFor: { $ne: userId },
     'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
     ...(deprecated.length ? { name: { $nin: deprecated } } : {}),
-  })
+  };
+
+  let conversationQuery = SupraSpaceConversation.find(baseConversationQuery)
     .populate('members', 'fullName username avatar role')
     .populate({
       path: 'lastMessage',
@@ -952,7 +955,25 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
 
   const conversations = await conversationQuery.lean();
   const hasMore = hasPagination && conversations.length > limit;
-  const pagedConversations = hasPagination ? conversations.slice(0, limit) : conversations;
+  const basePagedConversations = hasPagination ? conversations.slice(0, limit) : conversations;
+  let pagedConversations = basePagedConversations;
+  if (
+    includeConversationId
+    && mongoose.Types.ObjectId.isValid(includeConversationId)
+    && !basePagedConversations.some((conversation: any) => conversation._id.toString() === includeConversationId)
+  ) {
+    const includedConversation = await SupraSpaceConversation.findOne({
+      ...baseConversationQuery,
+      _id: includeConversationId,
+    })
+      .populate('members', 'fullName username avatar role')
+      .populate({
+        path: 'lastMessage',
+        populate: { path: 'sender', select: 'fullName username avatar' },
+      })
+      .lean();
+    if (includedConversation) pagedConversations = [includedConversation, ...basePagedConversations];
+  }
 
   const userIdStr = userId.toString();
   const signed = await Promise.all(pagedConversations.map((c: any) => withFreshAvatar(c)));
@@ -1044,7 +1065,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     res.json(new ApiResponse(200, {
       conversations: filtered,
       hasMore,
-      nextOffset: offset + pagedConversations.length,
+      nextOffset: offset + basePagedConversations.length,
     }, 'Conversations fetched'));
     return;
   }

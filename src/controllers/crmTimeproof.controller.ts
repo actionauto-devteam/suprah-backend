@@ -911,7 +911,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       .catch((err) => logger.error({ err, userId: user._id.toString() }, '[break-escalation] fireShiftAlert failed'));
   }
 
-  res.json(new ApiResponse(200, { received: true, screenshotsRequired }, 'Heartbeat recorded'));
+  res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
 });
 
 export const getAgentStatus = asyncHandler(async (req: Request, res: Response) => {
@@ -983,7 +983,7 @@ export const getAgentStatus = asyncHandler(async (req: Request, res: Response) =
       (x.isOnline ? 1e15 : 0) + (x.lastSeenAt ? new Date(x.lastSeenAt).getTime() : 0);
     if (rank(a) > rank(existing)) byEmail.set(key, a);
   }
-  const agents = [...byEmail.values(), ...noEmail].map(({ email: _email, ...rest }) => rest);
+  const agents = [...byEmail.values(), ...noEmail];
 
   agents.sort((a, b) => {
     if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;

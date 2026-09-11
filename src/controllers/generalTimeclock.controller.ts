@@ -10,6 +10,7 @@ import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { isMobileMonitoringDept, isLocationRequiredForUser } from '../config/departmentMonitoring';
+import { findDepartmentEntry } from '../services/department.service';
 import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
@@ -330,8 +331,11 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // push) rather than a raw, unpersisted PushService call, with a dedupeKey
   // per admin+actor+event-kind so a duplicate/retried clock action within a
   // few minutes compiles into one notification instead of a fresh alert.
-  const isLotTech = actor.model === 'User' && await isMobileMonitoringDept(actor.orgId, actor.department);
-  if (isLotTech && actor.orgId) {
+  const isMobileMonitoringUser = actor.model === 'User' && await isMobileMonitoringDept(actor.orgId, actor.department);
+  if (isMobileMonitoringUser && actor.orgId) {
+    const deptEntry = await findDepartmentEntry(actor.orgId, actor.department);
+    const deptLabel = deptEntry?.label || actor.department || 'Mobile Monitoring';
+
     if (type === 'time-in') {
       const admins = await CrmUser.find({ organizationId: actor.orgId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
       for (const admin of admins) {
@@ -339,7 +343,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
           userId: admin._id.toString(),
           organizationId: actor.orgId,
           type: 'crm_timeproof',
-          title: '🟢 Lot Tech — Clocked In',
+          title: `🟢 ${deptLabel} — Clocked In`,
           message: `${actor.fullName} clocked in`,
           metadata: { route: '/crm/timeproof/users' },
           dedupeKey: `lot-tech-clockin:${admin._id}:${actor.id}`,
@@ -375,7 +379,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
           userId: admin._id.toString(),
           organizationId: actor.orgId,
           type: 'crm_timeproof',
-          title: '🔴 Lot Tech — Clocked Out',
+          title: `🔴 ${deptLabel} — Clocked Out`,
           message: `${actor.fullName} clocked out — ${durationLabel}`,
           metadata: { route: '/crm/timeproof/users' },
           dedupeKey: `lot-tech-clockout:${admin._id}:${actor.id}`,
