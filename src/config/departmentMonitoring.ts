@@ -15,6 +15,23 @@ export async function requiresScreenshots(
   return !(await isMobileMonitoringDept(organizationId, department));
 }
 
+export type MonitoringMode = 'off' | 'always' | 'switching';
+export type MonitoringModeOverride = 'default' | MonitoringMode;
+
+export async function resolveMonitoringMode(
+  organizationId: string | undefined | null,
+  department?: string | null,
+  override?: MonitoringModeOverride | null
+): Promise<MonitoringMode> {
+  if (override === 'off' || override === 'always' || override === 'switching') return override;
+  const entry = await findDepartmentEntry(organizationId, department);
+  if (entry?.mobileMonitoringMode === 'always' || entry?.mobileMonitoringMode === 'switching') {
+    return entry.mobileMonitoringMode;
+  }
+  if (entry?.mobileMonitoringMode === 'off') return 'off';
+  return entry?.isMobileMonitoringDept ? 'always' : 'off';
+}
+
 export async function usesGpsStationaryIdle(
   organizationId: string | undefined | null,
   department?: string | null
@@ -99,6 +116,7 @@ export async function isIdleDetectionExemptDept(
   department?: string | null
 ): Promise<boolean> {
   const entry = await findDepartmentEntry(organizationId, department);
+  if (entry && entry.detectIdle === false) return true;
   const key = entry?.key || department;
   return !!key && IDLE_DETECTION_EXEMPT_DEPARTMENTS.includes(key);
 }

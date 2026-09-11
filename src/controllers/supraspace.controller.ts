@@ -35,6 +35,7 @@ const SHIFT_ALERTS_CHANNEL_NAME_REGEX = /^Shift Alerts$/i;
 type SupraSpaceNotifType = 'all' | 'main' | 'foryou' | 'none';
 type SupraSpaceNotifPref = { type: SupraSpaceNotifType; muted: boolean; muteUntil?: string | null };
 const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: false, muteUntil: null };
+const SUPRA_SPACE_REPORT_TIME_ZONE = 'America/Denver';
 const SUPRA_SPACE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpeg', '.mpg', '.ogv']);
 const SUPRA_SPACE_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.avif']);
 const SUPRA_SPACE_EXTENSION_MIME: Record<string, string> = {
@@ -62,6 +63,75 @@ const SUPRA_SPACE_EXTENSION_MIME: Record<string, string> = {
   '.mpg': 'video/mpeg',
   '.ogv': 'video/ogg',
 };
+
+const supraSpaceReportPartsFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: SUPRA_SPACE_REPORT_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+function parseSupraSpaceReportDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (
+    !Number.isInteger(year) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) return null;
+  return { year, month, day };
+}
+
+function supraSpaceReportMidnightUtcMs(year: number, month: number, day: number): number {
+  const desiredWallClockAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  let guess = desiredWallClockAsUtc;
+
+  for (let i = 0; i < 4; i += 1) {
+    const parts = supraSpaceReportPartsFormatter.formatToParts(new Date(guess));
+    const values: Record<string, string> = {};
+    for (const part of parts) {
+      if (part.type !== 'literal') values[part.type] = part.value;
+    }
+
+    const representedWallClockAsUtc = Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute),
+      Number(values.second),
+      0,
+    );
+
+    const correction = desiredWallClockAsUtc - representedWallClockAsUtc;
+    if (correction === 0) break;
+    guess += correction;
+  }
+
+  return guess;
+}
+
+function getSupraSpaceReportRange(dateStr: string) {
+  const parsed = parseSupraSpaceReportDate(dateStr);
+  if (!parsed) return null;
+  const startMs = supraSpaceReportMidnightUtcMs(parsed.year, parsed.month, parsed.day);
+  const nextDay = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day + 1));
+  const endMs = supraSpaceReportMidnightUtcMs(nextDay.getUTCFullYear(), nextDay.getUTCMonth() + 1, nextDay.getUTCDate());
+  return { start: new Date(startMs), end: new Date(endMs) };
+}
 
 function getSupraSpaceUploadFiles(files: any, field = 'files'): Express.Multer.File[] {
   if (Array.isArray(files)) return field === 'files' ? files : [];
@@ -1515,6 +1585,66 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
 });
 
 /** GET /api/supraspace/conversations/:id/search?q=  — search inside a conversation */
+const getConversationThreadReport = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const date = String(req.query.date || '');
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || '1000'), 10) || 1000, 1), 1000);
+  const range = getSupraSpaceReportRange(date);
+  if (!range) throw new ApiError(400, 'Valid date is required');
+
+  const conversation = await SupraSpaceConversation.findById(id).lean();
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const createdAtFilter: any = { $gte: range.start, $lt: range.end };
+  const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
+  if (rawClearedAt) {
+    const clearedDate = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
+    if (clearedDate.getTime() > range.start.getTime()) createdAtFilter.$gt = clearedDate;
+  }
+
+  const messages = await SupraSpaceMessage.find({
+    conversationId: id,
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+    createdAt: createdAtFilter,
+  })
+    .populate('sender', 'fullName username avatar')
+    .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
+    .sort({ createdAt: 1 })
+    .limit(limit)
+    .lean();
+
+  const fallbackSender = (m: any) => ({
+    _id: m.metadata?.customerUserId || 'unknown',
+    fullName: m.metadata?.customerName || 'Customer',
+    username: m.metadata?.customerUserId || 'customer',
+    avatar: m.metadata?.customerAvatar || null,
+    isCustomer: true,
+  });
+  const safeMsgs = messages.map((m: any) => ({
+    ...m,
+    sender: m.sender || fallbackSender(m),
+    replyTo: m.replyTo ? { ...m.replyTo, sender: m.replyTo.sender || fallbackSender(m.replyTo) } : m.replyTo,
+  }));
+
+  res.json(new ApiResponse(200, {
+    conversation: {
+      _id: (conversation as any)._id,
+      type: (conversation as any).type,
+      name: (conversation as any).name,
+      emoji: (conversation as any).emoji,
+    },
+    date,
+    timezone: SUPRA_SPACE_REPORT_TIME_ZONE,
+    start: range.start.toISOString(),
+    end: range.end.toISOString(),
+    truncated: messages.length === limit,
+    messages: safeMsgs,
+  }, 'Thread report fetched'));
+});
+
 const searchInConversation = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -2713,6 +2843,7 @@ const supraSpaceController = {
   updateMemberSettings,
   getMessages,
   getConversationAttachments,
+  getConversationThreadReport,
   searchInConversation,
   searchMessages,
   sendMessage,

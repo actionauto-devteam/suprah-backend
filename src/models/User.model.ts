@@ -78,6 +78,7 @@ export interface IUser extends Document {
   };
   locationSharingOptOut?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
+  monitoringModeOverride?: 'default' | 'off' | 'always' | 'switching';
 
   passwordResetToken?: string;
   passwordResetExpires?: Date;
@@ -254,6 +255,11 @@ const UserSchema = new Schema(
       // isLocationRequiredForUser in config/departmentMonitoring.ts.
       type: String,
       enum: ['default', 'required', 'exempt'],
+      default: 'default',
+    },
+    monitoringModeOverride: {
+      type: String,
+      enum: ['default', 'off', 'always', 'switching'],
       default: 'default',
     },
     lastPasswordChange: {

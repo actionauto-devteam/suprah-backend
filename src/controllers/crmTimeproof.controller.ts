@@ -20,6 +20,7 @@ import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
 import { isTimeEditExempt, isIdleDetectionExemptDept } from '../config/departmentMonitoring';
+import { resolveScreenshotsRequired } from '../utils/monitoringMode.util';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
@@ -717,6 +718,14 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
   const isIdle = idleExempt ? false : rawIsIdle;
 
+  const screenshotsRequired = await resolveScreenshotsRequired({
+    userId: user._id.toString(),
+    organizationId: user.organizationId?.toString(),
+    department: user.department,
+    monitoringModeOverride: user.monitoringModeOverride,
+    screenshotExempt: user.screenshotExempt,
+  });
+
   const existing = await AgentHeartbeat.findOne({ userId: user._id });
   const wasIdle = existing?.isIdle ?? false;
   const wasOnBreak = existing?.isOnBreak ?? false;
@@ -902,7 +911,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       .catch((err) => logger.error({ err, userId: user._id.toString() }, '[break-escalation] fireShiftAlert failed'));
   }
 
-  res.json(new ApiResponse(200, { received: true }, 'Heartbeat recorded'));
+  res.json(new ApiResponse(200, { received: true, screenshotsRequired }, 'Heartbeat recorded'));
 });
 
 export const getAgentStatus = asyncHandler(async (req: Request, res: Response) => {

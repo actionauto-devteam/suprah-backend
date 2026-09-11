@@ -122,6 +122,7 @@ router.patch('/conversations/:id/member-settings', supraSpaceController.updateMe
 
 router.get('/conversations/:id/messages',   supraSpaceController.getMessages);
 router.get('/conversations/:id/attachments', supraSpaceController.getConversationAttachments);
+router.get('/conversations/:id/thread-report', supraSpaceController.getConversationThreadReport);
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
 router.post('/conversations/:id/messages',  supraSpaceController.sendMessage);
 router.post('/messages/:messageId/react',   supraSpaceController.reactToMessage);

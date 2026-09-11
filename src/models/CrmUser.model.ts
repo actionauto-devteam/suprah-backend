@@ -47,6 +47,7 @@ export interface ICrmUser extends Document {
   otWarningExempt?: boolean;
   screenshotBlurUntilPayout?: boolean;
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
+  monitoringModeOverride?: 'default' | 'off' | 'always' | 'switching';
   hourlyRate?: number;
   payrollLocation?: 'Utah' | 'Philippines';
   googleCalendar?: {
@@ -220,6 +221,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
     locationRequiredOverride: {
       type: String,
       enum: ['default', 'required', 'exempt'],
+      default: 'default',
+    },
+    monitoringModeOverride: {
+      type: String,
+      enum: ['default', 'off', 'always', 'switching'],
       default: 'default',
     },
     hourlyRate: {

@@ -20,7 +20,8 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept } from "../config/departmentMonitoring";
+import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
@@ -163,11 +164,19 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     ? lookbackLogs.filter((l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime())
     : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt] = await Promise.all([
+  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt, mobileMonitoringDept, screenshotsRequired] = await Promise.all([
     getMainPersonalInfoByEmail(user.email),
     isMainMonitorOnlyDept(user.organizationId?.toString(), user.department),
     isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride),
     isIdleDetectionExemptDept(user.organizationId?.toString(), user.department),
+    isMobileMonitoringDept(user.organizationId?.toString(), user.department),
+    resolveScreenshotsRequired({
+      userId: user._id.toString(),
+      organizationId: user.organizationId?.toString(),
+      department: user.department,
+      monitoringModeOverride: user.monitoringModeOverride,
+      screenshotExempt: user.screenshotExempt,
+    }),
   ]);
 
   const userData = {
@@ -197,6 +206,8 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     // Tray-app reads this to skip idle detection entirely (Web Dev
     // department) — see isIdleDetectionExemptDept. Hidden field, no UI.
     idleDetectionExempt,
+    isMobileMonitoringDept: mobileMonitoringDept,
+    screenshotsRequired,
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
@@ -209,7 +220,7 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(401, "Not authenticated");
   }
 
-  const { type, note } = req.body;
+  const { type, note, deviceHint } = req.body;
 
   const VALID_TYPES = ["time-in", "time-out", "break-in", "break-out"] as const;
   if (!type || !VALID_TYPES.includes(type)) {
@@ -283,12 +294,18 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  const startedVia: 'desktop' | 'mobile' | undefined =
+    type === "time-in"
+      ? (typeof deviceHint === "string" && deviceHint !== "" && deviceHint !== "desktop-web" && deviceHint !== "desktop" ? "mobile" : "desktop")
+      : undefined;
+
   const timeLog = await TimeLog.create({
     userId: user._id,
     type,
     timestamp: new Date(),
     note: note || undefined,
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
+    ...(startedVia && { startedVia }),
   });
 
   // A fresh break resets the 1h05m admin-escalation "already notified" flag
@@ -664,7 +681,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -705,7 +722,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -771,6 +788,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (locationRequiredOverride !== undefined && ['default', 'required', 'exempt'].includes(locationRequiredOverride)) {
     user.locationRequiredOverride = locationRequiredOverride;
+  }
+
+  if (monitoringModeOverride !== undefined && ['default', 'off', 'always', 'switching'].includes(monitoringModeOverride)) {
+    user.monitoringModeOverride = monitoringModeOverride;
   }
 
   if (payrollLocation !== undefined) {

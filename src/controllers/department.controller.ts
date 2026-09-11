@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import Department from '../models/Department.model';
+import Department, { MobileMonitoringMode } from '../models/Department.model';
 import User, { IUser } from '../models/User.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import { getOrgDepartments, getActiveOrgDepartments, getDefaultDepartmentKey, invalidateOrgDepartmentCache } from '../services/department.service';
@@ -84,13 +84,19 @@ function slugifyKey(label: string): string {
 const createDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
-  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof } = req.body as {
+  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle } = req.body as {
     label?: string; color?: string;
-    isMobileMonitoringDept?: boolean; isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
-    locationRequiredForTimeproof?: boolean;
+    isMobileMonitoringDept?: boolean; mobileMonitoringMode?: MobileMonitoringMode;
+    isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
+    locationRequiredForTimeproof?: boolean; detectIdle?: boolean;
   };
 
   if (!label?.trim()) throw new ApiError(400, 'Department label is required');
+
+  const createdMode: MobileMonitoringMode =
+    mobileMonitoringMode === 'off' || mobileMonitoringMode === 'always' || mobileMonitoringMode === 'switching'
+      ? mobileMonitoringMode
+      : (isMobileMonitoringDept ? 'always' : 'off');
 
   const key = slugifyKey(label);
   if (!key) throw new ApiError(400, 'Department label must contain at least one letter or number');
@@ -105,10 +111,12 @@ const createDepartment = asyncHandler(async (req: Request, res: Response) => {
     key,
     label: label.trim(),
     color: color || 'emerald',
-    isMobileMonitoringDept: !!isMobileMonitoringDept,
+    isMobileMonitoringDept: createdMode !== 'off',
+    mobileMonitoringMode: createdMode,
     isTimeEditExempt: !!isTimeEditExempt,
     isMandatoryLocationDept: !!isMandatoryLocationDept,
     locationRequiredForTimeproof: locationRequiredForTimeproof !== false,
+    detectIdle: detectIdle !== false,
     isActive: true,
     sortOrder: count,
   });
@@ -121,10 +129,11 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
   const { id } = req.params;
-  const { label, color, isMobileMonitoringDept, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, isActive, isDefault } = req.body as {
+  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle, isActive, isDefault } = req.body as {
     label?: string; color?: string; isActive?: boolean; isDefault?: boolean;
-    isMobileMonitoringDept?: boolean; isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
-    locationRequiredForTimeproof?: boolean;
+    isMobileMonitoringDept?: boolean; mobileMonitoringMode?: MobileMonitoringMode;
+    isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
+    locationRequiredForTimeproof?: boolean; detectIdle?: boolean;
   };
 
   const department = await Department.findOne({ _id: id, organizationId: orgId });
@@ -132,10 +141,18 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
 
   if (label?.trim()) department.label = label.trim();
   if (color !== undefined) department.color = color;
-  if (isMobileMonitoringDept !== undefined) department.isMobileMonitoringDept = !!isMobileMonitoringDept;
+  if (mobileMonitoringMode !== undefined || isMobileMonitoringDept !== undefined) {
+    const nextMode: MobileMonitoringMode =
+      mobileMonitoringMode === 'off' || mobileMonitoringMode === 'always' || mobileMonitoringMode === 'switching'
+        ? mobileMonitoringMode
+        : (isMobileMonitoringDept ? 'always' : 'off');
+    department.mobileMonitoringMode = nextMode;
+    department.isMobileMonitoringDept = nextMode !== 'off';
+  }
   if (isTimeEditExempt !== undefined) department.isTimeEditExempt = !!isTimeEditExempt;
   if (isMandatoryLocationDept !== undefined) department.isMandatoryLocationDept = !!isMandatoryLocationDept;
   if (locationRequiredForTimeproof !== undefined) department.locationRequiredForTimeproof = !!locationRequiredForTimeproof;
+  if (detectIdle !== undefined) department.detectIdle = !!detectIdle;
   if (isActive !== undefined) department.isActive = !!isActive;
   if (isDefault !== undefined) {
     if (isDefault) {

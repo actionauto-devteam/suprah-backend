@@ -134,7 +134,10 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
   // in timeproof-clock/page.tsx. Without this, the client-side gate had no
   // way to know about the backend's per-department exemption and kept
   // blocking exempted users on a failed/denied location prompt.
-  const locationRequiredForTimeproof = await isLocationRequiredForUser(actor.orgId, actor.department, actor.locationRequiredOverride);
+  const [locationRequiredForTimeproof, mobileMonitoringDept] = await Promise.all([
+    isLocationRequiredForUser(actor.orgId, actor.department, actor.locationRequiredOverride),
+    isMobileMonitoringDept(actor.orgId, actor.department),
+  ]);
 
   res.json(new ApiResponse(200, {
     _id: actor.id,
@@ -147,12 +150,13 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
     userModel: actor.model,
     todayTimeLogs,
     locationRequiredForTimeproof,
+    isMobileMonitoringDept: mobileMonitoringDept,
   }, 'User fetched'));
 });
 
 export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const actor = getActor(req);
-  const { type, note } = req.body;
+  const { type, note, deviceHint } = req.body;
 
   const VALID_TYPES = ['time-in', 'time-out', 'break-in', 'break-out'] as const;
   if (!type || !VALID_TYPES.includes(type)) {
@@ -223,6 +227,11 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
 
   const { today, tomorrow } = getTodayMDTWindow();
 
+  const startedVia: 'desktop' | 'mobile' | undefined =
+    type === 'time-in'
+      ? (typeof deviceHint === 'string' && deviceHint !== '' && deviceHint !== 'desktop-web' && deviceHint !== 'desktop' ? 'mobile' : 'desktop')
+      : undefined;
+
   const timeLog = await TimeLog.create({
     userId: actor.id,
     userModel: actor.model,
@@ -230,6 +239,7 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
     timestamp: new Date(),
     note: note || undefined,
     ipAddress: req.ip || (req.headers['x-forwarded-for'] as string) || 'unknown',
+    ...(startedVia && { startedVia }),
   });
 
   // A fresh shift resets the connection-loss "already notified" flag — it's

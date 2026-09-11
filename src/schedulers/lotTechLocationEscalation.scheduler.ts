@@ -2,9 +2,12 @@ import cron from 'node-cron';
 import logger from '../utils/logger';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import TimeLog from '../models/TimeLog.model';
+import CrmUser from '../models/CrmUser.model';
+import User from '../models/User.model';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { isMandatoryLocationDept } from '../constants/departments';
+import { resolveMonitoringMode } from '../config/departmentMonitoring';
 
 // Mandatory-location depts (Lot Tech) only — other depts keep the lighter-touch single alert
 // in connectionLossShiftAlert.scheduler.ts, since they're allowed to go silent.
@@ -38,7 +41,17 @@ export async function runLotTechLocationEscalation(): Promise<{ warned: number; 
   for (const loc of candidates) {
     const orgId = (loc.organizationId as any)?.toString();
     if (!orgId) continue;
-    if (!(await isMandatoryLocationDept(orgId, loc.department))) continue;
+    if (!(await isMandatoryLocationDept(orgId, loc.department))) {
+      if (loc.deviceType !== 'mobile') continue;
+      const actorDoc = loc.userModel === 'CrmUser'
+        ? await CrmUser.findById(loc.userId).select('department monitoringModeOverride').lean()
+        : await User.findById(loc.userId).select('personalInfo.department monitoringModeOverride').lean();
+      const actorDept = loc.userModel === 'CrmUser'
+        ? (actorDoc as any)?.department
+        : (actorDoc as any)?.personalInfo?.department;
+      const mode = await resolveMonitoringMode(orgId, actorDept ?? loc.department, (actorDoc as any)?.monitoringModeOverride);
+      if (mode !== 'switching') continue;
+    }
 
     const { isOnShift, isOnBreak } = await getShiftStatusForActor(loc.userId);
     if (!isOnShift || isOnBreak) continue;

@@ -7,6 +7,7 @@ export interface ITimeLog extends Document {
   timestamp: Date;
   note?: string;
   ipAddress?: string;
+  startedVia?: 'desktop' | 'mobile';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -39,6 +40,10 @@ const TimeLogSchema = new Schema<ITimeLog>(
     },
     ipAddress: {
       type: String,
+    },
+    startedVia: {
+      type: String,
+      enum: ['desktop', 'mobile'],
     },
   },
   {

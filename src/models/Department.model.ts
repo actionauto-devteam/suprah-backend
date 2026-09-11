@@ -1,14 +1,18 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export type MobileMonitoringMode = 'off' | 'always' | 'switching';
+
 export interface IDepartment extends Document {
   organizationId?: mongoose.Types.ObjectId;
   key: string;
   label: string;
   color: string;
   isMobileMonitoringDept: boolean;
+  mobileMonitoringMode: MobileMonitoringMode;
   isTimeEditExempt: boolean;
   isMandatoryLocationDept: boolean;
   locationRequiredForTimeproof: boolean;
+  detectIdle: boolean;
   isActive: boolean;
   isDefault: boolean;
   sortOrder: number;
@@ -41,6 +45,11 @@ const DepartmentSchema = new Schema<IDepartment>(
       type: Boolean,
       default: false,
     },
+    mobileMonitoringMode: {
+      type: String,
+      enum: ['off', 'always', 'switching'],
+      default: 'off',
+    },
     isTimeEditExempt: {
       type: Boolean,
       default: false,
@@ -57,6 +66,10 @@ const DepartmentSchema = new Schema<IDepartment>(
     // (it shipped with no exemptions); toggling off is what opts a
     // department out.
     locationRequiredForTimeproof: {
+      type: Boolean,
+      default: true,
+    },
+    detectIdle: {
       type: Boolean,
       default: true,
     },
