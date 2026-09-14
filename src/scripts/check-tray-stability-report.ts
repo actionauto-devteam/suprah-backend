@@ -12,6 +12,7 @@ const STABILITY_EVENTS = [
   'status_window_responsive',
   'interval_error',
   'capture_timeout',
+  'capture_slow',
   'user_present_cleared_idle',
   'resume_from_suspend',
 ];
@@ -90,6 +91,28 @@ const run = async () => {
   const captureTimeouts = logs.filter((l) => l.event === 'capture_timeout');
   if (captureTimeouts.length > 0) {
     console.log(`\nCapture timeouts: ${captureTimeouts.length}`);
+  }
+
+  const slowCaptures = logs.filter((l) => l.event === 'capture_slow');
+  if (slowCaptures.length > 0) {
+    console.log(`\nSlow captures (completed but over ${5000}ms): ${slowCaptures.length}`);
+    const byStage = new Map<string, number>();
+    for (const l of slowCaptures) {
+      const stage = l.meta?.stage || '(unknown)';
+      byStage.set(stage, (byStage.get(stage) || 0) + 1);
+    }
+    for (const [stage, count] of byStage) {
+      console.log(`  stage=${stage}: ${count}`);
+    }
+    const avgGetSourcesMs = Math.round(
+      slowCaptures.reduce((sum, l) => sum + (Number(l.meta?.getSourcesMs) || 0), 0) / slowCaptures.length
+    );
+    console.log(`  avg getSourcesMs: ${avgGetSourcesMs}`);
+    const worstSlow = [...slowCaptures].sort((a, b) => (Number(b.meta?.elapsedMs) || 0) - (Number(a.meta?.elapsedMs) || 0)).slice(0, 10);
+    console.log('  Worst 10 slow captures:');
+    for (const l of worstSlow) {
+      console.log(`    [${new Date(l.timestamp).toISOString()}] userId=${l.req?.userId || '?'} elapsedMs=${l.meta?.elapsedMs} getSourcesMs=${l.meta?.getSourcesMs} stitchMs=${l.meta?.stitchMs} encodeMs=${l.meta?.encodeMs} sourceCount=${l.meta?.sourceCount}`);
+    }
   }
 
   const clearedIdle = logs.filter((l) => l.event === 'user_present_cleared_idle');
