@@ -19,7 +19,7 @@ import AuditLog from '../models/AuditLog.model';
 import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
-import { isTimeEditExempt, isIdleDetectionExemptDept } from '../config/departmentMonitoring';
+import { isTimeEditExempt, isIdleDetectionExemptDept, isIdleVideoProofEnabled } from '../config/departmentMonitoring';
 import { resolveScreenshotsRequired } from '../utils/monitoringMode.util';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
@@ -1144,6 +1144,97 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
 });
 
 /**
+ * POST /api/crm/timeproof/idle-recordings
+ */
+export const submitIdleRecording = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+
+  if (!req.file) throw new ApiError(400, 'Recording file is required');
+
+  const { shiftDate, idleStartMs, status } = req.body as { shiftDate?: string; idleStartMs?: string; status?: string };
+  if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
+    throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
+  }
+  if (status !== 'partial' && status !== 'confirmed') {
+    throw new ApiError(400, 'status must be partial or confirmed');
+  }
+  const idleStartMsNum = parseInt(idleStartMs || '', 10);
+  if (!Number.isFinite(idleStartMsNum)) {
+    throw new ApiError(400, 'idleStartMs is required');
+  }
+
+  if (!(await isIdleVideoProofEnabled(user.organizationId?.toString(), user.department))) {
+    throw new ApiError(403, 'Idle video proof is not enabled for this account');
+  }
+
+  const customFileName = `${idleStartMsNum}-${status}.webm`;
+  const fileWithName: Express.Multer.File = { ...req.file, originalname: customFileName };
+
+  const r2Key = await storageService.upload(
+    fileWithName,
+    `idle-recordings/${user._id.toString()}/${shiftDate}`,
+    BucketType.PRIVATE,
+    { allowLocalFallback: true, preserveFilename: true }
+  );
+
+  res.status(201).json(new ApiResponse(201, { r2Key }, 'Idle recording uploaded'));
+});
+
+/**
+ * GET /api/crm/timeproof/idle-recordings?date=YYYY-MM-DD&userId=...
+ */
+export const getIdleRecordings = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  const { date, userId } = req.query;
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date as string)) {
+    throw new ApiError(400, 'date query param required (YYYY-MM-DD)');
+  }
+
+  const targetId =
+    userId && ['admin', 'manager'].includes(requestor.role)
+      ? (userId as string)
+      : requestor._id.toString();
+
+  if (targetId !== requestor._id.toString() && !['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied');
+  }
+
+  const prefix = `idle-recordings/${targetId}/${date}/`;
+  const objects = await storageService.list(prefix, BucketType.PRIVATE);
+
+  const parsed = objects
+    .map((obj) => {
+      const tail = obj.key.slice(prefix.length).replace(/\.webm$/i, '');
+      const dashIdx = tail.indexOf('-');
+      if (dashIdx < 0) return null;
+      const msStr = tail.slice(0, dashIdx);
+      const status = tail.slice(dashIdx + 1);
+      const ms = parseInt(msStr, 10);
+      if (!Number.isFinite(ms) || (status !== 'partial' && status !== 'confirmed')) return null;
+      return { r2Key: obj.key, idleStartMs: ms, status: status as 'partial' | 'confirmed' };
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x)
+    .sort((a, b) => b.idleStartMs - a.idleStartMs);
+
+  const withUrls = await Promise.all(
+    parsed.map(async (r) => ({
+      _id: r.r2Key,
+      idleStartMs: r.idleStartMs,
+      status: r.status,
+      url: await getSignedProofUrl(r.r2Key),
+      downloadUrl: await storageService.getSignedUrl(
+        r.r2Key,
+        900,
+        `attachment; filename="idle-proof-${r.idleStartMs}.webm"`
+      ),
+    }))
+  );
+
+  res.json(new ApiResponse(200, { recordings: withUrls }, 'Idle recordings fetched'));
+});
+
+/**
  * GET /api/crm/timeproof/screenshot-blurred?key=...
  */
 export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Response) => {
@@ -2264,6 +2355,8 @@ export default {
   adminTimeOverride,
   submitScreenshot,
   getScreenshots,
+  submitIdleRecording,
+  getIdleRecordings,
   getBlurredScreenshot,
   deleteMyScreenshot,
   wipeAllScreenshotsHandler,

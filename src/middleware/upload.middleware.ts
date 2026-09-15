@@ -81,6 +81,23 @@ export const uploadScreenshot = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 }).single('screenshot');
 
+const idleRecordingFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const allowedMimeTypes = ['video/webm'];
+  const ext = path.extname(file.originalname).toLowerCase();
+
+  if (allowedMimeTypes.includes(file.mimetype) && ext === '.webm') {
+    cb(null, true);
+  } else {
+    cb(new ApiError(400, 'Only webm video files are allowed') as any, false);
+  }
+};
+
+export const uploadIdleRecording = multer({
+  storage: storage,
+  fileFilter: idleRecordingFileFilter,
+  limits: { fileSize: 50 * 1024 * 1024 },
+}).single('recording');
+
 // Optional evidence for Driver Dispatch Status change requests.
 // Kept separate from permanent compliance documents so request evidence has
 // its own lifecycle and can safely allow multiple files without changing the

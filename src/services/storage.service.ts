@@ -125,7 +125,7 @@ class StorageService {
      * @param key The file key in the private bucket
      * @param expiresIn Expiration time in seconds (default 15 mins)
      */
-    async getSignedUrl(key: string, expiresIn: number = 900): Promise<string | null> {
+    async getSignedUrl(key: string, expiresIn: number = 900, responseContentDisposition?: string): Promise<string | null> {
         if (!this.isConfigured || !this.s3Client || !key) return null;
 
         // If it's a local path, return it as is (internal dev)
@@ -135,6 +135,7 @@ class StorageService {
             const command = new GetObjectCommand({
                 Bucket: config.r2.buckets.private,
                 Key: key,
+                ...(responseContentDisposition && { ResponseContentDisposition: responseContentDisposition }),
             });
             return await getSignedUrl(this.s3Client, command, { expiresIn });
         } catch (error) {

@@ -22,6 +22,7 @@ import { initSyncScheduler } from "./schedulers/sync.scheduler";
 import { initCleanupScheduler } from "./schedulers/cleanup.scheduler";
 import { initMilestoneScheduler } from "./schedulers/milestone.scheduler";
 import { initScreenshotRetentionScheduler } from "./schedulers/screenshotRetention.scheduler";
+import { initIdleRecordingRetentionScheduler } from "./schedulers/idleRecordingRetention.scheduler";
 import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivityReminder.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
@@ -204,6 +205,7 @@ if (require.main === module) {
     initCleanupScheduler();
     initMilestoneScheduler();
     initScreenshotRetentionScheduler();
+    initIdleRecordingRetentionScheduler();
     initLeadInactivityReminderScheduler();
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();

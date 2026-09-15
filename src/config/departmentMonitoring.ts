@@ -120,3 +120,11 @@ export async function isIdleDetectionExemptDept(
   const key = entry?.key || department;
   return !!key && IDLE_DETECTION_EXEMPT_DEPARTMENTS.includes(key);
 }
+
+export async function isIdleVideoProofEnabled(
+  organizationId: string | undefined | null,
+  department?: string | null
+): Promise<boolean> {
+  const entry = await findDepartmentEntry(organizationId, department);
+  return !!entry?.idleVideoProofEnabled;
+}

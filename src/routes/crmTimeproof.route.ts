@@ -1,7 +1,7 @@
 import express from 'express';
 // v1.4.0
 import crmAuth from '../middleware/crmAuth.middleware';
-import { uploadScreenshot } from '../middleware/upload.middleware';
+import { uploadScreenshot, uploadIdleRecording } from '../middleware/upload.middleware';
 import {
   getMyTimeproof,
   getAllUsersTimeproof,
@@ -17,6 +17,8 @@ import {
   submitScreenshot,
   submitScreenshotPlaceholder,
   getScreenshots,
+  submitIdleRecording,
+  getIdleRecordings,
   getBlurredScreenshot,
   deleteMyScreenshot,
   wipeAllScreenshotsHandler,
@@ -65,6 +67,8 @@ router.get('/agent-status', getAgentStatus);
 router.post('/screenshots', uploadScreenshot, submitScreenshot);
 router.post('/screenshots/placeholder', submitScreenshotPlaceholder);
 router.get('/screenshots', getScreenshots);
+router.post('/idle-recordings', uploadIdleRecording, submitIdleRecording);
+router.get('/idle-recordings', getIdleRecordings);
 router.get('/screenshot-blurred', getBlurredScreenshot);
 router.delete('/screenshots', deleteMyScreenshot);
 router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler);

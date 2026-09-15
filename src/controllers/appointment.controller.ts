@@ -4,6 +4,7 @@ import Appointment from '../models/Appointment.model';
 import ServiceSlot from '../models/ServiceSlot.model';
 import User from '../models/User.model';
 import appointmentService from '../services/appointment.service';
+import { CALENDAR_TZ } from '../constants/calendarTimezone';
 import customerBookingService from '../services/customerbooking.service';
 import enhancedGoogleCalendarService from '../services/googleCalendar.service';
 import membershipService from '../services/membership.service';
@@ -87,7 +88,7 @@ const createAppointment = asyncHandler(async (req: Request, res: Response) => {
 
         const { title, message } = notificationTemplates.appointment_created({
             title: appointment.title || 'Untitled',
-            startTime: appointment.startTime ? new Date(appointment.startTime).toLocaleString() : undefined,
+            startTime: appointment.startTime ? new Date(appointment.startTime).toLocaleString('en-US', { timeZone: CALENDAR_TZ }) : undefined,
         });
         await notifyOrgAdmins(orgId, 'appointment_created', title, message, {
             appointmentId: appointment._id?.toString(),

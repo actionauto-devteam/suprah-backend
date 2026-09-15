@@ -8,6 +8,7 @@ import { google } from 'googleapis';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import Organization from '../models/Organization.model';
 import { decrypt } from '../utils/crypto';
+import { CALENDAR_TZ } from '../constants/calendarTimezone';
 
 interface EmailOptions {
     to: string;
@@ -268,12 +269,14 @@ class EmailService {
             month: 'long',
             day: 'numeric',
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            timeZone: CALENDAR_TZ
         });
 
         const endDate = new Date(appointment.endTime).toLocaleString('en-US', {
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            timeZone: CALENDAR_TZ
         });
 
         const dealerName = await this.resolveDealerName(organizationId);
@@ -536,7 +539,8 @@ Questions? Contact ${organizer.email}
             month: 'long',
             day: 'numeric',
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            timeZone: CALENDAR_TZ
         });
 
         const dealerName = await this.resolveDealerName(organizationId);
@@ -794,7 +798,8 @@ Questions? Contact ${organizer.email}
             month: 'long',
             day: 'numeric',
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            timeZone: CALENDAR_TZ
         });
 
         const dealerName = await this.resolveDealerName(organizationId);

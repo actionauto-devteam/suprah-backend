@@ -84,11 +84,11 @@ function slugifyKey(label: string): string {
 const createDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
-  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle } = req.body as {
+  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle, idleVideoProofEnabled } = req.body as {
     label?: string; color?: string;
     isMobileMonitoringDept?: boolean; mobileMonitoringMode?: MobileMonitoringMode;
     isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
-    locationRequiredForTimeproof?: boolean; detectIdle?: boolean;
+    locationRequiredForTimeproof?: boolean; detectIdle?: boolean; idleVideoProofEnabled?: boolean;
   };
 
   if (!label?.trim()) throw new ApiError(400, 'Department label is required');
@@ -117,6 +117,7 @@ const createDepartment = asyncHandler(async (req: Request, res: Response) => {
     isMandatoryLocationDept: !!isMandatoryLocationDept,
     locationRequiredForTimeproof: locationRequiredForTimeproof !== false,
     detectIdle: detectIdle !== false,
+    idleVideoProofEnabled: !!idleVideoProofEnabled,
     isActive: true,
     sortOrder: count,
   });
@@ -129,11 +130,11 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = actorOrgId(req);
   const { id } = req.params;
-  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle, isActive, isDefault } = req.body as {
+  const { label, color, isMobileMonitoringDept, mobileMonitoringMode, isTimeEditExempt, isMandatoryLocationDept, locationRequiredForTimeproof, detectIdle, idleVideoProofEnabled, isActive, isDefault } = req.body as {
     label?: string; color?: string; isActive?: boolean; isDefault?: boolean;
     isMobileMonitoringDept?: boolean; mobileMonitoringMode?: MobileMonitoringMode;
     isTimeEditExempt?: boolean; isMandatoryLocationDept?: boolean;
-    locationRequiredForTimeproof?: boolean; detectIdle?: boolean;
+    locationRequiredForTimeproof?: boolean; detectIdle?: boolean; idleVideoProofEnabled?: boolean;
   };
 
   const department = await Department.findOne({ _id: id, organizationId: orgId });
@@ -153,6 +154,7 @@ const updateDepartment = asyncHandler(async (req: Request, res: Response) => {
   if (isMandatoryLocationDept !== undefined) department.isMandatoryLocationDept = !!isMandatoryLocationDept;
   if (locationRequiredForTimeproof !== undefined) department.locationRequiredForTimeproof = !!locationRequiredForTimeproof;
   if (detectIdle !== undefined) department.detectIdle = !!detectIdle;
+  if (idleVideoProofEnabled !== undefined) department.idleVideoProofEnabled = !!idleVideoProofEnabled;
   if (isActive !== undefined) department.isActive = !!isActive;
   if (isDefault !== undefined) {
     if (isDefault) {

@@ -20,7 +20,7 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import EmployeeLocation from "../models/EmployeeLocation.model";
@@ -164,7 +164,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     ? lookbackLogs.filter((l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime())
     : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt, mobileMonitoringDept, screenshotsRequired] = await Promise.all([
+  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt, mobileMonitoringDept, screenshotsRequired, idleVideoProofEnabled] = await Promise.all([
     getMainPersonalInfoByEmail(user.email),
     isMainMonitorOnlyDept(user.organizationId?.toString(), user.department),
     isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride),
@@ -177,6 +177,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
       monitoringModeOverride: user.monitoringModeOverride,
       screenshotExempt: user.screenshotExempt,
     }),
+    isIdleVideoProofEnabled(user.organizationId?.toString(), user.department),
   ]);
 
   const userData = {
@@ -208,6 +209,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     idleDetectionExempt,
     isMobileMonitoringDept: mobileMonitoringDept,
     screenshotsRequired,
+    idleVideoProofEnabled,
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));

@@ -13,6 +13,7 @@ export interface IDepartment extends Document {
   isMandatoryLocationDept: boolean;
   locationRequiredForTimeproof: boolean;
   detectIdle: boolean;
+  idleVideoProofEnabled: boolean;
   isActive: boolean;
   isDefault: boolean;
   sortOrder: number;
@@ -72,6 +73,10 @@ const DepartmentSchema = new Schema<IDepartment>(
     detectIdle: {
       type: Boolean,
       default: true,
+    },
+    idleVideoProofEnabled: {
+      type: Boolean,
+      default: false,
     },
     isActive: {
       type: Boolean,
