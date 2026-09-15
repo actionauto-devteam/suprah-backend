@@ -17,10 +17,12 @@ const NO_DATA_GRACE_HOURS = 16;
 // Prevents race where break-out just before cron tick gets misclosed
 const BREAK_RESUME_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
-// Mirrors AUTO_SILENCE_CLOCKOUT_NOTES in crmTimeproof.controller.ts's getResumableShift/resumeShift
-// — these are the two notes written below that qualify for a seamless Resume Shift, so only
+// The two notes written below that qualify for a seamless Resume Shift, so only
 // these two get an immediate alert (the "no activity data ever" branch is a different, more
-// extreme case that isn't resumable and shouldn't be conflated with it).
+// extreme case that isn't resumable and shouldn't be conflated with it). This scheduler only
+// ever writes these two closeNote values itself — kept as its own local list rather than the
+// shared AUTO_CLOCKOUT_CLOSE_NOTES (see constants/autoClockoutNotes.ts), which also covers the
+// staged-idle-escalation notes this scheduler has nothing to do with.
 const SILENCE_CLOSURE_NOTES = [
   'Auto clock-out — device went idle/offline after rendering 8+ hours',
   'Auto clock-out — device went idle/offline for 30+ minutes',
@@ -276,6 +278,27 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
         note: closeNote,
       });
 
+      // A "ghost" shift — one with zero real ActivityInterval/heartbeat signal during its
+      // whole window — gets closed above like any other, but does NOT get a Shift Alert. This
+      // is the exact pattern behind the Ronalyn Obeso-Joye incident: a duplicate account (see
+      // crossIdentityShift.util.ts, which now blocks new occurrences at the source) left a
+      // shift open that nobody consciously worked under, and the alert made it look like a
+      // real attendance problem. A genuine forgot-to-clock-out shift (real activity data
+      // during its window) still alerts exactly as before — same reasoning
+      // runStaleShiftAutoClockout already applies via its own intervals.length>0 gate.
+      const [activityCount, heartbeatDoc] = await Promise.all([
+        ActivityInterval.countDocuments({
+          userId,
+          startAt: { $gte: shiftStartedAt, $lte: closeAt },
+        }),
+        AgentHeartbeat.findOne({ userId }).select("lastSeenAt").lean(),
+      ]);
+      const hadRealActivity =
+        activityCount > 0 ||
+        (!!heartbeatDoc?.lastSeenAt &&
+          heartbeatDoc.lastSeenAt >= shiftStartedAt &&
+          heartbeatDoc.lastSeenAt <= closeAt);
+
       // Route day-boundary auto-clockouts through Shift Alerts for admin visibility
       const userDoc =
         userModel === "CrmUser"
@@ -283,7 +306,7 @@ export async function closeShiftsFromPreviousMDTDays(opts: { dryRun?: boolean } 
               .select("organizationId fullName")
               .lean()
           : await User.findById(userId).select("organizationId name").lean();
-      if (userDoc?.organizationId) {
+      if (hadRealActivity && userDoc?.organizationId) {
         const displayName =
           (userDoc as any).fullName || (userDoc as any).name || "A user";
         const orgId = userDoc.organizationId.toString();

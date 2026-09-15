@@ -23,6 +23,7 @@ import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/d
 import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
+import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
 import AgentHeartbeat from "../models/AgentHeartbeat.model";
 import { resolveNextEmployeeId } from "../utils/employeeId.util";
@@ -260,6 +261,21 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === "break-in"  && !hasActiveSession)  throw new ApiError(400, "You must be clocked in to start a break");
   if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
   if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
+
+  // Prevent the same real person from having two concurrent open shifts across both identity
+  // models (CrmUser here vs. the main User account, linked only by email) — previously nothing
+  // stopped a second, parallel time-in from silently creating a "ghost" shift that never gets
+  // manually clocked out, later force-closed at midnight with a confusing admin alert about a
+  // shift nobody consciously started.
+  if (type === "time-in" && user.email) {
+    const otherShift = await findOpenShiftOnOtherIdentity(user.email, "CrmUser");
+    if (otherShift) {
+      const startedAtStr = otherShift.shiftStartedAt.toLocaleString("en-US", {
+        timeZone: "America/Denver", hour: "numeric", minute: "2-digit", hour12: true,
+      });
+      throw new ApiError(400, `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`);
+    }
+  }
 
   // Location sharing is required to clock in — no more pre-shift opt-out. Mid-shift,
   // it can be paused/resumed freely from TimeProof itself (locator.controller.ts's

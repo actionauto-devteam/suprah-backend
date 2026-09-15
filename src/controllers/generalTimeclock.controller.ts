@@ -15,6 +15,8 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
+import { AUTO_CLOCKOUT_CLOSE_NOTES } from '../constants/autoClockoutNotes';
+import { findOpenShiftOnOtherIdentity } from '../utils/crossIdentityShift.util';
 
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
@@ -188,6 +190,19 @@ export const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (type === 'break-in'  && !hasActiveSession) throw new ApiError(400, 'You must be clocked in to start a break');
   if (type === 'break-in'  && hasActiveBreak)   throw new ApiError(400, 'You are already on break');
   if (type === 'break-out' && !hasActiveBreak)  throw new ApiError(400, 'No active break to end');
+
+  // Prevent the same real person from having two concurrent open shifts across both identity
+  // models (this actor's model vs. the other one, linked only by email) — see
+  // crm.controller.ts's timeClock for the full rationale (the Ronalyn Obeso-Joye incident).
+  if (type === 'time-in' && actor.email) {
+    const otherShift = await findOpenShiftOnOtherIdentity(actor.email, actor.model);
+    if (otherShift) {
+      const startedAtStr = otherShift.shiftStartedAt.toLocaleString('en-US', {
+        timeZone: 'America/Denver', hour: 'numeric', minute: '2-digit', hour12: true,
+      });
+      throw new ApiError(400, `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`);
+    }
+  }
 
   // Location sharing is required to clock in — no more pre-shift opt-out. Covers both
   // account models. Mid-shift, it can be paused/resumed freely from TimeProof itself
@@ -617,13 +632,6 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
 
-// Mirrors AUTO_SILENCE_CLOCKOUT_NOTES in crmTimeproof.controller.ts — same two note strings
-// staleShiftAutoClockout.scheduler.ts writes for its silence-based closures.
-const AUTO_SILENCE_CLOCKOUT_NOTES = [
-  'Auto clock-out — device went idle/offline after rendering 8+ hours',
-  'Auto clock-out — device went idle/offline for 30+ minutes',
-];
-
 /**
  * GET /api/timeclock/resumable-shift
  * Check if today has a previous clock-out that can be resumed.
@@ -644,7 +652,7 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   const originalClockIn = resumable && timeIns.length > 0 ? new Date(timeIns[0].timestamp).toISOString() : null;
 
   const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
-  const canSeamlessResume = !!lastTimeOut && AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note);
+  const canSeamlessResume = !!lastTimeOut && AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note);
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
 });
@@ -670,7 +678,7 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  if (lastTimeOut.type !== 'time-out' || !AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note)) {
+  if (lastTimeOut.type !== 'time-out' || !AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note)) {
     throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
   }
 

@@ -25,6 +25,8 @@ import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezo
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
+import { closeShiftForInactivity } from '../services/autoClockout.service';
+import { AUTO_CLOCKOUT_CLOSE_NOTES } from '../constants/autoClockoutNotes';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -33,7 +35,12 @@ import { getShiftStatusForActor } from '../utils/shiftStatus';
 const BREAK_LIMIT_SECONDS = 3600;
 const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 
-const IDLE_ESCALATION_THRESHOLD_SECONDS = 15 * 60;
+// Elapsed minutes since idleSince (itself anchored to the confirmed 10-min mark) that
+// correspond to the "20 minutes real idle" (2nd warning) and "30 minutes real idle"
+// (auto-end) stages of the staged idle escalation ladder.
+const IDLE_STAGE2_ELAPSED_MIN = 10;
+const IDLE_STAGE3_ELAPSED_MIN = 20;
+const IDLE_ESCALATION_DEBUG_SCALE = Number(process.env.IDLE_ESCALATION_DEBUG_SCALE) || 1;
 
 const MAX_PUSH_SUBSCRIPTIONS = 6;
 
@@ -740,6 +747,21 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   if (isIdle && !wasIdle) idleSince = new Date();
   if (!isIdle) idleSince = null;
 
+  // Staged idle escalation ladder: 0 (not idle) / 1 (10min, existing alert, anchors idleSince)
+  // / 2 (20min, 2nd warning) / 3 (30min, auto-end). idleSince already starts at the confirmed
+  // 10-min mark, so +10min elapsed ≈ 20 min real idle, +20min ≈ 30 min real — same reasoning
+  // the old 15-min-only escalation used, just two checkpoints instead of one.
+  const existingIdleStage = existing?.idleStage ?? 0;
+  let idleStage = existingIdleStage;
+  if (!isIdle) {
+    idleStage = 0;
+  } else if (idleSince) {
+    const elapsedIdleMin = ((Date.now() - idleSince.getTime()) / 60_000) * IDLE_ESCALATION_DEBUG_SCALE;
+    if (elapsedIdleMin >= IDLE_STAGE3_ELAPSED_MIN && existingIdleStage < 3) idleStage = 3;
+    else if (elapsedIdleMin >= IDLE_STAGE2_ELAPSED_MIN && existingIdleStage < 2) idleStage = 2;
+    else if (existingIdleStage < 1) idleStage = 1;
+  }
+
   let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
   if (!isIdle) lastIdleEscalationNotifiedAt = null;
 
@@ -755,6 +777,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     {
       isIdle,
       idleSince,
+      idleStage,
       lastIdleEscalationNotifiedAt,
       lastIdleChannelPostedAt,
       isOnBreak,
@@ -838,6 +861,19 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       }).catch(() => {});
     }
 
+    // Self-notify the idle employee too (previously admin-only) — a heads-up so they
+    // have a chance to become active again before the 20-min 2nd warning / 30-min auto-end.
+    notificationService.createNotification({
+      userId: user._id.toString(),
+      organizationId: user.organizationId.toString(),
+      type: 'crm_timeproof',
+      title: '⚪ You went idle',
+      message: "No activity detected for 10 minutes. Move your mouse or press a key to resume — your shift will auto-end at 30 minutes if this continues.",
+      metadata: { route: '/crm/timeproof-clock', selfNotify: true },
+      dedupeKey: `agent-idle-self:${user._id}`,
+      groupWindowMinutes: 30,
+    }).catch(() => {});
+
     const idleChannelCooldownMs = 5 * 60 * 1000;
     const dueForIdleChannelPost = !existing?.lastIdleChannelPostedAt
       || Date.now() - new Date(existing.lastIdleChannelPostedAt).getTime() > idleChannelCooldownMs;
@@ -848,32 +884,48 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  if (isIdle && isOnShift && idleSince && !lastIdleEscalationNotifiedAt) {
-    const idleDurationSeconds = (Date.now() - idleSince.getTime()) / 1000;
-    if (idleDurationSeconds >= IDLE_ESCALATION_THRESHOLD_SECONDS) {
-      await AgentHeartbeat.updateOne({ userId: user._id }, { lastIdleEscalationNotifiedAt: new Date() });
+  // ── Staged idle escalation: 20-min "2nd warning" and 30-min auto-end ──────
+  // Gated on the transition (existingIdleStage < N && idleStage >= N), not the level — the
+  // idempotency latch that prevents double-firing/double-closing on every subsequent ~60s
+  // heartbeat while the tray keeps reporting isIdle:true at the same stage.
+  const displayName = user.fullName || 'A user';
+  const orgId = user.organizationId.toString();
 
-      const idleMinutes = Math.floor(idleDurationSeconds / 60);
-      const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
-      const idleEscalationPayload = { userId: user._id, fullName: user.fullName, idleMinutes, at: new Date() };
-      for (const admin of admins) {
-        emitToUser(admin._id.toString(), 'agent:idle-escalation', idleEscalationPayload);
-      }
-      emitToShiftBoard('agent:idle-escalation', idleEscalationPayload);
+  if (existingIdleStage < 2 && idleStage >= 2) {
+    fireShiftAlert({
+      organizationId: orgId,
+      targetUserId: user._id.toString(),
+      targetUserModel: 'CrmUser',
+      chatMessage: `🟠 ${displayName} has been idle for 20 minutes.`,
+      notifyTitle: '🟠 Agent Idle 20 Minutes — 2nd Warning',
+      notifyBody: "You've been idle for 20 minutes. Your shift will auto-end at 30 minutes if this continues.",
+      adminNotifyBody: `${displayName} has been idle for 20 minutes.`,
+      adminNotifyType: 'agent_idle_stage2',
+      notifyTag: `idle-stage2-${user._id}`,
+    }).catch((err) => logger.error({ err, userId: user._id.toString() }, '[idle-escalation] Failed to fire stage-2 alert'));
 
-      for (const admin of admins) {
-        notificationService.createNotification({
-          userId: admin._id.toString(),
-          organizationId: user.organizationId.toString(),
-          type: 'agent_idle_escalation',
-          title: '🟠 Agent Idle 15+ Minutes',
-          message: `${user.fullName} has been idle for ${idleMinutes} minutes. Tap to review and clock out if needed.`,
-          metadata: { route: `/crm/timeproof/users/${user._id}`, agentUserId: user._id },
-          dedupeKey: `agent-idle:${admin._id}:${user._id}`,
-          groupWindowMinutes: 30,
-        }).catch(() => {});
-      }
+    const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
+    const stage2Payload = { userId: user._id, fullName: displayName, idleMinutes: 20, at: new Date() };
+    for (const admin of admins) {
+      emitToUser(admin._id.toString(), 'agent:idle', stage2Payload);
     }
+    emitToShiftBoard('agent:idle', stage2Payload);
+  }
+
+  if (existingIdleStage < 3 && idleStage >= 3) {
+    closeShiftForInactivity({
+      userId: user._id.toString(),
+      userModel: 'CrmUser',
+      organizationId: orgId,
+      displayName,
+      closeNote: 'Auto clock-out — idle 30+ minutes (staged idle escalation)',
+      chatMessage: `🔴 ${displayName}'s shift was auto-ended — idle for 30 minutes.`,
+      notifyTitle: '🔴 Shift auto-ended — 30 minutes idle',
+      notifyBody: "Your shift was automatically ended after 30 minutes of inactivity. Click Resume if you're still working.",
+      adminNotifyBody: `${displayName}'s shift was auto-ended after 30 minutes of inactivity.`,
+      adminNotifyType: 'agent_idle_stage3',
+      notifyTag: `idle-stage3-${user._id}`,
+    }).catch((err) => logger.error({ err, userId: user._id.toString() }, '[idle-escalation] Failed to auto-end shift at stage 3'));
   }
 
   // ── Notify admins: agent exceeded 1-hour break ────────────────────────────
@@ -998,7 +1050,7 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
 
   if (!req.file) throw new ApiError(400, 'Screenshot file is required');
 
-  const { capturedAt, shiftDate, idleDetected = 'false', breakEvent } = req.body;
+  const { capturedAt, shiftDate, idleDetected = 'false', breakEvent, idleStage } = req.body;
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
     throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
   }
@@ -1006,8 +1058,18 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
     throw new ApiError(400, 'breakEvent must be break-in or break-out');
   }
 
+  // idleStage (1|2|3, from the staged idle escalation ladder) maps to the real-minute
+  // checkpoint it represents (10/20/30) — encoded straight into the flag so an old tray
+  // build that never sends it keeps producing the plain 'idle'/'active' flags exactly
+  // as before this feature existed.
+  const idleStageNum = idleStage ? parseInt(String(idleStage), 10) : null;
+  const idleStageMinutes = idleStageNum === 1 ? 10 : idleStageNum === 2 ? 20 : idleStageNum === 3 ? 30 : null;
   const capturedAtDate = capturedAt ? new Date(capturedAt) : new Date();
-  const flag = breakEvent ? breakEvent : (idleDetected === 'true' ? 'idle' : 'active');
+  const flag = breakEvent
+    ? breakEvent
+    : idleStageMinutes
+      ? `idle-${idleStageMinutes}`
+      : (idleDetected === 'true' ? 'idle' : 'active');
   const customFileName = `${capturedAtDate.getTime()}-${flag}.jpg`;
   const fileWithName: Express.Multer.File = { ...req.file, originalname: customFileName };
 
@@ -1105,10 +1167,13 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
       const flag = tail.slice(dashIdx + 1);
       const ms = parseInt(msStr, 10);
       if (!Number.isFinite(ms)) return null;
+      const idleStageMatch = /^idle-(\d+)$/.exec(flag);
+      const idleStage = idleStageMatch ? parseInt(idleStageMatch[1], 10) : null;
       return {
         r2Key: obj.key,
         capturedAt: new Date(ms),
-        idleDetected: flag === 'idle',
+        idleDetected: flag === 'idle' || !!idleStageMatch,
+        idleStage,
         isPlaceholder: flag === 'noaccess',
         breakEvent: (flag === 'break-in' || flag === 'break-out') ? flag as 'break-in' | 'break-out' : null,
       };
@@ -1121,6 +1186,7 @@ export const getScreenshots = asyncHandler(async (req: Request, res: Response) =
       _id: s.r2Key,
       capturedAt: s.capturedAt,
       idleDetected: s.idleDetected,
+      idleStage: s.idleStage,
       isPlaceholder: s.isPlaceholder,
       breakEvent: s.breakEvent,
       isBlurred: shouldBlur,
@@ -1151,7 +1217,7 @@ export const submitIdleRecording = asyncHandler(async (req: Request, res: Respon
 
   if (!req.file) throw new ApiError(400, 'Recording file is required');
 
-  const { shiftDate, idleStartMs, status } = req.body as { shiftDate?: string; idleStartMs?: string; status?: string };
+  const { shiftDate, idleStartMs, chunkIndex, status } = req.body as { shiftDate?: string; idleStartMs?: string; chunkIndex?: string; status?: string };
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
     throw new ApiError(400, 'shiftDate is required (YYYY-MM-DD)');
   }
@@ -1162,17 +1228,26 @@ export const submitIdleRecording = asyncHandler(async (req: Request, res: Respon
   if (!Number.isFinite(idleStartMsNum)) {
     throw new ApiError(400, 'idleStartMs is required');
   }
+  // Defaults to chunk 1 for an old tray build that predates chunking and never sends it.
+  const chunkIndexNum = chunkIndex ? parseInt(chunkIndex, 10) : 1;
+  if (![1, 2, 3].includes(chunkIndexNum)) {
+    throw new ApiError(400, 'chunkIndex must be 1, 2, or 3');
+  }
 
   if (!(await isIdleVideoProofEnabled(user.organizationId?.toString(), user.department))) {
     throw new ApiError(403, 'Idle video proof is not enabled for this account');
   }
 
-  const customFileName = `${idleStartMsNum}-${status}.webm`;
+  // Nested one path segment deeper than the pre-chunking scheme
+  // ({idleStartMs}-{status}.webm) so all chunks of the same idle stretch group under one
+  // folder — storageService.list is prefix-recursive (no Delimiter), so this needs no
+  // storage-layer changes, only this key shape and getIdleRecordings's parsing.
+  const customFileName = `${chunkIndexNum}-${status}.webm`;
   const fileWithName: Express.Multer.File = { ...req.file, originalname: customFileName };
 
   const r2Key = await storageService.upload(
     fileWithName,
-    `idle-recordings/${user._id.toString()}/${shiftDate}`,
+    `idle-recordings/${user._id.toString()}/${shiftDate}/${idleStartMsNum}`,
     BucketType.PRIVATE,
     { allowLocalFallback: true, preserveFilename: true }
   );
@@ -1206,27 +1281,43 @@ export const getIdleRecordings = asyncHandler(async (req: Request, res: Response
   const parsed = objects
     .map((obj) => {
       const tail = obj.key.slice(prefix.length).replace(/\.webm$/i, '');
-      const dashIdx = tail.indexOf('-');
-      if (dashIdx < 0) return null;
-      const msStr = tail.slice(0, dashIdx);
-      const status = tail.slice(dashIdx + 1);
-      const ms = parseInt(msStr, 10);
-      if (!Number.isFinite(ms) || (status !== 'partial' && status !== 'confirmed')) return null;
-      return { r2Key: obj.key, idleStartMs: ms, status: status as 'partial' | 'confirmed' };
+      const slashIdx = tail.indexOf('/');
+
+      if (slashIdx < 0) {
+        // Legacy pre-chunking format: {idleStartMs}-{status}.webm, flat under the
+        // shiftDate prefix — treat as chunk 1 so already-uploaded clips keep listing.
+        const dashIdx = tail.indexOf('-');
+        if (dashIdx < 0) return null;
+        const ms = parseInt(tail.slice(0, dashIdx), 10);
+        const status = tail.slice(dashIdx + 1);
+        if (!Number.isFinite(ms) || (status !== 'partial' && status !== 'confirmed')) return null;
+        return { r2Key: obj.key, idleStartMs: ms, chunkIndex: 1, status: status as 'partial' | 'confirmed' };
+      }
+
+      // Current nested format: {idleStartMs}/{chunkIndex}-{status}.webm
+      const ms = parseInt(tail.slice(0, slashIdx), 10);
+      const rest = tail.slice(slashIdx + 1);
+      const dashIdx = rest.indexOf('-');
+      if (!Number.isFinite(ms) || dashIdx < 0) return null;
+      const chunkIndex = parseInt(rest.slice(0, dashIdx), 10);
+      const status = rest.slice(dashIdx + 1);
+      if (![1, 2, 3].includes(chunkIndex) || (status !== 'partial' && status !== 'confirmed')) return null;
+      return { r2Key: obj.key, idleStartMs: ms, chunkIndex, status: status as 'partial' | 'confirmed' };
     })
     .filter((x): x is NonNullable<typeof x> => !!x)
-    .sort((a, b) => b.idleStartMs - a.idleStartMs);
+    .sort((a, b) => b.idleStartMs - a.idleStartMs || a.chunkIndex - b.chunkIndex);
 
   const withUrls = await Promise.all(
     parsed.map(async (r) => ({
       _id: r.r2Key,
       idleStartMs: r.idleStartMs,
+      chunkIndex: r.chunkIndex,
       status: r.status,
       url: await getSignedProofUrl(r.r2Key),
       downloadUrl: await storageService.getSignedUrl(
         r.r2Key,
         900,
-        `attachment; filename="idle-proof-${r.idleStartMs}.webm"`
+        `attachment; filename="idle-proof-${r.idleStartMs}-chunk${r.chunkIndex}.webm"`
       ),
     }))
   );
@@ -2265,11 +2356,6 @@ export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: 
   res.json(new ApiResponse(200, result, `Wiped ${result.deleted} screenshot record(s)`));
 });
 
-const AUTO_SILENCE_CLOCKOUT_NOTES = [
-  'Auto clock-out — device went idle/offline after rendering 8+ hours',
-  'Auto clock-out — device went idle/offline for 30+ minutes',
-];
-
 export const getResumableShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
@@ -2295,7 +2381,7 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
     : null;
 
   const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
-  const canSeamlessResume = !!lastTimeOut && AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note);
+  const canSeamlessResume = !!lastTimeOut && AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note);
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
 });
@@ -2320,7 +2406,7 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  if (lastTimeOut.type !== 'time-out' || !AUTO_SILENCE_CLOCKOUT_NOTES.includes((lastTimeOut as any).note)) {
+  if (lastTimeOut.type !== 'time-out' || !AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note)) {
     throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
   }
 

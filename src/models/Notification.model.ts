@@ -182,6 +182,8 @@ const NotificationSchema = new Schema(
 
         'agent_idle',
         'agent_idle_escalation',
+        'agent_idle_stage2',
+        'agent_idle_stage3',
         'agent_screen_recording_missing',
 
         'customer_call_requested',
