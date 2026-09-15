@@ -369,7 +369,7 @@ async function monitorDriverLocationSilence() {
         userId: { $in: driverIds },
       })
         .select(
-          "_id userId organizationId status coords lastSeenAt isSharing manualSharingOptIn offlineAlertSentAt",
+          "_id userId organizationId status coords lastSeenAt locationRecordedAt accuracy isSharing manualSharingOptIn offlineAlertSentAt",
         )
         .lean(),
 
@@ -476,7 +476,7 @@ async function monitorDriverLocationSilence() {
 
       // If the driver has shared at least once, lastSeenAt is authoritative.
       if (location?.lastSeenAt) {
-        const lastSeenAt = new Date(location.lastSeenAt);
+        const lastSeenAt = new Date(location.locationRecordedAt ?? location.lastSeenAt);
         if (lastSeenAt > cutoff) continue;
 
         // Atomically claim this stale incident so parallel server instances or
@@ -484,7 +484,7 @@ async function monitorDriverLocationSilence() {
         const claimed: any = await DriverLocation.findOneAndUpdate(
           {
             _id: location._id,
-            lastSeenAt: { $lte: cutoff },
+            $expr: { $lte: [{ $ifNull: ["$locationRecordedAt", "$lastSeenAt"] }, cutoff] },
             $or: [
               { offlineAlertSentAt: null },
               { offlineAlertSentAt: { $exists: false } },
@@ -530,6 +530,8 @@ async function monitorDriverLocationSilence() {
           status: "offline",
           isSharing: false,
           lastSeenAt: claimed.lastSeenAt,
+          locationRecordedAt: claimed.locationRecordedAt ?? null,
+          accuracy: claimed.accuracy ?? null,
         });
 
         continue;

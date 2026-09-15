@@ -15,7 +15,7 @@ import {
   OPEN_DRIVER_STATUS_REQUEST_STATES,
 } from "../services/driverStatusTransition.service";
 
-const PRESENCE_STALE_MS = 5 * 60 * 1000;
+const PRESENCE_STALE_MS = 90 * 1000;
 const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
 
 interface OrgDriver {
@@ -50,6 +50,8 @@ interface OrgDriver {
   presence: {
     status: string;
     lastSeenAt: Date | null;
+    locationRecordedAt: Date | null;
+    accuracy: number | null;
     coords: { lat: number; lng: number } | null;
     isSharing: boolean;
   };
@@ -201,7 +203,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
   ];
   const locations = gpsVisibleDriverIds.length
     ? await DriverLocation.find({ userId: { $in: gpsVisibleDriverIds } })
-        .select("userId status lastSeenAt coords isSharing")
+        .select("userId status lastSeenAt locationRecordedAt accuracy coords isSharing")
         .lean()
     : [];
 
@@ -290,8 +292,10 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     const statusRequest: any = statusRequestByUser.get(key) ?? null;
 
     const lastSeenAt = location?.lastSeenAt ?? null;
+    const locationRecordedAt = location?.locationRecordedAt ?? null;
+    const freshnessTime = locationRecordedAt ?? lastSeenAt;
     const isStale =
-      !lastSeenAt || now - new Date(lastSeenAt).getTime() > PRESENCE_STALE_MS;
+      !freshnessTime || now - new Date(freshnessTime).getTime() > PRESENCE_STALE_MS;
     // GPS sharing is independent from Dispatch Status / Live Status.
     // Legacy rows may not have the new isSharing field yet, so fall back to
     // the previous status-based inference until the driver's next heartbeat.
@@ -380,6 +384,8 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       presence: {
         status: liveStatus,
         lastSeenAt,
+        locationRecordedAt,
+        accuracy: location?.accuracy ?? null,
         coords: location?.coords ?? null,
         isSharing,
       },

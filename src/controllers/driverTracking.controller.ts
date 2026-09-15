@@ -911,11 +911,13 @@ async function getDriverGpsPolicyAcrossOrganizations(
 
 const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  const { lat, lng, status, manualSharingEnabled = false } = req.body as {
+  const { lat, lng, status, manualSharingEnabled = false, locationRecordedAt, accuracy } = req.body as {
     lat?: number;
     lng?: number;
     status?: string;
     manualSharingEnabled?: boolean;
+    locationRecordedAt?: string;
+    accuracy?: number;
   };
 
   if (user.role !== "driver") {
@@ -933,6 +935,15 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     lng > 180
   ) {
     throw new ApiError(400, "A valid latitude and longitude are required");
+  }
+
+  const measuredAt = typeof locationRecordedAt === "string" ? new Date(locationRecordedAt) : null;
+  if (locationRecordedAt !== undefined && (!measuredAt || !Number.isFinite(measuredAt.getTime()) ||
+      measuredAt.getTime() > Date.now() + 60_000 || Date.now() - measuredAt.getTime() > 120_000)) {
+    throw new ApiError(400, "A recent GPS measurement timestamp is required");
+  }
+  if (accuracy !== undefined && (typeof accuracy !== "number" || !Number.isFinite(accuracy) || accuracy < 0)) {
+    throw new ApiError(400, "GPS accuracy must be a nonnegative number");
   }
 
   const driverId = user._id.toString();
@@ -983,6 +994,8 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     String(policy.trackingLoads[0]?.organizationId ?? req.orgId ?? "").trim() || undefined;
   const locationSet: Record<string, any> = {
     coords: { lat, lng },
+    locationRecordedAt: measuredAt,
+    accuracy: accuracy ?? null,
     lastSeenAt: new Date(),
     isSharing: true,
     manualSharingOptIn,
@@ -994,11 +1007,23 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
   const locationUpdate: Record<string, any> = { $set: locationSet };
   if (!nextStatus) locationUpdate.$setOnInsert = { status: "idle" };
 
-  const location = await DriverLocation.findOneAndUpdate(
-    { userId: user._id },
-    locationUpdate,
-    { new: true, upsert: true },
-  );
+  let location;
+  try {
+    location = await DriverLocation.findOneAndUpdate(
+      { userId: user._id, ...(measuredAt ? { $or: [
+        { locationRecordedAt: null }, { locationRecordedAt: { $lte: measuredAt } },
+      ] } : {}) },
+      locationUpdate,
+      { new: true, upsert: true },
+    );
+  } catch (error: any) {
+    // A newer sample already owns the unique user row. Do not overwrite it.
+    if (measuredAt && error?.code === 11000) {
+      return res.status(200).json(new ApiResponse(200, { ok: true, locationAccepted: false }, "A newer GPS measurement is already stored"));
+    }
+    throw error;
+  }
+  if (!location) throw new ApiError(500, "Location could not be stored");
 
   // A heartbeat may be stored for the driver's own portal/manual sharing, but
   // exact coordinates are emitted only to dispatchers who own an Accepted,
@@ -1008,6 +1033,8 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     status: location.status,
     isSharing: true,
     lastSeenAt: location.lastSeenAt,
+    locationRecordedAt: location.locationRecordedAt ?? null,
+    accuracy: location.accuracy ?? null,
   });
 
   return res.status(200).json(
