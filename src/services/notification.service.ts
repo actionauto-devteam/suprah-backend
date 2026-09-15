@@ -56,7 +56,7 @@ const VALID_NOTIFICATION_TYPES = [
   'delivery_confirmed', 'proof_submitted',
   'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
   'location_share_requested',
-  'agent_idle', 'agent_idle_escalation', 'agent_screen_recording_missing',
+  'agent_idle', 'agent_idle_escalation', 'agent_idle_stage2', 'agent_idle_stage3', 'agent_screen_recording_missing',
   'customer_call_requested',
 ] as const;
 
@@ -121,6 +121,8 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
 
   agent_idle: 'adminStaffActivity',
   agent_idle_escalation: 'adminStaffActivity',
+  agent_idle_stage2: 'adminStaffActivity',
+  agent_idle_stage3: 'adminStaffActivity',
   agent_screen_recording_missing: 'adminStaffActivity',
 };
 
