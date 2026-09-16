@@ -19,6 +19,7 @@ export interface ILead extends Document {
 
   threadId?: string;
   messageId?: string;
+  ingestionFingerprint?: string;
   isRead?: boolean;
   isPending?: boolean;
   labels?: string[];
@@ -153,6 +154,12 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
     messageId: {
       type: String,
       sparse: true,
+    },
+
+    ingestionFingerprint: {
+      type: String,
+      immutable: true,
+      select: false,
     },
 
     isRead: {
@@ -349,6 +356,15 @@ LeadSchema.index({
   organizationId: 1,
   createdAt: -1,
 });
+
+LeadSchema.index(
+  { organizationId: 1, ingestionFingerprint: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ingestionFingerprint: { $type: 'string' } },
+    name: 'lead_org_ingestion_fingerprint_unique',
+  },
+);
 
 // Index for efficient per-user queries
 LeadSchema.index({

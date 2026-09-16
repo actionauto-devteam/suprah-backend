@@ -1626,10 +1626,21 @@ export const getNotificationCount = asyncHandler(async (req: Request, res: Respo
 export const getNotifications = asyncHandler(async (req: Request, res: Response) => {
   const actor = req.crmUser;
   if (!actor) throw new ApiError(401, 'Not authenticated');
+  if (!actor.organizationId) throw new ApiError(403, 'You must belong to an organization');
 
   const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 30, 1), 100);
+  const groupId = typeof req.query.groupId === 'string' ? req.query.groupId.trim() : '';
+  const filter: Record<string, unknown> = {
+    userId: actor._id,
+    organizationId: actor.organizationId,
+  };
 
-  const notifications = await ProjectNotification.find({ userId: actor._id })
+  if (groupId) {
+    await loadGroupForMember(groupId, actor);
+    filter.groupId = oid(groupId);
+  }
+
+  const notifications = await ProjectNotification.find(filter)
     .sort({ createdAt: -1 })
     .limit(limit)
     .lean();

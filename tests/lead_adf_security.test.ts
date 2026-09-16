@@ -5,6 +5,7 @@ import OrgLeadConfig from '../src/models/OrgLeadConfig.model';
 import Organization from '../src/models/Organization.model';
 import { encrypt, decrypt } from '../src/utils/crypto';
 import User from '../src/models/User.model';
+import Lead from '../src/models/lead.model';
 
 describe('ADF Webhook Security (HMAC)', () => {
     let testOrg: any;
@@ -47,6 +48,7 @@ describe('ADF Webhook Security (HMAC)', () => {
 
     afterAll(async () => {
         if (testOrg) {
+            await Lead.deleteMany({ organizationId: testOrg._id });
             await OrgLeadConfig.deleteMany({ organizationId: testOrg._id });
         }
         if (testUser) {
@@ -122,6 +124,35 @@ describe('ADF Webhook Security (HMAC)', () => {
             .expect(200);
 
         expect(res.text).toContain('Lead processed successfully');
+    });
+
+    it('stores one lead when a signed ADF delivery is retried concurrently', async () => {
+        const email = `retry-${Date.now()}@example.com`;
+        const adfXml = getAdfXml('Retry', 'Safe', email);
+        const signature = crypto.createHmac('sha256', webhookSecret)
+            .update(adfXml)
+            .digest('hex');
+
+        await Promise.all([
+            request(app)
+                .post('/api/leads/adf')
+                .query({ orgId })
+                .set('X-ADF-Signature', signature)
+                .set('Content-Type', 'application/xml')
+                .send(adfXml)
+                .expect(200),
+            request(app)
+                .post('/api/leads/adf')
+                .query({ orgId })
+                .set('X-ADF-Signature', signature)
+                .set('Content-Type', 'application/xml')
+                .send(adfXml)
+                .expect(200),
+        ]);
+
+        await expect(
+            Lead.countDocuments({ organizationId: testOrg._id, email }),
+        ).resolves.toBe(1);
     });
 
     it('should accept valid complexity XML payload', async () => {

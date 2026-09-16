@@ -367,11 +367,22 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressRes
 
   const exportType = (req.query.type       as string) || 'leaderboard';
   const periodType = (req.query.periodType as string) || 'monthly';
+
+  if (!['leaderboard', 'activity'].includes(exportType)) {
+    throw new ApiError(400, 'type must be leaderboard or activity');
+  }
+
+  if (!['daily', 'weekly', 'monthly'].includes(periodType)) {
+    throw new ApiError(400, 'periodType must be daily, weekly, or monthly');
+  }
+
   const periodKey  = (req.query.periodKey  as string) || getPeriodKey(new Date(), periodType as any);
 
   let rows: any[] = [];
 
   if (exportType === 'leaderboard') {
+    await rebuildRanks(orgId, periodType as any, periodKey);
+
     const docs = await AnalyticsAggregate.find({
       organizationId: new mongoose.Types.ObjectId(orgId),
       periodType,
@@ -439,11 +450,10 @@ export const exportAnalytics = asyncHandler(async (req: Request, res: ExpressRes
     }));
   }
 
-  if (rows.length === 0) {
-    throw new ApiError(404, 'No data found for the selected period');
-  }
-
-  const parser = new Parser({ fields: Object.keys(rows[0]) });
+  const fields = exportType === 'leaderboard'
+    ? ['rank', 'fullName', 'username', 'email', 'role', 'totalScore', 'leadsCreated', 'leadsConverted', 'conversionRate', 'appointmentsCompleted', 'callsMade', 'messagesSent', 'followUpsSent', 'transactionsCompleted', 'onboardingsCompleted', 'avgResponseTimeMin', 'period']
+    : ['timestamp', 'fullName', 'username', 'actionType', 'sourceModule', 'entityType', 'score'];
+  const parser = new Parser({ fields });
   const csv    = parser.parse(rows);
 
   res.setHeader('Content-Type', 'text/csv');

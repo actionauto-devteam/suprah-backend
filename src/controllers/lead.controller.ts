@@ -1,4 +1,5 @@
- import { Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
 import appointmentService from '../services/appointment.service';
 import googleCalendarService from '../services/googleCalendar.service';
 import Lead from '../models/lead.model';
@@ -28,6 +29,19 @@ import CrmUser from '../models/CrmUser.model';
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
 const UNANSWERED_LEAD_STATUSES = ['New', 'Pending'];
+
+function createAdfIngestionFingerprint(xmlData: string) {
+  const canonicalPayload = xmlData
+    .replace(/\r\n/g, '\n')
+    .replace(/>\s+</g, '><')
+    .trim();
+
+  return `adf:${createHash('sha256').update(canonicalPayload).digest('hex')}`;
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function parseReminderThreshold(value: unknown) {
   const parsed = Number(value);
@@ -418,6 +432,7 @@ export const receiveADF = async (req: Request, res: Response) => {
 
     const orgId = req.query.orgId || req.body.organizationId;
     const config = (req as any).orgLeadConfig;
+    const ingestionFingerprint = createAdfIngestionFingerprint(xmlData);
 
     const systemUserId = await getSystemUserId(orgId as string);
     if (!systemUserId) {
@@ -449,7 +464,7 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(200).send('Lead already processed');
     }
 
-    const newLead = new Lead({
+    const leadToInsert = {
       organizationId: orgId,
       createdBy: systemUserId,
       firstName: adfData.firstName,
@@ -463,14 +478,38 @@ export const receiveADF = async (req: Request, res: Response) => {
       source: adfData.source || 'ADF Email',
       senderEmail: config?.leadSourceEmail || LEADS_SOURCE_EMAIL,
       centralIngestion: true,
+      ingestionFingerprint,
       followUp: {
         lastCustomerActivityAt: new Date(),
         reminderCount: 0,
         reminderHistory: [],
       },
-    });
+    };
 
-    await newLead.save();
+    const upsertResult = await Lead.findOneAndUpdate(
+      { organizationId: orgId, ingestionFingerprint },
+      { $setOnInsert: leadToInsert },
+      {
+        new: true,
+        upsert: true,
+        includeResultMetadata: true,
+        setDefaultsOnInsert: true,
+      },
+    );
+    const newLead = upsertResult.value;
+
+    if (!newLead) {
+      throw new Error('Unable to persist ADF lead');
+    }
+
+    if (upsertResult.lastErrorObject?.updatedExisting) {
+      logger.info(
+        { leadId: newLead._id, orgId, ingestionFingerprint },
+        'Duplicate ADF webhook delivery ignored',
+      );
+      return res.status(200).send('Lead already processed');
+    }
+
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
 
     // ✨ AUTO-SYNC: Immediately add to customer database
@@ -548,7 +587,10 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
-    const search = req.query.search as string;
+    const search =
+      typeof req.query.search === 'string'
+        ? req.query.search.trim().slice(0, 100)
+        : '';
     const status = req.query.status as string;
 
     const sortBy =
@@ -564,13 +606,14 @@ export const getAllLeads = async (req: Request, res: Response) => {
     };
 
     if (search) {
+      const escapedSearch = escapeRegex(search);
       query.$or = [
-        { firstName: { $regex: search, $options: 'i' } },
-        { lastName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-        { 'vehicle.make': { $regex: search, $options: 'i' } },
-        { 'vehicle.model': { $regex: search, $options: 'i' } },
+        { firstName: { $regex: escapedSearch, $options: 'i' } },
+        { lastName: { $regex: escapedSearch, $options: 'i' } },
+        { email: { $regex: escapedSearch, $options: 'i' } },
+        { phone: { $regex: escapedSearch, $options: 'i' } },
+        { 'vehicle.make': { $regex: escapedSearch, $options: 'i' } },
+        { 'vehicle.model': { $regex: escapedSearch, $options: 'i' } },
       ];
     }
 

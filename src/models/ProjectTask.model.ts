@@ -11,6 +11,7 @@ export const PROJECT_TASK_STATUSES = [
   'in-progress',  // blue
   'backlog',      // orange
   'to-deploy',    // purple
+  'deployed',     // cyan
   'completed',    // green
 ] as const;
 

@@ -82,6 +82,7 @@ const ProjectNotificationSchema = new Schema<IProjectNotification>(
 
 // Badge count + inbox list.
 ProjectNotificationSchema.index({ userId: 1, readAt: 1, createdAt: -1 });
+ProjectNotificationSchema.index({ userId: 1, groupId: 1, createdAt: -1 });
 // Auto-expire notifications after 90 days to keep the collection small
 // (lesson learned from the systemlogs index blow-up).
 ProjectNotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
