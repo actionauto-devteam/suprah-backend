@@ -15,7 +15,6 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
-import { AUTO_CLOCKOUT_CLOSE_NOTES } from '../constants/autoClockoutNotes';
 import { findOpenShiftOnOtherIdentity } from '../utils/crossIdentityShift.util';
 
 
@@ -651,8 +650,10 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   const resumable = !isOnShift && timeOuts.length > 0;
   const originalClockIn = resumable && timeIns.length > 0 ? new Date(timeIns[0].timestamp).toISOString() : null;
 
-  const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
-  const canSeamlessResume = !!lastTimeOut && AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note);
+  // Resuming works the same regardless of why the shift ended (auto-clockout or a deliberate
+  // manual "End Shift") — see resumeShift below and crmTimeproof.controller.ts's twin function
+  // for the full rationale.
+  const canSeamlessResume = resumable;
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
 });
@@ -678,8 +679,10 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  if (lastTimeOut.type !== 'time-out' || !AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note)) {
-    throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
+  // Deliberately allows resuming regardless of why the shift ended (auto-clockout or a manual
+  // "End Shift" click) — see crmTimeproof.controller.ts's twin function for the full rationale.
+  if (lastTimeOut.type !== 'time-out') {
+    throw new ApiError(400, 'No shift to resume today');
   }
 
   await TimeLog.deleteOne({ _id: lastTimeOut._id });
