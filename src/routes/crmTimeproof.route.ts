@@ -19,6 +19,7 @@ import {
   getScreenshots,
   submitIdleRecording,
   getIdleRecordings,
+  getIdleRecordingDownloadUrl,
   getBlurredScreenshot,
   deleteMyScreenshot,
   wipeAllScreenshotsHandler,
@@ -69,6 +70,7 @@ router.post('/screenshots/placeholder', submitScreenshotPlaceholder);
 router.get('/screenshots', getScreenshots);
 router.post('/idle-recordings', uploadIdleRecording, submitIdleRecording);
 router.get('/idle-recordings', getIdleRecordings);
+router.get('/idle-recordings/download-url', getIdleRecordingDownloadUrl);
 router.get('/screenshot-blurred', getBlurredScreenshot);
 router.delete('/screenshots', deleteMyScreenshot);
 router.post('/screenshots/wipe-all', wipeAllScreenshotsHandler);

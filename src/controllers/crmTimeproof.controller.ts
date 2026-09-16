@@ -1325,6 +1325,41 @@ export const getIdleRecordings = asyncHandler(async (req: Request, res: Response
 });
 
 /**
+ * GET /api/crm/timeproof/idle-recordings/download-url?key=...
+ *
+ * The listing above embeds a signed downloadUrl per recording, but that signature expires in
+ * 15 minutes — fine for an immediate click, but an admin reviewing evidence often opens the
+ * page, looks at several videos, and only downloads one later, well past that window (the
+ * browser then shows a raw "ExpiredRequest" XML error page). This endpoint mints a fresh
+ * signature on demand at click-time instead, so the link never goes stale no matter how long
+ * the page has been open.
+ */
+export const getIdleRecordingDownloadUrl = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  const { key } = req.query;
+
+  if (!key || typeof key !== 'string' || !key.startsWith('idle-recordings/')) {
+    throw new ApiError(400, 'Valid key query param required');
+  }
+
+  const targetUserId = key.split('/')[1];
+  const isSelf = targetUserId === requestor._id.toString();
+  if (!isSelf) {
+    if (!['admin', 'manager'].includes(requestor.role)) {
+      throw new ApiError(403, 'Access denied');
+    }
+    const targetUser = await CrmUser.findOne({ _id: targetUserId, organizationId: requestor.organizationId }).select('_id').lean();
+    if (!targetUser) throw new ApiError(404, 'Recording not found');
+  }
+
+  const fileName = key.split('/').pop() || 'idle-proof.webm';
+  const downloadUrl = await storageService.getSignedUrl(key, 900, `attachment; filename="${fileName}"`);
+  if (!downloadUrl) throw new ApiError(404, 'Recording not found');
+
+  res.json(new ApiResponse(200, { downloadUrl }, 'Download URL generated'));
+});
+
+/**
  * GET /api/crm/timeproof/screenshot-blurred?key=...
  */
 export const getBlurredScreenshot = asyncHandler(async (req: Request, res: Response) => {
