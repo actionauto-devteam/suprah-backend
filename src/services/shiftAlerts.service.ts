@@ -191,18 +191,22 @@ async function notifyOrgAdmins(
   organizationId: string,
   payload: { title: string; body: string; tag: string; url?: string },
   dedupeSubjectId?: string,
+  notifyType: string = 'admin_staff_activity',
 ): Promise<void> {
   try {
-    // Persists as an 'admin_staff_activity' notification (bell/page visible,
-    // preference-gated) and pushes to both User and CrmUser admins/managers —
-    // replaces the old push-only, Redis-gated PushService.notifyOrgAdmins.
-    // Grouped by the affected employee (dedupeSubjectId) across all 3 "shift
-    // alert" triggers (connection-loss, stale-clockout, location-not-shared)
-    // uniformly — deliberately not split by which one fired, so repeat
-    // alerts about the same person compile into one notification.
+    // Persists as an 'admin_staff_activity' notification by default (bell/page
+    // visible, preference-gated) and pushes to both User and CrmUser
+    // admins/managers — replaces the old push-only, Redis-gated
+    // PushService.notifyOrgAdmins. Grouped by the affected employee
+    // (dedupeSubjectId) across all "shift alert" triggers (connection-loss,
+    // stale-clockout, location-not-shared, idle escalation) uniformly by
+    // default — deliberately not split by which one fired, so repeat alerts
+    // about the same person compile into one notification. Callers that need
+    // their own dedicated notification-preference category (e.g. idle
+    // escalation's existing "Idle Alerts" bucket) pass a distinct notifyType.
     await persistNotifyOrgAdmins(
       organizationId,
-      'admin_staff_activity',
+      notifyType,
       payload.title,
       payload.body,
       { route: payload.url || '/crm/timeproof/users' },
@@ -236,6 +240,11 @@ export async function fireShiftAlert(params: {
    * should supply this — a shared second-person body read by an admin about someone else's
    * shift is exactly the confusion this param exists to prevent. */
   adminNotifyBody?: string;
+  /** Notification type persisted for the admin/manager side (bell/page, preference-gated).
+   * Defaults to 'admin_staff_activity' — pass a dedicated type (e.g. 'agent_idle_stage2') when
+   * the alert should live under its own notification-preference category instead of the
+   * generic "Staff Activity" bucket. */
+  adminNotifyType?: string;
   notifyTag: string;
   url?: string;
   /** Caller will post the Shift Alerts chat message itself, batched together with
@@ -246,10 +255,10 @@ export async function fireShiftAlert(params: {
    * sound/popup handler as an unbatched burst. */
   skipChatMessage?: boolean;
 }): Promise<void> {
-  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, adminNotifyBody, notifyTag, url, skipChatMessage } = params;
+  const { organizationId, targetUserId, targetUserModel, chatMessage, notifyTitle, notifyBody, adminNotifyBody, adminNotifyType, notifyTag, url, skipChatMessage } = params;
   await Promise.allSettled([
     skipChatMessage ? Promise.resolve() : postShiftAlertMessage(organizationId, chatMessage),
-    notifyOrgAdmins(organizationId, { title: notifyTitle, body: adminNotifyBody ?? notifyBody, tag: notifyTag, url }, targetUserId),
+    notifyOrgAdmins(organizationId, { title: notifyTitle, body: adminNotifyBody ?? notifyBody, tag: notifyTag, url }, targetUserId, adminNotifyType),
     notifyTargetUser(organizationId, targetUserId, targetUserModel, { title: notifyTitle, body: notifyBody, tag: notifyTag, url }),
   ]);
 }

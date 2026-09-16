@@ -6,6 +6,10 @@ export interface IAgentHeartbeat extends Document {
   isIdle: boolean;
   idleSince: Date | null;
   lastIdleEscalationNotifiedAt: Date | null;
+  // Numeric progress marker for the staged idle escalation ladder: 0 (not
+  // idle) / 1 (10min, existing alert) / 2 (20min, 2nd warning) / 3 (30min,
+  // auto-end). Reset to 0 the instant isIdle goes false, same as idleSince.
+  idleStage: number;
   // Cooldown for the Shift Alerts channel idle message.
   lastIdleChannelPostedAt: Date | null;
   isOnBreak: boolean;
@@ -49,6 +53,10 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
     lastIdleEscalationNotifiedAt: {
       type: Date,
       default: null,
+    },
+    idleStage: {
+      type: Number,
+      default: 0,
     },
     lastIdleChannelPostedAt: {
       type: Date,

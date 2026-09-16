@@ -13,6 +13,8 @@ export interface IDriverLocation extends Document {
   };
   shipmentIds: mongoose.Types.ObjectId[];
   lastSeenAt: Date;
+  locationRecordedAt?: Date | null;
+  accuracy?: number | null;
   /** Independent GPS-sharing flag. A driver may share GPS while On Leave/In Shop even though live status stays Offline/Waiting. */
   isSharing: boolean;
   /**
@@ -56,6 +58,8 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
         ref: "Shipment",
       },
     ],
+    locationRecordedAt: { type: Date, default: null },
+    accuracy: { type: Number, min: 0, default: null },
     lastSeenAt: {
       type: Date,
       default: Date.now,
