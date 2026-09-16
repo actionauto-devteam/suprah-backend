@@ -26,7 +26,6 @@ import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { closeShiftForInactivity } from '../services/autoClockout.service';
-import { AUTO_CLOCKOUT_CLOSE_NOTES } from '../constants/autoClockoutNotes';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -2380,8 +2379,11 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
     ? new Date(timeIns[0].timestamp).toISOString()
     : null;
 
-  const lastTimeOut = resumable ? timeOuts[timeOuts.length - 1] : null;
-  const canSeamlessResume = !!lastTimeOut && AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note);
+  // Resuming works the same regardless of why the shift ended (auto-clockout or a deliberate
+  // manual "End Shift") — the modal's "Yes" always deletes the closing time-out and revives the
+  // original time-in via resumeShift below. Kept as its own field (rather than folding into
+  // `resumable`) in case a future caller needs to distinguish the two reasons again.
+  const canSeamlessResume = resumable;
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
 });
@@ -2406,8 +2408,12 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  if (lastTimeOut.type !== 'time-out' || !AUTO_CLOCKOUT_CLOSE_NOTES.includes((lastTimeOut as any).note)) {
-    throw new ApiError(400, 'This shift was not auto-ended and cannot be seamlessly resumed');
+  // Deliberately allows resuming regardless of why the shift ended (auto-clockout or a manual
+  // "End Shift" click) — deletes whatever the last time-out was and revives the original
+  // time-in either way. Employees explicitly choosing "Yes, Resume Shift" is the guard here,
+  // same as any other self-service clock action.
+  if (lastTimeOut.type !== 'time-out') {
+    throw new ApiError(400, 'No shift to resume today');
   }
 
   await TimeLog.deleteOne({ _id: lastTimeOut._id });
