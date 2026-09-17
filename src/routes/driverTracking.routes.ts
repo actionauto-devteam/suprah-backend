@@ -1,4 +1,5 @@
 import express from "express";
+import Load from "../models/Load.model";
 import type {
   Request as ExpressRequest,
   Response as ExpressResponse,
@@ -45,6 +46,28 @@ const driverOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunctio
     });
 };
 
+// Map reads must have an explicit authenticated organization scope. The shared
+// auth middleware also serves organization-less onboarding routes.
+const trackingOrganizationOnly = async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+  try {
+    const orgId = typeof req.orgId === "string" ? req.orgId.trim() : "";
+    if (!orgId) return res.status(403).json({ success: false, message: "Select an authorized organization before viewing driver tracking." });
+    const role = String(req.user?.role ?? "");
+    if (["admin", "super_admin"].includes(role)) return next();
+    // Matches driverReviewAccess: designated dispatchers can plan assignments;
+    // an employee owning an active load can retain the existing support workflow.
+    const scopedIds = (req.user as any)?.dispatcherOrganizationIds;
+    const designated = role === "employee" && Array.isArray(scopedIds) && scopedIds.some((id: unknown) => String(id) === orgId);
+    if (designated) return next();
+    const ownsActiveLoad = role === "employee" && req.user?._id && await Load.exists({
+      organizationId: orgId, dispatchOwnerId: req.user._id, assignedDriverId: { $ne: null },
+      status: { $in: ["Assigned", "Accepted", "Picked Up", "In-Transit"] },
+    });
+    if (ownsActiveLoad) return next();
+    return res.status(403).json({ success: false, message: "Driver tracking requires dispatcher access or an active assigned-load relationship." });
+  } catch (error) { return next(error); }
+};
+
 const noStoreSensitive = (_req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
   res.setHeader("Cache-Control", "private, no-store, max-age=0");
   res.setHeader("Pragma", "no-cache");
@@ -59,8 +82,8 @@ const router = express.Router();
 router.use(auth());
 
 // Directory / map
-router.get("/org-drivers", staffOnly, noStoreSensitive, driverDirectoryController.getOrgDrivers);
-router.get("/active-drivers", staffOnly, noStoreSensitive, driverTrackingController.getActiveDrivers);
+router.get("/org-drivers", staffOnly, trackingOrganizationOnly, noStoreSensitive, driverDirectoryController.getOrgDrivers);
+router.get("/active-drivers", staffOnly, trackingOrganizationOnly, noStoreSensitive, driverTrackingController.getActiveDrivers);
 router.post("/heartbeat", driverOnly, driverTrackingController.heartbeat);
 router.post(
   "/location-offline",

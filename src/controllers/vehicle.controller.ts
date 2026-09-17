@@ -282,6 +282,17 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const getVehicles = asyncHandler(async (req: Request, res: Response) => {
+  // Duration-only diagnostics for the inventory request. No identifiers,
+  // query values, credentials, or response contents are recorded.
+  const controllerStarted = process.hrtime.bigint();
+  const elapsedMs = (start: bigint) => Number(process.hrtime.bigint() - start) / 1_000_000;
+  const setTiming = (databaseMs: number, preparationStarted: bigint) => {
+    res.append("Server-Timing", [
+      `inventory_db;dur=${databaseMs.toFixed(2)}`,
+      `inventory_prepare;dur=${elapsedMs(preparationStarted).toFixed(2)}`,
+      `inventory_controller;dur=${elapsedMs(controllerStarted).toFixed(2)}`,
+    ].join(", "));
+  };
   const {
     status,
     search: searchParam,
@@ -532,12 +543,16 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
       },
     });
 
+    const databaseStarted = process.hrtime.bigint();
     const metricRows = await Vehicle.aggregate(pipeline);
+    const databaseMs = elapsedMs(databaseStarted);
+    const preparationStarted = process.hrtime.bigint();
     const metrics = metricRows.map((vehicle: any) => ({
       id: vehicle._id.toString(),
       leadCount: vehicle.leadCount || 0,
     }));
 
+    setTiming(databaseMs, preparationStarted);
     return res.json(
       new ApiResponse(
         200,
@@ -602,7 +617,10 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     },
   });
 
+  const databaseStarted = process.hrtime.bigint();
   const [result] = await Vehicle.aggregate(pipeline);
+  const databaseMs = elapsedMs(databaseStarted);
+  const preparationStarted = process.hrtime.bigint();
 
   const total = result.metadata[0]?.total || 0;
   const vehicles = result.data || [];
@@ -620,6 +638,7 @@ const getVehicles = asyncHandler(async (req: Request, res: Response) => {
     totalPages: fetchAll ? 1 : Math.max(1, Math.ceil(total / limitNum)),
   };
 
+  setTiming(databaseMs, preparationStarted);
   res.json(new ApiResponse(200, responseData, "Vehicles fetched successfully"));
 });
 

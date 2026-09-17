@@ -48,6 +48,7 @@ interface OrgDriver {
     };
   };
   presence: {
+    canViewExactGps: boolean;
     status: string;
     lastSeenAt: Date | null;
     locationRecordedAt: Date | null;
@@ -265,6 +266,8 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     const location: any = locationByUser.get(key) ?? null;
     const driverLoads = loadsByUser.get(key) ?? [];
     const activeLoadCount = driverLoads.length;
+    const canViewStatusRequestNotes = ["admin", "super_admin"].includes(String(req.user?.role ?? "")) ||
+      driverLoads.some((load: any) => String(load.dispatchOwnerId ?? "") === dispatcherId);
     const normalizedEmail = String(u.email ?? "").trim().toLowerCase();
     const crmCandidates = crmUsersByEmail.get(normalizedEmail) ?? [];
     const crmUser: any =
@@ -314,9 +317,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
         ? "offline"
         : operationalStatus === "maintenance"
           ? "waiting"
-          : isSharing
-            ? (location?.status ?? "idle")
-            : "offline";
+          : (location?.status ?? "offline");
     const requestBlocksNewWork = isStatusRequestBlockingNewWork(statusRequest);
 
     const warnings: string[] = [];
@@ -382,6 +383,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
         },
       },
       presence: {
+        canViewExactGps,
         status: liveStatus,
         lastSeenAt,
         locationRecordedAt,
@@ -463,8 +465,8 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
             requestedStatus: statusRequest.requestedStatus,
             priority: statusRequest.priority,
             status: statusRequest.status,
-            reason: statusRequest.reason ?? null,
-            message: statusRequest.message ?? null,
+            reason: canViewStatusRequestNotes ? statusRequest.reason ?? null : null,
+            message: canViewStatusRequestNotes ? statusRequest.message ?? null : null,
             submittedAt: statusRequest.submittedAt ?? statusRequest.createdAt ?? null,
           }
         : null,
