@@ -40,7 +40,7 @@ const VALID_NOTIFICATION_TYPES = [
   'dealership_inquiry',
   'driver_assigned', 'driver_location_update', 'driver_payout',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
-  'driver_dispatch_alert',
+  'driver_dispatch_alert', 'driver_dispatch_message',
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
   'driver_status_request_completed', 'driver_emergency_request',
   'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',
@@ -95,7 +95,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
 
   driver_location_update: 'driverTracker', driver_tracker_geofence_alert: 'driverTracker',
   driver_tracker_offline_alert: 'driverTracker', driver_tracker_place_visit: 'driverTracker',
-  driver_dispatch_alert: 'driverTracker',
+  driver_dispatch_alert: 'driverTracker', driver_dispatch_message: 'driverTracker',
   driver_status_request: 'driverTracker', driver_status_request_approved: 'driverTracker',
   driver_status_request_rejected: 'driverTracker', driver_status_request_completed: 'driverTracker',
   driver_emergency_request: 'driverTracker',
@@ -347,6 +347,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       driver_tracker_offline_alert: metadata?.route || '/driver-tracker',
       driver_tracker_place_visit: metadata?.route || '/driver-tracker',
       driver_dispatch_alert: metadata?.route || '/driver/notifications',
+      driver_dispatch_message: metadata?.route || '/notifications',
       driver_status_request: metadata?.route || '/driver-tracker',
       driver_emergency_request: metadata?.route || '/driver-tracker',
       driver_status_request_approved: metadata?.route || '/driver',
@@ -368,10 +369,20 @@ const createNotification = async (params: CreateNotificationParams) => {
     const pushPayload: any = {
       title: notification.title,
       body: notification.message,
-      tag: dedupeKey || category,
-      topic: dedupeKey,
+      tag: metadata?.pushTag || dedupeKey || category,
+      topic: metadata?.pushTopic || dedupeKey,
       source: metadata?.pushSource || CATEGORY_PUSH_LABELS[category],
-      data: { url: targetUrl, notificationId: notification._id, conversationId: metadata?.conversationId, messageId: metadata?.messageId },
+      data: {
+        url: targetUrl,
+        notificationId: notification._id,
+        conversationId: metadata?.conversationId,
+        messageId: metadata?.messageId,
+        threadId: metadata?.threadId,
+        driverId: metadata?.driverId,
+        dispatcherId: metadata?.dispatcherId,
+        pushPresentation: metadata?.pushPresentation,
+        soundProfile: metadata?.soundProfile,
+      },
     };
 
     if (type === 'driver_request') {

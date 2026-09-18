@@ -125,6 +125,7 @@ const NotificationSchema = new Schema(
         'driver_tracker_offline_alert',
         'driver_tracker_place_visit',
         'driver_dispatch_alert',
+        'driver_dispatch_message',
         'driver_status_request',
         'driver_status_request_approved',
         'driver_status_request_rejected',

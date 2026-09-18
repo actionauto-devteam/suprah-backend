@@ -15,6 +15,7 @@ import {
   touchDispatchChatThread,
 } from "../services/dispatchChat.service";
 import logger from "../utils/logger";
+import { safeCreateNotification } from "../utils/safeNotification";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const MAX_MESSAGE_LENGTH = 4000;
@@ -40,6 +41,99 @@ const TIMELINE_NOTIFICATION_TYPES = [
 // private-thread DispatchChatMessage system events by the load controller.
 
 const getUser = (req: ExpressRequest) => req.user as IUser;
+
+const DISPATCH_CHAT_NOTIFICATION_PREVIEW_LENGTH = 500;
+
+function dispatchChatNotificationPreview(value: string): string {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= DISPATCH_CHAT_NOTIFICATION_PREVIEW_LENGTH) {
+    return normalized;
+  }
+  return `${normalized.slice(0, DISPATCH_CHAT_NOTIFICATION_PREVIEW_LENGTH - 3).trimEnd()}...`;
+}
+
+function dispatchAttachmentNotificationPreview(
+  attachments: Array<{ mimeType?: string; originalName?: string }>,
+  content?: string,
+): string {
+  const text = dispatchChatNotificationPreview(content ?? "");
+  if (text) return text;
+
+  if (attachments.length === 1) {
+    const mimeType = String(attachments[0]?.mimeType ?? "");
+    if (mimeType.startsWith("image/")) return "Sent a photo";
+    if (mimeType.startsWith("video/")) return "Sent a video";
+    return "Sent an attachment";
+  }
+
+  return `Sent ${attachments.length} attachments`;
+}
+
+/**
+ * Messenger-style phone notification for the OTHER participant in this exact
+ * private Dispatcher ↔ Driver thread.
+ *
+ * This is intentionally non-fatal and additive. Dispatch Chat persistence and
+ * socket delivery remain authoritative even if Notification/Web Push is down.
+ */
+async function notifyDispatchChatRecipient(params: {
+  actor: IUser;
+  organizationId: string;
+  thread: any;
+  messageId: string;
+  preview: string;
+}) {
+  const { actor, organizationId, thread, messageId, preview } = params;
+
+  const senderIsDriver = actor.role === "driver";
+  const driverId = String(thread.driverId ?? "").trim();
+  const dispatcherId = String(thread.dispatcherId ?? "").trim();
+  const threadId = String(thread._id ?? "").trim();
+
+  if (!driverId || !dispatcherId || !threadId) return;
+
+  const recipientId = senderIsDriver ? dispatcherId : driverId;
+  if (!recipientId || recipientId === actor._id.toString()) return;
+
+  const route = senderIsDriver
+    ? `/driver-tracker?driverId=${encodeURIComponent(driverId)}&openDispatchChat=1`
+    : `/driver?openDispatchChat=1&threadId=${encodeURIComponent(threadId)}`;
+
+  const senderName =
+    String(actor.name ?? "").trim() ||
+    (senderIsDriver ? "Driver" : "Dispatch");
+
+  await safeCreateNotification({
+    userId: recipientId,
+    organizationId,
+    type: "driver_dispatch_message",
+    title: senderName,
+    message: dispatchChatNotificationPreview(preview) || "Sent you a message",
+    metadata: {
+      threadId,
+      driverId,
+      dispatcherId,
+      senderId: actor._id.toString(),
+      senderName,
+      messageId,
+      route,
+      pushSource: "Dispatch Chat",
+      // Keep phone delivery sender-specific even while the app is backgrounded.
+      // This bypasses only the generic burst summary; other notification types
+      // retain the existing anti-spam behavior.
+      pushPresentation: "direct_message",
+      // Latest message replaces the previous tray card for the SAME private
+      // conversation, while renotify in sw.ts still alerts on every new one.
+      pushTag: `dispatch-chat:${threadId}`,
+      // Web Push Topic collapses only still-undelivered pushes for this exact
+      // conversation. The Notification rows and Dispatch Chat messages remain
+      // separate, so no history/unread information is lost.
+      pushTopic: `dispatch-chat:${threadId}`,
+      soundProfile: "message",
+    },
+  });
+}
+
 
 function dispatchChatUnreadPredicate(
   actorId: mongoose.Types.ObjectId | string,
@@ -1425,6 +1519,22 @@ const sendMessage = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     payload,
   );
 
+  // Never make message sending depend on push delivery. The safe notification
+  // helper absorbs persistence/push errors and this detached call keeps the
+  // HTTP response on the existing chat-success path.
+  void notifyDispatchChatRecipient({
+    actor,
+    organizationId,
+    thread,
+    messageId: String(message._id),
+    preview: content,
+  }).catch((error) => {
+    logger.error(
+      { error, messageId: String(message._id), threadId: String(thread._id) },
+      "[DispatchChat] Non-fatal: failed to create direct-message notification",
+    );
+  });
+
   return res
     .status(201)
     .json(new ApiResponse(201, payload, "Dispatch Chat message sent"));
@@ -1536,6 +1646,19 @@ const uploadAttachments = asyncHandler(
       "dispatch-chat:message",
       payload,
     );
+
+    void notifyDispatchChatRecipient({
+      actor,
+      organizationId,
+      thread,
+      messageId: String(message._id),
+      preview: dispatchAttachmentNotificationPreview(attachments, content),
+    }).catch((error) => {
+      logger.error(
+        { error, messageId: String(message._id), threadId: String(thread._id) },
+        "[DispatchChat] Non-fatal: failed to create attachment notification",
+      );
+    });
 
     return res
       .status(201)
