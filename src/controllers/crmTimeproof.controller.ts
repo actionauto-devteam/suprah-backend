@@ -26,6 +26,7 @@ import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { closeShiftForInactivity } from '../services/autoClockout.service';
+import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -40,6 +41,7 @@ const BREAK_ADMIN_NOTIFY_SECONDS = BREAK_LIMIT_SECONDS + 5 * 60;
 const IDLE_STAGE2_ELAPSED_MIN = 10;
 const IDLE_STAGE3_ELAPSED_MIN = 20;
 const IDLE_ESCALATION_DEBUG_SCALE = Number(process.env.IDLE_ESCALATION_DEBUG_SCALE) || 1;
+const IDLE_GRACE_WINDOW_MS = 3 * 60 * 1000;
 
 const MAX_PUSH_SUBSCRIPTIONS = 6;
 
@@ -643,6 +645,13 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
 
   const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - todayBreakTotalSeconds);
 
+  const currentSessionWorkedSeconds = lastTimeIn
+    ? allSessions
+        .filter(s => new Date(s.in).getTime() >= lastTimeIn.getTime())
+        .reduce((sum, s) => sum + s.duration, 0)
+    : 0;
+  const currentSessionSeconds = Math.max(0, currentSessionWorkedSeconds - totalBreakSeconds);
+
   const activityIntervals = await ActivityInterval.find({
     userId: user._id,
     shiftDate: todayMDTStr,
@@ -689,6 +698,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     todayTotalActiveSeconds,
     currentIntervalStartAt,
     wallClockRenderedSeconds,
+    currentSessionSeconds,
   }, 'Shift state fetched'));
 });
 
@@ -742,30 +752,47 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     lastBreakNotifiedAt = null;
   }
 
-  let idleSince = existing?.idleSince ?? null;
-  if (isIdle && !wasIdle) idleSince = new Date();
-  if (!isIdle) idleSince = null;
+  const existingIdleBrokenAt = existing?.idleBrokenAt ?? null;
+  const withinGraceWindow = !!existingIdleBrokenAt
+    && Date.now() - existingIdleBrokenAt.getTime() <= IDLE_GRACE_WINDOW_MS;
 
-  // Staged idle escalation ladder: 0 (not idle) / 1 (10min, existing alert, anchors idleSince)
-  // / 2 (20min, 2nd warning) / 3 (30min, auto-end). idleSince already starts at the confirmed
-  // 10-min mark, so +10min elapsed ≈ 20 min real idle, +20min ≈ 30 min real — same reasoning
-  // the old 15-min-only escalation used, just two checkpoints instead of one.
+  let idleSince = existing?.idleSince ?? null;
+  let idleBrokenAt = existingIdleBrokenAt;
+  let lastIdleChannelPostedAt = existing?.lastIdleChannelPostedAt ?? null;
+  let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
+  let isGraceRestoration = false;
+
+  if (isIdle && !wasIdle) {
+    if (withinGraceWindow && idleSince) {
+      isGraceRestoration = true;
+      idleBrokenAt = null;
+    } else {
+      idleSince = new Date();
+      idleBrokenAt = null;
+      lastIdleChannelPostedAt = null;
+      lastIdleEscalationNotifiedAt = null;
+    }
+  } else if (!isIdle && wasIdle) {
+    idleBrokenAt = new Date();
+  } else if (!isIdle && !wasIdle) {
+    if (existingIdleBrokenAt && !withinGraceWindow) {
+      idleSince = null;
+      idleBrokenAt = null;
+      lastIdleChannelPostedAt = null;
+      lastIdleEscalationNotifiedAt = null;
+    }
+  }
+
   const existingIdleStage = existing?.idleStage ?? 0;
   let idleStage = existingIdleStage;
   if (!isIdle) {
-    idleStage = 0;
+    if (idleSince === null) idleStage = 0;
   } else if (idleSince) {
     const elapsedIdleMin = ((Date.now() - idleSince.getTime()) / 60_000) * IDLE_ESCALATION_DEBUG_SCALE;
     if (elapsedIdleMin >= IDLE_STAGE3_ELAPSED_MIN && existingIdleStage < 3) idleStage = 3;
     else if (elapsedIdleMin >= IDLE_STAGE2_ELAPSED_MIN && existingIdleStage < 2) idleStage = 2;
     else if (existingIdleStage < 1) idleStage = 1;
   }
-
-  let lastIdleEscalationNotifiedAt = existing?.lastIdleEscalationNotifiedAt ?? null;
-  if (!isIdle) lastIdleEscalationNotifiedAt = null;
-
-  let lastIdleChannelPostedAt = existing?.lastIdleChannelPostedAt ?? null;
-  if (!isIdle) lastIdleChannelPostedAt = null;
 
   const wasScreenRecordingGranted = existing?.screenRecordingGranted ?? null;
   let lastScreenRecordingNotifiedAt = existing?.lastScreenRecordingNotifiedAt ?? null;
@@ -777,6 +804,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
       isIdle,
       idleSince,
       idleStage,
+      idleBrokenAt,
       lastIdleEscalationNotifiedAt,
       lastIdleChannelPostedAt,
       isOnBreak,
@@ -839,7 +867,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   }
 
   // ── Notify admins: agent went idle ────────────────────────────────────────
-  if (!wasIdle && isIdle && isOnShift) {
+  if (!wasIdle && isIdle && isOnShift && !isGraceRestoration) {
     const admins = await CrmUser.find({ organizationId: user.organizationId, role: { $in: ['admin', 'manager'] }, isActive: true }).select('_id').lean();
     const idlePayload = { userId: user._id, fullName: user.fullName, isIdle: true, at: new Date() };
     for (const admin of admins) {
@@ -2023,7 +2051,7 @@ export const clockOutUser = asyncHandler(async (req: Request, res: Response) => 
     note: `Manually clocked out by ${requestor.fullName} (admin action — agent was idle)`,
   });
 
-  await AgentHeartbeat.updateOne({ userId }, { isIdle: false, idleSince: null, lastIdleEscalationNotifiedAt: null });
+  await AgentHeartbeat.updateOne({ userId }, { isIdle: false, idleSince: null, idleBrokenAt: null, lastIdleEscalationNotifiedAt: null });
 
   await AuditLog.create({
     entityType: 'TimeLog',
@@ -2408,16 +2436,13 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
 
   const isOnShift = timeIns.length > timeOuts.length;
   const hasClockOutToday = timeOuts.length > 0;
-  const resumable = !isOnShift && hasClockOutToday;
+  const lastTimeOut = timeOuts.length > 0 ? timeOuts[timeOuts.length - 1] : null;
+  const resumable = !isOnShift && hasClockOutToday && isSeamlesslyResumableNote(lastTimeOut?.note);
 
   const originalClockIn = resumable && timeIns.length > 0
     ? new Date(timeIns[0].timestamp).toISOString()
     : null;
 
-  // Resuming works the same regardless of why the shift ended (auto-clockout or a deliberate
-  // manual "End Shift") — the modal's "Yes" always deletes the closing time-out and revives the
-  // original time-in via resumeShift below. Kept as its own field (rather than folding into
-  // `resumable`) in case a future caller needs to distinguish the two reasons again.
   const canSeamlessResume = resumable;
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
@@ -2443,12 +2468,11 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  // Deliberately allows resuming regardless of why the shift ended (auto-clockout or a manual
-  // "End Shift" click) — deletes whatever the last time-out was and revives the original
-  // time-in either way. Employees explicitly choosing "Yes, Resume Shift" is the guard here,
-  // same as any other self-service clock action.
   if (lastTimeOut.type !== 'time-out') {
     throw new ApiError(400, 'No shift to resume today');
+  }
+  if (!isSeamlesslyResumableNote(lastTimeOut.note)) {
+    throw new ApiError(400, 'This shift was deliberately ended and cannot be resumed — start a new shift instead');
   }
 
   await TimeLog.deleteOne({ _id: lastTimeOut._id });

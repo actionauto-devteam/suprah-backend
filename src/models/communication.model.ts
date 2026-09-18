@@ -139,6 +139,7 @@ export interface ICallLog extends Document {
   durationSec?: number;
   hangupCause?: string;
   customerName?: string;
+  textBackSentAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -170,6 +171,7 @@ const CallLogSchema = new Schema<ICallLog>(
     durationSec: { type: Number },
     hangupCause: { type: String },
     customerName: { type: String },
+    textBackSentAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

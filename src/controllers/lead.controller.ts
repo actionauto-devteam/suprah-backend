@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
 import { createHash } from 'crypto';
 import appointmentService from '../services/appointment.service';
 import googleCalendarService from '../services/googleCalendar.service';
@@ -18,7 +19,7 @@ import {
   extractADFFromBody,
   detectChannel,
 } from '../utils/adfParser';
-import { getSocketIO } from '../utils/socketEmitter';
+import { getSocketIO, emitToUser } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
@@ -592,6 +593,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         ? req.query.search.trim().slice(0, 100)
         : '';
     const status = req.query.status as string;
+    const assignedTo = req.query.assignedTo as string;
 
     const sortBy =
       req.query.sortBy === "oldest" ||
@@ -619,6 +621,10 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     if (status && status !== 'All') {
       query.status = status;
+    }
+
+    if (assignedTo) {
+      query.assignedTo = assignedTo;
     }
 
     let sort: Record<string, 1 | -1>;
@@ -653,7 +659,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes'
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt'
       )
       .sort(sort)
       .skip(skip)
@@ -677,6 +683,36 @@ export const getAllLeads = async (req: Request, res: Response) => {
   }
 };
 
+export const getLeadStatusCounts = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
+    }
+
+    const results = await Lead.aggregate([
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]);
+
+    const counts: Record<string, number> = {};
+    for (const row of results) {
+      if (row._id) counts[row._id] = row.count;
+    }
+
+    res.json(new ApiResponse(200, { counts }));
+  } catch (error) {
+    console.error('[ERROR] Error fetching lead status counts:', error);
+
+    res.status(500).json({
+      message: 'Error fetching lead status counts',
+    });
+  }
+};
+
 export const getLeadById = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
@@ -687,7 +723,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes'
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt'
       )
       .lean();
 
@@ -1034,6 +1070,99 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[ERROR] Error updating lead details:', error);
     return res.status(500).json({ message: 'Error updating lead details' });
+  }
+};
+
+export const assignLead = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    const { id } = req.params;
+    const actingUser = req.user || req.crmUser;
+
+    if (!actingUser) throw new ApiError(401, 'Please authenticate');
+    if (!orgId) {
+      return res.status(400).json({ message: 'Organization context missing' });
+    }
+
+    const { assignedTo } = req.body || {};
+
+    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    let assigneeUser: IUser | null = null;
+    if (assignedTo) {
+      assigneeUser = await User.findOne({ _id: assignedTo, organizationId: orgId });
+      if (!assigneeUser) {
+        return res.status(400).json({ message: 'Assignee must belong to this organization' });
+      }
+    }
+
+    const previousAssignee = lead.assignedTo;
+
+    lead.assignmentHistory = lead.assignmentHistory || [];
+    lead.assignmentHistory.push({
+      from: previousAssignee || undefined,
+      to: assigneeUser?._id || undefined,
+      changedAt: new Date(),
+      changedBy: (actingUser as any)._id,
+    });
+
+    lead.assignedTo = assigneeUser?._id;
+    lead.assignedAt = assigneeUser ? new Date() : undefined;
+    await lead.save();
+
+    await activityService.createActivity({
+      userId: (actingUser as any)._id.toString(),
+      organizationId: orgId,
+      type: 'other',
+      title: assigneeUser ? 'Lead assigned' : 'Lead unassigned',
+      description: assigneeUser
+        ? `${lead.firstName} ${lead.lastName || ''}`.trim() + ` assigned to ${assigneeUser.name || assigneeUser.email}`
+        : `${lead.firstName} ${lead.lastName || ''}`.trim() + ' unassigned',
+      metadata: {
+        leadId: lead._id.toString(),
+        assignedTo: assigneeUser?._id?.toString() || null,
+      },
+      ipAddress: req.ip,
+    });
+
+    if (assigneeUser) {
+      const { title, message } = notificationTemplates.lead_assigned({
+        customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        assignedTo: assigneeUser.name || assigneeUser.email,
+      });
+
+      await safeCreateNotification({
+        userId: assigneeUser._id.toString(),
+        organizationId: orgId,
+        type: 'lead_assigned',
+        title,
+        message,
+        metadata: {
+          leadId: lead._id.toString(),
+          customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        },
+      });
+    }
+
+    const io = getSocketIO();
+    if (io) {
+      io.to(`org:${orgId}`).emit('lead:update', lead);
+    }
+    if (assigneeUser) {
+      emitToUser(assigneeUser._id.toString(), 'lead:assigned', {
+        leadId: lead._id.toString(),
+        leadName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        assignedBy: (actingUser as any).fullName || (actingUser as any).name || (actingUser as any).email,
+      });
+    }
+
+    return res.json(new ApiResponse(200, lead, assigneeUser ? 'Lead assigned' : 'Lead unassigned'));
+  } catch (error) {
+    console.error('[ERROR] Error assigning lead:', error);
+    return res.status(500).json({ message: 'Error assigning lead' });
   }
 };
 

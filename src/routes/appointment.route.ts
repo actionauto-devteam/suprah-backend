@@ -2,10 +2,12 @@ import express from 'express';
 import appointmentController from '../controllers/appointment.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
+import { publicBookingLimiter } from '../middleware/rate-limit.middleware';
 
 const router = express.Router();
 
 router.post('/:id/guest-response', appointmentController.handleGuestResponse);
+router.post('/public/book-test-drive', publicBookingLimiter, appointmentController.createPublicTestDriveBooking);
 
 router.use(auth());
 router.use(requireOrg);

@@ -59,6 +59,25 @@ export const adfLimiter = rateLimit({
     validate: { default: false }
 });
 
+export const publicBookingLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return (req.body?.email || req.ip).toString();
+    },
+    message: {
+        success: false,
+        message: 'Too many booking requests. Please wait a moment and try again.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 export const syncLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,

@@ -16,6 +16,7 @@ import { fireShiftAlert } from '../services/shiftAlerts.service';
 import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
 import { findOpenShiftOnOtherIdentity } from '../utils/crossIdentityShift.util';
+import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
 
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
@@ -486,6 +487,13 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
   // a
   const wallClockRenderedSeconds = Math.max(0, todayTotalWorkedSecondsIncludingLive - totalBreakSeconds);
 
+  const currentSessionWorkedSeconds = lastTimeIn
+    ? allSessions
+        .filter(s => new Date(s.in).getTime() >= lastTimeIn.getTime())
+        .reduce((sum, s) => sum + s.duration, 0)
+    : 0;
+  const currentSessionSeconds = Math.max(0, currentSessionWorkedSeconds - totalBreakSeconds);
+
   // Activity-based tracking: sum of completed ActivityIntervals for today
   const activityIntervals = await ActivityInterval.find({
     userId: actor.id,
@@ -537,6 +545,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     todayTotalActiveSeconds,
     currentIntervalStartAt,
     wallClockRenderedSeconds,
+    currentSessionSeconds,
   }, 'Shift state fetched'));
 });
 
@@ -647,12 +656,10 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
   const timeIns  = todayLogs.filter(l => l.type === 'time-in');
   const timeOuts = todayLogs.filter(l => l.type === 'time-out');
   const isOnShift = timeIns.length > timeOuts.length;
-  const resumable = !isOnShift && timeOuts.length > 0;
+  const lastTimeOut = timeOuts.length > 0 ? timeOuts[timeOuts.length - 1] : null;
+  const resumable = !isOnShift && timeOuts.length > 0 && isSeamlesslyResumableNote(lastTimeOut?.note);
   const originalClockIn = resumable && timeIns.length > 0 ? new Date(timeIns[0].timestamp).toISOString() : null;
 
-  // Resuming works the same regardless of why the shift ended (auto-clockout or a deliberate
-  // manual "End Shift") — see resumeShift below and crmTimeproof.controller.ts's twin function
-  // for the full rationale.
   const canSeamlessResume = resumable;
 
   res.json(new ApiResponse(200, { resumable, originalClockIn, canSeamlessResume }, 'Resumable shift checked'));
@@ -679,10 +686,11 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   if (timeOuts.length === 0) throw new ApiError(400, 'No shift to resume today');
 
   const lastTimeOut = todayLogs[todayLogs.length - 1];
-  // Deliberately allows resuming regardless of why the shift ended (auto-clockout or a manual
-  // "End Shift" click) — see crmTimeproof.controller.ts's twin function for the full rationale.
   if (lastTimeOut.type !== 'time-out') {
     throw new ApiError(400, 'No shift to resume today');
+  }
+  if (!isSeamlesslyResumableNote(lastTimeOut.note)) {
+    throw new ApiError(400, 'This shift was deliberately ended and cannot be resumed — start a new shift instead');
   }
 
   await TimeLog.deleteOne({ _id: lastTimeOut._id });
