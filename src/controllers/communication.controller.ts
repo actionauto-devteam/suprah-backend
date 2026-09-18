@@ -125,9 +125,11 @@ export const getCustomerThread = asyncHandler(async (req: Request, res: Response
   const orgId = orgOf(req);
   const { customerId } = req.params;
   const phone = req.query.phone ? comm.normalizePhone(String(req.query.phone)) : null;
+  const leadId = req.query.leadId ? String(req.query.leadId) : null;
 
   const convQuery: any = { orgId, $or: [{ customerId }] };
   if (phone) convQuery.$or.push({ customerPhone: phone });
+  if (leadId) convQuery.$or.push({ leadId });
 
   const conversation = await Conversation.findOne(convQuery).sort({ lastMessageAt: -1 });
 
@@ -144,6 +146,7 @@ export const getCustomerThread = asyncHandler(async (req: Request, res: Response
       $or: [
         { customerId },
         ...(phone ? [{ from: phone }, { to: phone }] : []),
+        ...(leadId ? [{ leadId }] : []),
       ],
     })
       .sort({ createdAt: -1 })
@@ -213,7 +216,7 @@ export const claimCall = asyncHandler(async (req: Request, res: Response) => {
 /** Browser-originated outbound call lifecycle logging. */
 export const logClientCall = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
-  const { clientCallId, event, toPhone, customerId, hangupCause } = req.body || {};
+  const { clientCallId, event, toPhone, customerId, leadId, hangupCause } = req.body || {};
   if (!clientCallId || !event) throw new ApiError(400, "clientCallId and event are required");
 
   const call = await comm.logClientCall({
@@ -223,6 +226,7 @@ export const logClientCall = asyncHandler(async (req: Request, res: Response) =>
     event,
     toPhone,
     customerId,
+    leadId,
     hangupCause,
   });
   res.json(new ApiResponse(200, { call }, "Call logged"));

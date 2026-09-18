@@ -40,6 +40,29 @@ function buildMissedCallMessage(dealerName: string): string {
   return `Thank you for calling ${dealerName}. All of our team members are currently unavailable. Please send us a text message and we will get back to you as soon as possible.`;
 }
 
+function buildMissedCallTextBackMessage(dealerName: string): string {
+  return `Sorry we missed your call, ${dealerName} here! Reply to this text and we'll get right back to you. Reply STOP to opt out.`;
+}
+
+const SYSTEM_ACTOR: IActorRef = { userId: "system", name: "Suprah AI" };
+
+async function sendMissedCallTextBack(call: any): Promise<void> {
+  try {
+    const dealerName = await resolveDealerName(call.orgId);
+    await sendSmsFromUser({
+      orgId: call.orgId,
+      user: SYSTEM_ACTOR,
+      toPhone: call.from,
+      body: buildMissedCallTextBackMessage(dealerName),
+      customerId: call.customerId,
+      customerName: call.customerName,
+      leadId: call.leadId,
+    });
+  } catch (err) {
+    console.error("[comm] missed-call text-back failed:", err);
+  }
+}
+
 /** Customer phone fields to match inbound numbers against.
  *  Adjust to your Customer schema if needed. */
 const CUSTOMER_PHONE_FIELDS = ["phoneNumber", "phone", "mobile", "contactNumber", "cellPhone"];
@@ -419,13 +442,14 @@ export async function handleCallInitiated(payload: any) {
     ringTimers.delete(String(call._id));
     const still = await CallLog.findOneAndUpdate(
       { _id: call._id, status: "ringing" },
-      { $set: { status: "missed", endedAt: new Date() } },
+      { $set: { status: "missed", endedAt: new Date(), textBackSentAt: new Date() } },
       { new: true }
     );
     if (still) {
       emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
       const dealerName = await resolveDealerName(orgId);
       await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+      await sendMissedCallTextBack(still);
     }
   }, RING_TIMEOUT_MS);
   ringTimers.set(String(call._id), timer);
@@ -541,6 +565,15 @@ export async function handleCallHangup(payload: any) {
   }
 
   emitToOrg(call.orgId, "comm:call:update", { call: call.toObject() });
+
+  if (status === "missed") {
+    const claimed = await CallLog.findOneAndUpdate(
+      { _id: call._id, textBackSentAt: null },
+      { $set: { textBackSentAt: new Date() } },
+      { new: true }
+    );
+    if (claimed) await sendMissedCallTextBack(claimed);
+  }
 }
 
 /** call.speak.ended — used by the missed-call announcement; hang up after. */
@@ -560,12 +593,14 @@ export async function logClientCall(opts: {
   event: "start" | "answered" | "end" | "failed";
   toPhone?: string;
   customerId?: any;
+  leadId?: any;
   hangupCause?: string;
 }) {
   if (opts.event === "start") {
     const to = normalizePhone(opts.toPhone || "");
     let customerId = opts.customerId ?? null;
     let customerName: string | undefined;
+    let leadId = opts.leadId ?? null;
     if (!customerId) {
       const c = await findCustomerByPhone(opts.orgId, to);
       if (c) {
@@ -573,11 +608,16 @@ export async function logClientCall(opts: {
         customerName = customerDisplayName(c);
       }
     }
+    if (!leadId) {
+      const lead = await findLeadByPhone(opts.orgId, to);
+      if (lead) leadId = lead._id;
+    }
     const conversation = await getOrCreateConversation({
       orgId: opts.orgId,
       phone: to,
       customerId,
       customerName,
+      leadId,
     });
     const call = await CallLog.findOneAndUpdate(
       { clientCallId: opts.clientCallId },
@@ -585,6 +625,7 @@ export async function logClientCall(opts: {
         $setOnInsert: {
           orgId: opts.orgId,
           customerId,
+          leadId,
           conversationId: conversation._id,
           direction: "outbound",
           from: telnyx.COMPANY_NUMBER,

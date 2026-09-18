@@ -2,11 +2,13 @@ import { Router } from "express";
 import {
   receiveADF,
   getAllLeads,
+  getLeadStatusCounts,
   getLeadById,
   getUnansweredInquiryReminders,
   runUnansweredInquiryReminderCheck,
   updateLeadContact,
   updateLeadDetails,
+  assignLead,
   updateLead,
   createInquiry,
   markAsRead,
@@ -50,6 +52,8 @@ router.post(
 router.get("/", getAllLeads);
 router.post("/", syncLimiter, createInquiry);
 
+router.get("/status-counts", getLeadStatusCounts);
+
 router.post(
   "/bulk-reply",
   bulkReplyLimiter,
@@ -72,6 +76,7 @@ router.post(
 router.post("/:id/notes", addLeadNote);
 router.patch("/:id/contact", updateLeadContact);
 router.patch("/:id/details", updateLeadDetails);
+router.patch("/:id/assign", assignLead);
 
 router.patch("/:id", updateLead);
 

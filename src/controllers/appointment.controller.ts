@@ -3,6 +3,8 @@ import { asyncHandler } from '../utils/asyncHandler';
 import Appointment from '../models/Appointment.model';
 import ServiceSlot from '../models/ServiceSlot.model';
 import User from '../models/User.model';
+import Vehicle from '../models/Vehicle.model';
+import Lead from '../models/lead.model';
 import appointmentService from '../services/appointment.service';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
 import customerBookingService from '../services/customerbooking.service';
@@ -453,6 +455,123 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
     );
 });
 
+const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Response) => {
+    const { vehicleId, firstName, lastName, email, phone, startTime, notes } = req.body || {};
+
+    if (!vehicleId || !firstName || !lastName || !email || !phone || !startTime) {
+        return res.status(400).json(
+            new ApiResponse(400, null, 'vehicleId, firstName, lastName, email, phone, and startTime are required')
+        );
+    }
+
+    const start = new Date(startTime);
+    if (isNaN(start.getTime()) || start < new Date()) {
+        return res.status(400).json(
+            new ApiResponse(400, null, 'Please choose a valid future date and time')
+        );
+    }
+
+    const vehicle = await Vehicle.findById(vehicleId).lean();
+    if (!vehicle) {
+        return res.status(404).json(new ApiResponse(404, null, 'Vehicle not found'));
+    }
+
+    const orgId = vehicle.organizationId;
+    if (!orgId) {
+        return res.status(400).json(new ApiResponse(400, null, 'This vehicle is not linked to a dealership'));
+    }
+
+    const systemUser = await User.findOne({
+        organizationId: orgId,
+        role: { $in: ['admin', 'employee'] },
+    })
+        .sort({ role: 1 })
+        .select('_id')
+        .lean();
+
+    if (!systemUser) {
+        return res.status(400).json(
+            new ApiResponse(400, null, 'This dealership is not yet set up to receive online bookings')
+        );
+    }
+
+    const systemUserId = (systemUser as any)._id;
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const vehicleLabel = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
+
+    const lead = await Lead.create({
+        organizationId: orgId,
+        createdBy: systemUserId,
+        firstName,
+        lastName,
+        email,
+        phone,
+        vehicle: {
+            year: vehicle.year ? String(vehicle.year) : undefined,
+            make: vehicle.make,
+            model: vehicle.model,
+            stock: vehicle.stockNumber,
+        },
+        comments: notes || `Requested a test drive for ${vehicleLabel} via the website.`,
+        source: 'Website Booking',
+        channel: 'web',
+        status: 'New',
+    });
+
+    const appointment = await Appointment.create({
+        organizationId: orgId,
+        createdBy: systemUserId,
+        createdByModel: 'User',
+        participants: [systemUserId],
+        participantModel: 'User',
+        title: `Test Drive Request — ${vehicleLabel}`,
+        startTime: start,
+        endTime: end,
+        type: 'test-drive',
+        entryType: 'appointment',
+        status: 'scheduled',
+        vehicleId: vehicle._id,
+        leadId: lead._id,
+        customerBooking: {
+            firstName,
+            lastName,
+            email,
+            phone,
+            isCustomerBooking: true,
+        },
+        notes,
+    });
+
+    lead.status = 'Appointment Set';
+    lead.appointment = {
+        date: start,
+        time: start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: CALENDAR_TZ }),
+        notes,
+    };
+    lead.statusHistory = lead.statusHistory || [];
+    lead.statusHistory.push({
+        from: 'New',
+        to: 'Appointment Set',
+        changedAt: new Date(),
+        changedBy: systemUserId,
+    });
+    await lead.save();
+
+    emitToOrg(String(orgId), 'lead:new', lead.toObject());
+    emitToOrg(String(orgId), 'appointment:new', {
+        _id: appointment._id?.toString(),
+        title: appointment.title,
+        startTime: appointment.startTime,
+        status: appointment.status,
+    });
+
+    logger.info({ leadId: lead._id, appointmentId: appointment._id, vehicleId }, 'Public test drive booking submitted');
+
+    res.status(201).json(
+        new ApiResponse(201, { leadId: lead._id, appointmentId: appointment._id }, 'Test drive request submitted')
+    );
+});
+
 /**
  * Get appointment statistics
  */
@@ -513,5 +632,6 @@ export default {
     cancelAppointment,
     deleteAppointment,
     handleGuestResponse,
-    getAppointmentStats
+    getAppointmentStats,
+    createPublicTestDriveBooking
 };

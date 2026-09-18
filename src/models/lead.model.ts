@@ -26,6 +26,15 @@ export interface ILead extends Document {
 
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
 
+  assignedTo?: mongoose.Types.ObjectId;
+  assignedAt?: Date;
+  assignmentHistory?: Array<{
+    from?: mongoose.Types.ObjectId;
+    to?: mongoose.Types.ObjectId;
+    changedAt: Date;
+    changedBy?: mongoose.Types.ObjectId;
+  }>;
+
   source: string;
 
   status:
@@ -184,6 +193,41 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       default: 'email',
       index: true,
     },
+
+    assignedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+
+    assignedAt: {
+      type: Date,
+      default: null,
+    },
+
+    assignmentHistory: [
+      {
+        from: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+
+        to: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+
+        changedAt: {
+          type: Date,
+          default: Date.now,
+        },
+
+        changedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+      },
+    ],
 
     source: {
       type: String,
@@ -384,6 +428,12 @@ LeadSchema.index({
   organizationId: 1,
   status: 1,
   'followUp.lastCustomerActivityAt': 1,
+});
+
+LeadSchema.index({
+  organizationId: 1,
+  assignedTo: 1,
+  createdAt: -1,
 });
 
 export default mongoose.model<ILead>(

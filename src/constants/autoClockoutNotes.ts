@@ -9,3 +9,8 @@ export const AUTO_CLOCKOUT_CLOSE_NOTES = [
   'Auto clock-out — idle 30+ minutes (staged idle escalation)',
   'Auto clock-out — idle 35+ minutes (local fallback — backend unreachable)',
 ];
+
+export function isSeamlesslyResumableNote(note: string | null | undefined): boolean {
+  if (!note || !note.trim()) return true;
+  return AUTO_CLOCKOUT_CLOSE_NOTES.includes(note);
+}

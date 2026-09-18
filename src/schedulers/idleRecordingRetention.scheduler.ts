@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { storageService, BucketType } from '../services/storage.service';
 import logger from '../utils/logger';
 
-const RETENTION_DAYS = parseInt(process.env.IDLE_RECORDING_RETENTION_DAYS || '3', 10);
+const RETENTION_DAYS = parseInt(process.env.IDLE_RECORDING_RETENTION_DAYS || '2', 10);
 const CRON_SCHEDULE = process.env.IDLE_RECORDING_RETENTION_CRON || '30 3 * * *';
 
 async function purgeOldIdleRecordings(): Promise<{ deleted: number; failures: number }> {

@@ -75,6 +75,7 @@ import noteRoute from "./note.route";
 import spotifyRoute from "./spotify.route";
 import yapLineRoute from "./yapline.route";
 import communicationRoute from "./communication.routes";
+import cannedReplyRoute from "./cannedReply.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import youtubeRoute from "./youtube.route";
@@ -200,6 +201,10 @@ const defaultRoutes = [
   {
     path: "/mail",
     route: mailRoute,
+  },
+  {
+    path: "/crm/canned-replies",
+    route: cannedReplyRoute,
   },
   {
     path: "/crm",
