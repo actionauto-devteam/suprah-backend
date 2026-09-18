@@ -37,7 +37,6 @@ async function emitScheduledMessage(messageId: string) {
         payload,
       );
     });
-    io.to(`conv:${conversation._id.toString()}`).emit("message:new", payload);
   } catch (error) {
     logger.warn({ error }, "[SupraSpaceSchedule] Socket emit failed");
   }

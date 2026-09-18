@@ -1,3 +1,5 @@
+import { createSupraSpaceMessageOnce, validateClientMessageId } from '../services/supraspaceDelivery.service';
+import { validateSupraSpaceMembers, validateSupraSpaceReply, resolveSupraSpaceAttachments } from '../services/supraspaceValidation.service';
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { randomBytes } from 'crypto';
@@ -1207,7 +1209,8 @@ const createGroup = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'At least one other member is required');
   }
 
-  const uniqueMembers = [...new Set([userId.toString(), ...memberIds])];
+  const validMembers = await validateSupraSpaceMembers(memberIds, req.crmUser!.organizationId);
+  const uniqueMembers = [...new Set([userId.toString(), ...validMembers])];
 
   const conversation = await SupraSpaceConversation.create({
     type: 'group',
@@ -1250,6 +1253,7 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
 
   // Any member can add new members; only admin (or self) may remove
   if (Array.isArray(addMembers)) {
+    await validateSupraSpaceMembers(addMembers, req.crmUser!.organizationId);
     addMembers.forEach((m) => {
       if (!idIn(conversation.members as any, m)) {
         conversation.members.push(new mongoose.Types.ObjectId(m));
@@ -1491,7 +1495,7 @@ const updateMemberSettings = asyncHandler(async (req: Request, res: Response) =>
 const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { before, limit = '40' } = req.query;
+  const { before, beforeId, limit = '40' } = req.query;
   const requestedLimit = Math.min(Math.max(parseInt(String(limit), 10) || 40, 1), 100);
 
   // Use lean() so clearedAt comes back as a plain JS object — no Mongoose Mixed
@@ -1502,7 +1506,13 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
 
   const filter: any = { conversationId: id, isDeleted: false, scheduledStatus: { $ne: 'pending' } };
   const createdAtFilter: any = {};
-  if (before) createdAtFilter.$lt = new Date(before as string);
+  if (before) {
+    const cursor = new Date(String(before));
+    if (Number.isNaN(cursor.getTime())) throw new ApiError(400, 'Invalid message cursor');
+    if (typeof beforeId === 'string' && mongoose.isValidObjectId(beforeId)) {
+      filter.$or = [{ createdAt: { $lt: cursor } }, { createdAt: cursor, _id: { $lt: new mongoose.Types.ObjectId(beforeId) } }];
+    } else createdAtFilter.$lt = cursor;
+  }
   const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
   if (rawClearedAt) {
     // Stored as BSON Date; ensure it's a JS Date regardless of driver version
@@ -1513,7 +1523,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   const messages = await SupraSpaceMessage.find(filter)
     .populate('sender', 'fullName username avatar')
     .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } })
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
     .limit(requestedLimit)
     .lean();
 
@@ -1732,7 +1742,11 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
-  const { content, replyTo, attachments, gif, scheduledAt } = req.body;
+  const { content, replyTo, gif, scheduledAt } = req.body;
+  if (content !== undefined && (typeof content !== 'string' || content.length > 10000)) throw new ApiError(400, 'Invalid message content');
+  const clientMessageId = validateClientMessageId(req.body.clientMessageId);
+  const attachments = await resolveSupraSpaceAttachments(req.body.attachments, userId);
+  if (gif && (typeof gif.url !== 'string' || !/^https:\/\//i.test(gif.url))) throw new ApiError(400, 'Invalid GIF URL');
 
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   const hasGif = !!gif?.url;
@@ -1748,6 +1762,8 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
   }
 
+  await validateSupraSpaceReply(replyTo, id);
+
   const scheduledDate = scheduledAt ? new Date(scheduledAt) : null;
   const isScheduled = !!scheduledDate && !Number.isNaN(scheduledDate.getTime()) && scheduledDate.getTime() > Date.now() + 30_000;
   if (scheduledAt && !isScheduled) throw new ApiError(400, 'Schedule time must be at least 30 seconds in the future');
@@ -1760,7 +1776,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     msgType = hasImage && attachments.length === 1 ? 'image' : 'file';
   }
 
-  const message = await SupraSpaceMessage.create({
+  const { message, created } = await createSupraSpaceMessageOnce({
     conversationId: id,
     sender: userId,
     content: content?.trim() || '',
@@ -1772,10 +1788,12 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     scheduledAt: isScheduled ? scheduledDate : null,
     scheduledStatus: isScheduled ? 'pending' : null,
     sentAt: isScheduled ? null : new Date(),
-  });
+  }, clientMessageId);
 
   await message.populate('sender', 'fullName username avatar');
   if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
+
+  if (!created) return res.status(message.scheduledStatus === 'pending' ? 202 : 200).json(new ApiResponse(200, await signAttachments(message.toObject()), 'Message already accepted'));
 
   if (isScheduled) {
     return res.status(202).json(new ApiResponse(202, message.toObject(), 'Message scheduled'));
@@ -1944,6 +1962,8 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
   const { replyTo, content, duration } = req.body;
+  if (content !== undefined && (typeof content !== 'string' || content.length > 10000)) throw new ApiError(400, 'Invalid message content');
+  const clientMessageId = validateClientMessageId(req.body.clientMessageId);
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
@@ -1955,6 +1975,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'Shift Alerts is read-only. Alerts are posted automatically by the system.');
   }
 
+  await validateSupraSpaceReply(replyTo, id);
   const files = getSupraSpaceUploadFiles(req.files);
   if (!files || files.length === 0) throw new ApiError(400, 'No files uploaded');
   const thumbnailsByIndex = mapSupraSpaceThumbnails(req.files, req.body);
@@ -2006,7 +2027,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     : hasImage && files.length === 1 ? 'image'
     : 'file';
 
-  const message = await SupraSpaceMessage.create({
+  const delivery = await createSupraSpaceMessageOnce({
     conversationId: id,
     sender: userId,
     content: content?.trim() || '',
@@ -2014,7 +2035,16 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     attachments,
     replyTo: replyTo || null,
     readBy: [userId],
+  }, clientMessageId).catch(async error => {
+    await Promise.all(attachments.map(attachment => deleteSupraSpaceAttachmentFiles(attachment)));
+    throw error;
   });
+  const { message, created } = delivery;
+  if (!created) {
+    await Promise.all(attachments.map(attachment => deleteSupraSpaceAttachmentFiles(attachment)));
+    await message.populate('sender', 'fullName username avatar');
+    return res.json(new ApiResponse(200, await signAttachments(message.toObject()), 'Message already accepted'));
+  }
 
   await message.populate('sender', 'fullName username avatar');
   if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
@@ -2704,7 +2734,8 @@ const createSpace = asyncHandler(async (req: Request, res: Response) => {
 
   if (!name?.trim()) throw new ApiError(400, 'Space name is required');
 
-  const uniqueMembers = [...new Set([userId.toString(), ...memberIds])];
+  const validMembers = await validateSupraSpaceMembers(memberIds, req.crmUser!.organizationId);
+  const uniqueMembers = [...new Set([userId.toString(), ...validMembers])];
 
   const space = await SupraSpaceSpace.create({
     name: name.trim(),
