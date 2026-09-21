@@ -39,7 +39,7 @@ async function sendReminderFor(appointment: any): Promise<void> {
 
   if (phone) {
     const timeLabel = formatApptTime(new Date(appointment.startTime));
-    const text = `Reminder: your appointment "${appointment.title}" is scheduled for ${timeLabel}. Reply STOP to opt out.`;
+    const text = `Reminder: your appointment "${appointment.title}" is scheduled for ${timeLabel}. Reply YES to confirm or CANCEL if you need to reschedule. Reply STOP to opt out.`;
     sends.push(
       sendSms(phone, text).catch((err) => {
         logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] SMS send failed');

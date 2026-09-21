@@ -236,6 +236,16 @@ export const notificationTemplates = {
     message: `${data.guestName} ${data.response} your invitation to "${data.appointmentTitle}"`,
   }),
 
+  appointment_confirmed_via_sms: (data: { customerName: string; appointmentTitle: string }) => ({
+    title: 'Appointment Confirmed',
+    message: `${data.customerName} confirmed "${data.appointmentTitle}" by text`,
+  }),
+
+  appointment_reschedule_requested: (data: { customerName: string; appointmentTitle: string }) => ({
+    title: 'Reschedule Requested',
+    message: `${data.customerName} wants to reschedule "${data.appointmentTitle}" — reply by text, give them a call`,
+  }),
+
   // ==================== CRM & LEADS ====================
   new_lead: (data: LeadData) => ({
     title: 'New Lead Received',

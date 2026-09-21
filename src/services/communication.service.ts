@@ -9,6 +9,10 @@ import {
 import * as telnyx from "./telnyx.service";
 import { getSocketIO } from "../utils/socketEmitter";
 import Organization from "../models/Organization.model";
+import Appointment from "../models/Appointment.model";
+import { notifyOrgAdmins } from "../utils/safeNotification";
+import { notificationTemplates } from "../utils/notificationTemplates";
+import { CALENDAR_TZ } from "../constants/calendarTimezone";
 
 /** Emit through the platform's existing Socket.io instance (same one the
  *  lead:new / lead:update events use). Payload always carries orgId so the
@@ -42,6 +46,15 @@ function buildMissedCallMessage(dealerName: string): string {
 
 function buildMissedCallTextBackMessage(dealerName: string): string {
   return `Sorry we missed your call, ${dealerName} here! Reply to this text and we'll get right back to you. Reply STOP to opt out.`;
+}
+
+function buildNoShowFollowUpMessage(
+  dealerName: string,
+  firstName: string,
+  title: string,
+  timeLabel: string
+): string {
+  return `Hi ${firstName}, ${dealerName} here — we missed you at your appointment "${title}" on ${timeLabel}. Reply to this text and we'll get you rebooked. Reply STOP to opt out.`;
 }
 
 const SYSTEM_ACTOR: IActorRef = { userId: "system", name: "Suprah AI" };
@@ -128,6 +141,133 @@ export async function findLeadByPhone(orgId: any, phone: string): Promise<any | 
     .lean()
     .catch(() => null);
   return lead;
+}
+
+const CONFIRM_KEYWORDS = new Set(["YES", "Y", "CONFIRM", "CONFIRMED", "OK", "OKAY"]);
+const RESCHEDULE_KEYWORDS = new Set(["NO", "N", "CANCEL", "RESCHEDULE", "CHANGE"]);
+
+function normalizeSmsCommand(body: string): string {
+  return (body || "").trim().toUpperCase().replace(/[.!?]+$/, "");
+}
+
+async function findAppointmentForReply(orgId: any, phone: string): Promise<any | null> {
+  const tail = last10(phone);
+  if (tail.length < 7) return null;
+
+  const phoneFilter = { "customerBooking.phone": { $regex: `${tail.split("").join("[^0-9]*")}$` } };
+  const baseFilter = {
+    organizationId: orgId,
+    entryType: "appointment",
+    status: { $in: ["scheduled", "confirmed"] },
+    ...phoneFilter,
+  };
+  const now = new Date();
+
+  const reminded = await Appointment.findOne({
+    ...baseFilter,
+    reminderSent: true,
+    startTime: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
+  })
+    .sort({ reminderSentAt: -1 })
+    .catch(() => null);
+  if (reminded) return reminded;
+
+  return Appointment.findOne({
+    ...baseFilter,
+    startTime: { $gte: now },
+  })
+    .sort({ startTime: 1 })
+    .catch(() => null);
+}
+
+function formatApptTimeForSms(date: Date): string {
+  return date.toLocaleString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: CALENDAR_TZ,
+  });
+}
+
+async function handleAppointmentSmsReply(orgId: any, from: string, body: string): Promise<void> {
+  const command = normalizeSmsCommand(body);
+  const isConfirm = CONFIRM_KEYWORDS.has(command);
+  const isReschedule = RESCHEDULE_KEYWORDS.has(command);
+  if (!isConfirm && !isReschedule) return;
+
+  const appointment = await findAppointmentForReply(orgId, from);
+  if (!appointment) return;
+
+  const customerName =
+    [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || "The customer";
+
+  try {
+    if (isConfirm) {
+      await Appointment.updateOne({ _id: appointment._id }, { $set: { status: "confirmed" } });
+      emitToOrg(orgId, "appointment:status_updated", {
+        _id: appointment._id.toString(),
+        status: "confirmed",
+        orgId: String(orgId),
+      });
+
+      const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
+      await sendSmsFromUser({
+        orgId,
+        user: SYSTEM_ACTOR,
+        toPhone: from,
+        body: `You're confirmed for ${timeLabel}! See you then.`,
+        leadId: appointment.leadId,
+      });
+
+      const { title, message } = notificationTemplates.appointment_confirmed_via_sms({
+        customerName,
+        appointmentTitle: appointment.title,
+      });
+      await notifyOrgAdmins(String(orgId), "appointment_confirmed_via_sms", title, message, {
+        appointmentId: appointment._id.toString(),
+      });
+    } else {
+      await sendSmsFromUser({
+        orgId,
+        user: SYSTEM_ACTOR,
+        toPhone: from,
+        body: "Got it — we'll reach out shortly to find a better time.",
+        leadId: appointment.leadId,
+      });
+
+      const { title, message } = notificationTemplates.appointment_reschedule_requested({
+        customerName,
+        appointmentTitle: appointment.title,
+      });
+      await notifyOrgAdmins(String(orgId), "appointment_reschedule_requested", title, message, {
+        appointmentId: appointment._id.toString(),
+      });
+    }
+  } catch (err) {
+    console.error("[comm] appointment SMS reply handling failed:", err);
+  }
+}
+
+export async function sendNoShowFollowUpText(appointment: any): Promise<void> {
+  const phone = appointment.customerBooking?.phone;
+  if (!phone) return;
+
+  const firstName = appointment.customerBooking?.firstName?.trim() || "there";
+  const dealerName = await resolveDealerName(appointment.organizationId);
+  const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
+
+  await sendSmsFromUser({
+    orgId: appointment.organizationId,
+    user: SYSTEM_ACTOR,
+    toPhone: phone,
+    body: buildNoShowFollowUpMessage(dealerName, firstName, appointment.title, timeLabel),
+    leadId: appointment.leadId,
+  });
 }
 
 /** Touch the lead so the unanswered-inquiry tracking and the leads list stay
@@ -339,6 +479,11 @@ export async function handleInboundSms(payload: any) {
       leadId: conversation.leadId,
     },
   });
+
+  await handleAppointmentSmsReply(orgId, from, body).catch((err) => {
+    console.error("[comm] handleAppointmentSmsReply failed:", err);
+  });
+
   return message;
 }
 

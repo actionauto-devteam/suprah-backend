@@ -55,6 +55,7 @@ export interface IAppointment extends Document {
   reminderSent: boolean;
   reminderTime?: Date;
   reminderSentAt?: Date;
+  noShowFollowUpSentAt?: Date;
 
   googleCalendarEventId?: string;
   meetingLink?: string;
@@ -177,6 +178,7 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
     reminderSentAt: { type: Date },
+    noShowFollowUpSentAt: { type: Date },
     googleCalendarEventId: String,
     meetingLink: String,
     syncedWithGoogleCalendar: { type: Boolean, default: false },
