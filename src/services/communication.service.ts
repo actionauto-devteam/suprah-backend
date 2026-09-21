@@ -13,6 +13,7 @@ import Appointment from "../models/Appointment.model";
 import { notifyOrgAdmins } from "../utils/safeNotification";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
+import SmsOptOut from "../models/SmsOptOut.model";
 
 /** Emit through the platform's existing Socket.io instance (same one the
  *  lead:new / lead:update events use). Payload always carries orgId so the
@@ -54,17 +55,39 @@ function buildNoShowFollowUpMessage(
   title: string,
   timeLabel: string
 ): string {
-  return `Hi ${firstName}, ${dealerName} here — we missed you at your appointment "${title}" on ${timeLabel}. Reply to this text and we'll get you rebooked. Reply STOP to opt out.`;
+  return `Hi ${firstName}, ${dealerName} here. We missed you at your appointment "${title}" on ${timeLabel}. Reply to this text and we'll get you rebooked. Reply STOP to opt out.`;
 }
 
 const SYSTEM_ACTOR: IActorRef = { userId: "system", name: "Suprah AI" };
 
+export async function isSmsOptedOut(orgId: any, phone: string): Promise<boolean> {
+  const record: any = await SmsOptOut.findOne({
+    organizationId: String(orgId),
+    phone: normalizePhone(phone),
+  })
+    .select("optedOut")
+    .lean();
+  return Boolean(record?.optedOut);
+}
+
+export async function sendAutomatedSms(opts: {
+  orgId: any;
+  toPhone: string;
+  body: string;
+  customerId?: any;
+  customerName?: string;
+  leadId?: any;
+}): Promise<boolean> {
+  if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
+  await sendSmsFromUser({ ...opts, user: SYSTEM_ACTOR });
+  return true;
+}
+
 async function sendMissedCallTextBack(call: any): Promise<void> {
   try {
     const dealerName = await resolveDealerName(call.orgId);
-    await sendSmsFromUser({
+    await sendAutomatedSms({
       orgId: call.orgId,
-      user: SYSTEM_ACTOR,
       toPhone: call.from,
       body: buildMissedCallTextBackMessage(dealerName),
       customerId: call.customerId,
@@ -145,6 +168,8 @@ export async function findLeadByPhone(orgId: any, phone: string): Promise<any | 
 
 const CONFIRM_KEYWORDS = new Set(["YES", "Y", "CONFIRM", "CONFIRMED", "OK", "OKAY"]);
 const RESCHEDULE_KEYWORDS = new Set(["NO", "N", "CANCEL", "RESCHEDULE", "CHANGE"]);
+const OPT_OUT_KEYWORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT"]);
+const OPT_IN_KEYWORDS = new Set(["START", "UNSTOP"]);
 
 function normalizeSmsCommand(body: string): string {
   return (body || "").trim().toUpperCase().replace(/[.!?]+$/, "");
@@ -216,9 +241,8 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
       });
 
       const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
-      await sendSmsFromUser({
+      await sendAutomatedSms({
         orgId,
-        user: SYSTEM_ACTOR,
         toPhone: from,
         body: `You're confirmed for ${timeLabel}! See you then.`,
         leadId: appointment.leadId,
@@ -232,11 +256,10 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
         appointmentId: appointment._id.toString(),
       });
     } else {
-      await sendSmsFromUser({
+      await sendAutomatedSms({
         orgId,
-        user: SYSTEM_ACTOR,
         toPhone: from,
-        body: "Got it — we'll reach out shortly to find a better time.",
+        body: "Got it, we'll reach out shortly to find a better time.",
         leadId: appointment.leadId,
       });
 
@@ -253,20 +276,70 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
   }
 }
 
-export async function sendNoShowFollowUpText(appointment: any): Promise<void> {
+async function handleSmsOptCommand(orgId: any, from: string, body: string): Promise<void> {
+  const command = normalizeSmsCommand(body);
+  const isOptOut = OPT_OUT_KEYWORDS.has(command);
+  const isOptIn = OPT_IN_KEYWORDS.has(command);
+  if (!isOptOut && !isOptIn) return;
+
+  await SmsOptOut.updateOne(
+    { organizationId: String(orgId), phone: normalizePhone(from) },
+    { $set: { optedOut: isOptOut, changedAt: new Date(), keyword: command } },
+    { upsert: true }
+  );
+
+  if (!isOptOut) return;
+
+  const lead = await findLeadByPhone(orgId, from);
+  const customerName =
+    [lead?.firstName, lead?.lastName].filter(Boolean).join(" ").trim() || normalizePhone(from);
+  const { title, message } = notificationTemplates.sms_opt_out({ customerName, keyword: command });
+  await notifyOrgAdmins(String(orgId), "sms_opt_out", title, message, {
+    leadId: lead?._id ? String(lead._id) : undefined,
+  });
+}
+
+export async function sendNoShowFollowUpText(appointment: any): Promise<boolean> {
   const phone = appointment.customerBooking?.phone;
-  if (!phone) return;
+  if (!phone) return false;
 
   const firstName = appointment.customerBooking?.firstName?.trim() || "there";
   const dealerName = await resolveDealerName(appointment.organizationId);
   const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
 
-  await sendSmsFromUser({
+  return sendAutomatedSms({
     orgId: appointment.organizationId,
-    user: SYSTEM_ACTOR,
     toPhone: phone,
     body: buildNoShowFollowUpMessage(dealerName, firstName, appointment.title, timeLabel),
     leadId: appointment.leadId,
+  });
+}
+
+const NURTURE_MESSAGES: Array<(dealerName: string, firstName: string, subject: string) => string> = [
+  (dealerName, firstName, subject) =>
+    `Hi ${firstName}, ${dealerName} here. Just checking in on ${subject}. Do you have any questions I can help with? Reply anytime. Reply STOP to opt out.`,
+  (dealerName, firstName, subject) =>
+    `Hi ${firstName}, this is ${dealerName}. Would you like to set up a time to see ${subject} in person? Reply with a day that works for you and we'll get it scheduled. Reply STOP to opt out.`,
+  (dealerName, firstName, subject) =>
+    `Hi ${firstName}, ${dealerName} here. This is my last check-in on ${subject}. If you're still interested, just reply and we'll take it from there. No worries if not! Reply STOP to opt out.`,
+];
+
+export async function sendLeadNurtureText(lead: any, step: number): Promise<boolean> {
+  if (!lead.phone) return false;
+
+  const firstName = lead.firstName?.trim() || "there";
+  const dealerName = await resolveDealerName(lead.organizationId);
+  const vehicleLabel = [lead.vehicle?.year, lead.vehicle?.make, lead.vehicle?.model]
+    .filter(Boolean)
+    .join(" ");
+  const subject = vehicleLabel ? `the ${vehicleLabel}` : "the vehicle you asked about";
+  const buildMessage = NURTURE_MESSAGES[Math.min(step, NURTURE_MESSAGES.length - 1)];
+
+  return sendAutomatedSms({
+    orgId: lead.organizationId,
+    toPhone: lead.phone,
+    body: buildMessage(dealerName, firstName, subject),
+    leadId: lead._id,
   });
 }
 
@@ -419,7 +492,7 @@ async function bumpConversation(conversationId: any, message: any) {
 }
 
 /** Inbound SMS from Telnyx webhook (message.received). */
-export async function handleInboundSms(payload: any) {
+export async function handleInboundSms(payload: any, orgOverride?: any) {
   const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
   const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
   const to = normalizePhone(toEntry?.phone_number || toEntry || telnyx.COMPANY_NUMBER);
@@ -436,7 +509,7 @@ export async function handleInboundSms(payload: any) {
 
   // Which org owns this number? Single-number setup: resolve org from env or
   // the first conversation. For a single-org deployment set COMM_ORG_ID.
-  const orgId = await resolveOrgForNumber(to);
+  const orgId = orgOverride ?? (await resolveOrgForNumber(to));
   if (!orgId) {
     console.error("[comm] inbound SMS but COMM_ORG_ID is not configured");
     return null;
@@ -478,6 +551,10 @@ export async function handleInboundSms(payload: any) {
       customerId: conversation.customerId,
       leadId: conversation.leadId,
     },
+  });
+
+  await handleSmsOptCommand(orgId, from, body).catch((err) => {
+    console.error("[comm] handleSmsOptCommand failed:", err);
   });
 
   await handleAppointmentSmsReply(orgId, from, body).catch((err) => {

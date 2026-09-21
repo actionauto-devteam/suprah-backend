@@ -88,6 +88,9 @@ const NotificationSchema = new Schema(
         'appointment_cancelled',
         'appointment_reminder',
         'guest_response',
+        'appointment_confirmed_via_sms',
+        'appointment_reschedule_requested',
+        'sms_opt_out',
 
         'new_lead',
         'lead_assigned',

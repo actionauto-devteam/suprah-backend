@@ -26,6 +26,7 @@ import { initIdleRecordingRetentionScheduler } from "./schedulers/idleRecordingR
 import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivityReminder.scheduler";
 import { initAppointmentReminderScheduler } from "./schedulers/appointmentReminder.scheduler";
 import { initNoShowFollowUpScheduler } from "./schedulers/appointmentNoShowFollowUp.scheduler";
+import { initLeadNurtureScheduler } from "./schedulers/leadNurture.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
@@ -211,6 +212,7 @@ if (require.main === module) {
     initLeadInactivityReminderScheduler();
     initAppointmentReminderScheduler();
     initNoShowFollowUpScheduler();
+    initLeadNurtureScheduler();
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();
     initConnectionLossShiftAlertScheduler();

@@ -1,7 +1,8 @@
 import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
 import emailService from '../services/email.service';
-import { sendSms } from '../services/telnyx.service';
+import { sendAutomatedSms } from '../services/communication.service';
+import { isDemoPhone } from '../utils/demoPhone';
 import logger from '../utils/logger';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
 
@@ -26,7 +27,7 @@ function formatApptTime(date: Date): string {
   });
 }
 
-async function sendReminderFor(appointment: any): Promise<void> {
+export async function sendReminderFor(appointment: any): Promise<void> {
   const sends: Array<Promise<unknown>> = [];
 
   const phone = appointment.customerBooking?.phone;
@@ -37,17 +38,24 @@ async function sendReminderFor(appointment: any): Promise<void> {
       .join(' ')
       .trim() || 'there';
 
+  const isDemoCustomer = Boolean(phone) && isDemoPhone(phone);
+
   if (phone) {
     const timeLabel = formatApptTime(new Date(appointment.startTime));
     const text = `Reminder: your appointment "${appointment.title}" is scheduled for ${timeLabel}. Reply YES to confirm or CANCEL if you need to reschedule. Reply STOP to opt out.`;
     sends.push(
-      sendSms(phone, text).catch((err) => {
+      sendAutomatedSms({
+        orgId: appointment.organizationId,
+        toPhone: phone,
+        body: text,
+        leadId: appointment.leadId,
+      }).catch((err) => {
         logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] SMS send failed');
       }),
     );
   }
 
-  if (email) {
+  if (email && !isDemoCustomer) {
     sends.push(
       emailService
         .sendAppointmentReminder(appointment, email, customerName, appointment.organizationId)
@@ -87,7 +95,7 @@ export async function runAppointmentReminderSweep(): Promise<ReminderStats> {
       { reminderTime: { $in: [null, undefined] }, startTime: { $gte: now, $lte: windowEnd } },
     ],
   })
-    .select('title startTime organizationId customerBooking guestEmails reminderTime')
+    .select('title startTime organizationId customerBooking guestEmails reminderTime leadId')
     .limit(BATCH_LIMIT)
     .lean();
 

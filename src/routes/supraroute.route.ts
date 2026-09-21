@@ -20,6 +20,7 @@ router.delete('/chat/history', supraLeoController.clearChatHistory);
 
 router.post('/summarize', supraLeoController.summarizeConversation);
 router.post('/draft', supraLeoController.draftReply);
+router.post('/draft-lead-reply', supraLeoController.draftLeadReply);
 router.post('/refine', supraLeoController.refineMessage);
 
 router.get('/reminders/:module', supraLeoController.getReminders);

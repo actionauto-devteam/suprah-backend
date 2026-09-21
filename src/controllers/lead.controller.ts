@@ -126,7 +126,7 @@ async function getSystemUserId(orgId?: string): Promise<string | null> {
   return null;
 }
 
-async function getCentralOAuth2Client(orgId: string) {
+export async function getCentralOAuth2Client(orgId: string) {
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,

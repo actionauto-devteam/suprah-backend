@@ -246,6 +246,11 @@ export const notificationTemplates = {
     message: `${data.customerName} wants to reschedule "${data.appointmentTitle}" — reply by text, give them a call`,
   }),
 
+  sms_opt_out: (data: { customerName: string; keyword: string }) => ({
+    title: 'Customer Opted Out of Texts',
+    message: `${data.customerName} replied ${data.keyword}. Automated texts to this number are now stopped`,
+  }),
+
   // ==================== CRM & LEADS ====================
   new_lead: (data: LeadData) => ({
     title: 'New Lead Received',

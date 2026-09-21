@@ -24,7 +24,7 @@ export interface ILead extends Document {
   isPending?: boolean;
   labels?: string[];
 
-  channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
+  channel: 'email' | 'sms' | 'adf' | 'phone' | 'web' | 'webchat';
 
   assignedTo?: mongoose.Types.ObjectId;
   assignedAt?: Date;
@@ -73,6 +73,8 @@ export interface ILead extends Document {
     lastRepResponseAt?: Date;
     lastReminderSentAt?: Date;
     reminderCount?: number;
+    nurtureCount?: number;
+    lastNurtureAt?: Date;
 
     reminderHistory?: Array<{
       sentAt: Date;
@@ -189,7 +191,7 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
     channel: {
       type: String,
-      enum: ['email', 'sms', 'adf', 'phone', 'web'],
+      enum: ['email', 'sms', 'adf', 'phone', 'web', 'webchat'],
       default: 'email',
       index: true,
     },
@@ -308,6 +310,16 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       reminderCount: {
         type: Number,
         default: 0,
+      },
+
+      nurtureCount: {
+        type: Number,
+        default: 0,
+      },
+
+      lastNurtureAt: {
+        type: Date,
+        default: null,
       },
 
       reminderHistory: [

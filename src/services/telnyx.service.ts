@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { isDemoPhone } from "../utils/demoPhone";
 
 const API_BASE = "https://api.telnyx.com/v2";
 
@@ -51,6 +52,10 @@ async function tx<T = any>(
 /* --------------------------------- SMS ---------------------------------- */
 
 export async function sendSms(to: string, text: string) {
+  if (isDemoPhone(to)) {
+    return { id: `demo-${crypto.randomUUID()}`, to: [{ phone_number: to }] };
+  }
+
   const res = await tx<{ data: { id: string; to: any[] } }>("POST", "/messages", {
     from: TELNYX_PHONE_NUMBER,
     to,

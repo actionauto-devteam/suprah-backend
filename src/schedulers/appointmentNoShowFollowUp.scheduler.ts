@@ -2,14 +2,12 @@ import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
 import { sendNoShowFollowUpText } from '../services/communication.service';
 import logger from '../utils/logger';
-import { CALENDAR_TZ } from '../constants/calendarTimezone';
+import { isWithinSendingHours } from '../utils/sendingWindow';
 
 const CRON_SCHEDULE = process.env.NOSHOW_FOLLOWUP_CRON || '*/10 * * * *';
 const DELAY_MINUTES = parseInt(process.env.NOSHOW_FOLLOWUP_DELAY_MINUTES || '30', 10);
 const MAX_AGE_HOURS = parseInt(process.env.NOSHOW_FOLLOWUP_MAX_AGE_HOURS || '24', 10);
 const MAX_APPOINTMENT_AGE_MS = 72 * 60 * 60 * 1000;
-const SEND_START_HOUR = 9;
-const SEND_END_HOUR = 20;
 const BATCH_LIMIT = 100;
 
 interface FollowUpStats {
@@ -17,19 +15,6 @@ interface FollowUpStats {
   sent: number;
   skipped: number;
   errors: number;
-}
-
-function localHour(date: Date): number {
-  const hour = parseInt(
-    date.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: CALENDAR_TZ }),
-    10,
-  );
-  return hour % 24;
-}
-
-function isWithinSendingHours(date: Date): boolean {
-  const hour = localHour(date);
-  return hour >= SEND_START_HOUR && hour < SEND_END_HOUR;
 }
 
 async function hasUpcomingAppointment(appointment: any, now: Date): Promise<boolean> {
@@ -85,8 +70,8 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
       );
       if (claimed.modifiedCount === 0) continue;
 
-      await sendNoShowFollowUpText(appointment);
-      stats.sent++;
+      if (await sendNoShowFollowUpText(appointment)) stats.sent++;
+      else stats.skipped++;
     } catch (err) {
       stats.errors++;
       logger.error({ err, appointmentId: appointment._id }, '[NoShowFollowUp] Failed to process appointment');
