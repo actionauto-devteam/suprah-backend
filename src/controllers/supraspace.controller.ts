@@ -202,6 +202,51 @@ function emitToConversation(conv: any, event: string, payload: any) {
   }
 }
 
+/** Keeps the denormalized summary aligned with messages visible in a conversation. */
+async function recomputeConversationLastMessage(conversationId: any, expectedLastMessageId?: any) {
+  const current = await SupraSpaceConversation.findById(conversationId).select('lastMessage lastMessageAt lastReaction').lean();
+  const lastMessageId = expectedLastMessageId === undefined ? current?.lastMessage : expectedLastMessageId;
+  const latest = await SupraSpaceMessage.findOne({
+    conversationId,
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+  })
+    .sort({ createdAt: -1, _id: -1 })
+    .populate('sender', 'fullName username avatar')
+    .lean();
+  const storedReaction = (current as any)?.lastReaction;
+  const reactionTargetsDeletedMessage = storedReaction?.messageId?.toString?.() === lastMessageId?.toString?.();
+  const reactionMessage = !reactionTargetsDeletedMessage && storedReaction?.messageId
+    ? await SupraSpaceMessage.exists({
+      _id: storedReaction.messageId,
+      conversationId,
+      isDeleted: false,
+      scheduledStatus: { $ne: 'pending' },
+    })
+    : null;
+  const reactionAt = reactionMessage && storedReaction?.createdAt ? new Date(storedReaction.createdAt) : null;
+  const lastMessageAt = reactionAt && !Number.isNaN(reactionAt.getTime()) && (!latest?.createdAt || reactionAt > latest.createdAt)
+    ? reactionAt
+    : latest?.createdAt || null;
+  const update: any = {
+    $set: {
+      lastMessage: latest?._id || null,
+      lastMessageAt,
+    },
+  };
+  if (!reactionMessage) {
+    update.$unset = { lastReaction: '' };
+  }
+
+  return SupraSpaceConversation.findOneAndUpdate(
+    { _id: conversationId, lastMessage: lastMessageId || null },
+    update,
+    { new: true },
+  )
+    .populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName username avatar' } })
+    .lean();
+}
+
 function emitNotificationToUser(userId: string, notification: any) {
   try {
     getIO().to(`user:${userId}`).emit('notification:new', notification?.toObject ? notification.toObject() : notification);
@@ -956,8 +1001,20 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   if (hasPagination) conversationQuery = conversationQuery.skip(offset).limit(limit + 1);
 
   const conversations = await conversationQuery.lean();
+  // Older deletes did not update the denormalized summary fields. Repair only
+  // pointers that are missing or no longer refer to a visible message.
+  const repairedSummaries = await Promise.all(conversations.map(async (conversation: any) => {
+    const lastMessage = conversation.lastMessage;
+    if (!conversation.lastMessageAt || (lastMessage && !lastMessage.isDeleted && lastMessage.scheduledStatus !== 'pending')) {
+      return conversation;
+    }
+    const repaired = await recomputeConversationLastMessage(conversation._id);
+    return repaired
+      ? { ...conversation, lastMessage: repaired.lastMessage, lastMessageAt: repaired.lastMessageAt, lastReaction: repaired.lastReaction }
+      : conversation;
+  }));
   const hasMore = hasPagination && conversations.length > limit;
-  const basePagedConversations = hasPagination ? conversations.slice(0, limit) : conversations;
+  const basePagedConversations = hasPagination ? repairedSummaries.slice(0, limit) : repairedSummaries;
   let pagedConversations = basePagedConversations;
   if (
     includeConversationId
@@ -974,7 +1031,24 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
         populate: { path: 'sender', select: 'fullName username avatar' },
       })
       .lean();
-    if (includedConversation) pagedConversations = [includedConversation, ...basePagedConversations];
+    if (includedConversation) {
+      const lastMessage = (includedConversation as any).lastMessage;
+      const repairedIncludedConversation = includedConversation.lastMessageAt
+        && (!lastMessage || lastMessage.isDeleted || lastMessage.scheduledStatus === 'pending')
+        ? await recomputeConversationLastMessage(includedConversation._id)
+        : null;
+      pagedConversations = [
+        repairedIncludedConversation
+          ? {
+            ...includedConversation,
+            lastMessage: repairedIncludedConversation.lastMessage,
+            lastMessageAt: repairedIncludedConversation.lastMessageAt,
+            lastReaction: repairedIncludedConversation.lastReaction,
+          }
+          : includedConversation,
+        ...basePagedConversations,
+      ];
+    }
   }
 
   const userIdStr = userId.toString();
@@ -2270,10 +2344,23 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (conversation) {
+    const summary = await recomputeConversationLastMessage(message.conversationId, message._id);
+    const unreadUserIds = (conversation.members || [])
+      .filter((member: any) => member.toString() !== message.sender.toString() && !idIn(message.readBy as any, member))
+      .map((member: any) => member.toString());
     emitToConversation(conversation, 'message:deleted', {
       conversationId: message.conversationId.toString(),
       messageId,
+      unreadUserIds,
     });
+    if (summary) {
+      emitToConversation(conversation, 'conversation:updated', {
+        _id: summary._id.toString(),
+        lastMessage: summary.lastMessage,
+        lastMessageAt: summary.lastMessageAt,
+        lastReaction: summary.lastReaction || null,
+      });
+    }
   }
   res.json(new ApiResponse(200, null, 'Message deleted'));
 });
