@@ -37,9 +37,12 @@ const gemini = new OpenAI({
   baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
 });
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest';
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-flash-lite-latest';
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const ANTHROPIC_FALLBACK_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514';
+const ANTHROPIC_SAFE_MODEL = 'claude-haiku-4-5-20251001';
+const ANTHROPIC_FALLBACK_MODEL = process.env.ANTHROPIC_MODEL || ANTHROPIC_SAFE_MODEL;
+const DRAFT_ANTHROPIC_MODEL = process.env.ANTHROPIC_DRAFT_MODEL || ANTHROPIC_SAFE_MODEL;
 const AI_RATE_LIMIT_MESSAGE =
   'Autrix is receiving too many AI requests right now. Please wait a moment, then try again.';
 const AI_CREDIT_MESSAGE =
@@ -96,13 +99,27 @@ async function createAnthropicFallbackCompletion(options: any): Promise<any> {
       content: String(message.content || ''),
     }));
 
-  const response = await anthropic.messages.create({
-    model: ANTHROPIC_FALLBACK_MODEL,
-    max_tokens: options.max_tokens || 1024,
-    system: systemMessage || undefined,
-    messages,
-    stream: false,
-  });
+  const requestedModel = options.anthropicModel || ANTHROPIC_FALLBACK_MODEL;
+  const send = (model: string) =>
+    anthropic.messages.create({
+      model,
+      max_tokens: options.max_tokens || 1024,
+      system: systemMessage || undefined,
+      messages,
+      stream: false,
+    });
+
+  let response: Anthropic.Message;
+  try {
+    response = await send(requestedModel);
+  } catch (error: any) {
+    if (error?.status !== 404 || requestedModel === ANTHROPIC_SAFE_MODEL) throw error;
+    console.error(
+      `[SupraLeo] Anthropic model "${requestedModel}" was not found. Retrying with "${ANTHROPIC_SAFE_MODEL}". Update ANTHROPIC_MODEL.`,
+    );
+    response = await send(ANTHROPIC_SAFE_MODEL);
+  }
+
   const text = response.content
     .map((item: any) => item?.type === 'text' ? item.text : '')
     .join('')
@@ -140,6 +157,13 @@ async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
   try {
     return await gemini.chat.completions.create(options);
   } catch (error: any) {
+    if (error?.status === 404 && options.model !== GEMINI_FALLBACK_MODEL) {
+      console.error(
+        `[SupraLeo] Gemini model "${options.model}" was not found. Retrying with "${GEMINI_FALLBACK_MODEL}". Update GEMINI_MODEL.`,
+      );
+      return createGeminiCompletion({ ...options, model: GEMINI_FALLBACK_MODEL }, retries);
+    }
+
     if (isAiRateLimitError(error) && retries > 0) {
       await sleep(1200);
       return createGeminiCompletion(options, retries - 1);
@@ -746,12 +770,55 @@ function clipText(text: string, max: number): string {
   return clean.length > max ? `${clean.slice(0, max)}…` : clean;
 }
 
+async function createLeadDraftText(options: any): Promise<string> {
+  const failures: string[] = [];
+  const errors: any[] = [];
+  const readText = (completion: any) =>
+    String(completion?.choices?.[0]?.message?.content || '').trim();
+
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const text = readText(await createGeminiCompletion(options));
+      if (text) return text;
+      failures.push('gemini: empty response');
+    } catch (error: any) {
+      errors.push(error);
+      failures.push(`gemini: ${error?.message || error}`);
+    }
+  }
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const text = readText(
+        await createAnthropicFallbackCompletion({ ...options, anthropicModel: DRAFT_ANTHROPIC_MODEL }),
+      );
+      if (text) return text;
+      failures.push('anthropic: empty response');
+    } catch (error: any) {
+      errors.push(error);
+      failures.push(`anthropic: ${error?.message || error}`);
+    }
+  }
+
+  console.error('[SupraLeo] Lead reply draft failed on every provider:', failures);
+
+  if (errors.length > 0 && errors.every((error) => isAiCreditError(error))) {
+    throw new ApiError(402, AI_CREDIT_MESSAGE);
+  }
+  if (errors.some((error) => isAiRateLimitError(error) || error?.statusCode === 429)) {
+    throw new ApiError(429, AI_RATE_LIMIT_MESSAGE);
+  }
+  throw new ApiError(503, 'Autrix could not write a draft right now. Please try again in a moment.');
+}
+
 export const draftLeadReply = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   const { leadId, channel } = req.body;
 
   if (!leadId) throw new ApiError(400, 'leadId is required');
-  if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
+  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    throw new ApiError(500, 'AI service not configured');
+  }
 
   const lead = await Lead.findOne({ _id: leadId, organizationId: user.organizationId }).lean();
   if (!lead) throw new ApiError(404, 'Lead not found');
@@ -821,26 +888,16 @@ export const draftLeadReply = asyncHandler(async (req: Request, res: Response) =
   }
   contextLines.push('', 'Write the best next reply.');
 
-  let draft = '';
-  try {
-    const completion = await createGeminiCompletion({
-      model: GEMINI_MODEL,
-      max_tokens: replyChannel === 'sms' ? 220 : 480,
-      temperature: 0.6,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: contextLines.join('\n') },
-      ],
-      stream: false,
-    });
-    draft = (completion.choices[0]?.message?.content || '').trim();
-  } catch (error: any) {
-    if (error instanceof ApiError) throw error;
-    throw new ApiError(
-      isAiCreditError(error) ? 402 : isAiRateLimitError(error) ? 429 : 503,
-      getAiErrorMessage(error),
-    );
-  }
+  let draft = await createLeadDraftText({
+    model: GEMINI_MODEL,
+    max_tokens: 1500,
+    temperature: 0.6,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: contextLines.join('\n') },
+    ],
+    stream: false,
+  });
 
   draft = draft
     .replace(/^```[a-z]*\n?|```$/gi, '')

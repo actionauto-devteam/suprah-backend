@@ -17,6 +17,8 @@ import EmployeeLocation from '../models/EmployeeLocation.model';
 import { buildBreakSessions } from '../utils/timeLogEngine';
 import { findOpenShiftOnOtherIdentity } from '../utils/crossIdentityShift.util';
 import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
+import AuditLog from '../models/AuditLog.model';
+import logger from '../utils/logger';
 
 
 const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
@@ -696,6 +698,28 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   await TimeLog.deleteOne({ _id: lastTimeOut._id });
 
   const originalTimeIn = timeIns[timeIns.length - 1];
+
+  try {
+    await AuditLog.create({
+      entityType: 'TimeLog',
+      entityId: lastTimeOut._id.toString(),
+      action: 'RESUME_SHIFT',
+      changes: {
+        userId: actor.id.toString(),
+        resumedAt: new Date(),
+        removedTimeOutId: lastTimeOut._id.toString(),
+        removedTimeOutAt: lastTimeOut.timestamp,
+        removedTimeOutNote: lastTimeOut.note ?? null,
+        shiftStartedAt: originalTimeIn.timestamp,
+      },
+      reason: 'Employee resumed shift',
+      performedBy: actor.id,
+      organizationId: actor.orgId?.toString(),
+    });
+  } catch (err) {
+    logger.warn({ err, userId: actor.id.toString() }, '[resumeShift] Failed to write resume audit entry');
+  }
+
   try {
     const io = getSocketIO();
     io?.to(`user:${actor.id.toString()}`).emit('time-in', {

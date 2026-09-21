@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 // v1.4.0
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -27,6 +28,7 @@ import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_S
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { closeShiftForInactivity } from '../services/autoClockout.service';
 import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
+import { buildActivityLog } from '../utils/activityLog.util';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -519,6 +521,84 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
   const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
+});
+
+export const getUserActivityLog = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied — admin or manager role required');
+  }
+  const { userId } = req.params;
+  const { date: dateStr } = req.query;
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr as string)) {
+    throw new ApiError(400, 'date is required (YYYY-MM-DD)');
+  }
+  if (!mongoose.isValidObjectId(userId)) throw new ApiError(404, 'User not found');
+
+  const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId })
+    .select('_id department organizationId')
+    .lean();
+  if (!targetUser) throw new ApiError(404, 'User not found');
+
+  const { start, end } = getCompanyDayRange(dateStr as string);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const lookbackStart = new Date(start.getTime() - 2 * dayMs);
+  const lookaheadEnd = new Date(end.getTime() + dayMs);
+
+  const [logs, activityIntervals, diagnosticLogs, resumeLogs] = await Promise.all([
+    TimeLog.find({ userId, timestamp: { $gte: lookbackStart, $lt: lookaheadEnd } })
+      .sort({ timestamp: 1 })
+      .select('type timestamp note startedVia createdAt')
+      .lean(),
+    ActivityInterval.find({ userId, startAt: { $lt: lookaheadEnd }, endAt: { $gte: lookbackStart } })
+      .select('startAt endAt')
+      .lean(),
+    SystemLog.find({
+      event: { $in: ['idle_detected', 'idle_stage_reached'] },
+      'req.userId': userId,
+      timestamp: { $gte: start, $lt: end },
+    })
+      .sort({ timestamp: 1 })
+      .select('timestamp event meta')
+      .lean(),
+    AuditLog.find({
+      action: 'RESUME_SHIFT',
+      'changes.userId': userId,
+      timestamp: { $gte: start, $lt: end },
+    })
+      .sort({ timestamp: 1 })
+      .select('timestamp changes')
+      .lean(),
+  ]);
+
+  const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
+  const idlePeriods = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  const idleDetected = idleExempt
+    ? []
+    : diagnosticLogs.filter((l) => l.event === 'idle_detected').map((l) => ({ at: l.timestamp }));
+  const idleStages = idleExempt
+    ? []
+    : diagnosticLogs
+        .filter((l) => l.event === 'idle_stage_reached')
+        .map((l) => ({ at: l.timestamp, stage: Number(l.meta?.stage) }));
+  const resumes = resumeLogs.map((l) => ({
+    at: l.changes?.resumedAt ?? l.timestamp,
+    removedTimeOutAt: l.changes?.removedTimeOutAt ?? null,
+    removedTimeOutNote: l.changes?.removedTimeOutNote ?? null,
+  }));
+
+  const { events, summary } = buildActivityLog({
+    timeLogs: logs,
+    idlePeriods,
+    idleDetected,
+    idleStages,
+    resumes,
+    dayStart: start,
+    dayEnd: end,
+    now: new Date(),
+  });
+
+  res.json(new ApiResponse(200, { date: dateStr, events, summary }, 'Activity log fetched'));
 });
 
 export const exportTimeproof = asyncHandler(async (req: Request, res: Response) => {
@@ -2478,6 +2558,28 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   await TimeLog.deleteOne({ _id: lastTimeOut._id });
 
   const originalTimeIn = timeIns[timeIns.length - 1];
+
+  try {
+    await AuditLog.create({
+      entityType: 'TimeLog',
+      entityId: lastTimeOut._id.toString(),
+      action: 'RESUME_SHIFT',
+      changes: {
+        userId: user._id.toString(),
+        resumedAt: new Date(),
+        removedTimeOutId: lastTimeOut._id.toString(),
+        removedTimeOutAt: lastTimeOut.timestamp,
+        removedTimeOutNote: lastTimeOut.note ?? null,
+        shiftStartedAt: originalTimeIn.timestamp,
+      },
+      reason: 'Employee resumed shift',
+      performedBy: user._id,
+      organizationId: user.organizationId?.toString(),
+    });
+  } catch (err) {
+    logger.warn({ err, userId: user._id.toString() }, '[resumeShift] Failed to write resume audit entry');
+  }
+
   try {
     getSocketIO()?.to(`user:${user._id.toString()}`).emit('time-in', {
       _id: originalTimeIn._id,

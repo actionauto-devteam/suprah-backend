@@ -14,7 +14,7 @@ const gemini = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY || '',
   baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
 });
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest';
 
 const FALLBACK_IMAGE =
   'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=800&h=600&fit=crop';

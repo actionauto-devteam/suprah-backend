@@ -34,6 +34,7 @@ import {
   excludeScreenshots,
   getMyIdleLog,
   getUserIdleLog,
+  getUserActivityLog,
   clockOutUser,
   postClientDiagnostic,
   getUserIdleDiagnostics,
@@ -56,6 +57,7 @@ router.get('/export', exportTimeproof);
 router.get('/idle-log', getMyIdleLog);
 router.get('/user/:userId/idle-log', getUserIdleLog);
 router.get('/user/:userId/idle-diagnostics', getUserIdleDiagnostics);
+router.get('/user/:userId/activity-log', getUserActivityLog);
 
 router.get('/shift-state', getShiftState);
 router.get('/resumable-shift', getResumableShift);
