@@ -570,20 +570,20 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   }
   if (truckMake !== undefined) profile.truckMake = truckMake;
   if (truckModel !== undefined) profile.truckModel = truckModel;
-  if (truckYear !== undefined) profile.truckYear = truckYear;
-  if (trailerLength !== undefined) profile.trailerLength = trailerLength;
+  if (truckYear !== undefined) profile.truckYear = truckYear === null ? undefined : truckYear;
+  if (trailerLength !== undefined) profile.trailerLength = trailerLength === null ? undefined : trailerLength;
   if (dotNumber !== undefined) profile.dotNumber = dotNumber;
   if (mcNumber !== undefined) profile.mcNumber = mcNumber;
   if (vin !== undefined) profile.vin = vin;
   if (plateNumber !== undefined) profile.plateNumber = plateNumber;
   if (truckColor !== undefined) profile.truckColor = truckColor;
-  if (gvwr !== undefined) profile.gvwr = gvwr;
+  if (gvwr !== undefined) profile.gvwr = gvwr === null ? undefined : gvwr;
   if (trailerAxles !== undefined) profile.trailerAxles = trailerAxles;
-  if (trailerGvwr !== undefined) profile.trailerGvwr = trailerGvwr;
+  if (trailerGvwr !== undefined) profile.trailerGvwr = trailerGvwr === null ? undefined : trailerGvwr;
   if (engineType !== undefined) profile.engineType = engineType;
   if (trailerMake !== undefined) profile.trailerMake = trailerMake;
   if (trailerModel !== undefined) profile.trailerModel = trailerModel;
-  if (trailerYear !== undefined) profile.trailerYear = trailerYear;
+  if (trailerYear !== undefined) profile.trailerYear = trailerYear === null ? undefined : trailerYear;
   if (hitchType !== undefined) profile.hitchType = hitchType;
   if (specialFeatures !== undefined) profile.specialFeatures = specialFeatures;
 
@@ -971,6 +971,10 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Maximum of 20 documents allowed");
   }
 
+  const parsedDocumentExpiration = expiresAt
+    ? parseOptionalDate(expiresAt, "Document Expiration")
+    : undefined;
+
   let fileUrl: string;
   try {
     fileUrl = await storageService.upload(
@@ -986,9 +990,6 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     );
   }
   const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
-  const parsedDocumentExpiration = expiresAt
-    ? parseOptionalDate(expiresAt, "Document Expiration")
-    : undefined;
 
   profile.documents.push({
     type,
@@ -1033,7 +1034,13 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     profile.verificationStatus = "in_progress";
   }
 
-  await profile.save();
+  try {
+    await profile.save();
+  } catch (error) {
+    // Match replacement cleanup: remove only this newly uploaded private file.
+    await storageService.delete(fileKey, BucketType.PRIVATE).catch(() => {});
+    throw error;
+  }
 
   const uploadedDocument: any = profile.documents[profile.documents.length - 1];
 
