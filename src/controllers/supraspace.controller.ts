@@ -938,14 +938,16 @@ export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
 async function signAttachments(message: any) {
   if (Array.isArray(message?.attachments)) {
     await Promise.all(message.attachments.map(async (a: any) => {
-      if (a.url && !a.url.startsWith('http')) {
-        const signed = await getCachedSignedUrl('supraspace-attachment', a.fileKey || a.url);
+      const fileKey = a.fileKey || a.url;
+      if (fileKey && !fileKey.startsWith('http')) {
+        const signed = await getCachedSignedUrl('supraspace-attachment', fileKey);
         if (signed) {
           a.url = signed;
         }
       }
-      if (a.thumbnailUrl && !a.thumbnailUrl.startsWith('http')) {
-        const signedThumbnail = await getCachedSignedUrl('supraspace-attachment-thumbnail', a.thumbnailUrl);
+      const thumbnailKey = a.thumbnailUrl;
+      if (thumbnailKey && !thumbnailKey.startsWith('http')) {
+        const signedThumbnail = await getCachedSignedUrl('supraspace-attachment-thumbnail', thumbnailKey);
         if (signedThumbnail) a.thumbnailUrl = signedThumbnail;
       }
     }));
@@ -1672,8 +1674,9 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
   }
 
   const signed = await Promise.all(items.map(async (item) => {
-    if (item.attachment.url && !item.attachment.url.startsWith('http')) {
-      const url = await storageService.getSignedUrl(item.attachment.fileKey || item.attachment.url);
+    const fileKey = item.attachment.fileKey || item.attachment.url;
+    if (fileKey && !fileKey.startsWith('http')) {
+      const url = await storageService.getSignedUrl(fileKey);
       if (url) item.attachment = { ...item.attachment, url };
     }
     if (item.attachment.thumbnailUrl && !item.attachment.thumbnailUrl.startsWith('http')) {
