@@ -14,7 +14,7 @@ import {
   startTranscription, getTranscriptionStatus, readTranscriptText, generateSummary,
 } from '../services/suprahMeetAI.service';
 
-const MDT_OFFSET_MINUTES = -360; // matches COMPANY_TZ_OFFSET_MINUTES elsewhere
+const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
 const MAX_SERIES_SESSIONS = 30;
 
 const makeCode = () => `MEET-${crypto.randomInt(1000, 10000)}`;
@@ -76,12 +76,35 @@ function canControl(user: any, meeting: IMeeting): boolean {
   );
 }
 
-/** "YYYY-MM-DDTHH:mm" interpreted as MDT wall time → UTC Date. */
+/** Minutes offset from UTC for America/Denver at a given instant (-360 MDT, -420 MST). */
+function denverOffsetMinutes(at: Date): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: COMPANY_TZ, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(at)) p[part.type] = part.value;
+  const asUtc = Date.UTC(
+    Number(p.year), Number(p.month) - 1, Number(p.day),
+    p.hour === '24' ? 0 : Number(p.hour), Number(p.minute), Number(p.second)
+  );
+  return Math.round((asUtc - at.getTime()) / 60_000);
+}
+
+/** "YYYY-MM-DDTHH:mm" interpreted as Mountain wall time (MDT/MST, DST-aware) → UTC Date. */
 function mdtWallToUtc(wall: string): Date {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(wall)) {
-    throw new ApiError(400, 'Scheduled times must be "YYYY-MM-DDTHH:mm" (MDT).');
+    throw new ApiError(400, 'Scheduled times must be "YYYY-MM-DDTHH:mm" (Mountain time).');
   }
-  return new Date(Date.parse(`${wall}:00.000Z`) - MDT_OFFSET_MINUTES * 60_000);
+  // Treat the wall string as UTC first, then correct by Denver's real offset at
+  // that instant; the second pass settles wall times near a DST switchover.
+  let utc = new Date(Date.parse(`${wall}:00.000Z`));
+  for (let i = 0; i < 2; i++) {
+    const offset = denverOffsetMinutes(utc);
+    utc = new Date(Date.parse(`${wall}:00.000Z`) - offset * 60_000);
+  }
+  return utc;
 }
 
 /** Create one meeting document, retrying on code collisions. */
