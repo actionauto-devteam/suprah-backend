@@ -24,6 +24,8 @@ router.post('/reset-password',  otpLimiter, crmController.confirmResetPassword);
 router.use(crmAuth());
 
 router.get('/me',             crmController.getMe);
+router.get('/org-settings',   crmController.getOrgSettings);
+router.patch('/org-settings', crmController.updateOrgSettings);
 router.patch('/me/avatar',    avatarUpload.single('avatar'), crmController.updateMeAvatar);
 router.patch('/me/screenshot-privacy', crmController.updateMyScreenshotPrivacy);
 router.post('/token-refresh', crmController.tokenRefresh);

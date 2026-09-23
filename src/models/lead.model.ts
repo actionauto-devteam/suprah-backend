@@ -75,6 +75,11 @@ export interface ILead extends Document {
     reminderCount?: number;
     nurtureCount?: number;
     lastNurtureAt?: Date;
+    nurtureStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
+    nurtureAttemptCount?: number;
+    nurtureLastAttemptAt?: Date;
+    nurtureNextRetryAt?: Date;
+    nurtureFailureReason?: string;
 
     reminderHistory?: Array<{
       sentAt: Date;
@@ -320,6 +325,31 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       lastNurtureAt: {
         type: Date,
         default: null,
+      },
+
+      nurtureStatus: {
+        type: String,
+        enum: ['processing', 'sent', 'failed', 'skipped'],
+      },
+
+      nurtureAttemptCount: {
+        type: Number,
+        default: 0,
+      },
+
+      nurtureLastAttemptAt: {
+        type: Date,
+        default: null,
+      },
+
+      nurtureNextRetryAt: {
+        type: Date,
+        default: null,
+      },
+
+      nurtureFailureReason: {
+        type: String,
+        maxlength: 500,
       },
 
       reminderHistory: [

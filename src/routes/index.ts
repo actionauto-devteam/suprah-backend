@@ -79,6 +79,7 @@ import cannedReplyRoute from "./cannedReply.routes";
 import webchatRoute from "./webchat.route";
 import crmWebchatRoute from "./crmWebchat.routes";
 import crmDemoRoute from "./crmDemo.routes";
+import smsCampaignRoute from "./smsCampaign.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import youtubeRoute from "./youtube.route";
@@ -216,6 +217,10 @@ const defaultRoutes = [
   {
     path: "/crm/demo",
     route: crmDemoRoute,
+  },
+  {
+    path: "/crm/sms-campaigns",
+    route: smsCampaignRoute,
   },
   {
     path: "/webchat",

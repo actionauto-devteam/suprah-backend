@@ -72,6 +72,7 @@ async function serializeScenario(orgId: string, lead: any, appointment: any) {
           startTime: appointment.startTime,
           reminderSent: Boolean(appointment.reminderSent),
           noShowFollowUpSentAt: appointment.noShowFollowUpSentAt || null,
+          reviewRequestSentAt: appointment.reviewRequestSentAt || null,
         }
       : null,
     optedOut: await comm.isSmsOptedOut(orgId, lead.phone),
@@ -264,6 +265,45 @@ export const sendNoShowFollowUp = asyncHandler(async (req: Request, res: Respons
   await comm.sendNoShowFollowUpText(appointment.toObject());
 
   await respondWithScenario(res, orgId, lead._id, 'No-show follow-up sent');
+});
+
+export const markCompleted = asyncHandler(async (req: Request, res: Response) => {
+  assertEnabled();
+  const { orgId, lead, appointment } = await loadScenario(req);
+  if (!appointment) throw new ApiError(400, 'This demo customer has no appointment');
+
+  await Appointment.updateOne(
+    { _id: appointment._id },
+    { $set: { status: 'completed', outcomeNotes: 'Demo: the customer completed the appointment' } },
+  );
+
+  await respondWithScenario(res, orgId, lead._id, 'Appointment marked as completed');
+});
+
+export const sendReviewRequest = asyncHandler(async (req: Request, res: Response) => {
+  assertEnabled();
+  const { orgId, lead, appointment } = await loadScenario(req);
+  if (!appointment) throw new ApiError(400, 'This demo customer has no appointment');
+  if (appointment.status !== 'completed') {
+    throw new ApiError(400, 'Mark the appointment as completed first');
+  }
+
+  if (await comm.isSmsOptedOut(orgId, lead.phone)) {
+    return respondWithScenario(res, orgId, lead._id, 'Blocked: the number opted out', true);
+  }
+
+  const claimed = await Appointment.updateOne(
+    { _id: appointment._id, reviewRequestSentAt: null },
+    { $set: { reviewRequestSentAt: new Date(), reviewRequestStatus: 'sent' } },
+    { timestamps: false },
+  );
+  if (claimed.modifiedCount === 0) {
+    throw new ApiError(409, 'The review request was already sent');
+  }
+
+  await comm.sendReviewRequestText(appointment.toObject());
+
+  await respondWithScenario(res, orgId, lead._id, 'Review request sent');
 });
 
 export const sendNurture = asyncHandler(async (req: Request, res: Response) => {

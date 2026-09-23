@@ -14,6 +14,9 @@ const STEP_INTERVALS_HOURS = (process.env.LEAD_NURTURE_INTERVALS_HOURS || '24,48
   .map((value) => parseInt(value.trim(), 10))
   .filter((value) => Number.isFinite(value) && value > 0);
 const MAX_LEAD_AGE_DAYS = parseInt(process.env.LEAD_NURTURE_MAX_LEAD_AGE_DAYS || '10', 10);
+const MAX_ATTEMPTS = parseInt(process.env.LEAD_NURTURE_MAX_ATTEMPTS || '3', 10);
+const RETRY_MINUTES = parseInt(process.env.LEAD_NURTURE_RETRY_MINUTES || '15', 10);
+const PROCESSING_TIMEOUT_MINUTES = 10;
 const ELIGIBLE_STATUSES = ['New', 'Contacted', 'Pending'];
 const HOUR_MS = 60 * 60 * 1000;
 const CUSTOMER_ACTIVITY_GRACE_MS = 60 * 1000;
@@ -100,6 +103,31 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
     phone: { $exists: true, $ne: '' },
     createdAt: { $gte: new Date(now.getTime() - MAX_LEAD_AGE_DAYS * 24 * HOUR_MS) },
     'followUp.nurtureCount': { $not: { $gte: STEP_INTERVALS_HOURS.length } },
+    $and: [
+      {
+        $or: [
+          { 'followUp.nurtureAttemptCount': { $lt: MAX_ATTEMPTS } },
+          { 'followUp.nurtureAttemptCount': { $exists: false } },
+        ],
+      },
+      {
+        $or: [
+          { 'followUp.nurtureNextRetryAt': null },
+          { 'followUp.nurtureNextRetryAt': { $exists: false } },
+          { 'followUp.nurtureNextRetryAt': { $lte: now } },
+        ],
+      },
+      {
+        $or: [
+          { 'followUp.nurtureStatus': { $ne: 'processing' } },
+          {
+            'followUp.nurtureLastAttemptAt': {
+              $lte: new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000),
+            },
+          },
+        ],
+      },
+    ],
   })
     .select('organizationId firstName lastName phone email senderEmail channel threadId vehicle followUp createdAt')
     .sort({ createdAt: 1 })
@@ -146,24 +174,110 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
       }
 
       if (await isSmsOptedOut(lead.organizationId, lead.phone)) {
+        await Lead.updateOne(
+          { _id: lead._id, status: { $in: ELIGIBLE_STATUSES } },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'skipped',
+              'followUp.nurtureFailureReason': 'Customer opted out of SMS',
+              'followUp.nurtureNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+            },
+          },
+          { timestamps: false },
+        );
         stats.skipped++;
         continue;
       }
 
+      const staleBefore = new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
       const claimed = await Lead.findOneAndUpdate(
         {
           _id: lead._id,
           status: { $in: ELIGIBLE_STATUSES },
           'followUp.nurtureCount': step === 0 ? { $in: [null, 0] } : step,
+          $and: [
+            {
+              $or: [
+                { 'followUp.nurtureAttemptCount': { $lt: MAX_ATTEMPTS } },
+                { 'followUp.nurtureAttemptCount': { $exists: false } },
+              ],
+            },
+            {
+              $or: [
+                { 'followUp.nurtureStatus': { $ne: 'processing' } },
+                { 'followUp.nurtureLastAttemptAt': { $lte: staleBefore } },
+              ],
+            },
+          ],
         },
-        { $set: { 'followUp.lastNurtureAt': now }, $inc: { 'followUp.nurtureCount': 1 } },
-        { timestamps: false },
+        {
+          $set: {
+            'followUp.nurtureStatus': 'processing',
+            'followUp.nurtureLastAttemptAt': now,
+          },
+          $inc: { 'followUp.nurtureAttemptCount': 1 },
+          $unset: {
+            'followUp.nurtureFailureReason': 1,
+            'followUp.nurtureNextRetryAt': 1,
+          },
+        },
+        { new: true, timestamps: false },
       );
       if (!claimed) continue;
 
-      if (await sendLeadNurtureText(lead, step)) stats.sent++;
-      else stats.skipped++;
+      if (await sendLeadNurtureText(lead, step)) {
+        await Lead.updateOne(
+          { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'sent',
+              'followUp.lastNurtureAt': new Date(),
+              'followUp.nurtureAttemptCount': 0,
+            },
+            $inc: { 'followUp.nurtureCount': 1 },
+            $unset: {
+              'followUp.nurtureFailureReason': 1,
+              'followUp.nurtureNextRetryAt': 1,
+            },
+          },
+          { timestamps: false },
+        );
+        stats.sent++;
+      } else {
+        await Lead.updateOne(
+          { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'failed',
+              'followUp.nurtureFailureReason': 'Customer opted out of SMS',
+              'followUp.nurtureNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+            },
+          },
+          { timestamps: false },
+        );
+        stats.skipped++;
+      }
     } catch (err) {
+      const attempts = (lead.followUp?.nurtureAttemptCount || 0) + 1;
+      const exhausted = attempts >= MAX_ATTEMPTS;
+      await Lead.updateOne(
+        { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+        {
+          $set: {
+            'followUp.nurtureStatus': 'failed',
+            'followUp.nurtureFailureReason': String((err as any)?.message || err).slice(0, 500),
+            ...(exhausted
+              ? {}
+              : {
+                  'followUp.nurtureNextRetryAt': new Date(
+                    Date.now() + RETRY_MINUTES * attempts * 60 * 1000,
+                  ),
+                }),
+          },
+          ...(exhausted ? { $unset: { 'followUp.nurtureNextRetryAt': 1 } } : {}),
+        },
+        { timestamps: false },
+      ).catch(() => undefined);
       stats.errors++;
       logger.error({ err, leadId: lead._id }, '[LeadNurture] Failed to process lead');
     }

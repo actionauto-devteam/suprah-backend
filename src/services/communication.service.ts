@@ -14,6 +14,7 @@ import { notifyOrgAdmins } from "../utils/safeNotification";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
+import Vehicle from "../models/Vehicle.model";
 
 /** Emit through the platform's existing Socket.io instance (same one the
  *  lead:new / lead:update events use). Payload always carries orgId so the
@@ -38,6 +39,38 @@ async function resolveDealerName(organizationId: any): Promise<string> {
     return org?.name || "Your Dealership";
   } catch {
     return "Your Dealership";
+  }
+}
+
+/** Resolve the org's review link. Organization.metadata.reviewLinks holds
+ *  per-location overrides (matched against Vehicle.dealerCity, case-
+ *  insensitive); Organization.metadata.reviewLink is the default/fallback,
+ *  used when no location is given or no location matches. Both are set via
+ *  the org-settings PATCH. */
+export async function resolveReviewLink(
+  organizationId: any,
+  dealerCity?: string | null,
+): Promise<string | null> {
+  if (!organizationId) return null;
+  try {
+    const org = await Organization.findById(organizationId).select("metadata").lean();
+    const metadata = (org?.metadata as any) || {};
+
+    if (dealerCity && dealerCity.trim()) {
+      const target = dealerCity.trim().toLowerCase();
+      const perLocation = Array.isArray(metadata.reviewLinks) ? metadata.reviewLinks : [];
+      const match = perLocation.find(
+        (row: any) => typeof row?.location === "string" && row.location.trim().toLowerCase() === target,
+      );
+      if (match?.url && typeof match.url === "string" && match.url.trim()) {
+        return match.url.trim();
+      }
+    }
+
+    const link = metadata.reviewLink;
+    return typeof link === "string" && link.trim() ? link.trim() : null;
+  } catch {
+    return null;
   }
 }
 
@@ -80,6 +113,24 @@ export async function sendAutomatedSms(opts: {
 }): Promise<boolean> {
   if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
   await sendSmsFromUser({ ...opts, user: SYSTEM_ACTOR });
+  return true;
+}
+
+/** Same opt-out guard as sendAutomatedSms, but attributed to the staff
+ *  member who actually triggered the send (e.g. a campaign) instead of the
+ *  system actor, so the conversation thread shows who sent it. */
+export async function sendStaffAttributedSms(opts: {
+  orgId: any;
+  toPhone: string;
+  body: string;
+  customerId?: any;
+  customerName?: string;
+  leadId?: any;
+  actor: IActorRef;
+}): Promise<boolean> {
+  if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
+  const { actor, ...rest } = opts;
+  await sendSmsFromUser({ ...rest, user: actor });
   return true;
 }
 
@@ -233,7 +284,23 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
 
   try {
     if (isConfirm) {
-      await Appointment.updateOne({ _id: appointment._id }, { $set: { status: "confirmed" } });
+      if (appointment.status !== "confirmed") {
+        await Appointment.updateOne(
+          { _id: appointment._id, status: appointment.status },
+          {
+            $set: { status: "confirmed" },
+            $push: {
+              statusHistory: {
+                from: appointment.status,
+                to: "confirmed",
+                changedAt: new Date(),
+                changedBy: "customer",
+                actorName: customerName,
+              },
+            },
+          },
+        );
+      }
       emitToOrg(orgId, "appointment:status_updated", {
         _id: appointment._id.toString(),
         status: "confirmed",
@@ -340,6 +407,55 @@ export async function sendLeadNurtureText(lead: any, step: number): Promise<bool
     toPhone: lead.phone,
     body: buildMessage(dealerName, firstName, subject),
     leadId: lead._id,
+  });
+}
+
+function buildReviewRequestMessage(dealerName: string, firstName: string, reviewLink: string | null): string {
+  return reviewLink
+    ? `Hi ${firstName}, thanks for choosing ${dealerName}! If you have a minute, we'd really appreciate a quick review: ${reviewLink} Reply STOP to opt out.`
+    : `Hi ${firstName}, thanks for choosing ${dealerName}! We'd love to hear how it went — reply and let us know. Reply STOP to opt out.`;
+}
+
+export async function sendReviewRequestText(appointment: any): Promise<boolean> {
+  const phone = appointment.customerBooking?.phone;
+  if (!phone) return false;
+
+  const firstName = appointment.customerBooking?.firstName?.trim() || "there";
+  const dealerCity = appointment.vehicleId
+    ? await Vehicle.findById(appointment.vehicleId).select("dealerCity").lean().then(
+        (vehicle: any) => vehicle?.dealerCity || null,
+        () => null,
+      )
+    : null;
+  const [dealerName, reviewLink] = await Promise.all([
+    resolveDealerName(appointment.organizationId),
+    resolveReviewLink(appointment.organizationId, dealerCity),
+  ]);
+
+  return sendAutomatedSms({
+    orgId: appointment.organizationId,
+    toPhone: phone,
+    body: buildReviewRequestMessage(dealerName, firstName, reviewLink),
+    leadId: appointment.leadId,
+  });
+}
+
+function buildWebchatFallbackMessage(dealerName: string, firstName: string): string {
+  return `Hi ${firstName}, ${dealerName} here. We got your message on our website chat and a team member will reply there shortly. Feel free to reply to this text instead if that's easier. Reply STOP to opt out.`;
+}
+
+export async function sendWebchatFallbackSms(opts: {
+  orgId: any;
+  phone: string;
+  firstName?: string;
+  leadId?: any;
+}): Promise<boolean> {
+  const dealerName = await resolveDealerName(opts.orgId);
+  return sendAutomatedSms({
+    orgId: opts.orgId,
+    toPhone: opts.phone,
+    body: buildWebchatFallbackMessage(dealerName, opts.firstName?.trim() || "there"),
+    leadId: opts.leadId,
   });
 }
 

@@ -188,6 +188,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     email: user.email,
     avatar: user.avatar,
     role: user.role,
+    organizationId: user.organizationId,
     department: user.department,
     screenshotExempt: user.screenshotExempt,
     screenshotBlurUntilPayout: user.screenshotBlurUntilPayout,
@@ -214,6 +215,70 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
+});
+
+const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  if (!orgId) throw new ApiError(400, 'Organization context missing');
+
+  const org = await Organization.findById(orgId).select('metadata').lean();
+  const metadata = (org?.metadata as any) || {};
+  const reviewLink = metadata.reviewLink || '';
+  const reviewLinks = Array.isArray(metadata.reviewLinks) ? metadata.reviewLinks : [];
+  const webchatEnabled = metadata.webchatEnabled !== false;
+  const webchatGreeting = metadata.webchatGreeting || '';
+
+  res.json(new ApiResponse(200, {
+    reviewLink,
+    reviewLinks,
+    webchatEnabled,
+    webchatGreeting,
+  }, 'Organization settings fetched'));
+});
+
+const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  const user = req.crmUser;
+  if (!orgId || !user) throw new ApiError(401, 'Please authenticate');
+  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can update organization settings');
+
+  const { reviewLink, reviewLinks, webchatEnabled, webchatGreeting } = req.body;
+  const org = await Organization.findById(orgId);
+  if (!org) throw new ApiError(404, 'Organization not found');
+
+  // Partial update — only touch the fields this caller actually sent, so
+  // e.g. the Webchat settings card saving can never wipe out the Review
+  // Requests card's fields (and vice versa); each card only sends its own.
+  const metadata: any = { ...(org.metadata || {}) };
+  if (reviewLink !== undefined) {
+    metadata.reviewLink = String(reviewLink || '').trim();
+  }
+  if (reviewLinks !== undefined) {
+    metadata.reviewLinks = Array.isArray(reviewLinks)
+      ? reviewLinks
+          .map((row: any) => ({
+            location: String(row?.location || '').trim(),
+            url: String(row?.url || '').trim(),
+          }))
+          .filter((row: { location: string; url: string }) => row.location && row.url)
+      : [];
+  }
+  if (webchatEnabled !== undefined) {
+    metadata.webchatEnabled = webchatEnabled !== false;
+  }
+  if (webchatGreeting !== undefined) {
+    metadata.webchatGreeting = String(webchatGreeting || '').trim().slice(0, 300);
+  }
+
+  org.metadata = metadata;
+  await org.save();
+
+  res.json(new ApiResponse(200, {
+    reviewLink: org.metadata.reviewLink,
+    reviewLinks: org.metadata.reviewLinks,
+    webchatEnabled: org.metadata.webchatEnabled,
+    webchatGreeting: org.metadata.webchatGreeting,
+  }, 'Organization settings updated'));
 });
 
 const timeClock = asyncHandler(async (req: Request, res: Response) => {
@@ -1209,6 +1274,8 @@ export default {
   forgotPassword,
   confirmResetPassword,
   getMe,
+  getOrgSettings,
+  updateOrgSettings,
   timeClock,
   getTimeLogs,
   getNextEmployeeId,
