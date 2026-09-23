@@ -83,6 +83,7 @@ import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
 import youtubeRoute from "./youtube.route";
+import suprahMeetRoute from "./suprahMeet.route";
 
 
 const router = express.Router();
@@ -99,6 +100,11 @@ const defaultRoutes = [
     path: "/sync",
     route: syncRoute,
   },
+  {
+    path: "/crm/meet",
+    route: suprahMeetRoute,
+  },
+
   {
     path: "/sync/feeds",
     route: feedSyncRoute,
