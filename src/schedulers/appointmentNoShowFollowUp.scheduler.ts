@@ -7,6 +7,9 @@ import { isWithinSendingHours } from '../utils/sendingWindow';
 const CRON_SCHEDULE = process.env.NOSHOW_FOLLOWUP_CRON || '*/10 * * * *';
 const DELAY_MINUTES = parseInt(process.env.NOSHOW_FOLLOWUP_DELAY_MINUTES || '30', 10);
 const MAX_AGE_HOURS = parseInt(process.env.NOSHOW_FOLLOWUP_MAX_AGE_HOURS || '24', 10);
+const MAX_ATTEMPTS = parseInt(process.env.NOSHOW_FOLLOWUP_MAX_ATTEMPTS || '3', 10);
+const RETRY_MINUTES = parseInt(process.env.NOSHOW_FOLLOWUP_RETRY_MINUTES || '15', 10);
+const PROCESSING_TIMEOUT_MINUTES = 10;
 const MAX_APPOINTMENT_AGE_MS = 72 * 60 * 60 * 1000;
 const BATCH_LIMIT = 100;
 
@@ -43,6 +46,32 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
     entryType: 'appointment',
     status: 'no-show',
     noShowFollowUpSentAt: null,
+    noShowFollowUpStatus: { $nin: ['sent', 'skipped'] },
+    $and: [
+      {
+        $or: [
+          { noShowFollowUpAttemptCount: { $lt: MAX_ATTEMPTS } },
+          { noShowFollowUpAttemptCount: { $exists: false } },
+        ],
+      },
+      {
+        $or: [
+          { noShowFollowUpNextRetryAt: null },
+          { noShowFollowUpNextRetryAt: { $exists: false } },
+          { noShowFollowUpNextRetryAt: { $lte: now } },
+        ],
+      },
+      {
+        $or: [
+          { noShowFollowUpStatus: { $ne: 'processing' } },
+          {
+            noShowFollowUpLastAttemptAt: {
+              $lte: new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000),
+            },
+          },
+        ],
+      },
+    ],
     'customerBooking.phone': { $exists: true, $ne: '' },
     updatedAt: {
       $gte: new Date(now.getTime() - MAX_AGE_HOURS * 60 * 60 * 1000),
@@ -50,7 +79,7 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
     },
     startTime: { $gte: new Date(now.getTime() - MAX_APPOINTMENT_AGE_MS) },
   })
-    .select('title startTime organizationId customerBooking leadId')
+    .select('title startTime organizationId customerBooking leadId noShowFollowUpAttemptCount')
     .limit(BATCH_LIMIT)
     .lean();
 
@@ -59,20 +88,100 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
   for (const appointment of candidates as any[]) {
     try {
       if (await hasUpcomingAppointment(appointment, now)) {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpSentAt: null },
+          {
+            $set: {
+              noShowFollowUpStatus: 'skipped',
+              noShowFollowUpFailureReason: 'Customer has an upcoming appointment',
+            },
+            $unset: { noShowFollowUpNextRetryAt: 1 },
+          },
+          { timestamps: false },
+        );
         stats.skipped++;
         continue;
       }
 
-      const claimed = await Appointment.updateOne(
-        { _id: appointment._id, status: 'no-show', noShowFollowUpSentAt: null },
-        { $set: { noShowFollowUpSentAt: now } },
-        { timestamps: false },
+      const staleBefore = new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
+      const claimed = await Appointment.findOneAndUpdate(
+        {
+          _id: appointment._id,
+          status: 'no-show',
+          noShowFollowUpSentAt: null,
+          noShowFollowUpStatus: { $nin: ['sent', 'skipped'] },
+          $and: [
+            {
+              $or: [
+                { noShowFollowUpAttemptCount: { $lt: MAX_ATTEMPTS } },
+                { noShowFollowUpAttemptCount: { $exists: false } },
+              ],
+            },
+            {
+              $or: [
+                { noShowFollowUpStatus: { $ne: 'processing' } },
+                { noShowFollowUpLastAttemptAt: { $lte: staleBefore } },
+              ],
+            },
+          ],
+        },
+        {
+          $set: {
+            noShowFollowUpStatus: 'processing',
+            noShowFollowUpLastAttemptAt: now,
+          },
+          $inc: { noShowFollowUpAttemptCount: 1 },
+          $unset: { noShowFollowUpFailureReason: 1, noShowFollowUpNextRetryAt: 1 },
+        },
+        { new: true, timestamps: false },
       );
-      if (claimed.modifiedCount === 0) continue;
+      if (!claimed) continue;
 
-      if (await sendNoShowFollowUpText(appointment)) stats.sent++;
-      else stats.skipped++;
+      if (await sendNoShowFollowUpText(appointment)) {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+          {
+            $set: { noShowFollowUpStatus: 'sent', noShowFollowUpSentAt: new Date() },
+            $unset: { noShowFollowUpNextRetryAt: 1, noShowFollowUpFailureReason: 1 },
+          },
+          { timestamps: false },
+        );
+        stats.sent++;
+      } else {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+          {
+            $set: {
+              noShowFollowUpStatus: 'skipped',
+              noShowFollowUpFailureReason: 'Customer opted out of SMS',
+            },
+            $unset: { noShowFollowUpNextRetryAt: 1 },
+          },
+          { timestamps: false },
+        );
+        stats.skipped++;
+      }
     } catch (err) {
+      const attempts = (appointment.noShowFollowUpAttemptCount || 0) + 1;
+      const exhausted = attempts >= MAX_ATTEMPTS;
+      await Appointment.updateOne(
+        { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+        {
+          $set: {
+            noShowFollowUpStatus: 'failed',
+            noShowFollowUpFailureReason: String((err as any)?.message || err).slice(0, 500),
+            ...(exhausted
+              ? {}
+              : {
+                  noShowFollowUpNextRetryAt: new Date(
+                    Date.now() + RETRY_MINUTES * attempts * 60 * 1000,
+                  ),
+                }),
+          },
+          ...(exhausted ? { $unset: { noShowFollowUpNextRetryAt: 1 } } : {}),
+        },
+        { timestamps: false },
+      ).catch(() => undefined);
       stats.errors++;
       logger.error({ err, appointmentId: appointment._id }, '[NoShowFollowUp] Failed to process appointment');
     }
@@ -82,8 +191,8 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
 }
 
 export function initNoShowFollowUpScheduler(): void {
-  if (process.env.NOSHOW_FOLLOWUP_ENABLED === 'false') {
-    logger.info('[NoShowFollowUp] Disabled via NOSHOW_FOLLOWUP_ENABLED');
+  if (process.env.NOSHOW_FOLLOWUP_ENABLED !== 'true') {
+    logger.info('[NoShowFollowUp] Disabled. Set NOSHOW_FOLLOWUP_ENABLED=true to enable');
     return;
   }
 

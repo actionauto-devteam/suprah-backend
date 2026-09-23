@@ -8,5 +8,6 @@ router.use(crmAuth());
 
 router.get('/leads/:leadId/messages', ctrl.getLeadWebChat);
 router.post('/leads/:leadId/messages', ctrl.sendStaffMessage);
+router.post('/leads/:leadId/typing', ctrl.pingTyping);
 
 export default router;

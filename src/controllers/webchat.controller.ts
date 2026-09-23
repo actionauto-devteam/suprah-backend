@@ -13,6 +13,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { isWithinSendingHours } from '../utils/sendingWindow';
 import logger from '../utils/logger';
 
 const MAX_MESSAGE_LENGTH = 1000;
@@ -89,6 +90,46 @@ function validateMessageBody(raw: unknown): string {
   return body;
 }
 
+function isOrgWebchatEnabled(metadata: any): boolean {
+  return process.env.WEBCHAT_ENABLED !== 'false' && metadata?.webchatEnabled !== false;
+}
+
+export const getPublicConfig = asyncHandler(async (req: Request, res: Response) => {
+  const { vehicleId, orgKey } = req.query;
+  let orgId: any = null;
+
+  if (vehicleId && mongoose.isValidObjectId(String(vehicleId))) {
+    const vehicle = await Vehicle.findById(String(vehicleId)).select('organizationId').lean();
+    orgId = vehicle?.organizationId;
+  } else if (orgKey) {
+    const organization = await Organization.findOne({ slug: String(orgKey), status: 'active' })
+      .select('_id')
+      .lean();
+    orgId = organization?._id;
+  }
+
+  if (!orgId) {
+    return res.json(
+      new ApiResponse(200, { enabled: false, greeting: '', withinHours: true }, 'Chat is not available for this dealership'),
+    );
+  }
+
+  const organization = await Organization.findById(orgId).select('metadata').lean();
+  const metadata = (organization?.metadata as any) || {};
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        enabled: isOrgWebchatEnabled(metadata),
+        greeting: metadata.webchatGreeting || '',
+        withinHours: isWithinSendingHours(),
+      },
+      'Chat configuration',
+    ),
+  );
+});
+
 export const startSession = asyncHandler(async (req: Request, res: Response) => {
   if (process.env.WEBCHAT_ENABLED === 'false') {
     throw new ApiError(503, 'Chat is currently unavailable. Please call us instead.');
@@ -128,6 +169,11 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
   }
 
   if (!orgId) throw new ApiError(404, 'Chat is not available for this dealership');
+
+  const organizationDoc = await Organization.findById(orgId).select('metadata').lean();
+  if (!isOrgWebchatEnabled(organizationDoc?.metadata)) {
+    throw new ApiError(503, 'Chat is currently unavailable. Please call us instead.');
+  }
 
   const systemUser = await User.findOne({
     organizationId: orgId,
@@ -268,8 +314,28 @@ export const syncVisitorMessages = asyncHandler(async (req: Request, res: Respon
   if (after && !isNaN(after.getTime())) filter.createdAt = { $gt: after };
 
   const messages = await WebChatMessage.find(filter).sort({ createdAt: 1 }).limit(SYNC_LIMIT).lean();
+  const TYPING_WINDOW_MS = 6000;
+  const staffTyping = Boolean(
+    session.staffTypingAt && Date.now() - new Date(session.staffTypingAt).getTime() < TYPING_WINDOW_MS,
+  );
 
-  res.json(new ApiResponse(200, { messages: messages.map(serializeForVisitor) }, 'Messages synced'));
+  res.json(
+    new ApiResponse(200, { messages: messages.map(serializeForVisitor), staffTyping }, 'Messages synced'),
+  );
+});
+
+export const pingTyping = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const { leadId } = req.params;
+
+  if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
+
+  await WebChatSession.updateOne(
+    { leadId, organizationId: orgId },
+    { $set: { staffTypingAt: new Date() } },
+  );
+
+  res.json(new ApiResponse(200, null, 'Typing signal sent'));
 });
 
 export const getLeadWebChat = asyncHandler(async (req: Request, res: Response) => {

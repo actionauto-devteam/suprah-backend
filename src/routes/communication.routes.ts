@@ -15,6 +15,7 @@ router.post("/calls/log", ctrl.logClientCall);
 router.get("/calls", ctrl.listCalls);
 router.post("/rtc/token", ctrl.getRtcToken);
 router.get("/customers/:customerId/thread", ctrl.getCustomerThread);
+router.get("/leads/:leadId/timeline", ctrl.getLeadTimeline);
 
 router.get("/conversations/:id/messages", ctrl.getConversationMessages);
 router.post("/conversations/:id/reply", ctrl.replyToConversation);

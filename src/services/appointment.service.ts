@@ -394,7 +394,17 @@ const updateAppointment = async (
     throw new ApiError(403, 'Only the creator can modify participants or guests');
   }
 
+  const previousStatus = appointment.status;
   Object.assign(appointment, updateData);
+  if (updateData.status && updateData.status !== previousStatus) {
+    appointment.statusHistory = appointment.statusHistory || [];
+    appointment.statusHistory.push({
+      from: previousStatus,
+      to: updateData.status,
+      changedAt: new Date(),
+      changedBy: userId,
+    });
+  }
   console.log(`[AppointmentService] Saving appointment ${appointmentId}...`);
   await appointment.save();
   console.log(`[AppointmentService] Saved. Starting sync...`);
@@ -474,7 +484,15 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     throw new ApiError(403, 'Only the creator can cancel this appointment');
   }
 
+  const previousStatus = appointment.status;
   appointment.status = 'cancelled';
+  appointment.statusHistory = appointment.statusHistory || [];
+  appointment.statusHistory.push({
+    from: previousStatus,
+    to: 'cancelled',
+    changedAt: new Date(),
+    changedBy: userId,
+  });
   await appointment.save();
 
   if (appointment.googleCalendarEventId) {

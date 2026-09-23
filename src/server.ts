@@ -27,6 +27,9 @@ import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivity
 import { initAppointmentReminderScheduler } from "./schedulers/appointmentReminder.scheduler";
 import { initNoShowFollowUpScheduler } from "./schedulers/appointmentNoShowFollowUp.scheduler";
 import { initLeadNurtureScheduler } from "./schedulers/leadNurture.scheduler";
+import { initReviewRequestScheduler } from "./schedulers/reviewRequest.scheduler";
+import { initSmsCampaignScheduler } from "./schedulers/smsCampaign.scheduler";
+import { initWebchatSmsFallbackScheduler } from "./schedulers/webchatSmsFallback.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
@@ -213,6 +216,9 @@ if (require.main === module) {
     initAppointmentReminderScheduler();
     initNoShowFollowUpScheduler();
     initLeadNurtureScheduler();
+    initReviewRequestScheduler();
+    initSmsCampaignScheduler();
+    initWebchatSmsFallbackScheduler();
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();
     initConnectionLossShiftAlertScheduler();
