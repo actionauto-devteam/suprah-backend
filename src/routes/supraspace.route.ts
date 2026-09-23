@@ -146,10 +146,6 @@ router.patch('/spaces/:id',                        supraSpaceController.updateSp
 router.delete('/spaces/:id',                       supraSpaceController.deleteSpace);
 router.patch('/conversations/:id/space',           supraSpaceController.moveConversationToSpace);
 
-// ─── Video conferencing ───────────────────────────────────────────────────────
-
-router.post('/conversations/:id/video-token', supraSpaceController.generateVideoToken);
-
 // ─── Voice message audio stream ──────────────────────────────────────────────
 
 router.get('/conversations/:id/messages/:msgId/voice', supraSpaceController.streamVoiceMessage);

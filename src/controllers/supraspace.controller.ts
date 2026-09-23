@@ -23,7 +23,6 @@ import Notification from '../models/Notification.model';
 import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
-import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
 import { resolveNextEmployeeId } from '../utils/employeeId.util';
@@ -2714,36 +2713,6 @@ const getActiveUsers = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, withPresence, 'Team users fetched'));
 });
 
-// ─── Video Conferencing ────────────────────────────────────────────────────
-
-const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
-  const userId = req.crmUser!._id;
-  const { id } = req.params;
-
-  const conversation = await SupraSpaceConversation.findById(id);
-  if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
-
-  const user = req.crmUser!;
-  const roomName = `supraspace-${id}`;
-
-  // No JaaS configured → return room only (fallback path, identity via userInfo).
-  if (!jaasConfigured()) {
-    return res.json(new ApiResponse(200, { token: undefined, roomName, domain: JAAS_DOMAIN }, 'JaaS not configured'));
-  }
-
-  const token = generateJaasToken({
-    user: {
-      id: userId.toString(),
-      name: user.fullName,
-      email: user.username,
-      avatar: user.avatar,
-      moderator: true,
-    },
-  });
-  res.json(new ApiResponse(200, { token, roomName: jaasRoomName(roomName), domain: JAAS_DOMAIN }, 'Video token generated'));
-});
-
 const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   const mainUser = req.user as IUser;
   const organizationId =
@@ -3002,7 +2971,6 @@ const supraSpaceController = {
   rsvpEvent,
   getCrmUsers,
   getActiveUsers,
-  generateVideoToken,
   getSpaces,
   createSpace,
   updateSpace,

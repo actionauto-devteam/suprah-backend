@@ -57,7 +57,6 @@ import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
 import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
-import callRoute from "./call.route";
 import auctionListingReviewRoute from "./auctionListingReview.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
@@ -418,10 +417,6 @@ const defaultRoutes = [
   {
     path: "/customer/auction-listings",
     route: auctionListingRoute,
-  },
-  {
-    path: "/calls",
-    route: callRoute,
   },
   {
     path: "/referral-leads",

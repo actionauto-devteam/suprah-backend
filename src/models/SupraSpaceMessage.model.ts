@@ -64,13 +64,6 @@ export interface ISupraSpaceMessageMetadata {
   // guarantee that retries map one report to one Suprah Space message.
   source?: string | null;
   dayPulseReportId?: mongoose.Types.ObjectId | null;
-  meeting?: {
-    meetingId: string;
-    meetingLink: string;
-    title: string;
-    scheduledAt?: Date | null;
-    allowedDomain?: string;
-  } | null;
 }
 
 
@@ -179,13 +172,6 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
     crmUserRole:       { type: String, default: null },
     source:            { type: String, default: null },
     dayPulseReportId:  { type: Schema.Types.ObjectId, ref: 'DayPulse', default: null },
-    meeting: {
-      meetingId: { type: String, default: '' },
-      meetingLink: { type: String, default: '' },
-      title: { type: String, default: '' },
-      scheduledAt: { type: Date, default: null },
-      allowedDomain: { type: String, default: '' },
-    },
   },
   { _id: false }
 );
