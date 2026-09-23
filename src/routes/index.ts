@@ -82,6 +82,7 @@ import crmDemoRoute from "./crmDemo.routes";
 import smsCampaignRoute from "./smsCampaign.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
+import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
 import youtubeRoute from "./youtube.route";
 
 
@@ -201,6 +202,11 @@ const defaultRoutes = [
   {
     path: "/webhooks/telnyx",
     route: telnyxWebhookRoute,
+  },
+  // Email unsubscribe — PUBLIC (JWT-signed token verified in controller, no crmAuth).
+  {
+    path: "/email/unsubscribe",
+    route: emailUnsubscribeRoute,
   },
   {
     path: "/mail",

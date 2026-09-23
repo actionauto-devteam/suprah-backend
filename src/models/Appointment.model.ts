@@ -67,6 +67,12 @@ export interface IAppointment extends Document {
   reviewRequestLastAttemptAt?: Date;
   reviewRequestNextRetryAt?: Date;
   reviewRequestFailureReason?: string;
+  reviewRequestEmailSentAt?: Date;
+  reviewRequestEmailStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
+  reviewRequestEmailAttemptCount?: number;
+  reviewRequestEmailLastAttemptAt?: Date;
+  reviewRequestEmailNextRetryAt?: Date;
+  reviewRequestEmailFailureReason?: string;
   statusHistory?: Array<{
     from: string;
     to: string;
@@ -214,6 +220,15 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reviewRequestLastAttemptAt: { type: Date },
     reviewRequestNextRetryAt: { type: Date },
     reviewRequestFailureReason: { type: String, trim: true, maxlength: 500 },
+    reviewRequestEmailSentAt: { type: Date },
+    reviewRequestEmailStatus: {
+      type: String,
+      enum: ['processing', 'sent', 'failed', 'skipped']
+    },
+    reviewRequestEmailAttemptCount: { type: Number, default: 0 },
+    reviewRequestEmailLastAttemptAt: { type: Date },
+    reviewRequestEmailNextRetryAt: { type: Date },
+    reviewRequestEmailFailureReason: { type: String, trim: true, maxlength: 500 },
     statusHistory: [{
       from: { type: String, required: true },
       to: { type: String, required: true },
