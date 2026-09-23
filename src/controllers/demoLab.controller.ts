@@ -10,6 +10,7 @@ import SmsOptOut from '../models/SmsOptOut.model';
 import Notification from '../models/Notification.model';
 import { Conversation, CommunicationMessage, CallLog } from '../models/communication.model';
 import * as comm from '../services/communication.service';
+import emailService, { isEmailOptedOut } from '../services/email.service';
 import * as telnyx from '../services/telnyx.service';
 import { sendReminderFor } from '../schedulers/appointmentReminder.scheduler';
 import { generateDemoPhone, isDemoPhone } from '../utils/demoPhone';
@@ -73,6 +74,7 @@ async function serializeScenario(orgId: string, lead: any, appointment: any) {
           reminderSent: Boolean(appointment.reminderSent),
           noShowFollowUpSentAt: appointment.noShowFollowUpSentAt || null,
           reviewRequestSentAt: appointment.reviewRequestSentAt || null,
+          reviewRequestEmailSentAt: appointment.reviewRequestEmailSentAt || null,
         }
       : null,
     optedOut: await comm.isSmsOptedOut(orgId, lead.phone),
@@ -288,22 +290,47 @@ export const sendReviewRequest = asyncHandler(async (req: Request, res: Response
     throw new ApiError(400, 'Mark the appointment as completed first');
   }
 
-  if (await comm.isSmsOptedOut(orgId, lead.phone)) {
-    return respondWithScenario(res, orgId, lead._id, 'Blocked: the number opted out', true);
+  const results: string[] = [];
+  let sentAny = false;
+
+  if (appointment.reviewRequestSentAt) {
+    results.push('SMS already sent');
+  } else if (await comm.isSmsOptedOut(orgId, lead.phone)) {
+    results.push('SMS blocked (opted out)');
+  } else {
+    const claimedSms = await Appointment.updateOne(
+      { _id: appointment._id, reviewRequestSentAt: null },
+      { $set: { reviewRequestSentAt: new Date(), reviewRequestStatus: 'sent' } },
+      { timestamps: false },
+    );
+    if (claimedSms.modifiedCount > 0) {
+      await comm.sendReviewRequestText(appointment.toObject());
+      results.push('SMS sent');
+      sentAny = true;
+    }
   }
 
-  const claimed = await Appointment.updateOne(
-    { _id: appointment._id, reviewRequestSentAt: null },
-    { $set: { reviewRequestSentAt: new Date(), reviewRequestStatus: 'sent' } },
-    { timestamps: false },
-  );
-  if (claimed.modifiedCount === 0) {
-    throw new ApiError(409, 'The review request was already sent');
+  const email = appointment.customerBooking?.email;
+  if (!email) {
+    results.push('Email skipped (no email on file)');
+  } else if (appointment.reviewRequestEmailSentAt) {
+    results.push('Email already sent');
+  } else if (await isEmailOptedOut(orgId, email)) {
+    results.push('Email blocked (opted out)');
+  } else {
+    const claimedEmail = await Appointment.updateOne(
+      { _id: appointment._id, reviewRequestEmailSentAt: null },
+      { $set: { reviewRequestEmailSentAt: new Date(), reviewRequestEmailStatus: 'sent' } },
+      { timestamps: false },
+    );
+    if (claimedEmail.modifiedCount > 0) {
+      await emailService.sendReviewRequestEmail(appointment.toObject());
+      results.push('Email sent');
+      sentAny = true;
+    }
   }
 
-  await comm.sendReviewRequestText(appointment.toObject());
-
-  await respondWithScenario(res, orgId, lead._id, 'Review request sent');
+  await respondWithScenario(res, orgId, lead._id, results.join(' · '), !sentAny);
 });
 
 export const sendNurture = asyncHandler(async (req: Request, res: Response) => {

@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
 import { sendReviewRequestText } from '../services/communication.service';
+import emailService from '../services/email.service';
 import logger from '../utils/logger';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 
@@ -17,138 +18,275 @@ interface ReviewRequestStats {
   sent: number;
   skipped: number;
   errors: number;
+  emailScanned: number;
+  emailSent: number;
+  emailSkipped: number;
+  emailErrors: number;
 }
 
 export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
-  const stats: ReviewRequestStats = { scanned: 0, sent: 0, skipped: 0, errors: 0 };
+  const stats: ReviewRequestStats = {
+    scanned: 0,
+    sent: 0,
+    skipped: 0,
+    errors: 0,
+    emailScanned: 0,
+    emailSent: 0,
+    emailSkipped: 0,
+    emailErrors: 0,
+  };
   const now = new Date();
   if (!isWithinSendingHours(now)) return stats;
 
-  const candidates = await Appointment.find({
-    entryType: 'appointment',
-    status: 'completed',
-    reviewRequestSentAt: null,
-    reviewRequestStatus: { $nin: ['sent', 'skipped'] },
-    $and: [
-      {
-        $or: [
-          { reviewRequestAttemptCount: { $lt: MAX_ATTEMPTS } },
-          { reviewRequestAttemptCount: { $exists: false } },
-        ],
-      },
-      {
-        $or: [
-          { reviewRequestNextRetryAt: null },
-          { reviewRequestNextRetryAt: { $exists: false } },
-          { reviewRequestNextRetryAt: { $lte: now } },
-        ],
-      },
-      {
-        $or: [
-          { reviewRequestStatus: { $ne: 'processing' } },
-          {
-            reviewRequestLastAttemptAt: {
-              $lte: new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000),
-            },
-          },
-        ],
-      },
-    ],
-    'customerBooking.phone': { $exists: true, $ne: '' },
-    updatedAt: {
-      $gte: new Date(now.getTime() - MAX_AGE_HOURS * 60 * 60 * 1000),
-      $lte: new Date(now.getTime() - DELAY_MINUTES * 60 * 1000),
-    },
-  })
-    .select('title organizationId customerBooking leadId vehicleId reviewRequestAttemptCount')
-    .limit(BATCH_LIMIT)
-    .lean();
+  const smsEnabled = process.env.REVIEW_REQUEST_ENABLED === 'true';
+  const emailEnabled = process.env.REVIEW_REQUEST_EMAIL_ENABLED === 'true';
+  const staleBefore = new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
+  const ageWindow = {
+    $gte: new Date(now.getTime() - MAX_AGE_HOURS * 60 * 60 * 1000),
+    $lte: new Date(now.getTime() - DELAY_MINUTES * 60 * 1000),
+  };
 
-  stats.scanned = candidates.length;
-
-  for (const appointment of candidates as any[]) {
-    try {
-      const staleBefore = new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
-      const claimed = await Appointment.findOneAndUpdate(
+  if (smsEnabled) {
+    const candidates = await Appointment.find({
+      entryType: 'appointment',
+      status: 'completed',
+      reviewRequestSentAt: null,
+      reviewRequestStatus: { $nin: ['sent', 'skipped'] },
+      $and: [
         {
-          _id: appointment._id,
-          status: 'completed',
-          reviewRequestSentAt: null,
-          reviewRequestStatus: { $nin: ['sent', 'skipped'] },
-          $and: [
-            {
-              $or: [
-                { reviewRequestAttemptCount: { $lt: MAX_ATTEMPTS } },
-                { reviewRequestAttemptCount: { $exists: false } },
-              ],
-            },
-            {
-              $or: [
-                { reviewRequestStatus: { $ne: 'processing' } },
-                { reviewRequestLastAttemptAt: { $lte: staleBefore } },
-              ],
-            },
+          $or: [
+            { reviewRequestAttemptCount: { $lt: MAX_ATTEMPTS } },
+            { reviewRequestAttemptCount: { $exists: false } },
           ],
         },
         {
-          $set: {
-            reviewRequestStatus: 'processing',
-            reviewRequestLastAttemptAt: now,
-          },
-          $inc: { reviewRequestAttemptCount: 1 },
-          $unset: { reviewRequestFailureReason: 1, reviewRequestNextRetryAt: 1 },
+          $or: [
+            { reviewRequestNextRetryAt: null },
+            { reviewRequestNextRetryAt: { $exists: false } },
+            { reviewRequestNextRetryAt: { $lte: now } },
+          ],
         },
-        { new: true, timestamps: false },
-      );
-      if (!claimed) continue;
+        {
+          $or: [
+            { reviewRequestStatus: { $ne: 'processing' } },
+            { reviewRequestLastAttemptAt: { $lte: staleBefore } },
+          ],
+        },
+      ],
+      'customerBooking.phone': { $exists: true, $ne: '' },
+      updatedAt: ageWindow,
+    })
+      .select('title organizationId customerBooking leadId vehicleId reviewRequestAttemptCount')
+      .limit(BATCH_LIMIT)
+      .lean();
 
-      if (await sendReviewRequestText(appointment)) {
-        await Appointment.updateOne(
-          { _id: appointment._id, reviewRequestStatus: 'processing' },
+    stats.scanned = candidates.length;
+
+    for (const appointment of candidates as any[]) {
+      try {
+        const claimed = await Appointment.findOneAndUpdate(
           {
-            $set: { reviewRequestStatus: 'sent', reviewRequestSentAt: new Date() },
-            $unset: { reviewRequestNextRetryAt: 1, reviewRequestFailureReason: 1 },
+            _id: appointment._id,
+            status: 'completed',
+            reviewRequestSentAt: null,
+            reviewRequestStatus: { $nin: ['sent', 'skipped'] },
+            $and: [
+              {
+                $or: [
+                  { reviewRequestAttemptCount: { $lt: MAX_ATTEMPTS } },
+                  { reviewRequestAttemptCount: { $exists: false } },
+                ],
+              },
+              {
+                $or: [
+                  { reviewRequestStatus: { $ne: 'processing' } },
+                  { reviewRequestLastAttemptAt: { $lte: staleBefore } },
+                ],
+              },
+            ],
           },
-          { timestamps: false },
+          {
+            $set: {
+              reviewRequestStatus: 'processing',
+              reviewRequestLastAttemptAt: now,
+            },
+            $inc: { reviewRequestAttemptCount: 1 },
+            $unset: { reviewRequestFailureReason: 1, reviewRequestNextRetryAt: 1 },
+          },
+          { new: true, timestamps: false },
         );
-        stats.sent++;
-      } else {
+        if (!claimed) continue;
+
+        if (await sendReviewRequestText(appointment)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestStatus: 'processing' },
+            {
+              $set: { reviewRequestStatus: 'sent', reviewRequestSentAt: new Date() },
+              $unset: { reviewRequestNextRetryAt: 1, reviewRequestFailureReason: 1 },
+            },
+            { timestamps: false },
+          );
+          stats.sent++;
+        } else {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestStatus: 'processing' },
+            {
+              $set: {
+                reviewRequestStatus: 'skipped',
+                reviewRequestFailureReason: 'Customer opted out of SMS',
+              },
+              $unset: { reviewRequestNextRetryAt: 1 },
+            },
+            { timestamps: false },
+          );
+          stats.skipped++;
+        }
+      } catch (err) {
+        const attempts = (appointment.reviewRequestAttemptCount || 0) + 1;
+        const exhausted = attempts >= MAX_ATTEMPTS;
         await Appointment.updateOne(
           { _id: appointment._id, reviewRequestStatus: 'processing' },
           {
             $set: {
-              reviewRequestStatus: 'skipped',
-              reviewRequestFailureReason: 'Customer opted out of SMS',
+              reviewRequestStatus: 'failed',
+              reviewRequestFailureReason: String((err as any)?.message || err).slice(0, 500),
+              ...(exhausted
+                ? {}
+                : {
+                    reviewRequestNextRetryAt: new Date(
+                      Date.now() + RETRY_MINUTES * attempts * 60 * 1000,
+                    ),
+                  }),
             },
-            $unset: { reviewRequestNextRetryAt: 1 },
+            ...(exhausted ? { $unset: { reviewRequestNextRetryAt: 1 } } : {}),
           },
           { timestamps: false },
-        );
-        stats.skipped++;
+        ).catch(() => undefined);
+        stats.errors++;
+        logger.error({ err, appointmentId: appointment._id }, '[ReviewRequest] Failed to process appointment');
       }
-    } catch (err) {
-      const attempts = (appointment.reviewRequestAttemptCount || 0) + 1;
-      const exhausted = attempts >= MAX_ATTEMPTS;
-      await Appointment.updateOne(
-        { _id: appointment._id, reviewRequestStatus: 'processing' },
+    }
+  }
+
+  if (emailEnabled) {
+    const emailCandidates = await Appointment.find({
+      entryType: 'appointment',
+      status: 'completed',
+      reviewRequestEmailSentAt: null,
+      reviewRequestEmailStatus: { $nin: ['sent', 'skipped'] },
+      $and: [
         {
-          $set: {
-            reviewRequestStatus: 'failed',
-            reviewRequestFailureReason: String((err as any)?.message || err).slice(0, 500),
-            ...(exhausted
-              ? {}
-              : {
-                  reviewRequestNextRetryAt: new Date(
-                    Date.now() + RETRY_MINUTES * attempts * 60 * 1000,
-                  ),
-                }),
-          },
-          ...(exhausted ? { $unset: { reviewRequestNextRetryAt: 1 } } : {}),
+          $or: [
+            { reviewRequestEmailAttemptCount: { $lt: MAX_ATTEMPTS } },
+            { reviewRequestEmailAttemptCount: { $exists: false } },
+          ],
         },
-        { timestamps: false },
-      ).catch(() => undefined);
-      stats.errors++;
-      logger.error({ err, appointmentId: appointment._id }, '[ReviewRequest] Failed to process appointment');
+        {
+          $or: [
+            { reviewRequestEmailNextRetryAt: null },
+            { reviewRequestEmailNextRetryAt: { $exists: false } },
+            { reviewRequestEmailNextRetryAt: { $lte: now } },
+          ],
+        },
+        {
+          $or: [
+            { reviewRequestEmailStatus: { $ne: 'processing' } },
+            { reviewRequestEmailLastAttemptAt: { $lte: staleBefore } },
+          ],
+        },
+      ],
+      'customerBooking.email': { $exists: true, $ne: '' },
+      updatedAt: ageWindow,
+    })
+      .select('title organizationId customerBooking leadId vehicleId reviewRequestEmailAttemptCount')
+      .limit(BATCH_LIMIT)
+      .lean();
+
+    stats.emailScanned = emailCandidates.length;
+
+    for (const appointment of emailCandidates as any[]) {
+      try {
+        const claimed = await Appointment.findOneAndUpdate(
+          {
+            _id: appointment._id,
+            status: 'completed',
+            reviewRequestEmailSentAt: null,
+            reviewRequestEmailStatus: { $nin: ['sent', 'skipped'] },
+            $and: [
+              {
+                $or: [
+                  { reviewRequestEmailAttemptCount: { $lt: MAX_ATTEMPTS } },
+                  { reviewRequestEmailAttemptCount: { $exists: false } },
+                ],
+              },
+              {
+                $or: [
+                  { reviewRequestEmailStatus: { $ne: 'processing' } },
+                  { reviewRequestEmailLastAttemptAt: { $lte: staleBefore } },
+                ],
+              },
+            ],
+          },
+          {
+            $set: {
+              reviewRequestEmailStatus: 'processing',
+              reviewRequestEmailLastAttemptAt: now,
+            },
+            $inc: { reviewRequestEmailAttemptCount: 1 },
+            $unset: { reviewRequestEmailFailureReason: 1, reviewRequestEmailNextRetryAt: 1 },
+          },
+          { new: true, timestamps: false },
+        );
+        if (!claimed) continue;
+
+        if (await emailService.sendReviewRequestEmail(appointment)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestEmailStatus: 'processing' },
+            {
+              $set: { reviewRequestEmailStatus: 'sent', reviewRequestEmailSentAt: new Date() },
+              $unset: { reviewRequestEmailNextRetryAt: 1, reviewRequestEmailFailureReason: 1 },
+            },
+            { timestamps: false },
+          );
+          stats.emailSent++;
+        } else {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestEmailStatus: 'processing' },
+            {
+              $set: {
+                reviewRequestEmailStatus: 'skipped',
+                reviewRequestEmailFailureReason: 'Customer opted out of email',
+              },
+              $unset: { reviewRequestEmailNextRetryAt: 1 },
+            },
+            { timestamps: false },
+          );
+          stats.emailSkipped++;
+        }
+      } catch (err) {
+        const attempts = (appointment.reviewRequestEmailAttemptCount || 0) + 1;
+        const exhausted = attempts >= MAX_ATTEMPTS;
+        await Appointment.updateOne(
+          { _id: appointment._id, reviewRequestEmailStatus: 'processing' },
+          {
+            $set: {
+              reviewRequestEmailStatus: 'failed',
+              reviewRequestEmailFailureReason: String((err as any)?.message || err).slice(0, 500),
+              ...(exhausted
+                ? {}
+                : {
+                    reviewRequestEmailNextRetryAt: new Date(
+                      Date.now() + RETRY_MINUTES * attempts * 60 * 1000,
+                    ),
+                  }),
+            },
+            ...(exhausted ? { $unset: { reviewRequestEmailNextRetryAt: 1 } } : {}),
+          },
+          { timestamps: false },
+        ).catch(() => undefined);
+        stats.emailErrors++;
+        logger.error({ err, appointmentId: appointment._id }, '[ReviewRequest] Failed to process appointment email');
+      }
     }
   }
 
@@ -156,8 +294,10 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
 }
 
 export function initReviewRequestScheduler(): void {
-  if (process.env.REVIEW_REQUEST_ENABLED !== 'true') {
-    logger.info('[ReviewRequest] Disabled. Set REVIEW_REQUEST_ENABLED=true to enable');
+  const smsEnabled = process.env.REVIEW_REQUEST_ENABLED === 'true';
+  const emailEnabled = process.env.REVIEW_REQUEST_EMAIL_ENABLED === 'true';
+  if (!smsEnabled && !emailEnabled) {
+    logger.info('[ReviewRequest] Disabled. Set REVIEW_REQUEST_ENABLED=true and/or REVIEW_REQUEST_EMAIL_ENABLED=true to enable');
     return;
   }
 
@@ -166,7 +306,7 @@ export function initReviewRequestScheduler(): void {
   cron.schedule(CRON_SCHEDULE, async () => {
     try {
       const stats = await runReviewRequestSweep();
-      if (stats.sent > 0 || stats.errors > 0) {
+      if (stats.sent > 0 || stats.errors > 0 || stats.emailSent > 0 || stats.emailErrors > 0) {
         logger.info(stats, '[ReviewRequest] Sweep complete');
       }
     } catch (err) {

@@ -78,6 +78,7 @@ const envVarsSchema = Joi.object()
 
     CRM_JWT_SECRET: Joi.string().allow('').description('CRM JWT Secret'),
     MEMBERSHIP_DISCOUNT_SECRET: Joi.string().allow('').description('Membership discount JWT secret'),
+    EMAIL_OPTOUT_SECRET: Joi.string().allow('').description('Email opt-out link JWT secret'),
     VAPID_PUBLIC_KEY: Joi.string()
       .when('NODE_ENV', { is: 'production', then: Joi.required(), otherwise: Joi.allow('') })
       .description('VAPID Public Key'),
@@ -117,6 +118,7 @@ const config = {
     refreshExpiration: envVars.JWT_REFRESH_EXPIRATION,
     crmJwtSecret: envVars.CRM_JWT_SECRET,
     membershipDiscountSecret: envVars.MEMBERSHIP_DISCOUNT_SECRET || 'membership-discount-dev-secret',
+    emailOptOutSecret: envVars.EMAIL_OPTOUT_SECRET || 'email-optout-dev-secret',
   },
   ftp: {
     host: envVars.DEALERSCLOUD_FTP_HOST,
