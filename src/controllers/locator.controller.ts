@@ -25,6 +25,7 @@ import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert } from '../services/shiftAlerts.service';
 import notificationService from '../services/notification.service';
 import { invalidateUserCache } from '../utils/cache.util';
+import { invalidateWorkSiteCache, processMobilePingForAutoSwitch } from '../services/autoSwitch.service';
 
 const HISTORY_THROTTLE_MS = 30_000;
 const HARSH_BRAKING_DROP_MPH = 15;
@@ -747,6 +748,10 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
         ).catch(() => {});
     }
 
+    if (deviceType === 'mobile' && actor.model === 'CrmUser') {
+        processMobilePingForAutoSwitch({ user: actor.doc as any, lat, lng, accuracyM }).catch(() => {});
+    }
+
     if (isLotTech) {
         const nowMs = Date.now();
 
@@ -1188,8 +1193,8 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can create places');
 
-    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description } = req.body as {
-        name: string; lat: number; lng: number; radiusM?: number; warningRadiusM?: number; icon?: string; color?: string; address?: string; description?: string;
+    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description, isWorkSite } = req.body as {
+        name: string; lat: number; lng: number; radiusM?: number; warningRadiusM?: number; icon?: string; color?: string; address?: string; description?: string; isWorkSite?: boolean;
     };
     if (!name || typeof lat !== 'number' || typeof lng !== 'number') {
         throw new ApiError(400, 'name, lat and lng are required');
@@ -1204,9 +1209,11 @@ const createPlace = asyncHandler(async (req: Request, res: Response) => {
         radiusM: radiusM || 100,
         warningRadiusM,
         icon, color, address, description,
+        isWorkSite: isWorkSite === true,
         createdBy: actor.id,
     });
 
+    invalidateWorkSiteCache(orgId);
     emitToOrg(orgId, 'locator:place_created', { place });
     res.json(new ApiResponse(201, place, 'Place created'));
 });
@@ -1218,8 +1225,8 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     const isAdmin = ['admin', 'super_admin'].includes(actor.role || '');
     if (!isAdmin) throw new ApiError(403, 'Only admins can update places');
 
-    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description, isActive } = req.body as Partial<{
-        name: string; lat: number; lng: number; radiusM: number; warningRadiusM: number | null; icon: string; color: string; address: string; description: string; isActive: boolean;
+    const { name, lat, lng, radiusM, warningRadiusM, icon, color, address, description, isActive, isWorkSite } = req.body as Partial<{
+        name: string; lat: number; lng: number; radiusM: number; warningRadiusM: number | null; icon: string; color: string; address: string; description: string; isActive: boolean; isWorkSite: boolean;
     }>;
 
     const place = await Place.findOne({ _id: id, organizationId: orgId });
@@ -1240,8 +1247,10 @@ const updatePlace = asyncHandler(async (req: Request, res: Response) => {
     if (address !== undefined) place.address = address;
     if (description !== undefined) place.description = description;
     if (isActive !== undefined) place.isActive = isActive;
+    if (typeof isWorkSite === 'boolean') place.isWorkSite = isWorkSite;
     await place.save();
 
+    invalidateWorkSiteCache(orgId);
     emitToOrg(orgId, 'locator:place_updated', { place });
     res.json(new ApiResponse(200, place, 'Place updated'));
 });
@@ -1256,6 +1265,7 @@ const deletePlace = asyncHandler(async (req: Request, res: Response) => {
     const place = await Place.findOneAndUpdate({ _id: id, organizationId: orgId }, { isActive: false });
     if (!place) throw new ApiError(404, 'Place not found');
 
+    invalidateWorkSiteCache(orgId);
     emitToOrg(orgId, 'locator:place_deleted', { placeId: id });
     res.json(new ApiResponse(200, null, 'Place deleted'));
 });

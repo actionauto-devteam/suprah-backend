@@ -4,6 +4,7 @@ const mockNormalizeDepartment = jest.fn();
 const mockRecordDeviceSwitch = jest.fn();
 const mockClearShiftDevice = jest.fn();
 const mockRecordDesktopLocation = jest.fn();
+const mockRecordAutoSwitch = jest.fn();
 
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: { findOne: mockCrmFindOne } }));
 jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: {} }));
@@ -40,6 +41,7 @@ jest.mock('../../src/services/monitoringDevice.service', () => ({
   initShiftDevice: jest.fn(),
   recordDeviceSwitchOverrideChange: mockRecordDeviceSwitch,
   recordDesktopLocationOverrideChange: mockRecordDesktopLocation,
+  recordAutoSwitchOverrideChange: mockRecordAutoSwitch,
   clearShiftDevice: mockClearShiftDevice,
 }));
 jest.mock('../../src/services/shiftAlerts.service', () => ({ fireShiftAlert: jest.fn() }));
@@ -68,6 +70,7 @@ const makeTarget = (overrides: Record<string, unknown> = {}) => ({
   organizationId: 'org1',
   trayDeviceAuthOverride: 'default',
   deviceSwitchOverride: 'default',
+  autoSwitchOverride: 'default',
   desktopLocationOverride: 'default',
   markModified: jest.fn(),
   validate: jest.fn().mockResolvedValue(undefined),
@@ -219,6 +222,55 @@ describe('PATCH /users/:id deviceSwitchOverride', () => {
     const { next } = await callUpdate({ ...admin, role: 'employee' }, { deviceSwitchOverride: 'on' });
     expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 403 });
     expect(mockRecordDeviceSwitch).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /users/:id autoSwitchOverride', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it.each([
+    ['default', 'on'],
+    ['on', 'off'],
+    ['off', 'default'],
+  ])('changes %s to %s, saves it and audits the admin', async (from, to) => {
+    const target = makeTarget({ autoSwitchOverride: from });
+    mockCrmFindOne.mockResolvedValue(target);
+    const { json, next } = await callUpdate(admin, { autoSwitchOverride: to });
+    expect(next).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalled();
+    expect(target.autoSwitchOverride).toBe(to);
+    expect(target.save).toHaveBeenCalled();
+    expect(mockRecordAutoSwitch).toHaveBeenCalledTimes(1);
+    expect(mockRecordAutoSwitch).toHaveBeenCalledWith(target, from, to, 'admin1');
+  });
+
+  it('does nothing when unchanged and ignores invalid values', async () => {
+    const target = makeTarget({ autoSwitchOverride: 'on' });
+    mockCrmFindOne.mockResolvedValue(target);
+    await callUpdate(admin, { autoSwitchOverride: 'on' });
+    for (const bad of ['ON', 'true', '', null, 1, {}, 'always']) {
+      await callUpdate(admin, { autoSwitchOverride: bad });
+    }
+    expect(target.autoSwitchOverride).toBe('on');
+    expect(mockRecordAutoSwitch).not.toHaveBeenCalled();
+  });
+
+  it('does not touch the other switches and never clears the shift device state', async () => {
+    const target = makeTarget({ trayDeviceAuthOverride: 'on', deviceSwitchOverride: 'on', desktopLocationOverride: 'on', autoSwitchOverride: 'default' });
+    mockCrmFindOne.mockResolvedValue(target);
+    await callUpdate(admin, { autoSwitchOverride: 'off' });
+    expect(target.trayDeviceAuthOverride).toBe('on');
+    expect(target.deviceSwitchOverride).toBe('on');
+    expect(target.desktopLocationOverride).toBe('on');
+    expect(mockClearShiftDevice).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-admin', async () => {
+    const { next } = await callUpdate({ ...admin, role: 'employee' }, { autoSwitchOverride: 'on' });
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 403 });
+    expect(mockRecordAutoSwitch).not.toHaveBeenCalled();
   });
 });
 

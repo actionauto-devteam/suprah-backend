@@ -15,6 +15,7 @@ import {
 } from '../utils/deviceSwitch.util';
 import type { MonitoringDevice, SwitchActor } from '../utils/deviceSwitch.util';
 import { getActiveDevice, getOpenShiftStart } from '../utils/monitoringDeviceState.util';
+import { getAutoSwitchAwayMs, isAutoSwitchEnabledForUser, isAwayBlockActive } from '../utils/autoSwitch.util';
 
 export interface DeviceSwitchSubject {
   _id: { toString(): string };
@@ -22,6 +23,7 @@ export interface DeviceSwitchSubject {
   department?: string | null;
   monitoringModeOverride?: 'default' | 'off' | 'always' | 'switching' | null;
   deviceSwitchOverride?: unknown;
+  autoSwitchOverride?: unknown;
 }
 
 export type SwitchResult =
@@ -31,7 +33,10 @@ export type SwitchResult =
 const resolveMode = (user: DeviceSwitchSubject) =>
   resolveMonitoringMode(user.organizationId?.toString(), user.department, user.monitoringModeOverride);
 
-const announce = (userId: string, payload: { activeDevice: MonitoringDevice; switchedAt: Date; by: string }) => {
+const announce = (
+  userId: string,
+  payload: { activeDevice: MonitoringDevice; switchedAt: Date; by: string; placeName?: string | null },
+) => {
   try {
     emitToUser(userId, 'monitoring-device', { userId, ...payload });
     emitToShiftBoard('monitoring-device', { userId, ...payload });
@@ -40,12 +45,19 @@ const announce = (userId: string, payload: { activeDevice: MonitoringDevice; swi
   }
 };
 
+const auditReasonFor = (actor: SwitchActor): string => {
+  if (actor === 'admin') return 'monitoring_device_switched_by_admin';
+  if (actor === 'geofence') return 'monitoring_device_switched_auto';
+  return 'monitoring_device_switched';
+};
+
 const audit = (
   user: DeviceSwitchSubject,
   from: MonitoringDevice | null,
   to: MonitoringDevice,
   actor: SwitchActor,
   actorId: unknown,
+  placeName?: string | null,
 ) => {
   try {
     Promise.resolve(
@@ -53,8 +65,8 @@ const audit = (
         entityType: 'TimeLog',
         entityId: user._id.toString(),
         action: 'UPDATE',
-        changes: { activeDevice: { from, to } },
-        reason: actor === 'admin' ? 'monitoring_device_switched_by_admin' : 'monitoring_device_switched',
+        changes: { activeDevice: { from, to }, ...(placeName ? { placeName } : {}) },
+        reason: auditReasonFor(actor),
         ...(actorId ? { performedBy: actorId } : {}),
         ...(user.organizationId ? { organizationId: user.organizationId.toString() } : {}),
       }),
@@ -92,10 +104,14 @@ export async function initShiftDevice(
 
 export async function getDeviceSwitchView(
   user: DeviceSwitchSubject,
-): Promise<{ enabled: boolean; activeDevice: MonitoringDevice | null }> {
-  if (!isDeviceSwitchEnabledForUser(user)) return { enabled: false, activeDevice: null };
-  if ((await resolveMode(user)) !== 'switching') return { enabled: false, activeDevice: null };
-  return { enabled: true, activeDevice: await getActiveDevice(user._id) };
+): Promise<{ enabled: boolean; activeDevice: MonitoringDevice | null; autoSwitch: boolean }> {
+  if (!isDeviceSwitchEnabledForUser(user)) return { enabled: false, activeDevice: null, autoSwitch: false };
+  if ((await resolveMode(user)) !== 'switching') return { enabled: false, activeDevice: null, autoSwitch: false };
+  return {
+    enabled: true,
+    activeDevice: await getActiveDevice(user._id),
+    autoSwitch: isAutoSwitchEnabledForUser(user),
+  };
 }
 
 export async function switchMonitoringDevice(params: {
@@ -103,8 +119,10 @@ export async function switchMonitoringDevice(params: {
   to: unknown;
   actor: SwitchActor;
   actorId?: unknown;
+  placeName?: string | null;
 }): Promise<SwitchResult> {
   const { user, actor, actorId } = params;
+  const placeName = params.placeName ? params.placeName : null;
   if (!isMonitoringDevice(params.to)) {
     return { ok: false, status: 400, code: 'BAD_DEVICE', message: 'Choose either desktop or mobile.' };
   }
@@ -116,7 +134,9 @@ export async function switchMonitoringDevice(params: {
 
   const nowMs = Date.now();
   const [mode, shiftStartedAt] = await Promise.all([resolveMode(user), getOpenShiftStart(user._id)]);
-  const state: any = await MonitoringDeviceState.findById(user._id).select('activeDevice shiftStartedAt switchedAt history').lean();
+  const state: any = await MonitoringDeviceState.findById(user._id)
+    .select('activeDevice shiftStartedAt switchedAt history awaySince awayLastPingAt awaySiteName awayPaused')
+    .lean();
   const stateValid = !!state && !!shiftStartedAt && isStateForShift(state.shiftStartedAt, shiftStartedAt);
   const current: MonitoringDevice | null = stateValid && isMonitoringDevice(state.activeDevice) ? state.activeDevice : null;
 
@@ -148,6 +168,12 @@ export async function switchMonitoringDevice(params: {
     }
   }
 
+  const awayFromWorkSite = actor === 'user'
+    && to === 'desktop'
+    && stateValid
+    && isAutoSwitchEnabledForUser(user)
+    && isAwayBlockActive(state, nowMs, getAutoSwitchAwayMs());
+
   const decision = decideSwitch({
     to,
     current,
@@ -158,6 +184,8 @@ export async function switchMonitoringDevice(params: {
     trayFresh,
     lastSwitchAt: stateValid && lastEntryBy !== 'shift-start' ? state.switchedAt : null,
     nowMs,
+    awayFromWorkSite,
+    awaySiteName: awayFromWorkSite ? state.awaySiteName ?? null : null,
   });
   if (!decision.ok) return decision;
   if (decision.unchanged) {
@@ -165,12 +193,21 @@ export async function switchMonitoringDevice(params: {
   }
 
   const at = new Date(nowMs);
-  const entry = { from: current, to, at, by: actor, actorId: actorId ?? null };
+  const entry = {
+    from: current,
+    to,
+    at,
+    by: actor,
+    actorId: actorId ?? null,
+    ...(placeName ? { placeName } : {}),
+  };
+  const pauseAutoSwitch = actor === 'admin' && to === 'desktop' && stateValid && !!state.awaySince;
   const base = {
     organizationId: user.organizationId,
     shiftStartedAt: shiftStartedAt!,
     activeDevice: to,
     switchedAt: at,
+    ...(pauseAutoSwitch ? { awayPaused: true } : {}),
   };
   if (stateValid) {
     await MonitoringDeviceState.updateOne(
@@ -189,11 +226,34 @@ export async function switchMonitoringDevice(params: {
     { userId: user._id },
     { locationIssueDetectedAt: null, locationWarningStage: 0, connectionLostNotifiedAt: null },
   ).catch(() => {});
-  audit(user, current, to, actor, actorId);
-  announce(user._id.toString(), { activeDevice: to, switchedAt: at, by: actor });
+  audit(user, current, to, actor, actorId, placeName);
+  announce(user._id.toString(), { activeDevice: to, switchedAt: at, by: actor, ...(placeName ? { placeName } : {}) });
 
   return { ok: true, activeDevice: to, switchedAt: at, unchanged: false };
 }
+
+export const recordAutoSwitchOverrideChange = (
+  target: { _id: unknown; organizationId?: unknown },
+  from: string,
+  to: string,
+  performedBy: unknown,
+): void => {
+  try {
+    Promise.resolve(
+      AuditLog.create({
+        entityType: 'User',
+        entityId: String(target._id),
+        action: 'UPDATE',
+        changes: { autoSwitchOverride: { from, to } },
+        reason: 'auto_switch_override_changed',
+        ...(performedBy ? { performedBy } : {}),
+        ...(target.organizationId ? { organizationId: String(target.organizationId) } : {}),
+      }),
+    ).catch(() => {});
+  } catch {
+    return;
+  }
+};
 
 export const recordDeviceSwitchOverrideChange = (
   target: { _id: unknown; organizationId?: unknown },

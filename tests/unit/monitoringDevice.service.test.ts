@@ -32,6 +32,7 @@ import {
   clearShiftDevice,
   getDeviceSwitchView,
   initShiftDevice,
+  recordAutoSwitchOverrideChange,
   recordDeviceSwitchOverrideChange,
   switchMonitoringDevice,
 } from '../../src/services/monitoringDevice.service';
@@ -110,19 +111,24 @@ describe('monitoringDevice.service', () => {
   describe('getDeviceSwitchView', () => {
     it('is disabled without touching the database when the feature is off', async () => {
       const view = await getDeviceSwitchView(user({ deviceSwitchOverride: 'default' }));
-      expect(view).toEqual({ enabled: false, activeDevice: null });
+      expect(view).toEqual({ enabled: false, activeDevice: null, autoSwitch: false });
       expect(mockResolveMode).not.toHaveBeenCalled();
       expect(mockGetActiveDevice).not.toHaveBeenCalled();
     });
 
     it('is disabled for an account that is not in Switching mode', async () => {
       mockResolveMode.mockResolvedValue('always');
-      expect(await getDeviceSwitchView(user())).toEqual({ enabled: false, activeDevice: null });
+      expect(await getDeviceSwitchView(user())).toEqual({ enabled: false, activeDevice: null, autoSwitch: false });
     });
 
     it('reports the active device for an enabled Switching account', async () => {
       mockGetActiveDevice.mockResolvedValue('mobile');
-      expect(await getDeviceSwitchView(user())).toEqual({ enabled: true, activeDevice: 'mobile' });
+      expect(await getDeviceSwitchView(user())).toEqual({ enabled: true, activeDevice: 'mobile', autoSwitch: false });
+    });
+
+    it('reports auto-switch only when it is turned on for the user as well', async () => {
+      expect(await getDeviceSwitchView(user({ autoSwitchOverride: 'on' }))).toMatchObject({ enabled: true, autoSwitch: true });
+      expect(await getDeviceSwitchView(user({ autoSwitchOverride: 'off' }))).toMatchObject({ enabled: true, autoSwitch: false });
     });
   });
 
@@ -250,6 +256,99 @@ describe('monitoringDevice.service', () => {
       const result = await switchMonitoringDevice({ user: user(), to: 'mobile', actor: 'user' });
       expect(result).toMatchObject({ ok: true, activeDevice: 'mobile' });
     });
+
+    describe('automatic move after leaving a work site', () => {
+      it('moves to the phone with no liveness check or cooldown, and records the site in history, audit and announcement', async () => {
+        mockLocFindOne.mockImplementation(() => lean(null));
+        mockStateFindById.mockImplementation(() => lean(state({ switchedAt: new Date(Date.now() - 1000), history: [{ from: 'mobile', to: 'desktop', at: new Date(), by: 'user' }] })));
+        const result = await switchMonitoringDevice({ user: user(), to: 'mobile', actor: 'geofence', placeName: 'Action Auto Lehi' });
+        expect(result).toMatchObject({ ok: true, activeDevice: 'mobile', unchanged: false });
+        expect(mockLocFindOne).not.toHaveBeenCalled();
+        expect(mockBeatFindOne).not.toHaveBeenCalled();
+        const [, update] = mockStateUpdateOne.mock.calls[0];
+        expect(update.$push.history.$each[0]).toMatchObject({ from: 'desktop', to: 'mobile', by: 'geofence', placeName: 'Action Auto Lehi' });
+        expect(mockAuditCreate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: 'monitoring_device_switched_auto',
+            changes: { activeDevice: { from: 'desktop', to: 'mobile' }, placeName: 'Action Auto Lehi' },
+          }),
+        );
+        expect(mockEmitToUser).toHaveBeenCalledWith(
+          'user1',
+          'monitoring-device',
+          expect.objectContaining({ activeDevice: 'mobile', by: 'geofence', placeName: 'Action Auto Lehi' }),
+        );
+      });
+
+      it('does not add a site name to a manual switch', async () => {
+        await switchMonitoringDevice({ user: user(), to: 'mobile', actor: 'user' });
+        expect(mockStateUpdateOne.mock.calls[0][1].$push.history.$each[0]).not.toHaveProperty('placeName');
+        expect(mockEmitToUser.mock.calls[0][2]).not.toHaveProperty('placeName');
+      });
+
+      it('still needs an open shift', async () => {
+        mockGetOpenShiftStart.mockResolvedValue(null);
+        expect(await switchMonitoringDevice({ user: user(), to: 'mobile', actor: 'geofence' })).toMatchObject({ ok: false, code: 'NOT_ON_SHIFT' });
+      });
+    });
+
+    describe('moving back to the computer while away from a work site', () => {
+      const away = (overrides: Record<string, unknown> = {}) =>
+        state({
+          activeDevice: 'mobile',
+          switchedAt: new Date(Date.now() - 10 * 60_000),
+          awaySince: new Date(Date.now() - 5 * 60_000),
+          awayLastPingAt: new Date(Date.now() - 20_000),
+          awaySiteName: 'Action Auto Lehi',
+          ...overrides,
+        });
+      const onUser = () => user({ autoSwitchOverride: 'on' });
+
+      it('refuses the employee, names the site, and writes nothing', async () => {
+        mockStateFindById.mockImplementation(() => lean(away()));
+        const result = await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'user' });
+        expect(result).toMatchObject({ ok: false, status: 409, code: 'AWAY_FROM_WORK_SITE' });
+        expect((result as { message: string }).message).toContain('Action Auto Lehi');
+        expect(mockStateUpdateOne).not.toHaveBeenCalled();
+        expect(mockEmitToUser).not.toHaveBeenCalled();
+      });
+
+      it('lets the employee back once the phone is seen at a site again', async () => {
+        mockStateFindById.mockImplementation(() => lean(away({ awaySince: null, awayLastPingAt: null })));
+        expect(await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'user' })).toMatchObject({ ok: true, activeDevice: 'desktop' });
+      });
+
+      it('lets the employee back when the phone has gone quiet, because its position is unknown', async () => {
+        mockStateFindById.mockImplementation(() => lean(away({ awayLastPingAt: new Date(Date.now() - 10 * 60_000) })));
+        expect(await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'user' })).toMatchObject({ ok: true, activeDevice: 'desktop' });
+      });
+
+      it('lets the employee back when auto-switch is not on for them', async () => {
+        mockStateFindById.mockImplementation(() => lean(away()));
+        expect(await switchMonitoringDevice({ user: user({ autoSwitchOverride: 'off' }), to: 'desktop', actor: 'user' })).toMatchObject({ ok: true });
+      });
+
+      it('lets an admin move the employee to the computer anyway and pauses the automatic move until the phone is back', async () => {
+        mockStateFindById.mockImplementation(() => lean(away()));
+        expect(await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'admin', actorId: 'admin1' })).toMatchObject({ ok: true, activeDevice: 'desktop' });
+        expect(mockStateUpdateOne.mock.calls[0][1].$set.awayPaused).toBe(true);
+      });
+
+      it('does not pause anything for an admin move when the phone is not away, or for a move to the phone', async () => {
+        mockStateFindById.mockImplementation(() => lean(away({ awaySince: null, awayLastPingAt: null })));
+        await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'admin', actorId: 'admin1' });
+        expect(mockStateUpdateOne.mock.calls[0][1].$set).not.toHaveProperty('awayPaused');
+        mockStateUpdateOne.mockClear();
+        mockStateFindById.mockImplementation(() => lean(state({ awaySince: new Date(Date.now() - 300_000), awayLastPingAt: new Date() })));
+        await switchMonitoringDevice({ user: onUser(), to: 'mobile', actor: 'admin', actorId: 'admin1' });
+        expect(mockStateUpdateOne.mock.calls[0][1].$set).not.toHaveProperty('awayPaused');
+      });
+
+      it('lets the employee back to the computer while the admin override is in force', async () => {
+        mockStateFindById.mockImplementation(() => lean(away({ awayPaused: true })));
+        expect(await switchMonitoringDevice({ user: onUser(), to: 'desktop', actor: 'user' })).toMatchObject({ ok: true, activeDevice: 'desktop' });
+      });
+    });
   });
 
   describe('bookkeeping helpers', () => {
@@ -266,6 +365,21 @@ describe('monitoringDevice.service', () => {
       );
       mockAuditCreate.mockImplementation(() => { throw new Error('db down'); });
       expect(() => recordDeviceSwitchOverrideChange({ _id: 'u2' }, 'on', 'off', undefined)).not.toThrow();
+    });
+
+    it('records who changed the per-user auto-switch override without ever throwing', () => {
+      recordAutoSwitchOverrideChange({ _id: 'u2', organizationId: 'org1' }, 'default', 'on', 'admin1');
+      expect(mockAuditCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entityType: 'User',
+          entityId: 'u2',
+          changes: { autoSwitchOverride: { from: 'default', to: 'on' } },
+          reason: 'auto_switch_override_changed',
+          performedBy: 'admin1',
+        }),
+      );
+      mockAuditCreate.mockImplementation(() => { throw new Error('db down'); });
+      expect(() => recordAutoSwitchOverrideChange({ _id: 'u2' }, 'on', 'off', undefined)).not.toThrow();
     });
 
     it('clears a user shift state and never throws', () => {

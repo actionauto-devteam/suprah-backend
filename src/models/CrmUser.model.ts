@@ -50,6 +50,7 @@ export interface ICrmUser extends Document {
   monitoringModeOverride?: 'default' | 'off' | 'always' | 'switching';
   trayDeviceAuthOverride?: 'default' | 'on' | 'off';
   deviceSwitchOverride?: 'default' | 'on' | 'off';
+  autoSwitchOverride?: 'default' | 'on' | 'off';
   desktopLocationOverride?: 'default' | 'on' | 'off';
   hourlyRate?: number;
   payrollLocation?: 'Utah' | 'Philippines';
@@ -237,6 +238,11 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: 'default',
     },
     deviceSwitchOverride: {
+      type: String,
+      enum: ['default', 'on', 'off'],
+      default: 'default',
+    },
+    autoSwitchOverride: {
       type: String,
       enum: ['default', 'on', 'off'],
       default: 'default',
