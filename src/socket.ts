@@ -137,6 +137,9 @@ export const setupSocket = (io: Server) => {
     // separate from the per-user/per-org rooms above.
     if (socket.handshake.auth?.clientType === 'tray') {
       socket.join('tray-clients');
+      if (socket.crmUserId && socket.crmUserId !== socket.userId) {
+        socket.join(`user:${socket.crmUserId}`);
+      }
     }
 
     // CRM presence tracking: mark online + join shift-board room if admin/manager
