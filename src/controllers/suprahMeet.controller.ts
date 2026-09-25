@@ -76,6 +76,23 @@ function canControl(user: any, meeting: IMeeting): boolean {
   );
 }
 
+/** May this user enter the room without waiting? */
+function isAllowedIn(user: any, meeting: IMeeting): boolean {
+  // Public meetings (the default) are open to everyone in the org — the
+  // waiting room only guards meetings explicitly marked private.
+  if ((meeting as any).visibility !== 'private') return true;
+  const uid = user._id.toString();
+  if (meeting.hostCrmUserId.toString() === uid) return true;
+  if (user.role === 'admin' || user.role === 'manager') return true;
+  if (meeting.inviteAll) return true;
+  if (meeting.invitees.some((id) => id.toString() === uid)) return true;
+  // Reconnect: anyone who has been in this meeting before may come back.
+  if (meeting.participants.some((p) => p.crmUserId.toString() === uid)) return true;
+  return ((meeting as any).waiting ?? []).some(
+    (w: any) => w.crmUserId.toString() === uid && w.status === 'admitted'
+  );
+}
+
 /** Minutes offset from UTC for America/Denver at a given instant (-360 MDT, -420 MST). */
 function denverOffsetMinutes(at: Date): number {
   const dtf = new Intl.DateTimeFormat('en-US', {
@@ -119,13 +136,47 @@ async function createOne(base: Record<string, any>): Promise<IMeeting> {
   throw new ApiError(500, 'Could not allocate a meeting code. Please try again.');
 }
 
+/**
+ * Resolve tagged people + departments to one deduped, org-scoped invitee list.
+ * Departments are expanded to their members up front so visibility, alerts,
+ * and reminders all keep working off `invitees` unchanged.
+ */
+async function resolveAudience(user: any, invitees: any, inviteDepartments: any) {
+  const inviteeIds = Array.isArray(invitees)
+    ? invitees.filter((id: any) => mongoose.isValidObjectId(id)).slice(0, 200)
+    : [];
+  const directInvitees = inviteeIds.length
+    ? (await CrmUser.find({ _id: { $in: inviteeIds }, organizationId: user.organizationId })
+        .select('_id').lean()).map((u) => u._id)
+    : [];
+
+  const deptKeys = Array.isArray(inviteDepartments)
+    ? inviteDepartments
+        .filter((d: any) => typeof d === 'string' && d.trim())
+        .map((d: string) => d.trim())
+        .slice(0, 50)
+    : [];
+  const deptMembers = deptKeys.length
+    ? (await CrmUser.find({
+        organizationId: user.organizationId,
+        isActive: true,
+        isSystem: { $ne: true },
+        department: { $in: deptKeys },
+      }).select('_id').lean()).map((u) => u._id)
+    : [];
+
+  const merged = new Map<string, mongoose.Types.ObjectId>();
+  [...directInvitees, ...deptMembers].forEach((id) => merged.set(id.toString(), id));
+  return { inviteeList: [...merged.values()], deptKeys };
+}
+
 // ── POST /api/crm/meet/meetings ─────────────────────────────────────────────
 // Body: { title, invitees[], inviteAll, inviteDepartments[],
 //         scheduledAt?: "YYYY-MM-DDTHH:mm",           ← single session
 //         occurrences?: ["YYYY-MM-DDTHH:mm", ...] }   ← recurring series
 const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   const user = requireCrmUser(req);
-  const { title, scheduledAt, occurrences, invitees, inviteAll, inviteDepartments } = req.body ?? {};
+  const { title, scheduledAt, occurrences, invitees, inviteAll, inviteDepartments, visibility } = req.body ?? {};
 
   const cleanTitle = typeof title === 'string' && title.trim()
     ? title.trim().slice(0, 120) : 'Instant meeting';
@@ -145,42 +196,18 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, 'All the selected times are in the past (MDT). Pick future times.');
   }
 
-  // Directly tagged people
-  const inviteeIds = Array.isArray(invitees)
-    ? invitees.filter((id: any) => mongoose.isValidObjectId(id)).slice(0, 200)
-    : [];
-  const directInvitees = inviteeIds.length
-    ? (await CrmUser.find({ _id: { $in: inviteeIds }, organizationId: user.organizationId })
-        .select('_id').lean()).map((u) => u._id)
-    : [];
-
-  // Tagged departments — resolved to their members at creation time so
-  // visibility, alerts, and reminders all work off `invitees` unchanged.
-  const deptKeys = Array.isArray(inviteDepartments)
-    ? inviteDepartments
-        .filter((d: any) => typeof d === 'string' && d.trim())
-        .map((d: string) => d.trim())
-        .slice(0, 50)
-    : [];
-  const deptMembers = deptKeys.length
-    ? (await CrmUser.find({
-        organizationId: user.organizationId,
-        isActive: true,
-        isSystem: { $ne: true },
-        department: { $in: deptKeys },
-      }).select('_id').lean()).map((u) => u._id)
-    : [];
-
-  const merged = new Map<string, mongoose.Types.ObjectId>();
-  [...directInvitees, ...deptMembers].forEach((id) => merged.set(id.toString(), id));
+  const { inviteeList, deptKeys } = await resolveAudience(user, invitees, inviteDepartments);
 
   const base = {
     organizationId: user.organizationId,
     title: cleanTitle,
     hostCrmUserId: user._id,
-    invitees: [...merged.values()],
+    invitees: inviteeList,
     inviteAll: Boolean(inviteAll),
     inviteDepartments: deptKeys,
+    // Public (default): anyone in the org with the code joins right away.
+    // Private: join-by-code users go through the waiting room.
+    visibility: visibility === 'private' ? 'private' : 'public',
     participants: [],
   };
 
@@ -233,6 +260,150 @@ const deleteMeeting = asyncHandler(async (req: Request, res: Response) => {
     wholeSeries ? 'Series deleted' : 'Meeting deleted'));
 });
 
+// ── Waiting room ────────────────────────────────────────────────────────────
+// Tagged attendees, the host, and admins/managers never wait; anyone joining
+// purely by code asks first. The entry lives on the meeting doc, so waiting
+// survives refreshes and reconnects.
+
+// POST /api/crm/meet/meetings/:code/request-join
+const requestJoin = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (meeting.status === 'ended') {
+    return res.json(new ApiResponse(200, { ended: true }, 'Meeting already ended'));
+  }
+  if (isAllowedIn(user, meeting)) {
+    return res.json(new ApiResponse(200, { admitted: true }, 'Admitted'));
+  }
+  const uid = user._id.toString();
+  const waiting: any[] = (meeting as any).waiting ?? ((meeting as any).waiting = []);
+  const entry = waiting.find((w) => w.crmUserId.toString() === uid);
+  if (entry?.status === 'denied') {
+    return res.json(new ApiResponse(200, { denied: true }, 'Declined by the host'));
+  }
+  if (!entry) {
+    waiting.push({
+      crmUserId: user._id,
+      fullName: user.fullName,
+      avatar: user.avatar || undefined,
+      status: 'waiting',
+      requestedAt: new Date(),
+    });
+    await meeting.save();
+  }
+  res.json(new ApiResponse(200, { waiting: true }, 'Waiting for the host'));
+});
+
+// GET /api/crm/meet/meetings/:code/waiting  (host / admin / manager)
+const getWaiting = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!canControl(user, meeting)) {
+    throw new ApiError(403, 'Only the host or an admin/manager can see the waiting room.');
+  }
+  const waiting = (((meeting as any).waiting ?? []) as any[])
+    .filter((w) => w.status === 'waiting')
+    .map((w) => ({
+      crmUserId: w.crmUserId.toString(),
+      fullName: w.fullName,
+      avatar: w.avatar ?? null,
+      requestedAt: w.requestedAt,
+    }));
+  res.json(new ApiResponse(200, { waiting }, 'Waiting room fetched'));
+});
+
+// POST /api/crm/meet/meetings/:code/waiting/:userId   Body: { action: 'admit' | 'deny' }
+const respondWaiting = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!canControl(user, meeting)) {
+    throw new ApiError(403, 'Only the host or an admin/manager can manage the waiting room.');
+  }
+  const { action } = req.body ?? {};
+  if (action !== 'admit' && action !== 'deny') {
+    throw new ApiError(400, "action must be 'admit' or 'deny'.");
+  }
+  const target = String(req.params.userId || '');
+  const entry = (((meeting as any).waiting ?? []) as any[]).find(
+    (w) => w.crmUserId.toString() === target
+  );
+  if (!entry) throw new ApiError(404, 'That person is not in the waiting room.');
+  entry.status = action === 'admit' ? 'admitted' : 'denied';
+  entry.respondedAt = new Date();
+  await meeting.save();
+  res.json(new ApiResponse(200,
+    { stillWaiting: (((meeting as any).waiting ?? []) as any[]).filter((w) => w.status === 'waiting').length },
+    action === 'admit' ? 'Admitted' : 'Declined'));
+});
+
+// ── PATCH /api/crm/meet/meetings/:code ──────────────────────────────────────
+// Edits an UPCOMING meeting. Body (all optional):
+//   { title, scheduledAt: "YYYY-MM-DDTHH:mm" (Mountain wall time),
+//     invitees[], inviteAll, inviteDepartments[] }
+// ?series=1 → title + attendees also apply to every remaining scheduled
+// session in the series; the time always applies to this session only.
+const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!canControl(user, meeting)) {
+    throw new ApiError(403, 'Only the host or an admin/manager can edit this meeting.');
+  }
+  if (meeting.status !== 'scheduled') {
+    throw new ApiError(400, 'Only upcoming meetings can be edited.');
+  }
+
+  const { title, scheduledAt, invitees, inviteAll, inviteDepartments, visibility } = req.body ?? {};
+
+  // Fields that may fan out to the whole series.
+  const shared: Record<string, any> = {};
+  if (title !== undefined) {
+    if (typeof title !== 'string' || !title.trim()) {
+      throw new ApiError(400, 'The title cannot be empty.');
+    }
+    shared.title = title.trim().slice(0, 120);
+  }
+  // Any audience field present → the audience was re-picked; replace it wholesale.
+  if (invitees !== undefined || inviteAll !== undefined || inviteDepartments !== undefined) {
+    const { inviteeList, deptKeys } = await resolveAudience(user, invitees, inviteDepartments);
+    shared.invitees = inviteeList;
+    shared.inviteAll = Boolean(inviteAll);
+    shared.inviteDepartments = deptKeys;
+  }
+  if (visibility !== undefined) {
+    shared.visibility = visibility === 'private' ? 'private' : 'public';
+  }
+
+  // Time applies to THIS session only — each session in a series has its own day.
+  const own: Record<string, any> = {};
+  if (scheduledAt !== undefined) {
+    const when = mdtWallToUtc(String(scheduledAt));
+    if (when.getTime() < Date.now() - 60_000) {
+      throw new ApiError(400, 'That time is already in the past (MDT). Pick a future time.');
+    }
+    own.scheduledAt = when;
+    own.reminderSentAt = null; // re-arm the 10-minute reminder for the new time
+  }
+
+  if (Object.keys(shared).length === 0 && Object.keys(own).length === 0) {
+    throw new ApiError(400, 'Nothing to update.');
+  }
+
+  const wholeSeries = String(req.query.series || '') === '1' && meeting.seriesId;
+  let seriesUpdated = 0;
+  if (wholeSeries && Object.keys(shared).length > 0) {
+    const result = await Meeting.updateMany(
+      { organizationId: user.organizationId, seriesId: meeting.seriesId, status: 'scheduled' },
+      { $set: shared }
+    );
+    seriesUpdated = result.modifiedCount ?? 0;
+    if (Object.keys(own).length > 0) {
+      await Meeting.updateOne({ _id: meeting._id }, { $set: own });
+    }
+  } else {
+    await Meeting.updateOne({ _id: meeting._id }, { $set: { ...shared, ...own } });
+  }
+
+  const fresh = await Meeting.findById(meeting._id).lean();
+  res.json(new ApiResponse(200, { ...serializeMeeting(fresh), seriesUpdated },
+    wholeSeries ? 'Series updated' : 'Meeting updated'));
+});
+
 // ── GET /api/crm/meet/meetings ──────────────────────────────────────────────
 const listMeetings = asyncHandler(async (req: Request, res: Response) => {
   const user = requireCrmUser(req);
@@ -246,7 +417,7 @@ const listMeetings = asyncHandler(async (req: Request, res: Response) => {
     ],
   })
     .sort({ status: 1, scheduledAt: 1, createdAt: -1 })
-    .limit(80)
+    .limit(200) // room for multiple 30-session series + history (frontend paginates)
     .lean();
   res.json(new ApiResponse(200, {
     meetings: meetings.map(serializeMeeting),
@@ -287,6 +458,9 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
 
   if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  if (!isAllowedIn(user, meeting)) {
+    throw new ApiError(403, 'The host has not admitted you to this meeting yet.');
+  }
 
   let chimeMeeting = meeting.chimeMeetingId ? await getChimeMeeting(meeting.chimeMeetingId) : null;
   if (!chimeMeeting) {
@@ -356,8 +530,17 @@ const leaveMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── POST /api/crm/meet/meetings/:code/end ───────────────────────────────────
 const endMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  if (!canControl(user, meeting)) {
-    throw new ApiError(403, 'Only the host or an admin/manager can end the meeting.');
+  // Host-only end: the host can always end for everyone. An admin/manager may
+  // end ONLY when the host is not currently in the room (host-absent fallback).
+  const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
+  const hostPresent = meeting.participants.some(
+    (p) => p.crmUserId.toString() === meeting.hostCrmUserId.toString() && !p.leftAt
+  );
+  const isElevated = user.role === 'admin' || user.role === 'manager';
+  if (!isHost && !(isElevated && !hostPresent)) {
+    throw new ApiError(403, hostPresent
+      ? 'Only the host can end this meeting while they are in the room.'
+      : 'Only the host or an admin/manager can end the meeting.');
   }
   if (meeting.status === 'ended') {
     return res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting already ended'));
@@ -506,6 +689,7 @@ function serializeMeeting(m: any) {
     code: m.code,
     title: m.title,
     status: m.status,
+    visibility: m.visibility === 'private' ? 'private' : 'public',
     scheduledAt: m.scheduledAt ?? null,
     seriesId: m.seriesId ?? null,
     inviteAll: Boolean(m.inviteAll),
@@ -534,5 +718,5 @@ function serializeMeeting(m: any) {
 
 export default {
   createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting,
-  deleteMeeting, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
+  deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
 };

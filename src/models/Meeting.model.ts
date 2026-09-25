@@ -9,6 +9,15 @@ export interface IMeetingParticipant {
   leftAt?: Date;
 }
 
+export interface IMeetingWaiting {
+  crmUserId: mongoose.Types.ObjectId;
+  fullName: string;
+  avatar?: string;
+  status: 'waiting' | 'admitted' | 'denied';
+  requestedAt: Date;
+  respondedAt?: Date;
+}
+
 export interface IMeetingSummary {
   overview: string;
   keyPoints: string[];
@@ -22,6 +31,7 @@ export interface IMeeting extends Document {
   title: string;
   hostCrmUserId: mongoose.Types.ObjectId;
   status: 'scheduled' | 'live' | 'ended';
+  visibility: 'public' | 'private';  // private → join-by-code users wait for the host
   scheduledAt?: Date;              // UTC instant of the MDT wall time chosen
   seriesId?: string;               // groups the sessions of a recurring meeting
   invitees: mongoose.Types.ObjectId[];
@@ -32,6 +42,7 @@ export interface IMeeting extends Document {
   chimeMeetingId?: string;
   mediaRegion?: string;
   participants: IMeetingParticipant[];
+  waiting: IMeetingWaiting[];      // waiting-room requests (join-by-code users)
   recording: {
     status: 'idle' | 'recording' | 'processing' | 'ready' | 'failed';
     capturePipelineId?: string;
@@ -64,6 +75,7 @@ const MeetingSchema = new Schema<IMeeting>(
     title: { type: String, required: true, trim: true, default: 'Instant meeting' },
     hostCrmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
     status: { type: String, enum: ['scheduled', 'live', 'ended'], default: 'live', index: true },
+    visibility: { type: String, enum: ['public', 'private'], default: 'public' },
     scheduledAt: { type: Date, default: null, index: true },
     seriesId: { type: String, default: null, index: true },
     invitees: [{ type: Schema.Types.ObjectId, ref: 'CrmUser' }],
@@ -80,6 +92,16 @@ const MeetingSchema = new Schema<IMeeting>(
         role: { type: String, enum: ['host', 'participant'], default: 'participant' },
         joinedAt: { type: Date, default: Date.now },
         leftAt: { type: Date },
+      },
+    ],
+    waiting: [
+      {
+        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
+        fullName: { type: String, required: true },
+        avatar: { type: String, default: null },
+        status: { type: String, enum: ['waiting', 'admitted', 'denied'], default: 'waiting' },
+        requestedAt: { type: Date, default: Date.now },
+        respondedAt: { type: Date },
       },
     ],
     recording: {
