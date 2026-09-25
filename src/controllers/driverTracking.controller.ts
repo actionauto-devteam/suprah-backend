@@ -5678,6 +5678,7 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
         pickupProofSubmitted: true,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
       },
       excludeUserId: user._id.toString(),
     }),
@@ -5739,7 +5740,11 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
       type: "load_in_transit",
       title: "Load In Transit",
       message: `${user.name} started the route for load ${load.loadNumber}`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+      },
       excludeUserId: user._id.toString(),
     }),
   ];
@@ -5831,6 +5836,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
         proofSubmitted: true,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
       },
       excludeUserId: user._id.toString(),
     }),

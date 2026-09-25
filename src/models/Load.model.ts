@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
+import { businessDateCompactKey } from "../utils/businessDate";
 
 export type LoadStatus =
   | "Draft"
@@ -58,10 +59,13 @@ export interface ILoad extends Document {
     nextAttemptAt: Date;
     attempts: number;
     processedAt?: Date;
+    deadLetteredAt?: Date;
     lockToken?: string;
     lockedUntil?: Date;
     lastError?: string;
   }>;
+  /** True while lifecycleOutbox holds undelivered events (worker claim index). */
+  lifecycleOutboxPending?: boolean;
   driverAmendments: Array<{
     _id: mongoose.Types.ObjectId;
     driverId: mongoose.Types.ObjectId;
@@ -173,6 +177,9 @@ const loadLifecycleOutboxEventSchema = new Schema(
     nextAttemptAt: { type: Date, required: true, default: Date.now },
     attempts: { type: Number, required: true, default: 0, min: 0 },
     processedAt: { type: Date },
+    // Set when an event can never succeed (invalid type, missing recipient) or
+    // exhausted its retries. Dead-lettered events are never claimed again.
+    deadLetteredAt: { type: Date },
     lockToken: { type: String, trim: true },
     lockedUntil: { type: Date },
     lastError: { type: String, maxlength: 1200 },
@@ -224,7 +231,10 @@ const loadSchema = new Schema<ILoad>(
     orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
     quoteId: { type: Schema.Types.ObjectId, ref: "Quote", index: true, sparse: true },
-    loadNumber: { type: String, unique: true, index: true },
+    // Unique per organization (see compound index below). The daily counter is
+    // per organization, so a global unique index made the second org to post
+    // on a given day collide with the first org's LD-YYYYMMDD-### numbers.
+    loadNumber: { type: String },
     postType: {
       type: String,
       enum: ["load-board", "assign-carrier"],
@@ -336,6 +346,10 @@ const loadSchema = new Schema<ILoad>(
       default: [],
       select: false,
     },
+    // Maintained by loadLifecycleOutbox.service so the worker can find loads
+    // with undelivered events through a small partial index instead of
+    // scanning every Load.
+    lifecycleOutboxPending: { type: Boolean, select: false },
     // Material edits made after the driver has accepted are recorded in the
     // same Load document as the edit itself. This keeps the edit + amendment
     // requirement atomic without requiring Mongo multi-document transactions.
@@ -375,6 +389,21 @@ const loadSchema = new Schema<ILoad>(
 // ── Indexes ──
 loadSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
 loadSchema.index({ organizationId: 1, assignedDriverId: 1, status: 1 });
+loadSchema.index(
+  { organizationId: 1, loadNumber: 1 },
+  {
+    unique: true,
+    name: "organizationId_1_loadNumber_1",
+    partialFilterExpression: { loadNumber: { $type: "string" } },
+  },
+);
+loadSchema.index(
+  { lifecycleOutboxPending: 1 },
+  {
+    name: "lifecycleOutboxPending_1",
+    partialFilterExpression: { lifecycleOutboxPending: true },
+  },
+);
 loadSchema.index({
   loadNumber: "text",
   "pickupLocation.city": "text",
@@ -396,12 +425,8 @@ const LoadCounter =
 loadSchema.pre("validate", async function (this: ILoad, next: (err?: Error) => void) {
   try {
     if (this.isNew && !this.loadNumber) {
-      const now = new Date();
-      const yyyymmdd = [
-        now.getFullYear(),
-        String(now.getMonth() + 1).padStart(2, "0"),
-        String(now.getDate()).padStart(2, "0"),
-      ].join("");
+      // Transportation business calendar, not the API server's timezone.
+      const yyyymmdd = businessDateCompactKey(new Date());
       const counter = await LoadCounter.findOneAndUpdate(
         { _id: `load-${this.organizationId}-${yyyymmdd}` },
         { $inc: { seq: 1 } },
