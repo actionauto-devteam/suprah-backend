@@ -32,7 +32,9 @@ import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_S
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { closeShiftForInactivity } from '../services/autoClockout.service';
 import { isSeamlesslyResumableNote } from '../constants/autoClockoutNotes';
-import { buildActivityLog } from '../utils/activityLog.util';
+import { buildActivityLog, computePhonePeriods } from '../utils/activityLog.util';
+import type { PhoneLocationUpdates } from '../utils/activityLog.util';
+import LocationHistory from '../models/LocationHistory.model';
 import notificationService from '../services/notification.service';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -540,7 +542,7 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
   if (!mongoose.isValidObjectId(userId)) throw new ApiError(404, 'User not found');
 
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId })
-    .select('_id department organizationId')
+    .select('_id department organizationId email')
     .lean();
   if (!targetUser) throw new ApiError(404, 'User not found');
 
@@ -549,7 +551,7 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
   const lookbackStart = new Date(start.getTime() - 2 * dayMs);
   const lookaheadEnd = new Date(end.getTime() + dayMs);
 
-  const [logs, activityIntervals, diagnosticLogs, resumeLogs] = await Promise.all([
+  const [logs, activityIntervals, diagnosticLogs, resumeLogs, switchLogs] = await Promise.all([
     TimeLog.find({ userId, timestamp: { $gte: lookbackStart, $lt: lookaheadEnd } })
       .sort({ timestamp: 1 })
       .select('type timestamp note startedVia createdAt')
@@ -573,6 +575,14 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
       .sort({ timestamp: 1 })
       .select('timestamp changes')
       .lean(),
+    AuditLog.find({
+      entityId: String(userId),
+      reason: { $in: ['monitoring_device_switched', 'monitoring_device_switched_by_admin'] },
+      timestamp: { $gte: start, $lt: end },
+    })
+      .sort({ timestamp: 1 })
+      .select('timestamp reason changes')
+      .lean(),
   ]);
 
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
@@ -591,18 +601,65 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
     removedTimeOutNote: l.changes?.removedTimeOutNote ?? null,
   }));
 
+  const rawSwitches = switchLogs
+    .map((entry: any) => ({
+      at: entry.timestamp as Date,
+      to: entry.changes?.activeDevice?.to as 'desktop' | 'mobile',
+      by: (entry.reason === 'monitoring_device_switched_by_admin' ? 'admin' : 'user') as 'user' | 'admin',
+    }))
+    .filter((change) => change.to === 'desktop' || change.to === 'mobile');
+
+  const mobileStarts = logs
+    .filter((l) => l.type === 'time-in' && (l as any).startedVia === 'mobile' && new Date(l.timestamp) >= start && new Date(l.timestamp) < end)
+    .map((l) => ({ at: l.timestamp as Date, to: 'mobile' as const }));
+  const updatesByIndex = new Map<number, PhoneLocationUpdates>();
+  const phonePeriods: Array<{ start: string; end: string; endedBy: 'switch' | 'time-out' | 'open'; startedBy: 'switch' | 'shift-start'; locationUpdates: PhoneLocationUpdates }> = [];
+  if (rawSwitches.length > 0 || mobileStarts.length > 0) {
+    const linkedMain = targetUser.email
+      ? await User.findOne({ email: String(targetUser.email).toLowerCase() }).select('_id').lean()
+      : null;
+    const historyIds = [new mongoose.Types.ObjectId(userId), ...(linkedMain ? [linkedMain._id] : [])];
+    const periods = computePhonePeriods(
+      [...rawSwitches, ...mobileStarts],
+      logs.filter((l) => l.type === 'time-out').map((l) => new Date(l.timestamp).getTime()),
+      Math.min(end.getTime(), Date.now()),
+    );
+    for (const period of periods) {
+      const [row] = await LocationHistory.aggregate([
+        { $match: { userId: { $in: historyIds }, recordedAt: { $gte: period.start, $lt: period.end } } },
+        { $group: { _id: null, count: { $sum: 1 }, firstAt: { $min: '$recordedAt' }, lastAt: { $max: '$recordedAt' } } },
+      ]);
+      const locationUpdates: PhoneLocationUpdates = {
+        count: row ? row.count : 0,
+        firstAt: row?.firstAt ? new Date(row.firstAt).toISOString() : null,
+        lastAt: row?.lastAt ? new Date(row.lastAt).toISOString() : null,
+      };
+      if (period.index < rawSwitches.length) updatesByIndex.set(period.index, locationUpdates);
+      phonePeriods.push({
+        start: period.start.toISOString(),
+        end: period.end.toISOString(),
+        endedBy: period.endedBy,
+        startedBy: period.index < rawSwitches.length ? 'switch' : 'shift-start',
+        locationUpdates,
+      });
+    }
+    phonePeriods.sort((a, b) => a.start.localeCompare(b.start));
+  }
+  const deviceSwitches = rawSwitches.map((change, index) => ({ ...change, locationUpdates: updatesByIndex.get(index) ?? null }));
+
   const { events, summary } = buildActivityLog({
     timeLogs: logs,
     idlePeriods,
     idleDetected,
     idleStages,
     resumes,
+    deviceSwitches,
     dayStart: start,
     dayEnd: end,
     now: new Date(),
   });
 
-  res.json(new ApiResponse(200, { date: dateStr, events, summary }, 'Activity log fetched'));
+  res.json(new ApiResponse(200, { date: dateStr, events, summary, phonePeriods }, 'Activity log fetched'));
 });
 
 export const exportTimeproof = asyncHandler(async (req: Request, res: Response) => {

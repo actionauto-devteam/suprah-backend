@@ -11,7 +11,7 @@ import {
   revokeDeviceById,
 } from '../services/trayDevice.service';
 import type { ServiceFailure } from '../services/trayDevice.service';
-import { isTrayDeviceAuthEnabledForUser, isTrayDeviceAuthKilled, sanitizeDeviceMeta } from '../utils/trayDevice.util';
+import { isTrayDeviceAuthEnabled, isTrayDeviceAuthKilled, sanitizeDeviceMeta } from '../utils/trayDevice.util';
 
 const sendFailure = (res: Response, failure: ServiceFailure) => {
   res.status(failure.status).json({
@@ -76,7 +76,7 @@ const disconnect = asyncHandler(async (req: Request, res: Response) => {
 
 const status = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  if (!isTrayDeviceAuthEnabledForUser(user)) {
+  if (!isTrayDeviceAuthEnabled(user._id)) {
     sendFlagOff(res);
     return;
   }
@@ -85,7 +85,7 @@ const status = asyncHandler(async (req: Request, res: Response) => {
 
 const bootstrap = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  if (!isTrayDeviceAuthEnabledForUser(user)) {
+  if (!isTrayDeviceAuthEnabled(user._id)) {
     sendFlagOff(res);
     return;
   }
@@ -94,7 +94,7 @@ const bootstrap = asyncHandler(async (req: Request, res: Response) => {
 
 const registerSession = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  if (!isTrayDeviceAuthEnabledForUser(user)) {
+  if (!isTrayDeviceAuthEnabled(user._id)) {
     sendFlagOff(res);
     return;
   }

@@ -7,7 +7,8 @@ export type ActivityEventKind =
   | 'break-out'
   | 'idle'
   | 'idle-stage'
-  | 'shift-resumed';
+  | 'shift-resumed'
+  | 'monitoring-switch';
 
 export type TimeOutReasonKind = 'auto' | 'admin' | 'early-end' | 'none';
 
@@ -25,6 +26,15 @@ export interface ActivityLogEvent {
   stage?: 2 | 3;
   removedTimeOutAt?: string | null;
   removedTimeOutNote?: string | null;
+  switchedTo?: 'desktop' | 'mobile';
+  switchedBy?: 'user' | 'admin';
+  locationUpdates?: PhoneLocationUpdates | null;
+}
+
+export interface PhoneLocationUpdates {
+  count: number;
+  firstAt: string | null;
+  lastAt: string | null;
 }
 
 export interface ActivityLogSummary {
@@ -36,6 +46,7 @@ export interface ActivityLogSummary {
   idleCount: number;
   idleSeconds: number;
   resumeCount: number;
+  switchCount: number;
 }
 
 export interface ActivityTimeLogInput {
@@ -62,12 +73,20 @@ export interface ActivityResumeInput {
   removedTimeOutNote?: string | null;
 }
 
+export interface ActivityDeviceSwitchInput {
+  at: Date | string;
+  to: 'desktop' | 'mobile';
+  by: 'user' | 'admin';
+  locationUpdates?: PhoneLocationUpdates | null;
+}
+
 export interface BuildActivityLogInput {
   timeLogs: ActivityTimeLogInput[];
   idlePeriods: IdlePeriod[];
   idleDetected: ActivityIdleDetectedInput[];
   idleStages: ActivityIdleStageInput[];
   resumes: ActivityResumeInput[];
+  deviceSwitches?: ActivityDeviceSwitchInput[];
   dayStart: Date;
   dayEnd: Date;
   now: Date;
@@ -77,6 +96,7 @@ const KIND_RANK: Record<ActivityEventKind, number> = {
   'time-in': 0,
   'shift-resumed': 1,
   'break-in': 2,
+  'monitoring-switch': 2.5,
   idle: 3,
   'idle-stage': 4,
   'break-out': 5,
@@ -105,6 +125,7 @@ interface SortableEntry {
 
 export function buildActivityLog(input: BuildActivityLogInput): { events: ActivityLogEvent[]; summary: ActivityLogSummary } {
   const { timeLogs, idlePeriods, idleDetected, idleStages, resumes, dayStart, dayEnd, now } = input;
+  const deviceSwitches = input.deviceSwitches ?? [];
   const dayStartMs = dayStart.getTime();
   const dayEndMs = dayEnd.getTime();
   const nowMs = now.getTime();
@@ -217,6 +238,21 @@ export function buildActivityLog(input: BuildActivityLogInput): { events: Activi
     }, ms);
   });
 
+  let switchCount = 0;
+  deviceSwitches.forEach((change, index) => {
+    const ms = toMs(change.at);
+    if (ms < dayStartMs || ms >= dayEndMs) return;
+    switchCount += 1;
+    push({
+      id: `switch-${ms}-${index}`,
+      kind: 'monitoring-switch',
+      at: toIso(change.at),
+      switchedTo: change.to,
+      switchedBy: change.by,
+      locationUpdates: change.to === 'mobile' ? change.locationUpdates ?? null : null,
+    }, ms);
+  });
+
   entries.sort((a, b) =>
     a.sortMs - b.sortMs
     || KIND_RANK[a.event.kind] - KIND_RANK[b.event.kind]
@@ -237,7 +273,37 @@ export function buildActivityLog(input: BuildActivityLogInput): { events: Activi
     idleCount,
     idleSeconds,
     resumeCount: resumes.length,
+    switchCount,
   };
 
   return { events, summary };
+}
+
+export interface PhonePeriod {
+  index: number;
+  start: Date;
+  end: Date;
+  endedBy: 'switch' | 'time-out' | 'open';
+}
+
+export function computePhonePeriods(
+  switches: Array<{ at: Date | string; to: 'desktop' | 'mobile' }>,
+  timeOutsMs: number[],
+  limitMs: number,
+): PhonePeriod[] {
+  const ordered = switches
+    .map((change, index) => ({ index, ms: toMs(change.at), to: change.to }))
+    .sort((a, b) => a.ms - b.ms || a.index - b.index);
+  const periods: PhonePeriod[] = [];
+  ordered.forEach((change, position) => {
+    if (change.to !== 'mobile') return;
+    const next = ordered[position + 1];
+    const nextTimeOut = timeOutsMs.filter((ms) => ms > change.ms).sort((a, b) => a - b)[0];
+    const switchMs = next ? next.ms : Infinity;
+    const timeOutMs = nextTimeOut === undefined ? Infinity : nextTimeOut;
+    const endMs = Math.max(change.ms, Math.min(limitMs, switchMs, timeOutMs));
+    const endedBy = endMs === switchMs && switchMs <= timeOutMs ? 'switch' : endMs === timeOutMs ? 'time-out' : 'open';
+    periods.push({ index: change.index, start: new Date(change.ms), end: new Date(endMs), endedBy });
+  });
+  return periods;
 }

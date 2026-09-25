@@ -19,6 +19,7 @@ import { uploadLimiter } from "../middleware/rate-limit.middleware";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
+import { areBackgroundJobsDisabled } from "../config/backgroundJobs";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const staffOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
@@ -283,7 +284,9 @@ router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
 // Start the organization-wide location-silence monitor once when Driver
 // Tracking routes are initialized. The service internally guards against
 // duplicate timers.
-startDriverLocationMonitor();
-startLoadLifecycleOutboxWorker();
+if (!areBackgroundJobsDisabled()) {
+  startDriverLocationMonitor();
+  startLoadLifecycleOutboxWorker();
+}
 
 export default router;
