@@ -33,6 +33,15 @@ const canManageConversation = (conversation: any, user: any) =>
   user.role === 'admin'
   || idIn(conversation.admins as any, user._id)
   || conversation.createdBy.toString() === user._id.toString();
+const getConversationLeftAt = (conversation: any, userId: any) => {
+  if (!idIn(conversation.leftBy as any, userId)) return null;
+  const value = conversation.leftAt?.[userId.toString()];
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+const canReadConversationHistory = (conversation: any, userId: any) =>
+  idIn(conversation.members as any, userId) || Boolean(getConversationLeftAt(conversation, userId));
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
@@ -203,6 +212,28 @@ function emitToConversation(conv: any, event: string, payload: any) {
   } catch (err) {
     console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
   }
+}
+
+async function createConversationActivityMessage(conversation: any, sender: any, content: string) {
+  const message = await SupraSpaceMessage.create({
+    conversationId: conversation._id,
+    sender: sender._id,
+    content,
+    type: 'system',
+    readBy: [sender._id],
+  });
+  await message.populate('sender', 'fullName username avatar');
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  await conversation.save({ validateModifiedOnly: true });
+  return message.toObject();
+}
+
+async function getConversationMemberNames(memberIds: string[]) {
+  if (!memberIds.length) return [];
+  const members = await CrmUser.find({ _id: { $in: memberIds } }).select('fullName').lean();
+  const names = new Map(members.map((member: any) => [member._id.toString(), member.fullName || 'Someone']));
+  return memberIds.map(memberId => names.get(memberId) || 'Someone');
 }
 
 /** Keeps the denormalized summary aligned with messages visible in a conversation. */
@@ -988,7 +1019,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     .filter(Boolean);
 
   const baseConversationQuery = {
-    members: userId,
+    $or: [{ members: userId }, { leftBy: userId }],
     isActive: true,
     deletedFor: { $ne: userId },
     'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
@@ -1059,7 +1090,26 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userIdStr = userId.toString();
   const signed = await Promise.all(pagedConversations.map((c: any) => withFreshAvatar(c)));
   const signedSafe = signed.map((c: any) => withMemberNicknames({ ...c, members: (c.members || []).filter(Boolean) }));
-  const visibleSafe = signedSafe.filter((c: any) => {
+  const historySafe = await Promise.all(signedSafe.map(async (conversation: any) => {
+    const leftAt = getConversationLeftAt(conversation, userId);
+    if (!leftAt) return conversation;
+    const lastMessage = await SupraSpaceMessage.findOne({
+      conversationId: conversation._id,
+      isDeleted: false,
+      scheduledStatus: { $ne: 'pending' },
+      createdAt: { $lte: leftAt },
+    })
+      .populate('sender', 'fullName username avatar')
+      .sort({ createdAt: -1, _id: -1 })
+      .lean();
+    return {
+      ...conversation,
+      lastMessage: lastMessage ? await signAttachments(lastMessage) : null,
+      lastMessageAt: lastMessage?.createdAt || null,
+      lastReaction: null,
+    };
+  }));
+  const visibleSafe = historySafe.filter((c: any) => {
     const clearedAt = c.clearedAt?.[userIdStr];
     return !(clearedAt && c.lastMessageAt && new Date(c.lastMessageAt) <= new Date(clearedAt));
   });
@@ -1112,7 +1162,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
       unreadMentionCounts.set(convId, unreadMentions);
     }));
 
-  const filtered = signedSafe.map((safeConv: any) => {
+  const filtered = historySafe.map((safeConv: any) => {
     const convId = safeConv._id.toString();
     const clearedAt = safeConv.clearedAt?.[userIdStr];
     if (clearedAt && safeConv.lastMessageAt && new Date(safeConv.lastMessageAt) <= new Date(clearedAt)) {
@@ -1131,6 +1181,18 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     const mentionCount = mentionCounts.get(convId) || 0;
     const unreadMentionCount = unreadMentionCounts.get(convId) || 0;
     const manualUnread = idIn(safeConv.manualUnreadBy as any, userId);
+    const leftAt = getConversationLeftAt(safeConv, userId);
+    if (leftAt) {
+      return omitMemberSettings({
+        ...safeConv,
+        notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
+        viewerQuickReactions: safeConv.memberSettings?.[userIdStr]?.quickReactions || [],
+        unreadCount: 0,
+        mentionCount: 0,
+        unreadMentionCount: 0,
+        manualUnread: false,
+      });
+    }
     return omitMemberSettings({
       ...safeConv,
       notificationPreference: getConversationNotificationPref(safeConv, userIdStr),
@@ -1300,8 +1362,15 @@ const createGroup = asyncHandler(async (req: Request, res: Response) => {
     createdBy: userId,
   });
 
+  const activityMessage = await createConversationActivityMessage(
+    conversation,
+    req.crmUser!,
+    `${req.crmUser!.fullName || 'Someone'} created this channel.`
+  );
   await conversation.populate('members', 'fullName username avatar role');
+  await conversation.populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName username avatar' } });
   emitToConversation(conversation, 'conversation:new', conversation);
+  emitToConversation(conversation, 'message:new', { conversationId: conversation._id.toString(), message: activityMessage });
 
   res.status(201).json(new ApiResponse(201, conversation, 'Group created'));
 });
@@ -1330,14 +1399,23 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
     conversation.emoji = (emoji || '').trim() || null;
   }
 
-  // Any member can add new members; only admin (or self) may remove
+  const addedMemberIds: string[] = [];
   if (Array.isArray(addMembers)) {
-    await validateSupraSpaceMembers(addMembers, req.crmUser!.organizationId);
-    addMembers.forEach((m) => {
+    const validMembers = await validateSupraSpaceMembers(addMembers, req.crmUser!.organizationId);
+    validMembers.forEach((m) => {
       if (!idIn(conversation.members as any, m)) {
         conversation.members.push(new mongoose.Types.ObjectId(m));
+        addedMemberIds.push(m);
       }
     });
+    if (addedMemberIds.length) {
+      conversation.archivedBy = conversation.archivedBy.filter(member => !addedMemberIds.includes(member.toString())) as any;
+      conversation.leftBy = conversation.leftBy.filter(member => !addedMemberIds.includes(member.toString())) as any;
+      const leftAt = { ...((conversation.leftAt as any) || {}) };
+      addedMemberIds.forEach(memberId => delete leftAt[memberId]);
+      conversation.leftAt = leftAt;
+      conversation.markModified('leftAt');
+    }
   }
 
   const removedMemberIds: string[] = [];
@@ -1360,19 +1438,64 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await conversation.save();
-  await conversation.populate('members', 'fullName username avatar role');
-  await withFreshAvatar(conversation);
-  emitToConversation(conversation, 'conversation:updated', conversation);
+  const leavingSelf = removedMemberIds.includes(userId.toString());
+  if (leavingSelf) {
+    if (!idIn(conversation.leftBy as any, userId)) conversation.leftBy.push(userId as any);
+    if (!idIn(conversation.archivedBy as any, userId)) conversation.archivedBy.push(userId as any);
+    conversation.manualUnreadBy = conversation.manualUnreadBy.filter(member => member.toString() !== userId.toString()) as any;
+    await conversation.save();
+  }
+
+  const activityMessages: any[] = [];
+  if (addedMemberIds.length) {
+    const names = await getConversationMemberNames(addedMemberIds);
+    activityMessages.push(await createConversationActivityMessage(
+      conversation,
+      req.crmUser!,
+      `${req.crmUser!.fullName || 'Someone'} added ${names.join(', ')}.`
+    ));
+  }
   if (removedMemberIds.length) {
-    try {
-      const io = getIO();
-      removedMemberIds.forEach((memberId) => {
-        io.to(`user:${memberId}`).emit('conversation:deleted', { conversationId: id });
-      });
-    } catch (err) {
-      console.warn('[SupraSpace] Socket emit failed on conversation:deleted:', err);
+    const names = await getConversationMemberNames(removedMemberIds);
+    const content = leavingSelf
+      ? `${req.crmUser!.fullName || 'Someone'} left this channel.`
+      : `${req.crmUser!.fullName || 'Someone'} removed ${names.join(', ')}.`;
+    const activityMessage = await createConversationActivityMessage(conversation, req.crmUser!, content);
+    activityMessages.push(activityMessage);
+    if (leavingSelf) {
+      conversation.leftAt = {
+        ...((conversation.leftAt as any) || {}),
+        [userId.toString()]: activityMessage.createdAt,
+      };
+      conversation.markModified('leftAt');
+      await conversation.save({ validateModifiedOnly: true });
     }
   }
+
+  await conversation.populate('members', 'fullName username avatar role');
+  await conversation.populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName username avatar' } });
+  await withFreshAvatar(conversation);
+  emitToConversation(conversation, 'conversation:updated', conversation);
+  if (addedMemberIds.length || removedMemberIds.length) {
+    try {
+      const io = getIO();
+      addedMemberIds.forEach((memberId) => {
+        io.to(`user:${memberId}`).emit('conversation:new', conversation);
+      });
+      removedMemberIds.forEach((memberId) => {
+        if (memberId === userId.toString() && leavingSelf) {
+          io.to(`user:${memberId}`).emit('conversation:left', { conversationId: id, leftAt: (conversation.leftAt as any)?.[memberId] });
+        } else {
+          io.to(`user:${memberId}`).emit('conversation:deleted', { conversationId: id });
+        }
+      });
+    } catch (err) {
+      console.warn('[SupraSpace] Socket emit failed on membership update:', err);
+    }
+  }
+  activityMessages.forEach(message => {
+    emitToConversation(conversation, 'message:new', { conversationId: id, message });
+  });
 
   res.json(new ApiResponse(200, conversation, 'Group updated'));
 });
@@ -1434,6 +1557,41 @@ const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
     );
     emitToConversation(conversation, 'conversation:deleted', { conversationId: id });
     return res.json(new ApiResponse(200, { conversationId: id, permanent: true }, 'Channel deleted'));
+  }
+
+  if (conversation.type === 'group') {
+    conversation.members = conversation.members.filter(member => member.toString() !== userId.toString()) as any;
+    conversation.admins = conversation.admins.filter(member => member.toString() !== userId.toString()) as any;
+    if (!idIn(conversation.leftBy as any, userId)) conversation.leftBy.push(userId as any);
+    if (!idIn(conversation.archivedBy as any, userId)) conversation.archivedBy.push(userId as any);
+    conversation.manualUnreadBy = conversation.manualUnreadBy.filter(member => member.toString() !== userId.toString()) as any;
+    await conversation.save();
+
+    const activityMessage = await createConversationActivityMessage(
+      conversation,
+      req.crmUser!,
+      `${req.crmUser!.fullName || 'Someone'} left this channel.`
+    );
+    conversation.leftAt = {
+      ...((conversation.leftAt as any) || {}),
+      [userId.toString()]: activityMessage.createdAt,
+    };
+    conversation.markModified('leftAt');
+    await conversation.save({ validateModifiedOnly: true });
+    await conversation.populate('members', 'fullName username avatar role');
+    await conversation.populate({ path: 'lastMessage', populate: { path: 'sender', select: 'fullName username avatar' } });
+    await withFreshAvatar(conversation);
+    emitToConversation(conversation, 'conversation:updated', conversation);
+    emitToConversation(conversation, 'message:new', { conversationId: id, message: activityMessage });
+    try {
+      getIO().to(`user:${userId.toString()}`).emit('conversation:left', {
+        conversationId: id,
+        leftAt: activityMessage.createdAt,
+      });
+    } catch (err) {
+      console.warn('[SupraSpace] Socket emit failed on conversation:left:', err);
+    }
+    return res.json(new ApiResponse(200, { conversationId: id, permanent: false, left: true }, 'Left channel'));
   }
 
   // Hide the conversation for this user and record the clear timestamp so that
@@ -1599,7 +1757,8 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   // type accessor wrapping that can silently swallow bracket-notation key access.
   const conversation = await SupraSpaceConversation.findById(id).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  const leftAt = getConversationLeftAt(conversation, userId);
 
   const filter: any = { conversationId: id, isDeleted: false, scheduledStatus: { $ne: 'pending' } };
   const createdAtFilter: any = {};
@@ -1615,6 +1774,7 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     // Stored as BSON Date; ensure it's a JS Date regardless of driver version
     createdAtFilter.$gt = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
   }
+  if (leftAt) createdAtFilter.$lte = leftAt;
   if (Object.keys(createdAtFilter).length > 0) filter.createdAt = createdAtFilter;
 
   const messages = await SupraSpaceMessage.find(filter)
@@ -1624,18 +1784,20 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .limit(requestedLimit)
     .lean();
 
-  SupraSpaceMessage.updateMany(
-    { conversationId: id, readBy: { $ne: userId } },
-    { $addToSet: { readBy: userId } }
-  ).catch(() => {});
-  SupraSpaceConversation.updateOne(
-    { _id: id, manualUnreadBy: userId },
-    { $pull: { manualUnreadBy: userId } }
-  ).catch(() => {});
-  Notification.updateMany(
-    { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
-    { $set: { isRead: true } }
-  ).catch(() => {});
+  if (!leftAt) {
+    SupraSpaceMessage.updateMany(
+      { conversationId: id, readBy: { $ne: userId } },
+      { $addToSet: { readBy: userId } }
+    ).catch(() => {});
+    SupraSpaceConversation.updateOne(
+      { _id: id, manualUnreadBy: userId },
+      { $pull: { manualUnreadBy: userId } }
+    ).catch(() => {});
+    Notification.updateMany(
+      { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
+      { $set: { isRead: true } }
+    ).catch(() => {});
+  }
 
   const fallbackSender = (m: any) => ({
     _id: m.metadata?.customerUserId || 'unknown',
@@ -1662,7 +1824,8 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
 
   const conversation = await SupraSpaceConversation.findById(id).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  const leftAt = getConversationLeftAt(conversation, userId);
 
   const filter: any = {
     conversationId: id,
@@ -1676,6 +1839,7 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
     const clearedDate = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
     filter.createdAt = { ...(filter.createdAt || {}), $gt: clearedDate };
   }
+  if (leftAt) filter.createdAt = { ...(filter.createdAt || {}), $lte: leftAt };
 
   const messages = await SupraSpaceMessage.find(filter)
     .select('_id conversationId sender attachments createdAt')
@@ -1724,7 +1888,8 @@ const getConversationThreadReport = asyncHandler(async (req: Request, res: Respo
 
   const conversation = await SupraSpaceConversation.findById(id).lean();
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  const leftAt = getConversationLeftAt(conversation, userId);
 
   const createdAtFilter: any = { $gte: range.start, $lt: range.end };
   const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
@@ -1732,6 +1897,7 @@ const getConversationThreadReport = asyncHandler(async (req: Request, res: Respo
     const clearedDate = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
     if (clearedDate.getTime() > range.start.getTime()) createdAtFilter.$gt = clearedDate;
   }
+  if (leftAt && leftAt.getTime() < createdAtFilter.$lt.getTime()) createdAtFilter.$lte = leftAt;
 
   const messages = await SupraSpaceMessage.find({
     conversationId: id,
@@ -1781,11 +1947,18 @@ const searchInConversation = asyncHandler(async (req: Request, res: Response) =>
 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  const leftAt = getConversationLeftAt(conversation, userId);
   if (!q.trim()) return res.json(new ApiResponse(200, [], 'No query'));
 
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
-  const messages = await SupraSpaceMessage.find({ conversationId: id, isDeleted: false, scheduledStatus: { $ne: 'pending' }, content: rx })
+  const messages = await SupraSpaceMessage.find({
+    conversationId: id,
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+    content: rx,
+    ...(leftAt ? { createdAt: { $lte: leftAt } } : {}),
+  })
     .populate('sender', 'fullName username avatar')
     .sort({ createdAt: -1 })
     .limit(50)
