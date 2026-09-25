@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import Joi from 'joi';
+import './productionDbGuard';
 
 dotenv.config({ path: path.join(__dirname, '../../.env.local'), override: true });
 dotenv.config({ path: path.join(__dirname, '../../.env') });

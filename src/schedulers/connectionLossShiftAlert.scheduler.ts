@@ -7,6 +7,7 @@ import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { isLocationRequiredForUser } from '../config/departmentMonitoring';
 import { isMandatoryLocationDept } from '../constants/departments';
+import { isLocationSilenceExcusedForRecord } from '../utils/locationExcuse.util';
 
 // Proactive offline check for all depts, independent of Lot Tech
 const CONNECTION_LOST_THRESHOLD_MS = 10 * 60 * 1000;
@@ -27,6 +28,8 @@ export async function runConnectionLossShiftAlertCheck(): Promise<{ notified: nu
   const chatMessagesByOrg = new Map<string, string[]>();
 
   for (const loc of candidates) {
+    if (await isLocationSilenceExcusedForRecord(loc, nowMs)) continue;
+
     // Atomically claim candidate before lookups to prevent duplicate alerts
     const claimed = await EmployeeLocation.findOneAndUpdate(
       { _id: loc._id, connectionLostNotifiedAt: null },

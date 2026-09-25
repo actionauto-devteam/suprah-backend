@@ -1,3 +1,4 @@
+import './src/config/productionDbGuard';
 import mongoose from 'mongoose';
 import AuthService from './src/services/auth.service';
 import User from './src/models/User.model';

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import config from './index';
 import seedCrmUsers from '../utils/seedCrmUsers';
 import CrmUser from '../models/CrmUser.model';
+import { initTrayDeviceAuth } from '../utils/initTrayDeviceAuth';
 
 const connectDB = async () => {
   try {
@@ -25,6 +26,7 @@ const connectDB = async () => {
       if (existingUserCount === 0) {
         await seedCrmUsers();
       }
+      await initTrayDeviceAuth();
     }
   } catch (err: any) {
     logger.error({ err }, `MongoDB Connection Error: ${err.message}`);

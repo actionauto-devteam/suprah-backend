@@ -8,6 +8,7 @@ import mongoose from 'mongoose';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
+import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
 import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
@@ -387,6 +388,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     logger.info({ orgId: id, removedUserId: userId }, 'Member removed from organization');
 
     const removedUser = await User.findById(userId);
+    if (removedUser?.email) revokeTrayDevicesForEmail(removedUser.email, id, 'org_membership_removed').catch(() => {});
     if (removedUser) {
         safeCreateNotification({ userId: removedUser._id.toString(), organizationId: id, type: 'team_member_left', title: 'Removed from Organization', message: `You have been removed from ${org.name}.` });
     }
