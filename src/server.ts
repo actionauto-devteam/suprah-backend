@@ -51,6 +51,7 @@ import { correlationIdMiddleware } from "./middleware/correlationId.middleware";
 import { metricsMiddleware } from "./middleware/metrics.middleware";
 import { activityAuditMiddleware } from "./middleware/activityAudit.middleware";
 import mailSyncService from './services/mailSync.service';
+import { areBackgroundJobsDisabled } from "./config/backgroundJobs";
 import "./jobs/push.worker";
 
 const app: Application = express();
@@ -209,36 +210,40 @@ if (require.main === module) {
       return;
     }
 
-    initSyncScheduler();
-    initCleanupScheduler();
-    initMilestoneScheduler();
-    initScreenshotRetentionScheduler();
-    initIdleRecordingRetentionScheduler();
-    initLeadInactivityReminderScheduler();
-    initAppointmentReminderScheduler();
-    initNoShowFollowUpScheduler();
-    initLeadNurtureScheduler();
-    initReviewRequestScheduler();
-    initSmsCampaignScheduler();
-    initWebchatSmsFallbackScheduler();
-    initSupraSpaceScheduledMessageScheduler();
-    initStaleShiftAutoClockoutScheduler();
-    initConnectionLossShiftAlertScheduler();
-    initLotTechLocationEscalationScheduler();
-    initPresenceOfflineScheduler();
-    // Do not also start the legacy org-wide driver alert scheduler.
-    startProjectDeadlineReminders();
-    startCalendarReminderSweep();
-    // ➕ SUPRAH MEET — dispatch the "starts in 10 minutes" reminders to
-    // tagged users. Safe here: first tick runs after the DB is open, same
-    // guard the schedulers above rely on.
-    initSuprahMeetReminders();
+    if (areBackgroundJobsDisabled()) {
+      logger.warn("[background-jobs] DISABLE_SCHEDULERS=true: schedulers, reminder sweeps, the Suprah Meet reminder loop and the mail sync engine are NOT running.");
+    } else {
+      initSyncScheduler();
+      initCleanupScheduler();
+      initMilestoneScheduler();
+      initScreenshotRetentionScheduler();
+      initIdleRecordingRetentionScheduler();
+      initLeadInactivityReminderScheduler();
+      initAppointmentReminderScheduler();
+      initNoShowFollowUpScheduler();
+      initLeadNurtureScheduler();
+      initReviewRequestScheduler();
+      initSmsCampaignScheduler();
+      initWebchatSmsFallbackScheduler();
+      initSupraSpaceScheduledMessageScheduler();
+      initStaleShiftAutoClockoutScheduler();
+      initConnectionLossShiftAlertScheduler();
+      initLotTechLocationEscalationScheduler();
+      initPresenceOfflineScheduler();
+      // Do not also start the legacy org-wide driver alert scheduler.
+      startProjectDeadlineReminders();
+      startCalendarReminderSweep();
+      // ➕ SUPRAH MEET — dispatch the "starts in 10 minutes" reminders to
+      // tagged users. Safe here: first tick runs after the DB is open, same
+      // guard the schedulers above rely on.
+      initSuprahMeetReminders();
 
-    // Suprah Mail — start the Gmail history poll + socket fan-out engine.
-    // Placed after waitForDbConnection() so its first tick never queries a
-    // not-yet-open DB (same guard the schedulers above rely on).
-    mailSyncService.start();
-    logger.info("✓ Suprah Mail sync engine started.");
+      // Suprah Mail — start the Gmail history poll + socket fan-out engine.
+      // Placed after waitForDbConnection() so its first tick never queries a
+      // not-yet-open DB (same guard the schedulers above rely on).
+      mailSyncService.start();
+      logger.info("✓ Suprah Mail sync engine started.");
+    }
 
     const server = httpServer.listen(config.port, () => {
       logger.info(`Server running on port ${config.port}`);
