@@ -20,8 +20,12 @@ import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled, resolveMonitoringMode } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
+import { isDesktopPlatformAllowed, isLocationFeatureOn } from "../utils/locationFlags.util";
+import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
+import { isTrayDeviceAuthEnabled } from "../utils/trayDevice.util";
+import { revokeUserTrayDevices } from "../services/trayDevice.service";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
@@ -181,6 +185,26 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isIdleVideoProofEnabled(user.organizationId?.toString(), user.department),
   ]);
 
+  const requestedPlatform = typeof req.query.platform === "string" ? req.query.platform : null;
+  const desktopLocationEnabled = isLocationFeatureOn("LOC_DESKTOP_CHANNEL", user._id)
+    ? evaluateDesktopLocationEligibility({
+        flagOn: true,
+        platformAllowed: requestedPlatform === null ? null : isDesktopPlatformAllowed(requestedPlatform),
+        hasOrganization: !!user.organizationId,
+        hasConsent: !!user.locationConsent?.granted,
+        optedOut: !!user.locationSharingOptOut,
+        locationRequired: locationRequiredForTimeproof,
+        mode: await resolveMonitoringMode(user.organizationId?.toString(), user.department, user.monitoringModeOverride),
+      }).eligible
+    : false;
+
+  const trayDeviceAuthEnabled = isTrayDeviceAuthEnabled(user._id);
+  const monitoringMode = await resolveMonitoringMode(
+    user.organizationId?.toString(),
+    user.department,
+    user.monitoringModeOverride,
+  ).catch(() => undefined);
+
   const userData = {
     _id: user._id,
     fullName: user.fullName,
@@ -212,6 +236,9 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isMobileMonitoringDept: mobileMonitoringDept,
     screenshotsRequired,
     idleVideoProofEnabled,
+    desktopLocationEnabled,
+    trayDeviceAuthEnabled,
+    ...(monitoringMode && { monitoringMode }),
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
@@ -1022,6 +1049,7 @@ const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
 
   user.isActive = !user.isActive;
   await user.save({ validateModifiedOnly: true });
+  if (!user.isActive) revokeUserTrayDevices(user._id, "user_deactivated").catch(() => {});
 
   res.json(
     new ApiResponse(
@@ -1191,6 +1219,7 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   user.isOffboarded = true;
   user.offboardedAt = new Date();
   await user.save({ validateModifiedOnly: true });
+  revokeUserTrayDevices(user._id, "user_offboarded").catch(() => {});
 
   res.json(new ApiResponse(200, null, "User offboarded successfully"));
 });

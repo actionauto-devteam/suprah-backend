@@ -40,6 +40,53 @@ export const otpLimiter = rateLimit({
     validate: { default: false }
 });
 
+const trayDeviceRejection = 'Too many attempts. Please wait a few minutes and try again.';
+
+export const trayDeviceConnectLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 60,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        const deviceId = req.body?.deviceId;
+        return typeof deviceId === 'string' && deviceId ? deviceId : String(req.ip);
+    },
+    message: { success: false, message: trayDeviceRejection },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const trayDeviceConnectIpLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 300,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => String(req.ip),
+    message: { success: false, message: trayDeviceRejection },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const trayDeviceBootstrapLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 30,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => String(req.crmUser?._id ?? req.ip),
+    message: { success: false, message: trayDeviceRejection },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 export const adfLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,

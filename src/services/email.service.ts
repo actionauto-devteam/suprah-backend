@@ -983,7 +983,7 @@ See you there!
                         display: block;
                     }
                     .header {
-                        background: #ca8a04;
+                        background: #00b262;
                         color: white;
                         padding: 30px 20px;
                         text-align: center;
@@ -999,7 +999,7 @@ See you there!
                         display: inline-block;
                         margin-top: 16px;
                         padding: 12px 28px;
-                        background: #ca8a04;
+                        background: #00b262;
                         color: white;
                         text-decoration: none;
                         border-radius: 6px;

@@ -41,6 +41,11 @@ export interface IEmployeeLocation extends Document {
   permissionDeniedNotifiedAt?: Date | null;
   locationIssueDetectedAt?: Date | null;
   locationWarningStage: number;
+  desktopLastSeenAt?: Date | null;
+  desktopCoords?: { lat: number; lng: number } | null;
+  desktopAccuracyM?: number | null;
+  desktopInputAgeSec?: number | null;
+  desktopPlatform?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -122,6 +127,14 @@ const EmployeeLocationSchema = new Schema<IEmployeeLocation>(
     permissionDeniedNotifiedAt: { type: Date, default: null },
     locationIssueDetectedAt: { type: Date, default: null },
     locationWarningStage: { type: Number, default: 0 },
+    desktopLastSeenAt: { type: Date },
+    desktopCoords: {
+      lat: { type: Number },
+      lng: { type: Number },
+    },
+    desktopAccuracyM: { type: Number },
+    desktopInputAgeSec: { type: Number },
+    desktopPlatform: { type: String },
   },
   {
     timestamps: true,

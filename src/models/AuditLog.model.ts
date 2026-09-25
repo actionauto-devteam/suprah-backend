@@ -1,9 +1,9 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IAuditLog extends Document {
-    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Load' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction' | 'TimeLog' | 'Screenshot';
+    entityType: 'Vehicle' | 'SyncJob' | 'Organization' | 'User' | 'Lead' | 'Quote' | 'Conversation' | 'System' | 'Billing' | 'Shipment' | 'Load' | 'Driver' | 'Invitation' | 'Referral' | 'Transaction' | 'TimeLog' | 'Screenshot' | 'TrayDevice';
     entityId?: mongoose.Types.ObjectId | string;
-    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL' | 'CORRECT_TIME_LOG' | 'EXCLUDE_SCREENSHOT' | 'ADMIN_DELETE_SCREENSHOT' | 'ADMIN_TIME_OVERRIDE' | 'MANUAL_CLOCK_OUT' | 'RESUME_SHIFT';
+    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'SYNC_STATUS' | 'LOGIN' | 'LOGOUT' | 'PAYMENT_FAILED' | 'PAYMENT_SUCCESS' | 'APPROVE_REWARD' | 'APPROVE_WITHDRAWAL' | 'REJECT_WITHDRAWAL' | 'CORRECT_TIME_LOG' | 'EXCLUDE_SCREENSHOT' | 'ADMIN_DELETE_SCREENSHOT' | 'ADMIN_TIME_OVERRIDE' | 'MANUAL_CLOCK_OUT' | 'RESUME_SHIFT' | 'TRAY_DEVICE_REGISTERED' | 'TRAY_DEVICE_REVOKED' | 'TRAY_DEVICE_REBOUND';
     changes?: any;
     reason: string;
     performedBy?: mongoose.Types.ObjectId;
@@ -33,11 +33,12 @@ const InternalAuditLogSchema: Schema = new Schema(
                 'Referral',
                 'Transaction',
                 'TimeLog',
-                'Screenshot'
+                'Screenshot',
+                'TrayDevice'
             ]
         },
         entityId: { type: Schema.Types.Mixed },
-        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS', 'APPROVE_REWARD', 'APPROVE_WITHDRAWAL', 'REJECT_WITHDRAWAL', 'CORRECT_TIME_LOG', 'EXCLUDE_SCREENSHOT', 'ADMIN_DELETE_SCREENSHOT', 'ADMIN_TIME_OVERRIDE', 'MANUAL_CLOCK_OUT', 'RESUME_SHIFT'] },
+        action: { type: String, required: true, enum: ['CREATE', 'UPDATE', 'DELETE', 'SYNC_STATUS', 'LOGIN', 'LOGOUT', 'PAYMENT_FAILED', 'PAYMENT_SUCCESS', 'APPROVE_REWARD', 'APPROVE_WITHDRAWAL', 'REJECT_WITHDRAWAL', 'CORRECT_TIME_LOG', 'EXCLUDE_SCREENSHOT', 'ADMIN_DELETE_SCREENSHOT', 'ADMIN_TIME_OVERRIDE', 'MANUAL_CLOCK_OUT', 'RESUME_SHIFT', 'TRAY_DEVICE_REGISTERED', 'TRAY_DEVICE_REVOKED', 'TRAY_DEVICE_REBOUND'] },
         changes: { type: Schema.Types.Mixed },
         reason: { type: String, required: true },
         performedBy: { type: Schema.Types.ObjectId, ref: 'User' },

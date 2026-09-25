@@ -8,6 +8,7 @@ import { getShiftStatusForActor } from '../utils/shiftStatus';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { resolveMonitoringMode } from '../config/departmentMonitoring';
+import { isLocationSilenceExcusedForRecord } from '../utils/locationExcuse.util';
 
 // Mandatory-location depts (Lot Tech) only — other depts keep the lighter-touch single alert
 // in connectionLossShiftAlert.scheduler.ts, since they're allowed to go silent.
@@ -77,6 +78,13 @@ export async function runLotTechLocationEscalation(): Promise<{ warned: number; 
     // (see the query comment above), not just "started, then went quiet."
     const isCurrentlySilent = loc.sharingState === 'off_duty' || nowMs - new Date(loc.lastSeenAt).getTime() >= SILENCE_DETECT_MS;
     const isDenied = loc.sharingState === 'declined_permission';
+
+    if (isCurrentlySilent && !isDenied && (await isLocationSilenceExcusedForRecord(loc, nowMs))) {
+      if (loc.locationIssueDetectedAt) {
+        await EmployeeLocation.updateOne({ _id: loc._id }, { locationIssueDetectedAt: null, locationWarningStage: 0 });
+      }
+      continue;
+    }
 
     if (!detectedAt) {
       if (!isCurrentlySilent && !isDenied) continue; // nothing wrong, no episode to track

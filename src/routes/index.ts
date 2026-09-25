@@ -67,6 +67,7 @@ import projectManagementRoute from "./projectManagement.route";
 import calendarRoutes from "./calendar.routes";
 import whatsNewRoute from "./whatsNew.route";
 import internalTrayRoute from "./internalTray.route";
+import trayDeviceRoute from "./trayDevice.route";
 import mailRoute from "./mail.route";
 import pulse360Route from "./pulse360.route";
 import storyRoute from "./story.route";
@@ -445,6 +446,10 @@ const defaultRoutes = [
   {
     path: "/internal",
     route: internalTrayRoute,
+  },
+  {
+    path: "/tray-device",
+    route: trayDeviceRoute,
   },
 ];
 defaultRoutes.forEach((route) => {
