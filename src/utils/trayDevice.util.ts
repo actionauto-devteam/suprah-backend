@@ -100,6 +100,25 @@ export const isTrayDeviceAuthEnabled = (
   return parseAllowlist(raw).includes(id);
 };
 
+export type TrayDeviceAuthOverride = 'default' | 'on' | 'off';
+
+export const TRAY_DEVICE_AUTH_OVERRIDES: readonly TrayDeviceAuthOverride[] = ['default', 'on', 'off'];
+
+export const normalizeTrayDeviceAuthOverride = (value: unknown): TrayDeviceAuthOverride =>
+  value === 'on' || value === 'off' ? value : 'default';
+
+export const isTrayDeviceAuthEnabledForUser = (
+  user: { _id?: string | { toString(): string } | null; trayDeviceAuthOverride?: unknown } | null | undefined,
+  env: Env = process.env,
+): boolean => {
+  if (!user) return false;
+  if (isTrayDeviceAuthKilled(env)) return false;
+  const override = normalizeTrayDeviceAuthOverride(user.trayDeviceAuthOverride);
+  if (override === 'off') return false;
+  if (override === 'on') return true;
+  return isTrayDeviceAuthEnabled(user._id, env);
+};
+
 export type TrayDeviceAuthMode = { mode: 'killed' | 'off' | 'all' | 'allowlist'; allowlistSize: number };
 
 export const getTrayDeviceAuthMode = (env: Env = process.env): TrayDeviceAuthMode => {

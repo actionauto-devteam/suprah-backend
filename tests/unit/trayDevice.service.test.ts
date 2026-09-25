@@ -41,6 +41,7 @@ import {
   disconnectDevice,
   getTrayDeviceStatus,
   issueBootstrapCode,
+  recordTrayDeviceAuthOverrideChange,
   registerDeviceFromSession,
   revokeDeviceById,
   revokeTrayDevicesForEmail,
@@ -110,6 +111,87 @@ describe('trayDevice.service', () => {
   const setDevice = (doc: unknown) => mockDeviceFindOne.mockReturnValue(chain(doc));
   const setCode = (code: string, doc: unknown) => mockCodeFindOne.mockImplementation((filter: any) =>
     chain(filter.codeHash === hashSecret(code) ? doc : null));
+
+  describe('the per-user override decides, the environment is only the default', () => {
+    it('a user set to on can sign in with the environment switch completely off', async () => {
+      delete process.env.TRAY_DEVICE_AUTH;
+      usersById.userA = { ...userA, trayDeviceAuthOverride: 'on' };
+      try {
+        const { secret, doc } = makeDevice();
+        setDevice(doc);
+        const result = await connectDevice({ deviceId: doc.deviceId, deviceSecret: secret, meta });
+        expect(result).toMatchObject({ ok: true, user: { id: 'userA' } });
+      } finally {
+        usersById.userA = userA;
+      }
+    });
+
+    it('a user set to on can register from a code with the environment switch off', async () => {
+      delete process.env.TRAY_DEVICE_AUTH;
+      usersById.userA = { ...userA, trayDeviceAuthOverride: 'on' };
+      try {
+        const code = generateBootstrapCode();
+        setDevice(null);
+        setCode(code, { userId: 'userA', organizationId: 'org1' });
+        const result = await connectDevice({ bootstrapCode: code, meta });
+        expect(result).toMatchObject({ ok: true, registered: true });
+      } finally {
+        usersById.userA = userA;
+      }
+    });
+
+    it('a user set to off is refused even when the environment says all', async () => {
+      process.env.TRAY_DEVICE_AUTH = 'all';
+      usersById.userA = { ...userA, trayDeviceAuthOverride: 'off' };
+      try {
+        const { secret, doc } = makeDevice();
+        setDevice(doc);
+        const result = await connectDevice({ deviceId: doc.deviceId, deviceSecret: secret, meta });
+        expect(result).toMatchObject({ ok: false, status: 403, code: 'TRAY_DEVICE_AUTH_OFF' });
+        expect(mockDeviceUpdateOne).not.toHaveBeenCalled();
+      } finally {
+        usersById.userA = userA;
+      }
+    });
+
+    it('a user left on default with the environment off is refused, as before', async () => {
+      delete process.env.TRAY_DEVICE_AUTH;
+      const { secret, doc } = makeDevice();
+      setDevice(doc);
+      const result = await connectDevice({ deviceId: doc.deviceId, deviceSecret: secret, meta });
+      expect(result).toMatchObject({ ok: false, code: 'TRAY_DEVICE_AUTH_OFF' });
+    });
+
+    it('the kill switch still wins over a user set to on', async () => {
+      process.env.TRAY_DEVICE_AUTH_DISABLED = 'true';
+      usersById.userA = { ...userA, trayDeviceAuthOverride: 'on' };
+      try {
+        const { secret, doc } = makeDevice();
+        setDevice(doc);
+        const result = await connectDevice({ deviceId: doc.deviceId, deviceSecret: secret, meta });
+        expect(result).toMatchObject({ ok: false, code: 'TRAY_DEVICE_AUTH_DISABLED' });
+      } finally {
+        usersById.userA = userA;
+      }
+    });
+
+    it('records who changed the override without ever throwing', () => {
+      recordTrayDeviceAuthOverrideChange({ _id: 'userB', organizationId: 'org1' }, 'default', 'on', 'admin1');
+      expect(mockAuditCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          entityType: 'User',
+          entityId: 'userB',
+          action: 'UPDATE',
+          changes: { trayDeviceAuthOverride: { from: 'default', to: 'on' } },
+          reason: 'tray_device_auth_override_changed',
+          performedBy: 'admin1',
+          organizationId: 'org1',
+        }),
+      );
+      mockAuditCreate.mockImplementation(() => { throw new Error('db down'); });
+      expect(() => recordTrayDeviceAuthOverrideChange({ _id: 'userB' }, 'on', 'off', undefined)).not.toThrow();
+    });
+  });
 
   describe('connectDevice with a registered device', () => {
     it('issues a 12 hour session and slides the idle expiry without touching a code', async () => {

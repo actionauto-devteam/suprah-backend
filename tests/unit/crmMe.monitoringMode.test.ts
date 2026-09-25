@@ -109,6 +109,15 @@ describe('GET /me monitoringMode', () => {
     expect(on.trayDeviceAuthEnabled).toBe(true);
   });
 
+  it('reflects the per-user override: on enables without the allowlist, off beats the allowlist and all, the kill switch beats on', async () => {
+    expect((await callMe(crmUser({ trayDeviceAuthOverride: 'on' }))).trayDeviceAuthEnabled).toBe(true);
+    process.env.TRAY_DEVICE_AUTH = 'all';
+    expect((await callMe(crmUser({ trayDeviceAuthOverride: 'off' }))).trayDeviceAuthEnabled).toBe(false);
+    expect((await callMe(crmUser({ trayDeviceAuthOverride: 'default' }))).trayDeviceAuthEnabled).toBe(true);
+    process.env.TRAY_DEVICE_AUTH_DISABLED = 'true';
+    expect((await callMe(crmUser({ trayDeviceAuthOverride: 'on' }))).trayDeviceAuthEnabled).toBe(false);
+  });
+
   it('is resolved from the user\'s organization, department and override, exactly like the other monitoring fields', async () => {
     await callMe(crmUser({ department: 'Recon', monitoringModeOverride: 'always' }));
     expect(mockResolveMonitoringMode).toHaveBeenCalledWith('org1', 'Recon', 'always');

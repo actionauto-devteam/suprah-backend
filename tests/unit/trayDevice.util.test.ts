@@ -14,7 +14,9 @@ import {
   isPlausibleCode,
   isPlausibleSecret,
   isTrayDeviceAuthEnabled,
+  isTrayDeviceAuthEnabledForUser,
   isTrayDeviceAuthKilled,
+  normalizeTrayDeviceAuthOverride,
   isValidDeviceId,
   sanitizeDeviceMeta,
   secretsMatch,
@@ -178,6 +180,50 @@ describe('feature flag', () => {
     expect(isTrayDeviceAuthKilled({ TRAY_DEVICE_AUTH_DISABLED: 'true' })).toBe(true);
     expect(isTrayDeviceAuthKilled({ TRAY_DEVICE_AUTH_DISABLED: 'false' })).toBe(false);
     expect(isTrayDeviceAuthEnabled('u1', { TRAY_DEVICE_AUTH: 'all', TRAY_DEVICE_AUTH_DISABLED: 'TRUE' })).toBe(false);
+  });
+});
+
+describe('per-user override', () => {
+  it('normalizes anything unexpected to default', () => {
+    expect(normalizeTrayDeviceAuthOverride('on')).toBe('on');
+    expect(normalizeTrayDeviceAuthOverride('off')).toBe('off');
+    for (const value of ['default', 'ON', 'true', '', null, undefined, 1, {}]) {
+      expect(normalizeTrayDeviceAuthOverride(value)).toBe('default');
+    }
+  });
+
+  it('default follows the environment exactly as before', () => {
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1' }, {})).toBe(false);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'default' }, { TRAY_DEVICE_AUTH: 'u1' })).toBe(true);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u2', trayDeviceAuthOverride: 'default' }, { TRAY_DEVICE_AUTH: 'u1' })).toBe(false);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u2' }, { TRAY_DEVICE_AUTH: 'all' })).toBe(true);
+  });
+
+  it('on enables that one user with no environment setting at all', () => {
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'on' }, {})).toBe(true);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'on' }, { TRAY_DEVICE_AUTH: 'off' })).toBe(true);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u2' }, {})).toBe(false);
+  });
+
+  it('off wins over an allowlist entry and over all', () => {
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'off' }, { TRAY_DEVICE_AUTH: 'u1' })).toBe(false);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'off' }, { TRAY_DEVICE_AUTH: 'all' })).toBe(false);
+  });
+
+  it('the kill switch beats everything, including on', () => {
+    const env = { TRAY_DEVICE_AUTH: 'all', TRAY_DEVICE_AUTH_DISABLED: 'true' };
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1', trayDeviceAuthOverride: 'on' }, env)).toBe(false);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1' }, env)).toBe(false);
+  });
+
+  it('a missing user is never enabled', () => {
+    expect(isTrayDeviceAuthEnabledForUser(null, { TRAY_DEVICE_AUTH: 'all' })).toBe(false);
+    expect(isTrayDeviceAuthEnabledForUser(undefined, {})).toBe(false);
+  });
+
+  it('a user object with no override field (for example a synthetic account) behaves as default', () => {
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u1' }, { TRAY_DEVICE_AUTH: 'u1' })).toBe(true);
+    expect(isTrayDeviceAuthEnabledForUser({ _id: 'u3' }, { TRAY_DEVICE_AUTH: 'u1' })).toBe(false);
   });
 });
 

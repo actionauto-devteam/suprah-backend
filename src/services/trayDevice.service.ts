@@ -19,7 +19,7 @@ import {
   isDeviceExpired,
   isPlausibleCode,
   isPlausibleSecret,
-  isTrayDeviceAuthEnabled,
+  isTrayDeviceAuthEnabledForUser,
   isTrayDeviceAuthKilled,
   isValidDeviceId,
   secretsMatch,
@@ -109,6 +109,12 @@ const recordAudit = (
   }
 };
 
+const isEnabledForUserId = async (userId: unknown): Promise<boolean> => {
+  if (isTrayDeviceAuthKilled()) return false;
+  const doc: any = await CrmUser.findById(userId).select('trayDeviceAuthOverride').lean();
+  return isTrayDeviceAuthEnabledForUser({ _id: userId as string, trayDeviceAuthOverride: doc?.trayDeviceAuthOverride });
+};
+
 const validateUser = (user: any, expectedOrganizationId?: unknown): ServiceFailure | null => {
   if (!user || !user.isActive || user.isOffboarded) {
     return fail(403, 'USER_DISABLED', 'This account is not active.');
@@ -176,6 +182,29 @@ const createDevice = async (
   });
   recordAudit('TRAY_DEVICE_REGISTERED', { deviceId, userId: user._id, organizationId: user.organizationId }, 'registered');
   return { deviceId, deviceSecret };
+};
+
+export const recordTrayDeviceAuthOverrideChange = (
+  target: { _id: unknown; organizationId?: unknown },
+  from: string,
+  to: string,
+  performedBy: unknown,
+): void => {
+  try {
+    Promise.resolve(
+      AuditLog.create({
+        entityType: 'User',
+        entityId: String(target._id),
+        action: 'UPDATE',
+        changes: { trayDeviceAuthOverride: { from, to } },
+        reason: 'tray_device_auth_override_changed',
+        ...(performedBy ? { performedBy } : {}),
+        ...(target.organizationId ? { organizationId: String(target.organizationId) } : {}),
+      }),
+    ).catch(() => {});
+  } catch {
+    return;
+  }
 };
 
 export async function issueBootstrapCode(user: {
@@ -282,7 +311,7 @@ export async function connectDevice(params: ConnectParams): Promise<ConnectResul
   const flagUserId = decision.action === 'REGISTER' || decision.action === 'REBIND' ? codeDoc?.userId : device?.userId;
   if (
     (decision.action === 'SESSION' || decision.action === 'SESSION_CONSUME_CODE' || decision.action === 'REGISTER' || decision.action === 'REBIND')
-    && !isTrayDeviceAuthEnabled(flagUserId)
+    && !(await isEnabledForUserId(flagUserId))
   ) {
     return fail(403, 'TRAY_DEVICE_AUTH_OFF', 'Device sign-in is not enabled for this account.');
   }

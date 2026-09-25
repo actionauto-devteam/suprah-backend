@@ -24,8 +24,8 @@ import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExempt
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
 import { isDesktopPlatformAllowed, isLocationFeatureOn } from "../utils/locationFlags.util";
 import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
-import { isTrayDeviceAuthEnabled } from "../utils/trayDevice.util";
-import { revokeUserTrayDevices } from "../services/trayDevice.service";
+import { isTrayDeviceAuthEnabledForUser, normalizeTrayDeviceAuthOverride, TRAY_DEVICE_AUTH_OVERRIDES } from "../utils/trayDevice.util";
+import { recordTrayDeviceAuthOverrideChange, revokeUserTrayDevices } from "../services/trayDevice.service";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
@@ -198,7 +198,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
       }).eligible
     : false;
 
-  const trayDeviceAuthEnabled = isTrayDeviceAuthEnabled(user._id);
+  const trayDeviceAuthEnabled = isTrayDeviceAuthEnabledForUser(user);
   const monitoringMode = await resolveMonitoringMode(
     user.organizationId?.toString(),
     user.department,
@@ -791,7 +791,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -832,7 +832,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -902,6 +902,16 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (monitoringModeOverride !== undefined && ['default', 'off', 'always', 'switching'].includes(monitoringModeOverride)) {
     user.monitoringModeOverride = monitoringModeOverride;
+  }
+
+  let trayDeviceAuthOverrideChange: { from: string; to: string } | null = null;
+  if (trayDeviceAuthOverride !== undefined && (TRAY_DEVICE_AUTH_OVERRIDES as readonly unknown[]).includes(trayDeviceAuthOverride)) {
+    const previous = normalizeTrayDeviceAuthOverride(user.trayDeviceAuthOverride);
+    const next = normalizeTrayDeviceAuthOverride(trayDeviceAuthOverride);
+    if (previous !== next) {
+      user.trayDeviceAuthOverride = next;
+      trayDeviceAuthOverrideChange = { from: previous, to: next };
+    }
   }
 
   if (payrollLocation !== undefined) {
@@ -995,6 +1005,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
       }
     }
     throw error;
+  }
+
+  if (trayDeviceAuthOverrideChange) {
+    recordTrayDeviceAuthOverrideChange(user, trayDeviceAuthOverrideChange.from, trayDeviceAuthOverrideChange.to, actor._id);
   }
 
   if (normalizeEmail(user.email) !== linkedCoreEmail) {

@@ -142,6 +142,30 @@ describe('trayDevice.controller', () => {
       expect(mockFn).not.toHaveBeenCalled();
     });
 
+    it('serves a user set to on even when the environment allowlist does not include them', async () => {
+      process.env.TRAY_DEVICE_AUTH = 'someone-else';
+      mockFn.mockResolvedValue(value);
+      const result = await run(getHandler(), { crmUser: { ...crmUser, trayDeviceAuthOverride: 'on' }, body: {} });
+      expect(result.failureStatus).toBeUndefined();
+      expect(mockFn).toHaveBeenCalled();
+    });
+
+    it('refuses a user set to off even when the environment says all', async () => {
+      process.env.TRAY_DEVICE_AUTH = 'all';
+      const result = await run(getHandler(), { crmUser: { ...crmUser, trayDeviceAuthOverride: 'off' }, body: {} });
+      expect(result.failureStatus).toBe(403);
+      expect(result.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TRAY_DEVICE_AUTH_OFF' }));
+      expect(mockFn).not.toHaveBeenCalled();
+    });
+
+    it('keeps the kill switch stronger than a user set to on', async () => {
+      process.env.TRAY_DEVICE_AUTH_DISABLED = 'true';
+      const result = await run(getHandler(), { crmUser: { ...crmUser, trayDeviceAuthOverride: 'on' }, body: {} });
+      expect(result.failureStatus).toBe(403);
+      expect(result.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'TRAY_DEVICE_AUTH_DISABLED' }));
+      expect(mockFn).not.toHaveBeenCalled();
+    });
+
     it('answers 403 with the disabled code when the kill switch is on, never a 503 the website would show as an outage', async () => {
       process.env.TRAY_DEVICE_AUTH_DISABLED = 'true';
       const result = await run(getHandler(), { crmUser, body: {} });
