@@ -23,8 +23,9 @@ import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../util
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
 import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled, resolveMonitoringMode } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
-import { clearShiftDevice, getDeviceSwitchView, initShiftDevice, recordDesktopLocationOverrideChange, recordDeviceSwitchOverrideChange } from "../services/monitoringDevice.service";
+import { clearShiftDevice, getDeviceSwitchView, initShiftDevice, recordAutoSwitchOverrideChange, recordDesktopLocationOverrideChange, recordDeviceSwitchOverrideChange } from "../services/monitoringDevice.service";
 import { DEVICE_SWITCH_OVERRIDES, normalizeDeviceSwitchOverride } from "../utils/deviceSwitch.util";
+import { AUTO_SWITCH_OVERRIDES, normalizeAutoSwitchOverride } from "../utils/autoSwitch.util";
 import { DESKTOP_LOCATION_OVERRIDES, isDesktopPlatformAllowed, isLocationFeatureOnForUser, normalizeDesktopLocationOverride } from "../utils/locationFlags.util";
 import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
 import { isTrayDeviceAuthEnabledForUser, normalizeTrayDeviceAuthOverride, TRAY_DEVICE_AUTH_OVERRIDES } from "../utils/trayDevice.util";
@@ -205,7 +206,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     : false;
 
   const trayDeviceAuthEnabled = isTrayDeviceAuthEnabledForUser(user);
-  const deviceSwitch = await getDeviceSwitchView(user).catch(() => ({ enabled: false, activeDevice: null }));
+  const deviceSwitch = await getDeviceSwitchView(user).catch(() => ({ enabled: false, activeDevice: null, autoSwitch: false }));
   const monitoringMode = await resolveMonitoringMode(
     user.organizationId?.toString(),
     user.department,
@@ -803,7 +804,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -844,7 +845,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, autoSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -933,6 +934,16 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     if (previous !== next) {
       user.deviceSwitchOverride = next;
       deviceSwitchOverrideChange = { from: previous, to: next };
+    }
+  }
+
+  let autoSwitchOverrideChange: { from: string; to: string } | null = null;
+  if (autoSwitchOverride !== undefined && (AUTO_SWITCH_OVERRIDES as readonly unknown[]).includes(autoSwitchOverride)) {
+    const previous = normalizeAutoSwitchOverride(user.autoSwitchOverride);
+    const next = normalizeAutoSwitchOverride(autoSwitchOverride);
+    if (previous !== next) {
+      user.autoSwitchOverride = next;
+      autoSwitchOverrideChange = { from: previous, to: next };
     }
   }
 
@@ -1045,6 +1056,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (desktopLocationOverrideChange) {
     recordDesktopLocationOverrideChange(user, desktopLocationOverrideChange.from, desktopLocationOverrideChange.to, actor._id);
+  }
+
+  if (autoSwitchOverrideChange) {
+    recordAutoSwitchOverrideChange(user, autoSwitchOverrideChange.from, autoSwitchOverrideChange.to, actor._id);
   }
 
   if (deviceSwitchOverrideChange) {

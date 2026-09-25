@@ -27,7 +27,8 @@ export interface ActivityLogEvent {
   removedTimeOutAt?: string | null;
   removedTimeOutNote?: string | null;
   switchedTo?: 'desktop' | 'mobile';
-  switchedBy?: 'user' | 'admin';
+  switchedBy?: 'user' | 'admin' | 'geofence';
+  placeName?: string | null;
   locationUpdates?: PhoneLocationUpdates | null;
 }
 
@@ -76,7 +77,8 @@ export interface ActivityResumeInput {
 export interface ActivityDeviceSwitchInput {
   at: Date | string;
   to: 'desktop' | 'mobile';
-  by: 'user' | 'admin';
+  by: 'user' | 'admin' | 'geofence';
+  placeName?: string | null;
   locationUpdates?: PhoneLocationUpdates | null;
 }
 
@@ -249,6 +251,7 @@ export function buildActivityLog(input: BuildActivityLogInput): { events: Activi
       at: toIso(change.at),
       switchedTo: change.to,
       switchedBy: change.by,
+      placeName: change.placeName ? change.placeName : null,
       locationUpdates: change.to === 'mobile' ? change.locationUpdates ?? null : null,
     }, ms);
   });

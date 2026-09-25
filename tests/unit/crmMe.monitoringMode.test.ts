@@ -142,7 +142,7 @@ describe('GET /me monitoringMode', () => {
   it('reports the switch as off, and never breaks /me, when the view cannot be built', async () => {
     mockGetDeviceSwitchView.mockRejectedValue(new Error('db down'));
     const data = await callMe(crmUser());
-    expect(data.deviceSwitch).toEqual({ enabled: false, activeDevice: null });
+    expect(data.deviceSwitch).toEqual({ enabled: false, activeDevice: null, autoSwitch: false });
     expect(data.fullName).toBe('Pat Example');
   });
 

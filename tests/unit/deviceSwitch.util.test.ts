@@ -133,4 +133,45 @@ describe('decideSwitch', () => {
   it('allows a switch with no known current device, for example a shift that started before the feature was on', () => {
     expect(decideSwitch({ ...base, current: null })).toEqual({ ok: true, unchanged: false });
   });
+
+  it('an automatic move to the phone skips the liveness checks and the cooldown', () => {
+    expect(decideSwitch({ ...base, actor: 'geofence', mobileFresh: false, lastSwitchAt: base.nowMs - 1000 })).toEqual({
+      ok: true,
+      unchanged: false,
+    });
+  });
+
+  it('an automatic move still needs an open shift and a Switching account', () => {
+    expect(decideSwitch({ ...base, actor: 'geofence', isOnShift: false })).toMatchObject({ ok: false, code: 'NOT_ON_SHIFT' });
+    expect(decideSwitch({ ...base, actor: 'geofence', mode: 'off' })).toMatchObject({ ok: false, code: 'NOT_SWITCHING' });
+  });
+
+  it('refuses the employee moving back to the computer while confirmed away from a work site, naming the site', () => {
+    const result = decideSwitch({
+      ...base,
+      to: 'desktop',
+      current: 'mobile',
+      awayFromWorkSite: true,
+      awaySiteName: 'Action Auto Lehi',
+    });
+    expect(result).toMatchObject({ ok: false, status: 409, code: 'AWAY_FROM_WORK_SITE' });
+    expect((result as { message: string }).message).toContain('Action Auto Lehi');
+  });
+
+  it('uses a generic name when the site is unknown', () => {
+    const result = decideSwitch({ ...base, to: 'desktop', current: 'mobile', awayFromWorkSite: true });
+    expect((result as { message: string }).message).toContain('your work site');
+  });
+
+  it('lets an admin move to the computer even while the employee is away', () => {
+    expect(decideSwitch({ ...base, actor: 'admin', to: 'desktop', current: 'mobile', awayFromWorkSite: true })).toEqual({
+      ok: true,
+      unchanged: false,
+    });
+  });
+
+  it('does not block moving to the phone when away, and answers unchanged before blocking', () => {
+    expect(decideSwitch({ ...base, awayFromWorkSite: true })).toEqual({ ok: true, unchanged: false });
+    expect(decideSwitch({ ...base, to: 'desktop', current: 'desktop', awayFromWorkSite: true })).toEqual({ ok: true, unchanged: true });
+  });
 });

@@ -24,6 +24,7 @@ import { isTimeEditExempt, isIdleDetectionExemptDept, isIdleVideoProofEnabled } 
 import { resolveScreenshotsRequired } from '../utils/monitoringMode.util';
 import { switchMonitoringDevice, getDeviceSwitchView } from '../services/monitoringDevice.service';
 import { isDeviceSwitchEnabledForUser, isMonitoringDevice } from '../utils/deviceSwitch.util';
+import { getAutoSwitchAwayMs, isAwayBlockActive } from '../utils/autoSwitch.util';
 import { getActiveDevice } from '../utils/monitoringDeviceState.util';
 import MonitoringDeviceState from '../models/MonitoringDeviceState.model';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
@@ -577,7 +578,7 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
       .lean(),
     AuditLog.find({
       entityId: String(userId),
-      reason: { $in: ['monitoring_device_switched', 'monitoring_device_switched_by_admin'] },
+      reason: { $in: ['monitoring_device_switched', 'monitoring_device_switched_by_admin', 'monitoring_device_switched_auto'] },
       timestamp: { $gte: start, $lt: end },
     })
       .sort({ timestamp: 1 })
@@ -601,11 +602,17 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
     removedTimeOutNote: l.changes?.removedTimeOutNote ?? null,
   }));
 
+  const switchActorFor = (reason: string): 'user' | 'admin' | 'geofence' => {
+    if (reason === 'monitoring_device_switched_by_admin') return 'admin';
+    if (reason === 'monitoring_device_switched_auto') return 'geofence';
+    return 'user';
+  };
   const rawSwitches = switchLogs
     .map((entry: any) => ({
       at: entry.timestamp as Date,
       to: entry.changes?.activeDevice?.to as 'desktop' | 'mobile',
-      by: (entry.reason === 'monitoring_device_switched_by_admin' ? 'admin' : 'user') as 'user' | 'admin',
+      by: switchActorFor(entry.reason),
+      placeName: typeof entry.changes?.placeName === 'string' && entry.changes.placeName ? (entry.changes.placeName as string) : null,
     }))
     .filter((change) => change.to === 'desktop' || change.to === 'mobile');
 
@@ -613,7 +620,15 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
     .filter((l) => l.type === 'time-in' && (l as any).startedVia === 'mobile' && new Date(l.timestamp) >= start && new Date(l.timestamp) < end)
     .map((l) => ({ at: l.timestamp as Date, to: 'mobile' as const }));
   const updatesByIndex = new Map<number, PhoneLocationUpdates>();
-  const phonePeriods: Array<{ start: string; end: string; endedBy: 'switch' | 'time-out' | 'open'; startedBy: 'switch' | 'shift-start'; locationUpdates: PhoneLocationUpdates }> = [];
+  const phonePeriods: Array<{
+    start: string;
+    end: string;
+    endedBy: 'switch' | 'time-out' | 'open';
+    startedBy: 'switch' | 'shift-start';
+    changedBy: 'user' | 'admin' | 'geofence' | null;
+    placeName: string | null;
+    locationUpdates: PhoneLocationUpdates;
+  }> = [];
   if (rawSwitches.length > 0 || mobileStarts.length > 0) {
     const linkedMain = targetUser.email
       ? await User.findOne({ email: String(targetUser.email).toLowerCase() }).select('_id').lean()
@@ -634,12 +649,15 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
         firstAt: row?.firstAt ? new Date(row.firstAt).toISOString() : null,
         lastAt: row?.lastAt ? new Date(row.lastAt).toISOString() : null,
       };
-      if (period.index < rawSwitches.length) updatesByIndex.set(period.index, locationUpdates);
+      const source = period.index < rawSwitches.length ? rawSwitches[period.index] : null;
+      if (source) updatesByIndex.set(period.index, locationUpdates);
       phonePeriods.push({
         start: period.start.toISOString(),
         end: period.end.toISOString(),
         endedBy: period.endedBy,
-        startedBy: period.index < rawSwitches.length ? 'switch' : 'shift-start',
+        startedBy: source ? 'switch' : 'shift-start',
+        changedBy: source ? source.by : null,
+        placeName: source ? source.placeName : null,
         locationUpdates,
       });
     }
@@ -2682,7 +2700,7 @@ const findTargetInOrg = async (actor: any, rawId: unknown) => {
   const id = typeof rawId === 'string' ? rawId : '';
   if (!mongoose.isValidObjectId(id)) throw new ApiError(404, 'User not found');
   const target = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId })
-    .select('organizationId department monitoringModeOverride deviceSwitchOverride');
+    .select('organizationId department monitoringModeOverride deviceSwitchOverride autoSwitchOverride');
   if (!target) throw new ApiError(404, 'User not found');
   return target;
 };
@@ -2693,13 +2711,18 @@ export const getUserMonitoringDevice = asyncHandler(async (req: Request, res: Re
   const target = await findTargetInOrg(actor, req.params.userId);
   const view = await getDeviceSwitchView(target);
   const state: any = view.enabled
-    ? await MonitoringDeviceState.findById(target._id).select('switchedAt history').lean()
+    ? await MonitoringDeviceState.findById(target._id).select('switchedAt history awaySince awayLastPingAt awaySiteName').lean()
+    : null;
+  const away = view.activeDevice && state && isAwayBlockActive(state, Date.now(), getAutoSwitchAwayMs())
+    ? { since: state.awaySince, siteName: state.awaySiteName ?? null }
     : null;
   res.json(new ApiResponse(200, {
     enabled: view.enabled,
+    autoSwitch: view.autoSwitch,
     activeDevice: view.activeDevice,
     switchedAt: view.activeDevice && state ? state.switchedAt : null,
     history: view.activeDevice && state && Array.isArray(state.history) ? state.history.slice(-10) : [],
+    away,
   }, 'Monitoring device fetched'));
 });
 

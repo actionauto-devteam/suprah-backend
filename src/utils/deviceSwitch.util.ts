@@ -2,7 +2,7 @@ type Env = Record<string, string | undefined>;
 
 export type MonitoringDevice = 'desktop' | 'mobile';
 export type DeviceSwitchOverride = 'default' | 'on' | 'off';
-export type SwitchActor = 'user' | 'admin';
+export type SwitchActor = 'user' | 'admin' | 'geofence';
 
 export const DEVICE_SWITCH_OVERRIDES: readonly DeviceSwitchOverride[] = ['default', 'on', 'off'];
 export const SWITCH_COOLDOWN_MS = 20_000;
@@ -75,6 +75,8 @@ export const decideSwitch = (params: {
   trayFresh: boolean;
   lastSwitchAt: Date | string | number | null | undefined;
   nowMs: number;
+  awayFromWorkSite?: boolean;
+  awaySiteName?: string | null;
 }): SwitchDecision => {
   if (params.mode !== 'switching') {
     return { ok: false, status: 409, code: 'NOT_SWITCHING', message: 'This account is not set up to switch monitoring between devices.' };
@@ -83,7 +85,17 @@ export const decideSwitch = (params: {
     return { ok: false, status: 409, code: 'NOT_ON_SHIFT', message: 'Start a shift before switching monitoring.' };
   }
   if (params.current === params.to) return { ok: true, unchanged: true };
-  if (params.actor === 'admin') return { ok: true, unchanged: false };
+  if (params.actor === 'admin' || params.actor === 'geofence') return { ok: true, unchanged: false };
+
+  if (params.to === 'desktop' && params.awayFromWorkSite) {
+    const site = params.awaySiteName ? params.awaySiteName : 'your work site';
+    return {
+      ok: false,
+      status: 409,
+      code: 'AWAY_FROM_WORK_SITE',
+      message: `You're away from ${site}. Monitoring stays on your phone until you're back at a work site.`,
+    };
+  }
 
   if (params.lastSwitchAt !== null && params.lastSwitchAt !== undefined) {
     const last = new Date(params.lastSwitchAt).getTime();

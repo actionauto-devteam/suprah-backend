@@ -19,6 +19,7 @@ export interface IPlace extends Document {
   address?: string;
   description?: string;
   isActive: boolean;
+  isWorkSite?: boolean;
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -44,6 +45,7 @@ const PlaceSchema = new Schema<IPlace>(
     address: { type: String, trim: true },
     description: { type: String, trim: true, maxlength: 300 },
     isActive: { type: Boolean, default: true },
+    isWorkSite: { type: Boolean, default: false },
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",

@@ -65,6 +65,19 @@ describe('buildActivityLog with monitoring switches', () => {
     expect(summary.switchCount).toBe(0);
   });
 
+  it('carries the site name of an automatic move and leaves it empty for a manual one', () => {
+    const { events } = buildActivityLog({
+      ...baseInput,
+      deviceSwitches: [
+        { at: at('11:00'), to: 'mobile', by: 'geofence', placeName: 'Action Auto Lehi' },
+        { at: at('12:00'), to: 'desktop', by: 'user' },
+      ],
+    });
+    const switches = events.filter((event) => event.kind === 'monitoring-switch');
+    expect(switches[0]).toMatchObject({ switchedTo: 'mobile', switchedBy: 'geofence', placeName: 'Action Auto Lehi' });
+    expect(switches[1]).toMatchObject({ switchedTo: 'desktop', switchedBy: 'user', placeName: null });
+  });
+
   it('a day with no switches behaves exactly as before', () => {
     const withNone = buildActivityLog({ ...baseInput, deviceSwitches: [] });
     const without = buildActivityLog(baseInput);
