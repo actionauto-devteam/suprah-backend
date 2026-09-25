@@ -27,6 +27,9 @@ import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivity
 import { initAppointmentReminderScheduler } from "./schedulers/appointmentReminder.scheduler";
 import { initNoShowFollowUpScheduler } from "./schedulers/appointmentNoShowFollowUp.scheduler";
 import { initLeadNurtureScheduler } from "./schedulers/leadNurture.scheduler";
+import { initReviewRequestScheduler } from "./schedulers/reviewRequest.scheduler";
+import { initSmsCampaignScheduler } from "./schedulers/smsCampaign.scheduler";
+import { initWebchatSmsFallbackScheduler } from "./schedulers/webchatSmsFallback.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
@@ -35,6 +38,8 @@ import { initPresenceOfflineScheduler } from "./schedulers/presenceOffline.sched
 // Driver GPS silence is monitored by startDriverLocationMonitor in driverTracking.routes.
 import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
 import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
+// ➕ SUPRAH MEET — 10-minute meeting reminders for tagged users.
+import { initSuprahMeetReminders } from "./services/suprahMeetReminder.service";
 import healthRoute from "./routes/health.route";
 import supraSpaceRoute from "./routes/supraspace.route";
 import { initSupraSpaceSocket } from "./socket/supraspace.socket";
@@ -213,6 +218,9 @@ if (require.main === module) {
     initAppointmentReminderScheduler();
     initNoShowFollowUpScheduler();
     initLeadNurtureScheduler();
+    initReviewRequestScheduler();
+    initSmsCampaignScheduler();
+    initWebchatSmsFallbackScheduler();
     initSupraSpaceScheduledMessageScheduler();
     initStaleShiftAutoClockoutScheduler();
     initConnectionLossShiftAlertScheduler();
@@ -221,6 +229,10 @@ if (require.main === module) {
     // Do not also start the legacy org-wide driver alert scheduler.
     startProjectDeadlineReminders();
     startCalendarReminderSweep();
+    // ➕ SUPRAH MEET — dispatch the "starts in 10 minutes" reminders to
+    // tagged users. Safe here: first tick runs after the DB is open, same
+    // guard the schedulers above rely on.
+    initSuprahMeetReminders();
 
     // Suprah Mail — start the Gmail history poll + socket fan-out engine.
     // Placed after waitForDbConnection() so its first tick never queries a

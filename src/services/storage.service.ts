@@ -258,6 +258,26 @@ class StorageService {
         }
     }
 
+    async streamPublicFile(key: string): Promise<{ stream: Readable; contentType: string } | null> {
+        if (!key || !this.isConfigured || !this.s3Client) return null;
+
+        try {
+            const command = new GetObjectCommand({
+                Bucket: config.r2.buckets.public,
+                Key: key,
+            });
+            const response = await this.s3Client.send(command);
+            if (!response.Body) return null;
+            return {
+                stream: response.Body as Readable,
+                contentType: response.ContentType || 'application/octet-stream',
+            };
+        } catch (error) {
+            console.error('[StorageService] streamPublicFile error:', error);
+            return null;
+        }
+    }
+
     /**
      * Extracts the R2 key from a full public URL
      * @param url The full R2 public URL

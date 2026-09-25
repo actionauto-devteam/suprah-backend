@@ -23,7 +23,6 @@ import Notification from '../models/Notification.model';
 import logger from '../utils/logger';
 import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
-import { generateJaasToken, jaasRoomName, jaasConfigured, JAAS_DOMAIN } from '../services/jaas.service';
 import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
 import { resolveNextEmployeeId } from '../utils/employeeId.util';
@@ -938,14 +937,16 @@ export async function syncDayPulseReportToSupraSpace(report: any): Promise<{
 async function signAttachments(message: any) {
   if (Array.isArray(message?.attachments)) {
     await Promise.all(message.attachments.map(async (a: any) => {
-      if (a.url && !a.url.startsWith('http')) {
-        const signed = await getCachedSignedUrl('supraspace-attachment', a.fileKey || a.url);
+      const fileKey = a.fileKey || a.url;
+      if (fileKey && !fileKey.startsWith('http')) {
+        const signed = await getCachedSignedUrl('supraspace-attachment', fileKey);
         if (signed) {
           a.url = signed;
         }
       }
-      if (a.thumbnailUrl && !a.thumbnailUrl.startsWith('http')) {
-        const signedThumbnail = await getCachedSignedUrl('supraspace-attachment-thumbnail', a.thumbnailUrl);
+      const thumbnailKey = a.thumbnailUrl;
+      if (thumbnailKey && !thumbnailKey.startsWith('http')) {
+        const signedThumbnail = await getCachedSignedUrl('supraspace-attachment-thumbnail', thumbnailKey);
         if (signedThumbnail) a.thumbnailUrl = signedThumbnail;
       }
     }));
@@ -1672,8 +1673,9 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
   }
 
   const signed = await Promise.all(items.map(async (item) => {
-    if (item.attachment.url && !item.attachment.url.startsWith('http')) {
-      const url = await storageService.getSignedUrl(item.attachment.fileKey || item.attachment.url);
+    const fileKey = item.attachment.fileKey || item.attachment.url;
+    if (fileKey && !fileKey.startsWith('http')) {
+      const url = await storageService.getSignedUrl(fileKey);
       if (url) item.attachment = { ...item.attachment, url };
     }
     if (item.attachment.thumbnailUrl && !item.attachment.thumbnailUrl.startsWith('http')) {
@@ -2711,36 +2713,6 @@ const getActiveUsers = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, withPresence, 'Team users fetched'));
 });
 
-// ─── Video Conferencing ────────────────────────────────────────────────────
-
-const generateVideoToken = asyncHandler(async (req: Request, res: Response) => {
-  const userId = req.crmUser!._id;
-  const { id } = req.params;
-
-  const conversation = await SupraSpaceConversation.findById(id);
-  if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
-
-  const user = req.crmUser!;
-  const roomName = `supraspace-${id}`;
-
-  // No JaaS configured → return room only (fallback path, identity via userInfo).
-  if (!jaasConfigured()) {
-    return res.json(new ApiResponse(200, { token: undefined, roomName, domain: JAAS_DOMAIN }, 'JaaS not configured'));
-  }
-
-  const token = generateJaasToken({
-    user: {
-      id: userId.toString(),
-      name: user.fullName,
-      email: user.username,
-      avatar: user.avatar,
-      moderator: true,
-    },
-  });
-  res.json(new ApiResponse(200, { token, roomName: jaasRoomName(roomName), domain: JAAS_DOMAIN }, 'Video token generated'));
-});
-
 const getSessionToken = asyncHandler(async (req: Request, res: Response) => {
   const mainUser = req.user as IUser;
   const organizationId =
@@ -2999,7 +2971,6 @@ const supraSpaceController = {
   rsvpEvent,
   getCrmUsers,
   getActiveUsers,
-  generateVideoToken,
   getSpaces,
   createSpace,
   updateSpace,

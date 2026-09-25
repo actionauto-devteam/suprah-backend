@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import jwt from 'jsonwebtoken';
 import config from '../config';
 import { ApiError } from '../utils/ApiError';
 import { IAppointment } from '../models/Appointment.model';
@@ -7,8 +8,12 @@ import ical, { ICalAttendeeStatus, ICalAttendeeRole, ICalEventStatus, ICalAlarmT
 import { google } from 'googleapis';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import Organization from '../models/Organization.model';
+import Vehicle from '../models/Vehicle.model';
+import EmailOptOut from '../models/EmailOptOut.model';
 import { decrypt } from '../utils/crypto';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
+import { resolveReviewLink } from './communication.service';
+import { isDemoPhone } from '../utils/demoPhone';
 
 interface EmailOptions {
     to: string;
@@ -22,6 +27,16 @@ interface EmailOptions {
 interface IEmailOrganizer {
     name: string;
     email: string;
+}
+
+export async function isEmailOptedOut(orgId: any, email: string): Promise<boolean> {
+    const record: any = await EmailOptOut.findOne({
+        organizationId: String(orgId),
+        email: String(email || '').trim().toLowerCase(),
+    })
+        .select('optedOut')
+        .lean();
+    return Boolean(record?.optedOut);
 }
 
 class EmailService {
@@ -907,6 +922,146 @@ See you there!
         });
     }
 
+    async sendReviewRequestEmail(appointment: any): Promise<boolean> {
+        const email = appointment.customerBooking?.email;
+        if (!email) return false;
+
+        const phone = appointment.customerBooking?.phone;
+        if (phone && isDemoPhone(phone)) return true;
+
+        const orgId = appointment.organizationId;
+        if (await isEmailOptedOut(orgId, email)) return false;
+
+        const firstName = appointment.customerBooking?.firstName?.trim() || 'there';
+
+        const vehicle = appointment.vehicleId
+            ? await Vehicle.findById(appointment.vehicleId).select('images dealerCity').lean().catch(() => null)
+            : null;
+
+        const [dealerName, reviewLink] = await Promise.all([
+            this.resolveDealerName(orgId, 'Suprah.AI'),
+            resolveReviewLink(orgId, (vehicle as any)?.dealerCity || null),
+        ]);
+
+        const vehicleImages = Array.isArray((vehicle as any)?.images) ? (vehicle as any).images : [];
+        const imageUrl = vehicleImages.find((url: string) => /^https?:\/\//i.test(url || '')) || null;
+
+        const unsubscribeToken = jwt.sign(
+            { organizationId: String(orgId), email, purpose: 'review_request_unsubscribe' },
+            config.jwt.emailOptOutSecret,
+            { expiresIn: '1y' },
+        );
+        const unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+
+        const subject = `How was your visit to ${dealerName}?`;
+
+        const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
+                        background-color: #f4f4f4;
+                        margin: 0;
+                        padding: 0;
+                    }
+                    .container {
+                        max-width: 600px;
+                        margin: 20px auto;
+                        background: white;
+                        border-radius: 8px;
+                        overflow: hidden;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
+                    .vehicle-photo {
+                        width: 100%;
+                        max-height: 280px;
+                        object-fit: cover;
+                        display: block;
+                    }
+                    .header {
+                        background: #00b262;
+                        color: white;
+                        padding: 30px 20px;
+                        text-align: center;
+                    }
+                    .header h1 {
+                        margin: 0;
+                        font-size: 24px;
+                    }
+                    .content {
+                        padding: 30px;
+                    }
+                    .cta {
+                        display: inline-block;
+                        margin-top: 16px;
+                        padding: 12px 28px;
+                        background: #00b262;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 6px;
+                        font-weight: bold;
+                    }
+                    .footer {
+                        text-align: center;
+                        color: #6b7280;
+                        font-size: 12px;
+                        padding: 20px;
+                        background: #f9fafb;
+                        border-top: 1px solid #e5e7eb;
+                    }
+                    .footer a {
+                        color: #9ca3af;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    ${imageUrl ? `<img src="${imageUrl}" alt="" class="vehicle-photo" />` : ''}
+                    <div class="header">
+                        <h1>Thanks for choosing ${dealerName}!</h1>
+                    </div>
+
+                    <div class="content">
+                        <p style="font-size: 16px;">Hi ${firstName},</p>
+                        ${reviewLink
+                            ? `<p style="font-size: 16px;">We'd really appreciate it if you could take a minute to share your experience.</p>
+                               <div style="text-align: center;">
+                                   <a href="${reviewLink}" class="cta">Leave a review</a>
+                               </div>`
+                            : `<p style="font-size: 16px;">We'd love to hear how it went — just reply to this email and let us know.</p>`
+                        }
+                    </div>
+
+                    <div class="footer">
+                        <p><strong>${dealerName}</strong></p>
+                        <p><a href="${unsubscribeUrl}">Unsubscribe from review request emails</a></p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        const text = `
+Hi ${firstName},
+
+Thanks for choosing ${dealerName}!
+${reviewLink
+    ? `We'd really appreciate a quick review: ${reviewLink}`
+    : `We'd love to hear how it went — just reply to this email and let us know.`}
+
+${dealerName}
+
+Unsubscribe from review request emails: ${unsubscribeUrl}
+        `;
+
+        await this.sendEmail({ to: email, subject, text, html, organizationId: orgId });
+        return true;
+    }
+
     /**
      * Send CRM password reset OTP email
      */
@@ -974,5 +1129,6 @@ export default {
     sendAppointmentUpdate: emailService.sendAppointmentUpdate.bind(emailService),
     sendAppointmentCancellation: emailService.sendAppointmentCancellation.bind(emailService),
     sendAppointmentReminder: emailService.sendAppointmentReminder.bind(emailService),
+    sendReviewRequestEmail: emailService.sendReviewRequestEmail.bind(emailService),
     sendCrmPasswordResetEmail: emailService.sendCrmPasswordResetEmail.bind(emailService),
 };

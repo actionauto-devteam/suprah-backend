@@ -6,7 +6,6 @@ import {
   createEvent,
   updateEvent,
   deleteEvent,
-  generateMeetingLink,
   bulkDeleteEvents,
   bulkUpdateStatus,
   bulkReassignEvents,
@@ -39,6 +38,5 @@ router.patch("/events/bulk-reassign", bulkReassignEvents);
 
 router.patch("/events/:id", updateEvent);
 router.delete("/events/:id", deleteEvent);
-router.post("/events/:id/meeting-link", generateMeetingLink);
 
 export default router;

@@ -1,3 +1,4 @@
+import '../src/config/productionDbGuard';
 
 import mongoose from 'mongoose';
 import { config } from 'dotenv';

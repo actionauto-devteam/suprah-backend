@@ -1210,7 +1210,6 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
 
 export default {
   chat,
-  meetingChat,
   transcribeChunk,
   summarizeConversation,
   draftReply,

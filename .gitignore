@@ -3,6 +3,7 @@ dist
 .env
 .env.prod
 .env.dev
+.env.local
 
 # FTP Server Credentials - DO NOT COMMIT
 SERVER.md

@@ -445,7 +445,6 @@ export const createEvent = asyncHandler(async (req: Request, res: Response) => {
     includedDates,
     assignees = [],
     color,
-    generateMeetingLink,
   } = req.body;
 
   const doc = new CalendarEvent({
@@ -464,12 +463,6 @@ export const createEvent = asyncHandler(async (req: Request, res: Response) => {
     assignees,
     color,
   });
-
-  if (type === "meeting" && generateMeetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
-    doc.meetingRoomName = roomName;
-    doc.meetingLink = link;
-  }
 
   await doc.save();
   await doc.populate(POPULATE_USERS);
@@ -541,12 +534,6 @@ export const updateEvent = asyncHandler(async (req: Request, res: Response) => {
     if (key in req.body) (doc as any)[key] = req.body[key];
   }
 
-  if (req.body.generateMeetingLink && !doc.meetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
-    doc.meetingRoomName = roomName;
-    doc.meetingLink = link;
-  }
-
   await doc.save();
   await doc.populate(POPULATE_USERS);
 
@@ -595,36 +582,6 @@ export const deleteEvent = asyncHandler(async (req: Request, res: Response) => {
     id: String(doc._id),
   });
   res.json({ ok: true });
-});
-
-/** POST /api/calendar/events/:id/meeting-link */
-export const generateMeetingLink = asyncHandler(async (req: Request, res: Response) => {
-  const auth = requireAuth(req);
-
-  const doc = await CalendarEvent.findOne({
-    _id: req.params.id,
-    organizationId: auth.orgId,
-    deletedAt: null,
-  });
-  if (!doc) {
-    throw new ApiError(404, "Calendar item not found.");
-  }
-  const isCreator = String(doc.createdBy) === auth.userId;
-  const isAdmin = isAdminRole(auth.role);
-  if (!isCreator && !isAdmin) {
-    throw new ApiError(403, "Only the creator or an admin can generate the meeting link.");
-  }
-  if (!doc.meetingLink) {
-    const { roomName, link } = buildSupraSpaceLink(String(doc._id), auth.orgId);
-    doc.meetingRoomName = roomName;
-    doc.meetingLink = link;
-    await doc.save();
-    emitCalendarChange("calendar:updated", auth.orgId, {
-      source: "calendarEvent",
-      item: stripViewerFields(mapCalendarEvent(doc.toObject(), auth.userId, isAdmin)),
-    });
-  }
-  res.json({ meetingLink: doc.meetingLink, roomName: doc.meetingRoomName });
 });
 
 /** Shape returned by every bulk-* endpoint below. */
@@ -745,17 +702,3 @@ export const bulkReassignEvents = asyncHandler(async (req: Request, res: Respons
   }
   res.json(result);
 });
-
-/**
- * TODO(integration): align with the SupraSpace/JaaS room + link format used
- * by the /calls flow. Deterministic room name; CallExperience mints the JWT
- * at join time, same as the existing calling system.
- */
-function buildSupraSpaceLink(
-  eventId: string,
-  orgId: string
-): { roomName: string; link: string } {
-  const roomName = `suprah-${orgId.slice(-6)}-${eventId.slice(-8)}`;
-  const base = process.env.APP_URL ?? "https://suprah-app.com";
-  return { roomName, link: `${base}/supraspace/meet/${roomName}` };
-}

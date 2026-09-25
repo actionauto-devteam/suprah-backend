@@ -1,3 +1,4 @@
+import '../config/productionDbGuard';
 import mongoose from 'mongoose';
 import * as XLSX from 'xlsx';
 import path from 'path';

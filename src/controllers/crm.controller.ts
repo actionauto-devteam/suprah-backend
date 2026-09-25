@@ -14,14 +14,19 @@ import {
 import emailService from "../services/email.service";
 import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
 import { storageService } from "../services/storage.service";
+import { deleteCrmAvatar, isCrmAvatarId, streamCrmAvatar, uploadCrmAvatar } from "../services/crmAvatar.service";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
 import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled } from "../config/departmentMonitoring";
+import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled, resolveMonitoringMode } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
+import { isDesktopPlatformAllowed, isLocationFeatureOn } from "../utils/locationFlags.util";
+import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
+import { isTrayDeviceAuthEnabledForUser, normalizeTrayDeviceAuthOverride, TRAY_DEVICE_AUTH_OVERRIDES } from "../utils/trayDevice.util";
+import { recordTrayDeviceAuthOverrideChange, revokeUserTrayDevices } from "../services/trayDevice.service";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
@@ -38,6 +43,8 @@ const COOKIE_OPTIONS = {
 };
 
 const COMPANY_TZ_OFFSET_MINUTES = -360;
+const CRM_AVATAR_FILENAME = /^\d{13}-\d{1,10}\.(?:jpe?g|png|webp|gif)$/i;
+const CRM_AVATAR_DATABASE_ID = /^db-([a-f\d]{24})$/i;
 // Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts —
 // same 1-hour allotment, enforced here as a hard cap on starting a new break.
 const BREAK_LIMIT_SECONDS = 3600;
@@ -181,6 +188,26 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isIdleVideoProofEnabled(user.organizationId?.toString(), user.department),
   ]);
 
+  const requestedPlatform = typeof req.query.platform === "string" ? req.query.platform : null;
+  const desktopLocationEnabled = isLocationFeatureOn("LOC_DESKTOP_CHANNEL", user._id)
+    ? evaluateDesktopLocationEligibility({
+        flagOn: true,
+        platformAllowed: requestedPlatform === null ? null : isDesktopPlatformAllowed(requestedPlatform),
+        hasOrganization: !!user.organizationId,
+        hasConsent: !!user.locationConsent?.granted,
+        optedOut: !!user.locationSharingOptOut,
+        locationRequired: locationRequiredForTimeproof,
+        mode: await resolveMonitoringMode(user.organizationId?.toString(), user.department, user.monitoringModeOverride),
+      }).eligible
+    : false;
+
+  const trayDeviceAuthEnabled = isTrayDeviceAuthEnabledForUser(user);
+  const monitoringMode = await resolveMonitoringMode(
+    user.organizationId?.toString(),
+    user.department,
+    user.monitoringModeOverride,
+  ).catch(() => undefined);
+
   const userData = {
     _id: user._id,
     fullName: user.fullName,
@@ -188,6 +215,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     email: user.email,
     avatar: user.avatar,
     role: user.role,
+    organizationId: user.organizationId,
     department: user.department,
     screenshotExempt: user.screenshotExempt,
     screenshotBlurUntilPayout: user.screenshotBlurUntilPayout,
@@ -211,9 +239,76 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isMobileMonitoringDept: mobileMonitoringDept,
     screenshotsRequired,
     idleVideoProofEnabled,
+    desktopLocationEnabled,
+    trayDeviceAuthEnabled,
+    ...(monitoringMode && { monitoringMode }),
   };
 
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
+});
+
+const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  if (!orgId) throw new ApiError(400, 'Organization context missing');
+
+  const org = await Organization.findById(orgId).select('metadata').lean();
+  const metadata = (org?.metadata as any) || {};
+  const reviewLink = metadata.reviewLink || '';
+  const reviewLinks = Array.isArray(metadata.reviewLinks) ? metadata.reviewLinks : [];
+  const webchatEnabled = metadata.webchatEnabled !== false;
+  const webchatGreeting = metadata.webchatGreeting || '';
+
+  res.json(new ApiResponse(200, {
+    reviewLink,
+    reviewLinks,
+    webchatEnabled,
+    webchatGreeting,
+  }, 'Organization settings fetched'));
+});
+
+const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  const user = req.crmUser;
+  if (!orgId || !user) throw new ApiError(401, 'Please authenticate');
+  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can update organization settings');
+
+  const { reviewLink, reviewLinks, webchatEnabled, webchatGreeting } = req.body;
+  const org = await Organization.findById(orgId);
+  if (!org) throw new ApiError(404, 'Organization not found');
+
+  // Partial update — only touch the fields this caller actually sent, so
+  // e.g. the Webchat settings card saving can never wipe out the Review
+  // Requests card's fields (and vice versa); each card only sends its own.
+  const metadata: any = { ...(org.metadata || {}) };
+  if (reviewLink !== undefined) {
+    metadata.reviewLink = String(reviewLink || '').trim();
+  }
+  if (reviewLinks !== undefined) {
+    metadata.reviewLinks = Array.isArray(reviewLinks)
+      ? reviewLinks
+          .map((row: any) => ({
+            location: String(row?.location || '').trim(),
+            url: String(row?.url || '').trim(),
+          }))
+          .filter((row: { location: string; url: string }) => row.location && row.url)
+      : [];
+  }
+  if (webchatEnabled !== undefined) {
+    metadata.webchatEnabled = webchatEnabled !== false;
+  }
+  if (webchatGreeting !== undefined) {
+    metadata.webchatGreeting = String(webchatGreeting || '').trim().slice(0, 300);
+  }
+
+  org.metadata = metadata;
+  await org.save();
+
+  res.json(new ApiResponse(200, {
+    reviewLink: org.metadata.reviewLink,
+    reviewLinks: org.metadata.reviewLinks,
+    webchatEnabled: org.metadata.webchatEnabled,
+    webchatGreeting: org.metadata.webchatGreeting,
+  }, 'Organization settings updated'));
 });
 
 const timeClock = asyncHandler(async (req: Request, res: Response) => {
@@ -699,7 +794,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -740,7 +835,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -810,6 +905,16 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (monitoringModeOverride !== undefined && ['default', 'off', 'always', 'switching'].includes(monitoringModeOverride)) {
     user.monitoringModeOverride = monitoringModeOverride;
+  }
+
+  let trayDeviceAuthOverrideChange: { from: string; to: string } | null = null;
+  if (trayDeviceAuthOverride !== undefined && (TRAY_DEVICE_AUTH_OVERRIDES as readonly unknown[]).includes(trayDeviceAuthOverride)) {
+    const previous = normalizeTrayDeviceAuthOverride(user.trayDeviceAuthOverride);
+    const next = normalizeTrayDeviceAuthOverride(trayDeviceAuthOverride);
+    if (previous !== next) {
+      user.trayDeviceAuthOverride = next;
+      trayDeviceAuthOverrideChange = { from: previous, to: next };
+    }
   }
 
   if (payrollLocation !== undefined) {
@@ -905,6 +1010,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     throw error;
   }
 
+  if (trayDeviceAuthOverrideChange) {
+    recordTrayDeviceAuthOverrideChange(user, trayDeviceAuthOverrideChange.from, trayDeviceAuthOverrideChange.to, actor._id);
+  }
+
   if (normalizeEmail(user.email) !== linkedCoreEmail) {
     await cascadeEmailToLinkedUser({
       previousEmail: linkedCoreEmail,
@@ -957,6 +1066,7 @@ const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
 
   user.isActive = !user.isActive;
   await user.save({ validateModifiedOnly: true });
+  if (!user.isActive) revokeUserTrayDevices(user._id, "user_deactivated").catch(() => {});
 
   res.json(
     new ApiResponse(
@@ -1126,6 +1236,7 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   user.isOffboarded = true;
   user.offboardedAt = new Date();
   await user.save({ validateModifiedOnly: true });
+  revokeUserTrayDevices(user._id, "user_offboarded").catch(() => {});
 
   res.json(new ApiResponse(200, null, "User offboarded successfully"));
 });
@@ -1135,19 +1246,39 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) throw new ApiError(400, "Avatar image file is required");
 
-  const avatarUrl = await storageService.upload(file, "avatars");
+  let avatarId: string;
+  try {
+    avatarId = await uploadCrmAvatar(file);
+  } catch {
+    throw new ApiError(503, "Profile image storage is temporarily unavailable");
+  }
+  const avatarReference = `db:${avatarId}`;
+  const avatarUrl = `/api/crm/avatars/db-${avatarId}`;
 
-  if (user.avatar) {
-    try { await storageService.delete(user.avatar); } catch { /* best-effort */ }
+  let updated: { _id: unknown; fullName: string; avatar?: string } | null;
+  try {
+    updated = await CrmUser.findByIdAndUpdate(
+      user._id,
+      { $set: { avatar: avatarReference } },
+      { new: true }
+    ).select("_id fullName avatar").lean();
+  } catch (error) {
+    await deleteCrmAvatar(avatarId).catch(() => undefined);
+    throw error;
   }
 
-  const updated = await CrmUser.findByIdAndUpdate(
-    user._id,
-    { $set: { avatar: avatarUrl } },
-    { new: true }
-  ).select("_id fullName avatar").lean();
+  if (!updated) {
+    await deleteCrmAvatar(avatarId).catch(() => undefined);
+    throw new ApiError(404, "CRM user not found");
+  }
 
-  if (!updated) throw new ApiError(404, "CRM user not found");
+  if (user.avatar) {
+    try {
+      const previousDatabaseId = user.avatar.startsWith("db:") ? user.avatar.slice(3) : "";
+      if (isCrmAvatarId(previousDatabaseId)) await deleteCrmAvatar(previousDatabaseId);
+      else await storageService.delete(user.avatar);
+    } catch { }
+  }
 
   try {
     const io = getSupraSpaceIO();
@@ -1159,6 +1290,24 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   } catch { /* socket may not be initialised — best effort */ }
 
   res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
+});
+
+const getAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const identifier = String(req.params.filename || "");
+  const databaseMatch = identifier.match(CRM_AVATAR_DATABASE_ID);
+  const avatar = databaseMatch
+    ? await CrmUser.exists({ avatar: `db:${databaseMatch[1]}` })
+      ? await streamCrmAvatar(databaseMatch[1])
+      : null
+    : CRM_AVATAR_FILENAME.test(identifier)
+      ? await storageService.streamPublicFile(`avatars/${identifier}`)
+      : null;
+  if (!avatar) throw new ApiError(404, "Avatar not found");
+
+  res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+  res.type(avatar.contentType);
+  avatar.stream.on("error", () => res.destroy());
+  avatar.stream.pipe(res);
 });
 
 // Allowlist exception — intentionally not a general-purpose feature. Only
@@ -1209,6 +1358,8 @@ export default {
   forgotPassword,
   confirmResetPassword,
   getMe,
+  getOrgSettings,
+  updateOrgSettings,
   timeClock,
   getTimeLogs,
   getNextEmployeeId,
@@ -1221,5 +1372,6 @@ export default {
   offboardUser,
   tokenRefresh,
   updateMeAvatar,
+  getAvatar,
   updateMyScreenshotPrivacy,
 };

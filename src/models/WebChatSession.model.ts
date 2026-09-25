@@ -10,6 +10,8 @@ export interface IWebChatSession extends Document {
   vehicleId?: mongoose.Types.ObjectId;
   pageUrl?: string;
   lastMessageAt: Date;
+  smsFallbackSentAt?: Date;
+  staffTypingAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -25,6 +27,8 @@ const WebChatSessionSchema: Schema<IWebChatSession> = new Schema(
     vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle' },
     pageUrl: { type: String, trim: true },
     lastMessageAt: { type: Date, default: Date.now },
+    smsFallbackSentAt: { type: Date },
+    staffTypingAt: { type: Date },
   },
   { timestamps: true },
 );

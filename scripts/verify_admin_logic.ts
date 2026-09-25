@@ -1,3 +1,4 @@
+import '../src/config/productionDbGuard';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import Organization from '../src/models/Organization.model';

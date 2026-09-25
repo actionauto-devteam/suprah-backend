@@ -10,6 +10,7 @@ import SmsOptOut from '../models/SmsOptOut.model';
 import Notification from '../models/Notification.model';
 import { Conversation, CommunicationMessage, CallLog } from '../models/communication.model';
 import * as comm from '../services/communication.service';
+import emailService, { isEmailOptedOut } from '../services/email.service';
 import * as telnyx from '../services/telnyx.service';
 import { sendReminderFor } from '../schedulers/appointmentReminder.scheduler';
 import { generateDemoPhone, isDemoPhone } from '../utils/demoPhone';
@@ -72,6 +73,8 @@ async function serializeScenario(orgId: string, lead: any, appointment: any) {
           startTime: appointment.startTime,
           reminderSent: Boolean(appointment.reminderSent),
           noShowFollowUpSentAt: appointment.noShowFollowUpSentAt || null,
+          reviewRequestSentAt: appointment.reviewRequestSentAt || null,
+          reviewRequestEmailSentAt: appointment.reviewRequestEmailSentAt || null,
         }
       : null,
     optedOut: await comm.isSmsOptedOut(orgId, lead.phone),
@@ -264,6 +267,70 @@ export const sendNoShowFollowUp = asyncHandler(async (req: Request, res: Respons
   await comm.sendNoShowFollowUpText(appointment.toObject());
 
   await respondWithScenario(res, orgId, lead._id, 'No-show follow-up sent');
+});
+
+export const markCompleted = asyncHandler(async (req: Request, res: Response) => {
+  assertEnabled();
+  const { orgId, lead, appointment } = await loadScenario(req);
+  if (!appointment) throw new ApiError(400, 'This demo customer has no appointment');
+
+  await Appointment.updateOne(
+    { _id: appointment._id },
+    { $set: { status: 'completed', outcomeNotes: 'Demo: the customer completed the appointment' } },
+  );
+
+  await respondWithScenario(res, orgId, lead._id, 'Appointment marked as completed');
+});
+
+export const sendReviewRequest = asyncHandler(async (req: Request, res: Response) => {
+  assertEnabled();
+  const { orgId, lead, appointment } = await loadScenario(req);
+  if (!appointment) throw new ApiError(400, 'This demo customer has no appointment');
+  if (appointment.status !== 'completed') {
+    throw new ApiError(400, 'Mark the appointment as completed first');
+  }
+
+  const results: string[] = [];
+  let sentAny = false;
+
+  if (appointment.reviewRequestSentAt) {
+    results.push('SMS already sent');
+  } else if (await comm.isSmsOptedOut(orgId, lead.phone)) {
+    results.push('SMS blocked (opted out)');
+  } else {
+    const claimedSms = await Appointment.updateOne(
+      { _id: appointment._id, reviewRequestSentAt: null },
+      { $set: { reviewRequestSentAt: new Date(), reviewRequestStatus: 'sent' } },
+      { timestamps: false },
+    );
+    if (claimedSms.modifiedCount > 0) {
+      await comm.sendReviewRequestText(appointment.toObject());
+      results.push('SMS sent');
+      sentAny = true;
+    }
+  }
+
+  const email = appointment.customerBooking?.email;
+  if (!email) {
+    results.push('Email skipped (no email on file)');
+  } else if (appointment.reviewRequestEmailSentAt) {
+    results.push('Email already sent');
+  } else if (await isEmailOptedOut(orgId, email)) {
+    results.push('Email blocked (opted out)');
+  } else {
+    const claimedEmail = await Appointment.updateOne(
+      { _id: appointment._id, reviewRequestEmailSentAt: null },
+      { $set: { reviewRequestEmailSentAt: new Date(), reviewRequestEmailStatus: 'sent' } },
+      { timestamps: false },
+    );
+    if (claimedEmail.modifiedCount > 0) {
+      await emailService.sendReviewRequestEmail(appointment.toObject());
+      results.push('Email sent');
+      sentAny = true;
+    }
+  }
+
+  await respondWithScenario(res, orgId, lead._id, results.join(' · '), !sentAny);
 });
 
 export const sendNurture = asyncHandler(async (req: Request, res: Response) => {

@@ -13,7 +13,12 @@ import DrivingSession from '../models/DrivingSession.model';
 import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
-import { isMobileMonitoringDept, isLocationRequiredForUser } from '../config/departmentMonitoring';
+import { isMobileMonitoringDept, isLocationRequiredForUser, resolveMonitoringMode } from '../config/departmentMonitoring';
+import { isDesktopPlatformAllowed, isLocationFeatureOn } from '../utils/locationFlags.util';
+import { getLocationTuning, pickDisplayChannel, shouldIgnoreDesktopPing } from '../utils/locationChannel.util';
+import { isLocationSilenceExcusedForRecord } from '../utils/locationExcuse.util';
+import { DESKTOP_PING_RETRY_LONG_SEC, DESKTOP_PING_RETRY_RECORD_SEC, evaluateDesktopPing, sanitizeDesktopPingBody } from '../utils/desktopPing.util';
+import type { DesktopPingRejection } from '../utils/desktopPing.util';
 import { getCompanyDayRange } from '../utils/companyTimezone';
 import { isMandatoryLocationDept } from '../constants/departments';
 import { getShiftStatusForActor } from '../utils/shiftStatus';
@@ -640,6 +645,26 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     }
 
     const previous = await EmployeeLocation.findOne({ userId: actor.id }).lean();
+
+    if (deviceType === 'desktop' && previous?.deviceType === 'mobile' && isLocationFeatureOn('LOC_STICKY_MOBILE', actor.id)) {
+        const stickyMode = await resolveMonitoringMode(orgId, actor.department, (actor.doc as any).monitoringModeOverride);
+        const ignoreDesktopPing = shouldIgnoreDesktopPing({
+            mode: stickyMode,
+            incomingDeviceType: deviceType,
+            previous,
+            nowMs: Date.now(),
+            tuning: getLocationTuning(),
+        });
+        if (ignoreDesktopPing) {
+            res.json(new ApiResponse(
+                200,
+                { sharingState: previous.sharingState, currentPlaceId: previous.currentPlaceId, ignored: true },
+                'Location ignored — phone is active',
+            ));
+            return;
+        }
+    }
+
     // A fix this coarse (WiFi/cell-tower positioning, hundreds of meters off) must never be
     // plotted as the person's actual position at all — see POSITION_ACCURACY_REJECT_M above.
     const positionReliable = typeof accuracyM !== 'number' || accuracyM <= POSITION_ACCURACY_REJECT_M;
@@ -784,6 +809,59 @@ const ingestLocation = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, { sharingState: updated.sharingState, currentPlaceId: updated.currentPlaceId }, 'Location updated'));
+});
+
+const ingestDesktopLocation = asyncHandler(async (req: Request, res: Response) => {
+    const actor = getLocatorActor(req);
+    const orgId = req.orgId as string | undefined;
+
+    const reject = (reason: DesktopPingRejection, retryAfterSec: number) => {
+        res.json(new ApiResponse(200, { accepted: false, reason, retryAfterSec }, 'Desktop location not accepted'));
+    };
+
+    if (!isLocationFeatureOn('LOC_DESKTOP_CHANNEL', actor.id)) {
+        reject('flag_off', DESKTOP_PING_RETRY_LONG_SEC);
+        return;
+    }
+
+    const payload = sanitizeDesktopPingBody(req.body);
+    if (!payload) throw new ApiError(400, 'lat and lng are required');
+
+    const [locationRequired, mode, shift] = await Promise.all([
+        orgId ? isLocationRequiredForUser(orgId, actor.department, actor.locationRequiredOverride) : Promise.resolve(false),
+        resolveMonitoringMode(orgId, actor.department, (actor.doc as any).monitoringModeOverride),
+        getShiftStatusForActor(actor.id),
+    ]);
+
+    const decision = evaluateDesktopPing({
+        flagOn: true,
+        hasOrganization: !!orgId,
+        hasConsent: !!actor.locationConsent?.granted,
+        optedOut: !!actor.locationSharingOptOut,
+        platformAllowed: isDesktopPlatformAllowed(payload.platform),
+        locationRequired,
+        mode,
+        isOnShift: shift.isOnShift,
+        isOnBreak: shift.isOnBreak,
+    });
+    if (!decision.eligible) { reject(decision.reason, decision.retryAfterSec); return; }
+
+    const result = await EmployeeLocation.updateOne(
+        { userId: actor.id, sharingState: 'sharing' },
+        {
+            $set: {
+                desktopLastSeenAt: new Date(),
+                desktopCoords: { lat: payload.lat, lng: payload.lng },
+                desktopAccuracyM: payload.accuracyM,
+                desktopInputAgeSec: payload.inputAgeSec,
+                desktopPlatform: payload.platform,
+            },
+        },
+        { timestamps: false },
+    );
+    if (result.matchedCount === 0) { reject('no_active_record', DESKTOP_PING_RETRY_RECORD_SEC); return; }
+
+    res.json(new ApiResponse(200, { accepted: true }, 'Desktop location recorded'));
 });
 
 const pauseSharing = asyncHandler(async (req: Request, res: Response) => {
@@ -962,6 +1040,21 @@ function locationLiveness(l: any): number {
     return stateRank * 1e13 + modelRank * 1e12 + new Date(l.lastSeenAt || 0).getTime();
 }
 
+function withDesktopDisplay(row: any, nowMs: number): any {
+    if (!row.desktopCoords || !isLocationFeatureOn('LOC_DESKTOP_DISPLAY', row.userId._id)) return row;
+    if (pickDisplayChannel({ main: row, desktop: row, nowMs, tuning: getLocationTuning() }) !== 'desktop') return row;
+    return {
+        ...row,
+        coords: row.desktopCoords,
+        accuracyM: row.desktopAccuracyM ?? undefined,
+        heading: undefined,
+        speedMph: undefined,
+        deviceType: 'desktop',
+        lastSeenAt: row.desktopLastSeenAt,
+        locationSource: 'tray',
+    };
+}
+
 const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
 
@@ -993,6 +1086,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
     const staleIds: any[] = [];
     for (const l of byPerson.values()) {
         if (l.sharingState === 'sharing' && nowMs - new Date(l.lastSeenAt).getTime() > SHARING_STALE_MS) {
+            if (await isLocationSilenceExcusedForRecord({ ...l, userId: l.userId._id }, nowMs)) continue;
             l.sharingState = 'off_duty';
             staleIds.push(l._id);
         }
@@ -1026,6 +1120,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
     // account, refPath/collection mismatch on legacy records, etc.). Populated fields are
     // only a fallback for records written before the snapshot existed.
     const result = [...byPerson.values()]
+        .map((row: any) => withDesktopDisplay(row, nowMs))
         .map((l: any) => ({
             userId: l.userId._id,
             userModel: l.userModel,
@@ -1052,6 +1147,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
             lastSeenAt: l.lastSeenAt,
             sharingSince: l.sharingSince,
             stationarySince: l.stationarySince,
+            ...(l.locationSource && { locationSource: l.locationSource }),
         }));
 
     res.json(new ApiResponse(200, result, 'Active employee locations fetched'));
@@ -1483,7 +1579,7 @@ const getActiveSosAlerts = asyncHandler(async (req: Request, res: Response) => {
 
 export default {
     getMyLocatorStatus, setLocationConsent, setLocationSharingOptOut,
-    ingestLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
+    ingestLocation, ingestDesktopLocation, pauseSharing, resumeSharing, stopSharing, getActiveEmployeeLocations,
     reportPermissionDenied,
     requestLocationShare,
     getPlaces, createPlace, updatePlace, deletePlace, manualCheckIn,

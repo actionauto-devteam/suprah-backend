@@ -246,16 +246,32 @@ export const crmCalendarController = {
     }
 
     // Direct update — CRM staff can update any booking in their org without creator check
+    const current = await Appointment.findOne({ _id: id, organizationId: orgId }).select('status');
+    if (!current) throw new ApiError(404, 'Appointment not found');
+
     const updateFields: Record<string, any> = { status };
     if (outcomeNotes) updateFields.outcomeNotes = outcomeNotes;
 
     const appointment = await Appointment.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
-      updateFields,
+      { _id: id, organizationId: orgId, status: current.status },
+      {
+        $set: updateFields,
+        ...(current.status !== status ? {
+          $push: {
+            statusHistory: {
+              from: current.status,
+              to: status,
+              changedAt: new Date(),
+              changedBy: String((req.crmUser as any)._id),
+              actorName: (req.crmUser as any).fullName || (req.crmUser as any).name || (req.crmUser as any).email,
+            },
+          },
+        } : {}),
+      },
       { new: true }
     );
 
-    if (!appointment) throw new ApiError(404, 'Appointment not found');
+    if (!appointment) throw new ApiError(409, 'Appointment status changed. Refresh and try again.');
 
     // Push update to org (CRM table refreshes live) and to the customer (stepper advances live)
     emitToOrg(orgId, 'appointment:status_updated', { _id: id, status, orgId });

@@ -57,7 +57,6 @@ import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
 import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
-import callRoute from "./call.route";
 import auctionListingReviewRoute from "./auctionListingReview.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
@@ -68,6 +67,7 @@ import projectManagementRoute from "./projectManagement.route";
 import calendarRoutes from "./calendar.routes";
 import whatsNewRoute from "./whatsNew.route";
 import internalTrayRoute from "./internalTray.route";
+import trayDeviceRoute from "./trayDevice.route";
 import mailRoute from "./mail.route";
 import pulse360Route from "./pulse360.route";
 import storyRoute from "./story.route";
@@ -79,9 +79,12 @@ import cannedReplyRoute from "./cannedReply.routes";
 import webchatRoute from "./webchat.route";
 import crmWebchatRoute from "./crmWebchat.routes";
 import crmDemoRoute from "./crmDemo.routes";
+import smsCampaignRoute from "./smsCampaign.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
+import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
 import youtubeRoute from "./youtube.route";
+import suprahMeetRoute from "./suprahMeet.route";
 
 
 const router = express.Router();
@@ -98,6 +101,11 @@ const defaultRoutes = [
     path: "/sync",
     route: syncRoute,
   },
+  {
+    path: "/crm/meet",
+    route: suprahMeetRoute,
+  },
+
   {
     path: "/sync/feeds",
     route: feedSyncRoute,
@@ -201,6 +209,11 @@ const defaultRoutes = [
     path: "/webhooks/telnyx",
     route: telnyxWebhookRoute,
   },
+  // Email unsubscribe — PUBLIC (JWT-signed token verified in controller, no crmAuth).
+  {
+    path: "/email/unsubscribe",
+    route: emailUnsubscribeRoute,
+  },
   {
     path: "/mail",
     route: mailRoute,
@@ -216,6 +229,10 @@ const defaultRoutes = [
   {
     path: "/crm/demo",
     route: crmDemoRoute,
+  },
+  {
+    path: "/crm/sms-campaigns",
+    route: smsCampaignRoute,
   },
   {
     path: "/webchat",
@@ -415,10 +432,6 @@ const defaultRoutes = [
     route: auctionListingRoute,
   },
   {
-    path: "/calls",
-    route: callRoute,
-  },
-  {
     path: "/referral-leads",
     route: referralLeadRoute,
   },
@@ -433,6 +446,10 @@ const defaultRoutes = [
   {
     path: "/internal",
     route: internalTrayRoute,
+  },
+  {
+    path: "/tray-device",
+    route: trayDeviceRoute,
   },
 ];
 defaultRoutes.forEach((route) => {

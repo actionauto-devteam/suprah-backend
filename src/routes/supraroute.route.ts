@@ -26,7 +26,6 @@ router.post('/refine', supraLeoController.refineMessage);
 router.get('/reminders/:module', supraLeoController.getReminders);
 router.get('/context/:module', supraLeoController.getModuleContext);
 
-router.post('/meeting-chat', supraLeoController.meetingChat);
 router.post('/transcribe-chunk', audioUpload.single('audio'), supraLeoController.transcribeChunk);
 
 router.get('/prepare-message/:leadId', supraLeoController.prepareMessage);

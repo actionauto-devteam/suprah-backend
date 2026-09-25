@@ -8,6 +8,7 @@ import {
 
 const router = express.Router();
 
+router.get('/public/config', ctrl.getPublicConfig);
 router.post('/public/sessions', webchatStartLimiter, ctrl.startSession);
 router.post('/public/sessions/:sessionId/messages', webchatMessageLimiter, ctrl.sendVisitorMessage);
 router.post('/public/sessions/:sessionId/sync', webchatSyncLimiter, ctrl.syncVisitorMessages);

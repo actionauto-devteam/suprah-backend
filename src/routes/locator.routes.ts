@@ -17,6 +17,7 @@ router.post('/consent', locatorController.setLocationConsent);
 router.post('/sharing-preference', locatorController.setLocationSharingOptOut);
 
 router.post('/ping', locatorController.ingestLocation);
+router.post('/desktop-ping', locatorController.ingestDesktopLocation);
 router.post('/pause', locatorController.pauseSharing);
 router.post('/resume', locatorController.resumeSharing);
 router.post('/off-duty', locatorController.stopSharing);

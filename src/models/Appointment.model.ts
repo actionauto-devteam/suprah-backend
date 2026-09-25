@@ -56,6 +56,30 @@ export interface IAppointment extends Document {
   reminderTime?: Date;
   reminderSentAt?: Date;
   noShowFollowUpSentAt?: Date;
+  noShowFollowUpStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
+  noShowFollowUpAttemptCount?: number;
+  noShowFollowUpLastAttemptAt?: Date;
+  noShowFollowUpNextRetryAt?: Date;
+  noShowFollowUpFailureReason?: string;
+  reviewRequestSentAt?: Date;
+  reviewRequestStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
+  reviewRequestAttemptCount?: number;
+  reviewRequestLastAttemptAt?: Date;
+  reviewRequestNextRetryAt?: Date;
+  reviewRequestFailureReason?: string;
+  reviewRequestEmailSentAt?: Date;
+  reviewRequestEmailStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
+  reviewRequestEmailAttemptCount?: number;
+  reviewRequestEmailLastAttemptAt?: Date;
+  reviewRequestEmailNextRetryAt?: Date;
+  reviewRequestEmailFailureReason?: string;
+  statusHistory?: Array<{
+    from: string;
+    to: string;
+    changedAt: Date;
+    changedBy?: string;
+    actorName?: string;
+  }>;
 
   googleCalendarEventId?: string;
   meetingLink?: string;
@@ -179,6 +203,39 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderTime: { type: Date },
     reminderSentAt: { type: Date },
     noShowFollowUpSentAt: { type: Date },
+    noShowFollowUpStatus: {
+      type: String,
+      enum: ['processing', 'sent', 'failed', 'skipped']
+    },
+    noShowFollowUpAttemptCount: { type: Number, default: 0 },
+    noShowFollowUpLastAttemptAt: { type: Date },
+    noShowFollowUpNextRetryAt: { type: Date },
+    noShowFollowUpFailureReason: { type: String, trim: true, maxlength: 500 },
+    reviewRequestSentAt: { type: Date },
+    reviewRequestStatus: {
+      type: String,
+      enum: ['processing', 'sent', 'failed', 'skipped']
+    },
+    reviewRequestAttemptCount: { type: Number, default: 0 },
+    reviewRequestLastAttemptAt: { type: Date },
+    reviewRequestNextRetryAt: { type: Date },
+    reviewRequestFailureReason: { type: String, trim: true, maxlength: 500 },
+    reviewRequestEmailSentAt: { type: Date },
+    reviewRequestEmailStatus: {
+      type: String,
+      enum: ['processing', 'sent', 'failed', 'skipped']
+    },
+    reviewRequestEmailAttemptCount: { type: Number, default: 0 },
+    reviewRequestEmailLastAttemptAt: { type: Date },
+    reviewRequestEmailNextRetryAt: { type: Date },
+    reviewRequestEmailFailureReason: { type: String, trim: true, maxlength: 500 },
+    statusHistory: [{
+      from: { type: String, required: true },
+      to: { type: String, required: true },
+      changedAt: { type: Date, default: Date.now },
+      changedBy: { type: String },
+      actorName: { type: String, trim: true }
+    }],
     googleCalendarEventId: String,
     meetingLink: String,
     syncedWithGoogleCalendar: { type: Boolean, default: false },

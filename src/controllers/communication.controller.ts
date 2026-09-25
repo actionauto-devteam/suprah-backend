@@ -9,6 +9,11 @@ import {
 } from "../models/communication.model";
 import * as comm from "../services/communication.service";
 import * as telnyx from "../services/telnyx.service";
+import Lead from "../models/lead.model";
+import Appointment from "../models/Appointment.model";
+import WebChatMessage from "../models/WebChatMessage.model";
+import MailConversation from "../models/MailConversation.model";
+import MailMessage from "../models/MailMessage.model";
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
@@ -155,6 +160,267 @@ export const getCustomerThread = asyncHandler(async (req: Request, res: Response
   ]);
 
   res.json(new ApiResponse(200, { conversation, messages, calls }, "Customer thread"));
+});
+
+type TimelineChannel = "sms" | "call" | "email" | "webchat" | "appointment" | "note";
+
+interface TimelineItem {
+  id: string;
+  channel: TimelineChannel;
+  direction?: "inbound" | "outbound" | "system";
+  title: string;
+  body?: string;
+  status?: string;
+  actor?: string;
+  occurredAt: Date;
+  metadata?: Record<string, unknown>;
+}
+
+export const getLeadTimeline = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String(orgOf(req));
+  const { leadId } = req.params;
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "30"), 10)));
+  let cursor: { occurredAt: Date; id: string } | null = null;
+  if (req.query.before) {
+    try {
+      const parsed = JSON.parse(Buffer.from(String(req.query.before), "base64url").toString("utf8"));
+      const occurredAt = new Date(parsed.occurredAt);
+      if (!isNaN(occurredAt.getTime()) && typeof parsed.id === "string") cursor = { occurredAt, id: parsed.id };
+    } catch {
+      const occurredAt = new Date(String(req.query.before));
+      if (!isNaN(occurredAt.getTime())) cursor = { occurredAt, id: "" };
+    }
+  }
+  const beforeDate = cursor?.occurredAt || null;
+
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId })
+    .select("firstName lastName email phone channel source subject body parsedContent comments notes statusHistory createdAt")
+    .lean();
+  if (!lead) throw new ApiError(404, "Lead not found");
+
+  const phone = lead.phone ? comm.normalizePhone(String(lead.phone)) : null;
+  const conversationQuery: any = { orgId, $or: [{ leadId }] };
+  if (phone) conversationQuery.$or.push({ customerPhone: phone });
+  const conversations = await Conversation.find(conversationQuery).select("_id").lean();
+  const conversationIds = conversations.map((item: any) => item._id);
+  const timeFilter = beforeDate ? { $lte: beforeDate } : undefined;
+  const sourceLimit = Math.min(250, limit * 3);
+  const unavailableSources: string[] = [];
+
+  const safe = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await load();
+    } catch {
+      unavailableSources.push(name);
+      return fallback;
+    }
+  };
+
+  const messageOr: any[] = [{ leadId }];
+  if (conversationIds.length) messageOr.push({ conversationId: { $in: conversationIds } });
+  const callOr: any[] = [{ leadId }];
+  if (phone) callOr.push({ from: phone }, { to: phone });
+
+  const [messages, calls, webchat, appointments, mailConversations] = await Promise.all([
+    safe("sms", () => CommunicationMessage.find({
+      orgId,
+      $or: messageOr,
+      ...(timeFilter ? { createdAt: timeFilter } : {}),
+    }).sort({ createdAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
+    safe("call", () => CallLog.find({
+      orgId,
+      $or: callOr,
+      ...(timeFilter ? { createdAt: timeFilter } : {}),
+    }).sort({ createdAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
+    safe("webchat", () => WebChatMessage.find({
+      organizationId: orgId,
+      leadId,
+      ...(timeFilter ? { createdAt: timeFilter } : {}),
+    }).sort({ createdAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
+    safe("appointment", () => Appointment.find({
+      organizationId: orgId,
+      leadId,
+    }).sort({ updatedAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
+    lead.email
+      ? safe("email", () => MailConversation.find({
+          organizationId: orgId,
+          "participants.email": String(lead.email).toLowerCase(),
+        }).select("_id").lean(), [])
+      : Promise.resolve([]),
+  ]);
+
+  const mailConversationIds = (mailConversations as any[]).map((item) => item._id);
+  const emails: any[] = mailConversationIds.length
+    ? await safe("email", () => MailMessage.find({
+        organizationId: orgId,
+        conversationId: { $in: mailConversationIds },
+        ...(timeFilter ? { sentAt: timeFilter } : {}),
+      }).sort({ sentAt: -1, _id: -1 }).limit(sourceLimit).lean(), [])
+    : [];
+
+  const items: TimelineItem[] = [];
+
+  for (const message of messages as any[]) {
+    items.push({
+      id: `sms:${message._id}`,
+      channel: "sms",
+      direction: message.direction,
+      title: message.direction === "inbound" ? "Text received" : "Text sent",
+      body: message.body,
+      status: message.status,
+      actor: message.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : message.sentBy?.name || "Team member",
+      occurredAt: message.createdAt,
+      metadata: message.errorDetail ? { error: message.errorDetail } : undefined,
+    });
+  }
+
+  for (const call of calls as any[]) {
+    const actor = call.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : call.placedBy?.name || "Team member";
+    items.push({
+      id: `call:${call._id}`,
+      channel: "call",
+      direction: call.direction,
+      title: call.direction === "inbound" ? "Inbound call" : "Outbound call",
+      body: call.durationSec ? `${Math.floor(call.durationSec / 60)}m ${call.durationSec % 60}s` : undefined,
+      status: call.status,
+      actor,
+      occurredAt: call.createdAt,
+      metadata: call.hangupCause ? { hangupCause: call.hangupCause } : undefined,
+    });
+  }
+
+  for (const message of webchat as any[]) {
+    items.push({
+      id: `webchat:${message._id}`,
+      channel: "webchat",
+      direction: message.direction,
+      title: message.direction === "inbound" ? "Web chat received" : "Web chat sent",
+      body: message.body,
+      status: "sent",
+      actor: message.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : message.sentBy?.name || "Team member",
+      occurredAt: message.createdAt,
+    });
+  }
+
+  for (const message of emails) {
+    items.push({
+      id: `email:${message._id}`,
+      channel: "email",
+      direction: message.direction,
+      title: message.direction === "inbound" ? "Email received" : "Email sent",
+      body: message.bodyText,
+      status: message.status,
+      actor: message.direction === "inbound" ? message.fromName || message.fromEmail : "Team member",
+      occurredAt: message.sentAt || message.createdAt,
+      metadata: message.errorMessage ? { error: message.errorMessage } : undefined,
+    });
+  }
+
+  for (const appointment of appointments as any[]) {
+    items.push({
+      id: `appointment:${appointment._id}:created`,
+      channel: "appointment",
+      direction: "system",
+      title: "Appointment scheduled",
+      body: appointment.notes || appointment.title,
+      status: "scheduled",
+      actor: "System",
+      occurredAt: appointment.createdAt,
+      metadata: { appointmentId: String(appointment._id), startTime: appointment.startTime },
+    });
+    if (appointment.statusHistory?.length) {
+      for (const history of appointment.statusHistory) {
+        items.push({
+          id: `appointment:${appointment._id}:status:${history._id || new Date(history.changedAt).getTime()}`,
+          channel: "appointment",
+          direction: "system",
+          title: `Appointment ${history.to}`,
+          body: history.to === appointment.status ? appointment.outcomeNotes : undefined,
+          status: history.to,
+          actor: history.actorName || "Team member",
+          occurredAt: history.changedAt,
+          metadata: { appointmentId: String(appointment._id), from: history.from, to: history.to },
+        });
+      }
+    } else if (appointment.status !== "scheduled") {
+      items.push({
+        id: `appointment:${appointment._id}:current`,
+        channel: "appointment",
+        direction: "system",
+        title: `Appointment ${appointment.status}`,
+        body: appointment.outcomeNotes,
+        status: appointment.status,
+        actor: "System",
+        occurredAt: appointment.updatedAt,
+        metadata: { appointmentId: String(appointment._id), startTime: appointment.startTime },
+      });
+    }
+  }
+
+  for (const note of lead.notes || []) {
+    items.push({
+      id: `note:${note._id || new Date(note.createdAt).getTime()}`,
+      channel: "note",
+      direction: "system",
+      title: "Internal note",
+      body: note.text,
+      actor: "Team member",
+      occurredAt: note.createdAt,
+    });
+  }
+
+  for (const history of lead.statusHistory || []) {
+    items.push({
+      id: `lead-status:${history._id || new Date(history.changedAt).getTime()}`,
+      channel: "appointment",
+      direction: "system",
+      title: `Lead moved to ${history.to}`,
+      body: history.reason,
+      status: history.to,
+      actor: "Team member",
+      occurredAt: history.changedAt,
+    });
+  }
+
+  const leadCreatedAt = new Date(lead.createdAt);
+  if (!beforeDate || leadCreatedAt < beforeDate) {
+    items.push({
+      id: `lead:${leadId}:created`,
+      channel: lead.channel === "webchat" ? "webchat" : lead.channel === "email" || lead.channel === "adf" ? "email" : "note",
+      direction: "inbound",
+      title: `Lead received from ${lead.source || lead.channel}`,
+      body: lead.parsedContent || lead.comments || lead.body,
+      actor: `${lead.firstName} ${lead.lastName || ""}`.trim(),
+      occurredAt: leadCreatedAt,
+      metadata: lead.subject ? { subject: lead.subject } : undefined,
+    });
+  }
+
+  const sorted = items
+    .filter((item) => item.occurredAt && !isNaN(new Date(item.occurredAt).getTime()))
+    .filter((item) => {
+      if (!cursor) return true;
+      const time = new Date(item.occurredAt).getTime();
+      const cursorTime = cursor.occurredAt.getTime();
+      return time < cursorTime || (time === cursorTime && item.id.localeCompare(cursor.id) < 0);
+    })
+    .sort((a, b) => {
+      const byTime = new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime();
+      return byTime || b.id.localeCompare(a.id);
+    });
+  const pageItems = sorted.slice(0, limit);
+  const hasMore = sorted.length > limit || [messages, calls, webchat, appointments, emails].some((source) => source.length === sourceLimit);
+  const lastItem = pageItems[pageItems.length - 1];
+  const nextCursor = hasMore && lastItem
+    ? Buffer.from(JSON.stringify({ occurredAt: new Date(lastItem.occurredAt).toISOString(), id: lastItem.id })).toString("base64url")
+    : null;
+
+  res.json(new ApiResponse(200, {
+    items: pageItems,
+    nextCursor,
+    hasMore,
+    unavailableSources: Array.from(new Set(unavailableSources)),
+  }, "Lead timeline"));
 });
 
 /** Thread by phone (leads page SMS conversations). */

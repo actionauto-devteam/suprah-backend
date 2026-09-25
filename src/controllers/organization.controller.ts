@@ -11,6 +11,7 @@ import { invalidateUserCache } from '../utils/cache.util';
 import Load from '../models/Load.model';
 import { getSocketIO } from '../utils/socketEmitter';
 import { DRIVER_ACTIVE_LOAD_STATUSES } from '../services/driverReviewAccess.service';
+import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
 import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
@@ -494,6 +495,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     logger.info({ orgId: id, removedUserId: userId }, 'Member removed from organization');
 
     const removedUser = await User.findById(userId);
+    if (removedUser?.email) revokeTrayDevicesForEmail(removedUser.email, id, 'org_membership_removed').catch(() => {});
     if (removedUser) {
         safeCreateNotification({ userId: removedUser._id.toString(), organizationId: id, type: 'team_member_left', title: 'Removed from Organization', message: `You have been removed from ${org.name}.` });
     }
