@@ -1405,4 +1405,4 @@ export default {
   deleteDocument,
   updateLogistics,
   updateIdentityVerification,
-};
+}

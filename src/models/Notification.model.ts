@@ -122,6 +122,8 @@ const NotificationSchema = new Schema(
         'driver_request_approved',
         'driver_request_rejected',
         'driver_assigned',
+        'load_accepted',
+        'load_amendment_acknowledged',
         'driver_location_update',
         'driver_payout',
         'driver_tracker_geofence_alert',
@@ -291,4 +293,4 @@ Notification.on('index', (err) => {
   if (err) logger.error({ err }, '[Notification] Index build failed — see deploy note in Notification.model.ts');
 });
 
-export default Notification;
+export default Notification; 

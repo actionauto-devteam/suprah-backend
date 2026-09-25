@@ -38,6 +38,8 @@ export interface ILoad extends Document {
    * assigned/reassigned the driver. Used to prevent stale acceptance.
    */
   assignmentMaterialFingerprint?: string;
+  assignmentReconfirmedAt?: Date;
+  assignmentReconfirmedBy?: mongoose.Types.ObjectId;
   /** Compatibility overrides explicitly confirmed by Dispatch at assignment. */
   assignmentCompatibilityOverrides?: {
     overrideAvailability: boolean;
@@ -85,6 +87,7 @@ export interface ILoad extends Document {
   }>;
   notes: Array<{ text: string; author: mongoose.Types.ObjectId; date: Date }>;
   proofOfDelivery?: Record<string, any>;
+  proofOfPickup?: Record<string, any>;
   assignedAt?: Date;
   acceptedAt?: Date;
   pickedUpAt?: Date;
@@ -270,6 +273,12 @@ const loadSchema = new Schema<ILoad>(
       carrierPayAmount: { type: Number, min: 0 },
       copCodAmount: { type: Number, min: 0, default: 0 },
       balanceAmount: { type: Number },
+      // Missing/true keeps legacy behavior. false means Dispatch intentionally
+      // skipped pricing for this load; financial values are treated as absent.
+      isPricingEnabled: { type: Boolean, default: true },
+      // Missing/true keeps legacy behavior; false redacts compensation from
+      // driver-facing endpoints while staff continue to see the stored amount.
+      isVisibleToDriver: { type: Boolean, default: true },
     },
     additionalInfo: {
       visibility: { type: String, enum: ["public", "private"], default: "public" },
@@ -314,6 +323,8 @@ const loadSchema = new Schema<ILoad>(
       maxlength: 64,
       default: null,
     },
+    assignmentReconfirmedAt: { type: Date },
+    assignmentReconfirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     assignmentCompatibilityOverrides: {
       overrideAvailability: { type: Boolean, default: false },
       overrideCapacity: { type: Boolean, default: false },
@@ -344,6 +355,12 @@ const loadSchema = new Schema<ILoad>(
       submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    },
+    proofOfPickup: {
+      imageUrl: { type: String },
+      submittedAt: { type: Date },
+      note: { type: String, trim: true, maxlength: 2000 },
+      submittedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },
     // ── Lifecycle timestamps written by driver-tracking transitions ──
     assignedAt: { type: Date },
@@ -405,7 +422,13 @@ loadSchema.pre("validate", async function (this: ILoad, next: (err?: Error) => v
 loadSchema.pre("save", function (this: ILoad, next: (err?: Error) => void) {
   const p: any = this.pricing ?? {};
   if (typeof p.carrierPayAmount === "number") {
-    p.balanceAmount = p.carrierPayAmount - (p.copCodAmount ?? 0);
+    if (this.postType === "load-board") {
+      const cod = p.copCodAmount ?? 0;
+      p.balanceAmount = p.carrierPayAmount - cod;
+    }
+    // Assign Carrier intentionally has no derived balance. Existing historical
+    // values are left untouched, while new direct-assignment loads do not
+    // synthesize a second compensation value.
     this.pricing = p;
   }
   next();

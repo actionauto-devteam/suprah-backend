@@ -9,6 +9,7 @@ import Load from "../models/Load.model";
 import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
 import LoadReleaseRequest from "../models/LoadReleaseRequest.model";
 import { GPS_TRACKING_LOAD_STATUSES } from "../services/driverLocationAccess.service";
+import { getLoadAcceptanceMaterialVersion } from "../services/loadAcceptanceMaterial.service";
 import {
   finalizeDriverStatusChangeIfClear,
   isStatusRequestBlockingNewWork,
@@ -76,6 +77,8 @@ interface OrgDriver {
       state: string | null;
       zip: string | null;
     };
+    requiresDispatchReconfirmation: boolean;
+    assignmentMaterialVersion: string | null;
     releaseRequest: {
       id: string;
       status: "pending";
@@ -104,6 +107,41 @@ interface OrgDriver {
     submittedAt?: Date | null;
   } | null;
   warnings: string[];
+}
+
+function getAssignmentReviewState(load: any, validDispatchOwnerIds: Set<string>) {
+  if (!load || String(load.status ?? "") !== "Assigned") {
+    return {
+      requiresDispatchReconfirmation: false,
+      assignmentMaterialVersion: null as string | null,
+    };
+  }
+
+  const currentMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+  const storedMaterialVersion = String(load.assignmentMaterialFingerprint ?? "").trim();
+  const dispatchOwnerId = String(load.dispatchOwnerId ?? "").trim();
+  const invalidDispatchOwner =
+    !dispatchOwnerId || !validDispatchOwnerIds.has(dispatchOwnerId);
+
+  if (storedMaterialVersion) {
+    return {
+      requiresDispatchReconfirmation:
+        invalidDispatchOwner || storedMaterialVersion !== currentMaterialVersion,
+      assignmentMaterialVersion: currentMaterialVersion,
+    };
+  }
+
+  const assignedAtMs = load.assignedAt ? new Date(load.assignedAt).getTime() : Number.NaN;
+  const updatedAtMs = load.updatedAt ? new Date(load.updatedAt).getTime() : Number.NaN;
+  const legacyChangedAfterAssignment =
+    Number.isFinite(assignedAtMs) &&
+    Number.isFinite(updatedAtMs) &&
+    updatedAtMs > assignedAtMs + 2000;
+
+  return {
+    requiresDispatchReconfirmation: invalidDispatchOwner || legacyChangedAfterAssignment,
+    assignmentMaterialVersion: currentMaterialVersion,
+  };
 }
 
 /**
@@ -157,7 +195,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       status: { $in: ACTIVE_LOAD_STATUSES },
     })
       .select(
-        "assignedDriverId dispatchOwnerId loadNumber status pickupLocation deliveryLocation vehicles trailerType dates",
+        "assignedDriverId dispatchOwnerId loadNumber postType status pickupLocation deliveryLocation vehicles trailerType dates pricing additionalInfo assignmentMaterialFingerprint assignedAt updatedAt",
       )
       .sort({ createdAt: -1 })
       .lean(),
@@ -185,6 +223,38 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       .sort({ createdAt: -1 })
       .lean(),
   ]);
+
+  const dispatchOwnerIds = [
+    ...new Set(
+      (loads as any[])
+        .map((load) => String(load.dispatchOwnerId ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  const dispatchOwners: any[] = dispatchOwnerIds.length
+    ? await User.find({
+        _id: { $in: dispatchOwnerIds },
+        role: { $in: ["employee", "admin", "super_admin"] },
+        isActive: true,
+      })
+        .select("_id role organizationId dispatcherOrganizationIds")
+        .lean()
+    : [];
+  const validDispatchOwnerIds = new Set(
+    dispatchOwners
+      .filter((owner) => {
+        if (owner.role === "super_admin") return true;
+        if (String(owner.organizationId ?? "") === organizationId) return true;
+        return (
+          owner.role === "employee" &&
+          Array.isArray(owner.dispatcherOrganizationIds) &&
+          owner.dispatcherOrganizationIds.some(
+            (id: unknown) => String(id) === organizationId,
+          )
+        );
+      })
+      .map((owner) => String(owner._id)),
+  );
 
   // Exact live GPS is private to the dispatcher who owns an accepted active
   // load. Assigned-only loads and another dispatcher's loads do not grant
@@ -427,6 +497,7 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
           state: load.deliveryLocation?.state ?? null,
           zip: load.deliveryLocation?.zip ?? null,
         },
+        ...getAssignmentReviewState(load, validDispatchOwnerIds),
         releaseRequest: (() => {
           const request: any = releaseRequestByLoadId.get(String(load._id));
           if (!request) return null;

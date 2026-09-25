@@ -39,7 +39,7 @@ const VALID_NOTIFICATION_TYPES = [
   'calendar_event_reminder', 'calendar_event_today', 'calendar_event_assigned',
   'driver_request', 'driver_request_approved', 'driver_request_rejected',
   'dealership_inquiry',
-  'driver_assigned', 'driver_location_update', 'driver_payout',
+  'driver_assigned', 'load_accepted', 'load_amendment_acknowledged', 'driver_location_update', 'driver_payout',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'driver_dispatch_alert', 'driver_dispatch_message',
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
@@ -70,7 +70,9 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   shipment_arrived_at_pickup: 'transportation', shipment_arrived_at_delivery: 'transportation',
   proof_submitted: 'transportation', delivery_confirmed: 'transportation',
   driver_request: 'transportation', driver_request_approved: 'transportation',
-  driver_request_rejected: 'transportation', driver_assigned: 'transportation', driver_payout: 'transportation',
+  driver_request_rejected: 'transportation', driver_assigned: 'transportation',
+  load_accepted: 'transportation', load_amendment_acknowledged: 'transportation',
+  driver_payout: 'transportation',
   driver_document_verified: 'transportation', driver_document_rejected: 'transportation',
   driver_profile_approved: 'transportation',
 
@@ -311,10 +313,12 @@ const createNotification = async (params: CreateNotificationParams) => {
       crm_biometric: metadata?.route || '/crm/biometrics',
       crm_timeproof: metadata?.route || '/crm/biometrics',
       reminder: metadata?.route || '/crm/leads',
-      driver_request: '/settings?tab=drivers',
+      driver_request: '/driver-tracker',
       driver_request_approved: '/driver/loads',
       driver_request_rejected: '/driver/loads',
       driver_assigned: '/driver/loads',
+      load_accepted: metadata?.route || '/driver-tracker',
+      load_amendment_acknowledged: metadata?.route || '/transportation',
       driver_payout: '/driver/earnings',
       payment_request: metadata?.route || '/customer/payments',
       payment_received: metadata?.route || '/billing',
@@ -390,7 +394,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       },
     };
 
-    if (type === 'driver_request') {
+    if (type === 'driver_request' && metadata?.suppressActions !== true) {
       pushPayload.actions = [
         { action: 'approve', title: 'Approve' },
         { action: 'reject', title: 'Reject' },
@@ -599,7 +603,7 @@ const broadcastNotification = async (params: {
       quote_created: '/transportation?tab=drafts',
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
-      driver_request: '/notifications',
+      driver_request: '/driver-tracker',
       admin_broadcast: '/notifications',
     };
     const broadcastPayload = { title, body: message, tag: category, source: CATEGORY_PUSH_LABELS[category], data: { url: metadata?.route || urlMap[type] || '/notifications' } };
