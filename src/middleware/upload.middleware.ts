@@ -129,6 +129,8 @@ const hasAllowedMagicBytes = (file: Express.Multer.File): boolean => {
         buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
         buffer.subarray(8, 12).toString('ascii') === 'WEBP'
       );
+    case 'image/gif':
+      return buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a';
     case 'application/pdf':
       return buffer.subarray(0, 5).toString('ascii') === '%PDF-';
     default:

@@ -14,6 +14,7 @@ import {
 import emailService from "../services/email.service";
 import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
 import { storageService } from "../services/storage.service";
+import { deleteCrmAvatar, isCrmAvatarId, streamCrmAvatar, uploadCrmAvatar } from "../services/crmAvatar.service";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
@@ -42,6 +43,8 @@ const COOKIE_OPTIONS = {
 };
 
 const COMPANY_TZ_OFFSET_MINUTES = -360;
+const CRM_AVATAR_FILENAME = /^\d{13}-\d{1,10}\.(?:jpe?g|png|webp|gif)$/i;
+const CRM_AVATAR_DATABASE_ID = /^db-([a-f\d]{24})$/i;
 // Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts —
 // same 1-hour allotment, enforced here as a hard cap on starting a new break.
 const BREAK_LIMIT_SECONDS = 3600;
@@ -1243,19 +1246,39 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) throw new ApiError(400, "Avatar image file is required");
 
-  const avatarUrl = await storageService.upload(file, "avatars");
+  let avatarId: string;
+  try {
+    avatarId = await uploadCrmAvatar(file);
+  } catch {
+    throw new ApiError(503, "Profile image storage is temporarily unavailable");
+  }
+  const avatarReference = `db:${avatarId}`;
+  const avatarUrl = `/api/crm/avatars/db-${avatarId}`;
 
-  if (user.avatar) {
-    try { await storageService.delete(user.avatar); } catch { /* best-effort */ }
+  let updated: { _id: unknown; fullName: string; avatar?: string } | null;
+  try {
+    updated = await CrmUser.findByIdAndUpdate(
+      user._id,
+      { $set: { avatar: avatarReference } },
+      { new: true }
+    ).select("_id fullName avatar").lean();
+  } catch (error) {
+    await deleteCrmAvatar(avatarId).catch(() => undefined);
+    throw error;
   }
 
-  const updated = await CrmUser.findByIdAndUpdate(
-    user._id,
-    { $set: { avatar: avatarUrl } },
-    { new: true }
-  ).select("_id fullName avatar").lean();
+  if (!updated) {
+    await deleteCrmAvatar(avatarId).catch(() => undefined);
+    throw new ApiError(404, "CRM user not found");
+  }
 
-  if (!updated) throw new ApiError(404, "CRM user not found");
+  if (user.avatar) {
+    try {
+      const previousDatabaseId = user.avatar.startsWith("db:") ? user.avatar.slice(3) : "";
+      if (isCrmAvatarId(previousDatabaseId)) await deleteCrmAvatar(previousDatabaseId);
+      else await storageService.delete(user.avatar);
+    } catch { }
+  }
 
   try {
     const io = getSupraSpaceIO();
@@ -1267,6 +1290,24 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
   } catch { /* socket may not be initialised — best effort */ }
 
   res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
+});
+
+const getAvatar = asyncHandler(async (req: Request, res: Response) => {
+  const identifier = String(req.params.filename || "");
+  const databaseMatch = identifier.match(CRM_AVATAR_DATABASE_ID);
+  const avatar = databaseMatch
+    ? await CrmUser.exists({ avatar: `db:${databaseMatch[1]}` })
+      ? await streamCrmAvatar(databaseMatch[1])
+      : null
+    : CRM_AVATAR_FILENAME.test(identifier)
+      ? await storageService.streamPublicFile(`avatars/${identifier}`)
+      : null;
+  if (!avatar) throw new ApiError(404, "Avatar not found");
+
+  res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+  res.type(avatar.contentType);
+  avatar.stream.on("error", () => res.destroy());
+  avatar.stream.pipe(res);
 });
 
 // Allowlist exception — intentionally not a general-purpose feature. Only
@@ -1331,5 +1372,6 @@ export default {
   offboardUser,
   tokenRefresh,
   updateMeAvatar,
+  getAvatar,
   updateMyScreenshotPrivacy,
 };
