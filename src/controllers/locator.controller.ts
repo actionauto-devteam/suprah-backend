@@ -14,7 +14,7 @@ import SosAlert from '../models/SosAlert.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { distanceMeters } from '../utils/geofence';
 import { isMobileMonitoringDept, isLocationRequiredForUser, resolveMonitoringMode } from '../config/departmentMonitoring';
-import { isDesktopPlatformAllowed, isLocationFeatureOn, isLocationFeatureOnForUser } from '../utils/locationFlags.util';
+import { isDesktopPlatformAllowed, isLocationFeatureOn } from '../utils/locationFlags.util';
 import { getLocationTuning, pickDisplayChannel, shouldIgnoreDesktopPing } from '../utils/locationChannel.util';
 import { isLocationSilenceExcusedForRecord } from '../utils/locationExcuse.util';
 import { DESKTOP_PING_RETRY_LONG_SEC, DESKTOP_PING_RETRY_RECORD_SEC, evaluateDesktopPing, sanitizeDesktopPingBody } from '../utils/desktopPing.util';
@@ -819,7 +819,7 @@ const ingestDesktopLocation = asyncHandler(async (req: Request, res: Response) =
         res.json(new ApiResponse(200, { accepted: false, reason, retryAfterSec }, 'Desktop location not accepted'));
     };
 
-    if (!isLocationFeatureOnForUser('LOC_DESKTOP_CHANNEL', { _id: actor.id, desktopLocationOverride: (actor.doc as any).desktopLocationOverride })) {
+    if (!isLocationFeatureOn('LOC_DESKTOP_CHANNEL', actor.id)) {
         reject('flag_off', DESKTOP_PING_RETRY_LONG_SEC);
         return;
     }
@@ -1041,7 +1041,7 @@ function locationLiveness(l: any): number {
 }
 
 function withDesktopDisplay(row: any, nowMs: number): any {
-    if (!row.desktopCoords || !isLocationFeatureOnForUser('LOC_DESKTOP_DISPLAY', { _id: row.userId._id, desktopLocationOverride: row.userId.desktopLocationOverride })) return row;
+    if (!row.desktopCoords || !isLocationFeatureOn('LOC_DESKTOP_DISPLAY', row.userId._id)) return row;
     if (pickDisplayChannel({ main: row, desktop: row, nowMs, tuning: getLocationTuning() }) !== 'desktop') return row;
     return {
         ...row,
@@ -1059,7 +1059,7 @@ const getActiveEmployeeLocations = asyncHandler(async (req: Request, res: Respon
     const orgId = req.orgId as string;
 
     const locations = await EmployeeLocation.find({ organizationId: orgId })
-        .populate('userId', 'name fullName email avatar department personalInfo.jobTitle personalInfo.department employmentLocationType desktopLocationOverride')
+        .populate('userId', 'name fullName email avatar department personalInfo.jobTitle personalInfo.department employmentLocationType')
         .lean();
 
     const withUser = locations.filter((l: any) => l.userId);
