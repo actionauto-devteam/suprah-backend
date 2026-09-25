@@ -26,6 +26,11 @@
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
     } from "../services/loadAcceptanceMaterial.service";
+    import {
+      appendLoadLifecycleOutbox,
+      createLoadLifecycleOutboxEvent,
+      processLoadLifecycleOutboxForLoad,
+    } from "../services/loadLifecycleOutbox.service";
 
 
     const getUser = (req: Request) => req.user as IUser;
@@ -1088,13 +1093,37 @@
         };
       }
 
+      // The driver must learn about the amendment: pickup, start-route and
+      // delivery are blocked until it is acknowledged. Queue the notification
+      // in the same write as the amendment so it is durable and retried.
+      const amendmentOutbox =
+        amendment && load.assignedDriverId
+          ? [
+              createLoadLifecycleOutboxEvent("user_notification", {
+                userId: load.assignedDriverId.toString(),
+                organizationId,
+                type: "load_amendment_required",
+                title: "Load Updated by Dispatch",
+                message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
+                metadata: {
+                  loadId: load._id.toString(),
+                  loadNumber: load.loadNumber,
+                  amendmentId: amendment._id.toString(),
+                  changedFields: materialChanges.map((change) => change.field),
+                  route: "/driver",
+                  pushSource: "Driver Tracker",
+                },
+              }),
+            ]
+          : [];
+
       const updatedLoad = await Load.findOneAndUpdate(
         {
           _id: loadId,
           organizationId,
           updatedAt: load.updatedAt,
         },
-        atomicUpdate,
+        appendLoadLifecycleOutbox(atomicUpdate, amendmentOutbox),
         { new: true, runValidators: true },
       );
 
@@ -1131,30 +1160,19 @@
         });
       }
 
-      if (amendment && load.assignedDriverId) {
+      if (amendmentOutbox.length > 0) {
+        // Immediate delivery for UX; failures stay queued for the worker.
         try {
-          await safeCreateNotification({
-            userId: load.assignedDriverId.toString(),
-            organizationId,
-            type: "load_amendment_required",
-            title: "Load Updated by Dispatch",
-            message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
-            metadata: {
-              loadId: load._id.toString(),
-              loadNumber: load.loadNumber,
-              amendmentId: amendment._id.toString(),
-              changedFields: materialChanges.map((change) => change.field),
-              route: "/driver",
-              pushSource: "Driver Tracker",
-            },
-          });
+          await processLoadLifecycleOutboxForLoad(loadId);
         } catch (error) {
           logger.error(
-            { error, loadId, amendmentId: amendment._id.toString() },
-            "Non-fatal: failed to notify driver about active Load amendment",
+            { error, loadId },
+            "Non-fatal: immediate Load amendment notification flush failed",
           );
         }
+      }
 
+      if (amendment && load.assignedDriverId) {
         if (_io) {
           _io.to(`user:${load.assignedDriverId.toString()}`).emit(
             "driver:loads_updated",

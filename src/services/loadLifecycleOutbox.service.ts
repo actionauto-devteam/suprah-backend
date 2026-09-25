@@ -13,6 +13,11 @@
   } from "./dispatchChat.service";
   import { getSocketIO } from "../utils/socketEmitter";
   import logger from "../utils/logger";
+  import mongoose from "mongoose";
+  import {
+    NonRetryableOutboxError,
+    decideOutboxFailure,
+  } from "./loadLifecycleOutboxPolicy";
 
   export type LoadLifecycleOutboxKind =
     | "load_sync"
@@ -35,6 +40,14 @@
   const EVENT_LOCK_MS = 30_000;
   const MAX_INLINE_EVENTS = 16;
   const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  const DEAD_LETTER_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+  // Outbox bookkeeping must not bump Load.updatedAt: lifecycle writes use
+  // updatedAt as their optimistic-concurrency token.
+  const NO_TIMESTAMPS = { timestamps: false } as const;
+  const PENDING_EVENT_MATCH = {
+    processedAt: { $exists: false },
+    deadLetteredAt: { $exists: false },
+  };
   let workerStarted = false;
   let workerRunning = false;
   let workerTimer: NodeJS.Timeout | null = null;
@@ -71,6 +84,8 @@
 
     existingPush.lifecycleOutbox = { $each: events };
     next.$push = existingPush;
+    // Same atomic write as the events, so the worker index can never miss them.
+    next.$set = { ...(next.$set ?? {}), lifecycleOutboxPending: true };
     return next;
   }
 
@@ -89,7 +104,7 @@
     const userId = String(payload.userId ?? "");
     const organizationId = String(payload.organizationId ?? "");
     if (!userId || !organizationId) {
-      throw new Error("Outbox user_notification is missing recipient ownership");
+      throw new NonRetryableOutboxError("Outbox user_notification is missing recipient ownership");
     }
 
     if (await notificationAlreadyDelivered(userId, event.eventId)) return;
@@ -113,7 +128,7 @@
     const payload = event.payload ?? {};
     const organizationId = String(payload.organizationId ?? "");
     if (!organizationId) {
-      throw new Error("Outbox org_admin_notification is missing organizationId");
+      throw new NonRetryableOutboxError("Outbox org_admin_notification is missing organizationId");
     }
 
     const excludeUserId = String(payload.excludeUserId ?? "");
@@ -174,11 +189,17 @@
     const payload = event.payload ?? {};
     const createActivity = (activityService as any).createActivity;
     if (typeof createActivity !== "function") {
-      throw new Error("activityService.createActivity is unavailable");
+      throw new NonRetryableOutboxError("activityService.createActivity is unavailable");
+    }
+
+    // UserActivity.userId is an ObjectId; a missing actor can never succeed.
+    const userId = String(payload.userId ?? "");
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      throw new NonRetryableOutboxError("Outbox activity is missing a valid actor userId");
     }
 
     await createActivity.call(activityService, {
-      userId: String(payload.userId ?? "SYSTEM"),
+      userId,
       organizationId: String(payload.organizationId ?? ""),
       type: String(payload.type ?? "load_updated"),
       title: String(payload.title ?? "Load Updated"),
@@ -197,7 +218,7 @@
     const dispatcherId = String(payload.dispatcherId ?? "");
     const driverId = String(payload.driverId ?? "");
     if (!organizationId || !dispatcherId || !driverId) {
-      throw new Error("Outbox dispatch_chat_system is missing thread ownership");
+      throw new NonRetryableOutboxError("Outbox dispatch_chat_system is missing thread ownership");
     }
 
     const existing = await DispatchChatMessage.findOne({
@@ -220,7 +241,7 @@
       .select("_id name email role isActive organizationId")
       .lean();
     if (!dispatcher) {
-      throw new Error("Outbox dispatcher is no longer available");
+      throw new NonRetryableOutboxError("Outbox dispatcher is no longer available");
     }
 
     const requestedPerformerId = String(
@@ -235,7 +256,7 @@
 
     if (requestedPerformerRole === "driver") {
       if (requestedPerformerId !== driverId) {
-        throw new Error(
+        throw new NonRetryableOutboxError(
           "Driver-authored Dispatch Chat lifecycle event does not match the thread driver",
         );
       }
@@ -249,7 +270,7 @@
         .lean();
 
       if (!candidate) {
-        throw new Error(
+        throw new NonRetryableOutboxError(
           "Outbox driver performer is no longer available",
         );
       }
@@ -482,7 +503,7 @@
       !targetStatus ||
       !decision
     ) {
-      throw new Error(
+      throw new NonRetryableOutboxError(
         "Outbox release_request_resolution is missing required ownership or decision data",
       );
     }
@@ -623,13 +644,8 @@
       case "release_request_resolution":
         return deliverReleaseRequestResolution(event);
       default:
-        throw new Error(`Unsupported Load lifecycle outbox kind: ${event.kind}`);
+        throw new NonRetryableOutboxError(`Unsupported Load lifecycle outbox kind: ${event.kind}`);
     }
-  }
-
-  function retryDelayMs(attempts: number) {
-    const exponent = Math.max(0, Math.min(8, attempts - 1));
-    return Math.min(15 * 60_000, 5_000 * 2 ** exponent);
   }
 
   async function claimNextEvent(loadId?: string) {
@@ -638,7 +654,7 @@
     const lockedUntil = new Date(now.getTime() + EVENT_LOCK_MS);
 
     const eventMatch: Record<string, any> = {
-      processedAt: { $exists: false },
+      ...PENDING_EVENT_MATCH,
       nextAttemptAt: { $lte: now },
       $or: [
         { lockedUntil: { $exists: false } },
@@ -649,7 +665,9 @@
 
     const load: any = await Load.findOneAndUpdate(
       {
-        ...(loadId ? { _id: loadId } : {}),
+        // The inline flush targets one known Load. The background worker only
+        // looks at Loads flagged as pending, which is served by a partial index.
+        ...(loadId ? { _id: loadId } : { lifecycleOutboxPending: true }),
         lifecycleOutbox: { $elemMatch: eventMatch },
       },
       {
@@ -659,7 +677,7 @@
         },
         $inc: { "lifecycleOutbox.$.attempts": 1 },
       },
-      { new: true },
+      { new: true, ...NO_TIMESTAMPS },
     ).select("+lifecycleOutbox");
 
     if (!load) return null;
@@ -671,6 +689,23 @@
     if (!event) return null;
 
     return { loadId: String(load._id), event, lockToken };
+  }
+
+  /**
+   * Clear the pending flag once no deliverable event remains. The filter is
+   * evaluated atomically, and appendLoadLifecycleOutbox sets the flag in the
+   * same write that adds events, so a concurrent append can never be missed.
+   */
+  async function clearPendingFlagIfDrained(loadId: string) {
+    await Load.updateOne(
+      {
+        _id: loadId,
+        lifecycleOutboxPending: true,
+        lifecycleOutbox: { $not: { $elemMatch: PENDING_EVENT_MATCH } },
+      },
+      { $unset: { lifecycleOutboxPending: "" } },
+      NO_TIMESTAMPS,
+    );
   }
 
   async function markProcessed(
@@ -691,6 +726,7 @@
         },
       },
       {
+        ...NO_TIMESTAMPS,
         arrayFilters: [
           {
             "event.eventId": eventId,
@@ -699,32 +735,63 @@
         ],
       },
     );
+    await clearPendingFlagIfDrained(loadId);
   }
 
-  async function markRetry(
+  async function markFailed(
     loadId: string,
     event: any,
     lockToken: string,
     error: unknown,
   ) {
     const attempts = Number(event.attempts ?? 1);
-    const nextAttemptAt = new Date(Date.now() + retryDelayMs(attempts));
-    const message =
-      error instanceof Error ? error.message : String(error ?? "unknown error");
+    const decision = decideOutboxFailure(error, attempts);
+    const message = (
+      error instanceof Error ? error.message : String(error ?? "unknown error")
+    ).slice(0, 1200);
+    const logContext = {
+      loadId,
+      eventId: String(event?.eventId ?? ""),
+      kind: String(event?.kind ?? ""),
+      attempts,
+      error: message,
+    };
+
+    if (decision.action === "dead_letter") {
+      // Never logs the payload: it can contain recipients and message text.
+      logger.error(
+        { ...logContext, reason: decision.reason },
+        "Load lifecycle outbox event dead-lettered; it will not be retried",
+      );
+    } else {
+      logger.warn(
+        { ...logContext, retryInMs: decision.delayMs },
+        "Load lifecycle outbox event delivery failed; retry scheduled",
+      );
+    }
+
+    const set: Record<string, unknown> = {
+      "lifecycleOutbox.$[event].lastError": message,
+    };
+    if (decision.action === "dead_letter") {
+      set["lifecycleOutbox.$[event].deadLetteredAt"] = new Date();
+    } else {
+      set["lifecycleOutbox.$[event].nextAttemptAt"] = new Date(
+        Date.now() + decision.delayMs,
+      );
+    }
 
     await Load.updateOne(
       { _id: loadId },
       {
-        $set: {
-          "lifecycleOutbox.$[event].nextAttemptAt": nextAttemptAt,
-          "lifecycleOutbox.$[event].lastError": message.slice(0, 1200),
-        },
+        $set: set,
         $unset: {
           "lifecycleOutbox.$[event].lockToken": "",
           "lifecycleOutbox.$[event].lockedUntil": "",
         },
       },
       {
+        ...NO_TIMESTAMPS,
         arrayFilters: [
           {
             "event.eventId": String(event.eventId),
@@ -733,28 +800,24 @@
         ],
       },
     );
+
+    if (decision.action === "dead_letter") {
+      await clearPendingFlagIfDrained(loadId);
+    }
   }
 
   async function processClaim(claim: any) {
     try {
       await deliverEvent(claim.event);
-      await markProcessed(
-        claim.loadId,
-        String(claim.event.eventId),
-        claim.lockToken,
-      );
     } catch (error) {
-      logger.error(
-        {
-          error,
-          loadId: claim.loadId,
-          eventId: String(claim.event?.eventId ?? ""),
-          kind: String(claim.event?.kind ?? ""),
-        },
-        "Load lifecycle outbox event delivery failed; retry scheduled",
-      );
-      await markRetry(claim.loadId, claim.event, claim.lockToken, error);
+      await markFailed(claim.loadId, claim.event, claim.lockToken, error);
+      return;
     }
+    await markProcessed(
+      claim.loadId,
+      String(claim.event.eventId),
+      claim.lockToken,
+    );
   }
 
   export async function processLoadLifecycleOutboxForLoad(loadId: string) {
@@ -765,15 +828,49 @@
     }
   }
 
+  /**
+   * Safety net for events written without the pending flag: rows queued before
+   * this flag existed, or a flag cleared by an unexpected race. This is the
+   * only unindexed outbox query, and it runs at startup and then hourly.
+   */
+  async function reflagOrphanedPendingEvents() {
+    const result = await Load.updateMany(
+      {
+        lifecycleOutboxPending: { $ne: true },
+        lifecycleOutbox: { $elemMatch: PENDING_EVENT_MATCH },
+      },
+      { $set: { lifecycleOutboxPending: true } },
+      NO_TIMESTAMPS,
+    );
+    if (result.modifiedCount > 0) {
+      logger.warn(
+        { count: result.modifiedCount },
+        "Re-flagged Loads with undelivered lifecycle outbox events",
+      );
+    }
+  }
+
   async function cleanupProcessedEvents() {
-    const cutoff = new Date(Date.now() - PROCESSED_RETENTION_MS);
+    const processedCutoff = new Date(Date.now() - PROCESSED_RETENTION_MS);
+    const deadLetterCutoff = new Date(Date.now() - DEAD_LETTER_RETENTION_MS);
     await Load.updateMany(
-      { "lifecycleOutbox.processedAt": { $lte: cutoff } },
+      {
+        $or: [
+          { "lifecycleOutbox.processedAt": { $lte: processedCutoff } },
+          { "lifecycleOutbox.deadLetteredAt": { $lte: deadLetterCutoff } },
+        ],
+      },
       {
         $pull: {
-          lifecycleOutbox: { processedAt: { $lte: cutoff } },
+          lifecycleOutbox: {
+            $or: [
+              { processedAt: { $lte: processedCutoff } },
+              { deadLetteredAt: { $lte: deadLetterCutoff } },
+            ],
+          },
         },
       },
+      NO_TIMESTAMPS,
     );
   }
 
@@ -790,6 +887,7 @@
       if (Date.now() - lastCleanupAt > 60 * 60_000) {
         lastCleanupAt = Date.now();
         await cleanupProcessedEvents();
+        await reflagOrphanedPendingEvents();
       }
     } catch (error) {
       logger.error({ error }, "Load lifecycle outbox worker cycle failed");
@@ -802,6 +900,8 @@
     if (workerStarted) return;
     workerStarted = true;
 
+    // lastCleanupAt starts at 0, so the first cycle runs cleanup and re-flag.
+    // Events queued before this deploy are picked up without a migration.
     void runWorkerCycle();
     workerTimer = setInterval(() => {
       void runWorkerCycle();
