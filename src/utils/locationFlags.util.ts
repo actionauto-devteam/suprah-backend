@@ -36,3 +36,30 @@ export const isDesktopPlatformAllowed = (
   const allowed = raw === '' ? DEFAULT_PLATFORMS : splitList(raw);
   return allowed.includes(platform.trim().toLowerCase());
 };
+
+export type DesktopLocationOverride = 'default' | 'on' | 'off';
+
+export const DESKTOP_LOCATION_OVERRIDES: readonly DesktopLocationOverride[] = ['default', 'on', 'off'];
+
+export const normalizeDesktopLocationOverride = (value: unknown): DesktopLocationOverride =>
+  value === 'on' || value === 'off' ? value : 'default';
+
+const OVERRIDE_FLAGS: readonly LocationFlagName[] = ['LOC_DESKTOP_CHANNEL', 'LOC_DESKTOP_EXCUSE', 'LOC_DESKTOP_DISPLAY'];
+
+export const isDesktopLocationKilled = (env: Env = process.env): boolean =>
+  (env.LOC_DESKTOP_DISABLED ?? '').trim().toLowerCase() === 'true';
+
+export const isLocationFeatureOnForUser = (
+  flag: LocationFlagName,
+  user: { _id?: string | { toString(): string } | null; desktopLocationOverride?: unknown } | null | undefined,
+  env: Env = process.env,
+): boolean => {
+  if (!user) return false;
+  if (OVERRIDE_FLAGS.includes(flag)) {
+    if (isDesktopLocationKilled(env)) return false;
+    const override = normalizeDesktopLocationOverride(user.desktopLocationOverride);
+    if (override === 'off') return false;
+    if (override === 'on') return true;
+  }
+  return isLocationFeatureOn(flag, user._id, env);
+};

@@ -91,6 +91,27 @@ describe('POST /api/locator/desktop-ping', () => {
     expect(mockUpdateOne).not.toHaveBeenCalled();
   });
 
+  it('accepts a user an admin turned the switch on for, with no environment setting at all', async () => {
+    delete process.env.LOC_DESKTOP_CHANNEL;
+    const { payload } = await run(buildRequest({ desktopLocationOverride: 'on' }));
+    expect(payload).toMatchObject({ accepted: true });
+    expect(mockUpdateOne).toHaveBeenCalled();
+  });
+
+  it('refuses a user an admin turned off even when the environment says all', async () => {
+    process.env.LOC_DESKTOP_CHANNEL = 'all';
+    const { payload } = await run(buildRequest({ desktopLocationOverride: 'off' }));
+    expect(payload).toMatchObject({ accepted: false, reason: 'flag_off' });
+    expect(mockUpdateOne).not.toHaveBeenCalled();
+  });
+
+  it('refuses everyone under the kill switch, including a user set to on', async () => {
+    process.env.LOC_DESKTOP_DISABLED = 'true';
+    const { payload } = await run(buildRequest({ desktopLocationOverride: 'on' }));
+    expect(payload).toMatchObject({ accepted: false, reason: 'flag_off' });
+    delete process.env.LOC_DESKTOP_DISABLED;
+  });
+
   it('answers flag_off before validating the body', async () => {
     delete process.env.LOC_DESKTOP_CHANNEL;
     const { payload, next } = await run(buildRequest({}, { nonsense: true }));

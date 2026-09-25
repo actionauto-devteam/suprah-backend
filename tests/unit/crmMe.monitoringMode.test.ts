@@ -6,6 +6,7 @@ const mockIsIdleExempt = jest.fn();
 const mockIsMobileDept = jest.fn();
 const mockIsIdleVideo = jest.fn();
 const mockResolveScreenshotsRequired = jest.fn();
+const mockGetDeviceSwitchView = jest.fn();
 
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/User.model', () => ({ __esModule: true, default: {} }));
@@ -33,6 +34,13 @@ jest.mock('../../src/config/departmentMonitoring', () => ({
 }));
 jest.mock('../../src/utils/monitoringMode.util', () => ({ resolveScreenshotsRequired: mockResolveScreenshotsRequired }));
 jest.mock('../../src/services/trayDevice.service', () => ({ revokeUserTrayDevices: jest.fn(), revokeTrayDevicesForEmail: jest.fn() }));
+jest.mock('../../src/services/monitoringDevice.service', () => ({
+  getDeviceSwitchView: mockGetDeviceSwitchView,
+  initShiftDevice: jest.fn(),
+  recordDeviceSwitchOverrideChange: jest.fn(),
+  recordDesktopLocationOverrideChange: jest.fn(),
+  clearShiftDevice: jest.fn(),
+}));
 jest.mock('../../src/services/shiftAlerts.service', () => ({ fireShiftAlert: jest.fn() }));
 jest.mock('../../src/utils/crossIdentityShift.util', () => ({ findOpenShiftOnOtherIdentity: jest.fn() }));
 jest.mock('../../src/utils/employeeId.util', () => ({ resolveNextEmployeeId: jest.fn() }));
@@ -61,10 +69,10 @@ const crmUser = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const callMe = async (user: unknown) => {
+const callMe = async (user: unknown, query: Record<string, unknown> = {}) => {
   const json = jest.fn();
   const next = jest.fn();
-  crmController.getMe({ crmUser: user, query: {} } as any, { json } as any, next);
+  crmController.getMe({ crmUser: user, query } as any, { json } as any, next);
   await new Promise((resolve) => setImmediate(resolve));
   if (next.mock.calls.length > 0) throw next.mock.calls[0][0];
   return json.mock.calls[0][0].data as Record<string, unknown>;
@@ -86,6 +94,7 @@ describe('GET /me monitoringMode', () => {
     mockIsIdleVideo.mockResolvedValue(false);
     mockResolveScreenshotsRequired.mockResolvedValue(true);
     mockResolveMonitoringMode.mockResolvedValue('switching');
+    mockGetDeviceSwitchView.mockResolvedValue({ enabled: false, activeDevice: null });
   });
 
   afterAll(() => {
@@ -121,6 +130,45 @@ describe('GET /me monitoringMode', () => {
   it('is resolved from the user\'s organization, department and override, exactly like the other monitoring fields', async () => {
     await callMe(crmUser({ department: 'Recon', monitoringModeOverride: 'always' }));
     expect(mockResolveMonitoringMode).toHaveBeenCalledWith('org1', 'Recon', 'always');
+  });
+
+  it('returns the device switch view so the website knows whether to show the switch button and who is active', async () => {
+    mockGetDeviceSwitchView.mockResolvedValue({ enabled: true, activeDevice: 'mobile' });
+    const data = await callMe(crmUser({ deviceSwitchOverride: 'on' }));
+    expect(data.deviceSwitch).toEqual({ enabled: true, activeDevice: 'mobile' });
+    expect(mockGetDeviceSwitchView).toHaveBeenCalledWith(expect.objectContaining({ deviceSwitchOverride: 'on' }));
+  });
+
+  it('reports the switch as off, and never breaks /me, when the view cannot be built', async () => {
+    mockGetDeviceSwitchView.mockRejectedValue(new Error('db down'));
+    const data = await callMe(crmUser());
+    expect(data.deviceSwitch).toEqual({ enabled: false, activeDevice: null });
+    expect(data.fullName).toBe('Pat Example');
+  });
+
+  it('gives the per-user switch setting to the screenshots rule', async () => {
+    await callMe(crmUser({ deviceSwitchOverride: 'on' }));
+    expect(mockResolveScreenshotsRequired).toHaveBeenCalledWith(expect.objectContaining({ deviceSwitchOverride: 'on' }));
+  });
+
+  it('reports the tray location channel as on for a user an admin switched on, with no environment setting', async () => {
+    delete process.env.LOC_DESKTOP_CHANNEL;
+    mockIsLocationRequired.mockResolvedValue(true);
+    const on = await callMe(crmUser({ desktopLocationOverride: 'on', locationConsent: { granted: true } }), { platform: 'win32' });
+    expect(on.desktopLocationEnabled).toBe(true);
+    const def = await callMe(crmUser({ locationConsent: { granted: true } }), { platform: 'win32' });
+    expect(def.desktopLocationEnabled).toBe(false);
+  });
+
+  it('an admin off beats the environment and the kill switch beats an admin on', async () => {
+    process.env.LOC_DESKTOP_CHANNEL = 'all';
+    const off = await callMe(crmUser({ desktopLocationOverride: 'off', locationConsent: { granted: true } }), { platform: 'win32' });
+    expect(off.desktopLocationEnabled).toBe(false);
+    delete process.env.LOC_DESKTOP_CHANNEL;
+    process.env.LOC_DESKTOP_DISABLED = 'true';
+    const killed = await callMe(crmUser({ desktopLocationOverride: 'on', locationConsent: { granted: true } }), { platform: 'win32' });
+    expect(killed.desktopLocationEnabled).toBe(false);
+    delete process.env.LOC_DESKTOP_DISABLED;
   });
 
   it('is additive: every existing monitoring field is unchanged by the rollout flag', async () => {

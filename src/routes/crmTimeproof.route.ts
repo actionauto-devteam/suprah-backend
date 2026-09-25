@@ -44,6 +44,9 @@ import {
   unlockPayPeriod,
   getPayrollStatus,
   getWeeklyOvertimeReport,
+  switchMyMonitoringDevice,
+  getUserMonitoringDevice,
+  adminSetMonitoringDevice,
 } from '../controllers/crmTimeproof.controller';
 
 const router = express.Router();
@@ -60,6 +63,9 @@ router.get('/user/:userId/idle-diagnostics', getUserIdleDiagnostics);
 router.get('/user/:userId/activity-log', getUserActivityLog);
 
 router.get('/shift-state', getShiftState);
+router.post('/monitoring-device', switchMyMonitoringDevice);
+router.get('/user/:userId/monitoring-device', getUserMonitoringDevice);
+router.post('/user/:userId/monitoring-device', adminSetMonitoringDevice);
 router.get('/resumable-shift', getResumableShift);
 router.post('/resume-shift', resumeShift);
 router.get('/my-agent', getMyAgentStatus);

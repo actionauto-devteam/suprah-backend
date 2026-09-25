@@ -22,7 +22,9 @@ import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../util
 import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
 import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled, resolveMonitoringMode } from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
-import { isDesktopPlatformAllowed, isLocationFeatureOn } from "../utils/locationFlags.util";
+import { clearShiftDevice, getDeviceSwitchView, initShiftDevice, recordDesktopLocationOverrideChange, recordDeviceSwitchOverrideChange } from "../services/monitoringDevice.service";
+import { DEVICE_SWITCH_OVERRIDES, normalizeDeviceSwitchOverride } from "../utils/deviceSwitch.util";
+import { DESKTOP_LOCATION_OVERRIDES, isDesktopPlatformAllowed, isLocationFeatureOnForUser, normalizeDesktopLocationOverride } from "../utils/locationFlags.util";
 import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
 import { isTrayDeviceAuthEnabledForUser, normalizeTrayDeviceAuthOverride, TRAY_DEVICE_AUTH_OVERRIDES } from "../utils/trayDevice.util";
 import { recordTrayDeviceAuthOverrideChange, revokeUserTrayDevices } from "../services/trayDevice.service";
@@ -181,12 +183,13 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
       department: user.department,
       monitoringModeOverride: user.monitoringModeOverride,
       screenshotExempt: user.screenshotExempt,
+      deviceSwitchOverride: user.deviceSwitchOverride,
     }),
     isIdleVideoProofEnabled(user.organizationId?.toString(), user.department),
   ]);
 
   const requestedPlatform = typeof req.query.platform === "string" ? req.query.platform : null;
-  const desktopLocationEnabled = isLocationFeatureOn("LOC_DESKTOP_CHANNEL", user._id)
+  const desktopLocationEnabled = isLocationFeatureOnForUser("LOC_DESKTOP_CHANNEL", user)
     ? evaluateDesktopLocationEligibility({
         flagOn: true,
         platformAllowed: requestedPlatform === null ? null : isDesktopPlatformAllowed(requestedPlatform),
@@ -199,6 +202,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     : false;
 
   const trayDeviceAuthEnabled = isTrayDeviceAuthEnabledForUser(user);
+  const deviceSwitch = await getDeviceSwitchView(user).catch(() => ({ enabled: false, activeDevice: null }));
   const monitoringMode = await resolveMonitoringMode(
     user.organizationId?.toString(),
     user.department,
@@ -238,6 +242,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     idleVideoProofEnabled,
     desktopLocationEnabled,
     trayDeviceAuthEnabled,
+    deviceSwitch,
     ...(monitoringMode && { monitoringMode }),
   };
 
@@ -417,6 +422,10 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     ipAddress: req.ip || req.headers["x-forwarded-for"] || "unknown",
     ...(startedVia && { startedVia }),
   });
+
+  if (type === "time-in") {
+    initShiftDevice(user, timeLog.timestamp, deviceHint).catch(() => {});
+  }
 
   // A fresh break resets the 1h05m admin-escalation "already notified" flag
   // (crmTimeproof.controller.ts's postHeartbeat) — that flag is normally
@@ -791,7 +800,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -832,7 +841,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -911,6 +920,26 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     if (previous !== next) {
       user.trayDeviceAuthOverride = next;
       trayDeviceAuthOverrideChange = { from: previous, to: next };
+    }
+  }
+
+  let deviceSwitchOverrideChange: { from: string; to: string } | null = null;
+  if (deviceSwitchOverride !== undefined && (DEVICE_SWITCH_OVERRIDES as readonly unknown[]).includes(deviceSwitchOverride)) {
+    const previous = normalizeDeviceSwitchOverride(user.deviceSwitchOverride);
+    const next = normalizeDeviceSwitchOverride(deviceSwitchOverride);
+    if (previous !== next) {
+      user.deviceSwitchOverride = next;
+      deviceSwitchOverrideChange = { from: previous, to: next };
+    }
+  }
+
+  let desktopLocationOverrideChange: { from: string; to: string } | null = null;
+  if (desktopLocationOverride !== undefined && (DESKTOP_LOCATION_OVERRIDES as readonly unknown[]).includes(desktopLocationOverride)) {
+    const previous = normalizeDesktopLocationOverride(user.desktopLocationOverride);
+    const next = normalizeDesktopLocationOverride(desktopLocationOverride);
+    if (previous !== next) {
+      user.desktopLocationOverride = next;
+      desktopLocationOverrideChange = { from: previous, to: next };
     }
   }
 
@@ -1009,6 +1038,15 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
 
   if (trayDeviceAuthOverrideChange) {
     recordTrayDeviceAuthOverrideChange(user, trayDeviceAuthOverrideChange.from, trayDeviceAuthOverrideChange.to, actor._id);
+  }
+
+  if (desktopLocationOverrideChange) {
+    recordDesktopLocationOverrideChange(user, desktopLocationOverrideChange.from, desktopLocationOverrideChange.to, actor._id);
+  }
+
+  if (deviceSwitchOverrideChange) {
+    recordDeviceSwitchOverrideChange(user, deviceSwitchOverrideChange.from, deviceSwitchOverrideChange.to, actor._id);
+    if (deviceSwitchOverrideChange.to === 'off') clearShiftDevice(user._id);
   }
 
   if (normalizeEmail(user.email) !== linkedCoreEmail) {

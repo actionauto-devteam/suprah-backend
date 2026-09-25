@@ -11,6 +11,7 @@ jest.mock('../../src/models/EmployeeLocation.model', () => ({
   __esModule: true,
   default: { find: mockFind, updateMany: mockUpdateMany, updateOne: mockUpdateOne },
 }));
+jest.mock('../../src/utils/monitoringDeviceState.util', () => ({ isDesktopActiveForUserId: jest.fn().mockResolvedValue(false) }));
 jest.mock('../../src/models/Place.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/PlaceVisit.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/PresenceEvent.model', () => ({ __esModule: true, default: {} }));
@@ -103,7 +104,7 @@ describe('GET /api/locator/active with the desktop channel', () => {
     expect(list[0].coords).toEqual({ lat: 14.5, lng: 121.0 });
     expect(list[0]).not.toHaveProperty('locationSource');
     expect(mockUpdateMany).toHaveBeenCalledWith({ _id: { $in: ['loc1'] } }, { sharingState: 'off_duty' });
-    expect(mockCrmFindById).not.toHaveBeenCalled();
+    expect(mockResolveMode).not.toHaveBeenCalled();
   });
 
   it('does not touch a record that is still fresh', async () => {

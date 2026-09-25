@@ -22,6 +22,10 @@ import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
 import { isTimeEditExempt, isIdleDetectionExemptDept, isIdleVideoProofEnabled } from '../config/departmentMonitoring';
 import { resolveScreenshotsRequired } from '../utils/monitoringMode.util';
+import { switchMonitoringDevice, getDeviceSwitchView } from '../services/monitoringDevice.service';
+import { isDeviceSwitchEnabledForUser, isMonitoringDevice } from '../utils/deviceSwitch.util';
+import { getActiveDevice } from '../utils/monitoringDeviceState.util';
+import MonitoringDeviceState from '../models/MonitoringDeviceState.model';
 import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
@@ -767,6 +771,10 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
         ? (lastIntervalEndMs !== null ? new Date(lastIntervalEndMs).toISOString() : null)
         : fallbackShiftedStart;
 
+  const monitoringDevice = isDeviceSwitchEnabledForUser(user)
+    ? await getActiveDevice(user._id, shiftStartedAt ? new Date(shiftStartedAt) : null).catch(() => null)
+    : null;
+
   res.json(new ApiResponse(200, {
     isOnShift,
     isOnBreak,
@@ -779,6 +787,7 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     currentIntervalStartAt,
     wallClockRenderedSeconds,
     currentSessionSeconds,
+    monitoringDevice,
   }, 'Shift state fetched'));
 });
 
@@ -812,7 +821,10 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
   } = req.body;
 
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
-  const isIdle = idleExempt ? false : rawIsIdle;
+  const mobileMonitoringActive = isDeviceSwitchEnabledForUser(user)
+    ? (await getActiveDevice(user._id).catch(() => null)) === 'mobile'
+    : false;
+  const isIdle = idleExempt || mobileMonitoringActive ? false : rawIsIdle;
 
   const screenshotsRequired = await resolveScreenshotsRequired({
     userId: user._id.toString(),
@@ -820,6 +832,7 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     department: user.department,
     monitoringModeOverride: user.monitoringModeOverride,
     screenshotExempt: user.screenshotExempt,
+    deviceSwitchOverride: user.deviceSwitchOverride,
   });
 
   const existing = await AgentHeartbeat.findOne({ userId: user._id });
@@ -2591,6 +2604,63 @@ export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   }
 
   res.json(new ApiResponse(200, { resumed: true, shiftStartedAt: originalTimeIn.timestamp }, 'Shift resumed'));
+});
+
+
+export const switchMyMonitoringDevice = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const result = await switchMonitoringDevice({ user, to: req.body?.to, actor: 'user', actorId: user._id });
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, code: result.code, message: result.message });
+    return;
+  }
+  res.json(new ApiResponse(200, {
+    activeDevice: result.activeDevice,
+    switchedAt: result.switchedAt,
+    unchanged: result.unchanged,
+  }, 'Monitoring device updated'));
+});
+
+const findTargetInOrg = async (actor: any, rawId: unknown) => {
+  const id = typeof rawId === 'string' ? rawId : '';
+  if (!mongoose.isValidObjectId(id)) throw new ApiError(404, 'User not found');
+  const target = await CrmUser.findOne({ _id: id, organizationId: actor.organizationId })
+    .select('organizationId department monitoringModeOverride deviceSwitchOverride');
+  if (!target) throw new ApiError(404, 'User not found');
+  return target;
+};
+
+export const getUserMonitoringDevice = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser!;
+  if (!['admin', 'manager'].includes(actor.role)) throw new ApiError(403, 'Only admins and managers can view this');
+  const target = await findTargetInOrg(actor, req.params.userId);
+  const view = await getDeviceSwitchView(target);
+  const state: any = view.enabled
+    ? await MonitoringDeviceState.findById(target._id).select('switchedAt history').lean()
+    : null;
+  res.json(new ApiResponse(200, {
+    enabled: view.enabled,
+    activeDevice: view.activeDevice,
+    switchedAt: view.activeDevice && state ? state.switchedAt : null,
+    history: view.activeDevice && state && Array.isArray(state.history) ? state.history.slice(-10) : [],
+  }, 'Monitoring device fetched'));
+});
+
+export const adminSetMonitoringDevice = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser!;
+  if (actor.role !== 'admin') throw new ApiError(403, 'Only admins can change the monitoring device');
+  if (!isMonitoringDevice(req.body?.to)) throw new ApiError(400, 'Choose either desktop or mobile');
+  const target = await findTargetInOrg(actor, req.params.userId);
+  const result = await switchMonitoringDevice({ user: target, to: req.body.to, actor: 'admin', actorId: actor._id });
+  if (!result.ok) {
+    res.status(result.status).json({ success: false, code: result.code, message: result.message });
+    return;
+  }
+  res.json(new ApiResponse(200, {
+    activeDevice: result.activeDevice,
+    switchedAt: result.switchedAt,
+    unchanged: result.unchanged,
+  }, 'Monitoring device updated'));
 });
 
 

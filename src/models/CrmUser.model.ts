@@ -49,6 +49,8 @@ export interface ICrmUser extends Document {
   locationRequiredOverride?: 'default' | 'required' | 'exempt';
   monitoringModeOverride?: 'default' | 'off' | 'always' | 'switching';
   trayDeviceAuthOverride?: 'default' | 'on' | 'off';
+  deviceSwitchOverride?: 'default' | 'on' | 'off';
+  desktopLocationOverride?: 'default' | 'on' | 'off';
   hourlyRate?: number;
   payrollLocation?: 'Utah' | 'Philippines';
   googleCalendar?: {
@@ -230,6 +232,16 @@ const CrmUserSchema = new Schema<ICrmUser>(
       default: 'default',
     },
     trayDeviceAuthOverride: {
+      type: String,
+      enum: ['default', 'on', 'off'],
+      default: 'default',
+    },
+    deviceSwitchOverride: {
+      type: String,
+      enum: ['default', 'on', 'off'],
+      default: 'default',
+    },
+    desktopLocationOverride: {
       type: String,
       enum: ['default', 'on', 'off'],
       default: 'default',

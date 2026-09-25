@@ -7,6 +7,7 @@ import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { toCompanyDateStr, getCompanyDayRange } from '../utils/companyTimezone';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
+import { isMobileActiveWithFreshPhone } from '../utils/monitoringDeviceState.util';
 
 // Auto-close forgotten shifts using last activity time
 const RENDERED_HOURS_THRESHOLD_SECONDS = 8 * 60 * 60;
@@ -79,6 +80,7 @@ export async function runStaleShiftAutoClockout(opts: { dryRun?: boolean } = {})
       ? now.getTime() - new Date(heartbeat.lastSeenAt).getTime()
       : Infinity;
     if (silentMs < SHORT_SILENCE_THRESHOLD_MS) continue; // tray still recently checking in — leave it alone
+    if (await isMobileActiveWithFreshPhone(userId, now.getTime())) continue;
 
     // Sum all active intervals since shift start (may span days)
     const intervals = await ActivityInterval.find({
