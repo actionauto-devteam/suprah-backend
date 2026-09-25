@@ -29,6 +29,10 @@ import { resolveNextEmployeeId } from '../utils/employeeId.util';
 
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
+const canManageConversation = (conversation: any, user: any) =>
+  user.role === 'admin'
+  || idIn(conversation.admins as any, user._id)
+  || conversation.createdBy.toString() === user._id.toString();
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
@@ -1313,7 +1317,7 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be updated');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const isAdmin = idIn(conversation.admins as any, userId) || conversation.createdBy.toString() === userId.toString();
+  const isAdmin = canManageConversation(conversation, req.crmUser!);
 
   // Name/emoji are open to any member now, same as the group photo
   // (updateAvatar below never required admin either) — isAdmin is still
@@ -1336,14 +1340,22 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
     });
   }
 
+  const removedMemberIds: string[] = [];
   if (Array.isArray(removeMembers) && removeMembers.length) {
-    const removingOnlySelf = removeMembers.length === 1 && removeMembers[0] === userId.toString();
+    if (removeMembers.length > 500 || removeMembers.some((memberId: unknown) => typeof memberId !== 'string' || !mongoose.isValidObjectId(memberId))) {
+      throw new ApiError(400, 'Invalid conversation members');
+    }
+    const uniqueRemovedMembers = [...new Set(removeMembers)];
+    const removingOnlySelf = uniqueRemovedMembers.length === 1 && uniqueRemovedMembers[0] === userId.toString();
     if (!isAdmin && !removingOnlySelf) throw new ApiError(403, 'Only admins can remove members');
+    conversation.members.forEach((member) => {
+      if (uniqueRemovedMembers.includes(member.toString())) removedMemberIds.push(member.toString());
+    });
     conversation.members = conversation.members.filter(
-      (m) => !removeMembers.includes(m.toString())
+      (m) => !uniqueRemovedMembers.includes(m.toString())
     ) as any;
     conversation.admins = conversation.admins.filter(
-      (m) => !removeMembers.includes(m.toString())
+      (m) => !uniqueRemovedMembers.includes(m.toString())
     ) as any;
   }
 
@@ -1351,6 +1363,16 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   await conversation.populate('members', 'fullName username avatar role');
   await withFreshAvatar(conversation);
   emitToConversation(conversation, 'conversation:updated', conversation);
+  if (removedMemberIds.length) {
+    try {
+      const io = getIO();
+      removedMemberIds.forEach((memberId) => {
+        io.to(`user:${memberId}`).emit('conversation:deleted', { conversationId: id });
+      });
+    } catch (err) {
+      console.warn('[SupraSpace] Socket emit failed on conversation:deleted:', err);
+    }
+  }
 
   res.json(new ApiResponse(200, conversation, 'Group updated'));
 });
@@ -1399,7 +1421,7 @@ const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const isAdmin = idIn(conversation.admins as any, userId) || conversation.createdBy.toString() === userId.toString();
+  const isAdmin = canManageConversation(conversation, req.crmUser!);
 
   if (conversation.type === 'group' && isAdmin) {
     // Permanently delete the channel for everyone
