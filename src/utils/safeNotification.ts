@@ -2,6 +2,7 @@ import notificationService from '../services/notification.service';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import Organization from '../models/Organization.model';
+import logger from './logger';
 
 interface CreateNotificationParams {
   userId: string;
@@ -43,8 +44,17 @@ export async function safeCreateNotification(params: CreateNotificationParams) {
 
     return notification;
   } catch (error) {
-    console.error('Failed to create notification:', error);
-    // Don't throw - we don't want notification failures to break the main operation
+    // Don't throw - we don't want notification failures to break the main operation.
+    // Log at error level with the type so allowlist drift is visible.
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        statusCode: (error as any)?.statusCode,
+        type: params.type,
+        userId: params.userId,
+      },
+      'Failed to create notification',
+    );
     return null;
   }
 }

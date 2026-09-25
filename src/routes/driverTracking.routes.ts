@@ -68,6 +68,20 @@ const trackingOrganizationOnly = async (req: ExpressRequest, res: ExpressRespons
   } catch (error) { return next(error); }
 };
 
+// Exact Load detail is shared by the Driver Portal and Driver Tracker. Drivers
+// keep their existing object-level authorization in getLoadDetail(); staff must
+// satisfy the same organization-scoped Tracker access used by map/directory reads.
+const driverOrTrackingStaff = async (
+  req: ExpressRequest,
+  res: ExpressResponse,
+  next: NextFunction,
+) => {
+  if (req.user?.role === "driver") return next();
+  const role = String(req.user?.role ?? "");
+  if (!STAFF_ROLES.includes(role)) return staffOnly(req, res, next);
+  return trackingOrganizationOnly(req, res, next);
+};
+
 const noStoreSensitive = (_req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
   res.setHeader("Cache-Control", "private, no-store, max-age=0");
   res.setHeader("Pragma", "no-cache");
@@ -198,7 +212,7 @@ router.get("/my-loads", driverOnly, noStoreSensitive, driverTrackingController.g
 router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingController.getMyRequests);
 router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 
-router.get("/loads/:id", driverOnly, noStoreSensitive, driverTrackingController.getLoadDetail);
+router.get("/loads/:id", driverOrTrackingStaff, noStoreSensitive, driverTrackingController.getLoadDetail);
 router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
 router.post(
   "/loads/:id/approve-request",
@@ -211,12 +225,28 @@ router.post(
   driverTrackingController.rejectLoadRequest,
 );
 
+router.post(
+  "/loads/:id/reconfirm-assignment",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  driverTrackingController.reconfirmAssignment,
+);
 router.post("/loads/:id/accept", driverOnly, driverTrackingController.acceptLoad);
 router.post(
   "/loads/:id/amendments/:amendmentId/acknowledge",
   driverOnly,
   noStoreSensitive,
   driverTrackingController.acknowledgeLoadAmendment,
+);
+router.post(
+  "/loads/:id/submit-pickup-proof",
+  driverOnly,
+  noStoreSensitive,
+  uploadLimiter,
+  uploadProofImage,
+  validateUploadedImageContent,
+  loadController.submitProofOfPickup,
 );
 router.post("/loads/:id/pickup", driverOnly, driverTrackingController.markPickedUp);
 router.post("/loads/:id/start-route", driverOnly, driverTrackingController.startRoute);
@@ -245,8 +275,9 @@ router.post(
   staffOnly,
   driverTrackingController.rejectReleaseRequest,
 );
-// Backward-compatible alias: /drop now creates a release request and never
-// directly changes assignment/status.
+// Backward-compatible driver action: before acceptance, /drop rejects the
+// assignment immediately and returns the load to Posted; after acceptance it
+// preserves the approval-based release-request workflow.
 router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
 
 // Start the organization-wide location-silence monitor once when Driver

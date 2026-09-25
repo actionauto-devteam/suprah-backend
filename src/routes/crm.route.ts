@@ -5,7 +5,8 @@ import crmController from '../controllers/crm.controller';
 import departmentController from '../controllers/department.controller';
 import hrController from '../controllers/hr.controller';
 import crmAuth from '../middleware/crmAuth.middleware';
-import { authLimiter, otpLimiter } from '../middleware/rate-limit.middleware';
+import { validateUploadedImageContent } from '../middleware/upload.middleware';
+import { authLimiter, otpLimiter, uploadLimiter } from '../middleware/rate-limit.middleware';
 
 const ALLOWED_AVATAR_MIME = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const avatarUpload = multer({
@@ -20,13 +21,14 @@ router.post('/login',           authLimiter, crmController.login);
 router.post('/logout',          crmController.logout);
 router.post('/forgot-password', otpLimiter, crmController.forgotPassword);
 router.post('/reset-password',  otpLimiter, crmController.confirmResetPassword);
+router.get('/avatars/:filename', crmController.getAvatar);
 
 router.use(crmAuth());
 
 router.get('/me',             crmController.getMe);
 router.get('/org-settings',   crmController.getOrgSettings);
 router.patch('/org-settings', crmController.updateOrgSettings);
-router.patch('/me/avatar',    avatarUpload.single('avatar'), crmController.updateMeAvatar);
+router.patch('/me/avatar',    uploadLimiter, avatarUpload.single('avatar'), validateUploadedImageContent, crmController.updateMeAvatar);
 router.patch('/me/screenshot-privacy', crmController.updateMyScreenshotPrivacy);
 router.post('/token-refresh', crmController.tokenRefresh);
 router.post('/time-clock',    crmController.timeClock);

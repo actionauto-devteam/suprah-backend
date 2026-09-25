@@ -28,6 +28,8 @@ export type ActivityType =
   | 'load_assigned'
   | 'load_updated'
   | 'load_delivered'
+  | 'load_reassigned'
+  | 'load_removed'
   | 'compliance_uploaded'
   | 'doc_verified'
   | 'payout_received'
@@ -96,6 +98,8 @@ const UserActivitySchema = new Schema(
         'load_assigned',
         'load_updated',
         'load_delivered',
+        'load_reassigned',
+        'load_removed',
         'compliance_uploaded',
         'doc_verified',
         'payout_received',

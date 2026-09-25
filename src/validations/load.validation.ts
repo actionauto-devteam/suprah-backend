@@ -139,6 +139,8 @@ const pricingInputSchema = z
     pricePerMile: z.coerce.number().min(0).max(1_000).optional(),
     carrierPayAmount: z.coerce.number().min(0).max(1_000_000).optional(),
     copCodAmount: z.coerce.number().min(0).max(1_000_000).optional(),
+    isPricingEnabled: z.boolean().optional(),
+    isVisibleToDriver: z.boolean().optional(),
   })
   .optional();
 
@@ -150,23 +152,41 @@ const pricingInputSchema = z
 
 export const MAX_VEHICLES_PER_LOAD = 20;
 
-export const createLoadSchema = z.object({
-  postType: z.enum(["load-board", "assign-carrier"]),
-  pickupLocation: locationBlockSchema,
-  deliveryLocation: locationBlockSchema,
-  vehicles: z
-    .array(loadVehicleSchema)
-    .min(1, "At least one vehicle is required")
-    .max(
-      MAX_VEHICLES_PER_LOAD,
-      `A load can include at most ${MAX_VEHICLES_PER_LOAD} vehicles`,
-    ),
-  trailerType: z.enum(TRAILER_TYPES),
-  dates: datesSchema,
-  additionalInfo: additionalInfoSchema,
-  contract: contractSchema,
-  pricing: pricingInputSchema,
-});
+export const createLoadSchema = z
+  .object({
+    postType: z.enum(["load-board", "assign-carrier"]),
+    pickupLocation: locationBlockSchema,
+    deliveryLocation: locationBlockSchema,
+    vehicles: z
+      .array(loadVehicleSchema)
+      .min(1, "At least one vehicle is required")
+      .max(
+        MAX_VEHICLES_PER_LOAD,
+        `A load can include at most ${MAX_VEHICLES_PER_LOAD} vehicles`,
+      ),
+    trailerType: z.enum(TRAILER_TYPES),
+    dates: datesSchema,
+    additionalInfo: additionalInfoSchema,
+    contract: contractSchema,
+    pricing: pricingInputSchema,
+  })
+  .superRefine((value, ctx) => {
+    if (value.postType !== "assign-carrier") return;
+    if (value.pricing?.isPricingEnabled === false) return;
+
+    const totalDriverPay = value.pricing?.carrierPayAmount;
+    if (
+      typeof totalDriverPay !== "number" ||
+      !Number.isFinite(totalDriverPay) ||
+      totalDriverPay <= 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pricing", "carrierPayAmount"],
+        message: "Total Driver Pay must be greater than $0",
+      });
+    }
+  });
 
 export type CreateLoadInput = z.infer<typeof createLoadSchema>;
 

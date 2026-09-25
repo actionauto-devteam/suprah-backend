@@ -1,1368 +1,1573 @@
-import { Request, Response } from "express";
-import mongoose from "mongoose";
-import { asyncHandler } from "../utils/asyncHandler";
-import { ApiResponse } from "../utils/ApiResponse";
-import { ApiError } from "../utils/ApiError";
-import Load from "../models/Load.model";
-import Vehicle from "../models/Vehicle.model";
-import User, { IUser } from "../models/User.model";
-import logger from "../utils/logger";
-import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
-import {
-  getCoordinatesForPair,
-  calculateDistance,
-  calculateRate,
-  calculateETA,
-} from "../utils/calculations";
-import { storageService, BucketType } from "../services/storage.service";
-import { getSignedProofUrl } from "../utils/signedUrlCache";
-import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
-import { notificationTemplates } from "../utils/notificationTemplates";
-import { getSocketIO } from "../utils/socketEmitter";
-import activityService from "../services/activity.service";
-import emailService from "../services/email.service";
-import Quote from "../models/Quote.model";
-import {
-  buildLoadMaterialChanges,
-  getLoadAcceptanceMaterialVersion,
-} from "../services/loadAcceptanceMaterial.service";
+    import { Request, Response } from "express";
+    import mongoose from "mongoose";
+    import { asyncHandler } from "../utils/asyncHandler";
+    import { ApiResponse } from "../utils/ApiResponse";
+    import { ApiError } from "../utils/ApiError";
+    import Load from "../models/Load.model";
+    import Vehicle from "../models/Vehicle.model";
+    import User, { IUser } from "../models/User.model";
+    import logger from "../utils/logger";
+    import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
+    import {
+      getCoordinatesForPair,
+      calculateDistance,
+      calculateRate,
+      calculateETA,
+    } from "../utils/calculations";
+    import { storageService, BucketType } from "../services/storage.service";
+    import { getSignedProofUrl } from "../utils/signedUrlCache";
+    import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
+    import { notificationTemplates } from "../utils/notificationTemplates";
+    import { getSocketIO } from "../utils/socketEmitter";
+    import activityService from "../services/activity.service";
+    import emailService from "../services/email.service";
+    import Quote from "../models/Quote.model";
+    import {
+      buildLoadMaterialChanges,
+      getLoadAcceptanceMaterialVersion,
+    } from "../services/loadAcceptanceMaterial.service";
+    import {
+      appendLoadLifecycleOutbox,
+      createLoadLifecycleOutboxEvent,
+      processLoadLifecycleOutboxForLoad,
+    } from "../services/loadLifecycleOutbox.service";
 
 
-const getUser = (req: Request) => req.user as IUser;
+    const getUser = (req: Request) => req.user as IUser;
 
-const escapeRegex = (value: string) =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escapeRegex = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const normalizeListQuery = (value: unknown) =>
-  typeof value === "string" ? value.trim().slice(0, 120) : "";
+    const normalizeListQuery = (value: unknown) =>
+      typeof value === "string" ? value.trim().slice(0, 120) : "";
 
-const TRANSPORTATION_TIME_ZONE = "America/Denver";
+    const TRANSPORTATION_TIME_ZONE = "America/Denver";
 
-const mountainDatePartsFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: TRANSPORTATION_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
+    const mountainDatePartsFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: TRANSPORTATION_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
 
-function partsToDateKey(parts: Intl.DateTimeFormatPart[]) {
-  const values: Record<string, string> = {};
-  for (const part of parts) {
-    if (part.type !== "literal") values[part.type] = part.value;
-  }
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-function mountainTodayDateKey() {
-  return partsToDateKey(
-    mountainDatePartsFormatter.formatToParts(new Date()),
-  );
-}
-
-/** Preserve date-only Load schedule fields as YYYY-MM-DD business dates. */
-function scheduleDateKey(value: unknown): string | null {
-  if (!value) return null;
-
-  const raw =
-    value instanceof Date
-      ? value.toISOString()
-      : String(value).trim();
-
-  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!match) return null;
-  return `${match[1]}-${match[2]}-${match[3]}`;
-}
-
-function formatScheduleDate(value: unknown) {
-  const key = scheduleDateKey(value);
-  if (!key) return "N/A";
-  const [year, month, day] = key.split("-").map(Number);
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(Date.UTC(year, month - 1, day, 12, 0, 0)));
-}
-
-/**
- * Convert an America/Denver wall-clock boundary to its UTC instant without
- * depending on the API server's local timezone. The second pass corrects for
- * MDT/MST offset differences.
- */
-function mountainWallTimeToUtc(
-  year: number,
-  monthIndex: number,
-  day: number,
-  hour = 0,
-  minute = 0,
-  second = 0,
-) {
-  const targetWallUtc = Date.UTC(
-    year,
-    monthIndex,
-    day,
-    hour,
-    minute,
-    second,
-  );
-  let instant = new Date(targetWallUtc);
-
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: TRANSPORTATION_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
-
-  for (let index = 0; index < 2; index += 1) {
-    const values: Record<string, string> = {};
-    for (const part of formatter.formatToParts(instant)) {
-      if (part.type !== "literal") values[part.type] = part.value;
-    }
-
-    const renderedWallUtc = Date.UTC(
-      Number(values.year),
-      Number(values.month) - 1,
-      Number(values.day),
-      Number(values.hour),
-      Number(values.minute),
-      Number(values.second),
-    );
-
-    instant = new Date(
-      instant.getTime() + (targetWallUtc - renderedWallUtc),
-    );
-  }
-
-  return instant;
-}
-
-function mountainMonthUtcRange(year: number, month: number) {
-  return {
-    start: mountainWallTimeToUtc(year, month - 1, 1),
-    end: mountainWallTimeToUtc(year, month, 1),
-  };
-}
-
-// ── Inspect step: sign each vehicle's private-bucket inspection photo key
-// the same way proofOfDelivery.imageUrl is signed — an unsigned key is not
-// directly viewable against the PRIVATE bucket. ──
-async function signInspectionPhotos(load: Record<string, any>) {
-  const vehicles = load?.vehicles;
-  if (!Array.isArray(vehicles) || !vehicles.length) return;
-  await Promise.all(
-    vehicles.map(async (v: any) => {
-      if (v?.inspectionPhotoUrl) {
-        const signed = await getSignedProofUrl(v.inspectionPhotoUrl);
-        if (signed) v.inspectionPhotoUrl = signed;
+    function partsToDateKey(parts: Intl.DateTimeFormatPart[]) {
+      const values: Record<string, string> = {};
+      for (const part of parts) {
+        if (part.type !== "literal") values[part.type] = part.value;
       }
-    }),
-  );
-}
-
-// ─── Inventory Image Enrichment ───────────────────────────────────────────────
-// Load vehicles only persist vin/year/make/model — real photos live on the
-// Vehicle (inventory) collection in `images[]`. This helper batch-resolves
-// inventory matches (by vehicleId first, then VIN fallback) for a page of
-// loads and attaches `imageUrl` to each load vehicle so the frontend can
-// render actual vehicle photos instead of a stock placeholder.
-// One query per request regardless of page size.
-
-const attachInventoryImages = async (
-  loads: Array<Record<string, any>>,
-  organizationId: string,
-): Promise<void> => {
-  const idSet = new Set<string>();
-  const vinSet = new Set<string>();
-
-  for (const load of loads) {
-    for (const v of load?.vehicles ?? []) {
-      if (!v) continue;
-      if (v.vehicleId) idSet.add(String(v.vehicleId));
-      if (v.vin) vinSet.add(String(v.vin).toUpperCase().trim());
+      return `${values.year}-${values.month}-${values.day}`;
     }
-  }
 
-  if (idSet.size === 0 && vinSet.size === 0) return;
+    function mountainTodayDateKey() {
+      return partsToDateKey(
+        mountainDatePartsFormatter.formatToParts(new Date()),
+      );
+    }
 
-  const or: Record<string, unknown>[] = [];
-  if (idSet.size) or.push({ _id: { $in: Array.from(idSet) } });
-  if (vinSet.size) or.push({ vin: { $in: Array.from(vinSet) } });
+    /** Preserve date-only Load schedule fields as YYYY-MM-DD business dates. */
+    function scheduleDateKey(value: unknown): string | null {
+      if (!value) return null;
 
-  try {
-    const inventory = await Vehicle.find({ organizationId, isDeleted: false, $or: or })
-      .select("vin images exteriorColor")
-      .lean();
+      const raw =
+        value instanceof Date
+          ? value.toISOString()
+          : String(value).trim();
 
-    const byId = new Map(inventory.map((v) => [String(v._id), v]));
-    const byVin = new Map(
-      inventory
-        .filter((v) => v.vin)
-        .map((v) => [String(v.vin).toUpperCase().trim(), v]),
-    );
+      const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!match) return null;
+      return `${match[1]}-${match[2]}-${match[3]}`;
+    }
 
-    for (const load of loads) {
-      for (const v of load?.vehicles ?? []) {
-        if (!v) continue;
-        const match =
-          (v.vehicleId && byId.get(String(v.vehicleId))) ||
-          (v.vin && byVin.get(String(v.vin).toUpperCase().trim()));
-        const image = match?.images?.[0];
-        if (image) v.imageUrl = image;
-        if (!v.color && match?.exteriorColor) v.color = match.exteriorColor;
+    function formatScheduleDate(value: unknown) {
+      const key = scheduleDateKey(value);
+      if (!key) return "N/A";
+      const [year, month, day] = key.split("-").map(Number);
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "UTC",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(new Date(Date.UTC(year, month - 1, day, 12, 0, 0)));
+    }
+
+    /**
+     * Convert an America/Denver wall-clock boundary to its UTC instant without
+     * depending on the API server's local timezone. The second pass corrects for
+     * MDT/MST offset differences.
+     */
+    function mountainWallTimeToUtc(
+      year: number,
+      monthIndex: number,
+      day: number,
+      hour = 0,
+      minute = 0,
+      second = 0,
+    ) {
+      const targetWallUtc = Date.UTC(
+        year,
+        monthIndex,
+        day,
+        hour,
+        minute,
+        second,
+      );
+      let instant = new Date(targetWallUtc);
+
+      const formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: TRANSPORTATION_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      });
+
+      for (let index = 0; index < 2; index += 1) {
+        const values: Record<string, string> = {};
+        for (const part of formatter.formatToParts(instant)) {
+          if (part.type !== "literal") values[part.type] = part.value;
+        }
+
+        const renderedWallUtc = Date.UTC(
+          Number(values.year),
+          Number(values.month) - 1,
+          Number(values.day),
+          Number(values.hour),
+          Number(values.minute),
+          Number(values.second),
+        );
+
+        instant = new Date(
+          instant.getTime() + (targetWallUtc - renderedWallUtc),
+        );
       }
+
+      return instant;
     }
-  } catch (err) {
-    // Non-fatal: loads render without photos rather than failing the request
-    logger.error({ err, organizationId }, "Failed to attach inventory images to loads");
-  }
-};
+
+    function mountainMonthUtcRange(year: number, month: number) {
+      return {
+        start: mountainWallTimeToUtc(year, month - 1, 1),
+        end: mountainWallTimeToUtc(year, month, 1),
+      };
+    }
+
+    // ── Inspect step: sign each vehicle's private-bucket inspection photo key
+    // the same way proofOfDelivery.imageUrl is signed — an unsigned key is not
+    // directly viewable against the PRIVATE bucket. ──
+    async function signInspectionPhotos(load: Record<string, any>) {
+      const vehicles = load?.vehicles;
+      if (!Array.isArray(vehicles) || !vehicles.length) return;
+      await Promise.all(
+        vehicles.map(async (v: any) => {
+          if (v?.inspectionPhotoUrl) {
+            const signed = await getSignedProofUrl(v.inspectionPhotoUrl);
+            if (signed) v.inspectionPhotoUrl = signed;
+          }
+        }),
+      );
+    }
+
+    async function signPickupProof(load: Record<string, any>) {
+      const proof = load?.proofOfPickup;
+      if (!proof?.imageUrl) return;
+      const signed = await getSignedProofUrl(proof.imageUrl);
+      if (signed) proof.imageUrl = signed;
+    }
+
+    // ─── Inventory Image Enrichment ───────────────────────────────────────────────
+    // Load vehicles only persist vin/year/make/model — real photos live on the
+    // Vehicle (inventory) collection in `images[]`. This helper batch-resolves
+    // inventory matches (by vehicleId first, then VIN fallback) for a page of
+    // loads and attaches `imageUrl` to each load vehicle so the frontend can
+    // render actual vehicle photos instead of a stock placeholder.
+    // One query per request regardless of page size.
+
+    const attachInventoryImages = async (
+      loads: Array<Record<string, any>>,
+      organizationId: string,
+    ): Promise<void> => {
+      const idSet = new Set<string>();
+      const vinSet = new Set<string>();
+
+      for (const load of loads) {
+        for (const v of load?.vehicles ?? []) {
+          if (!v) continue;
+          if (v.vehicleId) idSet.add(String(v.vehicleId));
+          if (v.vin) vinSet.add(String(v.vin).toUpperCase().trim());
+        }
+      }
+
+      if (idSet.size === 0 && vinSet.size === 0) return;
+
+      const or: Record<string, unknown>[] = [];
+      if (idSet.size) or.push({ _id: { $in: Array.from(idSet) } });
+      if (vinSet.size) or.push({ vin: { $in: Array.from(vinSet) } });
+
+      try {
+        const inventory = await Vehicle.find({ organizationId, isDeleted: false, $or: or })
+          .select("vin images exteriorColor")
+          .lean();
+
+        const byId = new Map(inventory.map((v) => [String(v._id), v]));
+        const byVin = new Map(
+          inventory
+            .filter((v) => v.vin)
+            .map((v) => [String(v.vin).toUpperCase().trim(), v]),
+        );
+
+        for (const load of loads) {
+          for (const v of load?.vehicles ?? []) {
+            if (!v) continue;
+            const match =
+              (v.vehicleId && byId.get(String(v.vehicleId))) ||
+              (v.vin && byVin.get(String(v.vin).toUpperCase().trim()));
+            const image = match?.images?.[0];
+            if (image) v.imageUrl = image;
+            if (!v.color && match?.exteriorColor) v.color = match.exteriorColor;
+          }
+        }
+      } catch (err) {
+        // Non-fatal: loads render without photos rather than failing the request
+        logger.error({ err, organizationId }, "Failed to attach inventory images to loads");
+      }
+    };
 
 
-const lookupVin = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-  const vin = req.params.vin?.toUpperCase().trim();
+    const lookupVin = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+      const vin = req.params.vin?.toUpperCase().trim();
 
-  if (!vin || vin.length > 17) {
-    throw new ApiError(400, "Invalid VIN");
-  }
+      if (!vin || vin.length > 17) {
+        throw new ApiError(400, "Invalid VIN");
+      }
 
-  const vehicle = await Vehicle.findOne({ vin, organizationId, isDeleted: false }).lean();
+      const vehicle = await Vehicle.findOne({ vin, organizationId, isDeleted: false }).lean();
 
-  if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found in inventory");
-  }
+      if (!vehicle) {
+        throw new ApiError(404, "Vehicle not found in inventory");
+      }
 
-  return res.status(200).json(
-    new ApiResponse(200, {
-      year: vehicle.year,
-      make: vehicle.make,
-      model: vehicle.modelName,
-      color: vehicle.exteriorColor || "",
-      condition: vehicle.status === "In Recon" ? "Inoperable" : "Operable",
-    }, "Vehicle found in inventory")
-  );
-});
+      return res.status(200).json(
+        new ApiResponse(200, {
+          year: vehicle.year,
+          make: vehicle.make,
+          model: vehicle.modelName,
+          color: vehicle.exteriorColor || "",
+          condition: vehicle.status === "In Recon" ? "Inoperable" : "Operable",
+        }, "Vehicle found in inventory")
+      );
+    });
 
 
-const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
-  const parsed = calculateRateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    const messages = parsed.error.issues.map((i) => i.message).join(", ");
-    throw new ApiError(400, messages);
-  }
+    const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
+      const parsed = calculateRateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        const messages = parsed.error.issues.map((i) => i.message).join(", ");
+        throw new ApiError(400, messages);
+      }
 
-  const { pickupZip, deliveryZip, vehicles, trailerType } = parsed.data;
+      const { pickupZip, deliveryZip, vehicles, trailerType } = parsed.data;
 
-  const [pickupCoords, deliveryCoords] = await getCoordinatesForPair(pickupZip, deliveryZip);
+      const [pickupCoords, deliveryCoords] = await getCoordinatesForPair(pickupZip, deliveryZip);
 
-  if (!pickupCoords) throw new ApiError(400, `Could not find location for pickup ZIP: ${pickupZip}`);
-  if (!deliveryCoords) throw new ApiError(400, `Could not find location for delivery ZIP: ${deliveryZip}`);
+      if (!pickupCoords) throw new ApiError(400, `Could not find location for pickup ZIP: ${pickupZip}`);
+      if (!deliveryCoords) throw new ApiError(400, `Could not find location for delivery ZIP: ${deliveryZip}`);
 
-  const miles = calculateDistance(
-    pickupCoords.lat, pickupCoords.lon,
-    deliveryCoords.lat, deliveryCoords.lon
-  );
+      const miles = calculateDistance(
+        pickupCoords.lat, pickupCoords.lon,
+        deliveryCoords.lat, deliveryCoords.lon
+      );
 
-  const units = vehicles.length || 1;
-  const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
-  const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
-
-  const rate = calculateRate(miles, units, hasEnclosed, hasInoperable);
-  const eta = calculateETA(miles);
-
-  return res.status(200).json(
-    new ApiResponse(200, { miles, estimatedRate: rate, eta }, "Rate calculated")
-  );
-});
-
-// ─── Create Load ──────────────────────────────────────────────────────────────
-
-const createLoad = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
-
-  const parsed = createLoadSchema.safeParse(req.body);
-  if (!parsed.success) {
-    const messages = parsed.error.issues.map((i) => i.message).join(", ");
-    throw new ApiError(400, messages);
-  }
-
-  const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
-
-  // Compute miles + estimatedRate server-side from ZIPs
-  let computedMiles: number | undefined;
-  let estimatedRate: number | undefined;
-  let pricingWarning: string | undefined;
-  try {
-    const [pc, dc] = await getCoordinatesForPair(pickupLocation.zip, deliveryLocation.zip);
-    if (pc && dc) {
-      computedMiles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
       const units = vehicles.length || 1;
       const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
       const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
-      estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
-    } else {
-      pricingWarning = "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
-    }
-  } catch {
-    pricingWarning = "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
-  }
 
-  // ── NEW: persist the dispatcher's $/mi rate ──
-  // The frontend keeps pricePerMile and carrierPayAmount in two-way sync
-  // (pay = ppm × miles); we store the rate the dispatcher settled on so
-  // load cards and detail views can show "$X.XX/mi" without re-deriving
-  // it from rounded totals. Guarded to non-negative finite numbers —
-  // NaN/negative input degrades to "field absent", never a bad write.
-  // NOTE: requires `pricePerMile` in createLoadSchema's pricing shape,
-  // otherwise zod strips it before we get here (see load.validation.ts).
-  const rawPpm = (clientPricing as any)?.pricePerMile;
-  const pricePerMile =
-    typeof rawPpm === "number" && Number.isFinite(rawPpm) && rawPpm >= 0
-      ? rawPpm
-      : undefined;
+      const rate = calculateRate(miles, units, hasEnclosed, hasInoperable);
+      const eta = calculateETA(miles);
 
-  const pricing = {
-    miles: computedMiles,
-    estimatedRate,
-    pricePerMile,
-    carrierPayAmount: clientPricing?.carrierPayAmount,
-    copCodAmount: clientPricing?.copCodAmount ?? 0,
-    // balanceAmount computed automatically by pre-save hook in the model
-  };
-
-  const contractWithTimestamp = contract?.agreedToTerms
-    ? { ...contract, signedAt: new Date() }
-    : contract;
-
-  // Validation 1: Check for duplicate VINs
-  const vins = vehicles?.map((v: any) => v.vin).filter(Boolean) || [];
-  if (new Set(vins).size !== vins.length) {
-    return res.status(400).json({
-      success: false,
-      error: 'Duplicate VINs not allowed',
-      code: 'DUPLICATE_VIN',
-      field: 'vehicles',
+      return res.status(200).json(
+        new ApiResponse(200, { miles, estimatedRate: rate, eta }, "Rate calculated")
+      );
     });
-  }
 
-  // Validation 2: Vehicle count limits.
-  // HARD LIMIT: 20 vehicles per load (applies to both load-board and
-  // assign-carrier). Per-trailer capacity is now a NON-BLOCKING warning —
-  // the dispatcher may intentionally post multi-trip or oversized loads,
-  // but they're told when the selected trailer's rated capacity is exceeded.
-  const MAX_VEHICLES_PER_LOAD = 20;
+    // ─── Create Load ──────────────────────────────────────────────────────────────
 
-  const TRAILER_CAPACITY: Record<string, number> = {
-    open_3car_wedge: 3,
-    open_2car: 2,
-    enclosed_2car: 2,
-    enclosed_3car: 3,
-    flatbed: 2,
-    hotshot: 1,
-    dually_flatbed: 1,
-    gooseneck: 2,
-    lowboy: 1,
-    step_deck: 2,
-    '9car_stinger': 9,
-    '7car_stinger': 7,
-    '5car_open': 5,
-    rgn: 2,
-    double_drop: 2,
-    power_only: 0,
-    other: 20,
-  };
+    const createLoad = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
 
-  const vehicleCount = vehicles?.length || 0;
+      const parsed = createLoadSchema.safeParse(req.body);
+      if (!parsed.success) {
+        const messages = parsed.error.issues.map((i) => i.message).join(", ");
+        throw new ApiError(400, messages);
+      }
 
-  if (vehicleCount > MAX_VEHICLES_PER_LOAD) {
-    return res.status(400).json({
-      success: false,
-      error: `Max ${MAX_VEHICLES_PER_LOAD} vehicles allowed per load`,
-      code: 'CAPACITY_EXCEEDED',
-      field: 'vehicles',
-    });
-  }
+      const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
 
-  let capacityWarning: string | undefined;
-  const ratedCapacity = TRAILER_CAPACITY[trailerType];
-  if (ratedCapacity !== undefined && vehicleCount > ratedCapacity) {
-    capacityWarning = `This load has ${vehicleCount} vehicles but the selected trailer (${trailerType.replace(/_/g, ' ')}) is rated for ${ratedCapacity}. Multiple trips or a larger trailer may be required.`;
-  }
+      const pricingEnabled = clientPricing?.isPricingEnabled !== false;
 
-  // Validation 3: Check against the Transportation business calendar
-  // (America/Denver), never the API server's local date.
-  if (dates?.firstAvailable) {
-    const selectedDateKey = scheduleDateKey(dates.firstAvailable);
-    const todayDateKey = mountainTodayDateKey();
+      // Compute route mileage server-side for operations. The estimated financial
+      // rate is stored only when Dispatch chose to include pricing.
+      let computedMiles: number | undefined;
+      let estimatedRate: number | undefined;
+      let pricingWarning: string | undefined;
+      try {
+        const [pc, dc] = await getCoordinatesForPair(pickupLocation.zip, deliveryLocation.zip);
+        if (pc && dc) {
+          computedMiles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
+          const units = vehicles.length || 1;
+          const hasEnclosed = trailerType.toLowerCase().includes("enclosed");
+          const hasInoperable = vehicles.some((v) => v.condition === "Inoperable");
+          if (pricingEnabled) {
+            estimatedRate = calculateRate(computedMiles, units, hasEnclosed, hasInoperable);
+          }
+        } else if (pricingEnabled) {
+          pricingWarning =
+            postType === "assign-carrier"
+              ? "Could not compute route mileage. Total Driver Pay was saved as entered."
+              : "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
+        }
+      } catch {
+        if (pricingEnabled) {
+          pricingWarning =
+            postType === "assign-carrier"
+              ? "Could not compute route mileage. Total Driver Pay was saved as entered."
+              : "Could not compute miles and rate from ZIP codes. Set carrier pay manually.";
+        }
+      }
 
-    if (selectedDateKey && selectedDateKey < todayDateKey) {
-      return res.status(400).json({
-        success: false,
-        error: 'Cannot select a date in the past',
-        code: 'INVALID_DATE',
-        field: 'dates.firstAvailable',
-      });
-    }
-  }
+      // Load Board keeps the dispatcher's persisted $/mi rate. Assign Carrier
+      // ignores this field and treats carrierPayAmount as the authoritative total.
+      // NOTE: requires `pricePerMile` in createLoadSchema's pricing shape,
+      // otherwise zod strips it before we get here (see load.validation.ts).
+      const rawPpm = (clientPricing as any)?.pricePerMile;
+      const pricePerMile =
+        typeof rawPpm === "number" && Number.isFinite(rawPpm) && rawPpm >= 0
+          ? rawPpm
+          : undefined;
 
-  // Link load vehicles to inventory by VIN so photos resolve on every fetch.
-  // Non-fatal: an unmatched VIN just means no photo enrichment for that unit.
-  const vehiclesWithLinks = [...(vehicles ?? [])] as Array<Record<string, any>>;
-  if (vins.length) {
-    try {
-      const inventoryMatches = await Vehicle.find({
+      const pricing = !pricingEnabled
+        ? {
+            miles: computedMiles,
+            isPricingEnabled: false,
+            // Keep the visibility preference for a later edit, but no compensation
+            // fields are persisted while pricing is intentionally skipped.
+            isVisibleToDriver: clientPricing?.isVisibleToDriver !== false,
+          }
+        : postType === "assign-carrier"
+          ? {
+              miles: computedMiles,
+              estimatedRate,
+              // Direct assignment uses one authoritative, dispatcher-entered total.
+              // Do not derive or persist load-board-only pricing inputs here.
+              carrierPayAmount: clientPricing?.carrierPayAmount,
+              isPricingEnabled: true,
+              isVisibleToDriver: clientPricing?.isVisibleToDriver !== false,
+            }
+          : {
+              miles: computedMiles,
+              estimatedRate,
+              pricePerMile,
+              carrierPayAmount: clientPricing?.carrierPayAmount,
+              copCodAmount: clientPricing?.copCodAmount ?? 0,
+              isPricingEnabled: true,
+              isVisibleToDriver: clientPricing?.isVisibleToDriver !== false,
+              // balanceAmount computed automatically by pre-save hook in the model
+            };
+
+      const contractWithTimestamp = contract?.agreedToTerms
+        ? { ...contract, signedAt: new Date() }
+        : contract;
+
+      // Validation 1: Check for duplicate VINs
+      const vins = vehicles?.map((v: any) => v.vin).filter(Boolean) || [];
+      if (new Set(vins).size !== vins.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'Duplicate VINs not allowed',
+          code: 'DUPLICATE_VIN',
+          field: 'vehicles',
+        });
+      }
+
+      // Validation 2: Vehicle count limits.
+      // HARD LIMIT: 20 vehicles per load (applies to both load-board and
+      // assign-carrier). Per-trailer capacity is now a NON-BLOCKING warning —
+      // the dispatcher may intentionally post multi-trip or oversized loads,
+      // but they're told when the selected trailer's rated capacity is exceeded.
+      const MAX_VEHICLES_PER_LOAD = 20;
+
+      const TRAILER_CAPACITY: Record<string, number> = {
+        open_3car_wedge: 3,
+        open_2car: 2,
+        enclosed_2car: 2,
+        enclosed_3car: 3,
+        flatbed: 2,
+        hotshot: 1,
+        dually_flatbed: 1,
+        gooseneck: 2,
+        lowboy: 1,
+        step_deck: 2,
+        '9car_stinger': 9,
+        '7car_stinger': 7,
+        '5car_open': 5,
+        rgn: 2,
+        double_drop: 2,
+        power_only: 0,
+        other: 20,
+      };
+
+      const vehicleCount = vehicles?.length || 0;
+
+      if (vehicleCount > MAX_VEHICLES_PER_LOAD) {
+        return res.status(400).json({
+          success: false,
+          error: `Max ${MAX_VEHICLES_PER_LOAD} vehicles allowed per load`,
+          code: 'CAPACITY_EXCEEDED',
+          field: 'vehicles',
+        });
+      }
+
+      let capacityWarning: string | undefined;
+      const ratedCapacity = TRAILER_CAPACITY[trailerType];
+      if (ratedCapacity !== undefined && vehicleCount > ratedCapacity) {
+        capacityWarning = `This load has ${vehicleCount} vehicles but the selected trailer (${trailerType.replace(/_/g, ' ')}) is rated for ${ratedCapacity}. Multiple trips or a larger trailer may be required.`;
+      }
+
+      // Validation 3: Check against the Transportation business calendar
+      // (America/Denver), never the API server's local date.
+      if (dates?.firstAvailable) {
+        const selectedDateKey = scheduleDateKey(dates.firstAvailable);
+        const todayDateKey = mountainTodayDateKey();
+
+        if (selectedDateKey && selectedDateKey < todayDateKey) {
+          return res.status(400).json({
+            success: false,
+            error: 'Cannot select a date in the past',
+            code: 'INVALID_DATE',
+            field: 'dates.firstAvailable',
+          });
+        }
+      }
+
+      // Link load vehicles to inventory by VIN so photos resolve on every fetch.
+      // Non-fatal: an unmatched VIN just means no photo enrichment for that unit.
+      const vehiclesWithLinks = [...(vehicles ?? [])] as Array<Record<string, any>>;
+      if (vins.length) {
+        try {
+          const inventoryMatches = await Vehicle.find({
+            organizationId,
+            isDeleted: false,
+            vin: { $in: vins.map((v: string) => v.toUpperCase().trim()) },
+          })
+            .select("vin")
+            .lean();
+          const vinToId = new Map(
+            inventoryMatches.map((v) => [String(v.vin).toUpperCase().trim(), v._id]),
+          );
+          for (const v of vehiclesWithLinks) {
+            if (v.vin && !v.vehicleId) {
+              const match = vinToId.get(String(v.vin).toUpperCase().trim());
+              if (match) v.vehicleId = match;
+            }
+          }
+        } catch (err) {
+          logger.error({ err, orgId: organizationId }, "Non-fatal: failed to link load vehicles to inventory");
+        }
+      }
+
+      const load = await Load.create({
         organizationId,
-        isDeleted: false,
-        vin: { $in: vins.map((v: string) => v.toUpperCase().trim()) },
-      })
-        .select("vin")
-        .lean();
-      const vinToId = new Map(
-        inventoryMatches.map((v) => [String(v.vin).toUpperCase().trim(), v._id]),
-      );
-      for (const v of vehiclesWithLinks) {
-        if (v.vin && !v.vehicleId) {
-          const match = vinToId.get(String(v.vin).toUpperCase().trim());
-          if (match) v.vehicleId = match;
-        }
-      }
-    } catch (err) {
-      logger.error({ err, orgId: organizationId }, "Non-fatal: failed to link load vehicles to inventory");
-    }
-  }
-
-  const load = await Load.create({
-    organizationId,
-    orgId: (user as any).orgId,
-    createdBy: user._id,
-    postType,
-    pickupLocation,
-    deliveryLocation,
-    vehicles: vehiclesWithLinks,
-    trailerType,
-    dates,
-    pricing,
-    additionalInfo,
-    contract: contractWithTimestamp,
-    status: "Posted",
-  });
-
-  const _io = getSocketIO();
-  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "created" });
-
-  // Log activity
-  await activityService.logLoadActivity(
-    user._id.toString(),
-    organizationId,
-    'load_posted',
-    load._id.toString(),
-    `Created load ${load.loadNumber}`
-  );
-
-  {
-    const { title, message } = notificationTemplates.shipment_created({
-      trackingNumber: load.loadNumber,
-      customerName: `${load.pickupLocation.city || ''} → ${load.deliveryLocation.city || ''}`.trim(),
-    });
-    notifyOrgAdmins(organizationId, 'shipment_created', title, message, {
-      loadId: load._id.toString(),
-      loadNumber: load.loadNumber,
-      route: '/transportation?tab=shipments',
-    }, user._id.toString()).catch((err) => logger.error(err, 'Failed to notify admins of new load'));
-  }
-
-  logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
-
-  const warnings = [pricingWarning, capacityWarning].filter(Boolean);
-  return res.status(201).json(
-    new ApiResponse(
-      201,
-      {
-        load,
-        ...(warnings.length ? { warning: warnings.join(' ') } : {}),
-      },
-      "Load created successfully",
-    ),
-  );
-});
-
-// ─── Get Inventory Vehicles (for VIN picker) ──────────────────────────────────
-// GET /api/loads/vehicles?q=search
-// Returns org vehicles for VIN combobox — vin, year, make, model, color only
-
-const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-  const q = (req.query.q as string | undefined)?.trim().toUpperCase();
-
-  const filter: Record<string, unknown> = { organizationId, isDeleted: false };
-  if (q) {
-    filter.$or = [
-      { vin: { $regex: q, $options: "i" } },
-      { make: { $regex: q, $options: "i" } },
-      { modelName: { $regex: q, $options: "i" } },
-    ];
-  }
-
-  const vehicles = await Vehicle.find(filter)
-    .select("vin year make modelName exteriorColor status images")
-    .limit(50)
-    .lean();
-
-  const data = vehicles.map((v) => ({
-    vin: v.vin,
-    year: v.year,
-    make: v.make,
-    model: v.modelName,
-    color: v.exteriorColor || "",
-    condition: v.status === "In Recon" ? "Inoperable" : "Operable",
-    imageUrl: v.images?.[0] || undefined,
-  }));
-
-  return res.status(200).json(new ApiResponse(200, data, "Vehicles fetched"));
-});
-
-// ─── Get Loads (with filters, search, pagination) ────────────────────────────
-// GET /api/loads?status=Posted&q=LD-2026&postType=load-board&page=1&limit=20
-
-const LOAD_STATUSES = ["Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"] as const;
-// Draft is queryable for pipeline/history visibility, but remains excluded from
-// the generic update-status allowlist so this visibility fix cannot downgrade
-// an active load back to Draft through PUT /api/loads/:id.
-const LOAD_QUERY_STATUSES = ["Draft", ...LOAD_STATUSES] as const;
-
-const getLoads = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-
-  const isReportRequest = req.query.report === "true";
-  const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 20);
-  const maxLimit = isReportRequest ? 5000 : 100;
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.min(maxLimit, Math.max(1, requestedLimit));
-  const skip = (page - 1) * limit;
-
-  const filter: Record<string, unknown> = { organizationId };
-
-  const status = req.query.status as string | undefined;
-  if (status && LOAD_QUERY_STATUSES.includes(status as typeof LOAD_QUERY_STATUSES[number])) {
-    filter.status = status;
-  }
-
-  const postType = req.query.postType as string | undefined;
-  if (postType === "load-board" || postType === "assign-carrier") {
-    filter.postType = postType;
-  }
-
-  const origin = normalizeListQuery(req.query.origin);
-  const destination = normalizeListQuery(req.query.destination);
-  const visibility = normalizeListQuery(req.query.visibility).toLowerCase();
-  const q = normalizeListQuery(req.query.q);
-
-  const andConditions: Record<string, unknown>[] = [];
-
-  if (visibility === "private") {
-    filter["additionalInfo.visibility"] = "private";
-  } else if (visibility === "public") {
-    // Older Load records may not have an explicit visibility field. The UI
-    // already treats those records as Public, so the server-side filter must
-    // preserve that same backward-compatible meaning.
-    andConditions.push({
-      $or: [
-        { "additionalInfo.visibility": "public" },
-        { "additionalInfo.visibility": { $exists: false } },
-        { "additionalInfo.visibility": null },
-      ],
-    });
-  }
-
-  if (origin) {
-    const pattern = { $regex: escapeRegex(origin), $options: "i" };
-    andConditions.push({
-      $or: [
-        { "pickupLocation.name": pattern },
-        { "pickupLocation.address": pattern },
-        { "pickupLocation.city": pattern },
-        { "pickupLocation.state": pattern },
-        { "pickupLocation.zip": pattern },
-        { "pickupLocation.contactName": pattern },
-      ],
-    });
-  }
-
-  if (destination) {
-    const pattern = { $regex: escapeRegex(destination), $options: "i" };
-    andConditions.push({
-      $or: [
-        { "deliveryLocation.name": pattern },
-        { "deliveryLocation.address": pattern },
-        { "deliveryLocation.city": pattern },
-        { "deliveryLocation.state": pattern },
-        { "deliveryLocation.zip": pattern },
-        { "deliveryLocation.contactName": pattern },
-      ],
-    });
-  }
-
-  if (q) {
-    filter.$text = { $search: q };
-  }
-
-  if (andConditions.length > 0) {
-    filter.$and = andConditions;
-  }
-
-  // Report period support. Accepts either month/year or date=YYYY-MM.
-  const dateParam = (req.query.date as string | undefined)?.trim();
-  const dateMatch = dateParam?.match(/^(\d{4})-(\d{2})$/);
-  const year = Number(req.query.year ?? dateMatch?.[1]);
-  const month = Number(req.query.month ?? dateMatch?.[2]);
-
-  if (Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
-    // Monthly reports follow the same America/Denver dealership calendar as
-    // the Transportation UI, including MDT/MST boundary changes.
-    const { start: startDate, end: endDate } =
-      mountainMonthUtcRange(year, month);
-    filter.createdAt = { $gte: startDate, $lt: endDate };
-  }
-
-  const [rawLoads, total, summaryRows] = await Promise.all([
-    Load.find(filter)
-      .populate("assignedDriverId", "name email phone avatar")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Load.countDocuments(filter),
-    Load.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: null,
-          totalLoads: { $sum: 1 },
-          delivered: { $sum: { $cond: [{ $eq: ["$status", "Delivered"] }, 1, 0] } },
-          cancelled: { $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] } },
-          totalRevenue: { $sum: { $ifNull: ["$pricing.estimatedRate", 0] } },
-          totalCarrierPay: { $sum: { $ifNull: ["$pricing.carrierPayAmount", 0] } },
-          totalMiles: { $sum: { $ifNull: ["$pricing.miles", 0] } },
-        },
-      },
-    ]),
-  ]);
-
-  // BUSINESS RULE CHANGE: drivers now receive the COMPLETE load record —
-  // no simplified/masked version. Drivers need full pickup/delivery contact,
-  // pricing, notes, and reference data to perform the transport task.
-  const loads = rawLoads;
-
-  // Attach real inventory photos
-  await attachInventoryImages(loads as Array<Record<string, any>>, organizationId);
-
-  const loadsWithSignedProofs = await Promise.all(
-    loads.map(async (load: any) => {
-      if (load.proofOfDelivery?.imageUrl) {
-        const signed = await getSignedProofUrl(load.proofOfDelivery.imageUrl);
-        if (signed) load.proofOfDelivery.imageUrl = signed;
-      }
-      await signInspectionPhotos(load);
-      return load;
-    }),
-  );
-
-  const aggregate = summaryRows[0] ?? {};
-  const totalRevenue = aggregate.totalRevenue ?? 0;
-  const totalCarrierPay = aggregate.totalCarrierPay ?? 0;
-  const summary = {
-    totalLoads: aggregate.totalLoads ?? 0,
-    delivered: aggregate.delivered ?? 0,
-    cancelled: aggregate.cancelled ?? 0,
-    totalRevenue,
-    totalCarrierPay,
-    grossProfit: totalRevenue - totalCarrierPay,
-    totalMiles: aggregate.totalMiles ?? 0,
-  };
-
-  return res.status(200).json(
-    new ApiResponse(
-      200,
-      {
-        loads: loadsWithSignedProofs,
-        summary,
-        pagination: {
-          page,
-          limit,
-          total,
-          totalPages: Math.ceil(total / limit),
-          hasMore: page * limit < total,
-        },
-      },
-      "Loads fetched successfully",
-    ),
-  );
-});
-
-// ─── Get Load Stats (counts per status) ──────────────────────────────────────
-// GET /api/loads/stats
-// Returns { all, Draft, Posted, Assigned, Accepted, Picked Up, In-Transit, Delivered, Cancelled }
-
-const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-
-  const postType = req.query.postType as string | undefined;
-  const countBy = req.query.countBy as string | undefined;
-
-  const match: Record<string, unknown> = { organizationId };
-
-  if (postType === "load-board" || postType === "assign-carrier") {
-    match.postType = postType;
-  }
-
-  const countVehicles = countBy === "vehicles";
-
-  // organizationId is stored as String on the Load model — do NOT cast to ObjectId.
-  //
-  // Normal Transportation stats count LOAD RECORDS.
-  // Board stats can request countBy=vehicles, in which case each status count is
-  // the number of vehicles contained in matching Board loads instead.
-  const agg = await Load.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: "$status",
-        count: {
-          $sum: countVehicles
-            ? { $size: { $ifNull: ["$vehicles", []] } }
-            : 1,
-        },
-      },
-    },
-  ]);
-
-  const stats: Record<string, number> = {
-    all: 0,
-    Draft: 0,
-    Posted: 0,
-    Assigned: 0,
-    Accepted: 0,
-    "Picked Up": 0,
-    "In-Transit": 0,
-    Delivered: 0,
-    Cancelled: 0,
-  };
-
-  for (const { _id, count } of agg) {
-    const numericCount = Number(count ?? 0);
-    if (_id && _id in stats) stats[_id] = numericCount;
-    stats.all += numericCount;
-  }
-
-  return res.status(200).json(
-    new ApiResponse(
-      200,
-      stats,
-      countVehicles ? "Vehicle stats fetched" : "Load stats fetched",
-    ),
-  );
-});
-
-// ─── Get Load by ID ───────────────────────────────────────────────────────────
-
-const getLoadById = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-
-  const raw = await Load.findOne({ _id: req.params.id, organizationId })
-    .populate("assignedDriverId", "name email phone avatar")
-    .lean();
-  if (!raw) throw new ApiError(404, "Load not found");
-
-  // BUSINESS RULE CHANGE: no driver masking — full load record for all roles.
-  const load = raw;
-
-  // Attach real inventory photos (single-item batch)
-  await attachInventoryImages([load as Record<string, any>], organizationId);
-
-  // Sign proof of delivery URL if exists
-  const loadObj = load as any;
-  if (loadObj.proofOfDelivery?.imageUrl) {
-    const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
-    if (signed) loadObj.proofOfDelivery.imageUrl = signed;
-  }
-  await signInspectionPhotos(loadObj);
-
-  return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
-});
-
-const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set([
-  "Accepted",
-  "Picked Up",
-  "In-Transit",
-]);
-
-function canOverrideActiveLoadMaterial(req: Request, load: any) {
-  const user = getUser(req);
-  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
-  if (
-    user.role === "super_admin" ||
-    ["admin", "super_admin"].includes(effectiveRole)
-  ) {
-    return true;
-  }
-  return (
-    String(load?.dispatchOwnerId ?? "").trim() !== "" &&
-    String(load.dispatchOwnerId) === user._id.toString()
-  );
-}
-
-/**
- * Update Load
- * PUT /api/loads/:id
- * Allows dispatchers to edit load details (pickup, delivery, pricing, vehicles, etc.)
- */
-const updateLoad = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
-  
-  const loadId = req.params.id;
-
-  const load = await Load.findOne({ _id: loadId, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-
-  // Prevent editing if load is Delivered or Cancelled
-  if (["Delivered", "Cancelled"].includes(load.status)) {
-    throw new ApiError(400, `Cannot edit a load in ${load.status} status`);
-  }
-
-  const {
-    postType,
-    pickupLocation,
-    deliveryLocation,
-    vehicles,
-    trailerType,
-    dates,
-    pricing,
-    additionalInfo,
-    contract,
-    status
-  } = req.body;
-
-  const updateData: any = {};
-
-  if (postType !== undefined) updateData.postType = postType;
-  if (pickupLocation !== undefined) updateData.pickupLocation = pickupLocation;
-  if (deliveryLocation !== undefined) updateData.deliveryLocation = deliveryLocation;
-  if (vehicles !== undefined) updateData.vehicles = vehicles;
-  if (trailerType !== undefined) updateData.trailerType = trailerType;
-  if (dates !== undefined) updateData.dates = dates;
-  if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
-  if (contract !== undefined) {
-    updateData.contract = {
-      ...contract,
-      signedAt: contract.agreedToTerms ? new Date() : load.contract?.signedAt,
-    };
-  }
-  if (pricing !== undefined) {
-    // If pricing is provided, we merge it with existing pricing to preserve
-    // computed fields. pricePerMile rides through this merge automatically —
-    // an edit payload that includes it overwrites, one that omits it keeps
-    // the stored rate.
-    updateData.pricing = { ...load.pricing, ...pricing };
-  }
-
-  if (status !== undefined) {
-    if (!LOAD_STATUSES.includes(status)) {
-      throw new ApiError(400, "Invalid status");
-    }
-    updateData.status = status;
-  }
-
-  // If pickup or delivery locations changed, recalculate miles/rate if not manually overridden
-  if (pickupLocation?.zip || deliveryLocation?.zip) {
-    try {
-      const finalPickupZip = pickupLocation?.zip || load.pickupLocation.zip;
-      const finalDeliveryZip = deliveryLocation?.zip || load.deliveryLocation.zip;
-      const [pc, dc] = await getCoordinatesForPair(finalPickupZip, finalDeliveryZip);
-      
-      if (pc && dc) {
-        const miles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
-        const units = (vehicles || load.vehicles).length || 1;
-        const currentTrailerType = trailerType || load.trailerType;
-        const hasEnclosed = currentTrailerType.toLowerCase().includes("enclosed");
-        const hasInoperable = (vehicles || load.vehicles).some((v: any) => v.condition === "Inoperable");
-        const estimatedRate = calculateRate(miles, units, hasEnclosed, hasInoperable);
-
-        if (!updateData.pricing) updateData.pricing = { ...load.pricing };
-        updateData.pricing.miles = miles;
-        updateData.pricing.estimatedRate = estimatedRate;
-
-        // ── NEW: keep the dispatcher's rate consistent over a NEW distance ──
-        // Mirrors the Create Load frontend behavior: if a $/mi rate is on
-        // file and this edit did NOT explicitly set carrierPayAmount, the
-        // rate wins and pay is re-derived against the recalculated mileage.
-        // An explicit carrierPayAmount in the payload always takes priority.
-        const storedPpm = updateData.pricing.pricePerMile;
-        const payExplicitlyProvided =
-          pricing !== undefined && pricing.carrierPayAmount !== undefined;
-        if (
-          !payExplicitlyProvided &&
-          typeof storedPpm === "number" &&
-          Number.isFinite(storedPpm) &&
-          storedPpm > 0
-        ) {
-          updateData.pricing.carrierPayAmount = Math.round(storedPpm * miles);
-        }
-      }
-    } catch (err) {
-      logger.error({ err, loadId }, "Error recalculating pricing on update");
-    }
-  }
-
-  // BUG FIX: the model's pre("save") hook computes balanceAmount, but
-  // Mongoose pre-save hooks do NOT run on findOneAndUpdate — the old comment
-  // claimed otherwise, leaving balanceAmount stale after carrier pay edits.
-  // Recompute it explicitly whenever pricing is part of this update.
-  if (updateData.pricing) {
-    const pay = updateData.pricing.carrierPayAmount ?? 0;
-    const cod = updateData.pricing.copCodAmount ?? 0;
-    updateData.pricing.balanceAmount = pay - cod;
-  }
-
-  const beforeMaterialVersion = getLoadAcceptanceMaterialVersion(load);
-  const beforeObject = load.toObject({ depopulate: true });
-  const afterCandidate = {
-    ...beforeObject,
-    ...updateData,
-  };
-  const afterMaterialVersion = getLoadAcceptanceMaterialVersion(afterCandidate);
-  const materialChanges = buildLoadMaterialChanges(load, afterCandidate);
-  const requiresDriverAcknowledgement =
-    DRIVER_ACK_REQUIRED_LOAD_STATUSES.has(load.status) &&
-    materialChanges.length > 0;
-
-  if (requiresDriverAcknowledgement) {
-    if (!load.assignedDriverId) {
-      throw new ApiError(
-        409,
-        "This active load has no assigned driver. Correct the assignment before changing driver-facing load terms.",
-      );
-    }
-
-    if (!canOverrideActiveLoadMaterial(req, load)) {
-      throw new ApiError(
-        403,
-        "Only the dispatcher responsible for this active load or an organization administrator can change driver-facing load terms.",
-      );
-    }
-  }
-
-  const amendment = requiresDriverAcknowledgement
-    ? {
-        _id: new mongoose.Types.ObjectId(),
-        driverId: load.assignedDriverId,
+        orgId: (user as any).orgId,
         createdBy: user._id,
-        createdAt: new Date(),
-        loadStatusAtChange: load.status,
-        materialVersionBefore: beforeMaterialVersion,
-        materialVersionAfter: afterMaterialVersion,
-        changes: materialChanges,
-        status: "pending" as const,
-      }
-    : null;
+        postType,
+        pickupLocation,
+        deliveryLocation,
+        vehicles: vehiclesWithLinks,
+        trailerType,
+        dates,
+        pricing,
+        additionalInfo,
+        contract: contractWithTimestamp,
+        status: "Posted",
+      });
 
-  const atomicUpdate: any = { $set: updateData };
-  if (amendment) {
-    atomicUpdate.$push = {
-      driverAmendments: {
-        $each: [amendment],
-        // Prevent an accidental unbounded embedded history while preserving a
-        // substantial audit window in the Load itself.
-        $slice: -100,
-      },
-    };
-  }
+      const _io = getSocketIO();
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "created" });
 
-  const updatedLoad = await Load.findOneAndUpdate(
-    {
-      _id: loadId,
-      organizationId,
-      updatedAt: load.updatedAt,
-    },
-    atomicUpdate,
-    { new: true, runValidators: true },
-  );
-
-  if (!updatedLoad) {
-    throw new ApiError(
-      409,
-      "This load changed while you were editing it. Refresh the load and apply your changes again.",
-    );
-  }
-
-  const _io = getSocketIO();
-  if (_io) {
-    _io.to(`org:${organizationId}`).emit("load:change", {
-      action: "updated",
-      loadId,
-    });
-  }
-
-  if (amendment && load.assignedDriverId) {
-    try {
-      await safeCreateNotification({
-        userId: load.assignedDriverId.toString(),
+      // Log activity
+      await activityService.logLoadActivity(
+        user._id.toString(),
         organizationId,
-        type: "load_amendment_required",
-        title: "Load Updated by Dispatch",
-        message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
-        metadata: {
+        'load_posted',
+        load._id.toString(),
+        `Created load ${load.loadNumber}`
+      );
+
+      {
+        const { title, message } = notificationTemplates.shipment_created({
+          trackingNumber: load.loadNumber,
+          customerName: `${load.pickupLocation.city || ''} → ${load.deliveryLocation.city || ''}`.trim(),
+        });
+        notifyOrgAdmins(organizationId, 'shipment_created', title, message, {
           loadId: load._id.toString(),
           loadNumber: load.loadNumber,
-          amendmentId: amendment._id.toString(),
-          changedFields: materialChanges.map((change) => change.field),
-          route: "/driver",
-          pushSource: "Driver Tracker",
-        },
-      });
-    } catch (error) {
-      logger.error(
-        { error, loadId, amendmentId: amendment._id.toString() },
-        "Non-fatal: failed to notify driver about active Load amendment",
-      );
-    }
-
-    if (_io) {
-      _io.to(`user:${load.assignedDriverId.toString()}`).emit(
-        "driver:loads_updated",
-        {
-          loadId,
-          amendmentId: amendment._id.toString(),
-          amendmentStatus: "pending",
-        },
-      );
-    }
-  }
-
-  await activityService.logLoadActivity(
-    user._id.toString(),
-    organizationId,
-    "load_updated",
-    loadId,
-    amendment
-      ? `Updated active load ${load.loadNumber}; driver acknowledgement required`
-      : `Updated load ${load.loadNumber}`,
-  );
-
-  return res.json(
-    new ApiResponse(
-      200,
-      updatedLoad,
-      amendment
-        ? "Load updated — driver acknowledgement required"
-        : "Load updated successfully",
-    ),
-  );
-});
-
-const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
-
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-
-  if (load.status === "In-Transit") {
-    throw new ApiError(400, "Cannot delete a load that is currently In-Transit");
-  }
-
-  await Load.deleteOne({ _id: load._id });
-
-  const _io = getSocketIO();
-  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
-
-  // Log activity — NON-FATAL. The load is already deleted at this point;
-  // a logging failure must not turn a successful delete into a 500 response
-  // (root-cause fix: the client was reporting "delete not working" while the
-  // document was in fact removed).
-  try {
-    await activityService.createActivity({
-      userId: user._id.toString(),
-      organizationId,
-      type: 'load_deleted',
-      title: 'Load Deleted',
-      description: `Deleted load ${load.loadNumber}`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
-    });
-  } catch (err) {
-    logger.error({ err, loadId: load._id }, 'Non-fatal: failed to log load deletion activity');
-  }
-
-  logger.warn({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load deleted');
-
-  return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
-});
-
-// ─── Submit Proof of Delivery ─────────────────────────────────────────────────
-// POST /api/loads/:id/submit-proof
-// Driver submits a proof-of-delivery image for a Load-type assignment.
-
-const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const userId = user._id.toString();
-  const { note } = req.body;
-  const file = (req as any).file as Express.Multer.File | undefined;
-
-  if (!file) throw new ApiError(400, "Proof image is required");
-
-  const load = await Load.findById(req.params.id);
-  if (!load) throw new ApiError(404, "Load not found");
-
-  if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
-    throw new ApiError(403, "Only the assigned driver can submit proof of delivery");
-  }
-
-  // Replace old image if one exists (R2 stores raw keys, not http URLs)
-  if (load.proofOfDelivery?.imageUrl) {
-    try { await storageService.delete(load.proofOfDelivery.imageUrl, BucketType.PRIVATE); } catch { /* non-fatal */ }
-  }
-
-  // Upload to PRIVATE bucket for security
-  const imageUrl = await storageService.upload(file, "proof-of-delivery", BucketType.PRIVATE);
-
-  // Auto-route proof to whoever created/posted the load
-  const submittedTo = load.createdBy ? load.createdBy.toString() : undefined;
-
-  (load as any).proofOfDelivery = {
-    imageUrl,
-    submittedAt: new Date(),
-    note: note || undefined,
-    submittedTo: submittedTo || undefined,
-  };
-
-  await load.save();
-
-  // Broadcast to Org Admins
-  const orgId = load.organizationId?.toString();
-  const { title, message } = notificationTemplates.proof_of_delivery({
-    driverName: user.name || "A driver",
-    trackingNumber: load.loadNumber || req.params.id,
-  });
-
-  if (orgId) {
-    await notifyOrgAdmins(
-      orgId,
-      "proof_of_delivery",
-      title,
-      message,
-      {
-        loadId: load._id.toString(),
-        loadNumber: load.loadNumber,
-        imageUrl,
-        driverName: user.name,
+          route: '/transportation?tab=shipments',
+        }, user._id.toString()).catch((err) => logger.error(err, 'Failed to notify admins of new load'));
       }
-    );
-  }
 
-  logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
+      logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
 
-  return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
-});
-
-// ─── Inspect step: vehicle condition photo ───────────────────────────────────
-// POST /api/loads/:id/vehicles/:index/inspection-photo
-// Dispatcher uploads a per-vehicle condition photo (or a photo of a QR/
-// inventory tag) during Create Load / Edit Load. Same storage pattern as
-// submitProofOfDelivery — PRIVATE bucket, key stored raw, signed on read.
-
-const uploadInspectionPhoto = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-  const file = (req as any).file as Express.Multer.File | undefined;
-  const index = Number(req.params.index);
-
-  if (!file) throw new ApiError(400, "An image is required");
-  if (!Number.isInteger(index) || index < 0) {
-    throw new ApiError(400, "Invalid vehicle index");
-  }
-
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-  if (!load.vehicles?.[index]) {
-    throw new ApiError(404, "Vehicle not found on this load");
-  }
-
-  const existing = (load.vehicles[index] as any).inspectionPhotoUrl;
-  if (existing) {
-    try { await storageService.delete(existing, BucketType.PRIVATE); } catch { /* non-fatal */ }
-  }
-
-  const imageUrl = await storageService.upload(file, "load-inspection", BucketType.PRIVATE);
-  (load.vehicles[index] as any).inspectionPhotoUrl = imageUrl;
-  load.markModified("vehicles");
-  await load.save();
-
-  const _io = getSocketIO();
-  if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: load._id.toString() });
-
-  const signed = await getSignedProofUrl(imageUrl);
-  return res.status(200).json(new ApiResponse(200, { inspectionPhotoUrl: signed || imageUrl }, "Inspection photo uploaded"));
-});
-
-// ─── Proof Image Proxy ────────────────────────────────────────────────────────
-// GET /api/loads/:id/proof-image
-// Streams the private proof image to authenticated admin/dealer clients.
-
-const streamProofImage = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
-
-  const load = await Load.findOne({ _id: req.params.id, organizationId }).lean();
-  if (!load) throw new ApiError(404, "Load not found");
-
-  const key = (load as any).proofOfDelivery?.imageUrl;
-  if (!key) throw new ApiError(404, "No proof image submitted");
-
-  const result = await storageService.streamPrivateFile(key);
-  if (!result) throw new ApiError(404, "Proof image not found in storage");
-
-  res.setHeader("Content-Type", result.contentType);
-  res.setHeader("Cache-Control", "private, max-age=300");
-  result.stream.pipe(res);
-});
-
-// ─── Confirm Delivery ─────────────────────────────────────────────────────────
-// POST /api/loads/:id/confirm-delivery
-// Admin/dealer confirms the driver's submitted proof, marking the load as Delivered.
-
-const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
-
-  const load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-
-  if (!load.proofOfDelivery?.imageUrl) {
-    throw new ApiError(400, "No proof of delivery has been submitted yet");
-  }
-
-  const updated = await Load.findOneAndUpdate(
-    { _id: req.params.id, organizationId },
-    {
-      status: "Delivered",
-      deliveredAt: new Date(),
-      "proofOfDelivery.confirmedAt": new Date(),
-      "proofOfDelivery.confirmedBy": user._id,
-    },
-    { new: true }
-  );
-
-  if (load.assignedDriverId) {
-    await safeCreateNotification({
-      userId: load.assignedDriverId.toString(),
-      organizationId,
-      type: "load_delivered", // Using load terminology
-      title: "Delivery Confirmed",
-      message: `Your delivery for load ${load.loadNumber} has been confirmed`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      const warnings = [pricingWarning, capacityWarning].filter(Boolean);
+      return res.status(201).json(
+        new ApiResponse(
+          201,
+          {
+            load,
+            ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+          },
+          "Load created successfully",
+        ),
+      );
     });
-  }
 
-  await activityService.logLoadActivity(
-    user._id.toString(),
-    organizationId,
-    "load_delivered",
-    load._id.toString(),
-    `Admin confirmed proof of delivery for load ${load.loadNumber}`
-  );
+    // ─── Get Inventory Vehicles (for VIN picker) ──────────────────────────────────
+    // GET /api/loads/vehicles?q=search
+    // Returns org vehicles for VIN combobox — vin, year, make, model, color only
 
-  logger.info({ loadId: load._id, userId: user._id }, "Delivery confirmed by admin for load");
+    const getInventoryVehicles = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+      const q = (req.query.q as string | undefined)?.trim().toUpperCase();
 
-  return res.status(200).json(new ApiResponse(200, updated, "Delivery confirmed successfully"));
-});
+      const filter: Record<string, unknown> = { organizationId, isDeleted: false };
+      if (q) {
+        filter.$or = [
+          { vin: { $regex: q, $options: "i" } },
+          { make: { $regex: q, $options: "i" } },
+          { modelName: { $regex: q, $options: "i" } },
+        ];
+      }
 
-/**
- * Add internal note to load
- */
-const addNote = asyncHandler(async (req: Request, res: Response) => {
-  const { text } = req.body;
-  const user = getUser(req);
-  const organizationId = req.orgId as string;
+      const vehicles = await Vehicle.find(filter)
+        .select("vin year make modelName exteriorColor status images")
+        .limit(50)
+        .lean();
 
-  if (!text) throw new ApiError(400, "Note text is required");
+      const data = vehicles.map((v) => ({
+        vin: v.vin,
+        year: v.year,
+        make: v.make,
+        model: v.modelName,
+        color: v.exteriorColor || "",
+        condition: v.status === "In Recon" ? "Inoperable" : "Operable",
+        imageUrl: v.images?.[0] || undefined,
+      }));
 
-  const load = await Load.findOneAndUpdate(
-    { _id: req.params.id, organizationId },
-    {
-      $push: {
-        notes: {
-          text,
-          author: user._id,
-          date: new Date(),
+      return res.status(200).json(new ApiResponse(200, data, "Vehicles fetched"));
+    });
+
+    // ─── Get Loads (with filters, search, pagination) ────────────────────────────
+    // GET /api/loads?status=Posted&q=LD-2026&postType=load-board&page=1&limit=20
+
+    const LOAD_STATUSES = ["Posted", "Assigned", "Accepted", "Picked Up", "In-Transit", "Delivered", "Cancelled"] as const;
+    // Draft is queryable for pipeline/history visibility, but remains excluded from
+    // the generic update-status allowlist so this visibility fix cannot downgrade
+    // an active load back to Draft through PUT /api/loads/:id.
+    const LOAD_QUERY_STATUSES = ["Draft", ...LOAD_STATUSES] as const;
+
+    const getLoads = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+
+      const isReportRequest = req.query.report === "true";
+      const requestedLimit = parseInt(req.query.limit as string) || (isReportRequest ? 5000 : 20);
+      const maxLimit = isReportRequest ? 5000 : 100;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(maxLimit, Math.max(1, requestedLimit));
+      const skip = (page - 1) * limit;
+
+      const filter: Record<string, unknown> = { organizationId };
+
+      const status = req.query.status as string | undefined;
+      if (status && LOAD_QUERY_STATUSES.includes(status as typeof LOAD_QUERY_STATUSES[number])) {
+        filter.status = status;
+      }
+
+      const postType = req.query.postType as string | undefined;
+      if (postType === "load-board" || postType === "assign-carrier") {
+        filter.postType = postType;
+      }
+
+      const origin = normalizeListQuery(req.query.origin);
+      const destination = normalizeListQuery(req.query.destination);
+      const visibility = normalizeListQuery(req.query.visibility).toLowerCase();
+      const q = normalizeListQuery(req.query.q);
+
+      const andConditions: Record<string, unknown>[] = [];
+
+      if (visibility === "private") {
+        filter["additionalInfo.visibility"] = "private";
+      } else if (visibility === "public") {
+        // Older Load records may not have an explicit visibility field. The UI
+        // already treats those records as Public, so the server-side filter must
+        // preserve that same backward-compatible meaning.
+        andConditions.push({
+          $or: [
+            { "additionalInfo.visibility": "public" },
+            { "additionalInfo.visibility": { $exists: false } },
+            { "additionalInfo.visibility": null },
+          ],
+        });
+      }
+
+      if (origin) {
+        const pattern = { $regex: escapeRegex(origin), $options: "i" };
+        andConditions.push({
+          $or: [
+            { "pickupLocation.name": pattern },
+            { "pickupLocation.address": pattern },
+            { "pickupLocation.city": pattern },
+            { "pickupLocation.state": pattern },
+            { "pickupLocation.zip": pattern },
+            { "pickupLocation.contactName": pattern },
+          ],
+        });
+      }
+
+      if (destination) {
+        const pattern = { $regex: escapeRegex(destination), $options: "i" };
+        andConditions.push({
+          $or: [
+            { "deliveryLocation.name": pattern },
+            { "deliveryLocation.address": pattern },
+            { "deliveryLocation.city": pattern },
+            { "deliveryLocation.state": pattern },
+            { "deliveryLocation.zip": pattern },
+            { "deliveryLocation.contactName": pattern },
+          ],
+        });
+      }
+
+      if (q) {
+        filter.$text = { $search: q };
+      }
+
+      if (andConditions.length > 0) {
+        filter.$and = andConditions;
+      }
+
+      // Report period support. Accepts either month/year or date=YYYY-MM.
+      const dateParam = (req.query.date as string | undefined)?.trim();
+      const dateMatch = dateParam?.match(/^(\d{4})-(\d{2})$/);
+      const year = Number(req.query.year ?? dateMatch?.[1]);
+      const month = Number(req.query.month ?? dateMatch?.[2]);
+
+      if (Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
+        // Monthly reports follow the same America/Denver dealership calendar as
+        // the Transportation UI, including MDT/MST boundary changes.
+        const { start: startDate, end: endDate } =
+          mountainMonthUtcRange(year, month);
+        filter.createdAt = { $gte: startDate, $lt: endDate };
+      }
+
+      const [rawLoads, total, summaryRows] = await Promise.all([
+        Load.find(filter)
+          .populate("assignedDriverId", "name email phone avatar")
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Load.countDocuments(filter),
+        Load.aggregate([
+          { $match: filter },
+          {
+            $group: {
+              _id: null,
+              totalLoads: { $sum: 1 },
+              delivered: { $sum: { $cond: [{ $eq: ["$status", "Delivered"] }, 1, 0] } },
+              cancelled: { $sum: { $cond: [{ $eq: ["$status", "Cancelled"] }, 1, 0] } },
+              totalRevenue: { $sum: { $ifNull: ["$pricing.estimatedRate", 0] } },
+              totalCarrierPay: { $sum: { $ifNull: ["$pricing.carrierPayAmount", 0] } },
+              totalMiles: { $sum: { $ifNull: ["$pricing.miles", 0] } },
+            },
+          },
+        ]),
+      ]);
+
+      // BUSINESS RULE CHANGE: drivers now receive the COMPLETE load record —
+      // no simplified/masked version. Drivers need full pickup/delivery contact,
+      // pricing, notes, and reference data to perform the transport task.
+      const loads = rawLoads;
+
+      // Attach real inventory photos
+      await attachInventoryImages(loads as Array<Record<string, any>>, organizationId);
+
+      const loadsWithSignedProofs = await Promise.all(
+        loads.map(async (load: any) => {
+          if (load.proofOfDelivery?.imageUrl) {
+            const signed = await getSignedProofUrl(load.proofOfDelivery.imageUrl);
+            if (signed) load.proofOfDelivery.imageUrl = signed;
+          }
+          await signPickupProof(load);
+          await signInspectionPhotos(load);
+          return load;
+        }),
+      );
+
+      const aggregate = summaryRows[0] ?? {};
+      const totalRevenue = aggregate.totalRevenue ?? 0;
+      const totalCarrierPay = aggregate.totalCarrierPay ?? 0;
+      const summary = {
+        totalLoads: aggregate.totalLoads ?? 0,
+        delivered: aggregate.delivered ?? 0,
+        cancelled: aggregate.cancelled ?? 0,
+        totalRevenue,
+        totalCarrierPay,
+        grossProfit: totalRevenue - totalCarrierPay,
+        totalMiles: aggregate.totalMiles ?? 0,
+      };
+
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          {
+            loads: loadsWithSignedProofs,
+            summary,
+            pagination: {
+              page,
+              limit,
+              total,
+              totalPages: Math.ceil(total / limit),
+              hasMore: page * limit < total,
+            },
+          },
+          "Loads fetched successfully",
+        ),
+      );
+    });
+
+    // ─── Get Load Stats (counts per status) ──────────────────────────────────────
+    // GET /api/loads/stats
+    // Returns { all, Draft, Posted, Assigned, Accepted, Picked Up, In-Transit, Delivered, Cancelled }
+
+    const getLoadStats = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+
+      const postType = req.query.postType as string | undefined;
+      const countBy = req.query.countBy as string | undefined;
+
+      const match: Record<string, unknown> = { organizationId };
+
+      if (postType === "load-board" || postType === "assign-carrier") {
+        match.postType = postType;
+      }
+
+      const countVehicles = countBy === "vehicles";
+
+      // organizationId is stored as String on the Load model — do NOT cast to ObjectId.
+      //
+      // Normal Transportation stats count LOAD RECORDS.
+      // Board stats can request countBy=vehicles, in which case each status count is
+      // the number of vehicles contained in matching Board loads instead.
+      const agg = await Load.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: "$status",
+            count: {
+              $sum: countVehicles
+                ? { $size: { $ifNull: ["$vehicles", []] } }
+                : 1,
+            },
+          },
         },
-      },
-    },
-    { new: true }
-  ).populate("notes.author", "name email avatar");
+      ]);
 
-  if (!load) throw new ApiError(404, "Load not found");
+      const stats: Record<string, number> = {
+        all: 0,
+        Draft: 0,
+        Posted: 0,
+        Assigned: 0,
+        Accepted: 0,
+        "Picked Up": 0,
+        "In-Transit": 0,
+        Delivered: 0,
+        Cancelled: 0,
+      };
 
-  res.json(new ApiResponse(200, load, "Note added successfully"));
-});
+      for (const { _id, count } of agg) {
+        const numericCount = Number(count ?? 0);
+        if (_id && _id in stats) stats[_id] = numericCount;
+        stats.all += numericCount;
+      }
 
-/**
- * Send load details via email
- */
-const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
-  const organizationId = req.orgId as string;
-  const { id } = req.params;
-  const { recipientEmail } = req.body as { recipientEmail?: string };
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          stats,
+          countVehicles ? "Vehicle stats fetched" : "Load stats fetched",
+        ),
+      );
+    });
 
-  const email = (recipientEmail || "").trim().toLowerCase();
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new ApiError(400, "A valid recipient email is required");
-  }
+    // ─── Get Load by ID ───────────────────────────────────────────────────────────
 
-  const load = await Load.findOne({ _id: id, organizationId }).populate("createdBy", "name email");
-  if (!load) throw new ApiError(404, "Load not found");
+    const getLoadById = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
 
-  const pickup = load.pickupLocation;
-  const delivery = load.deliveryLocation;
-  const vehicles = load.vehicles.map(v => `${v.year} ${v.make} ${v.model} (${v.condition})`).join(", ");
+      const raw = await Load.findOne({ _id: req.params.id, organizationId })
+        .populate("assignedDriverId", "name email phone avatar")
+        .lean();
+      if (!raw) throw new ApiError(404, "Load not found");
 
-  const text = [
-    "Load Details",
-    "",
-    `Load Number: ${load.loadNumber}`,
-    `Status: ${load.status}`,
-    `Vehicles: ${vehicles}`,
-    `Origin: ${pickup.city}, ${pickup.state} ${pickup.zip}`,
-    `Destination: ${delivery.city}, ${delivery.state} ${delivery.zip}`,
-    `Pickup: ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}`,
-  ].join("\n");
+      // BUSINESS RULE CHANGE: no driver masking — full load record for all roles.
+      const load = raw;
 
-  const html = `
-    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
-      <h2 style="margin-bottom: 12px;">Load Details</h2>
-      <p><strong>Load Number:</strong> ${load.loadNumber}</p>
-      <p><strong>Status:</strong> ${load.status}</p>
-      <p><strong>Vehicles:</strong> ${vehicles}</p>
-      <p><strong>Origin:</strong> ${pickup.city}, ${pickup.state} ${pickup.zip}</p>
-      <p><strong>Destination:</strong> ${delivery.city}, ${delivery.state} ${delivery.zip}</p>
-      <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}</p>
-    </div>
-  `;
+      // Attach real inventory photos (single-item batch)
+      await attachInventoryImages([load as Record<string, any>], organizationId);
 
-  await emailService.sendEmail({
-    to: email,
-    subject: `Load Update: ${load.loadNumber}`,
-    text,
-    html,
-    organizationId,
-  });
+      // Sign proof of delivery URL if exists
+      const loadObj = load as any;
+      if (loadObj.proofOfDelivery?.imageUrl) {
+        const signed = await getSignedProofUrl(loadObj.proofOfDelivery.imageUrl);
+        if (signed) loadObj.proofOfDelivery.imageUrl = signed;
+      }
+      await signPickupProof(loadObj);
+      await signInspectionPhotos(loadObj);
 
-  res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
-});
+      return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
+    });
 
-export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set([
+      "Accepted",
+      "Picked Up",
+      "In-Transit",
+    ]);
+
+    function canOverrideActiveLoadMaterial(req: Request, load: any) {
+      const user = getUser(req);
+      const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+      if (
+        user.role === "super_admin" ||
+        ["admin", "super_admin"].includes(effectiveRole)
+      ) {
+        return true;
+      }
+      return (
+        String(load?.dispatchOwnerId ?? "").trim() !== "" &&
+        String(load.dispatchOwnerId) === user._id.toString()
+      );
+    }
+
+    /**
+     * Update Load
+     * PUT /api/loads/:id
+     * Allows dispatchers to edit load details (pickup, delivery, pricing, vehicles, etc.)
+     */
+    const updateLoad = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+      
+      const loadId = req.params.id;
+
+      const load = await Load.findOne({ _id: loadId, organizationId });
+      if (!load) throw new ApiError(404, "Load not found");
+
+      // Prevent editing if load is Delivered or Cancelled
+      if (["Delivered", "Cancelled"].includes(load.status)) {
+        throw new ApiError(400, `Cannot edit a load in ${load.status} status`);
+      }
+
+      const {
+        postType,
+        pickupLocation,
+        deliveryLocation,
+        vehicles,
+        trailerType,
+        dates,
+        pricing,
+        additionalInfo,
+        contract,
+        status
+      } = req.body;
+
+      const updateData: any = {};
+      const effectivePostType = postType ?? load.postType;
+
+      if (postType !== undefined) updateData.postType = postType;
+      if (pickupLocation !== undefined) updateData.pickupLocation = pickupLocation;
+      if (deliveryLocation !== undefined) updateData.deliveryLocation = deliveryLocation;
+      if (vehicles !== undefined) updateData.vehicles = vehicles;
+      if (trailerType !== undefined) updateData.trailerType = trailerType;
+      if (dates !== undefined) updateData.dates = dates;
+      if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
+      if (contract !== undefined) {
+        updateData.contract = {
+          ...contract,
+          signedAt: contract.agreedToTerms ? new Date() : load.contract?.signedAt,
+        };
+      }
+      if (pricing !== undefined) {
+        const nextPricing = { ...pricing };
+        const storedPricing = (load.pricing as any)?.toObject
+          ? (load.pricing as any).toObject()
+          : { ...((load.pricing as any) ?? {}) };
+
+        if (nextPricing.isPricingEnabled !== undefined && typeof nextPricing.isPricingEnabled !== "boolean") {
+          throw new ApiError(400, "Include Pricing must be true or false");
+        }
+        if (nextPricing.isVisibleToDriver !== undefined && typeof nextPricing.isVisibleToDriver !== "boolean") {
+          throw new ApiError(400, "Pricing visibility must be true or false");
+        }
+
+        const effectivePricingEnabled =
+          nextPricing.isPricingEnabled ?? (storedPricing.isPricingEnabled !== false);
+
+        if (!effectivePricingEnabled) {
+          // Intentionally skipped pricing is represented by absence, not zero.
+          // Replacing the whole pricing object prevents stale compensation from
+          // leaking back into cards, reports or driver-facing responses.
+          updateData.pricing = {
+            ...(storedPricing.miles != null ? { miles: storedPricing.miles } : {}),
+            isPricingEnabled: false,
+            isVisibleToDriver:
+              nextPricing.isVisibleToDriver ?? storedPricing.isVisibleToDriver ?? true,
+          };
+        } else {
+          if (nextPricing.carrierPayAmount !== undefined) {
+            const total = Number(nextPricing.carrierPayAmount);
+            if (!Number.isFinite(total) || total < 0 || total > 1_000_000) {
+              throw new ApiError(400, "Invalid carrier pay amount");
+            }
+          }
+
+          updateData.pricing = {
+            ...storedPricing,
+            ...nextPricing,
+            isPricingEnabled: true,
+          };
+
+          if (effectivePostType === "assign-carrier") {
+            const total = Number(updateData.pricing.carrierPayAmount);
+            if (!Number.isFinite(total) || total <= 0 || total > 1_000_000) {
+              throw new ApiError(400, "Total Driver Pay must be greater than $0");
+            }
+          }
+        }
+      }
+
+      if (status !== undefined) {
+        if (!LOAD_STATUSES.includes(status)) {
+          throw new ApiError(400, "Invalid status");
+        }
+        updateData.status = status;
+      }
+
+      // If pickup or delivery locations changed, recalculate miles/rate if not manually overridden
+      if (pickupLocation?.zip || deliveryLocation?.zip) {
+        try {
+          const finalPickupZip = pickupLocation?.zip || load.pickupLocation.zip;
+          const finalDeliveryZip = deliveryLocation?.zip || load.deliveryLocation.zip;
+          const [pc, dc] = await getCoordinatesForPair(finalPickupZip, finalDeliveryZip);
+          
+          if (pc && dc) {
+            const miles = calculateDistance(pc.lat, pc.lon, dc.lat, dc.lon);
+            const units = (vehicles || load.vehicles).length || 1;
+            const currentTrailerType = trailerType || load.trailerType;
+            const hasEnclosed = currentTrailerType.toLowerCase().includes("enclosed");
+            const hasInoperable = (vehicles || load.vehicles).some((v: any) => v.condition === "Inoperable");
+            const estimatedRate = calculateRate(miles, units, hasEnclosed, hasInoperable);
+
+            if (!updateData.pricing) {
+              const storedPricing = (load.pricing as any)?.toObject
+                ? (load.pricing as any).toObject()
+                : { ...((load.pricing as any) ?? {}) };
+              updateData.pricing = storedPricing;
+            }
+            updateData.pricing.miles = miles;
+
+            const pricingStillEnabled = updateData.pricing.isPricingEnabled !== false;
+            if (pricingStillEnabled) {
+              updateData.pricing.estimatedRate = estimatedRate;
+            } else {
+              delete updateData.pricing.estimatedRate;
+            }
+
+            // ── NEW: keep the dispatcher's rate consistent over a NEW distance ──
+            // Mirrors the Create Load frontend behavior: if a $/mi rate is on
+            // file and this edit did NOT explicitly set carrierPayAmount, the
+            // rate wins and pay is re-derived against the recalculated mileage.
+            // An explicit carrierPayAmount in the payload always takes priority.
+            const storedPpm = updateData.pricing.pricePerMile;
+            const payExplicitlyProvided =
+              pricing !== undefined && pricing.carrierPayAmount !== undefined;
+            if (
+              pricingStillEnabled &&
+              effectivePostType === "load-board" &&
+              !payExplicitlyProvided &&
+              typeof storedPpm === "number" &&
+              Number.isFinite(storedPpm) &&
+              storedPpm > 0
+            ) {
+              updateData.pricing.carrierPayAmount = Math.round(storedPpm * miles);
+            }
+          }
+        } catch (err) {
+          logger.error({ err, loadId }, "Error recalculating pricing on update");
+        }
+      }
+
+      // BUG FIX: the model's pre("save") hook computes balanceAmount, but
+      // Mongoose pre-save hooks do NOT run on findOneAndUpdate — the old comment
+      // claimed otherwise, leaving balanceAmount stale after carrier pay edits.
+      // Recompute it explicitly whenever pricing is part of this update.
+      if (
+        updateData.pricing &&
+        effectivePostType === "load-board" &&
+        updateData.pricing.isPricingEnabled !== false
+      ) {
+        const pay = updateData.pricing.carrierPayAmount ?? 0;
+        const cod = updateData.pricing.copCodAmount ?? 0;
+        updateData.pricing.balanceAmount = pay - cod;
+      }
+
+      const beforeMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+      const beforeObject = load.toObject({ depopulate: true });
+      const afterCandidate = {
+        ...beforeObject,
+        ...updateData,
+      };
+      const afterMaterialVersion = getLoadAcceptanceMaterialVersion(afterCandidate);
+      const materialChanges = buildLoadMaterialChanges(load, afterCandidate);
+      const requiresDriverAcknowledgement =
+        DRIVER_ACK_REQUIRED_LOAD_STATUSES.has(load.status) &&
+        materialChanges.length > 0;
+
+      if (requiresDriverAcknowledgement) {
+        if (!load.assignedDriverId) {
+          throw new ApiError(
+            409,
+            "This active load has no assigned driver. Correct the assignment before changing driver-facing load terms.",
+          );
+        }
+
+        if (!canOverrideActiveLoadMaterial(req, load)) {
+          throw new ApiError(
+            403,
+            "Only the dispatcher responsible for this active load or an organization administrator can change driver-facing load terms.",
+          );
+        }
+      }
+
+      const amendment = requiresDriverAcknowledgement
+        ? {
+            _id: new mongoose.Types.ObjectId(),
+            driverId: load.assignedDriverId,
+            createdBy: user._id,
+            createdAt: new Date(),
+            loadStatusAtChange: load.status,
+            materialVersionBefore: beforeMaterialVersion,
+            materialVersionAfter: afterMaterialVersion,
+            changes: materialChanges,
+            status: "pending" as const,
+          }
+        : null;
+
+      const atomicUpdate: any = { $set: updateData };
+      // A pickup photo taken before an Accepted load's material terms change
+      // must not satisfy the pickup requirement for the newly reviewed terms.
+      // Preserve historical proof once the load is already Picked Up/In-Transit.
+      if (requiresDriverAcknowledgement && load.status === "Accepted") {
+        atomicUpdate.$unset = { proofOfPickup: "" };
+      }
+      if (amendment) {
+        atomicUpdate.$push = {
+          driverAmendments: {
+            $each: [amendment],
+            // Prevent an accidental unbounded embedded history while preserving a
+            // substantial audit window in the Load itself.
+            $slice: -100,
+          },
+        };
+      }
+
+      // The driver must learn about the amendment: pickup, start-route and
+      // delivery are blocked until it is acknowledged. Queue the notification
+      // in the same write as the amendment so it is durable and retried.
+      const amendmentOutbox =
+        amendment && load.assignedDriverId
+          ? [
+              createLoadLifecycleOutboxEvent("user_notification", {
+                userId: load.assignedDriverId.toString(),
+                organizationId,
+                type: "load_amendment_required",
+                title: "Load Updated by Dispatch",
+                message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
+                metadata: {
+                  loadId: load._id.toString(),
+                  loadNumber: load.loadNumber,
+                  amendmentId: amendment._id.toString(),
+                  changedFields: materialChanges.map((change) => change.field),
+                  route: "/driver",
+                  pushSource: "Driver Tracker",
+                },
+              }),
+            ]
+          : [];
+
+      const updatedLoad = await Load.findOneAndUpdate(
+        {
+          _id: loadId,
+          organizationId,
+          updatedAt: load.updatedAt,
+        },
+        appendLoadLifecycleOutbox(atomicUpdate, amendmentOutbox),
+        { new: true, runValidators: true },
+      );
+
+      if (!updatedLoad) {
+        throw new ApiError(
+          409,
+          "This load changed while you were editing it. Refresh the load and apply your changes again.",
+        );
+      }
+
+      if (
+        requiresDriverAcknowledgement &&
+        load.status === "Accepted" &&
+        (load as any).proofOfPickup?.imageUrl
+      ) {
+        try {
+          await storageService.delete(
+            (load as any).proofOfPickup.imageUrl,
+            BucketType.PRIVATE,
+          );
+        } catch (error) {
+          logger.error(
+            { error, loadId },
+            "Non-fatal: failed to delete invalidated pickup proof",
+          );
+        }
+      }
+
+      const _io = getSocketIO();
+      if (_io) {
+        _io.to(`org:${organizationId}`).emit("load:change", {
+          action: "updated",
+          loadId,
+        });
+      }
+
+      if (amendmentOutbox.length > 0) {
+        // Immediate delivery for UX; failures stay queued for the worker.
+        try {
+          await processLoadLifecycleOutboxForLoad(loadId);
+        } catch (error) {
+          logger.error(
+            { error, loadId },
+            "Non-fatal: immediate Load amendment notification flush failed",
+          );
+        }
+      }
+
+      if (amendment && load.assignedDriverId) {
+        if (_io) {
+          _io.to(`user:${load.assignedDriverId.toString()}`).emit(
+            "driver:loads_updated",
+            {
+              loadId,
+              amendmentId: amendment._id.toString(),
+              amendmentStatus: "pending",
+            },
+          );
+        }
+      }
+
+      await activityService.logLoadActivity(
+        user._id.toString(),
+        organizationId,
+        "load_updated",
+        loadId,
+        amendment
+          ? `Updated active load ${load.loadNumber}; driver acknowledgement required`
+          : `Updated load ${load.loadNumber}`,
+      );
+
+      return res.json(
+        new ApiResponse(
+          200,
+          updatedLoad,
+          amendment
+            ? "Load updated — driver acknowledgement required"
+            : "Load updated successfully",
+        ),
+      );
+    });
+
+    const deleteLoad = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+
+      const load = await Load.findOne({ _id: req.params.id, organizationId });
+      if (!load) throw new ApiError(404, "Load not found");
+
+      if (load.status === "In-Transit") {
+        throw new ApiError(400, "Cannot delete a load that is currently In-Transit");
+      }
+
+      await Load.deleteOne({ _id: load._id });
+
+      const _io = getSocketIO();
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
+
+      // Log activity — NON-FATAL. The load is already deleted at this point;
+      // a logging failure must not turn a successful delete into a 500 response
+      // (root-cause fix: the client was reporting "delete not working" while the
+      // document was in fact removed).
+      try {
+        await activityService.createActivity({
+          userId: user._id.toString(),
+          organizationId,
+          type: 'load_deleted',
+          title: 'Load Deleted',
+          description: `Deleted load ${load.loadNumber}`,
+          metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber }
+        });
+      } catch (err) {
+        logger.error({ err, loadId: load._id }, 'Non-fatal: failed to log load deletion activity');
+      }
+
+      logger.warn({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load deleted');
+
+      return res.status(200).json(new ApiResponse(200, null, "Load deleted successfully"));
+    });
+
+    // ─── Submit Proof of Pickup ───────────────────────────────────────────────────
+    // Driver uploads required pickup evidence while the load is Accepted. The
+    // actual Accepted -> Picked Up transition remains in Driver Tracking and
+    // re-validates this proof atomically before changing lifecycle state.
+
+    const submitProofOfPickup = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const userId = user._id.toString();
+      const { note } = req.body;
+      const file = (req as any).file as Express.Multer.File | undefined;
+
+      if (!file) throw new ApiError(400, "Pickup proof image is required");
+
+      const load = await Load.findById(req.params.id);
+      if (!load) throw new ApiError(404, "Load not found");
+      if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
+        throw new ApiError(403, "Only the assigned driver can submit pickup proof");
+      }
+      if (load.status !== "Accepted") {
+        throw new ApiError(400, `Pickup proof can only be submitted while the load is Accepted, not ${load.status}`);
+      }
+
+      const imageUrl = await storageService.upload(file, "proof-of-pickup", BucketType.PRIVATE);
+      const submittedAt = new Date();
+      const previousImageUrl = (load as any).proofOfPickup?.imageUrl as string | undefined;
+
+      const updated = await Load.findOneAndUpdate(
+        {
+          _id: load._id,
+          status: "Accepted",
+          assignedDriverId: user._id,
+        },
+        {
+          $set: {
+            proofOfPickup: {
+              imageUrl,
+              submittedAt,
+              note: String(note ?? "").trim().slice(0, 2000) || undefined,
+              submittedBy: user._id,
+            },
+          },
+        },
+        { new: true, runValidators: true },
+      );
+
+      if (!updated) {
+        try { await storageService.delete(imageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+        throw new ApiError(409, "This load changed while pickup proof was uploading. Refresh the load and try again.");
+      }
+
+      if (previousImageUrl && previousImageUrl !== imageUrl) {
+        try { await storageService.delete(previousImageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+      }
+
+      const signed = await getSignedProofUrl(imageUrl);
+      logger.info({ loadId: load._id, userId }, "Pickup proof submitted for load");
+
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          { imageUrl: signed || imageUrl, submittedAt },
+          "Pickup proof submitted",
+        ),
+      );
+    });
+
+    // ─── Submit Proof of Delivery ─────────────────────────────────────────────────
+    // POST /api/loads/:id/submit-proof
+    // Driver submits a proof-of-delivery image for a Load-type assignment.
+
+    const submitProofOfDelivery = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const userId = user._id.toString();
+      const { note } = req.body;
+      const file = (req as any).file as Express.Multer.File | undefined;
+
+      if (!file) throw new ApiError(400, "Proof image is required");
+
+      const load = await Load.findById(req.params.id);
+      if (!load) throw new ApiError(404, "Load not found");
+
+      if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
+        throw new ApiError(403, "Only the assigned driver can submit proof of delivery");
+      }
+
+      // Replace old image if one exists (R2 stores raw keys, not http URLs)
+      if (load.proofOfDelivery?.imageUrl) {
+        try { await storageService.delete(load.proofOfDelivery.imageUrl, BucketType.PRIVATE); } catch { /* non-fatal */ }
+      }
+
+      // Upload to PRIVATE bucket for security
+      const imageUrl = await storageService.upload(file, "proof-of-delivery", BucketType.PRIVATE);
+
+      // Auto-route proof to whoever created/posted the load
+      const submittedTo = load.createdBy ? load.createdBy.toString() : undefined;
+
+      (load as any).proofOfDelivery = {
+        imageUrl,
+        submittedAt: new Date(),
+        note: note || undefined,
+        submittedTo: submittedTo || undefined,
+      };
+
+      await load.save();
+
+      // Broadcast to Org Admins
+      const orgId = load.organizationId?.toString();
+      const { title, message } = notificationTemplates.proof_of_delivery({
+        driverName: user.name || "A driver",
+        trackingNumber: load.loadNumber || req.params.id,
+      });
+
+      if (orgId) {
+        await notifyOrgAdmins(
+          orgId,
+          "proof_of_delivery",
+          title,
+          message,
+          {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            imageUrl,
+            driverName: user.name,
+          }
+        );
+      }
+
+      logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
+
+      return res.status(200).json(new ApiResponse(200, { imageUrl }, "Proof of delivery submitted"));
+    });
+
+    // ─── Inspect step: vehicle condition photo ───────────────────────────────────
+    // POST /api/loads/:id/vehicles/:index/inspection-photo
+    // Dispatcher uploads a per-vehicle condition photo (or a photo of a QR/
+    // inventory tag) during Create Load / Edit Load. Same storage pattern as
+    // submitProofOfDelivery — PRIVATE bucket, key stored raw, signed on read.
+
+    const uploadInspectionPhoto = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+      const file = (req as any).file as Express.Multer.File | undefined;
+      const index = Number(req.params.index);
+
+      if (!file) throw new ApiError(400, "An image is required");
+      if (!Number.isInteger(index) || index < 0) {
+        throw new ApiError(400, "Invalid vehicle index");
+      }
+
+      const load = await Load.findOne({ _id: req.params.id, organizationId });
+      if (!load) throw new ApiError(404, "Load not found");
+      if (!load.vehicles?.[index]) {
+        throw new ApiError(404, "Vehicle not found on this load");
+      }
+
+      const existing = (load.vehicles[index] as any).inspectionPhotoUrl;
+      if (existing) {
+        try { await storageService.delete(existing, BucketType.PRIVATE); } catch { /* non-fatal */ }
+      }
+
+      const imageUrl = await storageService.upload(file, "load-inspection", BucketType.PRIVATE);
+      (load.vehicles[index] as any).inspectionPhotoUrl = imageUrl;
+      load.markModified("vehicles");
+      await load.save();
+
+      const _io = getSocketIO();
+      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "updated", loadId: load._id.toString() });
+
+      const signed = await getSignedProofUrl(imageUrl);
+      return res.status(200).json(new ApiResponse(200, { inspectionPhotoUrl: signed || imageUrl }, "Inspection photo uploaded"));
+    });
+
+    // ─── Proof Image Proxy ────────────────────────────────────────────────────────
+    // GET /api/loads/:id/proof-image
+    // Streams the private proof image to authenticated admin/dealer clients.
+
+    const streamProofImage = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+
+      const load = await Load.findOne({ _id: req.params.id, organizationId }).lean();
+      if (!load) throw new ApiError(404, "Load not found");
+
+      const key = (load as any).proofOfDelivery?.imageUrl;
+      if (!key) throw new ApiError(404, "No proof image submitted");
+
+      const result = await storageService.streamPrivateFile(key);
+      if (!result) throw new ApiError(404, "Proof image not found in storage");
+
+      res.setHeader("Content-Type", result.contentType);
+      res.setHeader("Cache-Control", "private, max-age=300");
+      result.stream.pipe(res);
+    });
+
+    // ─── Confirm Delivery ─────────────────────────────────────────────────────────
+    // POST /api/loads/:id/confirm-delivery
+    // Admin/dealer confirms the driver's submitted proof, marking the load as Delivered.
+
+    const confirmDelivery = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+
+      const load = await Load.findOne({ _id: req.params.id, organizationId });
+      if (!load) throw new ApiError(404, "Load not found");
+
+      if (!load.proofOfDelivery?.imageUrl) {
+        throw new ApiError(400, "No proof of delivery has been submitted yet");
+      }
+
+      const updated = await Load.findOneAndUpdate(
+        { _id: req.params.id, organizationId },
+        {
+          status: "Delivered",
+          deliveredAt: new Date(),
+          "proofOfDelivery.confirmedAt": new Date(),
+          "proofOfDelivery.confirmedBy": user._id,
+        },
+        { new: true }
+      );
+
+      if (load.assignedDriverId) {
+        await safeCreateNotification({
+          userId: load.assignedDriverId.toString(),
+          organizationId,
+          type: "load_delivered", // Using load terminology
+          title: "Delivery Confirmed",
+          message: `Your delivery for load ${load.loadNumber} has been confirmed`,
+          metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+        });
+      }
+
+      await activityService.logLoadActivity(
+        user._id.toString(),
+        organizationId,
+        "load_delivered",
+        load._id.toString(),
+        `Admin confirmed proof of delivery for load ${load.loadNumber}`
+      );
+
+      logger.info({ loadId: load._id, userId: user._id }, "Delivery confirmed by admin for load");
+
+      return res.status(200).json(new ApiResponse(200, updated, "Delivery confirmed successfully"));
+    });
+
+    /**
+     * Add internal note to load
+     */
+    const addNote = asyncHandler(async (req: Request, res: Response) => {
+      const { text } = req.body;
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+
+      if (!text) throw new ApiError(400, "Note text is required");
+
+      const load = await Load.findOneAndUpdate(
+        { _id: req.params.id, organizationId },
+        {
+          $push: {
+            notes: {
+              text,
+              author: user._id,
+              date: new Date(),
+            },
+          },
+        },
+        { new: true }
+      ).populate("notes.author", "name email avatar");
+
+      if (!load) throw new ApiError(404, "Load not found");
+
+      res.json(new ApiResponse(200, load, "Note added successfully"));
+    });
+
+    /**
+     * Send load details via email
+     */
+    const sendDetailsEmail = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+      const { id } = req.params;
+      const { recipientEmail } = req.body as { recipientEmail?: string };
+
+      const email = (recipientEmail || "").trim().toLowerCase();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new ApiError(400, "A valid recipient email is required");
+      }
+
+      const load = await Load.findOne({ _id: id, organizationId }).populate("createdBy", "name email");
+      if (!load) throw new ApiError(404, "Load not found");
+
+      const pickup = load.pickupLocation;
+      const delivery = load.deliveryLocation;
+      const vehicles = load.vehicles.map(v => `${v.year} ${v.make} ${v.model} (${v.condition})`).join(", ");
+
+      const text = [
+        "Load Details",
+        "",
+        `Load Number: ${load.loadNumber}`,
+        `Status: ${load.status}`,
+        `Vehicles: ${vehicles}`,
+        `Origin: ${pickup.city}, ${pickup.state} ${pickup.zip}`,
+        `Destination: ${delivery.city}, ${delivery.state} ${delivery.zip}`,
+        `Pickup: ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}`,
+      ].join("\n");
+
+      const html = `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
+          <h2 style="margin-bottom: 12px;">Load Details</h2>
+          <p><strong>Load Number:</strong> ${load.loadNumber}</p>
+          <p><strong>Status:</strong> ${load.status}</p>
+          <p><strong>Vehicles:</strong> ${vehicles}</p>
+          <p><strong>Origin:</strong> ${pickup.city}, ${pickup.state} ${pickup.zip}</p>
+          <p><strong>Destination:</strong> ${delivery.city}, ${delivery.state} ${delivery.zip}</p>
+          <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}</p>
+        </div>
+      `;
+
+      await emailService.sendEmail({
+        to: email,
+        subject: `Load Update: ${load.loadNumber}`,
+        text,
+        html,
+        organizationId,
+      });
+
+      res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
+    });
+
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };

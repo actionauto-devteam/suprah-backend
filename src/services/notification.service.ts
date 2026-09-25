@@ -2,6 +2,7 @@ import Notification from '../models/Notification.model';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
 import { NotificationCategory } from '../models/Notification.model';
+import { NOTIFICATION_TYPES } from '../constants/notificationTypes';
 import { ApiError } from '../utils/ApiError';
 import { emitToCrmUser, emitToUser } from '../utils/socketEmitter';
 import UnifiedPushService from './unifiedPush.service';
@@ -21,45 +22,7 @@ interface CreateNotificationParams {
 const formatOccurrenceTime = (date: Date) =>
   date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
-const VALID_NOTIFICATION_TYPES = [
-  'quote_created', 'quote_updated', 'quote_deleted', 'quote_converted', 'quote_accepted',
-  'shipment_created', 'shipment_updated', 'shipment_deleted', 'shipment_status_changed',
-  'shipment_assigned', 'shipment_picked_up', 'shipment_delivered', 'proof_of_delivery',
-  'shipment_arrived_at_pickup', 'shipment_arrived_at_delivery',
-  'vehicle_added', 'vehicle_updated', 'vehicle_sold', 'vehicle_status_changed',
-  'inventory_sync', 'new_inventory_alert',
-  'appointment_created', 'appointment_updated', 'appointment_cancelled',
-  'appointment_reminder', 'guest_response',
-  'appointment_confirmed_via_sms', 'appointment_reschedule_requested', 'sms_opt_out',
-  'new_lead', 'lead_assigned', 'lead_status_changed',
-  'crm_message', 'crm_task_assigned', 'crm_task_due', 'crm_biometric', 'crm_timeproof',
-  'feed_mention_post', 'feed_mention_comment', 'feed_comment_on_post', 'feed_announcement',
-  'pm_task_assigned', 'pm_task_comment', 'pm_task_status', 'pm_task_updated',
-  'pm_group_added', 'pm_task_mention', 'pm_task_deadline',
-  'calendar_event_reminder', 'calendar_event_today', 'calendar_event_assigned',
-  'driver_request', 'driver_request_approved', 'driver_request_rejected',
-  'dealership_inquiry',
-  'driver_assigned', 'driver_location_update', 'driver_payout',
-  'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
-  'driver_dispatch_alert', 'driver_dispatch_message',
-  'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
-  'driver_status_request_completed', 'driver_emergency_request',
-  'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',
-  'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
-  'wallet_low_balance', 'wallet_payout_failed',
-  'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
-  'team_invite_sent', 'team_member_joined', 'team_member_left', 'role_changed', 'board_note_posted',
-  'eotm_winner_announced',
-  'password_changed', 'email_changed', 'profile_updated', 'login_alert',
-  'system_announcement', 'message_received', 'reminder', 'general', 'ping',
-  'referral_joined', 'referral_rewarded',
-  'absence_requested', 'absence_approved', 'absence_rejected',
-  'delivery_confirmed', 'proof_submitted',
-  'aftermarket_inquiry', 'aftermarket_invoice', 'aftermarket_order',
-  'location_share_requested',
-  'agent_idle', 'agent_idle_escalation', 'agent_idle_stage2', 'agent_idle_stage3', 'agent_screen_recording_missing',
-  'customer_call_requested',
-] as const;
+const VALID_NOTIFICATION_TYPES = NOTIFICATION_TYPES;
 
 const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   quote_created: 'transportation', quote_updated: 'transportation', quote_deleted: 'transportation',
@@ -70,7 +33,11 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   shipment_arrived_at_pickup: 'transportation', shipment_arrived_at_delivery: 'transportation',
   proof_submitted: 'transportation', delivery_confirmed: 'transportation',
   driver_request: 'transportation', driver_request_approved: 'transportation',
-  driver_request_rejected: 'transportation', driver_assigned: 'transportation', driver_payout: 'transportation',
+  driver_request_rejected: 'transportation', driver_assigned: 'transportation',
+  load_accepted: 'transportation', load_amendment_acknowledged: 'transportation',
+  load_amendment_required: 'transportation', load_picked_up: 'transportation',
+  load_in_transit: 'transportation', load_delivered: 'transportation',
+  driver_payout: 'transportation',
   driver_document_verified: 'transportation', driver_document_rejected: 'transportation',
   driver_profile_approved: 'transportation',
 
@@ -311,10 +278,16 @@ const createNotification = async (params: CreateNotificationParams) => {
       crm_biometric: metadata?.route || '/crm/biometrics',
       crm_timeproof: metadata?.route || '/crm/biometrics',
       reminder: metadata?.route || '/crm/leads',
-      driver_request: '/settings?tab=drivers',
+      driver_request: '/driver-tracker',
       driver_request_approved: '/driver/loads',
       driver_request_rejected: '/driver/loads',
       driver_assigned: '/driver/loads',
+      load_accepted: metadata?.route || '/driver-tracker',
+      load_amendment_acknowledged: metadata?.route || '/transportation',
+      load_amendment_required: metadata?.route || '/driver',
+      load_picked_up: metadata?.route || '/transportation',
+      load_in_transit: metadata?.route || '/transportation',
+      load_delivered: metadata?.route || '/transportation',
       driver_payout: '/driver/earnings',
       payment_request: metadata?.route || '/customer/payments',
       payment_received: metadata?.route || '/billing',
@@ -390,7 +363,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       },
     };
 
-    if (type === 'driver_request') {
+    if (type === 'driver_request' && metadata?.suppressActions !== true) {
       pushPayload.actions = [
         { action: 'approve', title: 'Approve' },
         { action: 'reject', title: 'Reject' },
@@ -599,7 +572,7 @@ const broadcastNotification = async (params: {
       quote_created: '/transportation?tab=drafts',
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
-      driver_request: '/notifications',
+      driver_request: '/driver-tracker',
       admin_broadcast: '/notifications',
     };
     const broadcastPayload = { title, body: message, tag: category, source: CATEGORY_PUSH_LABELS[category], data: { url: metadata?.route || urlMap[type] || '/notifications' } };

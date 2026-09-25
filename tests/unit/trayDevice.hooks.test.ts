@@ -5,6 +5,8 @@ const mockOrgFindById = jest.fn();
 const mockUserExists = jest.fn();
 const mockUserFindByIdAndUpdate = jest.fn();
 const mockUserFindById = jest.fn();
+const mockUserFindOneAndUpdate = jest.fn();
+const mockLoadFind = jest.fn();
 
 jest.mock('../../src/services/trayDevice.service', () => ({
   revokeUserTrayDevices: mockRevokeUser,
@@ -13,8 +15,15 @@ jest.mock('../../src/services/trayDevice.service', () => ({
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: { findOne: mockCrmFindOne } }));
 jest.mock('../../src/models/User.model', () => ({
   __esModule: true,
-  default: { exists: mockUserExists, findByIdAndUpdate: mockUserFindByIdAndUpdate, findById: mockUserFindById },
+  default: {
+    exists: mockUserExists,
+    findByIdAndUpdate: mockUserFindByIdAndUpdate,
+    findOneAndUpdate: mockUserFindOneAndUpdate,
+    findById: mockUserFindById,
+  },
 }));
+// removeMember cleans up the member's unassigned loads inside a transaction.
+jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: { find: mockLoadFind, deleteMany: jest.fn() } }));
 jest.mock('../../src/models/Organization.model', () => ({ __esModule: true, default: { findById: mockOrgFindById } }));
 jest.mock('../../src/models/TimeLog.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/Absence.model', () => ({ __esModule: true, default: {} }));
@@ -52,6 +61,7 @@ jest.mock('../../src/config/subscriptionTiers', () => ({
   TIER_LABELS: {},
 }));
 
+import mongoose from 'mongoose';
 import crmController from '../../src/controllers/crm.controller';
 import { removeMember } from '../../src/controllers/organization.controller';
 
@@ -150,6 +160,14 @@ describe('tray device revocation hooks', () => {
       mockOrgFindById.mockResolvedValue({ ownerId: { toString: () => 'owner1' }, name: 'Org' });
       mockUserExists.mockResolvedValue({ _id: 'u2' });
       mockUserFindByIdAndUpdate.mockResolvedValue({});
+      mockUserFindOneAndUpdate.mockResolvedValue({ _id: 'u2' });
+      mockLoadFind.mockReturnValue({
+        select: () => ({ session: () => ({ lean: () => Promise.resolve([]) }) }),
+      });
+      jest.spyOn(mongoose, 'startSession').mockResolvedValue({
+        withTransaction: async (fn: () => Promise<unknown>) => fn(),
+        endSession: jest.fn(),
+      } as any);
     });
 
     it('revokes the linked computers by email after the member is removed', async () => {
@@ -163,6 +181,7 @@ describe('tray device revocation hooks', () => {
       mockUserExists.mockResolvedValue(null);
       await run(removeMember, request);
       expect(mockUserFindByIdAndUpdate).not.toHaveBeenCalled();
+      expect(mockUserFindOneAndUpdate).not.toHaveBeenCalled();
       expect(mockRevokeEmail).not.toHaveBeenCalled();
     });
   });

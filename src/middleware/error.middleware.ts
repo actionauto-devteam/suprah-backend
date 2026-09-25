@@ -3,11 +3,23 @@ import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import { streamLogToAdmins } from '../utils/socketEmitter';
 import { isDbOutageError, isQuotaExceededError, DB_OUTAGE_MESSAGE } from '../utils/dbOutage';
+import { mapKnownError } from '../utils/errorMapping';
+import { redactForLog } from '../utils/logRedaction';
 
 const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
   let statusCode = err.statusCode || 500;
   let message = err.message || 'Internal Server Error';
   let errorType: string | undefined;
+  let errors: unknown[] | undefined = Array.isArray(err?.errors) && err.errors.length > 0 ? err.errors : undefined;
+
+  // Malformed ids, schema validation and duplicate keys are client errors, not 500s.
+  const mapped = mapKnownError(err);
+  if (mapped) {
+    statusCode = mapped.statusCode;
+    message = mapped.message;
+    errorType = mapped.errorType;
+    errors = mapped.errors;
+  }
 
   if (isDbOutageError(err)) {
     statusCode = 503;
@@ -22,7 +34,7 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
     code: statusCode,
     message,
     ...(errorType && { errorType }),
-    ...(Array.isArray(err.errors) && err.errors.length > 0 && { errors: err.errors }),
+    ...(errors && errors.length > 0 && { errors }),
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   };
 
@@ -30,9 +42,10 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
     err,
     url: req.url,
     method: req.method,
-    body: req.body,
+    // Never log raw request data: bodies carry GPS, signatures, chat text and credentials.
+    body: redactForLog(req.body),
     params: req.params,
-    query: req.query
+    query: redactForLog(req.query)
   }, 'Unhandled Error');
 
   if (statusCode >= 500) {

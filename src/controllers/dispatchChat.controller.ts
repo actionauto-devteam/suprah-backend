@@ -15,6 +15,7 @@ import {
   touchDispatchChatThread,
 } from "../services/dispatchChat.service";
 import logger from "../utils/logger";
+import { recordAvailableLoadInquiry } from "../services/availableLoadInquiry.service";
 import { safeCreateNotification } from "../utils/safeNotification";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
@@ -575,8 +576,16 @@ async function serializeMessage(message: any, viewer?: IUser) {
       message?.messageType === "system" &&
       message?.systemEvent?.metadata?.hidePerformerIdentityFromDriver === true,
   );
+  const hideSelectedDriverIdentityFromDriver = Boolean(
+    viewer?.role === "driver" &&
+      message?.messageType === "system" &&
+      message?.systemEvent?.metadata?.hideSelectedDriverIdentityFromDriver === true,
+  );
+  const requiresDriverPrivacyRedaction =
+    hidePerformerIdentityFromDriver ||
+    hideSelectedDriverIdentityFromDriver;
 
-  if (hidePerformerIdentityFromDriver) {
+  if (requiresDriverPrivacyRedaction) {
     const driverSafeMessage = String(
       message.systemEvent?.metadata?.audienceMessages?.driver ??
         message.systemEvent?.message ??
@@ -587,33 +596,40 @@ async function serializeMessage(message: any, viewer?: IUser) {
       ...(message.systemEvent?.metadata ?? {}),
     } as Record<string, any>;
 
-    // A same-organization support member is authorized to perform the action,
-    // but the affected driver has no direct relationship with that staff user.
-    // Do not merely hide the name in React: remove the identity from the API
-    // payload too so it is not recoverable through DevTools/network inspection.
-    for (const key of [
-      "actorId",
-      "actorName",
-      "performedByUserId",
-      "performedByName",
-      "sentByUserId",
-      "sentByName",
-      "newDriverId",
-      "newDriverName",
-    ]) {
-      delete safeMetadata[key];
+    // Redact at the API boundary, not only in React. Performer privacy and
+    // selected-driver privacy are separate policies: Driver X may know
+    // Dispatcher A while still being forbidden from learning Driver Y.
+    if (hidePerformerIdentityFromDriver) {
+      for (const key of [
+        "actorId",
+        "actorName",
+        "performedByUserId",
+        "performedByName",
+        "sentByUserId",
+        "sentByName",
+        "newDriverId",
+        "newDriverName",
+      ]) {
+        delete safeMetadata[key];
+      }
+
+      serializedSender = {
+        id: "organization-dispatch",
+        name: "Another dispatcher",
+        email: "",
+        role: "dispatcher",
+      };
     }
+
+    if (hideSelectedDriverIdentityFromDriver) {
+      delete safeMetadata.selectedDriverId;
+      delete safeMetadata.selectedDriverName;
+    }
+
     safeMetadata.audienceMessages = {
       driver: driverSafeMessage,
     };
     safeMetadata.privacyRedacted = true;
-
-    serializedSender = {
-      id: "organization-dispatch",
-      name: "Another dispatcher",
-      email: "",
-      role: "dispatcher",
-    };
     serializedSystemEvent = {
       ...(message.systemEvent ?? {}),
       message: driverSafeMessage,
@@ -932,6 +948,23 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
     driverId: driver._id,
   });
   const thread: any = await seedThreadActivityFromSafeLegacy(ensuredThread);
+
+  // Only after the existing load availability and exact participant checks.
+  const inquiry = await recordAvailableLoadInquiry({ organizationId, thread, driver, load });
+  if (inquiry) {
+    await touchDispatchChatThread({ threadId: thread._id, senderId: actor._id,
+      messageType: "system", content: inquiry.content, at: inquiry.createdAt });
+    await inquiry.populate("senderId", "name email role");
+    emitToDispatchChatThreadParticipants(thread, "dispatch-chat:message",
+      await serializeMessage(inquiry.toObject(), actor));
+    thread.lastMessageAt = inquiry.createdAt;
+    thread.lastMessagePreview = inquiry.content;
+    thread.lastMessageType = "system";
+    void notifyDispatchChatRecipient({ actor, organizationId, thread,
+      messageId: String(inquiry._id), preview: inquiry.content }).catch((error) => {
+        logger.error({ error, threadId: String(thread._id) }, "[DispatchChat] Inquiry notification failed");
+      });
+  }
 
   const unreadCount = await DispatchChatMessage.countDocuments({
     organizationId,

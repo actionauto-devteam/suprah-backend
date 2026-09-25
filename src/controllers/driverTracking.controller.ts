@@ -89,6 +89,17 @@ function parseDriverSignature(body: unknown) {
 
 const getUser = (req: ExpressRequest) => req.user as IUser;
 
+const buildDriverTrackerLoadRoute = (
+  loadId: unknown,
+  driverId: unknown,
+  loadNumber?: unknown,
+) => {
+  const safeLoadId = String(loadId ?? "").trim();
+  const safeDriverId = String(driverId ?? "").trim();
+  const safeLoadNumber = String(loadNumber ?? safeLoadId).trim() || safeLoadId;
+  return `/driver-tracker?loadInquiryId=${encodeURIComponent(safeLoadId)}&inquiryDriverId=${encodeURIComponent(safeDriverId)}&inquiryLoadNumber=${encodeURIComponent(safeLoadNumber)}`;
+};
+
 
 function assignmentCompatibilityOverrides(load: any) {
   const stored = load?.assignmentCompatibilityOverrides;
@@ -161,6 +172,46 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
       }
     : undefined;
 
+  const proofOfPickup = source.proofOfPickup
+    ? {
+        submittedAt: source.proofOfPickup.submittedAt ?? null,
+        note: source.proofOfPickup.note ?? "",
+      }
+    : undefined;
+
+  const pricingEnabled = source.pricing?.isPricingEnabled !== false;
+  const pricingVisible = source.pricing?.isVisibleToDriver !== false;
+  const driverPricing = source.pricing
+    ? !pricingEnabled
+      ? {
+          // Dispatch intentionally skipped compensation. Preserve route distance
+          // but never synthesize a zero-dollar price.
+          miles: source.pricing.miles ?? null,
+          isPricingEnabled: false,
+          isVisibleToDriver: false,
+        }
+      : pricingVisible
+        ? source.postType === "assign-carrier"
+          ? {
+              // Direct assignments expose one authoritative compensation value.
+              miles: source.pricing.miles ?? null,
+              carrierPayAmount: source.pricing.carrierPayAmount ?? null,
+              isPricingEnabled: true,
+              isVisibleToDriver: true,
+            }
+          : {
+              ...source.pricing,
+              isPricingEnabled: true,
+              isVisibleToDriver: true,
+            }
+        : {
+            // Route distance is operational, not compensation.
+            miles: source.pricing.miles ?? null,
+            isPricingEnabled: true,
+            isVisibleToDriver: false,
+          }
+    : undefined;
+
   const {
     orgId: _legacyOrgId,
     createdBy: _createdBy,
@@ -170,6 +221,7 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
     assignmentCompatibilityOverrides: _assignmentCompatibilityOverrides,
     driverAmendments: _driverAmendments,
     driverRequests: _driverRequests,
+    pricing: _pricing,
     notes: _staffNotes,
     ...rest
   } = source;
@@ -177,8 +229,10 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
   return {
     ...rest,
     vehicles,
+    ...(driverPricing ? { pricing: driverPricing } : {}),
     ...(contract ? { contract } : {}),
     ...(driverContract ? { driverContract } : {}),
+    ...(proofOfPickup ? { proofOfPickup } : {}),
     ...(proofOfDelivery ? { proofOfDelivery } : {}),
     // Opaque material version only; internal assignment fingerprints and
     // dispatcher override decisions never leave the server.
@@ -197,12 +251,29 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
             materialVersionBefore: amendment.materialVersionBefore ?? null,
             materialVersionAfter: amendment.materialVersionAfter ?? null,
             changes: Array.isArray(amendment.changes)
-              ? amendment.changes.map((change: any) => ({
-                  field: String(change.field ?? ""),
-                  label: String(change.label ?? "Load Details"),
-                  before: String(change.before ?? ""),
-                  after: String(change.after ?? ""),
-                }))
+              ? amendment.changes.map((change: any) => {
+                  const field = String(change.field ?? "");
+                  const label = String(change.label ?? "Load Details");
+
+                  // A hidden-pricing load may still require a driver
+                  // acknowledgement when its actual compensation changes, but
+                  // the amendment payload must not reveal the hidden amount.
+                  if (!pricingVisible && field === "pricing") {
+                    return {
+                      field,
+                      label,
+                      before: "Pricing hidden by Dispatch",
+                      after: "Pricing hidden by Dispatch",
+                    };
+                  }
+
+                  return {
+                    field,
+                    label,
+                    before: String(change.before ?? ""),
+                    after: String(change.after ?? ""),
+                  };
+                })
               : [],
           }))
       : [],
@@ -293,19 +364,45 @@ function sanitizeAvailableLoadForDriver(load: any, driverId: string) {
       }
     : undefined;
 
+  const pricingEnabled = source.pricing?.isPricingEnabled !== false;
+  const pricingVisible = source.pricing?.isVisibleToDriver !== false;
   const pricing = source.pricing
-    ? {
-        // These are the driver's decision-making fields.
-        miles: source.pricing.miles ?? null,
-        pricePerMile: source.pricing.pricePerMile ?? null,
-        carrierPayAmount: source.pricing.carrierPayAmount ?? null,
+    ? !pricingEnabled
+      ? {
+          miles: source.pricing.miles ?? null,
+          isPricingEnabled: false,
+          isVisibleToDriver: false,
+        }
+      : pricingVisible
+        ? source.postType === "assign-carrier"
+          ? {
+              // Available loads created from Assign Carrier also use one flat
+              // Total Driver Pay. Never expose legacy $/mi or COD fields here.
+              miles: source.pricing.miles ?? null,
+              carrierPayAmount: source.pricing.carrierPayAmount ?? null,
+              isPricingEnabled: true,
+              isVisibleToDriver: true,
+            }
+          : {
+              // Load Board keeps the existing posted compensation structure.
+              miles: source.pricing.miles ?? null,
+              pricePerMile: source.pricing.pricePerMile ?? null,
+              carrierPayAmount: source.pricing.carrierPayAmount ?? null,
+              isPricingEnabled: true,
+              isVisibleToDriver: true,
 
-        // Internal estimate, cash-collection and balance details unlock only
-        // after assignment.
-        estimatedRate: undefined,
-        copCodAmount: undefined,
-        balanceAmount: undefined,
-      }
+              // Internal estimate, cash-collection and balance details unlock only
+              // after assignment.
+              estimatedRate: undefined,
+              copCodAmount: undefined,
+              balanceAmount: undefined,
+            }
+        : {
+            // Hidden pricing must be redacted server-side, not merely hidden in UI.
+            miles: source.pricing.miles ?? null,
+            isPricingEnabled: true,
+            isVisibleToDriver: false,
+          }
     : undefined;
 
   return {
@@ -330,6 +427,7 @@ function sanitizeAvailableLoadForDriver(load: any, driverId: string) {
       contactDetailsAvailableAfterAssignment: true,
       fullVinAvailableAfterAssignment: true,
       privateInstructionsAvailableAfterAssignment: true,
+      pricingVisibleToDriver: pricingVisible,
     },
 
     hasRequested: Boolean(myRequest),
@@ -632,18 +730,28 @@ async function findActiveDispatcherForLoad(
     role: { $in: ["employee", "admin", "super_admin"] },
     isActive: true,
   })
-    .select("_id role organizationId name email")
+    .select("_id role organizationId dispatcherOrganizationIds name email")
     .lean();
 
   if (!dispatcher) return null;
 
-  // Normal organization staff must belong to the Load's organization.
-  // A global super_admin remains a valid explicit owner when they performed
-  // the assignment through the organization context.
+  const targetOrganizationId = String(load.organizationId ?? "");
+  const directOrganizationMatch =
+    String(dispatcher.organizationId ?? "") === targetOrganizationId;
+  const scopedDispatcherMatch =
+    dispatcher.role === "employee" &&
+    Array.isArray(dispatcher.dispatcherOrganizationIds) &&
+    dispatcher.dispatcherOrganizationIds.some(
+      (id: unknown) => String(id) === targetOrganizationId,
+    );
+
+  // Keep the same explicit dispatcherOrganizationIds capability recognized by
+  // trackingOrganizationOnly. A designated cross-org dispatcher must remain a
+  // valid responsible dispatcher after assignment/reconfirmation.
   if (
     dispatcher.role !== "super_admin" &&
-    String(dispatcher.organizationId ?? "") !==
-      String(load.organizationId ?? "")
+    !directOrganizationMatch &&
+    !scopedDispatcherMatch
   ) {
     return null;
   }
@@ -1912,7 +2020,6 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
           loadId: load._id.toString(),
           loadNumber: load.loadNumber,
           driverId: requester.driverId,
-          selectedDriverId: driverId,
           assignmentResolution: "not_selected",
           route: "/driver",
         },
@@ -1941,6 +2048,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
             driverName: requester.driverName,
             selectedDriverId: driverId,
             selectedDriverName: assignedDriverName,
+            hideSelectedDriverIdentityFromDriver: true,
             originalDispatcherId: requestDispatcherId || dispatcherId,
             unreadForParticipantIds: [dispatcherId, requester.driverId],
             audienceMessages: {
@@ -1973,6 +2081,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
             driverName: requester.driverName,
             selectedDriverId: driverId,
             selectedDriverName: assignedDriverName,
+            hideSelectedDriverIdentityFromDriver: true,
             originalDispatcherId: requestDispatcherId || null,
             performedByUserId: dispatcherId,
             performedByName: dispatcherName,
@@ -2011,6 +2120,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
               driverName: requester.driverName,
               selectedDriverId: driverId,
               selectedDriverName: assignedDriverName,
+              hideSelectedDriverIdentityFromDriver: true,
               originalDispatcherId: creatorDispatcherId,
               performedByUserId: dispatcherId,
               performedByName: dispatcherName,
@@ -2083,6 +2193,11 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
               overrideAvailability: Boolean(overrideAvailability),
               overrideCapacity: Boolean(overrideCapacity),
             },
+          },
+          $unset: {
+            proofOfPickup: "",
+            assignmentReconfirmedAt: "",
+            assignmentReconfirmedBy: "",
           },
         },
         assignmentOutbox,
@@ -2533,6 +2648,11 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
               overrideCapacity: Boolean(overrideCapacity),
             },
           },
+          $unset: {
+            proofOfPickup: "",
+            assignmentReconfirmedAt: "",
+            assignmentReconfirmedBy: "",
+          },
         },
         reassignmentOutbox,
       ),
@@ -2802,6 +2922,9 @@ const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
           dispatchOwnerId: "",
           assignmentMaterialFingerprint: "",
           assignmentCompatibilityOverrides: "",
+          assignmentReconfirmedAt: "",
+          assignmentReconfirmedBy: "",
+          proofOfPickup: "",
         },
       },
       removalOutbox,
@@ -3156,6 +3279,7 @@ const getAvailableLoads = asyncHandler(async (req: ExpressRequest, res: ExpressR
   const requestedOrgId = req.query.organizationId as string | undefined;
   const filter: any = {
     status: "Posted",
+    "additionalInfo.visibility": { $ne: "private" },
     $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
   };
   if (requestedOrgId && mongoose.isValidObjectId(requestedOrgId)) {
@@ -3249,7 +3373,44 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
   if (!load) throw new ApiError(404, "Load not found");
 
   if (user.role !== "driver") {
-    return res.status(200).json(new ApiResponse(200, load, "Load fetched"));
+    const currentMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+    const activeDispatchOwner = await findActiveDispatcherForLoad(
+      load,
+      String((load as any).dispatchOwnerId ?? ""),
+    );
+    const storedMaterialVersion = String(
+      (load as any).assignmentMaterialFingerprint ?? "",
+    ).trim();
+    const assignedAtMs = (load as any).assignedAt
+      ? new Date((load as any).assignedAt).getTime()
+      : Number.NaN;
+    const updatedAtMs = (load as any).updatedAt
+      ? new Date((load as any).updatedAt).getTime()
+      : Number.NaN;
+    const legacyChangedAfterAssignment =
+      !storedMaterialVersion &&
+      Number.isFinite(assignedAtMs) &&
+      Number.isFinite(updatedAtMs) &&
+      updatedAtMs > assignedAtMs + 2000;
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          ...(load as any),
+          acceptanceMaterialVersion: currentMaterialVersion,
+          requiresDispatchReconfirmation:
+            load.status === "Assigned" &&
+            (
+              !activeDispatchOwner ||
+              (storedMaterialVersion
+                ? storedMaterialVersion !== currentMaterialVersion
+                : legacyChangedAfterAssignment)
+            ),
+        },
+        "Load fetched",
+      ),
+    );
   }
 
   const driverId = user._id.toString();
@@ -3261,7 +3422,9 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
       (request: any) => String(request?.driverId ?? "") === driverId,
     );
   const isAvailableBoardLoad =
-    load.status === "Posted" && !(load as any).assignedDriverId;
+    load.status === "Posted" &&
+    !(load as any).assignedDriverId &&
+    (load as any).additionalInfo?.visibility !== "private";
 
   // Object-level authorization: knowing a Load id is never enough. A driver
   // can read a load only when they are the assigned participant, have an
@@ -3271,11 +3434,18 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     throw new ApiError(404, "Load not found");
   }
 
-  const [profile, location] = await Promise.all([
+  const [profile, location, pendingReleaseRequest] = await Promise.all([
     DriverProfile.findOne({ userId: user._id }).lean(),
     DriverLocation.findOne({ userId: user._id })
       .select("coords isSharing lastSeenAt")
       .lean(),
+    isAssignedDriver
+      ? LoadReleaseRequest.findOne({
+          loadId: (load as any)._id,
+          driverId: user._id,
+          status: "pending",
+        }).lean()
+      : Promise.resolve(null),
   ]);
 
   const compatibility =
@@ -3295,6 +3465,7 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
       {
         ...driverLoadView,
         compatibility,
+        releaseRequest: releaseRequestSummary(pendingReleaseRequest),
       },
       "Load fetched",
     ),
@@ -3309,20 +3480,180 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
   const {
     note,
     overrideAvailability = false,
+    action,
   } = req.body as {
     note?: string;
     overrideAvailability?: boolean;
+    action?: "cancel";
   };
-  const signature = parseDriverSignature(req.body);
 
   // Drivers are a shared pool with no org of their own — the load being
   // requested determines which dealership's rules apply, not req.orgId.
   let load = await Load.findOne({ _id: req.params.id });
   if (!load) throw new ApiError(404, "Load not found");
-  if (load.status !== "Posted" || load.assignedDriverId) {
+  const organizationId = load.organizationId as unknown as string;
+  const driverId = user._id.toString();
+  const driverName = String(user.name || "Driver").trim() || "Driver";
+
+  // Cancellation deliberately reuses the existing request endpoint so the
+  // route contract does not change. A pending request never takes ownership of
+  // the Load: removing only this driver's embedded request restores the Load
+  // to its original Posted/unassigned workflow while preserving postType,
+  // visibility, pricing, route, and every other source field.
+  if (action === "cancel") {
+    if (load.status !== "Posted" || load.assignedDriverId) {
+      throw new ApiError(
+        409,
+        "This load request can no longer be cancelled because the load is no longer available. Refresh your requests to see the current status.",
+      );
+    }
+
+    const hasPendingRequest = Array.isArray((load as any).driverRequests) &&
+      (load as any).driverRequests.some(
+        (request: any) => String(request?.driverId ?? "") === driverId,
+      );
+    if (!hasPendingRequest) {
+      throw new ApiError(409, "You no longer have a pending request for this load.");
+    }
+
+    const creatorDispatcher = await findActiveDispatcherForLoad(
+      load,
+      String((load as any).createdBy ?? ""),
+    );
+    const creatorDispatcherId = creatorDispatcher
+      ? String(creatorDispatcher._id)
+      : "";
+    const creatorDispatcherName = creatorDispatcher
+      ? String(creatorDispatcher.name || "Dispatch").trim() || "Dispatch"
+      : "";
+
+    const cancellationOutbox: any[] = [
+      lifecycleSyncEvent(organizationId, [driverId], load._id.toString()),
+      lifecycleActivityEvent({
+        userId: driverId,
+        organizationId,
+        type: "load_updated",
+        title: "Load Request Cancelled",
+        description: `${driverName} cancelled the request for load ${load.loadNumber}`,
+        loadId: load._id.toString(),
+        metadata: { driverId },
+      }),
+    ];
+
+    if (creatorDispatcher) {
+      cancellationOutbox.push(
+        lifecycleUserNotificationEvent({
+          userId: creatorDispatcherId,
+          organizationId,
+          type: "driver_request",
+          title: "Load Request Cancelled",
+          message: `${driverName} cancelled the request for load ${load.loadNumber}.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            driverId,
+            requestResolution: "cancelled_by_driver",
+            // This is an informational resolution, not an actionable request.
+            // Prevent web-push Approve/Reject buttons from being attached.
+            suppressActions: true,
+            route: buildDriverTrackerLoadRoute(load._id, driverId, load.loadNumber),
+          },
+        }),
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId: creatorDispatcherId,
+          driverId,
+          eventType: "driver_load_request_cancelled",
+          title: "Load Request Cancelled",
+          message: `${driverName} cancelled the request for load ${load.loadNumber}.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_cancelled_by_driver",
+            actorId: driverId,
+            actorName: driverName,
+            actorRole: "driver",
+            driverId,
+            driverName,
+            dispatcherId: creatorDispatcherId,
+            dispatcherName: creatorDispatcherName,
+            unreadForParticipantIds: [creatorDispatcherId],
+            audienceMessages: {
+              dispatcher: `${driverName} cancelled the request for load ${load.loadNumber}.`,
+              driver: `You cancelled your request for load ${load.loadNumber}.`,
+            },
+          },
+          performedByUserId: driverId,
+          performedByName: driverName,
+          performedByRole: "driver",
+        }),
+      );
+    }
+
+    const cancelledLoad = await Load.findOneAndUpdate(
+      {
+        _id: load._id,
+        organizationId,
+        status: "Posted",
+        assignedDriverId: null,
+        "driverRequests.driverId": user._id,
+      },
+      appendLoadLifecycleOutbox(
+        {
+          $pull: { driverRequests: { driverId: user._id } },
+        },
+        cancellationOutbox,
+      ) as any,
+      { new: true, runValidators: true },
+    );
+
+    if (!cancelledLoad) {
+      throw new ApiError(
+        409,
+        "This load request changed while it was being cancelled. Refresh your requests and try again.",
+      );
+    }
+
+    await flushLifecycleOutbox(cancelledLoad._id.toString());
+
+    // A removed/inactive creator cannot own a valid private Dispatch Chat
+    // thread. In that legacy case, still inform the organization's admins.
+    if (!creatorDispatcher) {
+      try {
+        await notifyOrgAdminsLoose(
+          organizationId,
+          "driver_request",
+          "Load Request Cancelled",
+          `${driverName} cancelled the request for load ${cancelledLoad.loadNumber}.`,
+          {
+            loadId: cancelledLoad._id.toString(),
+            loadNumber: cancelledLoad.loadNumber,
+            driverId,
+            requestResolution: "cancelled_by_driver",
+            suppressActions: true,
+            route: buildDriverTrackerLoadRoute(cancelledLoad._id, driverId, cancelledLoad.loadNumber),
+          },
+          driverId,
+        );
+      } catch (err) {
+        logger.error({ err }, "Non-fatal: cancelled load-request admin notification failed");
+      }
+    }
+
+    return res.status(200).json(
+      new ApiResponse(200, null, "Load request cancelled"),
+    );
+  }
+
+  const signature = parseDriverSignature(req.body);
+
+  if (
+    load.status !== "Posted" ||
+    load.assignedDriverId ||
+    load.additionalInfo?.visibility === "private"
+  ) {
     throw new ApiError(400, "This load is no longer available");
   }
-  const organizationId = load.organizationId as unknown as string;
 
   await assertDriverCanTakeNewWork(
     user._id.toString(),
@@ -3347,9 +3678,6 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     actor: "driver",
   });
 
-  const driverId = user._id.toString();
-  const driverName =
-    String(user.name || "Driver").trim() || "Driver";
   const creatorDispatcher = await findActiveDispatcherForLoad(
     load,
     String((load as any).createdBy ?? ""),
@@ -3475,6 +3803,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
         driverId: user._id.toString(),
+        route: buildDriverTrackerLoadRoute(load._id, user._id, load.loadNumber),
       },
       user._id.toString(),
     );
@@ -3613,6 +3942,11 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
               overrideAvailability: Boolean(overrideAvailability),
               overrideCapacity: Boolean(overrideCapacity),
             },
+          },
+          $unset: {
+            proofOfPickup: "",
+            assignmentReconfirmedAt: "",
+            assignmentReconfirmedBy: "",
           },
         },
         approvalOutbox,
@@ -4891,6 +5225,165 @@ async function assertNoPendingReleaseRequestForProgression(
   }
 }
 
+// POST /api/driver-tracking/loads/:id/reconfirm-assignment
+// Dispatch revalidates the CURRENT Assigned-load material version after an edit
+// (or repairs missing dispatcher ownership) without changing the assigned driver.
+const reconfirmAssignment = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  const reviewedMaterialVersion = String(
+    (req.body as any)?.reviewedMaterialVersion ?? "",
+  ).trim();
+
+  if (!/^[a-f0-9]{64}$/i.test(reviewedMaterialVersion)) {
+    throw new ApiError(
+      400,
+      "The reviewed load version is invalid. Refresh the assignment and try again.",
+    );
+  }
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, "Load not found");
+  if (load.status !== "Assigned") {
+    throw new ApiError(
+      409,
+      `Only an Assigned load can be reconfirmed. This load is currently ${load.status}.`,
+    );
+  }
+  if (!load.assignedDriverId) {
+    throw new ApiError(409, "This assignment no longer has a driver. Refresh Driver Tracker.");
+  }
+
+  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+  const scopedOrganizations = (user as any)?.dispatcherOrganizationIds;
+  const designatedDispatcher =
+    user.role === "employee" &&
+    Array.isArray(scopedOrganizations) &&
+    scopedOrganizations.some((id: unknown) => String(id) === organizationId);
+  const activeDispatchOwner = await findActiveDispatcherForLoad(
+    load,
+    String(load.dispatchOwnerId ?? ""),
+  );
+  const actorAsDispatcher = await findActiveDispatcherForLoad(
+    load,
+    user._id.toString(),
+  );
+  const responsibleDispatcher =
+    String(activeDispatchOwner?._id ?? "") === user._id.toString();
+  const adminOverride =
+    user.role === "super_admin" ||
+    ["admin", "super_admin"].includes(effectiveRole);
+
+  if (!adminOverride && !responsibleDispatcher && !designatedDispatcher) {
+    throw new ApiError(
+      403,
+      "Only the responsible dispatcher, a designated dispatcher, or an organization administrator can reconfirm this assignment.",
+    );
+  }
+
+  // A reconfirmation should not silently transfer a healthy dispatch
+  // relationship. Keep the current valid owner; repair ownership to the actor
+  // only when the prior owner is missing/inactive/out of scope.
+  const confirmedDispatchOwner = activeDispatchOwner ?? actorAsDispatcher;
+  if (!confirmedDispatchOwner) {
+    throw new ApiError(
+      409,
+      "This assignment has no valid responsible dispatcher. Reconfirm it from an account with dispatcher access to this organization.",
+    );
+  }
+
+  const currentMaterialVersion = getLoadAcceptanceMaterialVersion(load);
+  if (reviewedMaterialVersion !== currentMaterialVersion) {
+    throw new ApiError(
+      409,
+      "This load changed while you were reviewing it. Reload the assignment and review the latest information before confirming.",
+      [
+        {
+          type: "load_assignment_review_stale",
+          requiresFreshReview: true,
+          loadId: load._id.toString(),
+        },
+      ],
+    );
+  }
+
+  const overrides = assignmentCompatibilityOverrides(load);
+  await assertDriverLoadCompatibility({
+    driverId: load.assignedDriverId.toString(),
+    organizationId,
+    load,
+    actor: "dispatcher",
+    overrides: {
+      overrideAvailability: overrides.overrideAvailability,
+      overrideCapacity: overrides.overrideCapacity,
+    },
+  });
+
+  const driverId = load.assignedDriverId.toString();
+  const reconfirmedAt = new Date();
+  const reconfirmOutbox = [
+    lifecycleSyncEvent(organizationId, [driverId], load._id.toString()),
+    lifecycleUserNotificationEvent({
+      userId: driverId,
+      organizationId,
+      type: "general",
+      title: "Assignment Reviewed by Dispatch",
+      message: `Dispatch reviewed the current details for load ${load.loadNumber}. Review the latest load information before accepting.`,
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: `/driver/loads/${load._id.toString()}`,
+        action: "assignment_reconfirmed",
+      },
+    }),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_assigned",
+      title: "Assignment Reconfirmed",
+      description: `Reconfirmed the current material terms for load ${load.loadNumber}`,
+      loadId: load._id.toString(),
+      metadata: { driverId, materialVersion: currentMaterialVersion },
+    }),
+  ];
+
+  const updated = await updateLoadIfCurrent({
+    load,
+    expected: {
+      organizationId,
+      status: "Assigned",
+      assignedDriverId: load.assignedDriverId,
+    },
+    update: appendLoadLifecycleOutbox(
+      {
+        $set: {
+          dispatchOwnerId: confirmedDispatchOwner._id,
+          assignmentMaterialFingerprint: currentMaterialVersion,
+          assignmentReconfirmedAt: reconfirmedAt,
+          assignmentReconfirmedBy: user._id,
+        },
+      },
+      reconfirmOutbox,
+    ),
+    action: "reconfirming the assignment",
+  });
+
+  await flushLifecycleOutbox(updated._id.toString());
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        loadId: updated._id.toString(),
+        acceptanceMaterialVersion: currentMaterialVersion,
+        requiresDispatchReconfirmation: false,
+        assignmentReconfirmedAt: reconfirmedAt,
+      },
+      "Assignment reconfirmed successfully",
+    ),
+  );
+});
+
 // POST /api/driver-tracking/loads/:id/accept  { signatureDataUrl, signerName }
 const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
@@ -5056,7 +5549,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
         driverId: user._id.toString(),
-        route: `/driver-tracker?driverId=${encodeURIComponent(user._id.toString())}`,
+        route: buildDriverTrackerLoadRoute(load._id, user._id, load.loadNumber),
       },
     }),
     lifecycleUserNotificationEvent({
@@ -5152,6 +5645,17 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
     throw new ApiError(400, `Cannot mark pickup from ${load.status} status`);
   }
 
+  const pickupProof = (load as any).proofOfPickup;
+  if (
+    !pickupProof?.imageUrl ||
+    String(pickupProof?.submittedBy ?? "") !== user._id.toString()
+  ) {
+    throw new ApiError(
+      400,
+      "A pickup photo submitted by the currently assigned driver is required before marking this load Picked Up.",
+    );
+  }
+
   assertNoPendingLoadAmendments(load, user._id.toString());
   await assertNoPendingReleaseRequestForProgression(
     load,
@@ -5170,7 +5674,12 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
       type: "load_picked_up",
       title: "Vehicles Picked Up",
       message: `${user.name} picked up load ${load.loadNumber}`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        pickupProofSubmitted: true,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+      },
       excludeUserId: user._id.toString(),
     }),
   ];
@@ -5181,6 +5690,8 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
       organizationId,
       status: "Accepted",
       assignedDriverId: user._id,
+      "proofOfPickup.imageUrl": { $exists: true, $ne: "" },
+      "proofOfPickup.submittedBy": user._id,
     },
     update: appendLoadLifecycleOutbox(
       {
@@ -5229,7 +5740,11 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
       type: "load_in_transit",
       title: "Load In Transit",
       message: `${user.name} started the route for load ${load.loadNumber}`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+      },
       excludeUserId: user._id.toString(),
     }),
   ];
@@ -5321,6 +5836,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
         proofSubmitted: true,
+        route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
       },
       excludeUserId: user._id.toString(),
     }),
@@ -5581,7 +6097,216 @@ const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) =
 };
 
 const requestLoadRelease = asyncHandler(createReleaseRequest);
-const dropLoad = asyncHandler(createReleaseRequest);
+
+// POST /api/driver-tracking/loads/:id/drop
+// Before acceptance, /drop is the driver's explicit rejection of a dispatcher
+// assignment. After acceptance it preserves the existing release-request flow.
+// This keeps the public route stable while making "Reject Load" immediate for
+// an Assigned load and approval-based for operational/accepted loads.
+const dropLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const driverId = user._id.toString();
+  const load: any = await Load.findOne({ _id: req.params.id });
+  if (!load) throw new ApiError(404, "Load not found");
+
+  requireAssignedDriver(load, driverId);
+
+  // Status is authoritative for the current assignment lifecycle. Acceptance
+  // atomically advances Assigned -> Accepted, while historical lifecycle
+  // timestamps may survive an older remove/reassign cycle. Using status avoids
+  // mistaking a stale timestamp for acceptance of the current assignment.
+  if (load.status !== "Assigned") {
+    return createReleaseRequest(req, res);
+  }
+
+  const organizationId = String(load.organizationId);
+  const pendingReleaseRequest = await LoadReleaseRequest.findOne({
+    organizationId,
+    loadId: load._id,
+    driverId,
+    status: "pending",
+  }).lean();
+  if (pendingReleaseRequest) {
+    throw new ApiError(
+      409,
+      "A release request is already awaiting Dispatch for this load. Cancel that request before rejecting the assignment.",
+    );
+  }
+
+  // Resolve the responsible dispatcher without repairing legacy ownership on
+  // the Load first. A repair write would advance updatedAt and invalidate the
+  // revision guard used by the rejection commit below.
+  let dispatcher = await findActiveDispatcherForLoad(
+    load,
+    String((load as any).dispatchOwnerId ?? ""),
+  );
+  if (!dispatcher) {
+    const recoveredDispatcherId =
+      await resolveExplicitDispatchOwnerFromAssignmentHistory({
+        organizationId,
+        driverId,
+        loadId: String(load._id),
+      });
+    dispatcher = await findActiveDispatcherForLoad(
+      load,
+      String(recoveredDispatcherId ?? ""),
+    );
+  }
+
+  const dispatcherId = dispatcher ? String(dispatcher._id) : "";
+  const dispatcherName = dispatcher
+    ? String(dispatcher.name || "Dispatch").trim() || "Dispatch"
+    : "";
+  const driverName = String(user.name || "Driver").trim() || "Driver";
+  const rejectionNote = String((req.body as any)?.message ?? (req.body as any)?.reason ?? "")
+    .trim()
+    .slice(0, 500);
+
+  const rejectionOutbox: any[] = [
+    lifecycleSyncEvent(organizationId, [driverId], load._id.toString()),
+    lifecycleActivityEvent({
+      userId: driverId,
+      organizationId,
+      type: "load_updated",
+      title: "Load Assignment Rejected",
+      description: `${driverName} rejected assignment for load ${load.loadNumber}`,
+      loadId: load._id.toString(),
+      metadata: {
+        driverId,
+        dispatcherId: dispatcherId || null,
+        reason: rejectionNote || null,
+      },
+    }),
+  ];
+
+  if (dispatcher) {
+    rejectionOutbox.push(
+      lifecycleUserNotificationEvent({
+        userId: dispatcherId,
+        organizationId,
+        type: "driver_request",
+        title: "Load Assignment Rejected",
+        message: `${driverName} rejected load ${load.loadNumber}.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          driverId,
+          assignmentResolution: "rejected_by_driver",
+          // The assignment has already been resolved, so push actions would be
+          // stale and misleading on this informational notification.
+          suppressActions: true,
+          route: buildDriverTrackerLoadRoute(load._id, driverId, load.loadNumber),
+        },
+      }),
+      lifecycleDispatchChatEvent({
+        organizationId,
+        dispatcherId,
+        driverId,
+        eventType: "driver_load_assignment_rejected",
+        title: "Load Assignment Rejected",
+        message: `${driverName} rejected load ${load.loadNumber}.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          action: "assignment_rejected_by_driver",
+          actorId: driverId,
+          actorName: driverName,
+          actorRole: "driver",
+          driverId,
+          driverName,
+          dispatcherId,
+          dispatcherName,
+          rejectionReason: rejectionNote || null,
+          unreadForParticipantIds: [dispatcherId],
+          audienceMessages: {
+            dispatcher: `${driverName} rejected load ${load.loadNumber}.`,
+            driver: `You rejected load ${load.loadNumber}.`,
+          },
+        },
+        performedByUserId: driverId,
+        performedByName: driverName,
+        performedByRole: "driver",
+      }),
+    );
+  }
+
+  const updatedLoad: any = await Load.findOneAndUpdate(
+    expectedLoadRevisionFilter(load, {
+      organizationId,
+      status: "Assigned",
+      assignedDriverId: user._id,
+    }),
+    appendLoadLifecycleOutbox(
+      {
+        $set: { status: "Posted" },
+        $unset: {
+          assignedDriverId: "",
+          dispatchOwnerId: "",
+          assignedAt: "",
+          assignmentMaterialFingerprint: "",
+          assignmentCompatibilityOverrides: "",
+          assignmentReconfirmedAt: "",
+          assignmentReconfirmedBy: "",
+          proofOfPickup: "",
+          driverContract: "",
+        },
+      },
+      rejectionOutbox,
+    ) as any,
+    { new: true, runValidators: true },
+  );
+
+  if (!updatedLoad) {
+    throw new ApiError(
+      409,
+      "This assignment changed while it was being rejected. Refresh the load to see the current assignment state.",
+    );
+  }
+
+  await flushLifecycleOutbox(updatedLoad._id.toString());
+
+  if (!dispatcher) {
+    try {
+      await notifyOrgAdminsLoose(
+        organizationId,
+        "driver_request",
+        "Load Assignment Rejected",
+        `${driverName} rejected load ${updatedLoad.loadNumber}. No active responsible dispatcher was available, so administrators were notified.`,
+        {
+          loadId: updatedLoad._id.toString(),
+          loadNumber: updatedLoad.loadNumber,
+          driverId,
+          assignmentResolution: "rejected_by_driver",
+          suppressActions: true,
+          route: buildDriverTrackerLoadRoute(updatedLoad._id, driverId, updatedLoad.loadNumber),
+        },
+        driverId,
+      );
+    } catch (err) {
+      logger.error({ err }, "Non-fatal: rejected assignment admin notification failed");
+    }
+  }
+
+  try {
+    await finalizeDriverStatusChangeIfClear(driverId, organizationId);
+  } catch (err) {
+    logger.error(
+      { err, driverId, loadId: updatedLoad._id },
+      "Non-fatal: failed to finalize driver status after rejecting assignment",
+    );
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        loadId: updatedLoad._id.toString(),
+        status: updatedLoad.status,
+      },
+      "Load assignment rejected and returned to its original available workflow",
+    ),
+  );
+});
 
 // POST /api/driver-tracking/loads/:id/release-request/cancel
 // Driver withdraws only their own still-pending request. This does not mutate
@@ -5713,7 +6438,7 @@ const cancelReleaseRequest = asyncHandler(
             loadId: load._id.toString(),
             loadNumber: load.loadNumber,
             driverId,
-            route: `/driver-tracker?driverId=${encodeURIComponent(driverId)}`,
+            route: buildDriverTrackerLoadRoute(load._id, driverId, load.loadNumber),
             requiresAttention: false,
           },
         });
@@ -6532,6 +7257,7 @@ export default {
   requestLoad,
   approveLoadRequest,
   rejectLoadRequest,
+  reconfirmAssignment,
   acceptLoad,
   markPickedUp,
   startRoute,
