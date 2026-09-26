@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
+import { SIGN_IN_AGAIN } from "../utils/userMessages";
 import User, { IUser } from "../models/User.model";
 import Load from "../models/Load.model";
 import DriverStatusChangeRequest, {
@@ -37,16 +38,16 @@ const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const getUser = (req: ExpressRequest) => req.user as IUser;
 
 const assertDriver = (user: IUser) => {
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
   if (user.role !== "driver") {
-    throw new ApiError(403, "Only drivers can submit status change requests");
+    throw new ApiError(403, "Only driver accounts can request a Work Availability change.");
   }
 };
 
 const assertStaff = (user: IUser) => {
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
   if (!STAFF_ROLES.includes(user.role)) {
-    throw new ApiError(403, "Staff access required");
+    throw new ApiError(403, "Only dispatch staff can review Work Availability requests.");
   }
 };
 
@@ -54,7 +55,7 @@ const parseOptionalDate = (value: unknown) => {
   if (!value) return undefined;
   const parsed = new Date(String(value));
   if (Number.isNaN(parsed.getTime())) {
-    throw new ApiError(400, "A valid date/time is required");
+    throw new ApiError(400, "Enter a valid date and time.");
   }
   return parsed;
 };
@@ -328,7 +329,7 @@ async function uploadAttachments(
       } catch (uploadError) {
         throw new ApiError(
           503,
-          "Document storage is not configured. Contact an administrator before uploading attachments.",
+          "Attachment uploads are temporarily unavailable. Please try again later, or contact your administrator if this continues.",
         );
       }
 
@@ -518,7 +519,7 @@ const getOrganizationRequests = asyncHandler(
 
 const getRequestById = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
   const organizationId = req.orgId as string;
 
   const request: any = await DriverStatusChangeRequest.findOne({
@@ -531,13 +532,13 @@ const getRequestById = asyncHandler(async (req: ExpressRequest, res: ExpressResp
       "loadNumber status pickupLocation deliveryLocation assignedDriverId",
     );
 
-  if (!request) throw new ApiError(404, "Status change request not found");
+  if (!request) throw new ApiError(404, "This Work Availability request is no longer available. Refresh the page.");
 
   const populatedDriverId: any = request.driverId as any;
   const isOwner = String(populatedDriverId?._id ?? populatedDriverId) === String(user._id);
   const isStaff = STAFF_ROLES.includes(user.role);
   if (!isOwner && !isStaff) {
-    throw new ApiError(403, "Access denied");
+    throw new ApiError(403, "You don't have access to this Work Availability request.");
   }
 
   // Staff may review only this organization's loads. Other organizations'
@@ -578,16 +579,16 @@ const createRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     : undefined;
 
   if (!( ["on_leave", "maintenance"] as string[]).includes(requestedStatus)) {
-    throw new ApiError(400, "Requested status must be On Leave or In Shop");
+    throw new ApiError(400, "Choose On Leave or In Shop for your Work Availability request.");
   }
   if (!DRIVER_STATUS_REQUEST_PRIORITIES.includes(priority)) {
-    throw new ApiError(400, "Invalid status request priority");
+    throw new ApiError(400, "Choose whether this is a standard or an emergency request.");
   }
   if (reason && !DRIVER_STATUS_REQUEST_REASONS.includes(reason as any)) {
-    throw new ApiError(400, "Invalid status request reason");
+    throw new ApiError(400, "Choose a reason for your request from the list.");
   }
   if (priority === "standard" && !reason) {
-    throw new ApiError(400, "A reason is required for a standard status change request");
+    throw new ApiError(400, "Choose a reason for your request.");
   }
 
   const statusContext = await getDriverStatusContext(
@@ -608,7 +609,7 @@ const createRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
   });
   if (existing) {
-    throw new ApiError(409, "You already have an active Work Availability request");
+    throw new ApiError(409, "You already have a Work Availability request in progress. Update or cancel that request instead of creating a new one.");
   }
 
   const activeLoads: any[] = await Load.find({
@@ -647,7 +648,7 @@ const createRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     if (!organizationId) {
       throw new ApiError(
         409,
-        `Load ${load.loadNumber || load._id} is missing organization ownership. Dispatch must correct the load before Work Availability can change safely.`,
+        `Load ${load.loadNumber || "(no load number)"} isn't linked to an organization, so your Work Availability can't change safely yet. Ask Dispatch to correct the load.`,
       );
     }
     const current = loadsByOrganization.get(organizationId) ?? [];
@@ -754,7 +755,7 @@ const updateRequestDetails = asyncHandler(
       driverId: user._id,
       status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
     });
-    if (!request) throw new ApiError(404, "Active Work Availability request not found");
+    if (!request) throw new ApiError(404, "You don't have an active Work Availability request to update.");
 
     const siblings: any[] = request.transitionGroupId
       ? await DriverStatusChangeRequest.find({
@@ -768,7 +769,7 @@ const updateRequestDetails = asyncHandler(
     if (req.body.reason) {
       const reason = String(req.body.reason);
       if (!DRIVER_STATUS_REQUEST_REASONS.includes(reason as any)) {
-        throw new ApiError(400, "Invalid status request reason");
+        throw new ApiError(400, "Choose a reason for your request from the list.");
       }
       nextReason = reason;
     }
@@ -789,7 +790,7 @@ const updateRequestDetails = asyncHandler(
     const currentAttachmentCount = request.attachments?.length ?? 0;
     const remainingSlots = Math.max(0, 5 - currentAttachmentCount);
     if (files.length && remainingSlots === 0) {
-      throw new ApiError(400, "A Work Availability request can have up to 5 attachments");
+      throw new ApiError(400, "You can attach up to 5 files to a Work Availability request.");
     }
 
     const newAttachments = files.length
@@ -850,7 +851,7 @@ const cancelRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     _id: req.params.requestId,
     driverId: user._id,
   });
-  if (!request) throw new ApiError(404, "Work Availability request not found");
+  if (!request) throw new ApiError(404, "This Work Availability request is no longer available. Refresh the page.");
 
   const siblings: any[] = request.transitionGroupId
     ? await DriverStatusChangeRequest.find({
@@ -909,7 +910,7 @@ const approveRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResp
     _id: req.params.requestId,
     organizationId,
   });
-  if (!request) throw new ApiError(404, "Work Availability request not found");
+  if (!request) throw new ApiError(404, "This Work Availability request is no longer available. Refresh the page.");
   if (request.priority === "emergency") {
     throw new ApiError(
       409,
@@ -917,7 +918,7 @@ const approveRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResp
     );
   }
   if (request.status !== "pending") {
-    throw new ApiError(409, `This request is already ${request.status.replace(/_/g, " ")}`);
+    throw new ApiError(409, `This request was already ${request.status.replace(/_/g, " ")}. Refresh the page to see its current status.`);
   }
 
   const activeLoads: any[] = await Load.find({
@@ -931,7 +932,7 @@ const approveRequest = asyncHandler(async (req: ExpressRequest, res: ExpressResp
 
   const rawLoadHandling = String(req.body?.loadHandling || "reassign");
   if (!DRIVER_STATUS_LOAD_HANDLING_OPTIONS.includes(rawLoadHandling as any)) {
-    throw new ApiError(400, "Choose a valid load handling option");
+    throw new ApiError(400, "Choose what should happen to the driver's active loads.");
   }
   const loadHandling = rawLoadHandling as DriverStatusLoadHandlingDecision;
   const retainedGpsRequired =
@@ -1107,14 +1108,14 @@ const rejectRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
   const reason = String(req.body.reason || "").trim();
 
   if (reason.length < 3) {
-    throw new ApiError(400, "A rejection reason is required");
+    throw new ApiError(400, "Enter a reason for declining this request.");
   }
 
   const request: any = await DriverStatusChangeRequest.findOne({
     _id: req.params.requestId,
     organizationId,
   });
-  if (!request) throw new ApiError(404, "Work Availability request not found");
+  if (!request) throw new ApiError(404, "This Work Availability request is no longer available. Refresh the page.");
   if (request.priority === "emergency") {
     throw new ApiError(
       409,
@@ -1122,7 +1123,7 @@ const rejectRequest = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
     );
   }
   if (request.status !== "pending") {
-    throw new ApiError(409, "Only pending requests can be rejected");
+    throw new ApiError(409, `Only pending requests can be declined. This request is already ${request.status.replace(/_/g, " ")}.`);
   }
 
   request.status = "rejected";

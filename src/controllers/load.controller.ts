@@ -3,6 +3,11 @@
     import { asyncHandler } from "../utils/asyncHandler";
     import { ApiResponse } from "../utils/ApiResponse";
     import { ApiError } from "../utils/ApiError";
+    import {
+      LOAD_NOT_FOUND,
+      LOAD_UNAVAILABLE_FOR_DRIVER,
+      describeValidationIssues,
+    } from "../utils/userMessages";
     import Load from "../models/Load.model";
     import Vehicle from "../models/Vehicle.model";
     import User, { IUser } from "../models/User.model";
@@ -16,7 +21,7 @@
     } from "../utils/calculations";
     import { storageService, BucketType } from "../services/storage.service";
     import { getSignedProofUrl } from "../utils/signedUrlCache";
-    import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
+    import { notifyOrgAdmins } from "../utils/safeNotification";
     import { notificationTemplates } from "../utils/notificationTemplates";
     import { getSocketIO } from "../utils/socketEmitter";
     import activityService from "../services/activity.service";
@@ -31,6 +36,12 @@
       createLoadLifecycleOutboxEvent,
       processLoadLifecycleOutboxForLoad,
     } from "../services/loadLifecycleOutbox.service";
+    import {
+      canStaffDeleteLoad,
+      checkDeliveryConfirmation,
+      checkProofOfDeliverySubmission,
+      staffDeletableLoadFilter,
+    } from "../services/loadLifecyclePolicy";
 
 
     const getUser = (req: Request) => req.user as IUser;
@@ -241,13 +252,13 @@
       const vin = req.params.vin?.toUpperCase().trim();
 
       if (!vin || vin.length > 17) {
-        throw new ApiError(400, "Invalid VIN");
+        throw new ApiError(400, "That VIN isn't valid. A VIN has 17 letters and numbers (no I, O or Q). Check it and try again.");
       }
 
       const vehicle = await Vehicle.findOne({ vin, organizationId, isDeleted: false }).lean();
 
       if (!vehicle) {
-        throw new ApiError(404, "Vehicle not found in inventory");
+        throw new ApiError(404, "No vehicle with that VIN is in your inventory. Check the VIN, or enter the vehicle details manually.");
       }
 
       return res.status(200).json(
@@ -265,16 +276,15 @@
     const calculateLoadRate = asyncHandler(async (req: Request, res: Response) => {
       const parsed = calculateRateSchema.safeParse(req.body);
       if (!parsed.success) {
-        const messages = parsed.error.issues.map((i) => i.message).join(", ");
-        throw new ApiError(400, messages);
+        throw new ApiError(400, describeValidationIssues(parsed.error.issues));
       }
 
       const { pickupZip, deliveryZip, vehicles, trailerType } = parsed.data;
 
       const [pickupCoords, deliveryCoords] = await getCoordinatesForPair(pickupZip, deliveryZip);
 
-      if (!pickupCoords) throw new ApiError(400, `Could not find location for pickup ZIP: ${pickupZip}`);
-      if (!deliveryCoords) throw new ApiError(400, `Could not find location for delivery ZIP: ${deliveryZip}`);
+      if (!pickupCoords) throw new ApiError(400, `We couldn't find the pickup ZIP code ${pickupZip}. Check the ZIP code and try again.`);
+      if (!deliveryCoords) throw new ApiError(400, `We couldn't find the delivery ZIP code ${deliveryZip}. Check the ZIP code and try again.`);
 
       const miles = calculateDistance(
         pickupCoords.lat, pickupCoords.lon,
@@ -301,8 +311,7 @@
 
       const parsed = createLoadSchema.safeParse(req.body);
       if (!parsed.success) {
-        const messages = parsed.error.issues.map((i) => i.message).join(", ");
-        throw new ApiError(400, messages);
+        throw new ApiError(400, describeValidationIssues(parsed.error.issues));
       }
 
       const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
@@ -388,6 +397,7 @@
         return res.status(400).json({
           success: false,
           error: 'Duplicate VINs not allowed',
+          message: 'The same VIN is entered on more than one vehicle. Each vehicle on a load needs its own VIN; remove or correct the duplicate.',
           code: 'DUPLICATE_VIN',
           field: 'vehicles',
         });
@@ -426,6 +436,7 @@
         return res.status(400).json({
           success: false,
           error: `Max ${MAX_VEHICLES_PER_LOAD} vehicles allowed per load`,
+          message: `A load can have at most ${MAX_VEHICLES_PER_LOAD} vehicles, and this one has ${vehicleCount}. Split the vehicles into separate loads.`,
           code: 'CAPACITY_EXCEEDED',
           field: 'vehicles',
         });
@@ -447,6 +458,7 @@
           return res.status(400).json({
             success: false,
             error: 'Cannot select a date in the past',
+          message: 'The First Available date is in the past. Choose today or a later date (Mountain Time).',
             code: 'INVALID_DATE',
             field: 'dates.firstAvailable',
           });
@@ -820,7 +832,7 @@
       const raw = await Load.findOne({ _id: req.params.id, organizationId })
         .populate("assignedDriverId", "name email phone avatar")
         .lean();
-      if (!raw) throw new ApiError(404, "Load not found");
+      if (!raw) throw new ApiError(404, LOAD_NOT_FOUND);
 
       // BUSINESS RULE CHANGE: no driver masking — full load record for all roles.
       const load = raw;
@@ -845,6 +857,14 @@
       "Picked Up",
       "In-Transit",
     ]);
+
+    // Driver-facing changes on these statuses are announced to the driver and
+    // to the load creator / assigning dispatcher.
+    const CHANGE_NOTICE_LOAD_STATUSES = new Set([
+      "Assigned",
+      ...DRIVER_ACK_REQUIRED_LOAD_STATUSES,
+    ]);
+    const STAFF_ROLES = ["employee", "admin", "super_admin"];
 
     function canOverrideActiveLoadMaterial(req: Request, load: any) {
       const user = getUser(req);
@@ -873,11 +893,14 @@
       const loadId = req.params.id;
 
       const load = await Load.findOne({ _id: loadId, organizationId });
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       // Prevent editing if load is Delivered or Cancelled
       if (["Delivered", "Cancelled"].includes(load.status)) {
-        throw new ApiError(400, `Cannot edit a load in ${load.status} status`);
+        throw new ApiError(
+          400,
+          `You can't edit load ${load.loadNumber} because it is already ${load.status}. Finished loads are kept as a record and can't be changed.`,
+        );
       }
 
       const {
@@ -916,10 +939,10 @@
           : { ...((load.pricing as any) ?? {}) };
 
         if (nextPricing.isPricingEnabled !== undefined && typeof nextPricing.isPricingEnabled !== "boolean") {
-          throw new ApiError(400, "Include Pricing must be true or false");
+          throw new ApiError(400, "The Include Pricing setting is invalid. Turn it on or off and save again.");
         }
         if (nextPricing.isVisibleToDriver !== undefined && typeof nextPricing.isVisibleToDriver !== "boolean") {
-          throw new ApiError(400, "Pricing visibility must be true or false");
+          throw new ApiError(400, "The pricing visibility setting is invalid. Choose whether drivers can see pricing and save again.");
         }
 
         const effectivePricingEnabled =
@@ -939,7 +962,7 @@
           if (nextPricing.carrierPayAmount !== undefined) {
             const total = Number(nextPricing.carrierPayAmount);
             if (!Number.isFinite(total) || total < 0 || total > 1_000_000) {
-              throw new ApiError(400, "Invalid carrier pay amount");
+              throw new ApiError(400, "Enter a carrier pay amount between $0 and $1,000,000.");
             }
           }
 
@@ -952,17 +975,20 @@
           if (effectivePostType === "assign-carrier") {
             const total = Number(updateData.pricing.carrierPayAmount);
             if (!Number.isFinite(total) || total <= 0 || total > 1_000_000) {
-              throw new ApiError(400, "Total Driver Pay must be greater than $0");
+              throw new ApiError(400, "Enter a Total Driver Pay greater than $0 for this direct assignment, or turn off Include Pricing.");
             }
           }
         }
       }
 
-      if (status !== undefined) {
-        if (!LOAD_STATUSES.includes(status)) {
-          throw new ApiError(400, "Invalid status");
-        }
-        updateData.status = status;
+      // Status transitions carry side effects (driver notifications, GPS,
+      // assignment cleanup, outbox) that only the Driver Tracker actions
+      // perform. Echoing the current status is harmless and still accepted.
+      if (status !== undefined && status !== load.status) {
+        throw new ApiError(
+          409,
+          `The status of load ${load.loadNumber} can't be changed from this form. Use the Driver Tracker actions to assign, reassign, or remove a driver; the driver completes pickup and delivery from their app.`,
+        );
       }
 
       // If pickup or delivery locations changed, recalculate miles/rate if not manually overridden
@@ -1049,14 +1075,24 @@
         if (!load.assignedDriverId) {
           throw new ApiError(
             409,
-            "This active load has no assigned driver. Correct the assignment before changing driver-facing load terms.",
+            `You can't save these changes because load ${load.loadNumber} is marked ${load.status} but has no driver assigned. Fix the driver assignment in Driver Tracker first, then edit the load.`,
           );
         }
 
         if (!canOverrideActiveLoadMaterial(req, load)) {
+          const owner: any = (load as any).dispatchOwnerId
+            ? await User.findById((load as any).dispatchOwnerId).select("name").lean()
+            : null;
+          const ownerName = String(owner?.name ?? "").trim();
+          const stage =
+            load.status === "Accepted"
+              ? "the driver has already accepted it"
+              : load.status === "Picked Up"
+                ? "the driver has already picked it up"
+                : "the driver is already on the way to deliver it";
           throw new ApiError(
             403,
-            "Only the dispatcher responsible for this active load or an organization administrator can change driver-facing load terms.",
+            `You can't update load ${load.loadNumber} because ${stage}. Once a driver accepts a load, only ${ownerName ? `${ownerName} (the dispatcher responsible for this load)` : "the dispatcher responsible for this load"} or an organization admin can change its route, vehicles, schedule, pay, or notes. Ask ${ownerName || "them"} or an admin to make this change.`,
           );
         }
       }
@@ -1093,29 +1129,129 @@
         };
       }
 
+      const loadId_ = load._id.toString();
+      const assignedDriverId = load.assignedDriverId ? load.assignedDriverId.toString() : "";
+      const announceChange =
+        Boolean(assignedDriverId) &&
+        CHANGE_NOTICE_LOAD_STATUSES.has(load.status) &&
+        materialChanges.length > 0;
+      const changedFields = materialChanges.map((change) => change.field);
+      const changedSummary = [...new Set(materialChanges.map((change) => change.label))].join(", ");
+      const changeOutbox: any[] = [];
+
       // The driver must learn about the amendment: pickup, start-route and
       // delivery are blocked until it is acknowledged. Queue the notification
       // in the same write as the amendment so it is durable and retried.
-      const amendmentOutbox =
-        amendment && load.assignedDriverId
-          ? [
-              createLoadLifecycleOutboxEvent("user_notification", {
-                userId: load.assignedDriverId.toString(),
-                organizationId,
-                type: "load_amendment_required",
-                title: "Load Updated by Dispatch",
-                message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
-                metadata: {
-                  loadId: load._id.toString(),
-                  loadNumber: load.loadNumber,
-                  amendmentId: amendment._id.toString(),
-                  changedFields: materialChanges.map((change) => change.field),
-                  route: "/driver",
-                  pushSource: "Driver Tracker",
-                },
-              }),
-            ]
-          : [];
+      if (amendment && assignedDriverId) {
+        changeOutbox.push(
+          createLoadLifecycleOutboxEvent("user_notification", {
+            userId: assignedDriverId,
+            organizationId,
+            type: "load_amendment_required",
+            title: "Load Updated by Dispatch",
+            message: `Material details changed on load ${load.loadNumber}. Review and acknowledge the update before continuing the load lifecycle.`,
+            metadata: {
+              loadId: loadId_,
+              loadNumber: load.loadNumber,
+              amendmentId: amendment._id.toString(),
+              changedFields,
+              route: "/driver",
+              pushSource: "Driver Tracker",
+            },
+          }),
+        );
+      } else if (announceChange && load.status === "Assigned") {
+        // Not accepted yet: the driver can't accept until Dispatch
+        // reconfirms the changed assignment, so tell them now.
+        changeOutbox.push(
+          createLoadLifecycleOutboxEvent("user_notification", {
+            userId: assignedDriverId,
+            organizationId,
+            type: "load_amendment_required",
+            title: "Load Updated by Dispatch",
+            message: `Dispatch changed ${changedSummary} on load ${load.loadNumber}. Dispatch will reconfirm the assignment before you can accept it.`,
+            metadata: {
+              loadId: loadId_,
+              loadNumber: load.loadNumber,
+              changedFields,
+              requiresDispatchReconfirmation: true,
+              route: `/driver/loads/${encodeURIComponent(loadId_)}`,
+            },
+          }),
+        );
+      }
+
+      // The load creator and the dispatcher who assigned it review the change
+      // (one notice when they are the same person; never to the editor).
+      if (announceChange) {
+        const editorId = user._id.toString();
+        const reviewerIds = [
+          ...new Set(
+            [load.createdBy, (load as any).dispatchOwnerId]
+              .map((id) => String(id ?? "").trim())
+              .filter((id) => id && mongoose.Types.ObjectId.isValid(id) && id !== editorId),
+          ),
+        ];
+        const [reviewers, assignedDriver] = await Promise.all([
+          reviewerIds.length
+            ? User.find({ _id: { $in: reviewerIds }, isActive: true, role: { $in: STAFF_ROLES } })
+                .select("_id")
+                .lean()
+            : Promise.resolve([]),
+          User.findById(assignedDriverId).select("name").lean(),
+        ]);
+        const editorName = String(user.name || "A team member").trim() || "A team member";
+        const driverName = String((assignedDriver as any)?.name || "the assigned driver").trim();
+        const nextStep =
+          load.status === "Assigned"
+            ? "Review and reconfirm the assignment so the driver can accept it."
+            : "The driver must acknowledge the update before continuing.";
+
+        for (const reviewer of reviewers as any[]) {
+          changeOutbox.push(
+            createLoadLifecycleOutboxEvent("user_notification", {
+              userId: String(reviewer._id),
+              organizationId,
+              type: "load_details_changed",
+              title: "Load Details Changed",
+              message: `${editorName} changed ${changedSummary} on load ${load.loadNumber} (${load.status}, ${driverName}). ${nextStep}`,
+              metadata: {
+                loadId: loadId_,
+                loadNumber: load.loadNumber,
+                driverId: assignedDriverId,
+                changedFields,
+                editedBy: editorId,
+                loadStatus: load.status,
+                route: `/driver-tracker?driverId=${encodeURIComponent(assignedDriverId)}&reviewLoadId=${encodeURIComponent(loadId_)}`,
+              },
+            }),
+          );
+        }
+      }
+
+      // Before acceptance nothing needs the driver's acknowledgement (Dispatch
+      // reconfirms instead), but the driver still gets a visible record of
+      // what changed. "informational" entries never block the lifecycle.
+      if (!amendment && announceChange && load.status === "Assigned") {
+        atomicUpdate.$push = {
+          driverAmendments: {
+            $each: [
+              {
+                _id: new mongoose.Types.ObjectId(),
+                driverId: load.assignedDriverId,
+                createdBy: user._id,
+                createdAt: new Date(),
+                loadStatusAtChange: load.status,
+                materialVersionBefore: beforeMaterialVersion,
+                materialVersionAfter: afterMaterialVersion,
+                changes: materialChanges,
+                status: "informational" as const,
+              },
+            ],
+            $slice: -100,
+          },
+        };
+      }
 
       const updatedLoad = await Load.findOneAndUpdate(
         {
@@ -1123,14 +1259,14 @@
           organizationId,
           updatedAt: load.updatedAt,
         },
-        appendLoadLifecycleOutbox(atomicUpdate, amendmentOutbox),
+        appendLoadLifecycleOutbox(atomicUpdate, changeOutbox),
         { new: true, runValidators: true },
       );
 
       if (!updatedLoad) {
         throw new ApiError(
           409,
-          "This load changed while you were editing it. Refresh the load and apply your changes again.",
+          `Someone else changed load ${load.loadNumber} while you were editing it, so your changes were not saved. Refresh the load and apply your changes again.`,
         );
       }
 
@@ -1160,7 +1296,7 @@
         });
       }
 
-      if (amendmentOutbox.length > 0) {
+      if (changeOutbox.length > 0) {
         // Immediate delivery for UX; failures stay queued for the worker.
         try {
           await processLoadLifecycleOutboxForLoad(loadId);
@@ -1183,6 +1319,12 @@
             },
           );
         }
+      } else if (announceChange && _io) {
+        // Assigned (not yet accepted): refresh the driver's view of the load.
+        _io.to(`user:${assignedDriverId}`).emit("driver:loads_updated", {
+          loadId,
+          reason: "load_updated_before_acceptance",
+        });
       }
 
       await activityService.logLoadActivity(
@@ -1211,16 +1353,46 @@
       const organizationId = req.orgId as string;
 
       const load = await Load.findOne({ _id: req.params.id, organizationId });
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
-      if (load.status === "In-Transit") {
-        throw new ApiError(400, "Cannot delete a load that is currently In-Transit");
+      // Active loads have a driver relying on them. Deleting one here would skip
+      // the driver notification, GPS cleanup and outbox that Remove performs.
+      if (!canStaffDeleteLoad(load)) {
+        throw new ApiError(
+          409,
+          `Load ${load.loadNumber} can't be deleted because it is ${load.status} with a driver assigned. Remove the driver in Driver Tracker first, then delete the load.`,
+        );
       }
 
-      await Load.deleteOne({ _id: load._id });
+      // Conditional delete: a concurrent assign or start-route must not be
+      // wiped out between the check above and this write.
+      const deleted = await Load.deleteOne({
+        _id: load._id,
+        organizationId,
+        ...staffDeletableLoadFilter(),
+      });
+      if (deleted.deletedCount === 0) {
+        throw new ApiError(
+          409,
+          `Load ${load.loadNumber} changed while it was being deleted, so it was not deleted. Refresh and try again.`,
+        );
+      }
 
       const _io = getSocketIO();
-      if (_io) _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
+      if (_io) {
+        _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
+
+        // Drivers with a pending request must see the load disappear.
+        const requesterIds = new Set(
+          ((load as any).driverRequests ?? [])
+            .map((request: any) => String(request?.driverId ?? "").trim())
+            .filter(Boolean),
+        );
+        for (const driverId of requesterIds) {
+          _io.to(`user:${driverId}`).emit("driver:loads_updated", { reason: "load_deleted" });
+          _io.to(`user:${driverId}`).emit("driver:load_request_updated", { reason: "load_deleted" });
+        }
+      }
 
       // Log activity — NON-FATAL. The load is already deleted at this point;
       // a logging failure must not turn a successful delete into a 500 response
@@ -1255,15 +1427,15 @@
       const { note } = req.body;
       const file = (req as any).file as Express.Multer.File | undefined;
 
-      if (!file) throw new ApiError(400, "Pickup proof image is required");
+      if (!file) throw new ApiError(400, "Take or choose a pickup photo before submitting.");
 
       const load = await Load.findById(req.params.id);
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_UNAVAILABLE_FOR_DRIVER);
       if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
-        throw new ApiError(403, "Only the assigned driver can submit pickup proof");
+        throw new ApiError(403, `Load ${load.loadNumber} is not assigned to you, so you can't upload a pickup photo for it.`);
       }
       if (load.status !== "Accepted") {
-        throw new ApiError(400, `Pickup proof can only be submitted while the load is Accepted, not ${load.status}`);
+        throw new ApiError(400, `You can't upload a pickup photo for load ${load.loadNumber} because it is ${load.status}. Pickup photos are taken after you accept the load and before you mark it Picked Up.`);
       }
 
       const imageUrl = await storageService.upload(file, "proof-of-pickup", BucketType.PRIVATE);
@@ -1291,7 +1463,7 @@
 
       if (!updated) {
         try { await storageService.delete(imageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
-        throw new ApiError(409, "This load changed while pickup proof was uploading. Refresh the load and try again.");
+        throw new ApiError(409, `Load ${load.loadNumber} changed while your pickup photo was uploading, so it was not saved. Refresh the load and try again.`);
       }
 
       if (previousImageUrl && previousImageUrl !== imageUrl) {
@@ -1320,55 +1492,92 @@
       const { note } = req.body;
       const file = (req as any).file as Express.Multer.File | undefined;
 
-      if (!file) throw new ApiError(400, "Proof image is required");
+      if (!file) throw new ApiError(400, "Take or choose a proof-of-delivery photo before submitting.");
 
       const load = await Load.findById(req.params.id);
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_UNAVAILABLE_FOR_DRIVER);
 
-      if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
-        throw new ApiError(403, "Only the assigned driver can submit proof of delivery");
+      const submissionCheck = checkProofOfDeliverySubmission(load, userId);
+      if (!submissionCheck.ok) {
+        throw new ApiError(submissionCheck.statusCode, submissionCheck.message);
       }
 
-      // Replace old image if one exists (R2 stores raw keys, not http URLs)
-      if (load.proofOfDelivery?.imageUrl) {
-        try { await storageService.delete(load.proofOfDelivery.imageUrl, BucketType.PRIVATE); } catch { /* non-fatal */ }
-      }
-
-      // Upload to PRIVATE bucket for security
+      // Upload to PRIVATE bucket for security. The previous image is only
+      // deleted after the new record is committed, so a failed upload or a
+      // lost race never leaves the load without proof.
       const imageUrl = await storageService.upload(file, "proof-of-delivery", BucketType.PRIVATE);
+      const previousImageUrl = load.proofOfDelivery?.imageUrl as string | undefined;
 
       // Auto-route proof to whoever created/posted the load
       const submittedTo = load.createdBy ? load.createdBy.toString() : undefined;
 
-      (load as any).proofOfDelivery = {
-        imageUrl,
-        submittedAt: new Date(),
-        note: note || undefined,
-        submittedTo: submittedTo || undefined,
-      };
-
-      await load.save();
-
-      // Broadcast to Org Admins
+      // Notify org admins through the outbox, without the raw storage key.
       const orgId = load.organizationId?.toString();
       const { title, message } = notificationTemplates.proof_of_delivery({
         driverName: user.name || "A driver",
         trackingNumber: load.loadNumber || req.params.id,
       });
+      const proofOutbox = orgId
+        ? [
+            createLoadLifecycleOutboxEvent("org_admin_notification", {
+              organizationId: orgId,
+              type: "proof_of_delivery",
+              title,
+              message,
+              metadata: {
+                loadId: load._id.toString(),
+                loadNumber: load.loadNumber,
+                driverName: user.name,
+                route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+              },
+              excludeUserId: userId,
+            }),
+          ]
+        : [];
 
-      if (orgId) {
-        await notifyOrgAdmins(
-          orgId,
-          "proof_of_delivery",
-          title,
-          message,
+      const updated = await Load.findOneAndUpdate(
+        {
+          _id: load._id,
+          status: "In-Transit",
+          assignedDriverId: user._id,
+          "proofOfDelivery.confirmedAt": { $exists: false },
+        },
+        appendLoadLifecycleOutbox(
           {
-            loadId: load._id.toString(),
-            loadNumber: load.loadNumber,
-            imageUrl,
-            driverName: user.name,
-          }
-        );
+            $set: {
+              proofOfDelivery: {
+                imageUrl,
+                submittedAt: new Date(),
+                note: String(note ?? "").trim().slice(0, 2000) || undefined,
+                submittedTo: submittedTo || undefined,
+                submittedBy: user._id,
+              },
+            },
+          },
+          proofOutbox,
+        ),
+        { new: true, runValidators: true },
+      );
+
+      if (!updated) {
+        try { await storageService.delete(imageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+        throw new ApiError(409, `Load ${load.loadNumber} changed while your proof-of-delivery photo was uploading, so it was not saved. Refresh the load and try again.`);
+      }
+
+      if (previousImageUrl && previousImageUrl !== imageUrl) {
+        try { await storageService.delete(previousImageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+      }
+
+      if (proofOutbox.length > 0) {
+        // Immediate delivery for UX; failures stay queued for the worker.
+        try {
+          await processLoadLifecycleOutboxForLoad(load._id.toString());
+        } catch (error) {
+          logger.error(
+            { error, loadId: load._id },
+            "Non-fatal: immediate proof-of-delivery notification flush failed",
+          );
+        }
       }
 
       logger.info({ loadId: load._id, userId }, 'Proof of delivery submitted for load');
@@ -1387,15 +1596,15 @@
       const file = (req as any).file as Express.Multer.File | undefined;
       const index = Number(req.params.index);
 
-      if (!file) throw new ApiError(400, "An image is required");
+      if (!file) throw new ApiError(400, "Choose a photo to upload.");
       if (!Number.isInteger(index) || index < 0) {
-        throw new ApiError(400, "Invalid vehicle index");
+        throw new ApiError(400, "That vehicle couldn't be found on this load. Refresh the page and try again.");
       }
 
       const load = await Load.findOne({ _id: req.params.id, organizationId });
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
       if (!load.vehicles?.[index]) {
-        throw new ApiError(404, "Vehicle not found on this load");
+        throw new ApiError(404, `That vehicle is no longer on load ${load.loadNumber}. Refresh the page and try again.`);
       }
 
       const existing = (load.vehicles[index] as any).inspectionPhotoUrl;
@@ -1424,13 +1633,13 @@
       const organizationId = req.orgId as string;
 
       const load = await Load.findOne({ _id: req.params.id, organizationId }).lean();
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       const key = (load as any).proofOfDelivery?.imageUrl;
-      if (!key) throw new ApiError(404, "No proof image submitted");
+      if (!key) throw new ApiError(404, `No proof-of-delivery photo has been submitted for load ${(load as any).loadNumber} yet.`);
 
       const result = await storageService.streamPrivateFile(key);
-      if (!result) throw new ApiError(404, "Proof image not found in storage");
+      if (!result) throw new ApiError(404, `The proof-of-delivery photo for load ${(load as any).loadNumber} couldn't be opened. Ask the driver to upload it again.`);
 
       res.setHeader("Content-Type", result.contentType);
       res.setHeader("Cache-Control", "private, max-age=300");
@@ -1446,32 +1655,78 @@
       const organizationId = req.orgId as string;
 
       const load = await Load.findOne({ _id: req.params.id, organizationId });
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
-      if (!load.proofOfDelivery?.imageUrl) {
-        throw new ApiError(400, "No proof of delivery has been submitted yet");
+      // Delivered is set only by the driver's completeDelivery, which also
+      // clears GPS, resolves release requests and finalizes status changes.
+      // Confirmation here is the staff sign-off on that proof, not a
+      // status transition.
+      const confirmationCheck = checkDeliveryConfirmation(load);
+      if (!confirmationCheck.ok) {
+        throw new ApiError(confirmationCheck.statusCode, confirmationCheck.message);
+      }
+      if (confirmationCheck.alreadyConfirmed) {
+        return res.status(200).json(new ApiResponse(200, load, "Delivery already confirmed"));
       }
 
+      const confirmedAt = new Date();
+      const confirmationOutbox = load.assignedDriverId
+        ? [
+            createLoadLifecycleOutboxEvent("user_notification", {
+              userId: load.assignedDriverId.toString(),
+              organizationId,
+              type: "load_delivered",
+              title: "Delivery Confirmed",
+              message: `Your delivery for load ${load.loadNumber} has been confirmed`,
+              metadata: {
+                loadId: load._id.toString(),
+                loadNumber: load.loadNumber,
+                // Drivers can't open /transportation (the type's default link).
+                route: `/driver/loads/${encodeURIComponent(load._id.toString())}`,
+              },
+            }),
+          ]
+        : [];
+
       const updated = await Load.findOneAndUpdate(
-        { _id: req.params.id, organizationId },
         {
+          _id: load._id,
+          organizationId,
           status: "Delivered",
-          deliveredAt: new Date(),
-          "proofOfDelivery.confirmedAt": new Date(),
-          "proofOfDelivery.confirmedBy": user._id,
+          "proofOfDelivery.imageUrl": load.proofOfDelivery!.imageUrl,
+          "proofOfDelivery.confirmedAt": { $exists: false },
         },
-        { new: true }
+        appendLoadLifecycleOutbox(
+          {
+            $set: {
+              "proofOfDelivery.confirmedAt": confirmedAt,
+              "proofOfDelivery.confirmedBy": user._id,
+              // Loads delivered before completeDelivery recorded deliveredAt.
+              ...(load.deliveredAt ? {} : { deliveredAt: confirmedAt }),
+            },
+          },
+          confirmationOutbox,
+        ),
+        { new: true },
       );
 
-      if (load.assignedDriverId) {
-        await safeCreateNotification({
-          userId: load.assignedDriverId.toString(),
-          organizationId,
-          type: "load_delivered", // Using load terminology
-          title: "Delivery Confirmed",
-          message: `Your delivery for load ${load.loadNumber} has been confirmed`,
-          metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
-        });
+      if (!updated) {
+        throw new ApiError(
+          409,
+          `Load ${load.loadNumber} changed while delivery was being confirmed, so it was not confirmed. Refresh and try again.`,
+        );
+      }
+
+      if (confirmationOutbox.length > 0) {
+        // Immediate delivery for UX; failures stay queued for the worker.
+        try {
+          await processLoadLifecycleOutboxForLoad(load._id.toString());
+        } catch (error) {
+          logger.error(
+            { error, loadId: load._id },
+            "Non-fatal: immediate delivery confirmation notification flush failed",
+          );
+        }
       }
 
       await activityService.logLoadActivity(
@@ -1495,7 +1750,7 @@
       const user = getUser(req);
       const organizationId = req.orgId as string;
 
-      if (!text) throw new ApiError(400, "Note text is required");
+      if (!text) throw new ApiError(400, "Write a note before saving.");
 
       const load = await Load.findOneAndUpdate(
         { _id: req.params.id, organizationId },
@@ -1511,7 +1766,7 @@
         { new: true }
       ).populate("notes.author", "name email avatar");
 
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       res.json(new ApiResponse(200, load, "Note added successfully"));
     });
@@ -1526,11 +1781,11 @@
 
       const email = (recipientEmail || "").trim().toLowerCase();
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        throw new ApiError(400, "A valid recipient email is required");
+        throw new ApiError(400, "Enter a valid email address to send the load details to.");
       }
 
       const load = await Load.findOne({ _id: id, organizationId }).populate("createdBy", "name email");
-      if (!load) throw new ApiError(404, "Load not found");
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       const pickup = load.pickupLocation;
       const delivery = load.deliveryLocation;

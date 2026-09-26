@@ -195,17 +195,17 @@ export async function reviewDriverDocument(args: {
   expectedUploadedAt?: string | Date | null;
 }) {
   const profile = await DriverProfile.findOne({ userId: args.driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
+  if (!profile) throw new ApiError(404, "We couldn't find this driver's profile. The driver may not have finished setting it up yet.");
 
   const document: any = profile.documents.find(
     (item: any) => item._id?.toString() === args.documentId,
   );
-  if (!document) throw new ApiError(404, "Document not found");
+  if (!document) throw new ApiError(404, "This document is no longer available. It may have been replaced or removed.");
 
   if (args.decision !== "pending" && document.uploadedAt && !args.expectedUploadedAt) {
     throw new ApiError(
       409,
-      "The document review snapshot is missing. Refresh the Driver Review Center before taking action.",
+      "This document's review details are out of date. Refresh the Driver Review Center, then try again.",
     );
   }
 
@@ -239,7 +239,7 @@ export async function reviewDriverDocument(args: {
   } else if (args.decision === "rejected") {
     const reason = String(args.reason || "").trim();
     if (reason.length < 3) {
-      throw new ApiError(400, "A rejection reason is required (min 3 chars)");
+      throw new ApiError(400, "Enter a reason for rejecting this document (at least 3 characters).");
     }
     document.verified = false;
     document.reviewStatus = "rejected";
@@ -327,14 +327,14 @@ export async function approveDriverVerification(args: {
   expectedUpdatedAt?: string | Date | null;
 }) {
   const profile: any = await DriverProfile.findOne({ userId: args.driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
+  if (!profile) throw new ApiError(404, "We couldn't find this driver's profile. The driver may not have finished setting it up yet.");
 
   const eligibility = evaluateDriverVerificationEligibility(profile);
   if (!eligibility.eligible) {
     const detail = eligibility.blockers.slice(0, 6).join("; ");
     throw new ApiError(
       409,
-      `Final approval unavailable. ${eligibility.blockers.length} item${eligibility.blockers.length === 1 ? "" : "s"} require attention: ${detail}`,
+      `Final approval isn't available yet. ${eligibility.blockers.length} item${eligibility.blockers.length === 1 ? " needs" : "s need"} attention: ${detail}`,
     );
   }
 
@@ -358,7 +358,7 @@ export async function approveDriverVerification(args: {
   const previousStatus = String(profile.verificationStatus || "unverified");
 
   const driverUser: any = await User.findById(args.driverId);
-  if (!driverUser) throw new ApiError(404, "Driver user not found");
+  if (!driverUser) throw new ApiError(404, "We couldn't find this driver's account. It may have been deactivated.");
 
   let driverRequest: any = await DriverRequest.findOne({
     driverUserId: args.driverId,
@@ -367,7 +367,7 @@ export async function approveDriverVerification(args: {
   if (driverRequest?.status === "rejected") {
     throw new ApiError(
       409,
-      "Final approval unavailable because the latest Driver Account application is rejected. A new pending application is required before verification can be approved.",
+      "Final approval isn't available because the driver's latest account application was rejected. The driver needs to submit a new application first.",
     );
   }
 

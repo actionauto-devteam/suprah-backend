@@ -18,7 +18,7 @@ const stripe = new Stripe(config.stripe.secretKey, {
 
 const getUserId = (req: Request): string => {
   const userId = (req.user as IUser)?._id?.toString();
-  if (!userId) throw new ApiError(401, "User not authenticated");
+  if (!userId) throw new ApiError(401, "Your session has ended. Please sign in again.");
   return userId;
 };
 
@@ -154,28 +154,28 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   const { loadId, driverId, amount, description, notes } = req.body;
 
   if (!loadId || !driverId || amount === undefined || amount === null) {
-    throw new ApiError(400, 'loadId, driverId, and amount are required');
+    throw new ApiError(400, 'Choose the load and driver, and enter the payout amount.');
   }
 
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-    throw new ApiError(400, 'Amount must be a positive number');
+    throw new ApiError(400, 'Enter a payout amount greater than $0.');
   }
 
   const load = await Load.findOne({ _id: loadId, organizationId: orgId, status: 'Delivered' });
-  if (!load) throw new ApiError(404, 'Load not found or not delivered');
+  if (!load) throw new ApiError(404, 'This load can\'t be paid out yet. Payouts are only possible for loads that were delivered and confirmed in your organization.');
 
   if (!load.assignedDriverId || load.assignedDriverId.toString() !== driverId) {
-    throw new ApiError(400, 'driverId must be the driver assigned to this load');
+    throw new ApiError(400, 'Payouts can only go to the driver who delivered this load.');
   }
 
   const duplicate = await DriverPayout.findOne({ organizationId: orgId, loadId, status: { $in: ['paid', 'processing'] } });
-  if (duplicate) throw new ApiError(400, 'Payout already processing or paid for this load');
+  if (duplicate) throw new ApiError(400, 'A payout for this load is already being processed or was already paid.');
 
   // Drivers are a shared platform-wide pool — payable by any org that had them on a load.
   const driver = await User.findOne({ _id: driverId, role: 'driver' });
-  if (!driver) throw new ApiError(404, 'Driver not found');
-  if (!driver.stripeConnectAccountId) throw new ApiError(400, 'Driver has no Stripe Connect account');
+  if (!driver) throw new ApiError(404, "We couldn't find this driver's account. It may have been deactivated.");
+  if (!driver.stripeConnectAccountId) throw new ApiError(400, 'This driver hasn\'t set up their payout account yet. Ask them to finish payout setup in the Driver Portal settings.');
 
   const payout = await DriverPayout.create({
     organizationId: orgId,
@@ -226,7 +226,7 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     payout.status = "failed";
     payout.failureReason = stripeError?.message || "Stripe transfer failed";
     await payout.save();
-    throw new ApiError(402, `Payout failed: ${payout.failureReason}`);
+    throw new ApiError(402, 'The payout could not be sent. Check that the driver\'s payout account is fully set up, then try again. The failure was recorded on the payout.');
   }
 });
 
@@ -238,7 +238,7 @@ const getPayouts = asyncHandler(async (req: Request, res: Response) => {
   const isReportRequest = req.query.report === 'true';
 
   if (status && status !== 'all' && !VALID_PAYOUT_STATUSES.includes(status as any)) {
-    throw new ApiError(400, `Invalid status filter. Must be one of: all, ${VALID_PAYOUT_STATUSES.join(', ')}`);
+    throw new ApiError(400, `That payout status filter isn't recognized. Choose one of: all, ${VALID_PAYOUT_STATUSES.join(', ')}.`);
   }
 
   const filter: Record<string, any> = { organizationId: orgId };
@@ -344,7 +344,7 @@ const getPayoutStats = asyncHandler(async (req: Request, res: Response) => {
 const initiateDriverOnboarding = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const user = await User.findById(userId);
-  if (!user || user.role !== 'driver') throw new ApiError(403, 'Invalid driver');
+  if (!user || user.role !== 'driver') throw new ApiError(403, 'Payout details are only available on driver accounts.');
 
   let accountId = user.stripeConnectAccountId;
   if (!accountId) {

@@ -36,7 +36,7 @@ describe('Driver Compliance Logic', () => {
         }
     });
 
-    it('should calculate 0/7 compliance score when no documents are uploaded', async () => {
+    it('should calculate a 0% compliance score when no documents are uploaded', async () => {
         const user = await User.create({
             name: 'Test Driver',
             email: testEmail,
@@ -57,10 +57,11 @@ describe('Driver Compliance Logic', () => {
 
         expect(uploadedCount).toBe(0);
         expect(complianceScore).toBe(0);
-        expect(profile.verificationStatus).toBe('not_started');
+        // New profiles start unverified (see DriverProfile.verificationStatus).
+        expect(profile.verificationStatus).toBe('unverified');
     });
 
-    it('should calculate 100% compliance when all 7 documents are uploaded', async () => {
+    it('should calculate 100% compliance when every required document is uploaded', async () => {
         const fullEmail = 'full.compliance@test.com';
         await User.deleteMany({ email: fullEmail });
 
@@ -78,7 +79,7 @@ describe('Driver Compliance Logic', () => {
             organizationId: testOrg._id.toString()
         });
 
-        // Simulate uploading all 7 required docs
+        // Simulate uploading every required doc
         REQUIRED_COMPLIANCE_DOCS.forEach(type => {
             profile.documents.push({
                 type,
@@ -98,7 +99,7 @@ describe('Driver Compliance Logic', () => {
         const uploadedCount = REQUIRED_COMPLIANCE_DOCS.filter(t => uploadedTypes.has(t)).length;
         const complianceScore = Math.round((uploadedCount / REQUIRED_COMPLIANCE_DOCS.length) * 100);
 
-        expect(uploadedCount).toBe(7);
+        expect(uploadedCount).toBe(REQUIRED_COMPLIANCE_DOCS.length);
         expect(complianceScore).toBe(100);
 
         // Cleanup

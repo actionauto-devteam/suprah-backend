@@ -6,6 +6,7 @@ import Organization from '../src/models/Organization.model';
 import mongoose from 'mongoose';
 import tokenService from '../src/services/token.service';
 
+
 describe('Organization Data Isolation', () => {
     let orgA: any;
     let orgB: any;
@@ -102,9 +103,10 @@ describe('Organization Data Isolation', () => {
             .set('Authorization', `Bearer ${tokenA}`)
             .expect(200);
 
-        expect(resA.body.data.length).toBe(1);
-        expect(resA.body.data[0].organizationId).toBe(orgA._id.toString());
-        expect(resA.body.data[0].firstName).toBe('John');
+        // GET /api/quotes returns a paginated { quotes, pagination } payload.
+        expect(resA.body.data.quotes.length).toBe(1);
+        expect(resA.body.data.quotes[0].organizationId).toBe(orgA._id.toString());
+        expect(resA.body.data.quotes[0].firstName).toBe('John');
 
         // 4. Request as Org B user
         const resB = await request(app)
@@ -112,9 +114,9 @@ describe('Organization Data Isolation', () => {
             .set('Authorization', `Bearer ${tokenB}`)
             .expect(200);
 
-        expect(resB.body.data.length).toBe(1);
-        expect(resB.body.data[0].organizationId).toBe(orgB._id.toString());
-        expect(resB.body.data[0].firstName).toBe('Jane');
+        expect(resB.body.data.quotes.length).toBe(1);
+        expect(resB.body.data.quotes[0].organizationId).toBe(orgB._id.toString());
+        expect(resB.body.data.quotes[0].firstName).toBe('Jane');
     });
 
     it('should prevent access to a quote from a different organization', async () => {
@@ -141,7 +143,8 @@ describe('Organization Data Isolation', () => {
             .set('Authorization', `Bearer ${tokenB}`)
             .expect(404);
 
-        expect(res.body.message).toContain('not found');
+        // Plain-English not-found message that doesn't reveal the other org's data.
+        expect(res.body.message).toMatch(/couldn't find this transportation draft/i);
     });
 
     it('should assign correct organizationId when creating a new quote', async () => {

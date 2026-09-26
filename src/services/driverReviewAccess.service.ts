@@ -64,10 +64,10 @@ export async function resolveDriverReviewAccess({
   const orgRole = normalizeId(organizationRole);
 
   if (!viewerId) {
-    throw new ApiError(401, "User not authenticated");
+    throw new ApiError(401, "Your session has ended. Please sign in again.");
   }
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
-    throw new ApiError(400, "Invalid driver ID");
+    throw new ApiError(400, "That driver link isn't valid. Open the driver again from the list.");
   }
 
   if (viewerRole === "super_admin") {
@@ -216,6 +216,6 @@ export function assertDriverReviewMutationAccess(
   decision: DriverReviewAccessDecision,
 ): void {
   if (!decision.canReviewDocuments || decision.level !== "ADMIN_REVIEW") {
-    throw new ApiError(403, "This Driver Verification action is restricted to an authorized administrator");
+    throw new ApiError(403, "Only an organization admin can approve or reject Driver Verification.");
   }
 }

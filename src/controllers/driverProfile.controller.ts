@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
+import { DOCUMENT_FILE_UNAVAILABLE, DOCUMENT_NOT_FOUND, SIGN_IN_AGAIN } from "../utils/userMessages";
 import DriverProfile, {
   REQUIRED_COMPLIANCE_DOCS,
 } from "../models/DriverProfile.model";
@@ -21,9 +22,9 @@ import { recordDriverReviewEvent } from "../services/driverVerificationReview.se
 
 const getDriverUser = (req: Request): IUser => {
   const user = req.user as IUser;
-  if (!user?._id) throw new ApiError(401, "User not authenticated");
+  if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
   if (user.role !== "driver") {
-    throw new ApiError(403, "Only drivers can access this");
+    throw new ApiError(403, "This page is only available on driver accounts.");
   }
   return user;
 };
@@ -52,7 +53,7 @@ const parseOptionalDate = (
 
   const parsed = new Date(String(value));
   if (!Number.isFinite(parsed.getTime())) {
-    throw new ApiError(400, `${label} must be a valid date`);
+    throw new ApiError(400, `Enter a valid date for ${label}.`);
   }
   return parsed;
 };
@@ -251,22 +252,22 @@ const getDocumentFile = asyncHandler(async (req: Request, res: Response) => {
   const documentId = String(req.params.documentId || "").trim();
 
   if (!documentId) {
-    throw new ApiError(400, "Document ID is required");
+    throw new ApiError(400, "Choose the document you want to open or replace, then try again.");
   }
 
   const profile = await DriverProfile.findOne({ userId: user._id });
   if (!profile) {
-    throw new ApiError(404, "Driver profile not found");
+    throw new ApiError(404, "Your driver profile hasn't been set up yet. Open Profile in the Driver Portal to finish setting it up.");
   }
 
   const document = getDriverDocumentById(profile, documentId);
   if (!document) {
-    throw new ApiError(404, "Document not found");
+    throw new ApiError(404, DOCUMENT_NOT_FOUND);
   }
 
   const storageKey = getDriverDocumentStorageKey(document);
   if (!storageKey) {
-    throw new ApiError(404, "Document file is unavailable");
+    throw new ApiError(404, DOCUMENT_FILE_UNAVAILABLE);
   }
 
   // Legacy records can contain a direct external URL without a private key.
@@ -278,7 +279,7 @@ const getDocumentFile = asyncHandler(async (req: Request, res: Response) => {
 
   const file = await storageService.streamPrivateFile(storageKey);
   if (!file) {
-    throw new ApiError(404, "Document file could not be opened");
+    throw new ApiError(404, DOCUMENT_FILE_UNAVAILABLE);
   }
 
   const safeFileName = String(
@@ -325,20 +326,20 @@ const replaceDocument = asyncHandler(async (req: Request, res: Response) => {
   const file = req.file;
 
   if (!documentId) {
-    throw new ApiError(400, "Document ID is required");
+    throw new ApiError(400, "Choose the document you want to open or replace, then try again.");
   }
   if (!file) {
-    throw new ApiError(400, "No replacement file provided");
+    throw new ApiError(400, "Choose a file to replace this document with.");
   }
 
   const profile = await DriverProfile.findOne({ userId: user._id });
   if (!profile) {
-    throw new ApiError(404, "Driver profile not found");
+    throw new ApiError(404, "Your driver profile hasn't been set up yet. Open Profile in the Driver Portal to finish setting it up.");
   }
 
   const document = getDriverDocumentById(profile, documentId);
   if (!document) {
-    throw new ApiError(404, "Document not found");
+    throw new ApiError(404, DOCUMENT_NOT_FOUND);
   }
 
   const type = String(document.type);
@@ -346,7 +347,7 @@ const replaceDocument = asyncHandler(async (req: Request, res: Response) => {
   const expiresAt = req.body?.expiresAt;
 
   if (!label) {
-    throw new ApiError(400, "Document label is required");
+    throw new ApiError(400, "Enter a name for this document.");
   }
 
   const needsExpiry = [
@@ -360,7 +361,7 @@ const replaceDocument = asyncHandler(async (req: Request, res: Response) => {
   if (needsExpiry.includes(type) && !expiresAt) {
     throw new ApiError(
       400,
-      `Expiration date is required for ${type.replace(/_/g, " ")}`,
+      `Enter the expiration date for your ${type.replace(/_/g, " ")}.`,
     );
   }
 
@@ -381,7 +382,7 @@ const replaceDocument = asyncHandler(async (req: Request, res: Response) => {
   } catch (error) {
     throw new ApiError(
       503,
-      "Document storage is not configured. Contact an administrator before uploading driver documents.",
+      "Document uploads are temporarily unavailable. Please try again later, or contact your administrator if this continues.",
     );
   }
   const newFileKey =
@@ -689,7 +690,7 @@ const updatePersonalInfo = asyncHandler(
     if (missing.length > 0) {
       throw new ApiError(
         400,
-        `Complete the required Driver Verification information: ${missing.join(
+        `Complete these Driver Verification details first: ${missing.join(
           ", ",
         )}`,
       );
@@ -699,7 +700,7 @@ const updatePersonalInfo = asyncHandler(
       normalized.licenseExpirationDate,
     );
     if (!Number.isFinite(parsedLicenseExpiration.getTime())) {
-      throw new ApiError(400, "CDL Expiration must be a valid date");
+      throw new ApiError(400, "Enter a valid CDL expiration date.");
     }
 
     const parsedVehicleYear =
@@ -715,7 +716,7 @@ const updatePersonalInfo = asyncHandler(
         parsedVehicleYear < 1950 ||
         parsedVehicleYear > 2100)
     ) {
-      throw new ApiError(400, "Vehicle year must be between 1950 and 2100");
+      throw new ApiError(400, "Enter a vehicle year between 1950 and 2100.");
     }
 
     profile.firstName = normalized.firstName;
@@ -925,11 +926,11 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
   const user = getDriverUser(req);
 
   const file = req.file;
-  if (!file) throw new ApiError(400, "No file provided");
+  if (!file) throw new ApiError(400, "Choose a file to upload.");
 
   const { type, label, expiresAt } = req.body;
   if (!type || !label) {
-    throw new ApiError(400, "Document type and label are required");
+    throw new ApiError(400, "Choose the document type and enter a name for it.");
   }
 
   const allowedTypes = [
@@ -945,7 +946,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
     "other",
   ];
   if (!allowedTypes.includes(type)) {
-    throw new ApiError(400, "Invalid document type");
+    throw new ApiError(400, "Choose a document type from the list.");
   }
 
   // Expiration is collected once at document upload for credentials that map
@@ -961,14 +962,14 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
   if (needsExpiry.includes(type) && !expiresAt) {
     throw new ApiError(
       400,
-      `Expiration date is required for ${type.replace(/_/g, " ")}`,
+      `Enter the expiration date for your ${type.replace(/_/g, " ")}.`,
     );
   }
 
   const profile = await getOrCreateProfile(user._id.toString());
 
   if (profile.documents.length >= 20) {
-    throw new ApiError(400, "Maximum of 20 documents allowed");
+    throw new ApiError(400, "You can upload up to 20 documents. Remove one you no longer need, then try again.");
   }
 
   const parsedDocumentExpiration = expiresAt
@@ -986,7 +987,7 @@ const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
   } catch (error) {
     throw new ApiError(
       503,
-      "Document storage is not configured. Contact an administrator before uploading driver documents.",
+      "Document uploads are temporarily unavailable. Please try again later, or contact your administrator if this continues.",
     );
   }
   const fileKey = storageService.getKeyFromUrl(fileUrl) || fileUrl;
@@ -1077,13 +1078,13 @@ const deleteDocument = asyncHandler(async (req: Request, res: Response) => {
   const user = getDriverUser(req);
   const { documentId } = req.params;
 
-  if (!documentId) throw new ApiError(400, "Document ID is required");
+  if (!documentId) throw new ApiError(400, "Choose the document you want to open or replace, then try again.");
 
   const profile = await DriverProfile.findOne({ userId: user._id });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
+  if (!profile) throw new ApiError(404, "Your driver profile hasn't been set up yet. Open Profile in the Driver Portal to finish setting it up.");
 
   const doc = getDriverDocumentById(profile, documentId);
-  if (!doc) throw new ApiError(404, "Document not found");
+  if (!doc) throw new ApiError(404, DOCUMENT_NOT_FOUND);
 
   const documentStorageKey = getDriverDocumentStorageKey(doc);
   const deletedType = String(doc.type);
@@ -1168,7 +1169,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
   if (operationalStatus !== undefined) {
     const allowed = ["active", "on_leave", "maintenance"];
     if (!allowed.includes(String(operationalStatus))) {
-      throw new ApiError(400, "Invalid Dispatch Status");
+      throw new ApiError(400, "Choose a Dispatch Status from the list.");
     }
   }
 
@@ -1265,7 +1266,7 @@ const updateIdentityVerification = asyncHandler(
     if (ssnLast4 !== undefined) {
       const cleaned = String(ssnLast4).replace(/\D/g, "");
       if (cleaned.length !== 4) {
-        throw new ApiError(400, "SSN must be exactly 4 digits");
+        throw new ApiError(400, "Enter only the last 4 digits of your SSN.");
       }
       profile.ssnLast4 = cleaned;
     }
@@ -1311,7 +1312,7 @@ const updateIdentityVerification = asyncHandler(
       if (missing.length > 0) {
         throw new ApiError(
           400,
-          `Driver Verification cannot be submitted yet. Complete: ${missing.join(
+          `Your Driver Verification can't be submitted yet. Complete these first: ${missing.join(
             ", ",
           )}`,
         );

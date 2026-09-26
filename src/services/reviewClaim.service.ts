@@ -53,7 +53,7 @@ export async function claimItem<T extends Claimable>(
       .select("claimedBy")
       .populate("claimedBy", "name")
       .lean();
-    if (!existing) throw new ApiError(404, "Review item not found");
+    if (!existing) throw new ApiError(404, "This review item is no longer available. Refresh the Review Center.");
     throw new ApiError(409, "This item is already claimed by another reviewer.", [
       { claimedByName: existing.claimedBy?.name || "another reviewer" },
     ]);
@@ -75,8 +75,8 @@ export async function releaseItem<T extends Claimable>(
 
   if (!released) {
     const existing: any = await model.findById(id).select("claimedBy").lean();
-    if (!existing) throw new ApiError(404, "Review item not found");
-    throw new ApiError(409, "You do not currently hold the claim on this item.");
+    if (!existing) throw new ApiError(404, "This review item is no longer available. Refresh the Review Center.");
+    throw new ApiError(409, "You aren't currently assigned to review this item. Claim it first, then try again.");
   }
 
   return released;

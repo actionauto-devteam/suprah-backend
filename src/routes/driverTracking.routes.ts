@@ -249,6 +249,12 @@ router.post(
   validateUploadedImageContent,
   loadController.submitProofOfPickup,
 );
+router.post(
+  "/loads/:id/changes/seen",
+  driverOnly,
+  noStoreSensitive,
+  driverTrackingController.markLoadChangesSeen,
+);
 router.post("/loads/:id/pickup", driverOnly, driverTrackingController.markPickedUp);
 router.post("/loads/:id/start-route", driverOnly, driverTrackingController.startRoute);
 router.post(

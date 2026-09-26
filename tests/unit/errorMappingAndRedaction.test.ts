@@ -1,5 +1,6 @@
 import { mapKnownError } from '../../src/utils/errorMapping';
 import { redactForLog } from '../../src/utils/logRedaction';
+import { INVALID_LINK } from '../../src/utils/userMessages';
 
 describe('mapKnownError', () => {
   it('maps a malformed ObjectId to 400 without leaking the Mongoose message', () => {
@@ -9,7 +10,8 @@ describe('mapKnownError', () => {
       path: '_id',
       message: 'Cast to ObjectId failed for value "abc" (type string) at path "_id" for model "Load"',
     });
-    expect(mapped).toEqual({ statusCode: 400, message: 'Invalid identifier', errorType: 'INVALID_ID' });
+    expect(mapped).toEqual({ statusCode: 400, message: INVALID_LINK, errorType: 'INVALID_ID' });
+    expect(mapped?.message).not.toContain('Cast to ObjectId');
   });
 
   it('maps a Mongoose ValidationError to 400 with field names only', () => {

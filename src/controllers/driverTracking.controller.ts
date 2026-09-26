@@ -5,6 +5,17 @@ import { createHash } from "crypto";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
+import {
+  DOCUMENT_FILE_UNAVAILABLE,
+  DOCUMENT_NOT_FOUND,
+  DRIVER_NOT_FOUND,
+  DRIVER_PROFILE_NOT_FOUND,
+  INVALID_LINK,
+  LOAD_NOT_FOUND,
+  LOAD_UNAVAILABLE_FOR_DRIVER,
+  SELECT_ORGANIZATION,
+  responsibleDispatcherPhrase,
+} from "../utils/userMessages";
 import Load from "../models/Load.model";
 import {
   getLoadAcceptanceMaterialVersion,
@@ -67,6 +78,11 @@ import {
   assertDriverReviewMutationAccess,
   resolveDriverReviewAccess,
 } from "../services/driverReviewAccess.service";
+import {
+  isReassignableLoad,
+  proofOfDeliveryBelongsTo,
+  proofOfDeliveryOwnedByFilter,
+} from "../services/loadLifecyclePolicy";
 import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
@@ -212,6 +228,36 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
           }
     : undefined;
 
+  const myAmendments: any[] = Array.isArray(source.driverAmendments)
+    ? source.driverAmendments.filter(
+        (amendment: any) => String(amendment?.driverId ?? "") === String(driverId),
+      )
+    : [];
+  const assignedAtMs = source.assignedAt ? new Date(source.assignedAt).getTime() : 0;
+  // A hidden-pricing load may still change its actual compensation, but the
+  // driver-facing change must not reveal the hidden amount.
+  const driverVisibleChanges = (amendment: any) =>
+    Array.isArray(amendment?.changes)
+      ? amendment.changes.map((change: any) => {
+          const field = String(change.field ?? "");
+          const label = String(change.label ?? "Load Details");
+          if (!pricingVisible && field === "pricing") {
+            return {
+              field,
+              label,
+              before: "Pricing hidden by Dispatch",
+              after: "Pricing hidden by Dispatch",
+            };
+          }
+          return {
+            field,
+            label,
+            before: String(change.before ?? ""),
+            after: String(change.after ?? ""),
+          };
+        })
+      : [];
+
   const {
     orgId: _legacyOrgId,
     createdBy: _createdBy,
@@ -237,46 +283,37 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
     // Opaque material version only; internal assignment fingerprints and
     // dispatcher override decisions never leave the server.
     acceptanceMaterialVersion: getLoadAcceptanceMaterialVersion(source),
-    pendingDriverAmendments: Array.isArray(_driverAmendments)
-      ? _driverAmendments
-          .filter(
-            (amendment: any) =>
-              amendment?.status === "pending" &&
-              String(amendment?.driverId ?? "") === driverId,
-          )
-          .map((amendment: any) => ({
-            id: String(amendment._id),
-            createdAt: amendment.createdAt ?? null,
-            loadStatusAtChange: amendment.loadStatusAtChange ?? null,
-            materialVersionBefore: amendment.materialVersionBefore ?? null,
-            materialVersionAfter: amendment.materialVersionAfter ?? null,
-            changes: Array.isArray(amendment.changes)
-              ? amendment.changes.map((change: any) => {
-                  const field = String(change.field ?? "");
-                  const label = String(change.label ?? "Load Details");
-
-                  // A hidden-pricing load may still require a driver
-                  // acknowledgement when its actual compensation changes, but
-                  // the amendment payload must not reveal the hidden amount.
-                  if (!pricingVisible && field === "pricing") {
-                    return {
-                      field,
-                      label,
-                      before: "Pricing hidden by Dispatch",
-                      after: "Pricing hidden by Dispatch",
-                    };
-                  }
-
-                  return {
-                    field,
-                    label,
-                    before: String(change.before ?? ""),
-                    after: String(change.after ?? ""),
-                  };
-                })
-              : [],
-          }))
-      : [],
+    pendingDriverAmendments: myAmendments
+      .filter((amendment: any) => amendment?.status === "pending")
+      .map((amendment: any) => ({
+        id: String(amendment._id),
+        createdAt: amendment.createdAt ?? null,
+        loadStatusAtChange: amendment.loadStatusAtChange ?? null,
+        materialVersionBefore: amendment.materialVersionBefore ?? null,
+        materialVersionAfter: amendment.materialVersionAfter ?? null,
+        changes: driverVisibleChanges(amendment),
+      })),
+    // Every change Dispatch made during this driver's current assignment,
+    // newest first, for the Current Load "View changes" history.
+    driverLoadChanges: myAmendments
+      .filter((amendment: any) => {
+        if (!assignedAtMs) return true;
+        const createdMs = new Date(amendment?.createdAt ?? 0).getTime();
+        return Number.isFinite(createdMs) && createdMs >= assignedAtMs;
+      })
+      .sort(
+        (a: any, b: any) =>
+          new Date(b?.createdAt ?? 0).getTime() - new Date(a?.createdAt ?? 0).getTime(),
+      )
+      .map((amendment: any) => ({
+        id: String(amendment._id),
+        createdAt: amendment.createdAt ?? null,
+        loadStatusAtChange: amendment.loadStatusAtChange ?? null,
+        status: amendment.status ?? "pending",
+        acknowledgedAt: amendment.acknowledgedAt ?? null,
+        seenAt: amendment.seenAt ?? null,
+        changes: driverVisibleChanges(amendment),
+      })),
     hasRequested: Boolean(myRequest),
     myRequestedAt: myRequest?.requestedAt ?? null,
   };
@@ -808,7 +845,7 @@ function assertNoPendingLoadAmendments(load: any, driverId: string) {
 
   throw new ApiError(
     409,
-    "Dispatch changed material details on this active load. Review and acknowledge the Load Update before continuing the load lifecycle.",
+    `Dispatch changed the details of load ${load.loadNumber}. Open "Load Updated by Dispatch" on your Current Load card and acknowledge the changes before you continue.`,
     [
       {
         type: "load_amendment_acknowledgement_required",
@@ -854,7 +891,7 @@ async function requireDispatchOwnerBeforeAcceptance(
 
   throw new ApiError(
     409,
-    "This load does not currently have a valid responsible dispatcher. Dispatch must reconfirm the assignment before you can accept it.",
+    `You can't accept load ${load.loadNumber} yet because the dispatcher responsible for it is no longer available. Contact Dispatch so they can reconfirm the assignment, then try again.`,
     [
       {
         type: "dispatch_owner_required_before_acceptance",
@@ -879,7 +916,7 @@ function assertCanReviewReleaseRequest(req: ExpressRequest, load: any, request: 
   if (canReviewReleaseRequest(req, load, request)) return;
   throw new ApiError(
     403,
-    "This release request must be reviewed by the dispatcher responsible for the load or an organization administrator.",
+    `You can't review the release request on load ${load.loadNumber}. Only the dispatcher responsible for this load or an organization admin can approve or decline it.`,
   );
 }
 
@@ -1029,7 +1066,7 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
   };
 
   if (user.role !== "driver") {
-    throw new ApiError(403, "Only driver accounts can publish Driver Tracker locations");
+    throw new ApiError(403, "Location sharing is only available on driver accounts. Sign in with your driver account to share your location.");
   }
 
   if (
@@ -1042,16 +1079,16 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     lng < -180 ||
     lng > 180
   ) {
-    throw new ApiError(400, "A valid latitude and longitude are required");
+    throw new ApiError(400, "Your location couldn't be read. Make sure location services are turned on for this app, then try again.");
   }
 
   const measuredAt = typeof locationRecordedAt === "string" ? new Date(locationRecordedAt) : null;
   if (locationRecordedAt !== undefined && (!measuredAt || !Number.isFinite(measuredAt.getTime()) ||
       measuredAt.getTime() > Date.now() + 60_000 || Date.now() - measuredAt.getTime() > 120_000)) {
-    throw new ApiError(400, "A recent GPS measurement timestamp is required");
+    throw new ApiError(400, "Your phone didn't provide a recent location reading. Check that location services are on, then try again.");
   }
   if (accuracy !== undefined && (typeof accuracy !== "number" || !Number.isFinite(accuracy) || accuracy < 0)) {
-    throw new ApiError(400, "GPS accuracy must be a nonnegative number");
+    throw new ApiError(400, "Your phone sent an invalid location reading. Turn location services off and on again, then try again.");
   }
 
   const driverId = user._id.toString();
@@ -1131,7 +1168,7 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     }
     throw error;
   }
-  if (!location) throw new ApiError(500, "Location could not be stored");
+  if (!location) throw new ApiError(500, "We couldn't save your location right now. Check your internet connection and try again.");
 
   // A heartbeat may be stored for the driver's own portal/manual sharing, but
   // exact coordinates are emitted only to dispatchers who own an Accepted,
@@ -1174,7 +1211,7 @@ const markLocationOffline = asyncHandler(
     if (user.role !== "driver") {
       throw new ApiError(
         403,
-        "Only driver accounts can publish Driver Tracker presence",
+        "Online status is only available on driver accounts. Sign in with your driver account to go online.",
       );
     }
 
@@ -1553,7 +1590,7 @@ async function updateLoadIfCurrent(params: {
   if (!updated) {
     throw new ApiError(
       409,
-      `This load changed while ${params.action}. Refresh the load and try again.`,
+      `Load ${params.load?.loadNumber ?? ""} changed while you were ${params.action}, so nothing was saved. Refresh to see the latest version and try again.`,
     );
   }
 
@@ -1714,6 +1751,179 @@ function pendingLoadRequestAssignmentMessage(
     : `Load ${conflict.loadNumber} has ${requestCount} pending driver ${requestLabel}. Confirm the assignment to ${conflict.selectedDriverName}; the pending requests will be marked not selected.`;
 }
 
+/**
+ * Outbox events that resolve every pending requester other than the selected
+ * driver with an explicit Not Selected outcome (notification + Dispatch Chat),
+ * rather than letting their request silently disappear from driverRequests.
+ * Shared by direct assignment and request approval.
+ */
+function buildRequestNotSelectedOutboxEvents(params: {
+  organizationId: string;
+  load: any;
+  dispatcherId: string;
+  dispatcherName: string;
+  selectedDriverId: string;
+  selectedDriverName: string;
+  pendingRequesters: PendingLoadRequestAssignmentRequester[];
+  creatorDispatcherId: string | null;
+  creatorDispatcherName: string;
+}) {
+  const {
+    organizationId,
+    load,
+    dispatcherId,
+    dispatcherName,
+    pendingRequesters,
+    creatorDispatcherId,
+    creatorDispatcherName,
+  } = params;
+  const driverId = params.selectedDriverId;
+  const assignedDriverName = params.selectedDriverName;
+  const requestDispatcherId = String(load.createdBy ?? "").trim();
+  const actorIsLoadRequestDispatcher = Boolean(
+    requestDispatcherId && requestDispatcherId === dispatcherId,
+  );
+  const events: any[] = [];
+
+  for (const requester of pendingRequesters) {
+    if (requester.driverId === driverId) continue;
+
+    events.push(
+      lifecycleUserNotificationEvent({
+        userId: requester.driverId,
+        organizationId,
+        type: "driver_request_rejected",
+        title: "Load Request Not Selected",
+        message: `Your request for load ${load.loadNumber} was not selected because the load was assigned to another driver.`,
+        metadata: {
+          loadId: load._id.toString(),
+          loadNumber: load.loadNumber,
+          driverId: requester.driverId,
+          assignmentResolution: "not_selected",
+          route: "/driver",
+        },
+      }),
+    );
+
+    if (actorIsLoadRequestDispatcher) {
+      events.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId: requester.driverId,
+          eventType: "driver_load_request_not_selected",
+          title: "Load Request Not Selected",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_not_selected_by_load_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            dispatcherId,
+            dispatcherName,
+            driverId: requester.driverId,
+            driverName: requester.driverName,
+            selectedDriverId: driverId,
+            selectedDriverName: assignedDriverName,
+            hideSelectedDriverIdentityFromDriver: true,
+            originalDispatcherId: requestDispatcherId || dispatcherId,
+            unreadForParticipantIds: [dispatcherId, requester.driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              driver: `${dispatcherName} assigned load ${load.loadNumber} to another driver. Your request was not selected.`,
+            },
+          },
+        }),
+      );
+    } else {
+      events.push(
+        lifecycleDispatchChatEvent({
+          organizationId,
+          dispatcherId,
+          driverId: requester.driverId,
+          eventType: "driver_load_request_not_selected",
+          title: "Load Request Not Selected",
+          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            action: "request_not_selected_by_support_dispatcher",
+            actorId: dispatcherId,
+            actorName: dispatcherName,
+            actorRole: "dispatcher",
+            dispatcherId,
+            dispatcherName,
+            driverId: requester.driverId,
+            driverName: requester.driverName,
+            selectedDriverId: driverId,
+            selectedDriverName: assignedDriverName,
+            hideSelectedDriverIdentityFromDriver: true,
+            originalDispatcherId: requestDispatcherId || null,
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            hidePerformerIdentityFromDriver: true,
+            unreadForParticipantIds: [dispatcherId, requester.driverId],
+            audienceMessages: {
+              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+              driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
+            },
+          },
+          performedByUserId: dispatcherId,
+          performedByName: dispatcherName,
+        }),
+      );
+
+      if (creatorDispatcherId && creatorDispatcherId !== dispatcherId) {
+        events.push(
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: creatorDispatcherId,
+            driverId: requester.driverId,
+            eventType: "driver_load_request_not_selected_by_org_member",
+            title: "Load Request Not Selected",
+            message: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+            metadata: {
+              loadId: load._id.toString(),
+              loadNumber: load.loadNumber,
+              action: "request_not_selected_by_org_member",
+              actorId: dispatcherId,
+              actorName: dispatcherName,
+              actorRole: "dispatcher",
+              dispatcherId: creatorDispatcherId,
+              dispatcherName: creatorDispatcherName,
+              driverId: requester.driverId,
+              driverName: requester.driverName,
+              selectedDriverId: driverId,
+              selectedDriverName: assignedDriverName,
+              hideSelectedDriverIdentityFromDriver: true,
+              originalDispatcherId: creatorDispatcherId,
+              performedByUserId: dispatcherId,
+              performedByName: dispatcherName,
+              hidePerformerIdentityFromDriver: true,
+              unreadForParticipantIds: [creatorDispatcherId],
+              audienceMessages: {
+                actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
+                threadDispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+                dispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
+                driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
+              },
+            },
+            performedByUserId: dispatcherId,
+            performedByName: dispatcherName,
+            notifyThreadOwner: true,
+          }),
+        );
+      }
+    }
+  }
+
+  return events;
+}
+
 // ─── Assign / Reassign / Remove (dispatcher actions) ─────────────────────────
 
 // POST /api/driver-tracking/assign-load  { loadId, driverId }
@@ -1735,7 +1945,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   };
 
   if (!loadId || !driverId) {
-    throw new ApiError(400, "loadId and driverId are required");
+    throw new ApiError(400, "Choose both a load and a driver, then try again.");
   }
 
   let [load, driver] = await Promise.all([
@@ -1744,8 +1954,8 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     User.findOne({ _id: driverId, role: "driver", isActive: true }).lean(),
   ]);
 
-  if (!load) throw new ApiError(404, "Load not found");
-  if (!driver) throw new ApiError(404, "Driver not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+  if (!driver) throw new ApiError(404, DRIVER_NOT_FOUND);
   await assertDriverCanTakeNewWork(driverId, organizationId, "assign");
 
   // Normal assignment owns only Posted + unassigned loads. Already-assigned
@@ -1755,8 +1965,8 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     throw new ApiError(
       409,
       load.assignedDriverId
-        ? "This load is already assigned. Use Reassign instead."
-        : `Cannot assign a load in ${load.status} status`,
+        ? `Load ${load.loadNumber} already has a driver. Use Reassign to give it to a different driver.`
+        : `Load ${load.loadNumber} can't be assigned because it is ${load.status}. Only Posted loads without a driver can be assigned.`,
     );
   }
 
@@ -2006,141 +2216,19 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   // Resolve every outstanding requester. The selected requester (if any) was
   // handled above as fulfilled; every other requester receives an explicit
   // Not Selected outcome rather than disappearing from driverRequests.
-  for (const requester of pendingRequesters) {
-    if (requester.driverId === driverId) continue;
-
-    assignmentOutbox.push(
-      lifecycleUserNotificationEvent({
-        userId: requester.driverId,
-        organizationId,
-        type: "driver_request_rejected",
-        title: "Load Request Not Selected",
-        message: `Your request for load ${load.loadNumber} was not selected because the load was assigned to another driver.`,
-        metadata: {
-          loadId: load._id.toString(),
-          loadNumber: load.loadNumber,
-          driverId: requester.driverId,
-          assignmentResolution: "not_selected",
-          route: "/driver",
-        },
-      }),
-    );
-
-    if (actorIsLoadRequestDispatcher) {
-      assignmentOutbox.push(
-        lifecycleDispatchChatEvent({
-          organizationId,
-          dispatcherId,
-          driverId: requester.driverId,
-          eventType: "driver_load_request_not_selected",
-          title: "Load Request Not Selected",
-          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
-          metadata: {
-            loadId: load._id.toString(),
-            loadNumber: load.loadNumber,
-            action: "request_not_selected_by_load_dispatcher",
-            actorId: dispatcherId,
-            actorName: dispatcherName,
-            actorRole: "dispatcher",
-            dispatcherId,
-            dispatcherName,
-            driverId: requester.driverId,
-            driverName: requester.driverName,
-            selectedDriverId: driverId,
-            selectedDriverName: assignedDriverName,
-            hideSelectedDriverIdentityFromDriver: true,
-            originalDispatcherId: requestDispatcherId || dispatcherId,
-            unreadForParticipantIds: [dispatcherId, requester.driverId],
-            audienceMessages: {
-              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
-              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
-              driver: `${dispatcherName} assigned load ${load.loadNumber} to another driver. Your request was not selected.`,
-            },
-          },
-        }),
-      );
-    } else {
-      assignmentOutbox.push(
-        lifecycleDispatchChatEvent({
-          organizationId,
-          dispatcherId,
-          driverId: requester.driverId,
-          eventType: "driver_load_request_not_selected",
-          title: "Load Request Not Selected",
-          message: `${dispatcherName} assigned load ${load.loadNumber} to ${assignedDriverName}; ${requester.driverName}'s pending request was not selected.`,
-          metadata: {
-            loadId: load._id.toString(),
-            loadNumber: load.loadNumber,
-            action: "request_not_selected_by_support_dispatcher",
-            actorId: dispatcherId,
-            actorName: dispatcherName,
-            actorRole: "dispatcher",
-            dispatcherId,
-            dispatcherName,
-            driverId: requester.driverId,
-            driverName: requester.driverName,
-            selectedDriverId: driverId,
-            selectedDriverName: assignedDriverName,
-            hideSelectedDriverIdentityFromDriver: true,
-            originalDispatcherId: requestDispatcherId || null,
-            performedByUserId: dispatcherId,
-            performedByName: dispatcherName,
-            hidePerformerIdentityFromDriver: true,
-            unreadForParticipantIds: [dispatcherId, requester.driverId],
-            audienceMessages: {
-              actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
-              dispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
-              driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
-            },
-          },
-          performedByUserId: dispatcherId,
-          performedByName: dispatcherName,
-        }),
-      );
-
-      if (creatorDispatcherId && creatorDispatcherId !== dispatcherId) {
-        assignmentOutbox.push(
-          lifecycleDispatchChatEvent({
-            organizationId,
-            dispatcherId: creatorDispatcherId,
-            driverId: requester.driverId,
-            eventType: "driver_load_request_not_selected_by_org_member",
-            title: "Load Request Not Selected",
-            message: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
-            metadata: {
-              loadId: load._id.toString(),
-              loadNumber: load.loadNumber,
-              action: "request_not_selected_by_org_member",
-              actorId: dispatcherId,
-              actorName: dispatcherName,
-              actorRole: "dispatcher",
-              dispatcherId: creatorDispatcherId,
-              dispatcherName: creatorDispatcherName,
-              driverId: requester.driverId,
-              driverName: requester.driverName,
-              selectedDriverId: driverId,
-              selectedDriverName: assignedDriverName,
-              hideSelectedDriverIdentityFromDriver: true,
-              originalDispatcherId: creatorDispatcherId,
-              performedByUserId: dispatcherId,
-              performedByName: dispatcherName,
-              hidePerformerIdentityFromDriver: true,
-              unreadForParticipantIds: [creatorDispatcherId],
-              audienceMessages: {
-                actorDispatcher: `You assigned load ${load.loadNumber} to ${assignedDriverName}. ${requester.driverName}'s pending request was not selected.`,
-                threadDispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
-                dispatcher: `${requester.driverName}'s request for load ${load.loadNumber} was closed because ${dispatcherName} assigned the load to ${assignedDriverName}.`,
-                driver: `Your request for load ${load.loadNumber} was not selected because another dispatcher assigned the load to another driver.`,
-              },
-            },
-            performedByUserId: dispatcherId,
-            performedByName: dispatcherName,
-            notifyThreadOwner: true,
-          }),
-        );
-      }
-    }
-  }
+  assignmentOutbox.push(
+    ...buildRequestNotSelectedOutboxEvents({
+      organizationId,
+      load,
+      dispatcherId,
+      dispatcherName,
+      selectedDriverId: driverId,
+      selectedDriverName: assignedDriverName,
+      pendingRequesters,
+      creatorDispatcherId,
+      creatorDispatcherName,
+    }),
+  );
 
   assignmentOutbox.push(
     lifecycleActivityEvent({
@@ -2196,6 +2284,10 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
           },
           $unset: {
             proofOfPickup: "",
+            // Leftover proof or a requester's signature must never be
+            // attributed to the newly assigned driver.
+            proofOfDelivery: "",
+            driverContract: "",
             assignmentReconfirmedAt: "",
             assignmentReconfirmedBy: "",
           },
@@ -2234,7 +2326,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
           });
         throw new ApiError(
           409,
-          "The pending request list changed before assignment. Review the updated requests and confirm again.",
+          `Driver requests for load ${validatedLoad.loadNumber} changed before the assignment was saved. Review the updated requests and confirm again.`,
           [latestConflict],
         );
       }
@@ -2242,7 +2334,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
 
     throw new ApiError(
       409,
-      "This load changed while assigning it. Refresh the load and try again.",
+      `Load ${validatedLoad.loadNumber} changed while you were assigning it, so nothing was saved. Refresh and try again.`,
     );
   });
 
@@ -2280,12 +2372,21 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
     overrideCapacity?: boolean;
   };
 
-  if (!loadId || !driverId) throw new ApiError(400, "loadId and driverId are required");
+  if (!loadId || !driverId) throw new ApiError(400, "Choose both a load and a driver, then try again.");
 
   let load = await Load.findOne({ _id: loadId, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   if (["Delivered", "Cancelled"].includes(load.status)) {
-    throw new ApiError(400, `Cannot reassign a load in ${load.status} status`);
+    throw new ApiError(400, `Load ${load.loadNumber} can't be reassigned because it is already ${load.status}.`);
+  }
+  // Reassign replaces an existing driver. Unassigned loads must go through
+  // Assign, which enforces the pending-request confirmation and resolves
+  // every requester.
+  if (!isReassignableLoad(load as any)) {
+    throw new ApiError(
+      409,
+      `Load ${load.loadNumber} has no driver to replace. Use Assign instead to give it a driver.`,
+    );
   }
 
   const previousDriverId = load.assignedDriverId
@@ -2326,7 +2427,7 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
           .lean()
       : Promise.resolve(null),
   ]);
-  if (!driver) throw new ApiError(404, "Driver not found");
+  if (!driver) throw new ApiError(404, DRIVER_NOT_FOUND);
   await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
 
   await assertDriverLoadCompatibility({
@@ -2692,13 +2793,13 @@ const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   const organizationId = req.orgId as string;
   const { loadId } = req.body as { loadId?: string };
 
-  if (!loadId) throw new ApiError(400, "loadId is required");
+  if (!loadId) throw new ApiError(400, "Choose the load you want to remove the driver from, then try again.");
 
   let load = await Load.findOne({ _id: loadId, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-  if (!load.assignedDriverId) throw new ApiError(400, "Load has no assigned driver");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+  if (!load.assignedDriverId) throw new ApiError(400, `Load ${load.loadNumber} doesn't have a driver to remove.`);
   if (["Delivered", "Cancelled"].includes(load.status)) {
-    throw new ApiError(400, `Cannot remove driver from a load in ${load.status} status`);
+    throw new ApiError(400, `You can't remove the driver from load ${load.loadNumber} because it is already ${load.status}.`);
   }
 
   const previousDriverId = load.assignedDriverId.toString();
@@ -2968,7 +3069,7 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
   const user = getUser(req);
 
   if (user.role !== "driver") {
-    throw new ApiError(403, "Only driver accounts can view driver dashboard statistics");
+    throw new ApiError(403, "Dashboard statistics are only available on driver accounts.");
   }
 
   const [pendingRequests, completedLoads, profile, payoutTotals] =
@@ -3103,7 +3204,7 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
     : [];
 
   if (requestedDriverIds.length === 0) {
-    throw new ApiError(400, "At least one driver is required for compatibility preview");
+    throw new ApiError(400, "Choose at least one driver to check compatibility.");
   }
 
   const normalizePreviewLoad = async (previewLoad: any) => {
@@ -3174,18 +3275,18 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
         _id: body.loadId,
         organizationId,
       }).lean();
-      if (!previewLoad) throw new ApiError(404, "Load not found");
+      if (!previewLoad) throw new ApiError(404, LOAD_NOT_FOUND);
     }
 
     if (!previewLoad || typeof previewLoad !== "object") {
-      throw new ApiError(400, "Load details are required for compatibility preview");
+      throw new ApiError(400, "Add the load's route, vehicles and trailer type before checking driver compatibility.");
     }
 
     previewEntries.push({ key: "single", load: await normalizePreviewLoad(previewLoad) });
   }
 
   if (previewEntries.length === 0) {
-    throw new ApiError(400, "No valid loads were supplied for compatibility preview");
+    throw new ApiError(400, "None of the selected loads could be checked. Refresh the page and try again.");
   }
 
   // Drivers are a shared platform-wide pool — not restricted to this org.
@@ -3370,7 +3471,7 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
   const load = await Load.findOne(lookup)
     .populate("assignedDriverId", "name email phone avatar")
     .lean();
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
   if (user.role !== "driver") {
     const currentMaterialVersion = getLoadAcceptanceMaterialVersion(load);
@@ -3431,7 +3532,7 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
   // existing request on it, or the load is legitimately visible on the shared
   // Available Loads board.
   if (!isAssignedDriver && !hasRequested && !isAvailableBoardLoad) {
-    throw new ApiError(404, "Load not found");
+    throw new ApiError(404, LOAD_UNAVAILABLE_FOR_DRIVER);
   }
 
   const [profile, location, pendingReleaseRequest] = await Promise.all([
@@ -3490,7 +3591,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
   // Drivers are a shared pool with no org of their own — the load being
   // requested determines which dealership's rules apply, not req.orgId.
   let load = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = load.organizationId as unknown as string;
   const driverId = user._id.toString();
   const driverName = String(user.name || "Driver").trim() || "Driver";
@@ -3504,7 +3605,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     if (load.status !== "Posted" || load.assignedDriverId) {
       throw new ApiError(
         409,
-        "This load request can no longer be cancelled because the load is no longer available. Refresh your requests to see the current status.",
+        `Your request for load ${load.loadNumber} can't be cancelled because the load is no longer available. Refresh your requests to see its current status.`,
       );
     }
 
@@ -3513,7 +3614,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
         (request: any) => String(request?.driverId ?? "") === driverId,
       );
     if (!hasPendingRequest) {
-      throw new ApiError(409, "You no longer have a pending request for this load.");
+      throw new ApiError(409, `You don't have a pending request for load ${load.loadNumber} anymore. Refresh your requests to see its current status.`);
     }
 
     const creatorDispatcher = await findActiveDispatcherForLoad(
@@ -3610,7 +3711,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     if (!cancelledLoad) {
       throw new ApiError(
         409,
-        "This load request changed while it was being cancelled. Refresh your requests and try again.",
+        `Your request for load ${load.loadNumber} changed while it was being cancelled. Refresh your requests and try again.`,
       );
     }
 
@@ -3652,7 +3753,7 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     load.assignedDriverId ||
     load.additionalInfo?.visibility === "private"
   ) {
-    throw new ApiError(400, "This load is no longer available");
+    throw new ApiError(400, `Load ${load.loadNumber} is no longer available to request. It may have been assigned to another driver or removed from the load board.`);
   }
 
   await assertDriverCanTakeNewWork(
@@ -3748,19 +3849,18 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     },
     appendLoadLifecycleOutbox(
       {
+        // The signature stays with this driver's own request; the load-level
+        // driverContract is only set for the approved requester.
         $push: {
           driverRequests: {
             driverId: user._id,
             requestedAt,
             note: (note ?? "").slice(0, 500),
-          },
-        },
-        $set: {
-          driverContract: {
-            agreedToTerms: true,
-            signedAt: requestedAt,
-            signatureDataUrl: signature.signatureDataUrl,
-            signerName: signature.signerName || user.name || "",
+            signature: {
+              signedAt: requestedAt,
+              signatureDataUrl: signature.signatureDataUrl,
+              signerName: signature.signerName || user.name || "",
+            },
           },
         },
       },
@@ -3779,8 +3879,8 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     throw new ApiError(
       409,
       alreadyRequested
-        ? "You have already requested this load"
-        : "This load changed while your request was being submitted. Refresh Available Loads and try again.",
+        ? `You've already requested load ${load.loadNumber}. Dispatch will review your request.`
+        : `Load ${load.loadNumber} changed while your request was being submitted. Refresh Available Loads and try again.`,
     );
   }
   load = requestedLoad;
@@ -3828,18 +3928,24 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
     overrideCapacity?: boolean;
   };
 
-  if (!driverId) throw new ApiError(400, "driverId is required");
+  if (!driverId) throw new ApiError(400, "Choose which driver's request you want to review, then try again.");
 
-  let load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
+  let load = await Load.findOne({ _id: req.params.id, organizationId })
+    // The approved requester's signature becomes the load's driverContract.
+    .select("+driverRequests.signature.signatureDataUrl");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   if (load.status !== "Posted" || load.assignedDriverId) {
-    throw new ApiError(400, "This load is no longer available");
+    throw new ApiError(400, `Load ${load.loadNumber} can no longer be approved for a driver because it is ${load.status}${load.assignedDriverId ? " and already has a driver" : ""}. Refresh the request list.`);
   }
 
   const requests: any[] = (load as any).driverRequests ?? [];
-  if (!requests.some((r) => String(r.driverId) === driverId)) {
-    throw new ApiError(400, "That driver has not requested this load");
+  const approvedRequest = requests.find((r) => String(r.driverId) === driverId);
+  if (!approvedRequest) {
+    throw new ApiError(400, `That driver doesn't have a pending request for load ${load.loadNumber}. Refresh the request list.`);
   }
+  const approvedSignature = approvedRequest.signature?.signatureDataUrl
+    ? approvedRequest.signature
+    : null;
 
   await assertDriverCanTakeNewWork(driverId, organizationId, "approve");
   await assertDriverLoadCompatibility({
@@ -3863,8 +3969,24 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
   const approvingDispatcherName =
     String(user.name || "Dispatch").trim() || "Dispatch";
 
+  // Every other requester gets the same explicit Not Selected outcome that
+  // direct assignment gives them. The revision guard below ensures this is
+  // exactly the request list that gets cleared.
+  const requestResolution = await buildPendingLoadRequestAssignmentConflict({
+    load,
+    selectedDriverId: driverId,
+    selectedDriverName: requestingDriverName,
+  });
+  const notSelectedRequesterIds = requestResolution.pendingRequesters
+    .map((requester) => requester.driverId)
+    .filter((requesterId) => requesterId !== driverId);
+
   const approvalOutbox = [
-    lifecycleSyncEvent(organizationId, [driverId], load._id.toString()),
+    lifecycleSyncEvent(
+      organizationId,
+      [driverId, ...notSelectedRequesterIds],
+      load._id.toString(),
+    ),
     lifecycleUserNotificationEvent({
       userId: driverId,
       organizationId,
@@ -3901,14 +4023,27 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
         },
       },
     }),
+    ...buildRequestNotSelectedOutboxEvents({
+      organizationId,
+      load,
+      dispatcherId: approvingDispatcherId,
+      dispatcherName: approvingDispatcherName,
+      selectedDriverId: driverId,
+      selectedDriverName: requestingDriverName,
+      pendingRequesters: requestResolution.pendingRequesters,
+      creatorDispatcherId: requestResolution.creatorDispatcherId,
+      creatorDispatcherName: requestResolution.creatorDispatcherName ?? "Dispatch",
+    }),
     lifecycleActivityEvent({
       userId: user._id.toString(),
       organizationId,
       type: "load_assigned",
       title: "Driver Request Approved",
-      description: `Approved driver request for load ${load.loadNumber}`,
+      description: notSelectedRequesterIds.length
+        ? `Approved driver request for load ${load.loadNumber} and resolved ${notSelectedRequesterIds.length} other pending request${notSelectedRequesterIds.length === 1 ? "" : "s"}`
+        : `Approved driver request for load ${load.loadNumber}`,
       loadId: load._id.toString(),
-      metadata: { driverId },
+      metadata: { driverId, notSelectedRequestCount: notSelectedRequesterIds.length },
     }),
   ];
 
@@ -3942,9 +4077,23 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
               overrideAvailability: Boolean(overrideAvailability),
               overrideCapacity: Boolean(overrideCapacity),
             },
+            ...(approvedSignature
+              ? {
+                  driverContract: {
+                    agreedToTerms: true,
+                    signedAt: approvedSignature.signedAt,
+                    signatureDataUrl: approvedSignature.signatureDataUrl,
+                    signerName: approvedSignature.signerName || requestingDriverName,
+                  },
+                }
+              : {}),
           },
           $unset: {
             proofOfPickup: "",
+            proofOfDelivery: "",
+            // Legacy requests stored no per-request signature; clear the
+            // load-level one rather than attribute another requester's.
+            ...(approvedSignature ? {} : { driverContract: "" }),
             assignmentReconfirmedAt: "",
             assignmentReconfirmedBy: "",
           },
@@ -3966,10 +4115,10 @@ const rejectLoadRequest = asyncHandler(async (req: ExpressRequest, res: ExpressR
   const organizationId = req.orgId as string;
   const { driverId } = req.body as { driverId?: string };
 
-  if (!driverId) throw new ApiError(400, "driverId is required");
+  if (!driverId) throw new ApiError(400, "Choose which driver's request you want to review, then try again.");
 
   let load = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
   const updatedLoad = await Load.findOneAndUpdate(
     {
@@ -3985,7 +4134,7 @@ const rejectLoadRequest = asyncHandler(async (req: ExpressRequest, res: ExpressR
   if (!updatedLoad) {
     throw new ApiError(
       409,
-      "This driver request is no longer pending on an available load. Refresh the request list and try again.",
+      `This driver's request for load ${load.loadNumber} is no longer pending. It may already have been approved or declined. Refresh the request list.`,
     );
   }
   load = updatedLoad;
@@ -4564,10 +4713,10 @@ const getDriverAlertContext = asyncHandler(
     const driverId = String(req.params.driverId || "").trim();
 
     if (!organizationId) {
-      throw new ApiError(403, "Organization access is required");
+      throw new ApiError(403, SELECT_ORGANIZATION);
     }
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
-      throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+      throw new ApiError(404, "This driver can't receive alerts from your organization right now. They may not have an active load with you, or their account is inactive.");
     }
 
     const [driver, loads] = await Promise.all([
@@ -4593,7 +4742,7 @@ const getDriverAlertContext = asyncHandler(
     // never confirms a platform-wide driver unless this dispatcher currently
     // owns an active operational relationship with them.
     if (!driver || loads.length === 0) {
-      throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+      throw new ApiError(404, "This driver can't receive alerts from your organization right now. They may not have an active load with you, or their account is inactive.");
     }
 
     return res.status(200).json(
@@ -4620,10 +4769,10 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
   const body = (req.body ?? {}) as Record<string, any>;
 
   if (!organizationId) {
-    throw new ApiError(403, "Organization access is required");
+    throw new ApiError(403, SELECT_ORGANIZATION);
   }
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
-    throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+    throw new ApiError(404, "This driver can't receive alerts from your organization right now. They may not have an active load with you, or their account is inactive.");
   }
 
   const requestedAlertType = String(body.alertType ?? "").trim();
@@ -4637,7 +4786,7 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     typeof body.destinationType === "string";
 
   if (!isNewAlertType && !isLegacyDestinationAlert) {
-    throw new ApiError(400, "A valid alertType is required");
+    throw new ApiError(400, "Choose an alert type, then send the alert again.");
   }
 
   const cleanMessage = String(body.message ?? "").trim().slice(0, 500);
@@ -4655,10 +4804,10 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
   if (isLegacyDestinationAlert) {
     const allowedDestinationTypes = ["site", "carshop", "specific-shop"];
     if (!allowedDestinationTypes.includes(String(body.destinationType))) {
-      throw new ApiError(400, "A valid destinationType is required");
+      throw new ApiError(400, "Choose where the driver should go, then send the alert again.");
     }
     if (!String(body.destinationName ?? "").trim()) {
-      throw new ApiError(400, "destinationName is required");
+      throw new ApiError(400, "Enter the destination name, then send the alert again.");
     }
 
     alertType = "legacy_destination";
@@ -4677,10 +4826,10 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     allowedResponses = [...config.allowedResponses];
 
     if (config.requiresLoad && !requestedLoadId) {
-      throw new ApiError(400, "A related load is required for this alert type");
+      throw new ApiError(400, "Choose the load this alert is about, then send it again.");
     }
     if (requestedLoadId && !mongoose.Types.ObjectId.isValid(requestedLoadId)) {
-      throw new ApiError(400, "A valid related load is required");
+      throw new ApiError(400, "The selected load can't be used for this alert. Choose one of the driver's current loads.");
     }
 
     if (alertType === "quick_attention") {
@@ -4733,7 +4882,7 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
   ]);
 
   if (!driver || !alertRelationship) {
-    throw new ApiError(404, "Driver is unavailable for this Dispatch Alert");
+    throw new ApiError(404, "This driver can't receive alerts from your organization right now. They may not have an active load with you, or their account is inactive.");
   }
 
   if (isLegacyDestinationAlert) {
@@ -4778,7 +4927,7 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
     });
 
     if (!notification) {
-      throw new ApiError(409, "The driver has disabled Driver Tracker notifications");
+      throw new ApiError(409, "This driver has turned off Driver Tracker notifications, so the alert can't be delivered. Message them in Dispatch Chat instead.");
     }
 
     await persistDriverDispatchAlertInChat({
@@ -4871,7 +5020,7 @@ const sendDriverAlert = asyncHandler(async (req: ExpressRequest, res: ExpressRes
   });
 
   if (!notification) {
-    throw new ApiError(409, "The driver has disabled Driver Tracker notifications");
+    throw new ApiError(409, "This driver has turned off Driver Tracker notifications, so the alert can't be delivered. Message them in Dispatch Chat instead.");
   }
 
   await persistDriverDispatchAlertInChat({
@@ -5015,7 +5164,7 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
     "unable",
   ];
   if (!response || !allowedResponses.includes(response)) {
-    throw new ApiError(400, "A valid response is required");
+    throw new ApiError(400, "Choose a response, then send it again.");
   }
 
   const notification: any = await Notification.findOne({
@@ -5024,7 +5173,7 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
     type: "driver_dispatch_alert",
   });
 
-  if (!notification) throw new ApiError(404, "Driver alert not found");
+  if (!notification) throw new ApiError(404, "This alert is no longer available. It may have expired or already been answered.");
 
   const configuredResponses = Array.isArray(notification.metadata?.allowedResponses)
     ? notification.metadata.allowedResponses
@@ -5032,7 +5181,7 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
         .filter((value: string) => allowedResponses.includes(value as DriverDispatchAlertResponse))
     : [];
   if (configuredResponses.length > 0 && !configuredResponses.includes(response)) {
-    throw new ApiError(400, "That response is not available for this alert");
+    throw new ApiError(400, "That response isn't available for this alert. Choose one of the listed options.");
   }
 
   const organizationId = notification.organizationId as string;
@@ -5196,7 +5345,7 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
 
 const requireAssignedDriver = (load: any, userId: string) => {
   if (!load.assignedDriverId || load.assignedDriverId.toString() !== userId) {
-    throw new ApiError(403, "You are not the assigned driver for this load");
+    throw new ApiError(403, `Load ${load.loadNumber} is not assigned to you, so you can't update it. Refresh your loads.`);
   }
 };
 
@@ -5220,7 +5369,7 @@ async function assertNoPendingReleaseRequestForProgression(
   if (pendingReleaseRequest) {
     throw new ApiError(
       409,
-      `Your release request is still awaiting Dispatch. Cancel the release request or wait for Dispatch before ${actionLabel}.`,
+      `Your release request for load ${load.loadNumber} is still waiting for Dispatch. Cancel the request or wait for Dispatch's decision before ${actionLabel}.`,
     );
   }
 }
@@ -5238,20 +5387,20 @@ const reconfirmAssignment = asyncHandler(async (req: ExpressRequest, res: Expres
   if (!/^[a-f0-9]{64}$/i.test(reviewedMaterialVersion)) {
     throw new ApiError(
       400,
-      "The reviewed load version is invalid. Refresh the assignment and try again.",
+      "Your review screen is out of date. Reload the load details, review them again, and then confirm.",
     );
   }
 
   const load: any = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   if (load.status !== "Assigned") {
     throw new ApiError(
       409,
-      `Only an Assigned load can be reconfirmed. This load is currently ${load.status}.`,
+      `Load ${load.loadNumber} is ${load.status}, so there is no assignment to reconfirm. Only Assigned loads that are waiting for the driver can be reconfirmed.`,
     );
   }
   if (!load.assignedDriverId) {
-    throw new ApiError(409, "This assignment no longer has a driver. Refresh Driver Tracker.");
+    throw new ApiError(409, `Load ${load.loadNumber} no longer has a driver, so there is nothing to reconfirm. Refresh Driver Tracker.`);
   }
 
   const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
@@ -5275,9 +5424,10 @@ const reconfirmAssignment = asyncHandler(async (req: ExpressRequest, res: Expres
     ["admin", "super_admin"].includes(effectiveRole);
 
   if (!adminOverride && !responsibleDispatcher && !designatedDispatcher) {
+    const { phrase, name } = await responsibleDispatcherPhrase(load);
     throw new ApiError(
       403,
-      "Only the responsible dispatcher, a designated dispatcher, or an organization administrator can reconfirm this assignment.",
+      `You can't reconfirm load ${load.loadNumber}. Only ${phrase}, a designated dispatcher, or an organization admin can reconfirm this assignment. Ask ${name || "them"} or an admin to review it.`,
     );
   }
 
@@ -5288,7 +5438,7 @@ const reconfirmAssignment = asyncHandler(async (req: ExpressRequest, res: Expres
   if (!confirmedDispatchOwner) {
     throw new ApiError(
       409,
-      "This assignment has no valid responsible dispatcher. Reconfirm it from an account with dispatcher access to this organization.",
+      `Load ${load.loadNumber} has no active responsible dispatcher. Reconfirm it from an account with dispatcher access to this organization.`,
     );
   }
 
@@ -5296,7 +5446,7 @@ const reconfirmAssignment = asyncHandler(async (req: ExpressRequest, res: Expres
   if (reviewedMaterialVersion !== currentMaterialVersion) {
     throw new ApiError(
       409,
-      "This load changed while you were reviewing it. Reload the assignment and review the latest information before confirming.",
+      `Load ${load.loadNumber} changed while you were reviewing it, so it was not reconfirmed. Reload the details and review the latest version before confirming.`,
       [
         {
           type: "load_assignment_review_stale",
@@ -5390,11 +5540,11 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   const signature = parseDriverSignature(req.body);
 
   let load = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Assigned") {
-    throw new ApiError(400, `Cannot accept a load in ${load.status} status`);
+    throw new ApiError(400, `You can't accept load ${load.loadNumber} because it is ${load.status}. Only loads waiting for your acceptance can be accepted.`);
   }
 
   const pendingReleaseRequest = await LoadReleaseRequest.findOne({
@@ -5405,7 +5555,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   if (pendingReleaseRequest) {
     throw new ApiError(
       409,
-      "Your release request is still awaiting Dispatch. The load cannot be accepted until Dispatch resolves that request.",
+      `Your release request for load ${load.loadNumber} is still waiting for Dispatch. You can't accept the load until Dispatch decides on that request.`,
     );
   }
 
@@ -5426,7 +5576,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   ) {
     throw new ApiError(
       409,
-      "This load's route, vehicles, schedule, compensation, or instructions changed after Dispatch assigned it. Dispatch must reconfirm the assignment before you can accept it.",
+      `You can't accept load ${load.loadNumber} yet because Dispatch changed its route, vehicles, schedule, pay, or instructions after assigning it to you. Dispatch must reconfirm the assignment first; you can accept once they do.`,
       [
         {
           type: "load_assignment_material_changed",
@@ -5455,7 +5605,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     ) {
       throw new ApiError(
         409,
-        "This legacy assignment was updated after it was assigned. Dispatch must reconfirm the assignment before you can accept it.",
+        `You can't accept load ${load.loadNumber} yet because it was updated after it was assigned to you. Dispatch must reconfirm the assignment first; you can accept once they do.`,
         [
           {
             type: "legacy_load_assignment_changed",
@@ -5475,7 +5625,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     reviewedMaterialVersion &&
     !/^[a-f0-9]{64}$/i.test(reviewedMaterialVersion)
   ) {
-    throw new ApiError(400, "The reviewed load version is invalid. Refresh the load and try again.");
+    throw new ApiError(400, "Your copy of this load is out of date. Refresh the load, review it again, and then sign.");
   }
 
   if (
@@ -5484,7 +5634,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   ) {
     throw new ApiError(
       409,
-      "This load changed since you reviewed it. Your signature was not accepted. Review the latest route, vehicles, schedule, compensation, and instructions before accepting.",
+      `Load ${load.loadNumber} changed while you were reviewing it, so your signature was not saved. Review the latest route, vehicles, schedule, pay, and instructions, then sign again.`,
       [
         {
           type: "load_reviewed_material_version_mismatch",
@@ -5638,11 +5788,11 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
   const user = getUser(req);
 
   let load = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Accepted") {
-    throw new ApiError(400, `Cannot mark pickup from ${load.status} status`);
+    throw new ApiError(400, `You can't mark load ${load.loadNumber} as Picked Up because it is ${load.status}. ${load.status === "Assigned" ? "Accept the load first." : "Only accepted loads can be marked Picked Up."}`);
   }
 
   const pickupProof = (load as any).proofOfPickup;
@@ -5652,7 +5802,7 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
   ) {
     throw new ApiError(
       400,
-      "A pickup photo submitted by the currently assigned driver is required before marking this load Picked Up.",
+      `Take and upload a pickup photo for load ${load.loadNumber} before marking it Picked Up.`,
     );
   }
 
@@ -5715,11 +5865,11 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   const user = getUser(req);
 
   let load = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
   if (load.status !== "Picked Up") {
-    throw new ApiError(400, `Cannot start route from ${load.status} status`);
+    throw new ApiError(400, `You can't start the route for load ${load.loadNumber} because it is ${load.status}. ${load.status === "Accepted" ? "Mark it Picked Up first." : "Only picked-up loads can start their route."}`);
   }
 
   assertNoPendingLoadAmendments(load, user._id.toString());
@@ -5786,7 +5936,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   const user = getUser(req);
 
   let load = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = load.organizationId as unknown as string;
   requireAssignedDriver(load, user._id.toString());
 
@@ -5801,14 +5951,23 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   if (load.status !== "In-Transit") {
     throw new ApiError(
       400,
-      `Cannot complete delivery from ${load.status} status`,
+      `You can't complete delivery for load ${load.loadNumber} because it is ${load.status}. ${load.status === "Picked Up" ? "Start the route first." : "Only loads that are In-Transit can be delivered."}`,
     );
   }
 
   if (!(load as any).proofOfDelivery?.imageUrl) {
     throw new ApiError(
       400,
-      "A proof-of-delivery photo is required before completing this load",
+      `Upload a proof-of-delivery photo for load ${load.loadNumber} before completing delivery.`,
+    );
+  }
+
+  // Proof left by a previously assigned driver must not complete this
+  // driver's delivery.
+  if (!proofOfDeliveryBelongsTo(load as any, user._id.toString())) {
+    throw new ApiError(
+      400,
+      `The proof-of-delivery photo on load ${load.loadNumber} was uploaded by a previous driver. Upload your own proof-of-delivery photo before completing this load.`,
     );
   }
 
@@ -5869,6 +6028,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
       status: "In-Transit",
       assignedDriverId: user._id,
       "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
+      ...proofOfDeliveryOwnedByFilter(user._id),
     }),
     appendLoadLifecycleOutbox(
       {
@@ -5895,7 +6055,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
     }
     throw new ApiError(
       409,
-      "This load changed while delivery was being completed. Refresh the load before trying again.",
+      `Load ${load.loadNumber} changed while delivery was being completed. Refresh the load before trying again.`,
     );
   }
   load = deliveredLoad;
@@ -5947,20 +6107,20 @@ const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) =
   };
 
   const load: any = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
   const organizationId = String(load.organizationId);
   requireAssignedDriver(load, user._id.toString());
 
   if (!RELEASE_REQUEST_ELIGIBLE_STATUSES.includes(load.status as any)) {
     throw new ApiError(
       400,
-      `A release request cannot be submitted for a load in ${load.status} status`,
+      `You can't request release from load ${load.loadNumber} because it is ${load.status}.`,
     );
   }
 
   const normalizedReason = String(reason ?? "").trim() as LoadReleaseRequestReason;
   if (!LOAD_RELEASE_REQUEST_REASONS.includes(normalizedReason as any)) {
-    throw new ApiError(400, "Select a valid reason for requesting release");
+    throw new ApiError(400, "Choose a reason for your release request, then submit it again.");
   }
 
   const existing = await LoadReleaseRequest.findOne({
@@ -5971,7 +6131,7 @@ const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) =
   if (existing) {
     throw new ApiError(
       409,
-      "A release request for this load is already waiting for Dispatch review.",
+      `A release request for load ${load.loadNumber} is already waiting for Dispatch. You'll be notified when Dispatch decides.`,
     );
   }
 
@@ -6002,7 +6162,7 @@ const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) =
     if (Number(error?.code) === 11000) {
       throw new ApiError(
         409,
-        "A release request for this load is already waiting for Dispatch review.",
+        `A release request for load ${load.loadNumber} is already waiting for Dispatch. You'll be notified when Dispatch decides.`,
       );
     }
     throw error;
@@ -6019,7 +6179,7 @@ const createReleaseRequest = async (req: ExpressRequest, res: ExpressResponse) =
     await LoadReleaseRequest.deleteOne({ _id: request._id, status: "pending" });
     throw new ApiError(
       409,
-      "This load changed while the release request was being submitted. Refresh the load and try again.",
+      `Load ${load.loadNumber} changed while your release request was being submitted. Refresh the load and try again.`,
     );
   }
 
@@ -6107,7 +6267,7 @@ const dropLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) 
   const user = getUser(req);
   const driverId = user._id.toString();
   const load: any = await Load.findOne({ _id: req.params.id });
-  if (!load) throw new ApiError(404, "Load not found");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
   requireAssignedDriver(load, driverId);
 
@@ -6129,7 +6289,7 @@ const dropLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) 
   if (pendingReleaseRequest) {
     throw new ApiError(
       409,
-      "A release request is already awaiting Dispatch for this load. Cancel that request before rejecting the assignment.",
+      `A release request for load ${load.loadNumber} is already waiting for Dispatch. Cancel that request before rejecting the assignment.`,
     );
   }
 
@@ -6318,7 +6478,7 @@ const cancelReleaseRequest = asyncHandler(
     const driverId = user._id.toString();
 
     const load: any = await Load.findOne({ _id: req.params.id });
-    if (!load) throw new ApiError(404, "Load not found");
+    if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
     const organizationId = String(load.organizationId);
     requireAssignedDriver(load, driverId);
@@ -6326,7 +6486,7 @@ const cancelReleaseRequest = asyncHandler(
     if (!RELEASE_REQUEST_ELIGIBLE_STATUSES.includes(load.status as any)) {
       throw new ApiError(
         409,
-        `This load is now in ${load.status} status. Refresh before changing the release request.`,
+        `Load ${load.loadNumber} is now ${load.status}. Refresh the load before changing your release request.`,
       );
     }
 
@@ -6556,8 +6716,8 @@ const rejectReleaseRequest = asyncHandler(async (req: ExpressRequest, res: Expre
   const decisionReason = String(req.body?.decisionReason ?? "").trim().slice(0, 1000);
 
   const load: any = await Load.findOne({ _id: req.params.id, organizationId });
-  if (!load) throw new ApiError(404, "Load not found");
-  if (!load.assignedDriverId) throw new ApiError(409, "This load no longer has an assigned driver");
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+  if (!load.assignedDriverId) throw new ApiError(409, `Load ${load.loadNumber} no longer has a driver, so there is no release request to review.`);
 
   let request: any = await LoadReleaseRequest.findOne({
     organizationId,
@@ -6565,7 +6725,7 @@ const rejectReleaseRequest = asyncHandler(async (req: ExpressRequest, res: Expre
     driverId: load.assignedDriverId,
     status: "pending",
   });
-  if (!request) throw new ApiError(404, "No pending release request was found for this load");
+  if (!request) throw new ApiError(404, `There is no pending release request on load ${load.loadNumber}. It may already have been approved, declined, or cancelled.`);
 
   assertCanReviewReleaseRequest(req, load, request);
 
@@ -6643,11 +6803,45 @@ const rejectReleaseRequest = asyncHandler(async (req: ExpressRequest, res: Expre
 });
 
 // POST /api/driver-tracking/loads/:id/amendments/:amendmentId/acknowledge
+// POST /api/driver-tracking/loads/:id/changes/seen
+// The assigned driver opened the Current Load change history. Marks their
+// unseen changes as seen so the card stops alerting. Bookkeeping only: it
+// never changes lifecycle state and does not bump the load revision.
+const markLoadChangesSeen = asyncHandler(
+  async (req: ExpressRequest, res: ExpressResponse) => {
+    const user = getUser(req);
+    const loadId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(loadId)) {
+      throw new ApiError(400, INVALID_LINK);
+    }
+
+    const seenAt = new Date();
+    const result = await Load.updateOne(
+      { _id: loadId, assignedDriverId: user._id },
+      { $set: { "driverAmendments.$[change].seenAt": seenAt } },
+      {
+        arrayFilters: [
+          { "change.driverId": user._id, "change.seenAt": { $exists: false } },
+        ],
+        timestamps: false,
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      throw new ApiError(404, LOAD_NOT_FOUND);
+    }
+
+    return res
+      .status(200)
+      .json(new ApiResponse(200, { seenAt }, "Load changes marked as seen"));
+  },
+);
+
 const acknowledgeLoadAmendment = asyncHandler(
   async (req: ExpressRequest, res: ExpressResponse) => {
     const user = getUser(req);
     if (user.role !== "driver") {
-      throw new ApiError(403, "Only the assigned driver can acknowledge a Load Update");
+      throw new ApiError(403, "Only the driver assigned to this load can acknowledge its updates.");
     }
 
     const { id: loadId, amendmentId } = req.params;
@@ -6655,7 +6849,7 @@ const acknowledgeLoadAmendment = asyncHandler(
       !mongoose.Types.ObjectId.isValid(loadId) ||
       !mongoose.Types.ObjectId.isValid(amendmentId)
     ) {
-      throw new ApiError(400, "Invalid load or amendment identifier");
+      throw new ApiError(400, "This update link isn't valid. Refresh your loads and open the update again.");
     }
 
     const acknowledgedAt = new Date();
@@ -6717,7 +6911,7 @@ const acknowledgeLoadAmendment = asyncHandler(
 
       throw new ApiError(
         404,
-        "This Load Update is unavailable or is no longer assigned to your account",
+        "This load update is no longer available, or the load is no longer assigned to you. Refresh your loads.",
       );
     }
 
@@ -6793,7 +6987,7 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
     .populate("userId", "name email avatar personalInfo.phone")
     .lean();
 
-  if (!profile) throw new ApiError(404, "Driver profile not found");
+  if (!profile) throw new ApiError(404, DRIVER_PROFILE_NOT_FOUND);
 
   const rawDocuments = Array.isArray(profile.documents) ? profile.documents : [];
   const uploadedTypes = new Set(rawDocuments.map((document: any) => document.type));
@@ -7095,18 +7289,18 @@ const getDriverReviewDocumentFile = asyncHandler(async (req: ExpressRequest, res
     driverId,
   });
   if (!access.canViewDocumentContents || access.level !== "ADMIN_REVIEW") {
-    throw new ApiError(403, "Document contents are restricted to an authorized Driver Verification reviewer");
+    throw new ApiError(403, "You don't have permission to view this driver's documents. Only authorized Driver Verification reviewers can open them.");
   }
 
   const profile: any = await DriverProfile.findOne({ userId: driverId });
-  if (!profile) throw new ApiError(404, "Driver profile not found");
+  if (!profile) throw new ApiError(404, DRIVER_PROFILE_NOT_FOUND);
   const document: any = profile.documents.find(
     (item: any) => item._id?.toString() === documentId,
   );
-  if (!document) throw new ApiError(404, "Document not found");
+  if (!document) throw new ApiError(404, DOCUMENT_NOT_FOUND);
 
   const storageKey = String(document.fileKey || document.fileUrl || "").trim();
-  if (!storageKey) throw new ApiError(404, "Document file is unavailable");
+  if (!storageKey) throw new ApiError(404, DOCUMENT_FILE_UNAVAILABLE);
 
   if (/^https?:\/\//i.test(storageKey)) {
     await recordDriverReviewEvent({
@@ -7123,7 +7317,7 @@ const getDriverReviewDocumentFile = asyncHandler(async (req: ExpressRequest, res
   }
 
   const file = await storageService.streamPrivateFile(storageKey);
-  if (!file) throw new ApiError(404, "Document file could not be opened");
+  if (!file) throw new ApiError(404, DOCUMENT_FILE_UNAVAILABLE);
 
   await recordDriverReviewEvent({
     driverId,
@@ -7266,5 +7460,6 @@ export default {
   cancelReleaseRequest,
   rejectReleaseRequest,
   acknowledgeLoadAmendment,
+  markLoadChangesSeen,
   dropLoad,
 };
