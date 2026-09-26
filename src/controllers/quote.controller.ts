@@ -7,6 +7,7 @@ import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
+import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN } from '../utils/userMessages';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
@@ -58,16 +59,16 @@ function normalizeStructuredQuoteLocation(
     const zip = String(raw.zip || '').trim();
 
     if (!city) {
-        throw new ApiError(400, `${label} city is required`);
+        throw new ApiError(400, `Enter the ${label.toLowerCase()} city.`);
     }
     if (!state) {
-        throw new ApiError(400, `${label} state is required`);
+        throw new ApiError(400, `Enter the ${label.toLowerCase()} state.`);
     }
     if (!/^[A-Z]{2}$/.test(state)) {
-        throw new ApiError(400, `${label} state must use a 2-letter code`);
+        throw new ApiError(400, `Use the 2-letter state code for the ${label.toLowerCase()} (for example UT).`);
     }
     if (!ZIP_RE.test(zip)) {
-        throw new ApiError(400, `${label} ZIP code must be 5 digits`);
+        throw new ApiError(400, `Enter a 5-digit ZIP code for the ${label.toLowerCase()}.`);
     }
 
     return {
@@ -125,7 +126,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
 
     if (!firstName || !lastName || !email || !phone) {
-        throw new ApiError(400, 'Customer information is required');
+        throw new ApiError(400, 'Enter the customer\'s first name, last name, email and phone number.');
     }
 
     const normalizedFromLocation = normalizeStructuredQuoteLocation(
@@ -158,11 +159,11 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         !resolvedFromAddress ||
         !resolvedToAddress
     ) {
-        throw new ApiError(400, 'Shipping route information is required');
+        throw new ApiError(400, 'Enter the origin and destination (city, state and ZIP code) for this draft.');
     }
 
     if (!ZIP_RE.test(resolvedFromZip) || !ZIP_RE.test(resolvedToZip)) {
-        throw new ApiError(400, 'Invalid ZIP code format');
+        throw new ApiError(400, 'ZIP codes must be 5 digits. Check the origin and destination ZIP codes.');
     }
 
     /*
@@ -241,12 +242,12 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 
     const fromCoords = await getCoordinatesFromZip(resolvedFromZip);
     if (!fromCoords) {
-        throw new ApiError(400, 'Invalid origin ZIP code');
+        throw new ApiError(400, `We couldn't find the origin ZIP code ${resolvedFromZip}. Check it and try again.`);
     }
 
     const toCoords = await getCoordinatesFromZip(resolvedToZip);
     if (!toCoords) {
-        throw new ApiError(400, 'Invalid destination ZIP code');
+        throw new ApiError(400, `We couldn't find the destination ZIP code ${resolvedToZip}. Check it and try again.`);
     }
 
     const miles = calculateDistance(
@@ -476,7 +477,7 @@ const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
         .populate('createdBy', 'name email avatar');
 
     if (!quote) {
-        throw new ApiError(404, 'Quote not found');
+        throw new ApiError(404, QUOTE_NOT_FOUND);
     }
 
     res.json(new ApiResponse(200, quote, 'Quote fetched successfully'));
@@ -578,7 +579,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (status !== undefined) {
         const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
         if (!validStatuses.includes(status)) {
-            throw new ApiError(400, 'Invalid status');
+            throw new ApiError(400, 'Choose a valid draft status: Pending, Accepted, Rejected or Booked.');
         }
         updateData.status = status;
     }
@@ -591,7 +592,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     ) {
         const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId });
         if (!quote) {
-            throw new ApiError(404, 'Quote not found');
+            throw new ApiError(404, QUOTE_NOT_FOUND);
         }
 
         const finalFromZip =
@@ -632,7 +633,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
-        throw new ApiError(404, 'Quote not found');
+        throw new ApiError(404, QUOTE_NOT_FOUND);
     }
 
     // Create notification safely
@@ -703,7 +704,7 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
     const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
     if (!validStatuses.includes(status)) {
-        throw new ApiError(400, 'Invalid status');
+        throw new ApiError(400, 'Choose a valid draft status: Pending, Accepted, Rejected or Booked.');
     }
 
     const quote = await Quote.findOneAndUpdate(
@@ -713,7 +714,7 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
 
     if (!quote) {
-        throw new ApiError(404, 'Quote not found');
+        throw new ApiError(404, QUOTE_NOT_FOUND);
     }
 
     // Create notification safely
@@ -915,7 +916,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     if (!userId) {
         throw new ApiError(
             401,
-            'Authenticated user is required to convert a quote to a load'
+            SIGN_IN_AGAIN
         );
     }
 
@@ -925,11 +926,11 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     });
 
     if (!quote) {
-        throw new ApiError(404, 'Quote not found');
+        throw new ApiError(404, QUOTE_NOT_FOUND);
     }
 
     if (quote.status === 'rejected') {
-        throw new ApiError(400, 'Cannot convert a rejected quote');
+        throw new ApiError(400, 'This draft was rejected, so it can\'t be converted into a load. Change its status first if the customer still wants the shipment.');
     }
 
     if (quote.status === 'booked') {
@@ -944,11 +945,11 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
             throw new ApiError(
                 409,
-                `This quote has already been converted to load ${existingLoad.loadNumber}`
+                `This draft was already converted into load ${existingLoad.loadNumber}. Open that load in Transportation instead.`
             );
         }
 
-        throw new ApiError(409, 'This quote has already been converted to a load');
+        throw new ApiError(409, 'This draft was already converted into a load. Open it from Transportation instead.');
     }
 
     const existingLoad = await Load.findOne({
@@ -962,7 +963,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
         throw new ApiError(
             409,
-            `This quote has already been converted to load ${existingLoad.loadNumber}`
+            `This draft was already converted into load ${existingLoad.loadNumber}. Open that load in Transportation instead.`
         );
     }
 
@@ -1219,7 +1220,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
         throw new ApiError(
             400,
-            `Additional route details are required before this quote can become a load: ${messages}`
+            `Add the missing route details before converting this draft into a load: ${messages}`
         );
     }
 

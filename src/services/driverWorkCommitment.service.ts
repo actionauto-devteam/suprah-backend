@@ -191,7 +191,7 @@ export async function assertNoDriverCommitmentConflict(params: {
 
 async function acquireDriverCommitmentLock(driverId: string) {
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
-    throw new ApiError(400, "Invalid driver identifier");
+    throw new ApiError(400, "That driver can't be found. Refresh the driver list and try again.");
   }
 
   const token = randomUUID();

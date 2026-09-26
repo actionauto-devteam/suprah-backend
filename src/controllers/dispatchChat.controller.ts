@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
+import { SELECT_ORGANIZATION } from "../utils/userMessages";
 import User, { IUser } from "../models/User.model";
 import Load from "../models/Load.model";
 import Notification from "../models/Notification.model";
@@ -264,7 +265,7 @@ async function authorizeDispatchChat(
   const requestOrganizationId = String(req.orgId ?? "");
 
   if (!mongoose.Types.ObjectId.isValid(driverId)) {
-    throw new ApiError(400, "A valid driverId is required");
+    throw new ApiError(400, "Choose a driver to open Dispatch Chat.");
   }
 
   const actorRole = actor.role;
@@ -275,19 +276,19 @@ async function authorizeDispatchChat(
     if (actorId !== driverId) {
       throw new ApiError(
         403,
-        "Drivers can only access their own Dispatch Chat",
+        "You can only open your own Dispatch Chat.",
       );
     }
   } else {
     if (!STAFF_ROLES.includes(String(actorRole))) {
       throw new ApiError(
         403,
-        "Dispatch Chat is limited to drivers and dispatch staff",
+        "Dispatch Chat is only available to drivers and dispatch staff.",
       );
     }
 
     if (!requestOrganizationId) {
-      throw new ApiError(403, "Organization access is required");
+      throw new ApiError(403, SELECT_ORGANIZATION);
     }
   }
 
@@ -307,8 +308,8 @@ async function authorizeDispatchChat(
     throw new ApiError(
       404,
       actorIsDriver
-        ? "Driver account is unavailable for Suprah Dispatch Chat"
-        : "Driver is no longer available for Suprah Dispatch Chat",
+        ? "Your account can't use Suprah Dispatch Chat right now. Refresh the page and try again."
+        : "This driver's account is no longer active, so Dispatch Chat is unavailable for them.",
     );
   }
 
@@ -330,7 +331,7 @@ function getRequestedThreadId(req: ExpressRequest): string | null {
   const value = String(candidate ?? "").trim();
   if (!value) return null;
   if (!mongoose.Types.ObjectId.isValid(value)) {
-    throw new ApiError(400, "A valid Dispatch Chat threadId is required");
+    throw new ApiError(400, "This conversation link isn't valid. Open the conversation again from Dispatch Chat.");
   }
   return value;
 }
@@ -355,7 +356,7 @@ async function resolvePrivateThread(
     if (!requestedThreadId) {
       throw new ApiError(
         400,
-        "Select a dispatcher conversation before opening or sending messages",
+        "Choose a conversation before sending a message.",
       );
     }
 
@@ -370,7 +371,7 @@ async function resolvePrivateThread(
     if (!thread) {
       throw new ApiError(
         404,
-        "Dispatch Chat conversation not found",
+        "This conversation is no longer available. Refresh Dispatch Chat.",
       );
     }
   } else if (requestedThreadId) {
@@ -386,7 +387,7 @@ async function resolvePrivateThread(
     if (!thread) {
       throw new ApiError(
         403,
-        "You do not have access to this Dispatch Chat conversation",
+        "You don't have access to this conversation.",
       );
     }
   } else if (options.createForDispatcher !== false) {
@@ -405,7 +406,7 @@ async function resolvePrivateThread(
     if (!thread) {
       throw new ApiError(
         404,
-        "Dispatch Chat conversation not found",
+        "This conversation is no longer available. Refresh Dispatch Chat.",
       );
     }
   }
@@ -417,7 +418,7 @@ async function resolvePrivateThread(
   if (!conversationOrganizationId) {
     throw new ApiError(
       409,
-      "Dispatch Chat conversation has invalid organization ownership",
+      "This conversation can't be opened right now. Please contact support.",
     );
   }
 
@@ -440,7 +441,7 @@ async function resolvePrivateThread(
   ) {
     throw new ApiError(
       404,
-      "Dispatcher for this conversation is no longer available",
+      "The dispatcher in this conversation is no longer available. Start a new conversation with Dispatch.",
     );
   }
 
@@ -450,7 +451,7 @@ async function resolvePrivateThread(
   ) {
     throw new ApiError(
       409,
-      "This dispatcher is no longer active",
+      "This dispatcher's account is no longer active, so they can't receive messages.",
     );
   }
 
@@ -877,10 +878,10 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
   const actor = getUser(req);
   const loadId = String(req.params.loadId ?? '').trim();
   if (actor.role !== 'driver') {
-    throw new ApiError(403, 'Only drivers can open a load creator conversation');
+    throw new ApiError(403, 'Only drivers can message the dispatcher who posted a load.');
   }
   if (!mongoose.Types.ObjectId.isValid(loadId)) {
-    throw new ApiError(400, 'A valid loadId is required');
+    throw new ApiError(400, 'This load link isn\'t valid. Open the load again from Available Loads.');
   }
 
   // This action is intentionally limited to loads that are still on the
@@ -898,19 +899,19 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
     .lean();
 
   if (!load) {
-    throw new ApiError(409, 'This load is no longer available on the Load Board');
+    throw new ApiError(409, 'This load is no longer on the load board, so you can\'t message its dispatcher.');
   }
 
   const organizationId = String(load.organizationId ?? '').trim();
   if (!organizationId) {
-    throw new ApiError(409, 'This load has invalid organization ownership');
+    throw new ApiError(409, 'This load can\'t be discussed in Dispatch Chat right now. Please contact support.');
   }
 
   const creatorId = String(load.createdBy ?? '').trim();
   if (!creatorId || !mongoose.Types.ObjectId.isValid(creatorId)) {
     throw new ApiError(
       409,
-      'The creator of this load is unavailable for Suprah Dispatch Chat',
+      'The dispatcher who posted this load isn\'t available in Dispatch Chat right now. Try again later.',
     );
   }
 
@@ -935,11 +936,11 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
   if (!dispatcher) {
     throw new ApiError(
       409,
-      'The creator of this load is no longer available for Suprah Dispatch Chat',
+      'The dispatcher who posted this load isn\'t available in Dispatch Chat right now. Try again later.',
     );
   }
   if (!driver) {
-    throw new ApiError(403, 'Driver account is unavailable for Suprah Dispatch Chat');
+    throw new ApiError(403, 'Your account can\'t use Suprah Dispatch Chat right now. Refresh the page and try again.');
   }
 
   const ensuredThread = await ensureDispatchChatThread({
@@ -1023,12 +1024,12 @@ const getThreads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   if (!actorIsDriver && !actorIsStaff) {
     throw new ApiError(
       403,
-      "Dispatch Chat is limited to drivers and dispatch staff",
+      "Dispatch Chat is only available to drivers and dispatch staff.",
     );
   }
 
   if (actorIsStaff && !requestOrganizationId) {
-    throw new ApiError(403, "Organization access is required");
+    throw new ApiError(403, SELECT_ORGANIZATION);
   }
 
   // Legacy private data can only be backfilled safely inside the driver's
@@ -1191,12 +1192,12 @@ const getUnreadTotal = asyncHandler(async (req: ExpressRequest, res: ExpressResp
   if (!actorIsDriver && !actorIsStaff) {
     throw new ApiError(
       403,
-      "Dispatch Chat is limited to drivers and dispatch staff",
+      "Dispatch Chat is only available to drivers and dispatch staff.",
     );
   }
 
   if (actorIsStaff && !requestOrganizationId) {
-    throw new ApiError(403, "Organization access is required");
+    throw new ApiError(403, SELECT_ORGANIZATION);
   }
 
   const threadFilter = actorIsDriver
@@ -1514,12 +1515,12 @@ const sendMessage = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
   const content = rawContent.trim();
 
   if (!content) {
-    throw new ApiError(400, "Message cannot be empty");
+    throw new ApiError(400, "Type a message before sending.");
   }
   if (content.length > MAX_MESSAGE_LENGTH) {
     throw new ApiError(
       400,
-      `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer`,
+      `Messages can be up to ${MAX_MESSAGE_LENGTH} characters. Shorten your message and try again.`,
     );
   }
 
@@ -1587,12 +1588,12 @@ const uploadAttachments = asyncHandler(
       typeof req.body?.content === "string" ? req.body.content.trim() : "";
 
     if (!files.length) {
-      throw new ApiError(400, "Select at least one file to send");
+      throw new ApiError(400, "Choose at least one file to send.");
     }
     if (content.length > MAX_MESSAGE_LENGTH) {
       throw new ApiError(
         400,
-        `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer`,
+        `Messages can be up to ${MAX_MESSAGE_LENGTH} characters. Shorten your message and try again.`,
       );
     }
 

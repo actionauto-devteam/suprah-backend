@@ -57,15 +57,45 @@
     return value;
   }
 
+  const MATERIAL_PATHS = [
+    "postType",
+    "pickupLocation",
+    "deliveryLocation",
+    "vehicles",
+    "trailerType",
+    "dates",
+    "pricing",
+    "additionalInfo",
+  ] as const;
+
+  /**
+   * Plain/lean loads lack the schema defaults a hydrated document carries
+   * (e.g. additionalInfo.instructions = ""), so the same stored load hashed to
+   * a different version depending on how it was read. Hydrating the material
+   * fields makes every read path produce the version stored at assignment.
+   */
+  function materialSource(load: any) {
+    const toPlain = (doc: any) =>
+      doc.toObject({ depopulate: true, getters: false, virtuals: false });
+    if (typeof load?.toObject === "function") return toPlain(load);
+
+    const raw = load ?? {};
+    const LoadModel: any = mongoose.models.Load;
+    if (!LoadModel) return raw;
+
+    const subset: Record<string, unknown> = {};
+    for (const path of MATERIAL_PATHS) {
+      if (raw[path] !== undefined) subset[path] = raw[path];
+    }
+    try {
+      return toPlain(LoadModel.hydrate(subset));
+    } catch {
+      return raw;
+    }
+  }
+
   export function getLoadAcceptanceMaterialSnapshot(load: any) {
-    const source =
-      typeof load?.toObject === "function"
-        ? load.toObject({
-            depopulate: true,
-            getters: false,
-            virtuals: false,
-          })
-        : load ?? {};
+    const source = materialSource(load);
 
     const pricingForAcceptance =
       source.postType === "assign-carrier" && source.pricing

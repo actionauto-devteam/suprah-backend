@@ -21,6 +21,13 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
     errors = mapped.errors;
   }
 
+  // Unexpected failures (anything not raised on purpose as an ApiError) must
+  // not show raw technical text to users. The full error is logged below.
+  if (statusCode >= 500 && !(err instanceof ApiError)) {
+    message =
+      "Something went wrong on our side, so this action wasn't completed. Please try again in a moment. If it keeps happening, contact support.";
+  }
+
   if (isDbOutageError(err)) {
     statusCode = 503;
     message = DB_OUTAGE_MESSAGE;

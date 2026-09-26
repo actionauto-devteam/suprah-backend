@@ -80,14 +80,20 @@ export interface ILoad extends Document {
       before: string;
       after: string;
     }>;
-    status: "pending" | "acknowledged";
+    status: "pending" | "acknowledged" | "informational";
     acknowledgedAt?: Date;
     acknowledgedBy?: mongoose.Types.ObjectId;
+    seenAt?: Date;
   }>;
   driverRequests: Array<{
     driverId: mongoose.Types.ObjectId;
     requestedAt: Date;
     note?: string;
+    signature?: {
+      signedAt?: Date;
+      signerName?: string;
+      signatureDataUrl?: string;
+    };
   }>;
   notes: Array<{ text: string; author: mongoose.Types.ObjectId; date: Date }>;
   proofOfDelivery?: Record<string, any>;
@@ -153,6 +159,14 @@ const driverRequestSchema = new Schema(
     driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     requestedAt: { type: Date, default: Date.now },
     note: { type: String, trim: true, maxlength: 500, default: "" },
+    // The requester's own contract signature. It moves to the load-level
+    // driverContract only if this request is approved. The image is excluded
+    // from normal queries so load lists don't carry every requester's image.
+    signature: {
+      signedAt: { type: Date },
+      signerName: { type: String, trim: true, maxlength: 160 },
+      signatureDataUrl: { type: String, maxlength: 200_000, select: false },
+    },
   },
   { _id: false },
 );
@@ -194,7 +208,7 @@ const loadDriverAmendmentSchema = new Schema(
     createdAt: { type: Date, default: Date.now, required: true },
     loadStatusAtChange: {
       type: String,
-      enum: ["Accepted", "Picked Up", "In-Transit"],
+      enum: ["Assigned", "Accepted", "Picked Up", "In-Transit"],
       required: true,
     },
     materialVersionBefore: { type: String, required: true, maxlength: 64 },
@@ -213,14 +227,19 @@ const loadDriverAmendmentSchema = new Schema(
       ],
       default: [],
     },
+    // pending: the driver must acknowledge before continuing.
+    // informational: recorded for the driver's change history only (the load
+    // was still Assigned; Dispatch reconfirms instead). Never blocks anything.
     status: {
       type: String,
-      enum: ["pending", "acknowledged"],
+      enum: ["pending", "acknowledged", "informational"],
       default: "pending",
       required: true,
     },
     acknowledgedAt: { type: Date },
     acknowledgedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    // When the driver opened the change history after this change.
+    seenAt: { type: Date },
   },
   { _id: true },
 );
@@ -367,6 +386,9 @@ const loadSchema = new Schema<ILoad>(
       submittedAt: { type: Date },
       note: { type: String, trim: true, maxlength: 2000 },
       submittedTo: { type: Schema.Types.ObjectId, ref: "User" },
+      // Driver who uploaded this proof. Delivery can only be completed with
+      // the current assigned driver's own proof (legacy proof has none).
+      submittedBy: { type: Schema.Types.ObjectId, ref: "User" },
       confirmedAt: { type: Date },
       confirmedBy: { type: Schema.Types.ObjectId, ref: "User" },
     },

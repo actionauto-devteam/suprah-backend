@@ -28,6 +28,8 @@ export const NOTIFICATION_TYPES = [
   'driver_assigned', 'load_accepted', 'load_amendment_acknowledged', 'driver_location_update', 'driver_payout',
   // Load lifecycle events emitted by Driver Tracker / Load Management.
   'load_amendment_required', 'load_picked_up', 'load_in_transit', 'load_delivered',
+  // Dispatch-side notice that an assigned load's driver-facing details changed.
+  'load_details_changed',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'driver_dispatch_alert', 'driver_dispatch_message',
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',

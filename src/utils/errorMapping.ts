@@ -3,6 +3,27 @@
  * (malformed ids, invalid values, duplicates) never surface as HTTP 500 with a
  * raw Mongoose message.
  */
+import { INVALID_LINK, describeValidationIssues } from "./userMessages";
+
+const FIELD_WORDS: Record<string, string> = {
+  zip: "ZIP code",
+  vin: "VIN",
+  pickupLocation: "pickup",
+  deliveryLocation: "delivery",
+  carrierPayAmount: "carrier pay",
+  copCodAmount: "COP/COD amount",
+  pricePerMile: "price per mile",
+};
+
+/** "pickupLocation.zip" -> "pickup ZIP code"; "vehicles.0.year" -> "year". */
+function humanizeField(path: string) {
+  const words = path
+    .split(".")
+    .filter((segment) => segment && !/^d+$/.test(segment))
+    .map((segment) => FIELD_WORDS[segment] ?? segment.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase());
+  return words.slice(-2).join(" ") || "a field";
+}
+
 export interface MappedError {
   statusCode: number;
   message: string;
@@ -30,7 +51,9 @@ export function mapKnownError(err: any): MappedError | null {
     const isIdentifier = path === "_id" || /Id$/.test(path) || err.kind === "ObjectId";
     return {
       statusCode: 400,
-      message: isIdentifier ? "Invalid identifier" : `Invalid value for ${path || "field"}`,
+      message: isIdentifier
+        ? INVALID_LINK
+        : `The value entered for ${humanizeField(path)} isn't valid. Check it and try again.`,
       errorType: isIdentifier ? "INVALID_ID" : "INVALID_VALUE",
     };
   }
@@ -42,7 +65,7 @@ export function mapKnownError(err: any): MappedError | null {
     }));
     return {
       statusCode: 400,
-      message: `Validation failed: ${fields.map((field) => field.field).filter(Boolean).join(", ") || "invalid input"}`,
+      message: `Some information is missing or not valid: ${[...new Set(fields.map((field) => humanizeField(field.field)))].join(", ")}. Check these fields and try again.`,
       errorType: "VALIDATION_ERROR",
       errors: fields,
     };
@@ -51,7 +74,7 @@ export function mapKnownError(err: any): MappedError | null {
   if (err.name === "ZodError" && Array.isArray(err.issues)) {
     return {
       statusCode: 400,
-      message: err.issues.map((issue: any) => issue?.message).filter(Boolean).join(", ") || "Invalid input",
+      message: err.issues.length ? describeValidationIssues(err.issues) : "Some of the information entered isn't valid. Check the form and try again.",
       errorType: "VALIDATION_ERROR",
     };
   }

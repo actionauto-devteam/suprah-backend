@@ -1,973 +1,730 @@
 /**
  * Load Flow — Integration Test Suite
  *
- * Tests the complete unified Load lifecycle:
- *   Draft → Posted → Assigned → Accepted → Picked Up → In-Transit → Delivered
+ * Exercises the Load lifecycle through the real HTTP endpoints:
+ *   Posted → (request / approve | assign) → Assigned → Accepted
+ *   → Picked Up → In-Transit → Delivered → staff confirmation
  *
- * Data safety rules:
- *   1. beforeAll: deletes ALL Load + Shipment documents (they're being migrated away)
- *   2. Every test entity uses TEST_ORG_ID / TEST_ORG_ID_B for scope isolation
- *   3. afterAll: deletes ONLY the records created by this test suite (by ID)
- *   4. No other collections are touched
+ * plus the lifecycle guards on the generic /api/loads endpoints.
+ *
+ * Data safety:
+ *   - Every record is created under this suite's own organizations/users.
+ *   - afterAll deletes only those records (by organization / user id).
+ *   - File storage is stubbed, so no object storage is touched.
  */
 
 import request from 'supertest';
-import app from '../src/server';
 import mongoose from 'mongoose';
+import app from '../src/server';
 import Load from '../src/models/Load.model';
-import Shipment from '../src/models/Shipment.model';
 import User from '../src/models/User.model';
 import Organization from '../src/models/Organization.model';
 import DriverProfile from '../src/models/DriverProfile.model';
-import DriverLocation from '../src/models/DriverLocation.model';
-import DriverPayout from '../src/models/DriverPayout.model';
+import Notification from '../src/models/Notification.model';
 import tokenService from '../src/services/token.service';
+import { storageService } from '../src/services/storage.service';
 
-// ─── Test Identifiers ─────────────────────────────────────────────────────────
-// All test entities are tagged with this org ID so we can cleanly target them
 const TEST_ORG_SLUG_A = 'load-flow-test-org-a';
 const TEST_ORG_SLUG_B = 'load-flow-test-org-b';
+const TEST_EMAIL_DOMAIN = '@load-flow-test.com';
 
-// ─── Shared State ─────────────────────────────────────────────────────────────
+// Smallest valid PNG, so upload content validation (magic bytes) passes.
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
+const signatureFor = (signerName: string) => ({
+  agreedToTerms: true,
+  signatureDataUrl: `data:image/png;base64,${PNG.toString('base64')}#${encodeURIComponent(signerName)}`,
+  signerName,
+});
+
 let orgA: any;
 let orgB: any;
 let dispatcher: any;
-let driver: any;
-let driverB: any; // second driver for assignment conflict tests
+let dispatcherB: any;
 let dispatcherToken: string;
-let driverToken: string;
-let driverBToken: string;
+let dispatcherBToken: string;
+let uploadCounter = 0;
 
-// IDs of records created during the test run — only these are cleaned up
-const createdLoadIds: mongoose.Types.ObjectId[] = [];
-const createdUserIds: mongoose.Types.ObjectId[] = [];
-const createdOrgIds: mongoose.Types.ObjectId[] = [];
-const createdPayoutIds: mongoose.Types.ObjectId[] = [];
-const createdDriverProfileIds: mongoose.Types.ObjectId[] = [];
-const createdDriverLocationIds: mongoose.Types.ObjectId[] = [];
+const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 
-// ─── Setup ────────────────────────────────────────────────────────────────────
+async function createDriver(label: string) {
+  const user = await User.create({
+    email: `${label}${TEST_EMAIL_DOMAIN}`,
+    name: `Driver ${label}`,
+    role: 'driver',
+    emailVerified: true,
+    onboardingCompleted: true,
+    isActive: true,
+    isApproved: true,
+  });
+  // Capacity must be configured for a driver to self-request work.
+  await DriverProfile.create({
+    userId: user._id,
+    maxVehicleCapacity: 5,
+    operationalStatus: 'active',
+  });
+  return { user, token: tokenService.generateAccessToken(user as any) };
+}
+
+async function seedLoad(overrides: Record<string, unknown> = {}) {
+  return Load.create({
+    organizationId: orgA._id,
+    createdBy: dispatcher._id,
+    postType: 'load-board',
+    status: 'Posted',
+    pickupLocation: { address: '1 Pickup St', city: 'Salt Lake City', state: 'UT', zip: '84101' },
+    deliveryLocation: { address: '2 Delivery Ave', city: 'Denver', state: 'CO', zip: '80202' },
+    vehicles: [{ year: 2020, make: 'Toyota', model: 'Camry', condition: 'Operable' }],
+    trailerType: 'open_2car',
+    additionalInfo: { visibility: 'public' },
+    pricing: { miles: 500, carrierPayAmount: 800, isPricingEnabled: true, isVisibleToDriver: true },
+    ...overrides,
+  });
+}
+
+const reload = (id: unknown) => Load.findById(id);
 
 beforeAll(async () => {
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test');
   }
 
-  // ── Step 1: Wipe ALL Load + Shipment data ──────────────────────────────────
-  // These are the two collections being unified. A clean slate ensures tests
-  // are not polluted by any existing production or seed data.
-  // Safety: check the URI string directly — mongoose.connection.name is unreliable
-  // after the global setup's clearMongooseRegistry() has run.
-  const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
-  const isSafeDb = MONGODB_URI.includes('localhost') || MONGODB_URI.toLowerCase().includes('test');
-  if (!isSafeDb && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-    throw new Error(`SAFETY BLOCK: Refusing to wipe Load/Shipment data. URI does not appear to be a local or test database. Set ALLOW_REMOTE_TEST_DB=true to proceed.`);
-  }
+  jest.spyOn(storageService, 'upload').mockImplementation(async () => `test/proof-${++uploadCounter}.png`);
+  jest.spyOn(storageService, 'delete').mockResolvedValue(undefined);
+  jest.spyOn(storageService, 'getSignedUrl').mockResolvedValue('https://signed.example/proof.png');
 
-  const loadDeleteResult = await Load.deleteMany({ _id: { $exists: true } });
-  const shipDeleteResult = await Shipment.deleteMany({ _id: { $exists: true } });
-  console.log(`[SETUP] Cleared ${loadDeleteResult.deletedCount} Load(s) and ${shipDeleteResult.deletedCount} Shipment(s) before test run.`);
+  // Clean up leftovers from an interrupted earlier run.
+  const oldOrgs = await Organization.find({ slug: { $in: [TEST_ORG_SLUG_A, TEST_ORG_SLUG_B] } }).select('_id');
+  await Load.deleteMany({ organizationId: { $in: oldOrgs.map((o) => o._id) } });
+  const oldUsers = await User.find({ email: { $regex: /@load-flow-test\.com$/ } }).select('_id');
+  await DriverProfile.deleteMany({ userId: { $in: oldUsers.map((u) => u._id) } });
+  await User.deleteMany({ _id: { $in: oldUsers.map((u) => u._id) } });
+  await Organization.deleteMany({ _id: { $in: oldOrgs.map((o) => o._id) } });
 
-  // ── Step 2: Clean up any leaked data from previous failed test runs ────────
-  await Organization.deleteMany({ slug: { $in: [TEST_ORG_SLUG_A, TEST_ORG_SLUG_B] } });
-  await User.deleteMany({ email: { $regex: /@load-flow-test\.com$/ } });
-
-  // ── Step 3: Create test organizations ─────────────────────────────────────
   orgA = await Organization.create({ name: 'Load Flow Test Org A', slug: TEST_ORG_SLUG_A, status: 'active' });
   orgB = await Organization.create({ name: 'Load Flow Test Org B', slug: TEST_ORG_SLUG_B, status: 'active' });
-  createdOrgIds.push(orgA._id, orgB._id);
 
-  // ── Step 4: Create test users ─────────────────────────────────────────────
   dispatcher = await User.create({
-    email: 'dispatcher@load-flow-test.com',
-    name: 'Test Dispatcher',
+    email: `dispatcher${TEST_EMAIL_DOMAIN}`,
+    name: 'Dispatcher A',
     role: 'admin',
     organizationId: orgA._id,
     emailVerified: true,
     onboardingCompleted: true,
     isActive: true,
   });
-  createdUserIds.push(dispatcher._id);
-
-  driver = await User.create({
-    email: 'driver@load-flow-test.com',
-    name: 'Test Driver',
-    role: 'driver',
-    organizationId: orgA._id,
+  dispatcherB = await User.create({
+    email: `dispatcher-b${TEST_EMAIL_DOMAIN}`,
+    name: 'Dispatcher B',
+    role: 'admin',
+    organizationId: orgB._id,
     emailVerified: true,
     onboardingCompleted: true,
     isActive: true,
-    isApproved: true,
-    stripeConnectAccountId: 'acct_test_stripe_driver',
   });
-  createdUserIds.push(driver._id);
-
-  driverB = await User.create({
-    email: 'driverb@load-flow-test.com',
-    name: 'Test Driver B',
-    role: 'driver',
-    organizationId: orgA._id,
-    emailVerified: true,
-    onboardingCompleted: true,
-    isActive: true,
-    isApproved: true,
-  });
-  createdUserIds.push(driverB._id);
-
-  // ── Step 5: Create driver profiles ────────────────────────────────────────
-  const profileA = await DriverProfile.create({
-    userId: driver._id,
-    organizationId: orgA._id.toString(),
-    trailerType: 'open_3car_wedge',
-    maxVehicleCapacity: 10,
-    operationalStatus: 'active',
-    isComplianceExpired: false,
-  });
-  createdDriverProfileIds.push(profileA._id);
-
-  const profileB = await DriverProfile.create({
-    userId: driverB._id,
-    organizationId: orgA._id.toString(),
-    trailerType: 'open_3car_wedge',
-    maxVehicleCapacity: 10,
-    operationalStatus: 'active',
-    isComplianceExpired: false,
-  });
-  createdDriverProfileIds.push(profileB._id);
-
-  // ── Step 6: Create driver location records ────────────────────────────────
-  const locA = await DriverLocation.create({
-    userId: driver._id,
-    organizationId: orgA._id.toString(),
-    coords: { lat: 40.76, lng: -111.89 },
-    status: 'idle',
-    lastSeenAt: new Date(),
-  });
-  createdDriverLocationIds.push(locA._id);
-
-  const locB = await DriverLocation.create({
-    userId: driverB._id,
-    organizationId: orgA._id.toString(),
-    coords: { lat: 40.80, lng: -111.90 },
-    status: 'idle',
-    lastSeenAt: new Date(),
-  });
-  createdDriverLocationIds.push(locB._id);
-
-  // ── Step 7: Generate JWT tokens ────────────────────────────────────────────
   dispatcherToken = tokenService.generateAccessToken(dispatcher);
-  driverToken = tokenService.generateAccessToken(driver);
-  driverBToken = tokenService.generateAccessToken(driverB);
+  dispatcherBToken = tokenService.generateAccessToken(dispatcherB);
 }, 60000);
 
-// ─── Cleanup ──────────────────────────────────────────────────────────────────
-
 afterAll(async () => {
-  // Ensure connection is still alive before cleanup — the global setup.ts afterAll
-  // may have already closed it if test suites race. Reconnect if needed.
-  if (mongoose.connection.readyState === 0) {
-    const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test';
-    await mongoose.connect(MONGODB_URI);
+  jest.restoreAllMocks();
+  // tests/setup.ts may already have closed the shared connection.
+  if (mongoose.connection.readyState !== 1) {
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test');
   }
-
-  // Delete ONLY the records this test suite created — by tracked ID
-  try {
-    if (createdLoadIds.length) await Load.deleteMany({ _id: { $in: createdLoadIds } });
-    if (createdPayoutIds.length) await DriverPayout.deleteMany({ _id: { $in: createdPayoutIds } });
-    if (createdDriverLocationIds.length) await DriverLocation.deleteMany({ _id: { $in: createdDriverLocationIds } });
-    if (createdDriverProfileIds.length) await DriverProfile.deleteMany({ _id: { $in: createdDriverProfileIds } });
-    if (createdUserIds.length) await User.deleteMany({ _id: { $in: createdUserIds } });
-    if (createdOrgIds.length) await Organization.deleteMany({ _id: { $in: createdOrgIds } });
-    console.log(`[TEARDOWN] Cleaned up ${createdLoadIds.length} load(s), ${createdPayoutIds.length} payout(s), ${createdUserIds.length} user(s), ${createdOrgIds.length} org(s).`);
-  } catch (err) {
-    console.error('[TEARDOWN] Cleanup error (non-fatal):', err);
-  }
+  const users = await User.find({ email: { $regex: /@load-flow-test\.com$/ } }).select('_id');
+  const userIds = users.map((u) => u._id);
+  await Load.deleteMany({ organizationId: { $in: [orgA?._id, orgB?._id] } });
+  await Notification.deleteMany({ userId: { $in: userIds } });
+  await DriverProfile.deleteMany({ userId: { $in: userIds } });
+  await User.deleteMany({ _id: { $in: userIds } });
+  await Organization.deleteMany({ _id: { $in: [orgA?._id, orgB?._id] } });
+  await mongoose.disconnect();
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 1 — Load CRUD
-// ═════════════════════════════════════════════════════════════════════════════
+// ─── Generic /api/loads endpoints ────────────────────────────────────────────
 
-describe('Load CRUD', () => {
-
-  it('POST /api/loads — dispatcher creates a load (status: Posted)', async () => {
+describe('Load CRUD and organization isolation', () => {
+  it('POST /api/loads — dispatcher creates a Posted load with a per-org load number', async () => {
     const res = await request(app)
       .post('/api/loads')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
+      .set(auth(dispatcherToken))
       .send({
-        postType: 'assign-carrier',
-        pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-        deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-        vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-        pricing: { carrierPayAmount: 500 },
+        postType: 'load-board',
+        pickupLocation: { address: '1 Pickup St', city: 'Salt Lake City', state: 'UT', zip: '84101' },
+        deliveryLocation: { address: '2 Delivery Ave', city: 'Denver', state: 'CO', zip: '80202' },
+        vehicles: [{ year: 2021, make: 'Honda', model: 'Civic', condition: 'Operable' }],
+        trailerType: 'open_2car',
+        additionalInfo: { visibility: 'public' },
       })
       .expect(201);
 
-    expect(res.body.data.status).toBe('Posted');
-    expect(res.body.data.loadNumber).toMatch(/^LD-/);
-    expect(res.body.data.organizationId).toBe(orgA._id.toString());
+    const created = res.body.data.load;
+    expect(created.status).toBe('Posted');
+    expect(created.loadNumber).toMatch(/^LD-\d{8}-\d{3}$/);
 
-    createdLoadIds.push(new mongoose.Types.ObjectId(res.body.data._id));
+    const stored = await reload(created._id);
+    expect(String(stored!.organizationId)).toBe(String(orgA._id));
   });
 
-  it('GET /api/loads — returns only loads for this org', async () => {
-    // Create a load in orgB to confirm isolation
-    const orgBLoad = await Load.create({
-      organizationId: orgB._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      pickupLocation: { city: 'Phoenix', state: 'AZ', zip: '85001', country: 'US' },
-      deliveryLocation: { city: 'Denver', state: 'CO', zip: '80201', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(orgBLoad._id as mongoose.Types.ObjectId);
+  it('GET /api/loads — returns only loads of the caller\'s organization', async () => {
+    const own = await seedLoad();
+    const foreign = await seedLoad({ organizationId: orgB._id, createdBy: dispatcherB._id });
 
-    const res = await request(app)
-      .get('/api/loads')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
+    const res = await request(app).get('/api/loads').set(auth(dispatcherToken)).expect(200);
+    const ids = res.body.data.loads.map((l: any) => String(l._id));
 
-    const orgIds = res.body.data.loads.map((l: any) => l.organizationId);
-    const hasOtherOrg = orgIds.some((id: string) => id === orgB._id.toString());
-
-    expect(hasOtherOrg).toBe(false);
-    expect(orgIds.every((id: string) => id === orgA._id.toString())).toBe(true);
+    expect(ids).toContain(String(own._id));
+    expect(ids).not.toContain(String(foreign._id));
   });
 
-  it('GET /api/loads?status=Posted — status filter works', async () => {
-    const res = await request(app)
-      .get('/api/loads?status=Posted')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data.loads.every((l: any) => l.status === 'Posted')).toBe(true);
+  it('GET /api/loads/:id — another organization\'s load is not found', async () => {
+    const foreign = await seedLoad({ organizationId: orgB._id, createdBy: dispatcherB._id });
+    await request(app).get(`/api/loads/${foreign._id}`).set(auth(dispatcherToken)).expect(404);
   });
 
-  it('GET /api/loads?status=Accepted — filter works for new statuses (B5 fix)', async () => {
-    // Create a load in Accepted state directly
-    const acceptedLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Accepted',
-      loadNumber: `LD-TEST-ACCEPTED-${Date.now()}`,
-      pickupLocation: { city: 'Provo', state: 'UT', zip: '84601', country: 'US' },
-      deliveryLocation: { city: 'Reno', state: 'NV', zip: '89501', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(acceptedLoad._id as mongoose.Types.ObjectId);
-
-    const res = await request(app)
-      .get('/api/loads?status=Accepted')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data.loads.length).toBeGreaterThan(0);
-    expect(res.body.data.loads.every((l: any) => l.status === 'Accepted')).toBe(true);
-  });
-
-  it('GET /api/loads?status=Picked Up — filter works for Picked Up (B5 fix)', async () => {
-    const pickedUpLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Picked Up',
-      loadNumber: `LD-TEST-PICKEDUP-${Date.now()}`,
-      pickupLocation: { city: 'Ogden', state: 'UT', zip: '84401', country: 'US' },
-      deliveryLocation: { city: 'Boise', state: 'ID', zip: '83701', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(pickedUpLoad._id as mongoose.Types.ObjectId);
-
-    const res = await request(app)
-      .get('/api/loads?status=Picked Up')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data.loads.length).toBeGreaterThan(0);
-    expect(res.body.data.loads.every((l: any) => l.status === 'Picked Up')).toBe(true);
-  });
-
-  it('GET /api/loads/:id — returns single load', async () => {
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      loadNumber: `LD-TEST-GET-${Date.now()}`,
-      pickupLocation: { city: 'Moab', state: 'UT', zip: '84532', country: 'US' },
-      deliveryLocation: { city: 'Flagstaff', state: 'AZ', zip: '86001', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(load._id as mongoose.Types.ObjectId);
-
-    const res = await request(app)
-      .get(`/api/loads/${load._id}`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data._id).toBe(load._id.toString());
-  });
-
-  it('DELETE /api/loads/:id — dispatcher can delete a Posted load', async () => {
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      loadNumber: `LD-TEST-DEL-${Date.now()}`,
-      pickupLocation: { city: 'Cedar City', state: 'UT', zip: '84720', country: 'US' },
-      deliveryLocation: { city: 'Albuquerque', state: 'NM', zip: '87101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    // Don't push to createdLoadIds — it gets deleted in this test
-
-    await request(app)
-      .delete(`/api/loads/${load._id}`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    const found = await Load.findById(load._id);
-    expect(found).toBeNull();
-  });
-
-  it('DELETE /api/loads/:id — cannot delete an In-Transit load', async () => {
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'In-Transit',
-      loadNumber: `LD-TEST-NODELETE-${Date.now()}`,
-      assignedDriverId: driver._id,
-      pickupLocation: { city: 'St George', state: 'UT', zip: '84770', country: 'US' },
-      deliveryLocation: { city: 'Tucson', state: 'AZ', zip: '85701', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(load._id as mongoose.Types.ObjectId);
-
-    await request(app)
-      .delete(`/api/loads/${load._id}`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(400);
-  });
-
-  it('GET /api/loads/stats — returns counts per status', async () => {
-    const res = await request(app)
-      .get('/api/loads/stats')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data).toHaveProperty('all');
-    expect(res.body.data).toHaveProperty('Posted');
-    expect(res.body.data).toHaveProperty('Assigned');
-    expect(res.body.data).toHaveProperty('In-Transit');
-    expect(res.body.data).toHaveProperty('Delivered');
+  it('GET /api/loads/:id — a malformed id is a 400, not a 500', async () => {
+    await request(app).get('/api/loads/not-an-id').set(auth(dispatcherToken)).expect(400);
   });
 
   it('Driver role cannot create a load', async () => {
-    await request(app)
-      .post('/api/loads')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({
-        postType: 'load-board',
-        pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-        deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-        vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      })
-      .expect(403);
+    const { token } = await createDriver('crud-driver');
+    await request(app).post('/api/loads').set(auth(token)).send({}).expect(403);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 2 — Assignment (assign-carrier path)
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Load Assignment — assign-carrier path', () => {
-  let testLoad: any;
-
-  beforeEach(async () => {
-    testLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Posted',
-      loadNumber: `LD-ASSIGN-${Date.now()}`,
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 600 },
-    });
-    createdLoadIds.push(testLoad._id as mongoose.Types.ObjectId);
-  });
-
-  it('POST /api/driver-tracking/assign-load — assigns driver, status → Assigned', async () => {
-    const res = await request(app)
-      .post('/api/driver-tracking/assign-load')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ shipmentId: testLoad._id.toString(), driverId: driver._id.toString() })
-      .expect(200);
-
-    expect(res.body.data.status).toBe('Assigned');
-    expect(res.body.data.assignedDriverId).toBe(driver._id.toString());
-    expect(res.body.data.assignedAt).toBeDefined();
-  });
-
-  it('POST /api/driver-tracking/assign-load — blocks double-assignment on In-Transit load', async () => {
-    // Advance directly to a state where re-assignment should be blocked
-    await Load.findByIdAndUpdate(testLoad._id, {
-      status: 'In-Transit',
-      assignedDriverId: driver._id,
-    });
+describe('Generic endpoints cannot bypass the lifecycle', () => {
+  it('PUT /api/loads/:id rejects a status change but accepts the current status', async () => {
+    const load = await seedLoad();
 
     await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ status: 'Delivered' })
+      .expect(409);
+    expect((await reload(load._id))!.status).toBe('Posted');
+
+    await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ status: 'Posted', additionalInfo: { visibility: 'public', notes: 'Gate 4' } })
+      .expect(200);
+    expect((await reload(load._id))!.additionalInfo?.notes).toBe('Gate 4');
+  });
+
+  it('DELETE /api/loads/:id deletes an unassigned Posted load', async () => {
+    const load = await seedLoad();
+    await request(app).delete(`/api/loads/${load._id}`).set(auth(dispatcherToken)).expect(200);
+    expect(await reload(load._id)).toBeNull();
+  });
+
+  it('DELETE /api/loads/:id refuses active loads with a driver', async () => {
+    const { user } = await createDriver('delete-active');
+    for (const status of ['Assigned', 'Accepted', 'Picked Up', 'In-Transit']) {
+      const load = await seedLoad({ status, assignedDriverId: user._id, dispatchOwnerId: dispatcher._id });
+      await request(app).delete(`/api/loads/${load._id}`).set(auth(dispatcherToken)).expect(409);
+      expect(await reload(load._id)).not.toBeNull();
+      await Load.deleteOne({ _id: load._id });
+    }
+  });
+
+  it('DELETE /api/loads/:id allows closed loads and cannot reach another organization', async () => {
+    const delivered = await seedLoad({ status: 'Delivered' });
+    await request(app).delete(`/api/loads/${delivered._id}`).set(auth(dispatcherToken)).expect(200);
+
+    const foreign = await seedLoad({ organizationId: orgB._id, createdBy: dispatcherB._id });
+    await request(app).delete(`/api/loads/${foreign._id}`).set(auth(dispatcherToken)).expect(404);
+    expect(await reload(foreign._id)).not.toBeNull();
+  });
+});
+
+// ─── Dispatcher assignment ───────────────────────────────────────────────────
+
+describe('Assign / reassign / remove', () => {
+  let driverOne: any;
+  let driverTwo: any;
+
+  beforeAll(async () => {
+    driverOne = (await createDriver('assign-one')).user;
+    driverTwo = (await createDriver('assign-two')).user;
+  });
+
+  it('assign-load assigns the driver and records the dispatch owner', async () => {
+    const load = await seedLoad();
+    await request(app)
       .post('/api/driver-tracking/assign-load')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ shipmentId: testLoad._id.toString(), driverId: driverB._id.toString() })
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driverOne._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+
+    const updated = await reload(load._id);
+    expect(updated!.status).toBe('Assigned');
+    expect(String(updated!.assignedDriverId)).toBe(String(driverOne._id));
+    expect(String((updated as any).dispatchOwnerId)).toBe(String(dispatcher._id));
+  });
+
+  it('reassign-load refuses a load that was never assigned', async () => {
+    const load = await seedLoad();
+    const res = await request(app)
+      .post('/api/driver-tracking/reassign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driverTwo._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(409);
+
+    expect(res.body.message).toMatch(/Use Assign/);
+    expect((await reload(load._id))!.status).toBe('Posted');
+  });
+
+  it('reassign-load moves an assigned load to another driver, and remove-load returns it to Posted', async () => {
+    // Fresh drivers: a driver already committed to another active load is
+    // (correctly) refused new work by the commitment check.
+    const from = (await createDriver('reassign-from')).user;
+    const to = (await createDriver('reassign-to')).user;
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(from._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+
+    await request(app)
+      .post('/api/driver-tracking/reassign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(to._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    expect(String((await reload(load._id))!.assignedDriverId)).toBe(String(to._id));
+
+    await request(app)
+      .post('/api/driver-tracking/remove-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id) })
+      .expect(200);
+    const removed = await reload(load._id);
+    expect(removed!.status).toBe('Posted');
+    expect(removed!.assignedDriverId).toBeNull();
+  });
+});
+
+// ─── Load board requests ─────────────────────────────────────────────────────
+
+describe('Driver requests and approval', () => {
+  let first: { user: any; token: string };
+  let second: { user: any; token: string };
+  let load: any;
+
+  beforeAll(async () => {
+    first = await createDriver('request-first');
+    second = await createDriver('request-second');
+    load = await seedLoad();
+  });
+
+  it('available-loads lists the Posted public load for a driver', async () => {
+    const res = await request(app).get('/api/driver-tracking/available-loads').set(auth(first.token)).expect(200);
+    const list = Array.isArray(res.body.data) ? res.body.data : res.body.data.loads;
+    expect(list.map((l: any) => String(l._id))).toContain(String(load._id));
+  });
+
+  it('each request keeps its own signature and does not touch the load contract', async () => {
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/request`)
+      .set(auth(first.token))
+      .send(signatureFor('First Signer'))
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/request`)
+      .set(auth(second.token))
+      .send(signatureFor('Second Signer'))
+      .expect(200);
+
+    const stored: any = await Load.findById(load._id).select('+driverRequests.signature.signatureDataUrl');
+    expect(stored.driverRequests).toHaveLength(2);
+    expect(stored.driverContract?.agreedToTerms).not.toBe(true);
+    const bySigner = stored.driverRequests.map((r: any) => r.signature?.signerName).sort();
+    expect(bySigner).toEqual(['First Signer', 'Second Signer']);
+
+    // The signature image is excluded from normal reads.
+    const plain: any = await Load.findById(load._id).lean();
+    expect(plain.driverRequests[0].signature?.signatureDataUrl).toBeUndefined();
+  });
+
+  it('a driver cannot request the same load twice', async () => {
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/request`)
+      .set(auth(first.token))
+      .send(signatureFor('First Signer'))
       .expect(409);
   });
 
-  it('POST /api/driver-tracking/remove-load — removes driver, status → Posted', async () => {
-    // First assign
-    await Load.findByIdAndUpdate(testLoad._id, {
-      status: 'Assigned',
-      assignedDriverId: driver._id,
-      assignedAt: new Date(),
-    });
-
-    const res = await request(app)
-      .post('/api/driver-tracking/remove-load')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ shipmentId: testLoad._id.toString() })
+  it('approving one request assigns it, keeps that signature, and tells the other requester', async () => {
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/approve-request`)
+      .set(auth(dispatcherToken))
+      .send({ driverId: String(first.user._id), overrideAvailability: true, overrideCapacity: true })
       .expect(200);
 
-    const updated = await Load.findById(testLoad._id);
-    expect(updated!.status).toBe('Posted');
-    expect(updated!.assignedDriverId).toBeUndefined();
-  });
+    const updated: any = await reload(load._id);
+    expect(updated.status).toBe('Assigned');
+    expect(String(updated.assignedDriverId)).toBe(String(first.user._id));
+    expect(updated.driverRequests).toHaveLength(0);
+    expect(updated.driverContract.signerName).toBe('First Signer');
 
-  it('POST /api/driver-tracking/reassign-load — reassigns to new driver', async () => {
-    await Load.findByIdAndUpdate(testLoad._id, {
-      status: 'Assigned',
-      assignedDriverId: driver._id,
-      assignedAt: new Date(),
+    const notSelected = await Notification.find({
+      userId: second.user._id,
+      type: 'driver_request_rejected',
+      'metadata.loadId': String(load._id),
     });
-
-    const res = await request(app)
-      .post('/api/driver-tracking/reassign-load')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ shipmentId: testLoad._id.toString(), newDriverId: driverB._id.toString() })
-      .expect(200);
-
-    const updated = await Load.findById(testLoad._id);
-    expect(updated!.assignedDriverId!.toString()).toBe(driverB._id.toString());
-    expect(updated!.status).toBe('Assigned');
-    // Timestamps from previous driver cleared
-    expect(updated!.driverAcceptedAt).toBeUndefined();
-    expect(updated!.acceptedAt).toBeUndefined();
+    expect(notSelected).toHaveLength(1);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 3 — Load Board path (request → approve → reject)
-// ═════════════════════════════════════════════════════════════════════════════
+// ─── Full driver progression ─────────────────────────────────────────────────
 
-describe('Load Board — request / approve / reject', () => {
-  let boardLoad: any;
+describe('Full lifecycle with proof of pickup and delivery', () => {
+  let driver: { user: any; token: string };
+  let other: { user: any; token: string };
+  let load: any;
 
-  beforeEach(async () => {
-    boardLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      loadNumber: `LD-BOARD-${Date.now()}`,
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 400 },
-    });
-    createdLoadIds.push(boardLoad._id as mongoose.Types.ObjectId);
+  beforeAll(async () => {
+    driver = await createDriver('lifecycle');
+    other = await createDriver('lifecycle-other');
+    load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
   });
 
-  it('GET /api/driver-tracking/available-loads — driver sees Posted load', async () => {
+  const driverPost = (path: string, token = driver.token) =>
+    request(app).post(`/api/driver-tracking/loads/${load._id}/${path}`).set(auth(token));
+
+  it('only the assigned driver can accept', async () => {
+    await driverPost('accept', other.token).send(signatureFor('Other')).expect(403);
+  });
+
+  it('accept → Accepted with the accepting driver\'s signature', async () => {
+    await driverPost('accept').send(signatureFor('Lifecycle Driver')).expect(200);
+    const updated: any = await reload(load._id);
+    expect(updated.status).toBe('Accepted');
+    expect(updated.driverContract.signerName).toBe('Lifecycle Driver');
+  });
+
+  it('pickup requires the driver\'s own pickup photo', async () => {
+    await driverPost('pickup').expect(400);
+    await driverPost('submit-pickup-proof').attach('proof', PNG, 'pickup.png').expect(200);
+    await driverPost('pickup').expect(200);
+    expect((await reload(load._id))!.status).toBe('Picked Up');
+  });
+
+  it('start-route → In-Transit', async () => {
+    await driverPost('start-route').expect(200);
+    expect((await reload(load._id))!.status).toBe('In-Transit');
+  });
+
+  it('deliver requires proof of delivery', async () => {
+    await driverPost('deliver').expect(400);
+  });
+
+  it('only the assigned driver can submit proof of delivery', async () => {
+    await driverPost('submit-proof', other.token).attach('proof', PNG, 'pod.png').expect(403);
+  });
+
+  it('staff cannot confirm before the driver completes delivery', async () => {
+    await driverPost('submit-proof').attach('proof', PNG, 'pod.png').expect(200);
+    const updated: any = await reload(load._id);
+    expect(String(updated.proofOfDelivery.submittedBy)).toBe(String(driver.user._id));
+
     const res = await request(app)
-      .get('/api/driver-tracking/available-loads')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .expect(200);
-
-    const loadIds = res.body.data.map((l: any) => l._id);
-    expect(loadIds).toContain(boardLoad._id.toString());
+      .post(`/api/loads/${load._id}/confirm-delivery`)
+      .set(auth(dispatcherToken))
+      .expect(409);
+    expect(res.body.message).toMatch(/complete delivery/);
   });
 
-  it('POST /api/driver-tracking/request-load — driver requests a load', async () => {
-    await request(app)
-      .post('/api/driver-tracking/request-load')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: boardLoad._id.toString() })
-      .expect(200);
+  it('deliver → Delivered, then staff confirmation is recorded once', async () => {
+    await driverPost('deliver').expect(200);
+    const delivered: any = await reload(load._id);
+    expect(delivered.status).toBe('Delivered');
+    expect(delivered.deliveredAt).toBeDefined();
 
-    const updated = await Load.findById(boardLoad._id);
-    const req = updated!.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === driver._id.toString()
-    );
-    expect(req).toBeDefined();
-    expect(req!.status).toBe('pending');
+    await request(app).post(`/api/loads/${load._id}/confirm-delivery`).set(auth(dispatcherToken)).expect(200);
+    const confirmed: any = await reload(load._id);
+    expect(confirmed.proofOfDelivery.confirmedAt).toBeDefined();
+    expect(String(confirmed.proofOfDelivery.confirmedBy)).toBe(String(dispatcher._id));
+    // deliveredAt is the driver's completion time, not overwritten by confirmation.
+    expect(confirmed.deliveredAt.getTime()).toBe(delivered.deliveredAt.getTime());
+
+    const again = await request(app)
+      .post(`/api/loads/${load._id}/confirm-delivery`)
+      .set(auth(dispatcherToken))
+      .expect(200);
+    expect(again.body.message).toMatch(/already confirmed/);
+
+    // The driver is told once, with a link they can actually open.
+    const confirmedNotices = await Notification.find({
+      userId: driver.user._id,
+      type: 'load_delivered',
+      title: 'Delivery Confirmed',
+      'metadata.loadId': String(load._id),
+    });
+    expect(confirmedNotices).toHaveLength(1);
+    expect(confirmedNotices[0].metadata?.route).toBe(`/driver/loads/${load._id}`);
   });
 
-  it('POST /api/driver-tracking/request-load — driver cannot request the same load twice', async () => {
-    await Load.findByIdAndUpdate(boardLoad._id, {
-      $push: {
-        pendingDriverRequests: {
-          driverId: driver._id,
-          driverName: driver.name,
-          requestedAt: new Date(),
-          status: 'pending',
-        },
-      },
+  it('confirmed proof can no longer be replaced', async () => {
+    await driverPost('submit-proof').attach('proof', PNG, 'pod-2.png').expect(409);
+  });
+});
+
+describe('Proof of delivery belongs to the driver who uploaded it', () => {
+  it('a new driver cannot complete delivery with the previous driver\'s proof', async () => {
+    const previous = await createDriver('pod-previous');
+    const current = await createDriver('pod-current');
+    const load = await seedLoad({
+      status: 'In-Transit',
+      assignedDriverId: current.user._id,
+      dispatchOwnerId: dispatcher._id,
+      proofOfDelivery: { imageUrl: 'test/previous.png', submittedAt: new Date(), submittedBy: previous.user._id },
     });
 
-    await request(app)
-      .post('/api/driver-tracking/request-load')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: boardLoad._id.toString() })
+    const res = await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/deliver`)
+      .set(auth(current.token))
       .expect(400);
-  });
-
-  it('POST /api/driver-tracking/approve-request — approves driver, auto-rejects others', async () => {
-    // Add two pending requests
-    await Load.findByIdAndUpdate(boardLoad._id, {
-      $push: {
-        pendingDriverRequests: {
-          $each: [
-            { driverId: driver._id, driverName: driver.name, requestedAt: new Date(), status: 'pending' },
-            { driverId: driverB._id, driverName: driverB.name, requestedAt: new Date(), status: 'pending' },
-          ],
-        },
-      },
-    });
-
-    await request(app)
-      .post('/api/driver-tracking/approve-request')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ loadId: boardLoad._id.toString(), driverId: driver._id.toString() })
-      .expect(200);
-
-    const updated = await Load.findById(boardLoad._id);
-    expect(updated!.status).toBe('Assigned');
-    expect(updated!.assignedDriverId!.toString()).toBe(driver._id.toString());
-
-    const approvedReq = updated!.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === driver._id.toString()
-    );
-    expect(approvedReq!.status).toBe('approved');
-
-    const rejectedReq = updated!.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === driverB._id.toString()
-    );
-    expect(rejectedReq!.status).toBe('rejected');
-    expect(rejectedReq!.rejectionReason).toBe('Another driver was approved for this load');
-  });
-
-  it('POST /api/driver-tracking/reject-request — rejects a single driver request', async () => {
-    await Load.findByIdAndUpdate(boardLoad._id, {
-      $push: {
-        pendingDriverRequests: {
-          driverId: driver._id,
-          driverName: driver.name,
-          requestedAt: new Date(),
-          status: 'pending',
-        },
-      },
-    });
-
-    await request(app)
-      .post('/api/driver-tracking/reject-request')
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .send({ loadId: boardLoad._id.toString(), driverId: driver._id.toString(), reason: 'Equipment mismatch' })
-      .expect(200);
-
-    const updated = await Load.findById(boardLoad._id);
-    const req = updated!.pendingDriverRequests?.find(
-      (r: any) => r.driverId.toString() === driver._id.toString()
-    );
-    expect(req!.status).toBe('rejected');
-    expect(req!.rejectionReason).toBe('Equipment mismatch');
-    // Load stays Posted — no driver assigned
-    expect(updated!.status).toBe('Posted');
+    expect(res.body.message).toMatch(/your own proof/);
+    expect((await reload(load._id))!.status).toBe('In-Transit');
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 4 — Driver Status Progression (the full 5-step flow)
-// ═════════════════════════════════════════════════════════════════════════════
+// ─── Driver-facing edits after assignment ────────────────────────────────────
 
-describe('Driver Status Progression — full 5-step flow', () => {
-  let flowLoad: any;
+describe('Editing an assigned load notifies the driver, creator and assigning dispatcher', () => {
+  let assigner: any;
+  let assignerToken: string;
+  let editor: any;
+  let editorToken: string;
 
-  beforeEach(async () => {
-    flowLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Assigned',
-      loadNumber: `LD-FLOW-${Date.now()}`,
-      assignedDriverId: driver._id,
-      assignedAt: new Date(),
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 750 },
+  async function createStaff(label: string) {
+    const user = await User.create({
+      email: `${label}${TEST_EMAIL_DOMAIN}`,
+      name: `Staff ${label}`,
+      role: 'admin',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
     });
-    createdLoadIds.push(flowLoad._id as mongoose.Types.ObjectId);
-  });
+    return { user, token: tokenService.generateAccessToken(user as any) };
+  }
 
-  it('Step 1 — POST /api/driver-tracking/accept-load → Assigned → Accepted', async () => {
-    const res = await request(app)
-      .post('/api/driver-tracking/accept-load')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
+  async function assignedLoad(driverId: unknown, token: string) {
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(token))
+      .send({ loadId: String(load._id), driverId: String(driverId), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    return load;
+  }
+
+  const editNotes = (loadId: unknown, token: string, notes: string) =>
+    request(app)
+      .put(`/api/loads/${loadId}`)
+      .set(auth(token))
+      .send({ additionalInfo: { visibility: 'public', notes } })
       .expect(200);
 
-    expect(res.body.data.status).toBe('Accepted');
-    expect(res.body.data.acceptedAt).toBeDefined();
-    expect(res.body.data.driverAcceptedAt).toBeDefined();
+  const noticesFor = (userId: unknown, type: string, loadId: unknown) =>
+    Notification.find({ userId, type, 'metadata.loadId': String(loadId) });
+
+  beforeAll(async () => {
+    ({ user: assigner, token: assignerToken } = await createStaff('assigner'));
+    ({ user: editor, token: editorToken } = await createStaff('editor'));
   });
 
-  it('Step 1b — accept-load fails if not the assigned driver', async () => {
+  it('Assigned load: driver, creator and assigner are each notified once; the editor is not', async () => {
+    const { user: driver } = await createDriver('edit-assigned');
+    const load = await assignedLoad(driver._id, assignerToken);
+
+    await editNotes(load._id, editorToken, 'Gate code changed');
+
+    const driverNotices = await noticesFor(driver._id, 'load_amendment_required', load._id);
+    expect(driverNotices).toHaveLength(1);
+    expect(driverNotices[0].title).toBe('Load Updated by Dispatch');
+    expect(driverNotices[0].metadata?.route).toBe(`/driver/loads/${load._id}`);
+
+    const creatorNotices = await noticesFor(dispatcher._id, 'load_details_changed', load._id);
+    const assignerNotices = await noticesFor(assigner._id, 'load_details_changed', load._id);
+    expect(creatorNotices).toHaveLength(1);
+    expect(assignerNotices).toHaveLength(1);
+    expect(creatorNotices[0].metadata?.route).toBe(
+      `/driver-tracker?driverId=${driver._id}&reviewLoadId=${load._id}`,
+    );
+    expect(creatorNotices[0].message).toMatch(/reconfirm the assignment/);
+    expect(await noticesFor(editor._id, 'load_details_changed', load._id)).toHaveLength(0);
+  });
+
+  it('creator and assigner are the same person: exactly one reviewer notification', async () => {
+    const { user: driver } = await createDriver('edit-same-reviewer');
+    const load = await assignedLoad(driver._id, dispatcherToken);
+
+    await editNotes(load._id, editorToken, 'New delivery window');
+
+    expect(await noticesFor(dispatcher._id, 'load_details_changed', load._id)).toHaveLength(1);
+    expect(await noticesFor(assigner._id, 'load_details_changed', load._id)).toHaveLength(0);
+  });
+
+  it('the editor is the creator: only the assigning dispatcher is notified', async () => {
+    const { user: driver } = await createDriver('edit-by-creator');
+    const load = await assignedLoad(driver._id, assignerToken);
+
+    await editNotes(load._id, dispatcherToken, 'Creator changed the notes');
+
+    expect(await noticesFor(dispatcher._id, 'load_details_changed', load._id)).toHaveLength(0);
+    expect(await noticesFor(assigner._id, 'load_details_changed', load._id)).toHaveLength(1);
+    expect(await noticesFor(driver._id, 'load_amendment_required', load._id)).toHaveLength(1);
+  });
+
+  it('Accepted load: the driver must acknowledge, reviewers are told so', async () => {
+    const { user: driver, token: driverToken } = await createDriver('edit-accepted');
+    const load = await assignedLoad(driver._id, assignerToken);
     await request(app)
-      .post('/api/driver-tracking/accept-load')
-      .set('Authorization', `Bearer ${driverBToken}`)
-      .send({ loadId: flowLoad._id.toString() })
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driverToken))
+      .send(signatureFor('Accepted Driver'))
+      .expect(200);
+
+    await editNotes(load._id, editorToken, 'Changed after acceptance');
+
+    const driverNotices = await noticesFor(driver._id, 'load_amendment_required', load._id);
+    expect(driverNotices).toHaveLength(1);
+    expect(driverNotices[0].metadata?.amendmentId).toBeDefined();
+    const reviewerNotices = await noticesFor(assigner._id, 'load_details_changed', load._id);
+    expect(reviewerNotices).toHaveLength(1);
+    expect(reviewerNotices[0].message).toMatch(/must acknowledge/);
+  });
+
+  it('an unassigned load sends no change notifications', async () => {
+    const load = await seedLoad();
+    await editNotes(load._id, editorToken, 'Still on the board');
+    expect(await Notification.countDocuments({ type: 'load_details_changed', 'metadata.loadId': String(load._id) })).toBe(0);
+  });
+});
+
+// ─── Driver's change history on the Current Load card ────────────────────────
+
+describe('Driver change history for the current load', () => {
+  const myLoad = async (token: string, loadId: unknown) => {
+    const res = await request(app).get('/api/driver-tracking/my-loads').set(auth(token)).expect(200);
+    const list = Array.isArray(res.body.data) ? res.body.data : res.body.data.loads;
+    return list.find((l: any) => String(l._id) === String(loadId));
+  };
+
+  it('records changes before acceptance as info, marks them seen, then adds acknowledgeable changes', async () => {
+    const { user: driver, token: driverToken } = await createDriver('history');
+    const other = await createDriver('history-other');
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+
+    // Change while Assigned: visible to the driver, never blocking.
+    await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ additionalInfo: { visibility: 'public', notes: 'Use the north gate' } })
+      .expect(200);
+
+    let view = await myLoad(driverToken, load._id);
+    expect(view.pendingDriverAmendments).toHaveLength(0);
+    expect(view.driverLoadChanges).toHaveLength(1);
+    expect(view.driverLoadChanges[0]).toMatchObject({ status: 'informational', loadStatusAtChange: 'Assigned', seenAt: null });
+    expect(view.driverLoadChanges[0].changes[0].after).toMatch(/north gate/);
+
+    // Opening the history marks it seen without changing the load revision.
+    const before: any = await reload(load._id);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/changes/seen`).set(auth(other.token)).expect(404);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/changes/seen`).set(auth(driverToken)).expect(200);
+    const after: any = await reload(load._id);
+    expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    view = await myLoad(driverToken, load._id);
+    expect(view.driverLoadChanges[0].seenAt).not.toBeNull();
+
+    // Reconfirm, accept, then change again: now it needs acknowledgement.
+    const review = await request(app)
+      .get(`/api/driver-tracking/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/reconfirm-assignment`)
+      .set(auth(dispatcherToken))
+      .send({ reviewedMaterialVersion: review.body.data.acceptanceMaterialVersion })
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driverToken))
+      .send(signatureFor('History Driver'))
+      .expect(200);
+    await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ additionalInfo: { visibility: 'public', notes: 'Call before arrival' } })
+      .expect(200);
+
+    view = await myLoad(driverToken, load._id);
+    expect(view.pendingDriverAmendments).toHaveLength(1);
+    expect(view.driverLoadChanges).toHaveLength(2);
+    expect(view.driverLoadChanges[0]).toMatchObject({ status: 'pending', loadStatusAtChange: 'Accepted' });
+    expect(view.driverLoadChanges[1]).toMatchObject({ status: 'informational' });
+  });
+});
+
+describe('Plain-English reasons when an edit is refused', () => {
+  it('names the responsible dispatcher when a non-admin edits an accepted load', async () => {
+    const employee = await User.create({
+      email: `employee-editor${TEST_EMAIL_DOMAIN}`,
+      name: 'Employee Editor',
+      role: 'employee',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const employeeToken = tokenService.generateAccessToken(employee as any);
+    const { user: driver, token: driverToken } = await createDriver('refused-edit');
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driverToken))
+      .send(signatureFor('Refused Edit Driver'))
+      .expect(200);
+
+    const res = await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(employeeToken))
+      .send({ additionalInfo: { visibility: 'public', notes: 'Employee change' } })
       .expect(403);
+    expect(res.body.message).toMatch(/^You can't update load LD-/);
+    expect(res.body.message).toMatch(/the driver has already accepted it/);
+    expect(res.body.message).toMatch(/Dispatcher A \(the dispatcher responsible for this load\)/);
   });
 
-  it('Step 2 — POST /api/driver-tracking/mark-picked-up → Accepted → Picked Up', async () => {
-    await Load.findByIdAndUpdate(flowLoad._id, {
-      status: 'Accepted',
-      acceptedAt: new Date(),
-      driverAcceptedAt: new Date(),
-    });
-
+  it('explains that delivered loads cannot be edited', async () => {
+    const load = await seedLoad({ status: 'Delivered' });
     const res = await request(app)
-      .post('/api/driver-tracking/mark-picked-up')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
-      .expect(200);
-
-    expect(res.body.data.status).toBe('Picked Up');
-    expect(res.body.data.pickedUpAt).toBeDefined();
-  });
-
-  it('Step 2b — mark-picked-up fails if status is not Accepted', async () => {
-    // Still in Assigned status — cannot skip Accepted
-    await request(app)
-      .post('/api/driver-tracking/mark-picked-up')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ additionalInfo: { visibility: 'public', notes: 'Too late' } })
       .expect(400);
+    expect(res.body.message).toMatch(/because it is already Delivered/);
   });
-
-  it('Step 3 — POST /api/driver-tracking/start-route → Picked Up → In-Transit', async () => {
-    await Load.findByIdAndUpdate(flowLoad._id, {
-      status: 'Picked Up',
-      pickedUpAt: new Date(),
-    });
-
-    const res = await request(app)
-      .post('/api/driver-tracking/start-route')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
-      .expect(200);
-
-    expect(res.body.data.status).toBe('In-Transit');
-  });
-
-  it('Step 3b — start-route is idempotent if already In-Transit', async () => {
-    await Load.findByIdAndUpdate(flowLoad._id, { status: 'In-Transit' });
-
-    const res = await request(app)
-      .post('/api/driver-tracking/start-route')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
-      .expect(200);
-
-    expect(res.body.data.status).toBe('In-Transit');
-  });
-
-  it('Step 3c — start-route fails if not Picked Up (cannot skip steps)', async () => {
-    // Load is still in Assigned status
-    await request(app)
-      .post('/api/driver-tracking/start-route')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: flowLoad._id.toString() })
-      .expect(400);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 5 — Drop Load
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Driver Drop Load', () => {
-  it('Dropping a Load reverts status to Posted (not Assigned)', async () => {
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Accepted',
-      loadNumber: `LD-DROP-${Date.now()}`,
-      assignedDriverId: driver._id,
-      assignedAt: new Date(),
-      acceptedAt: new Date(),
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(load._id as mongoose.Types.ObjectId);
-
-    await request(app)
-      .post('/api/driver-tracking/drop-load')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: load._id.toString() })
-      .expect(200);
-
-    const updated = await Load.findById(load._id);
-    expect(updated!.status).toBe('Posted');
-    expect(updated!.droppedAt).toBeDefined();
-    expect(updated!.acceptedAt).toBeUndefined();
-    expect(updated!.pickedUpAt).toBeUndefined();
-  });
-
-  it('drop-load (B4 fix) — uses org-scoped query, not raw findById', async () => {
-    // Create a load in orgB that the orgA driver should NOT be able to drop
-    const orgBLoad = await Load.create({
-      organizationId: orgB._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Accepted',
-      loadNumber: `LD-DROP-SECURITY-${Date.now()}`,
-      assignedDriverId: driver._id, // same driver ID — but different org
-      assignedAt: new Date(),
-      pickupLocation: { city: 'Phoenix', state: 'AZ', zip: '85001', country: 'US' },
-      deliveryLocation: { city: 'Denver', state: 'CO', zip: '80201', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(orgBLoad._id as mongoose.Types.ObjectId);
-
-    // Driver from orgA trying to drop a load from orgB — should fail
-    const res = await request(app)
-      .post('/api/driver-tracking/drop-load')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .send({ loadId: orgBLoad._id.toString() })
-      .expect(404);
-
-    // Load should NOT have been dropped
-    const stillExists = await Load.findById(orgBLoad._id);
-    expect(stillExists!.status).toBe('Accepted');
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 6 — Confirm Delivery
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Confirm Delivery', () => {
-  it('POST /api/loads/:id/confirm-delivery — sets status=Delivered AND deliveredAt (B1 fix)', async () => {
-    // Create a load with proof already submitted
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'In-Transit',
-      loadNumber: `LD-CONFIRM-${Date.now()}`,
-      assignedDriverId: driver._id,
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 850 },
-      proofOfDelivery: {
-        imageUrl: 'proof-of-delivery/test-load-proof.jpg',
-        submittedAt: new Date(),
-        submittedTo: dispatcher._id,
-      },
-    });
-    createdLoadIds.push(load._id as mongoose.Types.ObjectId);
-
-    const res = await request(app)
-      .post(`/api/loads/${load._id}/confirm-delivery`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(200);
-
-    expect(res.body.data.status).toBe('Delivered');
-
-    // THE CRITICAL B1 FIX — deliveredAt must be set
-    expect(res.body.data.deliveredAt).toBeDefined();
-    expect(new Date(res.body.data.deliveredAt).getTime()).toBeGreaterThan(0);
-
-    // proofOfDelivery.confirmedAt must also be set
-    expect(res.body.data.proofOfDelivery.confirmedAt).toBeDefined();
-    expect(res.body.data.proofOfDelivery.confirmedBy).toBe(dispatcher._id.toString());
-  });
-
-  it('confirm-delivery fails without a submitted proof image', async () => {
-    const load = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'In-Transit',
-      loadNumber: `LD-CONFIRM-NOPROOF-${Date.now()}`,
-      assignedDriverId: driver._id,
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(load._id as mongoose.Types.ObjectId);
-
-    await request(app)
-      .post(`/api/loads/${load._id}/confirm-delivery`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(400);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 7 — Driver Dashboard Stats (B3 fix)
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Driver Dashboard Stats — Load-aware (B3 fix)', () => {
-  it('GET /api/driver-tracking/dashboard-stats — counts Loads (not just Shipments)', async () => {
-    // Create two loads: one active, one delivered
-    const activeLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'In-Transit',
-      loadNumber: `LD-STATS-ACTIVE-${Date.now()}`,
-      assignedDriverId: driver._id,
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 300 },
-    });
-    createdLoadIds.push(activeLoad._id as mongoose.Types.ObjectId);
-
-    const deliveredLoad = await Load.create({
-      organizationId: orgA._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'assign-carrier',
-      status: 'Delivered',
-      loadNumber: `LD-STATS-DELIVERED-${Date.now()}`,
-      assignedDriverId: driver._id,
-      deliveredAt: new Date(),
-      pickupLocation: { city: 'Salt Lake City', state: 'UT', zip: '84101', country: 'US' },
-      deliveryLocation: { city: 'Las Vegas', state: 'NV', zip: '89101', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-      pricing: { carrierPayAmount: 400 },
-    });
-    createdLoadIds.push(deliveredLoad._id as mongoose.Types.ObjectId);
-
-    const res = await request(app)
-      .get('/api/driver-tracking/dashboard-stats')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .expect(200);
-
-    // After B3 fix: these must reflect Load collection — not 0
-    expect(res.body.data.totalLoads).toBeGreaterThanOrEqual(2);
-    expect(res.body.data.activeLoads).toBeGreaterThanOrEqual(1);
-    expect(res.body.data.completedLoads).toBeGreaterThanOrEqual(1);
-    // Earnings from Load.pricing.carrierPayAmount — must not be 0
-    expect(res.body.data.totalEarnings).toBeGreaterThanOrEqual(400);
-  });
-
-  it('GET /api/driver-tracking/my-loads — returns Load documents with normalized fields', async () => {
-    const res = await request(app)
-      .get('/api/driver-tracking/my-loads')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .expect(200);
-
-    const loads = res.body.data.loads;
-    expect(loads.length).toBeGreaterThan(0);
-
-    // Every load must have the normalized fields
-    for (const l of loads) {
-      expect(l.__docType).toBe('load');
-      expect(l.origin).toBeDefined();
-      expect(l.destination).toBeDefined();
-      expect(l.trackingNumber).toBeDefined();
-    }
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 8 — Org Isolation
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Org Isolation', () => {
-  it('Dispatcher from Org A cannot see loads from Org B', async () => {
-    const orgBLoad = await Load.create({
-      organizationId: orgB._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      loadNumber: `LD-ISOLATION-${Date.now()}`,
-      pickupLocation: { city: 'Miami', state: 'FL', zip: '33101', country: 'US' },
-      deliveryLocation: { city: 'Atlanta', state: 'GA', zip: '30301', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(orgBLoad._id as mongoose.Types.ObjectId);
-
-    // GET by ID from orgA token — should 404
-    await request(app)
-      .get(`/api/loads/${orgBLoad._id}`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(404);
-  });
-
-  it('Dispatcher from Org A cannot delete a load owned by Org B', async () => {
-    const orgBLoad = await Load.create({
-      organizationId: orgB._id.toString(),
-      createdBy: dispatcher._id,
-      postType: 'load-board',
-      status: 'Posted',
-      loadNumber: `LD-ISO-DEL-${Date.now()}`,
-      pickupLocation: { city: 'Seattle', state: 'WA', zip: '98101', country: 'US' },
-      deliveryLocation: { city: 'Portland', state: 'OR', zip: '97201', country: 'US' },
-      vehicles: [{ trailerType: 'open', condition: 'Operable' }],
-    });
-    createdLoadIds.push(orgBLoad._id as mongoose.Types.ObjectId);
-
-    await request(app)
-      .delete(`/api/loads/${orgBLoad._id}`)
-      .set('Authorization', `Bearer ${dispatcherToken}`)
-      .expect(404);
-
-    // Still exists
-    const stillExists = await Load.findById(orgBLoad._id);
-    expect(stillExists).not.toBeNull();
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// GROUP 9 — Available Loads (Load-only, no Shipments)
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe('Available Loads — Load-only', () => {
-  it('GET /api/driver-tracking/available-loads — returns only Posted Loads (no Shipments)', async () => {
-    const res = await request(app)
-      .get('/api/driver-tracking/available-loads')
-      .set('Authorization', `Bearer ${driverToken}`)
-      .expect(200);
-
-    const items = res.body.data;
-    // After removing Shipment from the backend, every item must be a Load
-    // (no __docType: "shipment" should appear)
-    const shipmentItems = items.filter((i: any) => i.__docType === 'shipment');
-    expect(shipmentItems.length).toBe(0);
-
-    // All loads must be in Posted status
-    const nonPosted = items.filter((i: any) => i.__docType === 'load' && i.status !== 'Posted');
-    expect(nonPosted.length).toBe(0);
-  });
-});
 });

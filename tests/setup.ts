@@ -92,35 +92,12 @@ mongoose.Model.deleteMany = function (this: mongoose.Model<any>, filter: any, op
 // ---------------------------------
 
 
-const clearMongooseRegistry = (): void => {
-    // 1. Clear Mongoose Model Registry
-    Object.keys(mongoose.models).forEach(modelName => {
-        delete mongoose.models[modelName];
-    });
-
-    // 2. Clear Mongoose Connection Model Registry (Crucial for isolated tests)
-    if (mongoose.connection && (mongoose.connection as any).models) {
-        Object.keys((mongoose.connection as any).models).forEach(modelName => {
-            delete (mongoose.connection as any).models[modelName];
-        });
-    }
-
-    // 3. Clear Mongoose Schema Registry
-    const anyMongoose = mongoose as any;
-    if (anyMongoose.modelSchemas) {
-        Object.keys(anyMongoose.modelSchemas).forEach(schemaName => {
-            delete anyMongoose.modelSchemas[schemaName];
-        });
-    }
-};
-
-// Double-Registry Purge: Clean state before AND after every test
-beforeEach(async () => {
-    clearMongooseRegistry();
-});
+// The Mongoose model registry is intentionally NOT cleared between tests.
+// Jest already gives every test file a fresh module registry, and clearing
+// models inside a file broke any endpoint that populates a ref (for example
+// "Schema hasn't been registered for model User").
 
 afterEach(async () => {
-    clearMongooseRegistry();
 
     // 🔒 DATA PROTECTION: Automatic collection cleanup has been DISABLED to prevent accidental wipes.
     // If you need a clean state for a specific test, please manage your data manually within that test.

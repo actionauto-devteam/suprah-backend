@@ -5,6 +5,7 @@ import Vehicle from "../models/Vehicle.model";
 import Lead from "../models/lead.model";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
+import { SIGN_IN_AGAIN, VEHICLE_NOT_FOUND } from "../utils/userMessages";
 import {
   safeCreateNotification,
   notifyOrgAdmins,
@@ -663,7 +664,7 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
     .populate("assignedTo", "email name");
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   // Role-based normalization
@@ -700,7 +701,7 @@ const getPublicVehicleById = asyncHandler(
     );
 
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, VEHICLE_NOT_FOUND);
     }
 
     // Double check status - normally we only show 'Ready for Sale' publicly
@@ -725,7 +726,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   });
 
   if (!existingVehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   const updateData: Record<string, any> = { ...req.body };
@@ -787,7 +788,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   ).populate("assignedTo", "email name");
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
@@ -897,7 +898,7 @@ const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   });
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   if (orgId) {
@@ -948,7 +949,7 @@ const getVehiclePriceHistory = asyncHandler(
       .lean();
 
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, VEHICLE_NOT_FOUND);
     }
 
     const rawHistory = Array.isArray((vehicle as any).priceHistory)
@@ -1006,11 +1007,11 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
   if (!text) {
-    throw new ApiError(400, "Note text is required");
+    throw new ApiError(400, "Write a note before saving.");
   }
 
   if (!userId) {
-    throw new ApiError(401, "User not authenticated");
+    throw new ApiError(401, SIGN_IN_AGAIN);
   }
 
   const vehicle = await Vehicle.findOneAndUpdate(
@@ -1030,7 +1031,7 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
     .populate("notes.author", "name email");
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   res.json(
@@ -1394,7 +1395,7 @@ const updateVehicleStatus = asyncHandler(
     const { status, currentStep } = req.body;
 
     if (!status) {
-      throw new ApiError(400, "Status is required");
+      throw new ApiError(400, "Choose a status for this vehicle before saving.");
     }
 
     const orgId = req.orgId as string;
@@ -1414,7 +1415,7 @@ const updateVehicleStatus = asyncHandler(
     ).populate("assignedTo", "email name");
 
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, VEHICLE_NOT_FOUND);
     }
 
     res.json(
@@ -1652,7 +1653,7 @@ const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
   });
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   const available = vehicle.status === "Ready for Sale";
@@ -1678,7 +1679,7 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
   if (!customerName) {
-    throw new ApiError(400, "Customer name is required");
+    throw new ApiError(400, "Enter the customer's name to reserve this vehicle.");
   }
 
   const vehicle = await Vehicle.findOne({
@@ -1687,11 +1688,11 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   });
 
   if (!vehicle) {
-    throw new ApiError(404, "Vehicle not found");
+    throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
   if (vehicle.status !== "Ready for Sale") {
-    throw new ApiError(400, "Vehicle is not available for reservation");
+    throw new ApiError(400, `This vehicle${vehicle.stockNumber ? ` (stock #${vehicle.stockNumber})` : ""} can't be reserved because it is ${vehicle.status}. Only vehicles marked Ready for Sale can be reserved.`);
   }
 
   const userId = (req as any).user?._id;

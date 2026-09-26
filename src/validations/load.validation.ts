@@ -20,7 +20,7 @@ const locationBlockSchema = z.object({
   country: z.string().trim().max(3).optional().or(z.literal("")),
   phone: z.string().trim().max(30).optional().or(z.literal("")),
   phoneExt: z.string().trim().max(6).optional().or(z.literal("")),
-  email: z.string().trim().email("Invalid email").optional().or(z.literal("")),
+  email: z.string().trim().email("Enter a valid email address").optional().or(z.literal("")),
   contactName: z.string().trim().max(120).optional().or(z.literal("")),
   locationType: z
     .enum(["dealership", "auction", "residence", "business", "port", "other"])
@@ -35,14 +35,14 @@ const loadVehicleSchema = z.object({
   vin: z
     .string()
     .trim()
-    .max(17, "VIN must be at most 17 characters")
+    .max(17, "A VIN can be at most 17 characters")
     .optional()
     .or(z.literal("")),
   year: z.coerce
     .number()
     .int()
-    .min(1900, "Invalid year")
-    .max(2100, "Invalid year")
+    .min(1900, "Enter a valid year")
+    .max(2100, "Enter a valid year")
     .optional(),
   make: z.string().trim().max(80).optional().or(z.literal("")),
   model: z.string().trim().max(80).optional().or(z.literal("")),
@@ -101,10 +101,10 @@ const additionalInfoSchema = z
 const signatureDataUrlSchema = z
   .string()
   .trim()
-  .max(200_000, "Signature image is too large")
+  .max(200_000, "Your signature is too large to save. Clear the signature box and sign again.")
   .refine(
     (v: string) => v === "" || v.startsWith("data:image/"),
-    "Signature must be an image data URL",
+    "Your signature couldn't be read. Clear the signature box and sign again.",
   );
 
 const contractSchema = z
@@ -119,8 +119,8 @@ const contractSchema = z
 // Required, not optional — a driver cannot accept or request a load without
 // agreeing to terms and providing a signature.
 export const driverSignSchema = z.object({
-  agreedToTerms: z.literal(true, "You must agree to the transport terms"),
-  signatureDataUrl: signatureDataUrlSchema.min(1, "A signature is required"),
+  agreedToTerms: z.literal(true, "Check the box to agree to the transport terms before signing."),
+  signatureDataUrl: signatureDataUrlSchema.min(1, "Sign in the signature box before continuing."),
   signerName: z.string().trim().max(160).optional().or(z.literal("")),
 });
 
@@ -154,17 +154,17 @@ export const MAX_VEHICLES_PER_LOAD = 20;
 
 export const createLoadSchema = z
   .object({
-    postType: z.enum(["load-board", "assign-carrier"]),
+    postType: z.enum(["load-board", "assign-carrier"], "Choose Load Board or Assign Carrier."),
     pickupLocation: locationBlockSchema,
     deliveryLocation: locationBlockSchema,
     vehicles: z
       .array(loadVehicleSchema)
-      .min(1, "At least one vehicle is required")
+      .min(1, "Add at least one vehicle to the load.")
       .max(
         MAX_VEHICLES_PER_LOAD,
         `A load can include at most ${MAX_VEHICLES_PER_LOAD} vehicles`,
       ),
-    trailerType: z.enum(TRAILER_TYPES),
+    trailerType: z.enum(TRAILER_TYPES, "Choose a trailer type from the list."),
     dates: datesSchema,
     additionalInfo: additionalInfoSchema,
     contract: contractSchema,
@@ -183,7 +183,7 @@ export const createLoadSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["pricing", "carrierPayAmount"],
-        message: "Total Driver Pay must be greater than $0",
+        message: "Enter a Total Driver Pay greater than $0, or turn off Include Pricing.",
       });
     }
   });
