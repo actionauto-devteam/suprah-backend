@@ -591,7 +591,7 @@ export const chat = asyncHandler(async (req: Request, res: Response) => {
   if (!message?.trim()) throw new ApiError(400, 'Message is required');
   if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
 
-  let chatDoc = await SupraLeoChat.findOne({ userId: user._id });
+  let chatDoc = await SupraLeoChat.findOne({ userId: user._id, organizationId: user.organizationId });
   if (!chatDoc) {
     chatDoc = await SupraLeoChat.create({ userId: user._id, organizationId: user.organizationId, messages: [] });
   }
@@ -952,7 +952,7 @@ export const getChatHistory = asyncHandler(async (req: Request, res: Response) =
   const user = req.crmUser!;
   const { page = '1', limit = '50', module } = req.query;
 
-  const chatDoc = await SupraLeoChat.findOne({ userId: user._id });
+  const chatDoc = await SupraLeoChat.findOne({ userId: user._id, organizationId: user.organizationId });
   if (!chatDoc) return res.json(new ApiResponse(200, { messages: [], total: 0, hasMore: false }, 'No history'));
 
   const allMessages = (chatDoc.messages as any).toObject ? (chatDoc.messages as any).toObject() : [...chatDoc.messages];
@@ -974,7 +974,7 @@ export const getChatHistory = asyncHandler(async (req: Request, res: Response) =
 export const clearChatHistory = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
   await SupraLeoChat.findOneAndUpdate(
-    { userId: user._id },
+    { userId: user._id, organizationId: user.organizationId },
     { messages: [], messageCount: 0, lastActivityAt: new Date() }
   );
   res.json(new ApiResponse(200, null, 'Chat history cleared'));
@@ -1049,7 +1049,7 @@ export const meetingChat = asyncHandler(async (req: Request, res: Response) => {
   if (!message?.trim()) throw new ApiError(400, 'Message is required');
   if (!process.env.GEMINI_API_KEY) throw new ApiError(500, 'AI service not configured');
 
-  let chatDoc = await SupraLeoChat.findOne({ userId: user._id });
+  let chatDoc = await SupraLeoChat.findOne({ userId: user._id, organizationId: user.organizationId });
   if (!chatDoc) {
     chatDoc = await SupraLeoChat.create({ userId: user._id, organizationId: user.organizationId, messages: [] });
   }
@@ -1174,7 +1174,7 @@ export const getStatus = asyncHandler(async (req: Request, res: Response) => {
   const [leadCount, unreadCount, chatDoc] = await Promise.all([
     Lead.countDocuments({ organizationId: user.organizationId }),
     Lead.countDocuments({ organizationId: user.organizationId, isRead: false }),
-    SupraLeoChat.findOne({ userId: user._id }).select('messageCount lastActivityAt'),
+    SupraLeoChat.findOne({ userId: user._id, organizationId: user.organizationId }).select('messageCount lastActivityAt'),
   ]);
 
   res.json(new ApiResponse(200, {
