@@ -101,6 +101,7 @@ router.patch('/me/status', supraSpaceController.updateMyStatus);
 // ─── Global message search ───────────────────────────────────────────────────
 
 router.get('/search', supraSpaceController.searchMessages);
+router.get('/gifs', supraSpaceController.searchGifs);
 router.post('/daypulse-report', supraSpaceController.postDayPulseReport);
 
 // ─── Conversations ────────────────────────────────────────────────────────────

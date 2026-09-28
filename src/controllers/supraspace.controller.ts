@@ -52,6 +52,8 @@ const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: fal
 const SUPRA_SPACE_REPORT_TIME_ZONE = 'America/Denver';
 const SUPRA_SPACE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpeg', '.mpg', '.ogv']);
 const SUPRA_SPACE_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.avif']);
+const SUPRA_SPACE_GIPHY_MAX_QUERY_LENGTH = 120;
+const SUPRA_SPACE_GIPHY_MAX_RESULTS = 48;
 const SUPRA_SPACE_EXTENSION_MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -2009,6 +2011,75 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, messages, 'Search results'));
 });
 
+const searchGifs = asyncHandler(async (req: Request, res: Response) => {
+  const apiKey = process.env.GIPHY_API_KEY;
+  if (!apiKey) throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+
+  if (Array.isArray(req.query.q) || Array.isArray(req.query.limit)) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (query.length > SUPRA_SPACE_GIPHY_MAX_QUERY_LENGTH) {
+    throw new ApiError(400, 'GIF search is too long');
+  }
+
+  const rawLimit = typeof req.query.limit === 'string' ? req.query.limit : '';
+  if (rawLimit && !/^\d+$/.test(rawLimit)) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+  const requestedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 24;
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+  const limit = Math.min(requestedLimit, SUPRA_SPACE_GIPHY_MAX_RESULTS);
+  const endpoint = new URL(`https://api.giphy.com/v1/gifs/${query ? 'search' : 'trending'}`);
+  endpoint.searchParams.set('api_key', apiKey);
+  endpoint.searchParams.set('limit', String(limit));
+  endpoint.searchParams.set('rating', 'pg-13');
+  endpoint.searchParams.set('lang', 'en');
+  if (query) endpoint.searchParams.set('q', query);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    if (!response.ok) {
+      logger.warn({ status: response.status }, '[SupraSpace] GIF search failed');
+      throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+    }
+
+    const payload = await response.json() as { data?: unknown[] };
+    const gifs = (Array.isArray(payload.data) ? payload.data : [])
+      .map((item: any) => {
+        const preview = item?.images?.fixed_width_small || item?.images?.fixed_height_small || item?.images?.fixed_width || item?.images?.fixed_height;
+        const originalUrl = typeof item?.images?.original?.url === 'string' ? item.images.original.url : '';
+        const previewUrl = typeof preview?.url === 'string' ? preview.url : '';
+        const isGiphyMediaUrl = (value: string) => /^https:\/\/(?:media\d*\.giphy\.com|i\.giphy\.com)\//i.test(value);
+        const url = isGiphyMediaUrl(originalUrl) ? originalUrl : isGiphyMediaUrl(previewUrl) ? previewUrl : '';
+        if (!url) return null;
+
+        const width = Number(preview?.width || item?.images?.original?.width);
+        const height = Number(preview?.height || item?.images?.original?.height);
+        return {
+          url,
+          width: Number.isFinite(width) && width > 0 ? width : undefined,
+          height: Number.isFinite(height) && height > 0 ? height : undefined,
+          title: typeof item?.title === 'string' ? item.title.slice(0, 280) : undefined,
+        };
+      })
+      .filter(Boolean);
+
+    res.json(new ApiResponse(200, gifs, 'GIFs loaded'));
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    logger.warn({ error }, '[SupraSpace] GIF search failed');
+    throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 /** POST /api/supraspace/conversations/:id/messages  — text / gif / pre-uploaded attachments */
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -3151,6 +3222,7 @@ const supraSpaceController = {
   getConversationAttachments,
   getConversationThreadReport,
   searchInConversation,
+  searchGifs,
   searchMessages,
   sendMessage,
   postDayPulseReport,
