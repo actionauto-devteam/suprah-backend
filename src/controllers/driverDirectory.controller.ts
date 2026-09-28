@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
+import { ApiError } from "../utils/ApiError";
 import { ApiResponse } from "../utils/ApiResponse";
 import User from "../models/User.model";
 import CrmUser from "../models/CrmUser.model";
@@ -144,43 +146,32 @@ function getAssignmentReviewState(load: any, validDispatchOwnerIds: Set<string>)
   };
 }
 
+const DIRECTORY_PAGE_SIZE = 50;
+const DIRECTORY_MAX_PAGE_SIZE = 100;
+const DIRECTORY_MAX_IDS = 50;
+const DIRECTORY_USER_FIELDS = "name email avatar isActive createdAt";
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
- * GET /api/driver-tracking/org-drivers
- *
- * Organization-wide driver directory. Every active driver account is returned,
- * even when the driver has never shared a location or has no DriverProfile yet.
+ * Builds directory entries for the given driver accounts. With
+ * includeActivity, this organization's active loads, Work Availability
+ * requests, release requests and (for the responsible dispatcher) exact GPS
+ * are included. Without it, only identity and profile data is returned: the
+ * Driver Tracker's working set is the single source of that activity.
  */
-const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
+async function buildDirectoryEntries(
+  req: Request,
+  users: any[],
+  includeActivity: boolean,
+): Promise<OrgDriver[]> {
   const organizationId = req.orgId as string;
   const dispatcherId = String(req.user?._id ?? "");
   const effectiveRole = String((req as any).orgRole ?? req.user?.role ?? "");
   const canAdminReviewReleaseRequests =
     req.user?.role === "super_admin" || ["admin", "super_admin"].includes(effectiveRole);
 
-  // The shared driver directory is live identity/availability data. Do not
-  // reuse a stale browser copy after driver account, organization, or active
-  // status changes.
-  res.setHeader(
-    "Cache-Control",
-    "private, no-store, max-age=0",
-  );
-
-  const includeInactive = req.query.includeInactive === "true";
-
-  // Drivers are a shared platform-wide pool — every org's dispatchers see
-  // the same driver directory, not just drivers who signed up under them.
-  const userFilter: Record<string, unknown> = { role: "driver" };
-  if (!includeInactive) userFilter.isActive = true;
-
-  const users: any[] = await User.find(userFilter)
-    .select("name email avatar isActive createdAt")
-    .lean();
-
-  if (users.length === 0) {
-    return res
-      .status(200)
-      .json(new ApiResponse(200, { drivers: [], total: 0 }, "Org drivers fetched"));
-  }
+  if (users.length === 0) return [];
 
   const ids = users.map((u: any) => u._id);
   const driverEmails = users
@@ -188,8 +179,14 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     .filter(Boolean);
 
   const [profiles, loads, crmUsers, statusRequests, releaseRequests] = await Promise.all([
-    DriverProfile.find({ userId: { $in: ids } }).lean(),
-    Load.find({
+    // Only the fields the directory shows. Profiles also hold uploaded document
+    // records and review data, which made this platform-wide list heavy.
+    DriverProfile.find({ userId: { $in: ids } })
+      .select(
+        "userId operationalStatus maxVehicleCapacity trailerType truckMake truckModel isComplianceExpired profileCompletionScore availableDays serviceRadius preferredRoutes homeBase.city homeBase.state homeBase.zip",
+      )
+      .lean(),
+    !includeActivity ? Promise.resolve([] as any[]) : Load.find({
       organizationId,
       assignedDriverId: { $in: ids },
       status: { $in: ACTIVE_LOAD_STATUSES },
@@ -208,14 +205,14 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     })
       .select("_id email organizationId")
       .lean(),
-    DriverStatusChangeRequest.find({
+    !includeActivity ? Promise.resolve([] as any[]) : DriverStatusChangeRequest.find({
       organizationId,
       driverId: { $in: ids },
       status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
     })
       .sort({ createdAt: -1 })
       .lean(),
-    LoadReleaseRequest.find({
+    !includeActivity ? Promise.resolve([] as any[]) : LoadReleaseRequest.find({
       organizationId,
       driverId: { $in: ids },
       status: "pending",
@@ -545,6 +542,11 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     };
   });
 
+
+  return drivers;
+}
+
+function sortDirectoryEntries(drivers: OrgDriver[]) {
   drivers.sort((a, b) => {
     const attentionRank = (driver: OrgDriver) =>
       driver.statusRequest?.priority === "emergency"
@@ -562,14 +564,191 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
     if (aOnline !== bOnline) return aOnline - bOnline;
     return a.name.localeCompare(b.name);
   });
+  return drivers;
+}
 
-  return res.status(200).json(
-    new ApiResponse(
-      200,
-      { drivers, total: drivers.length },
-      "Org drivers fetched",
-    ),
+/** Platform-wide driver totals, so paged views still show accurate counts. */
+async function getDirectorySummary() {
+  const activeDriverIds = await User.distinct("_id", { role: "driver", isActive: true });
+  const [onLeave, inShop] = await Promise.all([
+    DriverProfile.countDocuments({ userId: { $in: activeDriverIds }, operationalStatus: "on_leave" }),
+    DriverProfile.countDocuments({ userId: { $in: activeDriverIds }, operationalStatus: "maintenance" }),
+  ]);
+  return {
+    totalDrivers: activeDriverIds.length,
+    active: Math.max(0, activeDriverIds.length - onLeave - inShop),
+    onLeave,
+    inShop,
+  };
+}
+
+/**
+ * GET /api/driver-tracking/org-drivers
+ *
+ * Without ?scope, every active driver on the platform is returned with this
+ * organization's activity (unchanged behavior for existing callers). The
+ * Driver Tracker uses the lighter scopes:
+ *   scope=working    drivers with activity in this organization (active loads,
+ *                    Work Availability requests, release requests, pending load
+ *                    requests). Always complete. Includes platform totals.
+ *   scope=directory  the shared driver pool, paged and searchable by name or
+ *                    email (page, limit, search, status=all|active|on_leave|maintenance).
+ *                    Identity and profile only.
+ *   scope=assignable every driver who can currently take work (for the assign
+ *                    and reassign pickers). Identity and profile only.
+ *   scope=ids        specific drivers (ids=a,b,...), with activity.
+ */
+const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
+  const organizationId = req.orgId as string;
+
+  // The shared driver directory is live identity/availability data. Do not
+  // reuse a stale browser copy after driver account, organization, or active
+  // status changes.
+  res.setHeader(
+    "Cache-Control",
+    "private, no-store, max-age=0",
   );
+
+  const includeInactive = req.query.includeInactive === "true";
+  const scope = String(req.query.scope ?? "").trim();
+
+  // Drivers are a shared platform-wide pool — every org's dispatchers see
+  // the same driver directory, not just drivers who signed up under them.
+  const userFilter: Record<string, unknown> = { role: "driver" };
+  if (!includeInactive) userFilter.isActive = true;
+
+  if (!scope) {
+    const users: any[] = await User.find(userFilter).select(DIRECTORY_USER_FIELDS).lean();
+    const drivers = sortDirectoryEntries(await buildDirectoryEntries(req, users, true));
+    return res.status(200).json(
+      new ApiResponse(200, { drivers, total: drivers.length }, "Org drivers fetched"),
+    );
+  }
+
+  if (scope === "working") {
+    const [loadDriverIds, statusRequestDriverIds, releaseDriverIds, loadRequestDriverIds] =
+      await Promise.all([
+        Load.distinct("assignedDriverId", {
+          organizationId,
+          assignedDriverId: { $ne: null },
+          status: { $in: ACTIVE_LOAD_STATUSES },
+        }),
+        DriverStatusChangeRequest.distinct("driverId", {
+          organizationId,
+          status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
+        }),
+        LoadReleaseRequest.distinct("driverId", { organizationId, status: "pending" }),
+        Load.distinct("driverRequests.driverId", {
+          organizationId,
+          assignedDriverId: null,
+          status: "Posted",
+        }),
+      ]);
+    const ids = [
+      ...new Set(
+        [...loadDriverIds, ...statusRequestDriverIds, ...releaseDriverIds, ...loadRequestDriverIds]
+          .map((id: any) => String(id ?? ""))
+          .filter(Boolean),
+      ),
+    ];
+    const [users, summary] = await Promise.all([
+      ids.length
+        ? User.find({ ...userFilter, _id: { $in: ids } }).select(DIRECTORY_USER_FIELDS).lean()
+        : Promise.resolve([] as any[]),
+      getDirectorySummary(),
+    ]);
+    const drivers = sortDirectoryEntries(await buildDirectoryEntries(req, users as any[], true));
+    return res.status(200).json(
+      new ApiResponse(200, { drivers, total: drivers.length, summary }, "Driver Tracker working set fetched"),
+    );
+  }
+
+  if (scope === "ids") {
+    const ids = String(req.query.ids ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .slice(0, DIRECTORY_MAX_IDS);
+    const users: any[] = ids.length
+      ? await User.find({ ...userFilter, _id: { $in: ids } }).select(DIRECTORY_USER_FIELDS).lean()
+      : [];
+    const drivers = sortDirectoryEntries(await buildDirectoryEntries(req, users, true));
+    return res.status(200).json(
+      new ApiResponse(200, { drivers, total: drivers.length }, "Drivers fetched"),
+    );
+  }
+
+  if (scope === "assignable") {
+    const users: any[] = await User.find({ ...userFilter, isActive: true })
+      .select(DIRECTORY_USER_FIELDS)
+      .sort({ name: 1, _id: 1 })
+      .lean();
+    const drivers = (await buildDirectoryEntries(req, users, false)).filter((driver) => driver.assignable);
+    return res.status(200).json(
+      new ApiResponse(200, { drivers, total: drivers.length }, "Assignable drivers fetched"),
+    );
+  }
+
+  if (scope === "directory") {
+    const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+    const limit = Math.min(
+      DIRECTORY_MAX_PAGE_SIZE,
+      Math.max(1, Number.parseInt(String(req.query.limit ?? DIRECTORY_PAGE_SIZE), 10) || DIRECTORY_PAGE_SIZE),
+    );
+    const search = String(req.query.search ?? "").trim().slice(0, 100);
+    const status = String(req.query.status ?? "all");
+    if (!["all", "active", "on_leave", "maintenance"].includes(status)) {
+      throw new ApiError(400, "Choose All, Active, On Leave or In Shop to filter drivers.");
+    }
+
+    const filter: Record<string, unknown> = { ...userFilter };
+    if (search) {
+      const pattern = new RegExp(escapeRegex(search), "i");
+      filter.$or = [{ name: pattern }, { email: pattern }];
+    }
+    const skip = (page - 1) * limit;
+
+    let total: number;
+    let users: any[];
+    if (status === "all") {
+      [total, users] = await Promise.all([
+        User.countDocuments(filter),
+        User.find(filter).select(DIRECTORY_USER_FIELDS).sort({ name: 1, _id: 1 }).skip(skip).limit(limit).lean(),
+      ]);
+    } else {
+      // Work Availability lives on the driver profile; drivers without a
+      // profile count as Active.
+      const candidates: any[] = await User.find(filter).select("_id").sort({ name: 1, _id: 1 }).lean();
+      const offDuty: any[] = await DriverProfile.find({
+        userId: { $in: candidates.map((candidate) => candidate._id) },
+        operationalStatus: { $in: ["on_leave", "maintenance"] },
+      })
+        .select("userId operationalStatus")
+        .lean();
+      const statusByUser = new Map(offDuty.map((profile) => [String(profile.userId), String(profile.operationalStatus)]));
+      const matching = candidates.filter(
+        (candidate) => (statusByUser.get(String(candidate._id)) ?? "active") === status,
+      );
+      total = matching.length;
+      const pageIds = matching.slice(skip, skip + limit).map((candidate) => String(candidate._id));
+      const pageUsers: any[] = pageIds.length
+        ? await User.find({ _id: { $in: pageIds } }).select(DIRECTORY_USER_FIELDS).lean()
+        : [];
+      const byId = new Map(pageUsers.map((user) => [String(user._id), user]));
+      users = pageIds.map((id) => byId.get(id)).filter(Boolean);
+    }
+
+    const drivers = await buildDirectoryEntries(req, users, false);
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { drivers, total, page, limit, hasMore: skip + drivers.length < total },
+        "Driver directory page fetched",
+      ),
+    );
+  }
+
+  throw new ApiError(400, "That driver list view isn't available. Refresh the page and try again.");
 });
 
 export default { getOrgDrivers };

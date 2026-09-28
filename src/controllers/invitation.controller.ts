@@ -11,6 +11,7 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins, safeBroadcastNotification } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { invalidateUserCache } from '../utils/cache.util';
 
 export const createInvitation = asyncHandler(async (req: Request, res: Response) => {
     const { email, role } = req.body;
@@ -254,6 +255,8 @@ export const acceptInvitation = asyncHandler(async (req: Request, res: Response)
 
     user.onboardingCompleted = true;
     await user.save();
+    // The new organization and role apply to the user's very next request.
+    invalidateUserCache(user._id.toString());
 
     // Update invite
     invite.status = 'accepted';

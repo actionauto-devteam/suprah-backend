@@ -3,6 +3,7 @@ import { OAuth2Client } from 'google-auth-library';
 import crypto from 'crypto';
 import CrmUser from '../models/CrmUser.model';
 import { ApiError } from '../utils/ApiError';
+import { resolveCrmJwtSecret } from '../utils/crmJwtSecret';
 
 /**
  * gmail.service — everything Suprah Mail needs from the Gmail API.
@@ -27,7 +28,7 @@ import { ApiError } from '../utils/ApiError';
 const CLIENT_ID = process.env.GOOGLE_MAIL_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.GOOGLE_MAIL_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '';
 const REDIRECT_URI = process.env.GOOGLE_MAIL_REDIRECT_URI || '';
-const STATE_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+const STATE_SECRET = resolveCrmJwtSecret();
 
 // Stage 1.2 request-pressure safeguards. Gmail remains authoritative;
 // every known mutation/history change invalidates these short-lived snapshots.

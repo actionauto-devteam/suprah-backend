@@ -9,9 +9,10 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
 import Load from '../models/Load.model';
-import { getSocketIO } from '../utils/socketEmitter';
+import { disconnectUserSockets, getSocketIO } from '../utils/socketEmitter';
 import { DRIVER_ACTIVE_LOAD_STATUSES } from '../services/driverReviewAccess.service';
 import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
+import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
@@ -228,6 +229,25 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         return;
     }
 
+    // Loads with a driver on them can't be orphaned: the driver would keep
+    // sharing GPS with nobody able to dispatch or release them.
+    const activeLoads: any[] = await Load.find({
+        organizationId: id,
+        assignedDriverId: { $ne: null },
+        status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
+    })
+        .select('loadNumber status')
+        .limit(10)
+        .lean();
+    if (activeLoads.length > 0) {
+        const numbers = activeLoads.map((load) => load.loadNumber).filter(Boolean).join(', ');
+        res.status(409).json({
+            success: false,
+            message: `You can't delete ${org.name} yet because ${activeLoads.length === 10 ? 'at least 10 loads' : activeLoads.length === 1 ? '1 load' : `${activeLoads.length} loads`} still ${activeLoads.length === 1 ? 'has' : 'have'} a driver: ${numbers}. Finish those loads, or remove or reassign their drivers in Driver Tracker, then try again.`,
+        });
+        return;
+    }
+
     const affectedUserIds = await User.find({
         $or: [
             { organizationId: id },
@@ -235,7 +255,40 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         ],
     }).distinct('_id');
 
+    // Unassigned Draft/Posted loads leave the public board with the org.
+    const boardLoads: any[] = await Load.find({
+        organizationId: id,
+        status: { $in: ['Draft', 'Posted'] },
+        $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
+    })
+        .select('_id driverRequests')
+        .lean();
+    if (boardLoads.length > 0) {
+        await Load.deleteMany({
+            _id: { $in: boardLoads.map((load) => load._id) },
+            status: { $in: ['Draft', 'Posted'] },
+            $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
+        });
+    }
+
     await Organization.findByIdAndDelete(id);
+    invalidateActiveOrganizations();
+
+    // Drivers with a pending request on a removed load must see it disappear.
+    const io = getSocketIO();
+    if (io && boardLoads.length > 0) {
+        const requesterIds = new Set<string>();
+        for (const load of boardLoads) {
+            for (const request of Array.isArray(load.driverRequests) ? load.driverRequests : []) {
+                const driverId = String(request?.driverId ?? '').trim();
+                if (driverId) requesterIds.add(driverId);
+            }
+        }
+        for (const driverId of requesterIds) {
+            io.to(`user:${driverId}`).emit('driver:loads_updated', { reason: 'organization_deleted' });
+            io.to(`user:${driverId}`).emit('driver:load_request_updated', { reason: 'organization_deleted' });
+        }
+    }
 
     await activityService.createActivity({
         userId: (req.user?._id as any).toString(),
@@ -264,7 +317,10 @@ export const deleteOrganization = asyncHandler(async (req: Request, res: Respons
         { $pull: { dispatcherOrganizationIds: id } }
     );
 
-    affectedUserIds.forEach((userId: any) => invalidateUserCache(String(userId)));
+    affectedUserIds.forEach((userId: any) => {
+        invalidateUserCache(String(userId));
+        disconnectUserSockets(userId);
+    });
 
     res.status(200).json({
         success: true,
@@ -384,6 +440,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     const activeStatusSet = new Set<string>(DRIVER_ACTIVE_LOAD_STATUSES);
     const deletableStatuses = ['Draft', 'Posted'];
     let deletedLoads: any[] = [];
+    let transferredLoads: any[] = [];
 
     const session = await mongoose.startSession();
     try {
@@ -405,7 +462,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
             if (protectedLoad) {
                 throw new ApiError(
                     409,
-                    `Member cannot be removed while load ${protectedLoad.loadNumber || protectedLoad._id} is ${protectedLoad.status} or still has an assigned driver. Resolve or complete the load first.`,
+                    `This member can't be removed yet because they created load ${protectedLoad.loadNumber || '(no load number)'}, which is ${protectedLoad.status}${protectedLoad.assignedDriverId ? ' with a driver assigned' : ''}. Complete the load, or remove its driver in Driver Tracker, then try again.`,
                 );
             }
 
@@ -426,6 +483,29 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
                     ],
                 }).session(session);
             }
+
+            // Active loads this member is responsible for (as dispatcher)
+            // but didn't create: the admin removing them takes over, so the
+            // driver's GPS oversight and alerts never stop.
+            const responsibleLoads: any[] = await Load.find({
+                organizationId: id,
+                dispatchOwnerId: userId,
+                assignedDriverId: { $ne: null },
+                status: { $in: DRIVER_ACTIVE_LOAD_STATUSES },
+            })
+                .select('_id loadNumber')
+                .session(session)
+                .lean();
+            if (responsibleLoads.length > 0) {
+                await Load.updateMany(
+                    { _id: { $in: responsibleLoads.map((load) => load._id) }, dispatchOwnerId: userId },
+                    { $set: { dispatchOwnerId: req.user?._id } },
+                    // Ownership bookkeeping only; must not look like a change
+                    // to the load's terms.
+                    { session, timestamps: false },
+                );
+            }
+            transferredLoads = responsibleLoads;
 
             const detachedUser = await User.findOneAndUpdate(
                 { _id: userId, organizationId: id },
@@ -450,6 +530,8 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     }
 
     invalidateUserCache(userId);
+    // Stop organization events reaching the removed member right away.
+    disconnectUserSockets(userId);
 
     // Keep Driver Page, Driver Tracker, Transportation and pending-request
     // views synchronized without requiring a manual refresh.
@@ -501,9 +583,20 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     }
     notifyOrgAdmins(id, 'team_member_left', 'Member Removed', `A member has been removed from the organization.`, { removedUserId: userId });
 
+    if (transferredLoads.length > 0) {
+        logger.info(
+            { orgId: id, removedUserId: userId, newOwnerId: req.user?._id, loadIds: transferredLoads.map((load) => String(load._id)) },
+            'Transferred responsible-dispatcher ownership after member removal',
+        );
+    }
+
+    const transferredNumbers = transferredLoads.map((load) => load.loadNumber).filter(Boolean);
     res.status(200).json({
         success: true,
-        message: 'Member removed',
+        message: transferredNumbers.length
+            ? `Member removed. You are now the responsible dispatcher for ${transferredNumbers.length === 1 ? 'load' : 'loads'} ${transferredNumbers.join(', ')}.`
+            : 'Member removed',
+        transferredLoadNumbers: transferredNumbers,
     });
 });
 

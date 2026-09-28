@@ -10,6 +10,23 @@ export function setSocketIO(instance: Server) {
   io = instance;
 }
 
+/**
+ * Drops a user's live socket connections. Rooms (org:*, user:*) are joined at
+ * connect time, so after an access change (removed from an organization,
+ * suspended, role changed) the client reconnects and rooms are rebuilt from
+ * the user's current access instead of receiving stale organization events.
+ */
+export function disconnectUserSockets(userId: unknown): void {
+  const id = String(userId ?? '').trim();
+  const io = getSocketIO();
+  if (!io || !id) return;
+  try {
+    io.in(`user:${id}`).disconnectSockets(true);
+  } catch {
+    // Best effort: the next reconnect re-validates access anyway.
+  }
+}
+
 export function getSocketIO(): Server | null {
   return io;
 }

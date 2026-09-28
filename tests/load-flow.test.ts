@@ -21,8 +21,15 @@ import User from '../src/models/User.model';
 import Organization from '../src/models/Organization.model';
 import DriverProfile from '../src/models/DriverProfile.model';
 import Notification from '../src/models/Notification.model';
+import DriverStatusChangeRequest from '../src/models/DriverStatusChangeRequest.model';
+import DriverReviewEvent from '../src/models/DriverReviewEvent.model';
+import DriverLocation from '../src/models/DriverLocation.model';
+import DispatchChatMessage from '../src/models/DispatchChatMessage.model';
+import DispatchChatThread from '../src/models/DispatchChatThread.model';
+import { monitorDriverLocationSilence } from '../src/services/driverLocationMonitor.service';
 import tokenService from '../src/services/token.service';
 import { storageService } from '../src/services/storage.service';
+import { invalidateActiveOrganizations } from '../src/services/activeOrganizations.service';
 
 const TEST_ORG_SLUG_A = 'load-flow-test-org-a';
 const TEST_ORG_SLUG_B = 'load-flow-test-org-b';
@@ -138,6 +145,11 @@ afterAll(async () => {
   const userIds = users.map((u) => u._id);
   await Load.deleteMany({ organizationId: { $in: [orgA?._id, orgB?._id] } });
   await Notification.deleteMany({ userId: { $in: userIds } });
+  await DriverStatusChangeRequest.deleteMany({ organizationId: { $in: [String(orgA?._id), String(orgB?._id)] } });
+  await DriverReviewEvent.deleteMany({ driverId: { $in: userIds } });
+  await DriverLocation.deleteMany({ userId: { $in: userIds } });
+  await DispatchChatMessage.deleteMany({ organizationId: { $in: [String(orgA?._id), String(orgB?._id)] } });
+  await DispatchChatThread.deleteMany({ organizationId: { $in: [String(orgA?._id), String(orgB?._id)] } });
   await DriverProfile.deleteMany({ userId: { $in: userIds } });
   await User.deleteMany({ _id: { $in: userIds } });
   await Organization.deleteMany({ _id: { $in: [orgA?._id, orgB?._id] } });
@@ -726,5 +738,906 @@ describe('Plain-English reasons when an edit is refused', () => {
       .send({ additionalInfo: { visibility: 'public', notes: 'Too late' } })
       .expect(400);
     expect(res.body.message).toMatch(/because it is already Delivered/);
+  });
+});
+
+// ─── Batch 3/4: mid-trip changes, organizations, notifications ───────────────
+
+describe('Mid-trip reassign keeps the previous driver\'s evidence', () => {
+  let support: { user: any; token: string };
+
+  beforeAll(async () => {
+    const user = await User.create({
+      email: `support${TEST_EMAIL_DOMAIN}`,
+      name: 'Support Dispatcher',
+      role: 'admin',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    support = { user, token: tokenService.generateAccessToken(user as any) };
+  });
+
+  async function pickedUpLoad(label: string) {
+    const first = await createDriver(`${label}-first`);
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(first.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    const post = (path: string) => request(app).post(`/api/driver-tracking/loads/${load._id}/${path}`).set(auth(first.token));
+    await post('accept').send(signatureFor('First Driver')).expect(200);
+    await post('submit-pickup-proof').attach('proof', PNG, 'pickup.png').expect(200);
+    await post('pickup').expect(200);
+    return { load, first };
+  }
+
+  it('reassigning after pickup archives the photo, signature and times, and tells the involved dispatchers', async () => {
+    const { load, first } = await pickedUpLoad('midtrip');
+    const second = await createDriver('midtrip-second');
+
+    await request(app)
+      .post('/api/driver-tracking/reassign-load')
+      .set(auth(support.token))
+      .send({ loadId: String(load._id), driverId: String(second.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+
+    const updated: any = await Load.findById(load._id).select('+assignmentHistory');
+    expect(updated.status).toBe('Assigned');
+    expect(String(updated.assignedDriverId)).toBe(String(second.user._id));
+    expect(updated.proofOfPickup?.imageUrl).toBeUndefined();
+    expect(updated.driverContract?.agreedToTerms).not.toBe(true);
+    expect(updated.pickedUpAt).toBeUndefined();
+
+    expect(updated.assignmentHistory).toHaveLength(1);
+    const entry = updated.assignmentHistory[0];
+    expect(String(entry.driverId)).toBe(String(first.user._id));
+    expect(entry.endReason).toBe('reassigned');
+    expect(entry.statusAtEnd).toBe('Picked Up');
+    expect(entry.proofOfPickup.imageUrl).toMatch(/^test\/proof-/);
+    expect(entry.driverContract.signerName).toBe('First Driver');
+    expect(entry.pickedUpAt).toBeDefined();
+
+    // The creator (not the actor) is told, with a link to the history.
+    const notices = await Notification.find({ userId: dispatcher._id, title: 'Driver Changed Mid-Trip', 'metadata.loadId': String(load._id) });
+    expect(notices).toHaveLength(1);
+    expect(notices[0].metadata?.route).toBe(`/transportation/load/${load._id}?history=1`);
+  });
+
+  it('the history is readable by involved dispatchers and admins, not by other staff', async () => {
+    const { load } = await pickedUpLoad('history-access');
+    const second = await createDriver('history-access-second');
+    await request(app)
+      .post('/api/driver-tracking/reassign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(second.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+
+    const res = await request(app)
+      .get(`/api/driver-tracking/loads/${load._id}/assignment-history`)
+      .set(auth(dispatcherToken))
+      .expect(200);
+    expect(res.body.data.entries).toHaveLength(1);
+    const entry = res.body.data.entries[0];
+    expect(entry.driverName).toBe('Driver history-access-first');
+    expect(entry.pickupPhoto.url).toBe('https://signed.example/proof.png');
+    expect(entry.signature.signerName).toBe('First Driver');
+    expect(JSON.stringify(res.body)).not.toMatch(/test\/proof-/); // no raw storage keys
+
+    const outsider = await User.create({
+      email: `outsider${TEST_EMAIL_DOMAIN}`,
+      name: 'Outsider Employee',
+      role: 'employee',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    await request(app)
+      .get(`/api/driver-tracking/loads/${load._id}/assignment-history`)
+      .set(auth(tokenService.generateAccessToken(outsider as any)))
+      .expect(403);
+  });
+
+  it('Remove is blocked after pickup, and removing earlier keeps a history entry', async () => {
+    const { load } = await pickedUpLoad('remove-blocked');
+    const res = await request(app)
+      .post('/api/driver-tracking/remove-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id) })
+      .expect(409);
+    expect(res.body.message).toMatch(/Use Reassign/);
+
+    const { user: driver, token } = await createDriver('remove-accepted');
+    const accepted = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(accepted._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${accepted._id}/accept`).set(auth(token)).send(signatureFor('Accepted Driver')).expect(200);
+    await request(app)
+      .post('/api/driver-tracking/remove-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(accepted._id) })
+      .expect(200);
+    const updated: any = await Load.findById(accepted._id).select('+assignmentHistory');
+    expect(updated.status).toBe('Posted');
+    expect(updated.assignmentHistory[0]).toMatchObject({ endReason: 'removed', statusAtEnd: 'Accepted' });
+    expect(updated.assignmentHistory[0].driverContract.signerName).toBe('Accepted Driver');
+  });
+});
+
+describe('Organizations that are deleted or suspended', () => {
+  it('suspended organizations disappear from the load board and cannot be requested', async () => {
+    const suspended = await Organization.create({ name: 'Load Flow Suspended Org', slug: 'load-flow-test-org-suspended', status: 'suspended' });
+    try {
+      const load = await seedLoad({ organizationId: suspended._id });
+      const { token } = await createDriver('board-suspended');
+      invalidateActiveOrganizations();
+
+      const board = await request(app).get('/api/driver-tracking/available-loads').set(auth(token)).expect(200);
+      const list = Array.isArray(board.body.data) ? board.body.data : board.body.data.loads;
+      expect(list.map((l: any) => String(l._id))).not.toContain(String(load._id));
+
+      const res = await request(app)
+        .post(`/api/driver-tracking/loads/${load._id}/request`)
+        .set(auth(token))
+        .send(signatureFor('Board Driver'))
+        .expect(409);
+      expect(res.body.message).toMatch(/isn't active/);
+    } finally {
+      await Load.deleteMany({ organizationId: suspended._id });
+      await Organization.deleteOne({ _id: suspended._id });
+    }
+  });
+
+  it('deletion is blocked while a load has a driver, and removes unassigned board loads otherwise', async () => {
+    const owner = await User.create({
+      email: `org-owner${TEST_EMAIL_DOMAIN}`,
+      name: 'Org Owner',
+      role: 'super_admin',
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const ownerToken = tokenService.generateAccessToken(owner as any);
+    const doomed = await Organization.create({ name: 'Load Flow Doomed Org', slug: 'load-flow-test-org-doomed', status: 'active', ownerId: owner._id });
+    await User.updateOne({ _id: owner._id }, { $set: { organizationId: doomed._id, organizationRole: 'admin' } });
+    const { user: driver } = await createDriver('doomed-driver');
+    const active = await seedLoad({ organizationId: doomed._id, createdBy: owner._id, status: 'Accepted', assignedDriverId: driver._id, dispatchOwnerId: owner._id });
+    const posted = await seedLoad({ organizationId: doomed._id, createdBy: owner._id });
+
+    try {
+      const blocked = await request(app).delete(`/api/organizations/${doomed._id}`).set(auth(ownerToken)).expect(409);
+      expect(blocked.body.message).toContain(String((active as any).loadNumber));
+      expect(await Organization.exists({ _id: doomed._id })).toBeTruthy();
+
+      await Load.updateOne({ _id: active._id }, { $set: { status: 'Delivered' } });
+      await request(app).delete(`/api/organizations/${doomed._id}`).set(auth(ownerToken)).expect(200);
+      expect(await Organization.exists({ _id: doomed._id })).toBeNull();
+      expect(await Load.exists({ _id: posted._id })).toBeNull();
+      expect(await Load.exists({ _id: active._id })).toBeTruthy(); // delivered history is kept
+    } finally {
+      await Load.deleteMany({ organizationId: doomed._id });
+      await Organization.deleteOne({ _id: doomed._id });
+    }
+  });
+});
+
+describe('Driver notifications (DT-09 / DT-30)', () => {
+  it('a driver can mark notifications from any organization as read and delete them', async () => {
+    const { user: driver, token } = await createDriver('notifications');
+    const fromOrgA = await Notification.create({ userId: driver._id, organizationId: String(orgA._id), type: 'driver_assigned', title: 'A', message: 'A' });
+    const fromOrgB = await Notification.create({ userId: driver._id, organizationId: String(orgB._id), type: 'driver_assigned', title: 'B', message: 'B' });
+
+    await request(app).patch(`/api/notifications/${fromOrgA._id}/read`).set(auth(token)).expect(200);
+    expect((await Notification.findById(fromOrgA._id))!.isRead).toBe(true);
+
+    await request(app).patch('/api/notifications/read-all').set(auth(token)).expect(200);
+    expect((await Notification.findById(fromOrgB._id))!.isRead).toBe(true);
+
+    await request(app).delete(`/api/notifications/${fromOrgB._id}`).set(auth(token)).expect(200);
+    expect(await Notification.findById(fromOrgB._id)).toBeNull();
+  });
+
+  it('assignment notifications link the driver straight to the load', async () => {
+    const { user: driver } = await createDriver('deep-link');
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    const notice = await Notification.findOne({ userId: driver._id, type: 'driver_assigned', 'metadata.loadId': String(load._id) });
+    expect(notice?.metadata?.route).toBe(`/driver/loads/${load._id}`);
+  });
+});
+
+// ─── Batch 5: dispatcher access, dispatcher review, status-request privacy ───
+
+describe('Dispatcher access (DT-11)', () => {
+  let plainEmployee: any;
+  let plainToken: string;
+  let designated: any;
+  let designatedToken: string;
+
+  async function createEmployee(label: string, dispatcherForOrg: boolean) {
+    const user = await User.create({
+      email: `${label}${TEST_EMAIL_DOMAIN}`,
+      name: `Employee ${label}`,
+      role: 'employee',
+      organizationId: orgA._id,
+      ...(dispatcherForOrg ? { dispatcherOrganizationIds: [orgA._id] } : {}),
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    return { user, token: tokenService.generateAccessToken(user as any) };
+  }
+
+  beforeAll(async () => {
+    ({ user: plainEmployee, token: plainToken } = await createEmployee('plain-employee', false));
+    ({ user: designated, token: designatedToken } = await createEmployee('designated-dispatcher', true));
+  });
+
+  it('only designated dispatchers (and admins) can assign a load', async () => {
+    const { user: driver } = await createDriver('dt11-assign');
+    const load = await seedLoad();
+    const refused = await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(plainToken))
+      .send({ loadId: String(load._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(403);
+    expect(refused.body.message).toMatch(/You need Dispatcher access for this organization/);
+
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(designatedToken))
+      .send({ loadId: String(load._id), driverId: String(driver._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+  });
+
+  it('any staff member can still reassign a load', async () => {
+    const { user: first } = await createDriver('dt11-first');
+    const { user: second } = await createDriver('dt11-second');
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(designatedToken))
+      .send({ loadId: String(load._id), driverId: String(first._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app)
+      .post('/api/driver-tracking/reassign-load')
+      .set(auth(plainToken))
+      .send({ loadId: String(load._id), driverId: String(second._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    expect(String((await reload(load._id))!.assignedDriverId)).toBe(String(second._id));
+  });
+
+  it('a designated dispatcher can review and approve driver documents', async () => {
+    const { user: driver } = await createDriver('dt11-documents');
+    const uploadedAt = new Date('2026-09-01T12:00:00Z');
+    const profile: any = await DriverProfile.findOneAndUpdate(
+      { userId: driver._id },
+      {
+        $push: {
+          documents: {
+            type: 'drivers_license',
+            label: 'CDL',
+            fileUrl: 'https://files.example/cdl.png',
+            fileKey: 'test/cdl.png',
+            uploadedAt,
+          },
+        },
+      },
+      { new: true },
+    );
+    const documentId = String(profile.documents[0]._id);
+
+    const view = await request(app)
+      .get(`/api/driver-tracking/drivers/${driver._id}/profile`)
+      .set(auth(designatedToken))
+      .expect(200);
+    expect(view.body.data.access.level).toBe('DISPATCH_REVIEW');
+    expect(view.body.data.access.canReviewDocuments).toBe(true);
+    expect(view.body.data.documents).toHaveLength(1);
+
+    const refused = await request(app)
+      .patch(`/api/driver-tracking/drivers/${driver._id}/documents/${documentId}/approve`)
+      .set(auth(plainToken))
+      .send({ expectedUploadedAt: uploadedAt.toISOString() })
+      .expect(403);
+    expect(refused.body.message).toMatch(/Only an admin or a dispatcher for this organization/);
+
+    await request(app)
+      .patch(`/api/driver-tracking/drivers/${driver._id}/documents/${documentId}/approve`)
+      .set(auth(designatedToken))
+      .send({ expectedUploadedAt: uploadedAt.toISOString() })
+      .expect(200);
+    const saved: any = await DriverProfile.findOne({ userId: driver._id });
+    expect(saved.documents[0].reviewStatus).toBe('approved');
+  });
+
+  it('Work Availability notes are hidden from staff not handling the driver (DT-26)', async () => {
+    const { user: driver } = await createDriver('dt26-status');
+    const statusRequest = await DriverStatusChangeRequest.create({
+      organizationId: String(orgA._id),
+      driverId: driver._id,
+      requestedStatus: 'on_leave',
+      priority: 'standard',
+      status: 'pending',
+      reason: 'personal_leave',
+      message: 'Family matter',
+    });
+    const path = `/api/driver-profile/status-requests/${statusRequest._id}`;
+
+    const hidden = await request(app).get(path).set(auth(plainToken)).expect(200);
+    expect(hidden.body.data.reason).toBeNull();
+    expect(hidden.body.data.message).toBeNull();
+    expect(hidden.body.data.notesHidden).toBe(true);
+
+    const asAdmin = await request(app).get(path).set(auth(dispatcherToken)).expect(200);
+    expect(asAdmin.body.data.message).toBe('Family matter');
+
+    // The employee becomes responsible for an active load with this driver.
+    await seedLoad({ status: 'Assigned', assignedDriverId: driver._id, dispatchOwnerId: plainEmployee._id });
+    const asOwner = await request(app).get(path).set(auth(plainToken)).expect(200);
+    expect(asOwner.body.data.message).toBe('Family matter');
+    expect(asOwner.body.data.notesHidden).toBeUndefined();
+  });
+});
+
+// ─── Batch 6: work availability lock, emergency GPS, GPS flags and ordering ──
+
+describe('Driver status and GPS rules (batch 6)', () => {
+  const freshFix = () => new Date(Date.now() - 5_000).toISOString();
+
+  async function acceptedLoad(label: string) {
+    const driver = await createDriver(label);
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driver.token))
+      .send(signatureFor(`Driver ${label}`))
+      .expect(200);
+    return { ...driver, load };
+  }
+
+  const sendFix = (token: string, measuredAt = freshFix()) =>
+    request(app)
+      .post('/api/driver-tracking/heartbeat')
+      .set(auth(token))
+      .send({ lat: 40.76, lng: -111.89, accuracy: 12, locationRecordedAt: measuredAt });
+
+  it('DT-15: going On Leave waits for a Dispatch assignment in progress and saves nothing', async () => {
+    const { user, token } = await createDriver('dt15-lock');
+    await DriverProfile.updateOne(
+      { userId: user._id },
+      { $set: { serviceRadius: 100, commitmentLock: { token: 'dispatch', acquiredAt: new Date(), lockedUntil: new Date(Date.now() + 60_000) } } },
+    );
+
+    const res = await request(app)
+      .patch('/api/driver-profile/logistics')
+      .set(auth(token))
+      .send({ operationalStatus: 'on_leave', serviceRadius: 250 })
+      .expect(409);
+    expect(res.body.message).toMatch(/Dispatch is updating your loads right now/);
+
+    const profile: any = await DriverProfile.findOne({ userId: user._id });
+    expect(profile.operationalStatus).toBe('active');
+    expect(profile.serviceRadius).toBe(100);
+  });
+
+  it('DT-15: a refused status change does not half-save the service area', async () => {
+    const { user, token } = await acceptedLoad('dt15-active-load');
+    await DriverProfile.updateOne({ userId: user._id }, { $set: { serviceRadius: 100 } });
+
+    await request(app)
+      .patch('/api/driver-profile/logistics')
+      .set(auth(token))
+      .send({ operationalStatus: 'on_leave', serviceRadius: 250 })
+      .expect(409);
+    const profile: any = await DriverProfile.findOne({ userId: user._id });
+    expect(profile.operationalStatus).toBe('active');
+    expect(profile.serviceRadius).toBe(100);
+
+    // A plain service-area change still works.
+    await request(app)
+      .patch('/api/driver-profile/logistics')
+      .set(auth(token))
+      .send({ serviceRadius: 300 })
+      .expect(200);
+    expect((await DriverProfile.findOne({ userId: user._id }) as any).serviceRadius).toBe(300);
+  });
+
+  it('DT-19: pickup without recent GPS goes through but is flagged to the dispatcher', async () => {
+    const { user, token, load } = await acceptedLoad('dt19-no-gps');
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/submit-pickup-proof`).set(auth(token)).attach('proof', PNG, 'pickup.png').expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/pickup`).set(auth(token)).expect(200);
+
+    const updated: any = await reload(load._id);
+    expect(updated.status).toBe('Picked Up');
+    expect(updated.gpsGapEvents).toHaveLength(1);
+    expect(updated.gpsGapEvents[0].step).toBe('picked_up');
+
+    const notice = await Notification.findOne({ userId: dispatcher._id, 'metadata.loadId': String(load._id), 'metadata.gpsMissing': true });
+    expect(notice?.title).toBe('Picked Up without recent GPS');
+    expect(notice?.message).toMatch(new RegExp(`${user.name} marked load ${updated.loadNumber} as Picked Up`));
+  });
+
+  it('DT-19: pickup with recent GPS is not flagged', async () => {
+    const { token, load } = await acceptedLoad('dt19-with-gps');
+    await sendFix(token).expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/submit-pickup-proof`).set(auth(token)).attach('proof', PNG, 'pickup.png').expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/pickup`).set(auth(token)).expect(200);
+    expect((await reload(load._id) as any).gpsGapEvents).toHaveLength(0);
+  });
+
+  it('DT-21: a GPS sample must say when it was measured', async () => {
+    const { token } = await acceptedLoad('dt21-no-time');
+    await request(app)
+      .post('/api/driver-tracking/heartbeat')
+      .set(auth(token))
+      .send({ lat: 40.76, lng: -111.89 })
+      .expect(400);
+  });
+
+  it('DT-21: a sample still on its way when GPS was turned off cannot turn sharing back on', async () => {
+    const { user, token } = await acceptedLoad('dt21-offline-fence');
+    await sendFix(token).expect(200);
+    await request(app).post('/api/driver-tracking/location-offline').set(auth(token)).expect(200);
+    const stopped: any = await DriverLocation.findOne({ userId: user._id });
+    expect(stopped.isSharing).toBe(false);
+
+    // Simulate the in-flight sample: GPS was turned off after the server received it.
+    await DriverLocation.updateOne({ userId: user._id }, { $set: { sharingStoppedAt: new Date(Date.now() + 60_000) } });
+    const late = await sendFix(token).expect(200);
+    expect(late.body.data.locationAccepted).toBe(false);
+    expect((await DriverLocation.findOne({ userId: user._id }) as any).isSharing).toBe(false);
+
+    // Turning GPS back on later works normally.
+    await DriverLocation.updateOne({ userId: user._id }, { $set: { sharingStoppedAt: new Date(Date.now() - 60_000) } });
+    const back = await sendFix(token).expect(200);
+    expect(back.body.data.locationAccepted).toBe(true);
+  });
+
+  it('DT-21: starting the route does not make an old position look fresh', async () => {
+    const { user, token, load } = await acceptedLoad('dt21-start-route');
+    await sendFix(token).expect(200);
+    const oldSeen = new Date(Date.now() - 30 * 60_000);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/submit-pickup-proof`).set(auth(token)).attach('proof', PNG, 'pickup.png').expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/pickup`).set(auth(token)).expect(200);
+    await DriverLocation.updateOne({ userId: user._id }, { $set: { lastSeenAt: oldSeen, locationRecordedAt: oldSeen } });
+
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/start-route`).set(auth(token)).expect(200);
+    const location: any = await DriverLocation.findOne({ userId: user._id });
+    expect(location.status).toBe('on-route');
+    expect(location.lastSeenAt.getTime()).toBe(oldSeen.getTime());
+    // Started the route 30 minutes after the last GPS: flagged.
+    expect((await reload(load._id) as any).gpsGapEvents.map((g: any) => g.step)).toContain('in_transit');
+  });
+
+  it('DT-18: during an emergency, turning GPS off keeps the last position for vehicles on board', async () => {
+    const { user, token, load } = await acceptedLoad('dt18-emergency');
+    await sendFix(token).expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/submit-pickup-proof`).set(auth(token)).attach('proof', PNG, 'pickup.png').expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/pickup`).set(auth(token)).expect(200);
+    await DriverStatusChangeRequest.create({
+      organizationId: String(orgA._id),
+      driverId: user._id,
+      requestedStatus: 'on_leave',
+      priority: 'emergency',
+      status: 'approved_awaiting_reassignment',
+      affectedLoadIds: [load._id],
+    });
+
+    const res = await request(app).post('/api/driver-tracking/location-offline').set(auth(token)).expect(200);
+    expect(res.body.data.required).toBe(false); // the driver is not blocked
+    const location: any = await DriverLocation.findOne({ userId: user._id });
+    expect(location).not.toBeNull(); // Dispatch keeps the last known position
+    expect(location.isSharing).toBe(false);
+  });
+});
+
+// ─── Account changes by a super admin apply on the next request ──────────────
+
+describe('Role and suspension changes apply immediately', () => {
+  let superAdminToken: string;
+
+  async function createStaff(label: string) {
+    const user = await User.create({
+      email: `${label}${TEST_EMAIL_DOMAIN}`,
+      name: `Staff ${label}`,
+      role: 'admin',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    return { user, token: tokenService.generateAccessToken(user as any) };
+  }
+
+  beforeAll(async () => {
+    const superAdmin = await User.create({
+      email: `super-admin${TEST_EMAIL_DOMAIN}`,
+      name: 'Super Admin',
+      role: 'super_admin',
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    superAdminToken = tokenService.generateAccessToken(superAdmin as any);
+  });
+
+  it('an admin changed to driver loses Dispatch access on the very next request', async () => {
+    const { user, token } = await createStaff('demoted-admin');
+    // First request caches the signed-in user.
+    await request(app).get('/api/driver-tracking/load-requests').set(auth(token)).expect(200);
+
+    await request(app)
+      .put(`/api/admin/users/${user._id}/role`)
+      .set(auth(superAdminToken))
+      .send({ role: 'driver' })
+      .expect(200);
+
+    await request(app).get('/api/driver-tracking/load-requests').set(auth(token)).expect(403);
+  });
+
+  it('a suspended user is refused on the very next request', async () => {
+    const { user, token } = await createStaff('suspended-admin');
+    await request(app).get('/api/driver-tracking/load-requests').set(auth(token)).expect(200);
+
+    await request(app).post(`/api/admin/users/${user._id}/suspend`).set(auth(superAdminToken)).expect(200);
+
+    const refused = await request(app).get('/api/driver-tracking/load-requests').set(auth(token)).expect(403);
+    expect(refused.body.message).toMatch(/suspended/);
+  });
+});
+
+// ─── DT-18: "Driver Offline" alerts during an emergency request ──────────────
+
+describe('Emergency request GPS alerts (DT-18)', () => {
+  async function driverWithLoad(label: string, pickUp: boolean) {
+    const driver = await createDriver(label);
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driver.token))
+      .send(signatureFor(`Driver ${label}`))
+      .expect(200);
+    await request(app)
+      .post('/api/driver-tracking/heartbeat')
+      .set(auth(driver.token))
+      .send({ lat: 40.76, lng: -111.89, accuracy: 12, locationRecordedAt: new Date(Date.now() - 5_000).toISOString() })
+      .expect(200);
+    if (pickUp) {
+      await request(app).post(`/api/driver-tracking/loads/${load._id}/submit-pickup-proof`).set(auth(driver.token)).attach('proof', PNG, 'pickup.png').expect(200);
+      await request(app).post(`/api/driver-tracking/loads/${load._id}/pickup`).set(auth(driver.token)).expect(200);
+    }
+    // Emergency request, then the driver turns GPS off.
+    await DriverStatusChangeRequest.create({
+      organizationId: String(orgA._id),
+      driverId: driver.user._id,
+      requestedStatus: 'on_leave',
+      priority: 'emergency',
+      status: 'approved_awaiting_reassignment',
+      affectedLoadIds: [load._id],
+    });
+    await request(app).post('/api/driver-tracking/location-offline').set(auth(driver.token)).expect(200);
+    // 15 minutes pass without GPS.
+    const lastFix = new Date(Date.now() - 15 * 60_000);
+    await DriverLocation.updateOne(
+      { userId: driver.user._id },
+      { $set: { lastSeenAt: lastFix, locationRecordedAt: lastFix, offlineAlertSentAt: null } },
+    );
+    return { ...driver, load };
+  }
+
+  const offlineAlertsFor = (driverId: unknown) =>
+    Notification.find({ userId: dispatcher._id, type: 'driver_tracker_offline_alert', 'metadata.driverId': String(driverId) });
+
+  it('still alerts the responsible dispatcher for a Picked Up load', async () => {
+    const { user, load } = await driverWithLoad('dt18-picked-up', true);
+    await monitorDriverLocationSilence();
+    const alerts = await offlineAlertsFor(user._id);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].metadata?.loadIds).toContain(String(load._id));
+  });
+
+  it('stays quiet for a load that has not been picked up yet', async () => {
+    const { user } = await driverWithLoad('dt18-accepted-only', false);
+    await monitorDriverLocationSilence();
+    expect(await offlineAlertsFor(user._id)).toHaveLength(0);
+  });
+});
+
+// ─── DT-26: Dispatch Chat shows only the dispatcher's own loads ──────────────
+
+describe('Dispatch Chat load list (DT-26)', () => {
+  it('a dispatcher sees only the loads they are responsible for; an admin sees all', async () => {
+    const { user: driver } = await createDriver('dt26-chat');
+    const employee = await User.create({
+      email: `dt26-chat-dispatcher${TEST_EMAIL_DOMAIN}`,
+      name: 'Chat Dispatcher',
+      role: 'employee',
+      organizationId: orgA._id,
+      dispatcherOrganizationIds: [orgA._id],
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const employeeToken = tokenService.generateAccessToken(employee as any);
+
+    const theirs = await seedLoad({ status: 'Assigned', assignedDriverId: driver._id, dispatchOwnerId: employee._id });
+    const someoneElses = await seedLoad({ status: 'Assigned', assignedDriverId: driver._id, dispatchOwnerId: dispatcher._id });
+
+    const asDispatcher = await request(app)
+      .get(`/api/driver-tracking/dispatch-chat/${driver._id}/messages`)
+      .set(auth(employeeToken))
+      .expect(200);
+    const dispatcherLoadIds = asDispatcher.body.data.context.loads.map((load: any) => load.id);
+    expect(dispatcherLoadIds).toEqual([String(theirs._id)]);
+
+    const asAdmin = await request(app)
+      .get(`/api/driver-tracking/dispatch-chat/${driver._id}/messages`)
+      .set(auth(dispatcherToken))
+      .expect(200);
+    const adminLoadIds = asAdmin.body.data.context.loads.map((load: any) => load.id);
+    expect(adminLoadIds).toEqual(expect.arrayContaining([String(theirs._id), String(someoneElses._id)]));
+  });
+});
+
+// ─── Driver Tracker speed: lighter requests, same results ───────────────────
+
+describe('Lighter Driver Tracker and Driver Portal requests', () => {
+  it('one unread-count request matches the per-driver counts', async () => {
+    const { user: driver, token: driverToken } = await createDriver('unread-batch');
+    const employee = await User.create({
+      email: `unread-batch-dispatcher${TEST_EMAIL_DOMAIN}`,
+      name: 'Unread Dispatcher',
+      role: 'employee',
+      organizationId: orgA._id,
+      dispatcherOrganizationIds: [orgA._id],
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const employeeToken = tokenService.generateAccessToken(employee as any);
+
+    // The dispatcher opens the chat, and the driver replies twice.
+    const opened = await request(app)
+      .get(`/api/driver-tracking/dispatch-chat/${driver._id}/messages`)
+      .set(auth(employeeToken))
+      .expect(200);
+    const threadId = opened.body.data.thread.id;
+    for (const text of ['On my way', 'Running 10 minutes late']) {
+      await request(app)
+        .post(`/api/driver-tracking/dispatch-chat/${driver._id}/messages`)
+        .set(auth(driverToken))
+        .send({ threadId, content: text })
+        .expect((res) => { if (res.status >= 300) throw new Error(`send failed ${res.status}: ${res.body?.message}`); });
+    }
+
+    const single = await request(app)
+      .get(`/api/driver-tracking/dispatch-chat/${driver._id}/unread`)
+      .set(auth(employeeToken))
+      .expect(200);
+    const batch = await request(app)
+      .get('/api/driver-tracking/dispatch-chat/unread-by-driver')
+      .set(auth(employeeToken))
+      .expect(200);
+
+    expect(single.body.data.unreadCount).toBe(2);
+    expect(batch.body.data.counts[String(driver._id)]).toBe(2);
+
+    // Drivers can't use the staff-wide count.
+    await request(app).get('/api/driver-tracking/dispatch-chat/unread-by-driver').set(auth(driverToken)).expect(403);
+  });
+
+  it('my-loads?view=active returns only current loads, and history skips compatibility', async () => {
+    const { user: driver, token } = await createDriver('my-loads-view');
+    const delivered = await seedLoad({ status: 'Delivered', assignedDriverId: driver._id, dispatchOwnerId: dispatcher._id });
+    const current = await seedLoad({ status: 'Assigned', assignedDriverId: driver._id, dispatchOwnerId: dispatcher._id });
+
+    const active = await request(app).get('/api/driver-tracking/my-loads?view=active').set(auth(token)).expect(200);
+    expect(active.body.data.map((load: any) => String(load._id))).toEqual([String(current._id)]);
+
+    const all = await request(app).get('/api/driver-tracking/my-loads').set(auth(token)).expect(200);
+    const byId = new Map(all.body.data.map((load: any) => [String(load._id), load]));
+    expect(byId.size).toBe(2);
+    expect((byId.get(String(delivered._id)) as any).compatibility).toBeNull();
+    expect((byId.get(String(current._id)) as any).compatibility).toBeTruthy();
+  });
+
+  it('the driver directory still returns the profile details it shows', async () => {
+    const { user: driver } = await createDriver('directory-fields');
+    await DriverProfile.updateOne(
+      { userId: driver._id },
+      { $set: { trailerType: 'open_2car', serviceRadius: 250, preferredRoutes: ['UT-CO'], availableDays: ['monday'], 'homeBase.city': 'Provo', 'homeBase.state': 'UT' } },
+    );
+    const res = await request(app).get('/api/driver-tracking/org-drivers').set(auth(dispatcherToken)).expect(200);
+    const entry = res.body.data.drivers.find((item: any) => item.id === String(driver._id));
+    expect(entry.equipment.trailerType).toBe('open_2car');
+    expect(entry.equipment.maxVehicleCapacity).toBe(5);
+    expect(entry.logistics.serviceRadiusMiles).toBe(250);
+    expect(entry.logistics.preferredRoutes).toEqual(['UT-CO']);
+    expect(entry.availability.availableDays).toEqual(['monday']);
+    expect(entry.logistics.homeBase).toMatchObject({ city: 'Provo', state: 'UT' });
+  });
+});
+
+// ─── Driver Tracker directory paging and chat unread consistency ────────────
+
+describe('Driver Tracker directory paging', () => {
+  const directory = (params: Record<string, string | number>) =>
+    request(app)
+      .get('/api/driver-tracking/org-drivers')
+      .query(params)
+      .set(auth(dispatcherToken))
+      .expect(200);
+
+  it('the working set holds every driver with activity here, and platform totals', async () => {
+    const { user: busy } = await createDriver('paging-busy');
+    const { user: idle } = await createDriver('paging-idle');
+    await seedLoad({ status: 'Assigned', assignedDriverId: busy._id, dispatchOwnerId: dispatcher._id });
+
+    const res = await directory({ scope: 'working' });
+    const ids = res.body.data.drivers.map((driver: any) => driver.id);
+    expect(ids).toContain(String(busy._id));
+    expect(ids).not.toContain(String(idle._id));
+    const busyEntry = res.body.data.drivers.find((driver: any) => driver.id === String(busy._id));
+    expect(busyEntry.shipments.length).toBeGreaterThan(0);
+    expect(res.body.data.summary.totalDrivers).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the directory is paged and searchable, with profile data only', async () => {
+    const { user: found } = await createDriver('paging-zzsearchable');
+    await seedLoad({ status: 'Assigned', assignedDriverId: found._id, dispatchOwnerId: dispatcher._id });
+
+    const searched = await directory({ scope: 'directory', search: 'zzsearchable' });
+    expect(searched.body.data.total).toBe(1);
+    expect(searched.body.data.drivers[0].id).toBe(String(found._id));
+    // Activity never comes from directory pages.
+    expect(searched.body.data.drivers[0].shipments).toEqual([]);
+
+    const firstPage = await directory({ scope: 'directory', page: 1, limit: 1 });
+    expect(firstPage.body.data.drivers).toHaveLength(1);
+    expect(firstPage.body.data.hasMore).toBe(firstPage.body.data.total > 1);
+    const secondPage = await directory({ scope: 'directory', page: 2, limit: 1 });
+    if (firstPage.body.data.total > 1) {
+      expect(secondPage.body.data.drivers[0].id).not.toBe(firstPage.body.data.drivers[0].id);
+    }
+  });
+
+  it('the Work Availability filter and the assignable list leave out drivers on leave', async () => {
+    const { user: onLeave } = await createDriver('paging-onleave');
+    await DriverProfile.updateOne({ userId: onLeave._id }, { $set: { operationalStatus: 'on_leave' } });
+
+    const leaveOnly = await directory({ scope: 'directory', status: 'on_leave', search: 'paging-onleave' });
+    expect(leaveOnly.body.data.drivers.map((driver: any) => driver.id)).toEqual([String(onLeave._id)]);
+    const activeOnly = await directory({ scope: 'directory', status: 'active', search: 'paging-onleave' });
+    expect(activeOnly.body.data.total).toBe(0);
+
+    const assignable = await directory({ scope: 'assignable' });
+    expect(assignable.body.data.drivers.map((driver: any) => driver.id)).not.toContain(String(onLeave._id));
+  });
+
+  it('specific drivers can be fetched by id, and the default list is unchanged', async () => {
+    const { user: target } = await createDriver('paging-by-id');
+    const byId = await directory({ scope: 'ids', ids: String(target._id) });
+    expect(byId.body.data.drivers.map((driver: any) => driver.id)).toEqual([String(target._id)]);
+
+    const legacy = await request(app).get('/api/driver-tracking/org-drivers').set(auth(dispatcherToken)).expect(200);
+    expect(legacy.body.data.drivers.length).toBe(legacy.body.data.total);
+    expect(legacy.body.data.drivers.map((driver: any) => driver.id)).toContain(String(target._id));
+  });
+
+  it('refuses an unknown view with a plain message', async () => {
+    const res = await request(app)
+      .get('/api/driver-tracking/org-drivers')
+      .query({ scope: 'everything' })
+      .set(auth(dispatcherToken))
+      .expect(400);
+    expect(res.body.message).toMatch(/isn't available/);
+  });
+});
+
+describe('Dispatch Chat unread counts agree (DT-28)', () => {
+  it('a system event meant for the dispatcher is counted the same everywhere', async () => {
+    const { user: driver } = await createDriver('dt28-counts');
+    const employee = await User.create({
+      email: `dt28-dispatcher${TEST_EMAIL_DOMAIN}`,
+      name: 'DT28 Dispatcher',
+      role: 'employee',
+      organizationId: orgA._id,
+      dispatcherOrganizationIds: [orgA._id],
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const employeeToken = tokenService.generateAccessToken(employee as any);
+    const opened = await request(app)
+      .get(`/api/driver-tracking/dispatch-chat/${driver._id}/messages`)
+      .set(auth(employeeToken))
+      .expect(200);
+
+    // For example an alert response recorded in the dispatcher's own thread.
+    await DispatchChatMessage.create({
+      organizationId: String(orgA._id),
+      threadId: opened.body.data.thread.id,
+      dispatcherId: employee._id,
+      driverId: driver._id,
+      senderId: employee._id,
+      senderRole: 'dispatcher',
+      messageType: 'system',
+      content: 'Driver responded to your alert',
+      systemEvent: { type: 'alert_response', metadata: { unreadForParticipantIds: [String(employee._id)] } },
+    });
+
+    const single = await request(app).get(`/api/driver-tracking/dispatch-chat/${driver._id}/unread`).set(auth(employeeToken)).expect(200);
+    const batch = await request(app).get('/api/driver-tracking/dispatch-chat/unread-by-driver').set(auth(employeeToken)).expect(200);
+    const total = await request(app).get('/api/driver-tracking/dispatch-chat/unread-total').set(auth(employeeToken)).expect(200);
+    expect(single.body.data.unreadCount).toBe(1);
+    expect(batch.body.data.counts[String(driver._id)]).toBe(1);
+    expect(total.body.data.unreadTotal).toBe(1);
+
+    // Reading the chat clears it everywhere.
+    await request(app).post(`/api/driver-tracking/dispatch-chat/${driver._id}/read`).set(auth(employeeToken)).send({}).expect(200);
+    const after = await request(app).get(`/api/driver-tracking/dispatch-chat/${driver._id}/unread`).set(auth(employeeToken)).expect(200);
+    expect(after.body.data.unreadCount).toBe(0);
+  });
+});
+
+// ─── Notification badge counts don't depend on how many are loaded ──────────
+
+describe('Notification unread counts', () => {
+  it('returns the same unread and CRM unread counts whether 1 or all notifications are loaded', async () => {
+    const staff = await User.create({
+      email: `notif-counts${TEST_EMAIL_DOMAIN}`,
+      name: 'Notification Counts',
+      role: 'admin',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const token = tokenService.generateAccessToken(staff as any);
+    const base = { userId: staff._id, organizationId: String(orgA._id), title: 'T', message: 'M', isRead: false };
+    await Notification.create([
+      { ...base, type: 'crm_message', category: 'crm' },
+      { ...base, type: 'new_lead', category: 'crm' },
+      { ...base, type: 'load_picked_up', category: 'transportation' },
+      { ...base, type: 'load_delivered', category: 'transportation', isRead: true },
+    ]);
+    // An older row saved before notifications had a category.
+    await Notification.collection.insertOne({
+      ...base,
+      type: 'lead_assigned',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const one = await request(app).get('/api/notifications').query({ limit: 1 }).set(auth(token)).expect(200);
+    const all = await request(app).get('/api/notifications').query({ limit: 0 }).set(auth(token)).expect(200);
+
+    for (const res of [one, all]) {
+      expect(res.body.data.unreadCount).toBe(4);
+      expect(res.body.data.unreadCrmCount).toBe(3);
+    }
+    expect(one.body.data.notifications).toHaveLength(1);
+    expect(all.body.data.notifications).toHaveLength(5);
   });
 });

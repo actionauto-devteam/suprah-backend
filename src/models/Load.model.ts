@@ -66,6 +66,8 @@ export interface ILoad extends Document {
   }>;
   /** True while lifecycleOutbox holds undelivered events (worker claim index). */
   lifecycleOutboxPending?: boolean;
+  assignmentHistory?: Array<Record<string, any>>;
+  gpsGapEvents?: Array<{ step: string; recordedAt: Date; lastGpsAt?: Date | null }>;
   driverAmendments: Array<{
     _id: mongoose.Types.ObjectId;
     driverId: mongoose.Types.ObjectId;
@@ -244,6 +246,44 @@ const loadDriverAmendmentSchema = new Schema(
   { _id: true },
 );
 
+/**
+ * One entry per driver who left this load through Reassign or Remove. Keeps
+ * that driver's evidence (pickup/delivery photos, contract signature) and
+ * lifecycle times instead of deleting them, so the dispatchers involved can
+ * review who had the load and when.
+ */
+const loadAssignmentHistorySchema = new Schema(
+  {
+    driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    dispatchOwnerId: { type: Schema.Types.ObjectId, ref: "User" },
+    statusAtEnd: { type: String, required: true, maxlength: 40 },
+    endReason: { type: String, enum: ["reassigned", "removed"], required: true },
+    endedAt: { type: Date, required: true },
+    endedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    replacementDriverId: { type: Schema.Types.ObjectId, ref: "User" },
+    assignedAt: { type: Date },
+    acceptedAt: { type: Date },
+    pickedUpAt: { type: Date },
+    inTransitAt: { type: Date },
+    proofOfPickup: {
+      imageUrl: { type: String },
+      submittedAt: { type: Date },
+      note: { type: String, maxlength: 2000 },
+    },
+    proofOfDelivery: {
+      imageUrl: { type: String },
+      submittedAt: { type: Date },
+      note: { type: String, maxlength: 2000 },
+    },
+    driverContract: {
+      signedAt: { type: Date },
+      signerName: { type: String, maxlength: 160 },
+      signatureDataUrl: { type: String, maxlength: 200_000 },
+    },
+  },
+  { _id: true },
+);
+
 const loadSchema = new Schema<ILoad>(
   {
     organizationId: { type: String, required: true, index: true },
@@ -373,6 +413,24 @@ const loadSchema = new Schema<ILoad>(
     // same Load document as the edit itself. This keeps the edit + amendment
     // requirement atomic without requiring Mongo multi-document transactions.
     driverAmendments: { type: [loadDriverAmendmentSchema], default: [] },
+    // Excluded from normal reads (images and signatures); served only by the
+    // Driver Tracker assignment-history endpoint.
+    assignmentHistory: { type: [loadAssignmentHistorySchema], default: [], select: false },
+    // Driver steps (pickup, start route, delivery) taken while GPS was required
+    // but no location had been shared in the last 10 minutes.
+    gpsGapEvents: {
+      type: [
+        new Schema(
+          {
+            step: { type: String, enum: ["picked_up", "in_transit", "delivered"], required: true },
+            recordedAt: { type: Date, required: true },
+            lastGpsAt: { type: Date, default: null },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
     driverRequests: { type: [driverRequestSchema], default: [] },
     notes: [
       {

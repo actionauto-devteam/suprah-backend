@@ -31,6 +31,11 @@ import DriverLocation from "../models/DriverLocation.model";
 import storageService from "../services/storage.service";
 import DriverPayout from "../models/DriverPayout.model";
 import logger from "../utils/logger";
+import { getSignedProofUrl } from "../utils/signedUrlCache";
+import {
+  activeOrganizationObjectIds,
+  isOrganizationActive,
+} from "../services/activeOrganizations.service";
 import { getSocketIO, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import { safeCreateNotification, notifyOrgAdmins } from "../utils/safeNotification";
 import activityService from "../services/activity.service";
@@ -981,7 +986,12 @@ async function resolveOriginalDispatcherIdForSupportAudit(
 async function getDriverGpsPolicyAcrossOrganizations(
   driverId: string,
   fallbackOrganizationId?: string,
+  // GPS heartbeats (up to 12 a minute) skip the lazy status finalization: it
+  // is a write, and it is already retried by the driver's status polling and
+  // the Driver Tracker directory.
+  options: { finalize?: boolean } = {},
 ) {
+  const finalize = options.finalize !== false;
   const trackingLoads = await getDriverGpsTrackingLoads(driverId);
   const byOrg = new Map<string, string[]>();
   for (const load of trackingLoads) {
@@ -997,11 +1007,22 @@ async function getDriverGpsPolicyAcrossOrganizations(
   let reason: "active_load" | "dispatch_retained_load" | null = null;
   const requiredLoadIds = new Set<string>();
   const retainedLoadIds = new Set<string>();
+  let emergencyReleaseActive = false;
+
+  if (finalize) {
+    for (const organizationId of byOrg.keys()) {
+      await finalizeDriverStatusChangeIfClear(driverId, organizationId);
+    }
+  }
+  // Work Availability is platform-wide, so one read serves every organization.
+  const statusContext = byOrg.size > 0
+    ? await getDriverStatusContext(driverId)
+    : null;
 
   for (const [organizationId, activeLoadIds] of byOrg.entries()) {
-    await finalizeDriverStatusChangeIfClear(driverId, organizationId);
-    const statusContext = await getDriverStatusContext(driverId, organizationId);
+    if (!statusContext) break;
     operationalStatus = statusContext.operationalStatus;
+    if (statusContext.emergencyReleaseActive) emergencyReleaseActive = true;
     const requirement = await getDriverLocationRequirement(
       driverId,
       organizationId,
@@ -1048,6 +1069,7 @@ async function getDriverGpsPolicyAcrossOrganizations(
     reason,
     requiredLoadIds: [...requiredLoadIds],
     retainedLoadIds: [...retainedLoadIds],
+    emergencyReleaseActive,
   };
 }
 
@@ -1056,6 +1078,7 @@ async function getDriverGpsPolicyAcrossOrganizations(
 
 const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
+  const receivedAt = new Date();
   const { lat, lng, status, manualSharingEnabled = false, locationRecordedAt, accuracy } = req.body as {
     lat?: number;
     lng?: number;
@@ -1082,9 +1105,11 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     throw new ApiError(400, "Your location couldn't be read. Make sure location services are turned on for this app, then try again.");
   }
 
+  // Every sample must say when the phone measured it; without that an older
+  // reading could replace a newer one.
   const measuredAt = typeof locationRecordedAt === "string" ? new Date(locationRecordedAt) : null;
-  if (locationRecordedAt !== undefined && (!measuredAt || !Number.isFinite(measuredAt.getTime()) ||
-      measuredAt.getTime() > Date.now() + 60_000 || Date.now() - measuredAt.getTime() > 120_000)) {
+  if (!measuredAt || !Number.isFinite(measuredAt.getTime()) ||
+      measuredAt.getTime() > Date.now() + 60_000 || Date.now() - measuredAt.getTime() > 120_000) {
     throw new ApiError(400, "Your phone didn't provide a recent location reading. Check that location services are on, then try again.");
   }
   if (accuracy !== undefined && (typeof accuracy !== "number" || !Number.isFinite(accuracy) || accuracy < 0)) {
@@ -1095,6 +1120,7 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
   const policy = await getDriverGpsPolicyAcrossOrganizations(
     driverId,
     req.orgId as string | undefined,
+    { finalize: false },
   );
   const hasTrackingRelationship = policy.trackingLoads.length > 0;
   const manualSharingOptIn = manualSharingEnabled === true;
@@ -1155,15 +1181,21 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
   let location;
   try {
     location = await DriverLocation.findOneAndUpdate(
-      { userId: user._id, ...(measuredAt ? { $or: [
-        { locationRecordedAt: null }, { locationRecordedAt: { $lte: measuredAt } },
-      ] } : {}) },
+      {
+        userId: user._id,
+        $and: [
+          { $or: [{ locationRecordedAt: null }, { locationRecordedAt: { $lte: measuredAt } }] },
+          // A sample already on its way when the driver turned GPS off must
+          // not switch sharing back on.
+          { $or: [{ sharingStoppedAt: null }, { sharingStoppedAt: { $lte: receivedAt } }] },
+        ],
+      },
       locationUpdate,
       { new: true, upsert: true },
     );
   } catch (error: any) {
     // A newer sample already owns the unique user row. Do not overwrite it.
-    if (measuredAt && error?.code === 11000) {
+    if (error?.code === 11000) {
       return res.status(200).json(new ApiResponse(200, { ok: true, locationAccepted: false }, "A newer GPS measurement is already stored"));
     }
     throw error;
@@ -1172,7 +1204,8 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
 
   // A heartbeat may be stored for the driver's own portal/manual sharing, but
   // exact coordinates are emitted only to dispatchers who own an Accepted,
-  // Picked Up, or In-Transit load for this driver.
+  // Picked Up, or In-Transit load for this driver. Reuses the tracking loads
+  // read at the start of this same request.
   await emitDriverLocationToResponsibleDispatchers(driverId, {
     coords: location.coords,
     status: location.status,
@@ -1180,7 +1213,7 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
     lastSeenAt: location.lastSeenAt,
     locationRecordedAt: location.locationRecordedAt ?? null,
     accuracy: location.accuracy ?? null,
-  });
+  }, policy.trackingLoads);
 
   return res.status(200).json(
     new ApiResponse(
@@ -1223,12 +1256,18 @@ const markLocationOffline = asyncHandler(
     const forcedStatus =
       policy.operationalStatus === "maintenance" ? "waiting" : "offline";
     const locationRequired = policy.required;
+    // Emergency release: the driver isn't forced to share GPS, but Dispatch
+    // keeps the last known position (and silence alerts) for vehicles on board.
+    const keepForVehiclesOnBoard =
+      !locationRequired &&
+      policy.emergencyReleaseActive &&
+      policy.trackingLoads.some((load: any) => VEHICLES_ON_BOARD_STATUSES.has(String(load.status ?? "")));
 
     const now = new Date();
     const existing: any = await DriverLocation.findOne({ userId: user._id });
     let location: any = existing;
 
-    if (!locationRequired) {
+    if (!locationRequired && !keepForVehiclesOnBoard) {
       await DriverLocation.deleteOne({ userId: user._id });
       return res.status(200).json(
         new ApiResponse(
@@ -1259,6 +1298,7 @@ const markLocationOffline = asyncHandler(
         isSharing: false,
         manualSharingOptIn: false,
         offlineAlertSentAt: null,
+        sharingStoppedAt: now,
       };
       if (locationRequired) {
         update.lastSeenAt = now;
@@ -1366,9 +1406,11 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
       const operationalStatus = p?.operationalStatus ?? "active";
       const persistedSharing =
         typeof loc.isSharing === "boolean" ? loc.isSharing : loc.status !== "offline";
+      // Fresh means the phone measured this position recently, not merely
+      // that the server heard from the driver.
       const locationIsFresh =
-        Boolean(loc.lastSeenAt) &&
-        Date.now() - new Date(loc.lastSeenAt).getTime() <= 5 * 60 * 1000;
+        Boolean(loc.locationRecordedAt) &&
+        Date.now() - new Date(loc.locationRecordedAt).getTime() <= 5 * 60 * 1000;
       const effectiveSharing =
         Boolean(loc.coords) && locationIsFresh && Boolean(persistedSharing);
       const effectiveStatus =
@@ -1385,6 +1427,8 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
         status: effectiveStatus,
         coords: effectiveSharing ? (loc.coords ?? null) : null,
         lastSeenAt: loc.lastSeenAt ?? null,
+        locationRecordedAt: loc.locationRecordedAt ?? null,
+        accuracy: effectiveSharing ? (loc.accuracy ?? null) : null,
         isSharing: effectiveSharing,
         dispatcherId,
         driver: {
@@ -1456,6 +1500,119 @@ function lifecycleAdminNotificationEvent(params: {
   excludeUserId?: string;
 }) {
   return createLoadLifecycleOutboxEvent("org_admin_notification", params);
+}
+
+/**
+ * Snapshot of the outgoing driver's evidence and lifecycle times, kept in
+ * Load.assignmentHistory when a driver leaves through Reassign or Remove,
+ * instead of deleting the pickup photo, delivery photo and signature.
+ */
+function buildAssignmentHistoryEntry(
+  load: any,
+  params: {
+    endedBy: unknown;
+    endReason: "reassigned" | "removed";
+    replacementDriverId?: unknown;
+  },
+) {
+  const pickup = load?.proofOfPickup?.imageUrl ? load.proofOfPickup : null;
+  const delivery = load?.proofOfDelivery?.imageUrl ? load.proofOfDelivery : null;
+  const contract = load?.driverContract?.agreedToTerms ? load.driverContract : null;
+  return {
+    _id: new mongoose.Types.ObjectId(),
+    driverId: load.assignedDriverId,
+    ...(load.dispatchOwnerId ? { dispatchOwnerId: load.dispatchOwnerId } : {}),
+    statusAtEnd: String(load.status ?? ""),
+    endReason: params.endReason,
+    endedAt: new Date(),
+    endedBy: params.endedBy,
+    ...(params.replacementDriverId ? { replacementDriverId: params.replacementDriverId } : {}),
+    ...(load.assignedAt ? { assignedAt: load.assignedAt } : {}),
+    ...(load.acceptedAt ? { acceptedAt: load.acceptedAt } : {}),
+    ...(load.pickedUpAt ? { pickedUpAt: load.pickedUpAt } : {}),
+    ...(load.inTransitAt ? { inTransitAt: load.inTransitAt } : {}),
+    ...(pickup
+      ? { proofOfPickup: { imageUrl: pickup.imageUrl, submittedAt: pickup.submittedAt, note: pickup.note } }
+      : {}),
+    ...(delivery
+      ? { proofOfDelivery: { imageUrl: delivery.imageUrl, submittedAt: delivery.submittedAt, note: delivery.note } }
+      : {}),
+    ...(contract
+      ? {
+          driverContract: {
+            signedAt: contract.signedAt,
+            signerName: contract.signerName,
+            signatureDataUrl: contract.signatureDataUrl,
+          },
+        }
+      : {}),
+  };
+}
+
+const MID_TRIP_STATUSES = new Set(["Picked Up", "In-Transit"]);
+// Loads with vehicles on the trailer.
+const VEHICLES_ON_BOARD_STATUSES = MID_TRIP_STATUSES;
+const RECENT_GPS_MS = 10 * 60 * 1000;
+
+const GPS_GAP_STEPS = {
+  picked_up: { label: "Picked Up", type: "load_picked_up" },
+  in_transit: { label: "In Transit", type: "load_in_transit" },
+  delivered: { label: "Delivered", type: "load_delivered" },
+} as const;
+
+/**
+ * Pickup, start route and delivery always go through. When GPS is required for
+ * this load but the driver hasn't shared a location in the last 10 minutes,
+ * the step is recorded on the load and the responsible dispatcher is told.
+ */
+async function buildMissingGpsFlag(
+  load: any,
+  driver: any,
+  step: keyof typeof GPS_GAP_STEPS,
+) {
+  const organizationId = String(load.organizationId);
+  const driverId = String(driver._id);
+  const loadId = String(load._id);
+  const requirement = await getDriverLocationRequirement(driverId, organizationId);
+  const requiredForLoad =
+    requirement.required &&
+    (requirement.reason === "dispatch_retained_load"
+      ? requirement.retainedLoadIds.includes(loadId)
+      : requirement.activeLoadIds.includes(loadId));
+  if (!requiredForLoad) return null;
+
+  const location: any = await DriverLocation.findOne({ userId: driver._id })
+    .select("locationRecordedAt")
+    .lean();
+  const lastGpsAt = location?.locationRecordedAt ? new Date(location.locationRecordedAt) : null;
+  const now = new Date();
+  if (lastGpsAt && now.getTime() - lastGpsAt.getTime() <= RECENT_GPS_MS) return null;
+
+  const { label, type } = GPS_GAP_STEPS[step];
+  const minutes = lastGpsAt ? Math.round((now.getTime() - lastGpsAt.getTime()) / 60_000) : null;
+  const title = `${label} without recent GPS`;
+  const message =
+    `${driver.name || "The driver"} marked load ${load.loadNumber} as ${label} without a recent GPS location. ` +
+    (minutes != null
+      ? `Their last GPS location was ${minutes} minutes earlier.`
+      : "They haven't shared a GPS location for this load.");
+  const metadata = {
+    loadId,
+    loadNumber: load.loadNumber,
+    driverId,
+    gpsMissing: true,
+    route: `/transportation/load/${encodeURIComponent(loadId)}`,
+  };
+  const ownerId = String(load.dispatchOwnerId ?? "").trim();
+  const event = ownerId
+    ? lifecycleUserNotificationEvent({ userId: ownerId, organizationId, type, title, message, metadata })
+    : lifecycleAdminNotificationEvent({ organizationId, type, title, message, metadata, excludeUserId: driverId });
+
+  return { entry: { step, recordedAt: now, lastGpsAt }, event };
+}
+
+function withGpsGap(update: Record<string, any>, flag: Awaited<ReturnType<typeof buildMissingGpsFlag>>) {
+  return flag ? { ...update, $push: { ...(update.$push ?? {}), gpsGapEvents: flag.entry } } : update;
 }
 
 function lifecycleActivityEvent(params: {
@@ -1800,7 +1957,7 @@ function buildRequestNotSelectedOutboxEvents(params: {
           loadNumber: load.loadNumber,
           driverId: requester.driverId,
           assignmentResolution: "not_selected",
-          route: "/driver",
+          route: "/driver/available-loads",
         },
       }),
     );
@@ -2052,11 +2209,11 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
         title: "Load Request Fulfilled",
         message: `Your request for load ${load.loadNumber} was fulfilled and the load was assigned to you.`,
         metadata: {
+          route: `/driver/loads/${encodeURIComponent(load._id.toString())}`,
           loadId: load._id.toString(),
           loadNumber: load.loadNumber,
           driverId,
           assignmentResolution: "fulfilled",
-          route: "/driver",
         },
       }),
     );
@@ -2183,6 +2340,7 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
         metadata: {
           loadId: load._id.toString(),
           loadNumber: load.loadNumber,
+          route: `/driver/loads/${encodeURIComponent(load._id.toString())}`,
         },
       }),
       lifecycleDispatchChatEvent({
@@ -2465,7 +2623,7 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
             message: pendingReleaseRequest
               ? `Dispatch approved your release request for load ${load.loadNumber} and reassigned the load to another driver. Location sharing for this load is no longer required.`
               : `Load ${load.loadNumber} has been reassigned to another driver`,
-            metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+            metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber, route: "/driver/loads" },
           }),
           ...(!activeAuthority.supportMemberAction
             ? [
@@ -2625,6 +2783,7 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
       metadata: {
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
+        route: `/driver/loads/${encodeURIComponent(load._id.toString())}`,
         driverId,
         driverName: newDriverName,
         dispatcherId: user._id.toString(),
@@ -2634,7 +2793,6 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
         action: previousDriverId && previousDriverId !== driverId
           ? "reassigned_to"
           : "assigned_to",
-        route: "/driver",
       },
     }),
     lifecycleDispatchChatEvent({
@@ -2720,6 +2878,47 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
       : []),
   ];
 
+  // A driver change after pickup means the vehicles were already on the
+  // previous driver's truck. The load creator and the previous responsible
+  // dispatcher are told, with a link to the assignment history.
+  if (MID_TRIP_STATUSES.has(previousStatus)) {
+    const involvedIds = [
+      ...new Set(
+        [(load as any).createdBy, (load as any).dispatchOwnerId]
+          .map((id) => String(id ?? "").trim())
+          .filter((id) => id && mongoose.Types.ObjectId.isValid(id) && id !== user._id.toString()),
+      ),
+    ];
+    const involved: any[] = involvedIds.length
+      ? await User.find({
+          _id: { $in: involvedIds },
+          isActive: true,
+          role: { $in: ["employee", "admin", "super_admin"] },
+        })
+          .select("_id")
+          .lean()
+      : [];
+    for (const dispatcher of involved) {
+      reassignmentOutbox.push(
+        lifecycleUserNotificationEvent({
+          userId: String(dispatcher._id),
+          organizationId,
+          type: "load_details_changed",
+          title: "Driver Changed Mid-Trip",
+          message: `${actorName} reassigned load ${load.loadNumber} from ${previousDriverName} to ${newDriverName} while it was ${previousStatus}. ${previousDriverName}'s pickup photo, signature and times are kept in the assignment history.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            driverId,
+            previousDriverId,
+            loadStatus: previousStatus,
+            route: `/transportation/load/${encodeURIComponent(load._id.toString())}?history=1`,
+          },
+        }),
+      );
+    }
+  }
+
   load = await withDriverCommitmentLock(driverId, async () => {
     await assertDriverCanTakeNewWork(driverId, organizationId, "reassign");
     await assertNoDriverCommitmentConflict({
@@ -2750,9 +2949,28 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
             },
           },
           $unset: {
+            // The outgoing driver's evidence and times move to
+            // assignmentHistory (below); the new driver starts fresh.
             proofOfPickup: "",
+            proofOfDelivery: "",
+            driverContract: "",
+            acceptedAt: "",
+            pickedUpAt: "",
+            inTransitAt: "",
             assignmentReconfirmedAt: "",
             assignmentReconfirmedBy: "",
+          },
+          $push: {
+            assignmentHistory: {
+              $each: [
+                buildAssignmentHistoryEntry(validatedLoad, {
+                  endedBy: user._id,
+                  endReason: "reassigned",
+                  replacementDriverId: driver._id,
+                }),
+              ],
+              $slice: -50,
+            },
           },
         },
         reassignmentOutbox,
@@ -2800,6 +3018,14 @@ const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   if (!load.assignedDriverId) throw new ApiError(400, `Load ${load.loadNumber} doesn't have a driver to remove.`);
   if (["Delivered", "Cancelled"].includes(load.status)) {
     throw new ApiError(400, `You can't remove the driver from load ${load.loadNumber} because it is already ${load.status}.`);
+  }
+  // Once picked up, the vehicles are on the driver's truck: the load can't go
+  // back to the public board. Reassign it to another driver instead.
+  if (MID_TRIP_STATUSES.has(load.status)) {
+    throw new ApiError(
+      409,
+      `Load ${load.loadNumber} is already ${load.status}, so it can't go back to the load board while the vehicles are on the driver's truck. Use Reassign to hand it to another driver.`,
+    );
   }
 
   const previousDriverId = load.assignedDriverId.toString();
@@ -3025,7 +3251,21 @@ const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
           assignmentCompatibilityOverrides: "",
           assignmentReconfirmedAt: "",
           assignmentReconfirmedBy: "",
+          // Evidence and times move to assignmentHistory (below).
           proofOfPickup: "",
+          driverContract: "",
+          acceptedAt: "",
+        },
+        $push: {
+          assignmentHistory: {
+            $each: [
+              buildAssignmentHistoryEntry(load, {
+                endedBy: user._id,
+                endReason: "removed",
+              }),
+            ],
+            $slice: -50,
+          },
         },
       },
       removalOutbox,
@@ -3140,10 +3380,15 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
 const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
   const driverId = user._id.toString();
+  // ?view=active: only current loads (Assigned → In-Transit), for callers that
+  // just need to know what the driver is carrying (the GPS requirement check).
+  const activeOnly = req.query.view === "active";
 
   const loads = await Load.find({
     assignedDriverId: user._id,
-    status: { $nin: ["Cancelled"] },
+    status: activeOnly
+      ? { $in: ["Assigned", "Accepted", "Picked Up", "In-Transit"] }
+      : { $nin: ["Cancelled"] },
   })
     .sort({ createdAt: -1 })
     .lean();
@@ -3171,11 +3416,16 @@ const getMyLoads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   const data = await Promise.all(
     (loads as any[]).map(async (load) => ({
       ...sanitizeLoadForDriver(load, driverId),
-      compatibility: await evaluateDriverLoadCompatibilityWithRecommendations(
-        profile,
-        load,
-        null,
-      ),
+      // Only loads still ahead of the driver use this (the Accept dialog);
+      // skipping delivered history keeps this frequently polled list light.
+      compatibility:
+        activeOnly || load.status === "Delivered"
+          ? null
+          : await evaluateDriverLoadCompatibilityWithRecommendations(
+              profile,
+              load,
+              null,
+            ),
       releaseRequest: releaseRequestSummary(releaseByLoadId.get(String(load._id))),
       // Only retained On Leave/In Shop policy needs this explicit flag. Normal
       // Accepted/Picked Up/In-Transit GPS enforcement still comes from status.
@@ -3383,9 +3633,12 @@ const getAvailableLoads = asyncHandler(async (req: ExpressRequest, res: ExpressR
     "additionalInfo.visibility": { $ne: "private" },
     $or: [{ assignedDriverId: null }, { assignedDriverId: { $exists: false } }],
   };
-  if (requestedOrgId && mongoose.isValidObjectId(requestedOrgId)) {
-    filter.organizationId = requestedOrgId;
-  }
+  // Only active organizations can approve and dispatch board loads.
+  const activeOrgIds = await activeOrganizationObjectIds();
+  filter.organizationId =
+    requestedOrgId && mongoose.isValidObjectId(requestedOrgId)
+      ? { $in: activeOrgIds.filter((orgId) => String(orgId) === requestedOrgId) }
+      : { $in: activeOrgIds };
 
   const [loads, total, profile, location] = await Promise.all([
     Load.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -3457,6 +3710,104 @@ const getMyRequests = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
 // GET /api/driver-tracking/loads/:id
 // Driver-facing detail keeps the operational Load shape but enforces exact
 // object-level access and strips staff-only/internal fields before returning.
+// GET /api/driver-tracking/loads/:id/assignment-history
+// Every driver who left this load through Reassign or Remove, with their
+// pickup/delivery photos (short-lived links), contract signature and times.
+// Open to the dispatchers involved with the load and organization admins.
+const getLoadAssignmentHistory = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new ApiError(400, INVALID_LINK);
+  }
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId })
+    .select("+assignmentHistory loadNumber status createdBy dispatchOwnerId assignedDriverId")
+    .lean();
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+
+  const history: any[] = Array.isArray(load.assignmentHistory) ? load.assignmentHistory : [];
+  const userId = user._id.toString();
+  const effectiveRole = String((req as any).orgRole ?? user.role ?? "");
+  const isAdmin = user.role === "super_admin" || ["admin", "super_admin"].includes(effectiveRole);
+  const involvedIds = new Set(
+    [
+      load.createdBy,
+      load.dispatchOwnerId,
+      ...history.flatMap((entry) => [entry.dispatchOwnerId, entry.endedBy]),
+    ]
+      .map((id) => String(id ?? ""))
+      .filter(Boolean),
+  );
+  if (!isAdmin && !involvedIds.has(userId)) {
+    throw new ApiError(
+      403,
+      `You can't view the assignment history of load ${load.loadNumber}. It's available to the dispatchers involved with this load and organization admins.`,
+    );
+  }
+
+  const peopleIds = [
+    ...new Set(
+      history
+        .flatMap((entry) => [entry.driverId, entry.dispatchOwnerId, entry.endedBy, entry.replacementDriverId])
+        .map((id) => String(id ?? ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  const people: any[] = peopleIds.length
+    ? await User.find({ _id: { $in: peopleIds } }).select("_id name").lean()
+    : [];
+  const nameOf = (id: unknown) => {
+    const match = people.find((person) => String(person._id) === String(id ?? ""));
+    return match ? String(match.name || "Unnamed user") : null;
+  };
+  const signed = async (key?: string) => (key ? await getSignedProofUrl(key) : null);
+
+  const entries = await Promise.all(
+    [...history]
+      .sort((a, b) => new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime())
+      .map(async (entry) => ({
+        id: String(entry._id),
+        driverName: nameOf(entry.driverId),
+        dispatcherName: nameOf(entry.dispatchOwnerId),
+        endedByName: nameOf(entry.endedBy),
+        replacementDriverName: nameOf(entry.replacementDriverId),
+        endReason: entry.endReason,
+        statusAtEnd: entry.statusAtEnd,
+        endedAt: entry.endedAt ?? null,
+        assignedAt: entry.assignedAt ?? null,
+        acceptedAt: entry.acceptedAt ?? null,
+        pickedUpAt: entry.pickedUpAt ?? null,
+        inTransitAt: entry.inTransitAt ?? null,
+        pickupPhoto: entry.proofOfPickup?.imageUrl
+          ? {
+              url: await signed(entry.proofOfPickup.imageUrl),
+              submittedAt: entry.proofOfPickup.submittedAt ?? null,
+              note: entry.proofOfPickup.note ?? "",
+            }
+          : null,
+        deliveryPhoto: entry.proofOfDelivery?.imageUrl
+          ? {
+              url: await signed(entry.proofOfDelivery.imageUrl),
+              submittedAt: entry.proofOfDelivery.submittedAt ?? null,
+              note: entry.proofOfDelivery.note ?? "",
+            }
+          : null,
+        signature: entry.driverContract?.signedAt
+          ? {
+              signerName: entry.driverContract.signerName ?? "",
+              signedAt: entry.driverContract.signedAt,
+              imageDataUrl: entry.driverContract.signatureDataUrl ?? null,
+            }
+          : null,
+      })),
+  );
+
+  return res.status(200).json(
+    new ApiResponse(200, { loadNumber: load.loadNumber, entries }, "Assignment history fetched"),
+  );
+});
+
 const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
 
@@ -3525,7 +3876,8 @@ const getLoadDetail = asyncHandler(async (req: ExpressRequest, res: ExpressRespo
   const isAvailableBoardLoad =
     load.status === "Posted" &&
     !(load as any).assignedDriverId &&
-    (load as any).additionalInfo?.visibility !== "private";
+    (load as any).additionalInfo?.visibility !== "private" &&
+    (await isOrganizationActive((load as any).organizationId));
 
   // Object-level authorization: knowing a Load id is never enough. A driver
   // can read a load only when they are the assigned participant, have an
@@ -3747,6 +4099,13 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
   }
 
   const signature = parseDriverSignature(req.body);
+
+  if (!(await isOrganizationActive(load.organizationId))) {
+    throw new ApiError(
+      409,
+      `Load ${load.loadNumber} is no longer available because the organization that posted it isn't active on the load board.`,
+    );
+  }
 
   if (
     load.status !== "Posted" ||
@@ -3993,7 +4352,11 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
       type: "driver_request_approved",
       title: "Load Request Approved",
       message: `Your request for load ${load.loadNumber} was approved`,
-      metadata: { loadId: load._id.toString(), loadNumber: load.loadNumber },
+      metadata: {
+        loadId: load._id.toString(),
+        loadNumber: load.loadNumber,
+        route: `/driver/loads/${encodeURIComponent(load._id.toString())}`,
+      },
     }),
     lifecycleDispatchChatEvent({
       organizationId,
@@ -4163,6 +4526,7 @@ const rejectLoadRequest = asyncHandler(async (req: ExpressRequest, res: ExpressR
     title: "Load Request Declined",
     message: `Your request for load ${load.loadNumber} was declined`,
     metadata: {
+      route: "/driver/available-loads",
       loadId: load._id.toString(),
       loadNumber: load.loadNumber,
       driverId,
@@ -5813,7 +6177,9 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
     "recording pickup",
   );
 
+  const pickupGpsFlag = await buildMissingGpsFlag(load, user, "picked_up");
   const pickupOutbox = [
+    ...(pickupGpsFlag ? [pickupGpsFlag.event] : []),
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -5844,12 +6210,12 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
       "proofOfPickup.submittedBy": user._id,
     },
     update: appendLoadLifecycleOutbox(
-      {
+      withGpsGap({
         $set: {
           status: "Picked Up",
           pickedUpAt: new Date(),
         },
-      },
+      }, pickupGpsFlag),
       pickupOutbox,
     ),
     action: "recording pickup",
@@ -5879,7 +6245,9 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
     "starting the route",
   );
 
+  const routeGpsFlag = await buildMissingGpsFlag(load, user, "in_transit");
   const routeOutbox = [
+    ...(routeGpsFlag ? [routeGpsFlag.event] : []),
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -5907,20 +6275,22 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
       assignedDriverId: user._id,
     },
     update: appendLoadLifecycleOutbox(
-      {
+      withGpsGap({
         $set: {
           status: "In-Transit",
           inTransitAt: new Date(),
         },
-      },
+      }, routeGpsFlag),
       routeOutbox,
     ),
     action: "starting the route",
   });
 
+  // Only the activity changes: starting the route is not a new GPS reading,
+  // so the last position must not start looking fresh again.
   await DriverLocation.findOneAndUpdate(
     { userId: user._id },
-    { $set: { status: "on-route", lastSeenAt: new Date() } },
+    { $set: { status: "on-route" } },
   );
 
   await flushLifecycleOutbox(load._id.toString());
@@ -5980,7 +6350,9 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
     status: "pending",
   });
 
+  const deliveryGpsFlag = await buildMissingGpsFlag(load, user, "delivered");
   const deliveryOutbox = [
+    ...(deliveryGpsFlag ? [deliveryGpsFlag.event] : []),
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -6031,12 +6403,12 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
       ...proofOfDeliveryOwnedByFilter(user._id),
     }),
     appendLoadLifecycleOutbox(
-      {
+      withGpsGap({
         $set: {
           status: "Delivered",
           deliveredAt: new Date(),
         },
-      },
+      }, deliveryGpsFlag),
       deliveryOutbox,
     ) as any,
     { new: true, runValidators: true },
@@ -7288,7 +7660,7 @@ const getDriverReviewDocumentFile = asyncHandler(async (req: ExpressRequest, res
     organizationRole: req.orgRole,
     driverId,
   });
-  if (!access.canViewDocumentContents || access.level !== "ADMIN_REVIEW") {
+  if (!access.canViewDocumentContents) {
     throw new ApiError(403, "You don't have permission to view this driver's documents. Only authorized Driver Verification reviewers can open them.");
   }
 
@@ -7448,6 +7820,7 @@ export default {
   getMyRequests,
   getAvailableLoads,
   getLoadDetail,
+  getLoadAssignmentHistory,
   requestLoad,
   approveLoadRequest,
   rejectLoadRequest,

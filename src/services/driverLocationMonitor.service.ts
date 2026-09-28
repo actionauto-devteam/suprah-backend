@@ -17,6 +17,8 @@ import { purgeUnneededDriverExactLocations } from "./driverLocationRetention.ser
 const LOCATION_SILENCE_MS = 10 * 60 * 1000;
 const MONITOR_INTERVAL_MS = 60 * 1000;
 const ALERT_REPEAT_MS = 10 * 60 * 1000;
+// Loads with vehicles on the trailer.
+const VEHICLES_ON_BOARD_STATUSES = new Set(["Picked Up", "In-Transit"]);
 
 // GPS-silence monitoring uses the same accepted-load privacy boundary as
 // heartbeat/map visibility. Assigned-only loads never start GPS tracking.
@@ -201,28 +203,60 @@ async function notifyResponsibleDispatchers(params: {
 
   const loadsByDispatcher = groupLoadsByDispatchOwner(driverLoads);
   const dispatcherIds = [...loadsByDispatcher.keys()];
-  if (!dispatcherIds.length) {
-    logger.warn(
-      { driverId, loadIds: driverLoads.map((load) => String(load._id)) },
-      "[DriverLocationMonitor] GPS alert skipped because no explicit dispatch owner is recorded",
-    );
-    return;
-  }
 
   // Validate only the explicitly recorded owners. Same-organization membership
   // alone never grants another dispatcher access to this GPS safety alert.
-  const dispatcherCandidates: any[] = await User.find({
-    _id: { $in: dispatcherIds },
-    role: { $in: DISPATCH_ROLES },
-    isActive: true,
-  })
-    .select("_id name role organizationId")
-    .lean();
-  const dispatchers = dispatcherCandidates.filter(
+  const dispatcherCandidates: any[] = dispatcherIds.length
+    ? await User.find({
+        _id: { $in: dispatcherIds },
+        role: { $in: DISPATCH_ROLES },
+        isActive: true,
+      })
+        .select("_id name role organizationId")
+        .lean()
+    : [];
+  const dispatchers: any[] = dispatcherCandidates.filter(
     (dispatcher: any) =>
       dispatcher.role === "super_admin" ||
       String(dispatcher.organizationId ?? "") === String(organizationId),
   );
+
+  // Safety net: loads with no valid responsible dispatcher (never recorded,
+  // removed, or deactivated) must still raise the alert. Their organization's
+  // admins receive it instead of the alert being silently dropped.
+  const validOwnerIds = new Set(dispatchers.map((dispatcher: any) => String(dispatcher._id)));
+  const orphanedLoads = driverLoads.filter(
+    (load) => !validOwnerIds.has(String(getDispatchOwnerId(load) ?? "")),
+  );
+  if (orphanedLoads.length > 0) {
+    const admins: any[] = await User.find({
+      organizationId,
+      isActive: true,
+      $or: [
+        { role: { $in: ["admin", "super_admin"] } },
+        { organizationRole: { $in: ["admin", "super_admin"] } },
+      ],
+    })
+      .select("_id name role organizationId")
+      .lean();
+    logger.warn(
+      {
+        driverId,
+        organizationId,
+        loadIds: orphanedLoads.map((load) => String(load._id)),
+        fallbackAdminCount: admins.length,
+      },
+      "[DriverLocationMonitor] No valid responsible dispatcher; GPS alert sent to organization admins",
+    );
+    for (const admin of admins) {
+      const adminId = String(admin._id);
+      loadsByDispatcher.set(adminId, [...(loadsByDispatcher.get(adminId) ?? []), ...orphanedLoads]);
+      if (!validOwnerIds.has(adminId)) {
+        dispatchers.push(admin);
+        validOwnerIds.add(adminId);
+      }
+    }
+  }
 
   if (!dispatchers.length) return;
 
@@ -460,16 +494,19 @@ async function monitorDriverLocationSilence() {
         continue;
       }
 
-      // Emergency release is safety-first: keep GPS if it is available, but
-      // suppress ordinary 10-minute compliance-style reminders while Dispatch
-      // is already handling the emergency and affected loads.
-      if (emergencyDriverIds.has(driverId)) continue;
+      // Emergency release: the driver is not forced to share GPS and the
+      // ordinary reminders stop, except for loads with vehicles already on
+      // board (Picked Up / In-Transit), where Dispatch still needs to know.
+      const monitoredLoads = emergencyDriverIds.has(driverId)
+        ? driverLoads.filter((load) => VEHICLES_ON_BOARD_STATUSES.has(String(load.status ?? "")))
+        : driverLoads;
+      if (!monitoredLoads.length) continue;
 
       const location: any = locationByDriver.get(driverId) ?? null;
 
       // GPS safety alerts are tied to explicit dispatcher ownership. A legacy
       // load with no owner is never guessed into another dispatcher's alerts.
-      const ownedDriverLoads = driverLoads.filter((load) =>
+      const ownedDriverLoads = monitoredLoads.filter((load) =>
         Boolean(getDispatchOwnerId(load)),
       );
       if (!ownedDriverLoads.length) continue;

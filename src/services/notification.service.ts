@@ -422,6 +422,18 @@ const createNotificationBatch = async (notifications: CreateNotificationParams[]
   };
 };
 
+// Same rule as the app's resolveNotificationCategory: the stored category, or
+// for older rows without one, the CRM type names.
+const CRM_CATEGORY_FILTER = {
+  $or: [
+    { category: 'crm' },
+    {
+      category: null,
+      type: { $regex: /^(new_lead|lead_|crm_|aftermarket_)|^(reminder|location_share_requested|sms_opt_out)$/ },
+    },
+  ],
+};
+
 const getUserNotifications = async (
   userId: string,
   orgId: string,
@@ -454,7 +466,16 @@ const getUserNotifications = async (
     broadcastQuery.limit(fetchLimit);
   }
 
-  const [personalNotifs, broadcastNotifs, totalPersonal, totalBroadcast, unreadPersonal, unreadBroadcast] =
+  const [
+    personalNotifs,
+    broadcastNotifs,
+    totalPersonal,
+    totalBroadcast,
+    unreadPersonal,
+    unreadBroadcast,
+    unreadCrmPersonal,
+    unreadCrmBroadcast,
+  ] =
     await Promise.all([
       personalQuery.lean(),
       broadcastQuery.lean(),
@@ -462,6 +483,8 @@ const getUserNotifications = async (
       Notification.countDocuments(broadcastFilter),
       Notification.countDocuments({ ...personalFilter, isRead: false }),
       Notification.countDocuments({ ...broadcastFilter, isRead: false }),
+      Notification.countDocuments({ ...personalFilter, isRead: false, $and: [CRM_CATEGORY_FILTER] }),
+      Notification.countDocuments({ ...broadcastFilter, isRead: false, $and: [CRM_CATEGORY_FILTER] }),
     ]);
 
   const mergedNotifs = [...personalNotifs, ...broadcastNotifs]
@@ -472,16 +495,26 @@ const getUserNotifications = async (
     notifications: mergedNotifs,
     total: totalPersonal + totalBroadcast,
     unreadCount: unreadPersonal + unreadBroadcast,
+    // Unread CRM-category notifications (counted by the CRM badge instead), so
+    // badges don't depend on how many notifications happen to be loaded.
+    unreadCrmCount: unreadCrmPersonal + unreadCrmBroadcast,
   };
 };
 
-const markAsRead = async (notificationId: string, orgId: string, userId: string) => {
+// Personal notifications belong to their recipient, whichever organization
+// sent them. The list and unread count are already scoped by userId only, so
+// read/delete must match: drivers are a shared pool without a home
+// organization and receive notifications from each load's organization.
+// (orgId is kept in these signatures for callers; broadcasts are separate.)
+const NOTIFICATION_GONE = 'This notification is no longer available. It may have already been deleted.';
+
+const markAsRead = async (notificationId: string, _orgId: string, userId: string) => {
   const notification = await Notification.findOneAndUpdate(
-    { _id: notificationId, userId, organizationId: orgId },
+    { _id: notificationId, userId },
     { isRead: true },
     { new: true }
   );
-  if (!notification) throw new ApiError(404, 'Notification not found or access denied');
+  if (!notification) throw new ApiError(404, NOTIFICATION_GONE);
 
   const category = TYPE_CATEGORY_MAP[notification.type] || 'system';
   UnifiedPushService.dismiss(userId, category).catch(err =>
@@ -492,20 +525,20 @@ const markAsRead = async (notificationId: string, orgId: string, userId: string)
   return notification;
 };
 
-const markAllAsRead = async (userId: string, orgId: string) => {
-  await Notification.updateMany({ userId, organizationId: orgId, isRead: false }, { isRead: true });
+const markAllAsRead = async (userId: string, _orgId: string) => {
+  await Notification.updateMany({ userId, isRead: false }, { isRead: true });
   emitToUser(userId, 'notification:readAll', {});
   return { message: 'All notifications marked as read' };
 };
 
-const deleteNotification = async (notificationId: string, orgId: string, userId: string) => {
-  const notification = await Notification.findOneAndDelete({ _id: notificationId, userId, organizationId: orgId });
-  if (!notification) throw new ApiError(404, 'Notification not found or access denied');
+const deleteNotification = async (notificationId: string, _orgId: string, userId: string) => {
+  const notification = await Notification.findOneAndDelete({ _id: notificationId, userId });
+  if (!notification) throw new ApiError(404, NOTIFICATION_GONE);
   return notification;
 };
 
-const deleteAllRead = async (userId: string, orgId: string) => {
-  const result = await Notification.deleteMany({ userId, organizationId: orgId, isRead: true });
+const deleteAllRead = async (userId: string, _orgId: string) => {
+  const result = await Notification.deleteMany({ userId, isRead: true });
   return { message: 'All read notifications deleted', deletedCount: result.deletedCount };
 };
 

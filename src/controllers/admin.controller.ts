@@ -17,6 +17,9 @@ import { SystemLog } from '../models/SystemLog.model';
 
 import { metrics, getPercentile } from '../utils/metrics';
 import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../config/subscriptionTiers';
+import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
+import { disconnectUserSockets } from '../utils/socketEmitter';
+import { invalidateUserCache } from '../utils/cache.util';
 
 export const getAllOrganizations = asyncHandler(
   async (req: Request, res: Response) => {
@@ -316,6 +319,9 @@ export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
     { new: true },
   );
   if (!user) throw new ApiError(404, "User not found");
+  // Signed-in users are cached for up to a minute; drop the copy so the
+  // suspension applies to their very next request.
+  invalidateUserCache(String(user._id));
 
   const adminUser = req.user as any;
   await activityService.logAdminAction(
@@ -328,6 +334,7 @@ export const suspendUser = asyncHandler(async (req: Request, res: Response) => {
 
   logger.warn({ adminId: adminUser._id, targetUserId: user._id, targetEmail: user.email }, 'User suspended by administrator');
 
+  disconnectUserSockets(id);
   res.json(new ApiResponse(200, user, "User suspended successfully"));
 });
 
@@ -339,6 +346,7 @@ export const activateUser = asyncHandler(async (req: Request, res: Response) => 
     { new: true },
   );
   if (!user) throw new ApiError(404, "User not found");
+  invalidateUserCache(String(user._id));
 
   // Log activity
   const adminUser = req.user as any;
@@ -397,12 +405,15 @@ export const updateUserRole = asyncHandler(async (req: Request, res: Response) =
   }
 
   await user.save();
+  // The new role applies to the user's very next request, not after the cache expires.
+  invalidateUserCache(String(user._id));
 
   logger.info(
     { adminId: actorId, targetUserId: user._id, role, organizationRole },
     "User role updated",
   );
 
+  disconnectUserSockets(user._id);
   res.json(new ApiResponse(200, user, "User role updated successfully"));
 });
 
@@ -421,6 +432,7 @@ export const updateUserOrganization = asyncHandler(async (req: Request, res: Res
   const previousOrgId = user.organizationId?.toString();
   user.organizationId = org._id as any;
   await user.save();
+  invalidateUserCache(String(user._id));
 
   const adminUser = req.user as any;
   await activityService.logAdminAction(
@@ -437,6 +449,7 @@ export const updateUserOrganization = asyncHandler(async (req: Request, res: Res
   );
 
   const updated = await User.findById(user._id).select("-password").populate("organizationId", "name");
+  disconnectUserSockets(id);
   res.json(new ApiResponse(200, updated, "User organization updated successfully"));
 });
 
@@ -456,6 +469,8 @@ export const deleteUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   await User.findByIdAndDelete(id);
+  invalidateUserCache(String(id));
+  disconnectUserSockets(id);
 
   res.json(new ApiResponse(200, null, "User deleted successfully"));
 });
@@ -470,6 +485,7 @@ export const suspendOrganization = asyncHandler(
       { new: true },
     );
     if (!org) throw new ApiError(404, "Organization not found");
+    invalidateActiveOrganizations();
 
     const adminUser = req.user as any;
     await activityService.logAdminAction(
@@ -495,6 +511,7 @@ export const activateOrganization = asyncHandler(
       { new: true },
     );
     if (!org) throw new ApiError(404, "Organization not found");
+    invalidateActiveOrganizations();
     res.json(new ApiResponse(200, org, "Organization activated successfully"));
   },
 );

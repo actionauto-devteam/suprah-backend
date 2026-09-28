@@ -172,6 +172,7 @@ type ResolvedPrivateThread = AuthorizedChat & {
     email?: string;
     avatar?: string;
     isActive?: boolean;
+    role?: string;
   };
 };
 
@@ -685,10 +686,14 @@ async function getThreadContext(
   dispatcher: ResolvedPrivateThread["dispatcher"],
   thread: any,
 ) {
+  // A private thread shows only the loads this thread's dispatcher is
+  // responsible for; admins still see all of the driver's active loads.
+  const dispatcherIsAdmin = ["admin", "super_admin"].includes(String(dispatcher.role ?? ""));
   const activeLoads = await Load.find({
     organizationId,
     assignedDriverId: driver._id,
     status: { $in: ACTIVE_LOAD_STATUSES },
+    ...(dispatcherIsAdmin ? {} : { dispatchOwnerId: dispatcher._id }),
   })
     .select("_id loadNumber status pickupLocation deliveryLocation dates vehicles")
     .sort({ updatedAt: -1, createdAt: -1 })
@@ -1485,12 +1490,13 @@ const getUnreadCount = asyncHandler(async (req: ExpressRequest, res: ExpressResp
     );
   }
 
+  // Same unread rule as the thread list, the unread total, live badge updates
+  // and markRead, so the per-driver badge doesn't drop after a refresh.
   const unreadCount =
     await DispatchChatMessage.countDocuments({
       organizationId,
       threadId: thread._id,
-      senderId: { $ne: actor._id },
-      readBy: { $ne: actor._id },
+      ...dispatchChatUnreadPredicate(actor._id),
     });
 
   return res.status(200).json(
@@ -1499,6 +1505,56 @@ const getUnreadCount = asyncHandler(async (req: ExpressRequest, res: ExpressResp
       { unreadCount },
       "Unread count fetched",
     ),
+  );
+});
+
+// GET /api/driver-tracking/dispatch-chat/unread-by-driver
+// Staff only. Every unread count for this dispatcher's private threads in one
+// request, using the same unread rule as every other Dispatch Chat count.
+// Drivers with no thread are omitted (their count is 0).
+const getUnreadByDriver = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const actor = getUser(req);
+  const organizationId = String(req.orgId ?? "");
+
+  if (!STAFF_ROLES.includes(String(actor.role))) {
+    throw new ApiError(403, "Dispatch Chat is only available to drivers and dispatch staff.");
+  }
+  if (!organizationId) throw new ApiError(403, SELECT_ORGANIZATION);
+
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+
+  const threads: any[] = await DispatchChatThread.find({
+    organizationId,
+    dispatcherId: actor._id,
+  })
+    .select("_id driverId")
+    .lean();
+
+  const counts: Record<string, number> = {};
+  if (threads.length > 0) {
+    const actorId = new mongoose.Types.ObjectId(String(actor._id));
+    const rows: Array<{ _id: mongoose.Types.ObjectId; count: number }> =
+      await DispatchChatMessage.aggregate([
+        {
+          $match: {
+            organizationId,
+            threadId: { $in: threads.map((thread) => thread._id) },
+            ...dispatchChatUnreadPredicate(actorId),
+          },
+        },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]);
+    const driverByThread = new Map(
+      threads.map((thread) => [String(thread._id), String(thread.driverId)]),
+    );
+    for (const row of rows) {
+      const driverId = driverByThread.get(String(row._id));
+      if (driverId) counts[driverId] = (counts[driverId] ?? 0) + row.count;
+    }
+  }
+
+  return res.status(200).json(
+    new ApiResponse(200, { counts }, "Dispatch Chat unread counts fetched"),
   );
 });
 
@@ -1744,6 +1800,7 @@ export default {
   getUnreadTotal,
   getMessages,
   getUnreadCount,
+  getUnreadByDriver,
   sendMessage,
   uploadAttachments,
   markRead,

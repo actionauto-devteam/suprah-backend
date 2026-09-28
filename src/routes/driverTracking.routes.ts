@@ -52,7 +52,7 @@ const driverOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunctio
 const trackingOrganizationOnly = async (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
   try {
     const orgId = typeof req.orgId === "string" ? req.orgId.trim() : "";
-    if (!orgId) return res.status(403).json({ success: false, message: "Select an authorized organization before viewing driver tracking." });
+    if (!orgId) return res.status(403).json({ success: false, message: "Select your organization first, then open Driver Tracker again." });
     const role = String(req.user?.role ?? "");
     if (["admin", "super_admin"].includes(role)) return next();
     // Matches driverReviewAccess: designated dispatchers can plan assignments;
@@ -65,7 +65,7 @@ const trackingOrganizationOnly = async (req: ExpressRequest, res: ExpressRespons
       status: { $in: ["Assigned", "Accepted", "Picked Up", "In-Transit"] },
     });
     if (ownsActiveLoad) return next();
-    return res.status(403).json({ success: false, message: "Driver tracking requires dispatcher access or an active assigned-load relationship." });
+    return res.status(403).json({ success: false, message: "You need Dispatcher access for this organization to do this. Ask an organization admin to turn on Dispatcher access for your account." });
   } catch (error) { return next(error); }
 };
 
@@ -107,26 +107,33 @@ router.post(
 );
 
 // Dispatcher load actions
-router.post("/assign-load", staffOnly, driverTrackingController.assignLoad);
+// Dispatchers only: organization admins, employees with Dispatcher access for
+// this organization, or the responsible dispatcher on an active load.
+router.post("/assign-load", staffOnly, trackingOrganizationOnly, driverTrackingController.assignLoad);
 router.post(
   "/compatibility-preview",
   staffOnly,
+  trackingOrganizationOnly,
   driverTrackingController.previewDriverLoadCompatibility,
 );
+// Reassign / Remove stay open to any organization employee so another staff
+// member can step in when the responsible dispatcher is unavailable.
 router.post("/reassign-load", staffOnly, driverTrackingController.reassignLoad);
 router.post("/remove-load", staffOnly, driverTrackingController.removeLoad);
-router.get("/load-requests", staffOnly, driverTrackingController.getPendingLoadRequests);
+router.get("/load-requests", staffOnly, trackingOrganizationOnly, driverTrackingController.getPendingLoadRequests);
 
 // Dispatcher alert actions
 router.get(
   "/drivers/:driverId/alert-context",
   staffOnly,
+  trackingOrganizationOnly,
   noStoreSensitive,
   driverTrackingController.getDriverAlertContext,
 );
 router.post(
   "/drivers/:driverId/alert",
   staffOnly,
+  trackingOrganizationOnly,
   driverTrackingController.sendDriverAlert,
 );
 router.get(
@@ -183,6 +190,12 @@ router.get(
   "/dispatch-chat/unread-total",
   dispatchChatController.getUnreadTotal,
 );
+// Must stay above "/dispatch-chat/:driverId/..." routes.
+router.get(
+  "/dispatch-chat/unread-by-driver",
+  staffOnly,
+  dispatchChatController.getUnreadByDriver,
+);
 router.get(
   "/dispatch-chat/:driverId/messages",
   dispatchChatController.getMessages,
@@ -214,15 +227,23 @@ router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingControlle
 router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 
 router.get("/loads/:id", driverOrTrackingStaff, noStoreSensitive, driverTrackingController.getLoadDetail);
+router.get(
+  "/loads/:id/assignment-history",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.getLoadAssignmentHistory,
+);
 router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
 router.post(
   "/loads/:id/approve-request",
   staffOnly,
+  trackingOrganizationOnly,
   driverTrackingController.approveLoadRequest,
 );
 router.post(
   "/loads/:id/reject-request",
   staffOnly,
+  trackingOrganizationOnly,
   driverTrackingController.rejectLoadRequest,
 );
 

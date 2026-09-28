@@ -24,6 +24,8 @@ export interface IDriverLocation extends Document {
   manualSharingOptIn: boolean;
   /** Set when a "went offline" alert has already fired for the current silence gap; cleared on the next location ping. */
   offlineAlertSentAt?: Date | null;
+  /** When the driver last turned GPS sharing off; older in-flight samples can't turn it back on. */
+  sharingStoppedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -73,6 +75,10 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
       default: false,
     },
     offlineAlertSentAt: {
+      type: Date,
+      default: null,
+    },
+    sharingStoppedAt: {
       type: Date,
       default: null,
     },

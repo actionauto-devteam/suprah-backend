@@ -5,6 +5,9 @@ import logger from './utils/logger';
 import User from './models/User.model';
 import PresenceEvent from './models/PresenceEvent.model';
 import CrmUser from './models/CrmUser.model';
+import SupraSpaceConversation from './models/SupraSpaceConversation.model';
+import mongoose from 'mongoose';
+import { resolveCrmJwtSecret } from './utils/crmJwtSecret';
 import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard, emitPresenceUpdate } from './utils/socketEmitter';
 
 interface AuthSocket extends Socket {
@@ -88,7 +91,7 @@ export const setupSocket = (io: Server) => {
         }
       } catch {
         try {
-          const CRM_SECRET = config.jwt.crmJwtSecret || 'crm-secret-key';
+          const CRM_SECRET = resolveCrmJwtSecret(config.jwt.crmJwtSecret);
           decoded = jwt.verify(token, CRM_SECRET) as any;
           socket.userId = decoded.id;
           socket.crmUserId = decoded.id;
@@ -215,9 +218,25 @@ export const setupSocket = (io: Server) => {
       }
     });
 
-    socket.on('join_conversation', (conversationId: string) => {
-      socket.join(`conversation:${conversationId}`);
-      logger.debug({ userId: socket.userId, conversationId }, 'User joined conversation');
+    socket.on('join_conversation', async (conversationId: string) => {
+      try {
+        if (!mongoose.Types.ObjectId.isValid(String(conversationId ?? ''))) return;
+        const identities = [...new Set([socket.crmUserId, socket.userId].filter(Boolean))]
+          .filter((id) => mongoose.Types.ObjectId.isValid(String(id)));
+        if (!identities.length) return;
+        const isMember = await SupraSpaceConversation.exists({
+          _id: conversationId,
+          members: { $in: identities },
+        });
+        if (!isMember) {
+          logger.warn({ userId: socket.userId, conversationId }, 'Refused join_conversation for a non-member');
+          return;
+        }
+        socket.join(`conversation:${conversationId}`);
+        logger.debug({ userId: socket.userId, conversationId }, 'User joined conversation');
+      } catch (err) {
+        logger.warn({ err, userId: socket.userId }, 'join_conversation check failed');
+      }
     });
 
     // Leave conversation room
@@ -227,7 +246,11 @@ export const setupSocket = (io: Server) => {
     });
 
     // Typing indicators
+    const inConversation = (conversationId: unknown) =>
+      socket.rooms.has(`conversation:${String(conversationId ?? '')}`);
+
     socket.on('typing_start', (data: { conversationId: string }) => {
+      if (!inConversation(data?.conversationId)) return;
       socket.to(`conversation:${data.conversationId}`).emit('user_typing', {
         userId: socket.userId,
         conversationId: data.conversationId,
@@ -236,6 +259,7 @@ export const setupSocket = (io: Server) => {
     });
 
     socket.on('typing_stop', (data: { conversationId: string }) => {
+      if (!inConversation(data?.conversationId)) return;
       socket.to(`conversation:${data.conversationId}`).emit('user_typing', {
         userId: socket.userId,
         conversationId: data.conversationId,
@@ -245,6 +269,7 @@ export const setupSocket = (io: Server) => {
 
     // Mark message as read
     socket.on('mark_read', (data: { conversationId: string; messageId: string }) => {
+      if (!inConversation(data?.conversationId)) return;
       socket.to(`conversation:${data.conversationId}`).emit('message_read', {
         userId: socket.userId,
         conversationId: data.conversationId,

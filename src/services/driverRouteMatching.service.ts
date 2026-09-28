@@ -335,7 +335,9 @@ function resolveLiveCoordinates(location: any): {
   coords: CoordinatePair | null;
   lastSeenAt: string | null;
 } {
-  const lastSeen = location?.lastSeenAt ? new Date(location.lastSeenAt) : null;
+  // Freshness is when the phone measured the position, not when the server last heard from it.
+  const measuredAt = location?.locationRecordedAt ?? location?.lastSeenAt;
+  const lastSeen = measuredAt ? new Date(measuredAt) : null;
   const lastSeenAt =
     lastSeen && Number.isFinite(lastSeen.getTime()) ? lastSeen.toISOString() : null;
   const stale = !lastSeen || Date.now() - lastSeen.getTime() > PRESENCE_STALE_MS;

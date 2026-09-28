@@ -11,6 +11,7 @@ export const DRIVER_ACTIVE_LOAD_STATUSES = [
 
 export type DriverReviewAccessLevel =
   | "ADMIN_REVIEW"
+  | "DISPATCH_REVIEW"
   | "DISPATCH_ACTIVE_LOAD"
   | "DISPATCH_LIMITED"
   | "OPERATIONAL_ONLY"
@@ -142,33 +143,20 @@ export async function resolveDriverReviewAccess({
     viewerRole === "employee" &&
     hasDispatcherAccessForOrganization(viewer, orgId);
 
+  // Designated Dispatchers for this organization review driver documents
+  // and give final Driver Verification approval, the same as an Admin.
   if (hasDispatcherDesignation) {
-    if (hasActiveLoadRelationship) {
-      return {
-        level: "DISPATCH_ACTIVE_LOAD",
-        canOpenReviewCenter: true,
-        canReviewDocuments: false,
-        canViewDocumentContents: false,
-        canViewReviewHistory: false,
-        canFinalizeVerification: false,
-        hasActiveLoadRelationship: true,
-        organizationId: orgId,
-        activeLoads,
-        reason: "Organization-scoped Dispatcher owns an active load assigned to this exact driver",
-      };
-    }
-
     return {
-      level: "DISPATCH_LIMITED",
+      level: "DISPATCH_REVIEW",
       canOpenReviewCenter: true,
-      canReviewDocuments: false,
-      canViewDocumentContents: false,
-      canViewReviewHistory: false,
-      canFinalizeVerification: false,
-      hasActiveLoadRelationship: false,
+      canReviewDocuments: true,
+      canViewDocumentContents: true,
+      canViewReviewHistory: true,
+      canFinalizeVerification: true,
+      hasActiveLoadRelationship,
       organizationId: orgId,
-      activeLoads: [],
-      reason: "Organization-scoped Dispatcher has no active load relationship with this driver",
+      activeLoads,
+      reason: "Organization-scoped Dispatcher verification responsibility",
     };
   }
 
@@ -208,14 +196,20 @@ export function assertDriverReviewCenterAccess(
   decision: DriverReviewAccessDecision,
 ): void {
   if (!decision.canOpenReviewCenter || decision.level === "NONE") {
-    throw new ApiError(403, decision.reason);
+    throw new ApiError(
+      403,
+      "You can't open this driver's review. Only an admin, a dispatcher for this organization, or the dispatcher handling this driver's current load can.",
+    );
   }
 }
 
 export function assertDriverReviewMutationAccess(
   decision: DriverReviewAccessDecision,
 ): void {
-  if (!decision.canReviewDocuments || decision.level !== "ADMIN_REVIEW") {
-    throw new ApiError(403, "Only an organization admin can approve or reject Driver Verification.");
+  if (!decision.canReviewDocuments || !decision.canFinalizeVerification) {
+    throw new ApiError(
+      403,
+      "Only an admin or a dispatcher for this organization can approve or reject Driver Verification.",
+    );
   }
 }

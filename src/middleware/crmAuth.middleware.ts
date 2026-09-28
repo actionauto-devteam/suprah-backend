@@ -5,6 +5,7 @@ import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
 import tokenService from '../services/token.service';
+import { resolveCrmJwtSecret } from '../utils/crmJwtSecret';
 
 declare global {
   namespace Express {
@@ -14,7 +15,7 @@ declare global {
   }
 }
 
-const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+const CRM_JWT_SECRET = resolveCrmJwtSecret();
 const CRM_TOKEN_COOKIE = 'crm_token';
 
 export const generateCrmToken = (
