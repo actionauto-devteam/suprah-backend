@@ -25,6 +25,7 @@ import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
+import { createPushAvatarFallback } from '../utils/pushPayload';
 import { resolveNextEmployeeId } from '../utils/employeeId.util';
 
 
@@ -423,19 +424,14 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
     const pushTitle = conv.type === 'group' && conv.emoji ? `${conv.emoji} ${title}` : title;
 
-    let iconUrl = '/icon-192x192.png';
-    let imageUrl: string | undefined;
-    const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
+    const senderDoc = await CrmUser.findById(senderId).select('fullName avatar').lean();
+    const senderName = (senderDoc as any)?.fullName || 'Someone';
     const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
-    if (conv.type === 'group') {
-      const freshGroupAvatar = conv.avatarKey
-        ? await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL)
-        : conv.avatar;
-      if (freshGroupAvatar) iconUrl = freshGroupAvatar;
-      if (senderAvatar) imageUrl = senderAvatar;
-    } else if (senderAvatar) {
-      iconUrl = senderAvatar;
-    }
+    const iconUrl = senderAvatar || createPushAvatarFallback(senderId, senderName);
+    const senderPrefix = new RegExp(`^${escapeRegex(senderName)}:\\s*`, 'i');
+    const singlePreview = body.replace(senderPrefix, '').trim() || 'New message';
+    const notificationTitle = conv.type === 'group' ? pushTitle : senderName;
+    const notificationMessage = conv.type === 'group' ? `${senderName}\n${singlePreview}` : singlePreview;
 
     const recentMessages = await SupraSpaceMessage.find({
       conversationId: conv._id,
@@ -473,8 +469,8 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           organizationId: (recipient as any).organizationId.toString(),
           type: 'crm_message',
           category: 'crm',
-          title,
-          message: body,
+          title: notificationTitle,
+          message: notificationMessage,
           metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
         })
           .then((notification) => emitNotificationToUser(memberId, notification))
@@ -505,7 +501,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
-      let previewBody = body;
+      let previewBody = notificationMessage;
       if (unreadCount >= 2) {
         const n = Math.min(unreadCount, recentPreviewLines.length);
         const lines = recentPreviewLines.slice(-n);
@@ -517,7 +513,6 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         title: pushTitle,
         body: previewBody,
         icon: iconUrl,
-        image: imageUrl,
         tag: conv._id?.toString() ?? 'supraspace',
         topic: conv._id?.toString(),
         actions: [
@@ -685,22 +680,27 @@ async function notifyMentionedMembers(params: {
 
     if (!uniqueRecipients.length) return;
 
-    const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
+    const senderDoc = await CrmUser.findById(params.senderId).select('fullName avatar').lean();
     const senderName = (senderDoc as any)?.fullName || 'Someone';
     const preview = truncateWithEllipsis(stripMessageFormatting(text), 100);
+    const isGroup = params.conversation.type === 'group';
+    const context = isGroup ? (params.conversation.name || 'Channel') : senderName;
+    const message = isGroup ? `${senderName}\nMentioned you: ${preview}` : `Mentioned you: ${preview}`;
+    const pushIcon = (senderDoc as any)?.avatar || createPushAvatarFallback(params.senderId.toString(), senderName);
 
     await Promise.allSettled(uniqueRecipients.map((memberId: string) =>
       notificationService.createNotification({
         userId: memberId,
         organizationId: params.organizationId,
         type: 'crm_message',
-        title: `${senderName} mentioned you`,
-        message: `"${preview}"`,
+        title: context,
+        message,
         metadata: {
           conversationId: params.conversation._id.toString(),
           messageId: params.messageId,
           route: params.route || supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
-          pushSource: 'SupraSpace',
+          pushPresentation: 'conversation',
+          pushIcon,
           kind: 'mention',
         },
       })
@@ -722,18 +722,25 @@ async function notifyMessageReaction(params: {
     if (!params.targetUserId || params.targetUserId === params.reactorId) return;
     const pref = getConversationNotificationPref(params.conversation, params.targetUserId);
     if (!shouldNotifyForPreference(pref, true)) return;
+    const reactor = await CrmUser.findById(params.reactorId).select('avatar').lean();
+    const isGroup = params.conversation.type === 'group';
+    const context = isGroup ? (params.conversation.name || 'Channel') : params.reactorName;
+    const message = isGroup
+      ? `${params.reactorName}\nReacted ${params.emoji} to your message`
+      : `Reacted ${params.emoji} to your message`;
 
     await notificationService.createNotification({
       userId: params.targetUserId,
       organizationId: params.organizationId,
       type: 'crm_message',
-      title: `${params.reactorName} reacted ${params.emoji}`,
-      message: `${params.emoji} to your message`,
+      title: context,
+      message,
       metadata: {
         conversationId: params.conversation._id.toString(),
         messageId: params.messageId,
         route: supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
-        pushSource: 'SupraSpace',
+        pushPresentation: 'conversation',
+        pushIcon: (reactor as any)?.avatar || createPushAvatarFallback(params.reactorId, params.reactorName),
         kind: 'reaction',
         reaction: params.emoji,
         reactorId: params.reactorId,
@@ -2155,9 +2162,10 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
   // Web Push to offline members (those whose socket has disconnected, e.g. mobile background)
   const senderName = (req.crmUser as any)?.fullName || 'Someone';
-  const pushBody = content?.trim()
+  const messagePreview = content?.trim()
     ? truncateWithEllipsis(stripMessageFormatting(content.trim()), 120)
     : hasGif ? 'Sent a GIF' : 'Sent an attachment';
+  const pushBody = replyTo ? `Replied: ${messagePreview}` : messagePreview;
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;

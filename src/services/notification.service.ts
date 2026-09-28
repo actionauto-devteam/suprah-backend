@@ -351,7 +351,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       body: notification.message,
       tag: metadata?.pushTag || dedupeKey || category,
       topic: metadata?.pushTopic || dedupeKey,
-      source: metadata?.pushSource || CATEGORY_PUSH_LABELS[category],
+      source: metadata?.pushPresentation === 'conversation' ? undefined : (metadata?.pushSource || CATEGORY_PUSH_LABELS[category]),
       data: {
         url: targetUrl,
         notificationId: notification._id,
@@ -364,6 +364,10 @@ const createNotification = async (params: CreateNotificationParams) => {
         soundProfile: metadata?.soundProfile,
       },
     };
+
+    if (typeof metadata?.pushIcon === 'string' && metadata.pushIcon.trim()) {
+      pushPayload.icon = metadata.pushIcon.trim();
+    }
 
     if (type === 'driver_request' && metadata?.suppressActions !== true) {
       pushPayload.actions = [
