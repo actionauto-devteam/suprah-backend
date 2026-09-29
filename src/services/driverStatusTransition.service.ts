@@ -108,25 +108,25 @@ export async function getDriverStatusContext(
   driverId: string,
   _organizationId?: string,
 ) {
-  const [profile, request, emergencyRequest] = await Promise.all([
-    DriverProfile.findOne({ userId: driverId }).lean(),
+  const [profile, openRequests] = await Promise.all([
+    DriverProfile.findOne({ userId: driverId })
+      .select("operationalStatus")
+      .lean(),
     // Work Availability is a platform-wide driver property. Any open
     // coordinated request must therefore block eligibility in every org, not
-    // just in the organization currently making the API call.
-    DriverStatusChangeRequest.findOne({
+    // just in the organization currently making the API call. One read gives
+    // both the top request and whether any open request is an emergency.
+    DriverStatusChangeRequest.find({
       driverId,
       status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
     })
       .sort({ priority: 1, createdAt: -1 })
       .lean(),
-    DriverStatusChangeRequest.findOne({
-      driverId,
-      priority: "emergency",
-      status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
-    })
-      .select("_id priority status transitionGroupId")
-      .lean(),
   ]);
+  const request = openRequests[0] ?? null;
+  const emergencyRequest = openRequests.find(
+    (openRequest: any) => openRequest.priority === "emergency",
+  );
 
   const operationalStatus = (profile?.operationalStatus ||
     "active") as DriverOperationalStatus;

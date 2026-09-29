@@ -19,6 +19,7 @@ import {
   getOpenDriverStatusRequest,
 } from "../services/driverStatusTransition.service";
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
+import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
 
 const getDriverUser = (req: Request): IUser => {
   const user = req.user as IUser;
@@ -1173,21 +1174,27 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  if (serviceRadius !== undefined) profile.serviceRadius = serviceRadius;
-  if (preferredRoutes !== undefined) profile.preferredRoutes = preferredRoutes;
-  if (availableDays !== undefined) profile.availableDays = availableDays;
-  if (homeBase !== undefined) {
-    if (homeBase.address !== undefined) profile.homeBase.address = homeBase.address;
-    if (homeBase.city !== undefined) profile.homeBase.city = homeBase.city;
-    if (homeBase.state !== undefined) profile.homeBase.state = homeBase.state;
-    if (homeBase.zip !== undefined) profile.homeBase.zip = homeBase.zip;
-    if (homeBase.coordinates !== undefined) {
-      profile.homeBase.coordinates = homeBase.coordinates;
-      profile.homeBase.type = "Point";
+  const applyLogisticsFields = (target: any) => {
+    if (serviceRadius !== undefined) target.serviceRadius = serviceRadius;
+    if (preferredRoutes !== undefined) target.preferredRoutes = preferredRoutes;
+    if (availableDays !== undefined) target.availableDays = availableDays;
+    if (homeBase !== undefined) {
+      if (homeBase.address !== undefined) target.homeBase.address = homeBase.address;
+      if (homeBase.city !== undefined) target.homeBase.city = homeBase.city;
+      if (homeBase.state !== undefined) target.homeBase.state = homeBase.state;
+      if (homeBase.zip !== undefined) target.homeBase.zip = homeBase.zip;
+      if (homeBase.coordinates !== undefined) {
+        target.homeBase.coordinates = homeBase.coordinates;
+        target.homeBase.type = "Point";
+      }
     }
-  }
+  };
 
-  await profile.save();
+  // Check the service-area values before anything is written, so a refused
+  // status change never leaves them half-saved (and a bad value never leaves
+  // the status changed).
+  applyLogisticsFields(profile);
+  await profile.validate();
 
   if (operationalStatus !== undefined) {
     const nextStatus = String(operationalStatus) as
@@ -1196,43 +1203,66 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
       | "maintenance";
 
     if (nextStatus !== profile.operationalStatus) {
-      if (
-        profile.operationalStatus === "active" &&
-        nextStatus !== "active"
-      ) {
-        const openRequest = await getOpenDriverStatusRequest(
-          user._id.toString(),
-          "global",
-        );
-        if (openRequest) {
-          throw new ApiError(
-            409,
-            "You already have an active Dispatch Status request. Wait for Dispatch or update that request instead of changing status directly.",
-          );
-        }
+      const driverId = user._id.toString();
+      let lockAcquired = false;
+      try {
+        // Same lock Dispatch uses for assign, approve and accept, so the driver
+        // can't go On Leave / In Shop while a load is being given to them.
+        await withDriverCommitmentLock(driverId, async () => {
+          lockAcquired = true;
+          const current: any = await DriverProfile.findOne({ userId: user._id })
+            .select("operationalStatus")
+            .lean();
+          const currentStatus = current?.operationalStatus ?? "active";
+          if (currentStatus === nextStatus) return;
 
-        const activeLoadCount = await Load.countDocuments({
-          assignedDriverId: user._id,
-          status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
+          if (currentStatus === "active" && nextStatus !== "active") {
+            const openRequest = await getOpenDriverStatusRequest(driverId, "global");
+            if (openRequest) {
+              throw new ApiError(
+                409,
+                "You already have an active Dispatch Status request. Wait for Dispatch or update that request instead of changing status directly.",
+              );
+            }
+
+            const activeLoadCount = await Load.countDocuments({
+              assignedDriverId: user._id,
+              status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
+            });
+
+            if (activeLoadCount > 0) {
+              throw new ApiError(
+                409,
+                `You currently have ${activeLoadCount} active load${
+                  activeLoadCount === 1 ? "" : "s"
+                }. Submit a Dispatch Status request so Dispatch can review and reassign the affected loads.`,
+              );
+            }
+          }
+
+          await applyDriverOperationalStatus({
+            driverId,
+            organizationId: "global",
+            status: nextStatus,
+          });
         });
-
-        if (activeLoadCount > 0) {
+      } catch (error: any) {
+        if (!lockAcquired && error instanceof ApiError && error.statusCode === 409) {
           throw new ApiError(
             409,
-            `You currently have ${activeLoadCount} active load${
-              activeLoadCount === 1 ? "" : "s"
-            }. Submit a Dispatch Status request so Dispatch can review and reassign the affected loads.`,
+            "Dispatch is updating your loads right now. Wait a moment, then change your Dispatch Status again.",
           );
         }
+        throw error;
       }
-
-      profile = await applyDriverOperationalStatus({
-        driverId: user._id.toString(),
-        organizationId: "global",
-        status: nextStatus,
-      });
     }
   }
+
+  // Save the service-area values on a fresh copy so they never overwrite the
+  // status that was just applied.
+  profile = (await DriverProfile.findOne({ userId: user._id })) || profile;
+  applyLogisticsFields(profile);
+  await profile.save();
 
   res.json(new ApiResponse(200, profile, "Logistics updated"));
 

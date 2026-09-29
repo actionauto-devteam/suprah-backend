@@ -15,12 +15,13 @@ import { resolvePresenceForCrmRoster } from '../utils/presenceBridge';
 // connection below; disconnect cleanup removes the user from any live yap
 // sessions so a closed tab never leaves a ghost participant.
 import { registerYapLineHandlers, handleYapLineDisconnect } from './yapline.socket';
+import { resolveCrmJwtSecret } from '../utils/crmJwtSecret';
 
 let io: IOServer;
 
 const onlineUsers = new Map<string, number>();
 
-const CRM_JWT_SECRET = process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'crm-secret-key';
+const CRM_JWT_SECRET = resolveCrmJwtSecret();
 const SUPRASPACE_AWAY_THRESHOLD_MS = 30 * 60 * 1000;
 
 function normalizeDeviceType(value: unknown): 'mobile' | 'desktop' | undefined {

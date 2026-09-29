@@ -557,6 +557,30 @@ const getRequestById = asyncHandler(async (req: ExpressRequest, res: ExpressResp
   serialized.currentActiveLoads = currentActiveLoads;
   await addCoordinationSummary(serialized, request);
 
+  // Same rule as the Driver Directory: the driver's own reason, message,
+  // attachments and phone are shown only to the driver, admins, and the
+  // dispatcher responsible for one of this driver's active loads here.
+  const canViewStatusRequestNotes =
+    isOwner ||
+    ["admin", "super_admin"].includes(String(user.role ?? "")) ||
+    Boolean(
+      await Load.exists({
+        organizationId,
+        assignedDriverId: populatedDriverId?._id ?? populatedDriverId,
+        dispatchOwnerId: user._id,
+        status: { $in: ACTIVE_DRIVER_LOAD_STATUSES },
+      }),
+    );
+  if (!canViewStatusRequestNotes) {
+    serialized.reason = null;
+    serialized.message = null;
+    serialized.attachments = [];
+    if (serialized.driverId && typeof serialized.driverId === "object") {
+      delete serialized.driverId.phone;
+    }
+    serialized.notesHidden = true;
+  }
+
   return res.status(200).json(
     new ApiResponse(200, serialized, "Driver status request fetched"),
   );

@@ -97,8 +97,11 @@ async function getValidDispatcherRecipients(loads: DriverGpsTrackingLoad[]) {
 export async function emitDriverLocationToResponsibleDispatchers(
   driverId: string,
   payload: Record<string, unknown>,
+  // A caller that already read this driver's tracking loads in the same request
+  // (the GPS heartbeat) passes them in, instead of reading them a second time.
+  trackingLoads?: DriverGpsTrackingLoad[],
 ): Promise<string[]> {
-  const loads = await getDriverGpsTrackingLoads(driverId);
+  const loads = trackingLoads ?? (await getDriverGpsTrackingLoads(driverId));
   const dispatcherIds = await getValidDispatcherRecipients(loads);
 
   for (const dispatcherId of dispatcherIds) {
