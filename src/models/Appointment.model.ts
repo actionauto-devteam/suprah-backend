@@ -73,6 +73,8 @@ export interface IAppointment extends Document {
   reviewRequestEmailLastAttemptAt?: Date;
   reviewRequestEmailNextRetryAt?: Date;
   reviewRequestEmailFailureReason?: string;
+  rescheduleAwaitingReplyAt?: Date;
+  rescheduleStatedPreference?: string;
   statusHistory?: Array<{
     from: string;
     to: string;
@@ -229,6 +231,8 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reviewRequestEmailLastAttemptAt: { type: Date },
     reviewRequestEmailNextRetryAt: { type: Date },
     reviewRequestEmailFailureReason: { type: String, trim: true, maxlength: 500 },
+    rescheduleAwaitingReplyAt: { type: Date },
+    rescheduleStatedPreference: { type: String, trim: true, maxlength: 300 },
     statusHistory: [{
       from: { type: String, required: true },
       to: { type: String, required: true },

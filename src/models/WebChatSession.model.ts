@@ -1,5 +1,18 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+interface IAiPausedBy {
+  userId: string;
+  name?: string;
+}
+
+const AiPausedBySchema = new Schema<IAiPausedBy>(
+  {
+    userId: { type: String, required: true },
+    name: { type: String },
+  },
+  { _id: false },
+);
+
 export interface IWebChatSession extends Document {
   organizationId: string;
   leadId: mongoose.Types.ObjectId;
@@ -12,6 +25,9 @@ export interface IWebChatSession extends Document {
   lastMessageAt: Date;
   smsFallbackSentAt?: Date;
   staffTypingAt?: Date;
+  aiPausedAt?: Date;
+  aiPausedBy?: IAiPausedBy;
+  aiGeneratingAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -29,6 +45,9 @@ const WebChatSessionSchema: Schema<IWebChatSession> = new Schema(
     lastMessageAt: { type: Date, default: Date.now },
     smsFallbackSentAt: { type: Date },
     staffTypingAt: { type: Date },
+    aiPausedAt: { type: Date },
+    aiPausedBy: { type: AiPausedBySchema },
+    aiGeneratingAt: { type: Date },
   },
   { timestamps: true },
 );

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
 
 export interface ILead extends Document {
   organizationId: mongoose.Types.ObjectId;
@@ -37,12 +38,8 @@ export interface ILead extends Document {
 
   source: string;
 
-  status:
-    | 'New'
-    | 'Contacted'
-    | 'Pending'
-    | 'Appointment Set'
-    | 'Closed';
+  /** Constrained at the DB layer to LEAD_STATUS_VALUES (constants/leadStatus.ts). */
+  status: string;
 
   vehicle: {
     year: string;
@@ -67,6 +64,8 @@ export interface ILead extends Document {
   address?: string;
   tags?: string[];
   opportunityValue?: number | null;
+  aiSummary?: string;
+  aiSummaryGeneratedAt?: Date;
 
   followUp?: {
     lastCustomerActivityAt?: Date;
@@ -80,6 +79,8 @@ export interface ILead extends Document {
     nurtureLastAttemptAt?: Date;
     nurtureNextRetryAt?: Date;
     nurtureFailureReason?: string;
+    lastReengagementAt?: Date;
+    reengagementCount?: number;
 
     reminderHistory?: Array<{
       sentAt: Date;
@@ -243,13 +244,7 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
     status: {
       type: String,
-      enum: [
-        'New',
-        'Contacted',
-        'Pending',
-        'Appointment Set',
-        'Closed',
-      ],
+      enum: LEAD_STATUS_VALUES,
       default: 'New',
     },
 
@@ -293,6 +288,9 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       min: 0,
       default: null,
     },
+
+    aiSummary: { type: String, trim: true },
+    aiSummaryGeneratedAt: { type: Date },
 
     followUp: {
       lastCustomerActivityAt: {
@@ -350,6 +348,16 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
       nurtureFailureReason: {
         type: String,
         maxlength: 500,
+      },
+
+      lastReengagementAt: {
+        type: Date,
+        default: null,
+      },
+
+      reengagementCount: {
+        type: Number,
+        default: 0,
       },
 
       reminderHistory: [

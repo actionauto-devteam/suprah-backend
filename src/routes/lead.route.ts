@@ -22,6 +22,7 @@ import {
   getCentralSyncStatus,
   addLeadNote,
 } from "../controllers/lead.controller";
+import { getLeadAiSummary, regenerateLeadAiSummary } from "../controllers/leadAiSummary.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
 import {
   adfLimiter,
@@ -62,6 +63,8 @@ router.post(
 
 router.get("/:id", getLeadById);
 router.get("/:id/thread", getThreadMessages);
+router.get("/:id/ai-summary", getLeadAiSummary);
+router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
 router.patch("/:id/read", markAsRead);
 router.patch("/:id/pending", markAsPending);
 router.post("/:id/appointment", setAppointmentForLead);

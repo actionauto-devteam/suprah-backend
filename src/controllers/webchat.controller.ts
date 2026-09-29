@@ -13,8 +13,18 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import { emitToOrg } from '../utils/socketEmitter';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
+import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import logger from '../utils/logger';
+import {
+  resolveAiAgentSettings,
+  processAlexTurn,
+  AiAgentTranscriptEntry,
+  HISTORY_LIMIT,
+} from '../services/aiAgent.service';
+
+const AI_AGENT_ACTOR_ID = 'ai-agent';
+const AI_STALE_LOCK_MS = 30_000;
 
 const MAX_MESSAGE_LENGTH = 1000;
 const MAX_VISITOR_MESSAGES_PER_HOUR = 80;
@@ -92,6 +102,136 @@ function validateMessageBody(raw: unknown): string {
 
 function isOrgWebchatEnabled(metadata: any): boolean {
   return process.env.WEBCHAT_ENABLED !== 'false' && metadata?.webchatEnabled !== false;
+}
+
+async function resolveDealerName(organizationId: any): Promise<string> {
+  try {
+    const org = await Organization.findById(organizationId).select('name').lean();
+    return org?.name || 'Your Dealership';
+  } catch {
+    return 'Your Dealership';
+  }
+}
+
+async function buildWebchatTranscript(sessionId: any): Promise<AiAgentTranscriptEntry[]> {
+  const messages = await WebChatMessage.find({ sessionId })
+    .sort({ createdAt: -1 })
+    .limit(HISTORY_LIMIT)
+    .lean();
+
+  return messages.reverse().map((m: any): AiAgentTranscriptEntry => {
+    if (m.direction === 'inbound') return { from: 'customer', body: m.body };
+    if (m.sentBy?.userId === AI_AGENT_ACTOR_ID) return { from: 'ai', body: m.body };
+    return { from: 'staff', staffName: m.sentBy?.name, body: m.body };
+  });
+}
+
+/** Fire-and-forget: generates and sends Alex's next reply for this session,
+ *  if the org has Alex enabled and this conversation isn't paused. Called
+ *  after every inbound visitor message (first message and every follow-up),
+ *  never awaited by the caller so LLM latency never blocks the visitor's
+ *  own HTTP response. */
+async function triggerWebchatAiReply(session: any): Promise<void> {
+  try {
+    const { enabled, agentName } = await resolveAiAgentSettings(session.organizationId);
+    if (!enabled) return;
+
+    const staleCutoff = new Date(Date.now() - AI_STALE_LOCK_MS);
+    const claimed = await WebChatSession.findOneAndUpdate(
+      {
+        _id: session._id,
+        aiPausedAt: { $exists: false },
+        $or: [
+          { aiGeneratingAt: { $exists: false } },
+          { aiGeneratingAt: null },
+          { aiGeneratingAt: { $lt: staleCutoff } },
+        ],
+      },
+      { $set: { aiGeneratingAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) return;
+
+    try {
+      const lead = await Lead.findById(session.leadId).select('firstName vehicle assignedTo').lean();
+      const [transcript, repliesSentToday, dealerName] = await Promise.all([
+        buildWebchatTranscript(session._id),
+        WebChatMessage.countDocuments({
+          sessionId: session._id,
+          'sentBy.userId': AI_AGENT_ACTOR_ID,
+          createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        }),
+        resolveDealerName(session.organizationId),
+      ]);
+
+      const vehicleInterest = (lead as any)?.vehicle
+        ? [(lead as any).vehicle.year, (lead as any).vehicle.make, (lead as any).vehicle.model]
+            .filter(Boolean)
+            .join(' ')
+        : undefined;
+
+      await processAlexTurn({
+        organizationId: String(session.organizationId),
+        leadId: String(session.leadId),
+        channel: 'webchat',
+        sessionId: String(session._id),
+        agentName,
+        dealerName,
+        customerFirstName: firstNameOf(session.visitorName) || (lead as any)?.firstName,
+        leadVehicleInterest: vehicleInterest,
+        transcript,
+        repliesSentToday,
+        send: async (text: string) => {
+          const message = await WebChatMessage.create({
+            organizationId: session.organizationId,
+            sessionId: session._id,
+            leadId: session.leadId,
+            direction: 'outbound',
+            body: text,
+            sentBy: { userId: AI_AGENT_ACTOR_ID, name: agentName },
+          });
+          const now = new Date();
+          await Promise.all([
+            WebChatSession.updateOne({ _id: session._id }, { $set: { lastMessageAt: now } }),
+            Lead.updateOne({ _id: session.leadId }, { $set: { 'followUp.lastRepResponseAt': now } }),
+          ]);
+          const payload = serializeForStaff(message);
+          emitToOrg(String(session.organizationId), 'webchat:message', {
+            leadId: String(session.leadId),
+            message: payload,
+          });
+          return { messageId: String(message._id) };
+        },
+        notifyHandoff: async (reason) => {
+          const assignedTo = (lead as any)?.assignedTo;
+          await createAiAgentTaskAndNotify({
+            organizationId: String(session.organizationId),
+            leadId: String(session.leadId),
+            channel: 'webchat',
+            question: reason,
+            agentName,
+            customerName: session.visitorName || 'A customer',
+            assignedTo: assignedTo ? String(assignedTo) : null,
+          });
+        },
+        onCapExceeded: async () => {
+          await WebChatSession.updateOne(
+            { _id: session._id },
+            { $set: { aiPausedAt: new Date(), aiPausedBy: { userId: 'system', name: 'Suprah AI' } } },
+          );
+          emitToOrg(String(session.organizationId), 'webchat:ai_paused', {
+            leadId: String(session.leadId),
+            paused: true,
+            pausedBy: 'Suprah AI',
+          });
+        },
+      });
+    } finally {
+      await WebChatSession.updateOne({ _id: session._id }, { $unset: { aiGeneratingAt: '' } });
+    }
+  } catch (err) {
+    logger.error({ err }, '[Webchat] Alex trigger failed');
+  }
 }
 
 export const getPublicConfig = asyncHandler(async (req: Request, res: Response) => {
@@ -254,6 +394,8 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
 
   logger.info({ leadId: lead._id, sessionId: session._id }, 'Website chat started');
 
+  triggerWebchatAiReply(session).catch(() => undefined);
+
   res.status(201).json(
     new ApiResponse(
       201,
@@ -303,6 +445,8 @@ export const sendVisitorMessage = asyncHandler(async (req: Request, res: Respons
   });
   emitToOrg(session.organizationId, 'lead:update', { leadId: String(session.leadId) });
 
+  triggerWebchatAiReply(session).catch(() => undefined);
+
   res.status(201).json(new ApiResponse(201, { message: serializeForVisitor(message) }, 'Message sent'));
 });
 
@@ -347,12 +491,25 @@ export const getLeadWebChat = asyncHandler(async (req: Request, res: Response) =
   const lead = await Lead.findOne({ _id: leadId, organizationId: orgId }).select('_id').lean();
   if (!lead) throw new ApiError(404, 'Lead not found');
 
-  const messages = await WebChatMessage.find({ leadId, organizationId: orgId })
-    .sort({ createdAt: 1 })
-    .limit(500)
-    .lean();
+  const [messages, session] = await Promise.all([
+    WebChatMessage.find({ leadId, organizationId: orgId }).sort({ createdAt: 1 }).limit(500).lean(),
+    WebChatSession.findOne({ leadId, organizationId: orgId })
+      .select('aiPausedAt aiPausedBy')
+      .sort({ createdAt: -1 })
+      .lean(),
+  ]);
 
-  res.json(new ApiResponse(200, { messages: messages.map(serializeForStaff) }, 'Web chat fetched'));
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        messages: messages.map(serializeForStaff),
+        aiPausedAt: session?.aiPausedAt || null,
+        aiPausedBy: session?.aiPausedBy || null,
+      },
+      'Web chat fetched',
+    ),
+  );
 });
 
 export const sendStaffMessage = asyncHandler(async (req: Request, res: Response) => {
@@ -385,4 +542,37 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
   emitToOrg(orgId, 'webchat:message', { leadId: String(session.leadId), message: payload });
 
   res.status(201).json(new ApiResponse(201, { message: payload }, 'Message sent'));
+});
+
+export const pauseWebchatAi = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const { leadId } = req.params;
+  if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
+
+  const staff = actor(req);
+  const session = await WebChatSession.findOneAndUpdate(
+    { leadId, organizationId: orgId },
+    { $set: { aiPausedAt: new Date(), aiPausedBy: { userId: staff.userId, name: staff.name } } },
+    { new: true },
+  );
+  if (!session) throw new ApiError(404, 'No web chat found for this lead');
+
+  emitToOrg(orgId, 'webchat:ai_paused', { leadId: String(leadId), paused: true, pausedBy: staff.name });
+  res.json(new ApiResponse(200, { paused: true }, 'AI agent paused for this conversation'));
+});
+
+export const resumeWebchatAi = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const { leadId } = req.params;
+  if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
+
+  const session = await WebChatSession.findOneAndUpdate(
+    { leadId, organizationId: orgId },
+    { $unset: { aiPausedAt: '', aiPausedBy: '' } },
+    { new: true },
+  );
+  if (!session) throw new ApiError(404, 'No web chat found for this lead');
+
+  emitToOrg(orgId, 'webchat:ai_paused', { leadId: String(leadId), paused: false });
+  res.json(new ApiResponse(200, { paused: false }, 'AI agent resumed for this conversation'));
 });

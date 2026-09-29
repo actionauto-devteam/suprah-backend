@@ -263,12 +263,16 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const reviewLinks = Array.isArray(metadata.reviewLinks) ? metadata.reviewLinks : [];
   const webchatEnabled = metadata.webchatEnabled !== false;
   const webchatGreeting = metadata.webchatGreeting || '';
+  const aiAgentEnabled = metadata.aiAgentEnabled === true;
+  const aiAgentName = metadata.aiAgentName || 'Alex';
 
   res.json(new ApiResponse(200, {
     reviewLink,
     reviewLinks,
     webchatEnabled,
     webchatGreeting,
+    aiAgentEnabled,
+    aiAgentName,
   }, 'Organization settings fetched'));
 });
 
@@ -278,7 +282,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (!orgId || !user) throw new ApiError(401, 'Please authenticate');
   if (user.role !== 'admin') throw new ApiError(403, 'Only admins can update organization settings');
 
-  const { reviewLink, reviewLinks, webchatEnabled, webchatGreeting } = req.body;
+  const { reviewLink, reviewLinks, webchatEnabled, webchatGreeting, aiAgentEnabled, aiAgentName } = req.body;
   const org = await Organization.findById(orgId);
   if (!org) throw new ApiError(404, 'Organization not found');
 
@@ -305,6 +309,12 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (webchatGreeting !== undefined) {
     metadata.webchatGreeting = String(webchatGreeting || '').trim().slice(0, 300);
   }
+  if (aiAgentEnabled !== undefined) {
+    metadata.aiAgentEnabled = aiAgentEnabled === true;
+  }
+  if (aiAgentName !== undefined) {
+    metadata.aiAgentName = String(aiAgentName || '').trim().slice(0, 40) || 'Alex';
+  }
 
   org.metadata = metadata;
   await org.save();
@@ -314,6 +324,8 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     reviewLinks: org.metadata.reviewLinks,
     webchatEnabled: org.metadata.webchatEnabled,
     webchatGreeting: org.metadata.webchatGreeting,
+    aiAgentEnabled: org.metadata.aiAgentEnabled,
+    aiAgentName: org.metadata.aiAgentName,
   }, 'Organization settings updated'));
 });
 

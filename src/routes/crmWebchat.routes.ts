@@ -9,5 +9,7 @@ router.use(crmAuth());
 router.get('/leads/:leadId/messages', ctrl.getLeadWebChat);
 router.post('/leads/:leadId/messages', ctrl.sendStaffMessage);
 router.post('/leads/:leadId/typing', ctrl.pingTyping);
+router.post('/leads/:leadId/ai-pause', ctrl.pauseWebchatAi);
+router.post('/leads/:leadId/ai-resume', ctrl.resumeWebchatAi);
 
 export default router;

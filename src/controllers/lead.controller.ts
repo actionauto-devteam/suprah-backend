@@ -26,10 +26,10 @@ import { cacheService } from '../services/cache.service';
 import customerService from '../services/customer.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
+import { UNANSWERED_LEAD_STATUSES } from '../constants/leadStatus';
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
-const UNANSWERED_LEAD_STATUSES = ['New', 'Pending'];
 
 function createAdfIngestionFingerprint(xmlData: string) {
   const canonicalPayload = xmlData
@@ -659,7 +659,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt'
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt'
       )
       .sort(sort)
       .skip(skip)
@@ -723,7 +723,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'parsedContent threadId messageId isRead isPending channel ' +
         'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt'
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt'
       )
       .lean();
 
