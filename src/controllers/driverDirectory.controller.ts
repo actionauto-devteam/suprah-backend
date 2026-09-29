@@ -11,6 +11,8 @@ import Load from "../models/Load.model";
 import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
 import LoadReleaseRequest from "../models/LoadReleaseRequest.model";
 import { GPS_TRACKING_LOAD_STATUSES } from "../services/driverLocationAccess.service";
+import { GPS_LIVE_MS } from "../constants/driverGps";
+import { ACTIVE_LOAD_STATUSES as SHARED_ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 import { getLoadAcceptanceMaterialVersion } from "../services/loadAcceptanceMaterial.service";
 import {
   finalizeDriverStatusChangeIfClear,
@@ -18,8 +20,8 @@ import {
   OPEN_DRIVER_STATUS_REQUEST_STATES,
 } from "../services/driverStatusTransition.service";
 
-const PRESENCE_STALE_MS = 90 * 1000;
-const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
+const PRESENCE_STALE_MS = GPS_LIVE_MS;
+const ACTIVE_LOAD_STATUSES: string[] = [...SHARED_ACTIVE_LOAD_STATUSES];
 
 interface OrgDriver {
   id: string;
@@ -220,6 +222,21 @@ async function buildDirectoryEntries(
       .sort({ createdAt: -1 })
       .lean(),
   ]);
+
+  // Whether a driver can take new work uses their open Work Availability
+  // requests in every organization: the same rule as the Assign button
+  // (getDriverWorkEligibility), so the list never offers a driver it would refuse.
+  const globalOpenRequests: any[] = await DriverStatusChangeRequest.find({
+    driverId: { $in: ids },
+    status: { $in: OPEN_DRIVER_STATUS_REQUEST_STATES },
+  })
+    .select("driverId priority status transitionGroupId")
+    .lean();
+  const blockedByAnyRequest = new Set(
+    globalOpenRequests
+      .filter((request) => isStatusRequestBlockingNewWork(request))
+      .map((request) => String(request.driverId)),
+  );
 
   const dispatchOwnerIds = [
     ...new Set(
@@ -519,7 +536,8 @@ async function buildDirectoryEntries(
       assignable:
         Boolean(u.isActive) &&
         operationalStatus === "active" &&
-        !requestBlocksNewWork,
+        !requestBlocksNewWork &&
+        !blockedByAnyRequest.has(key),
       messagingAvailable: Boolean(crmUser),
       crmUserId: crmUser ? String(crmUser._id) : null,
       messagingUnavailableReason: crmUser
@@ -567,8 +585,26 @@ function sortDirectoryEntries(drivers: OrgDriver[]) {
   return drivers;
 }
 
+// The working set is reloaded every 30 seconds and after live events, by
+// every open Driver Tracker. The platform-wide totals change rarely, so they
+// are reused briefly instead of recounted each time.
+const DIRECTORY_SUMMARY_TTL_MS = 15_000;
+let directorySummaryCache: { at: number; value: Promise<Awaited<ReturnType<typeof countDirectorySummary>>> } | null = null;
+
 /** Platform-wide driver totals, so paged views still show accurate counts. */
 async function getDirectorySummary() {
+  const now = Date.now();
+  if (!directorySummaryCache || now - directorySummaryCache.at > DIRECTORY_SUMMARY_TTL_MS) {
+    const value = countDirectorySummary();
+    directorySummaryCache = { at: now, value };
+    value.catch(() => {
+      if (directorySummaryCache?.value === value) directorySummaryCache = null;
+    });
+  }
+  return directorySummaryCache.value;
+}
+
+async function countDirectorySummary() {
   const activeDriverIds = await User.distinct("_id", { role: "driver", isActive: true });
   const [onLeave, inShop] = await Promise.all([
     DriverProfile.countDocuments({ userId: { $in: activeDriverIds }, operationalStatus: "on_leave" }),
@@ -683,7 +719,27 @@ const getOrgDrivers = asyncHandler(async (req: Request, res: Response) => {
       .select(DIRECTORY_USER_FIELDS)
       .sort({ name: 1, _id: 1 })
       .lean();
-    const drivers = (await buildDirectoryEntries(req, users, false)).filter((driver) => driver.assignable);
+    const [entries, activeCounts] = await Promise.all([
+      buildDirectoryEntries(req, users, false),
+      // This organization's active loads per driver: one grouped query instead
+      // of the full activity lookup.
+      Load.aggregate([
+        {
+          $match: {
+            organizationId,
+            assignedDriverId: { $ne: null },
+            status: { $in: ACTIVE_LOAD_STATUSES },
+          },
+        },
+        { $group: { _id: "$assignedDriverId", count: { $sum: 1 } } },
+      ]),
+    ]);
+    const activeCountByDriver = new Map(
+      (activeCounts as any[]).map((row) => [String(row._id), Number(row.count) || 0]),
+    );
+    const drivers = entries
+      .filter((driver) => driver.assignable)
+      .map((driver) => ({ ...driver, activeLoadCount: activeCountByDriver.get(driver.id) ?? 0 }));
     return res.status(200).json(
       new ApiResponse(200, { drivers, total: drivers.length }, "Assignable drivers fetched"),
     );

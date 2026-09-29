@@ -5,8 +5,24 @@ import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
 import { uploadLimiter } from "../middleware/rate-limit.middleware";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import { ApiError } from "../utils/ApiError";
 
 const router = express.Router();
+
+// Load details can be emailed to any address, so cap how many one person sends.
+const loadDetailsEmailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  skip: () => process.env.SKIP_RATE_LIMIT === "true",
+  keyGenerator: (req: any) => req.user?._id?.toString() ?? ipKeyGenerator(req.ip ?? "unknown"),
+  message: { success: false, message: "You've sent a lot of load detail emails in the last hour. Please wait a while and try again." },
+  handler: (req, res, next, options) => {
+    next(new ApiError(429, options.message.message));
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 router.use(auth());
 router.use(requireOrg);
@@ -38,7 +54,7 @@ router
 
 router.post("/:id/notes", staffOnly, loadController.addNote);
 
-router.post("/:id/send-email", staffOnly, loadController.sendDetailsEmail);
+router.post("/:id/send-email", staffOnly, loadDetailsEmailLimiter, loadController.sendDetailsEmail);
 
 router.post("/:id/submit-proof", uploadLimiter, uploadProofImage, validateUploadedImageContent, loadController.submitProofOfDelivery);
 

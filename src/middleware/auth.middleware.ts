@@ -43,13 +43,16 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(401, 'Your session is no longer valid. Please sign in again.');
         }
 
+        // The cache holds a plain snapshot; every request gets its own document
+        // built from it, so a change one request makes in memory never leaks
+        // into another request. Account changes clear the entry (invalidateUserCache).
         let user: IUser | undefined | null;
         const cachedUser = userAuthCache.get(userId);
         if (cachedUser) {
-            user = cachedUser;
+            user = User.hydrate(cachedUser) as IUser;
         } else {
             user = await User.findById(userId);
-            if (user) userAuthCache.set(userId, user);
+            if (user) userAuthCache.set(userId, user.toObject());
         }
 
         if (!user) {

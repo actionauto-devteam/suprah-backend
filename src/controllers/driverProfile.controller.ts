@@ -1208,7 +1208,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
       try {
         // Same lock Dispatch uses for assign, approve and accept, so the driver
         // can't go On Leave / In Shop while a load is being given to them.
-        await withDriverCommitmentLock(driverId, async () => {
+        await withDriverCommitmentLock(driverId, async (lock) => {
           lockAcquired = true;
           const current: any = await DriverProfile.findOne({ userId: user._id })
             .select("operationalStatus")
@@ -1240,6 +1240,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
             }
           }
 
+          await lock.ensureHeld();
           await applyDriverOperationalStatus({
             driverId,
             organizationId: "global",

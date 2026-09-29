@@ -1,12 +1,10 @@
 import Load from "../models/Load.model";
 import User from "../models/User.model";
 import { emitToUser } from "../utils/socketEmitter";
+import { GPS_TRACKING_LOAD_STATUSES } from "../constants/loadStatus";
 
-export const GPS_TRACKING_LOAD_STATUSES = [
-  "Accepted",
-  "Picked Up",
-  "In-Transit",
-] as const;
+// Shared lifecycle list (constants/loadStatus.ts), re-exported for existing imports.
+export { GPS_TRACKING_LOAD_STATUSES };
 
 const DISPATCH_ROLES = ["employee", "admin", "super_admin"];
 

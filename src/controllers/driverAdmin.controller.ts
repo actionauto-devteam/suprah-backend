@@ -21,6 +21,7 @@ import {
 } from "../services/driverVerificationReview.service";
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+const DRIVER_ACCOUNT_NOT_FOUND = "We couldn't find this driver's account. It may have been removed. Refresh the Drivers list.";
 const MAX_INVITE_COUNT = 50;
 const MAX_BULK_EMAILS = 50;
 
@@ -57,7 +58,155 @@ async function createDriverInviteToken(createdByUser: string, multiUse: boolean,
 // super_admin-only (gated at the route level in admin.routes.ts), so none
 // of these queries filter by organizationId.
 
+const DRIVER_PAGE_DEFAULT = 25;
+const DRIVER_PAGE_MAX = 100;
+const APPLICATION_FILTERS = new Set(["pending", "approved", "rejected", "null"]);
+// Table column -> field it sorts by.
+const DRIVER_SORT_FIELDS: Record<string, string> = {
+  name: "nameSort",
+  applicationStatus: "applicationStatus",
+  verificationStatus: "verificationStatus",
+  profileCompletionScore: "profileCompletionScore",
+  isActive: "isActive",
+};
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function listParam(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : String(value ?? "").split(",");
+  return raw.map((item) => String(item).trim()).filter(Boolean).slice(0, 10);
+}
+
+function toDirectoryRow(row: any) {
+  return {
+    id: String(row._id),
+    name: row.name ?? "",
+    email: row.email ?? "",
+    phone: row.personalInfo?.phone ?? "",
+    avatar: row.avatar ?? null,
+    isActive: Boolean(row.isActive),
+    memberSince: row.createdAt ?? null,
+    applicationStatus: row.applicationStatus ?? null,
+    appliedAt: row.appliedAt ?? null,
+    verificationStatus: row.verificationStatus ?? "not_started",
+    profileCompletionScore: Number(row.profileCompletionScore ?? 0),
+    isComplianceExpired: Boolean(row.isComplianceExpired),
+  };
+}
+
+/**
+ * GET /api/admin/drivers?page=&limit=&search=&application=&verification=&active=&sort=&order=
+ * One page of the driver directory with the same fields as the full list,
+ * plus platform-wide totals for the page header.
+ */
+async function getDriverDirectoryPage(req: Request, res: Response) {
+  const page = Math.max(1, Number.parseInt(String(req.query.page), 10) || 1);
+  const limit = Math.min(DRIVER_PAGE_MAX, Math.max(1, Number.parseInt(String(req.query.limit), 10) || DRIVER_PAGE_DEFAULT));
+  const search = String(req.query.search ?? "").trim().slice(0, 80);
+  const application = listParam(req.query.application).filter((value) => APPLICATION_FILTERS.has(value));
+  const verification = listParam(req.query.verification);
+  const active = listParam(req.query.active).filter((value) => value === "true" || value === "false");
+  const sortField = DRIVER_SORT_FIELDS[String(req.query.sort ?? "")];
+
+  const rowFilter: Record<string, any> = {};
+  if (search) {
+    const pattern = new RegExp(escapeRegex(search), "i");
+    rowFilter.$or = [{ name: pattern }, { email: pattern }];
+  }
+  if (application.length) rowFilter.applicationStatus = { $in: application.map((value) => (value === "null" ? null : value)) };
+  if (verification.length) rowFilter.verificationStatus = { $in: verification };
+  if (active.length === 1) rowFilter.isActive = active[0] === "true";
+
+  // Default order matches the full list: newest application first.
+  const sort: Record<string, 1 | -1> = sortField
+    ? { [sortField]: req.query.order === "asc" ? 1 : -1, _id: 1 }
+    : { appliedAt: -1, _id: 1 };
+
+  const [result] = await User.aggregate([
+    { $match: { role: "driver" } },
+    { $project: { name: 1, email: 1, "personalInfo.phone": 1, avatar: 1, isActive: 1, createdAt: 1 } },
+    {
+      $lookup: {
+        from: DriverProfile.collection.name,
+        let: { driverId: "$_id" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$userId", "$$driverId"] } } },
+          { $limit: 1 },
+          { $project: { verificationStatus: 1, profileCompletionScore: 1, isComplianceExpired: 1 } },
+        ],
+        as: "profile",
+      },
+    },
+    {
+      $lookup: {
+        from: DriverRequest.collection.name,
+        let: { driverId: "$_id" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$driverUserId", "$$driverId"] } } },
+          { $sort: { createdAt: -1 } },
+          { $limit: 1 },
+          { $project: { status: 1, createdAt: 1 } },
+        ],
+        as: "request",
+      },
+    },
+    {
+      $addFields: {
+        applicationStatus: { $ifNull: [{ $arrayElemAt: ["$request.status", 0] }, null] },
+        appliedAt: { $ifNull: [{ $arrayElemAt: ["$request.createdAt", 0] }, null] },
+        verificationStatus: { $ifNull: [{ $arrayElemAt: ["$profile.verificationStatus", 0] }, "not_started"] },
+        profileCompletionScore: { $ifNull: [{ $arrayElemAt: ["$profile.profileCompletionScore", 0] }, 0] },
+        isComplianceExpired: { $eq: [{ $arrayElemAt: ["$profile.isComplianceExpired", 0] }, true] },
+        isActive: { $eq: ["$isActive", true] },
+        nameSort: { $toLower: { $ifNull: ["$name", ""] } },
+      },
+    },
+    {
+      $facet: {
+        summary: [
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              pendingApplications: { $sum: { $cond: [{ $eq: ["$applicationStatus", "pending"] }, 1, 0] } },
+              expiredCompliance: { $sum: { $cond: ["$isComplianceExpired", 1, 0] } },
+            },
+          },
+        ],
+        matching: [{ $match: rowFilter }, { $count: "count" }],
+        rows: [{ $match: rowFilter }, { $sort: sort }, { $skip: (page - 1) * limit }, { $limit: limit }],
+      },
+    },
+  ]);
+
+  const summary = result?.summary?.[0] ?? { total: 0, pendingApplications: 0, expiredCompliance: 0 };
+  const matching = Number(result?.matching?.[0]?.count ?? 0);
+  return res.json(
+    new ApiResponse(
+      200,
+      {
+        drivers: (result?.rows ?? []).map(toDirectoryRow),
+        total: Number(summary.total) || 0,
+        matching,
+        page,
+        limit,
+        hasMore: page * limit < matching,
+        summary: {
+          total: Number(summary.total) || 0,
+          pendingApplications: Number(summary.pendingApplications) || 0,
+          expiredCompliance: Number(summary.expiredCompliance) || 0,
+        },
+      },
+      "Drivers fetched",
+    ),
+  );
+}
+
 const getAllDrivers = asyncHandler(async (req: Request, res: Response) => {
+  // With ?page, one page at a time (the Drivers page). Without it, the full
+  // list as before (CSV export and the admin command palette).
+  if (req.query.page !== undefined) return getDriverDirectoryPage(req, res);
+
   const users = await User.find({ role: "driver" })
     .select("name email personalInfo.phone avatar isActive createdAt")
     .lean();
@@ -182,7 +331,7 @@ const getExpiringCompliance = asyncHandler(async (req: Request, res: Response) =
 const getDriverById = asyncHandler(async (req: Request, res: Response) => {
   const driverId = String(req.params.driverId || "").trim();
   const driverUser = await User.findOne({ _id: driverId, role: "driver" }).select("_id");
-  if (!driverUser) throw new ApiError(404, "Driver not found");
+  if (!driverUser) throw new ApiError(404, DRIVER_ACCOUNT_NOT_FOUND);
 
   // A driver may not have created a DriverProfile yet (e.g. mid-application) —
   // vivify one so the existing Super Admin detail page preserves its current
@@ -238,11 +387,11 @@ const addDriverNote = asyncHandler(async (req: Request, res: Response) => {
   const driverId = String(req.params.driverId || "").trim();
   const note = String(req.body?.note || "").trim();
 
-  if (note.length < 2) throw new ApiError(400, "A note is required");
-  if (note.length > 1000) throw new ApiError(400, "Notes are limited to 1000 characters");
+  if (note.length < 2) throw new ApiError(400, "Write a note of at least 2 characters, then save it.");
+  if (note.length > 1000) throw new ApiError(400, "Notes can be up to 1,000 characters. Shorten the note, then save it.");
 
   const driverUser = await User.findOne({ _id: driverId, role: "driver" }).select("_id");
-  if (!driverUser) throw new ApiError(404, "Driver not found");
+  if (!driverUser) throw new ApiError(404, DRIVER_ACCOUNT_NOT_FOUND);
 
   await recordDriverReviewEvent({
     driverId,
@@ -263,7 +412,7 @@ const verifyDocument = asyncHandler(async (req: Request, res: Response) => {
   const { verified } = req.body;
 
   if (typeof verified !== "boolean") {
-    throw new ApiError(400, "verified field must be a boolean");
+    throw new ApiError(400, "Choose whether to verify or unverify this document, then try again.");
   }
 
   const profile: any = await reviewDriverDocument({
@@ -303,7 +452,7 @@ const rejectDocument = asyncHandler(async (req: Request, res: Response) => {
   const reason = String(req.body?.reason || "").trim();
 
   if (reason.length < 3) {
-    throw new ApiError(400, "A rejection reason is required (min 3 chars)");
+    throw new ApiError(400, "Enter a reason for rejecting this document (at least 3 characters). The driver will see it.");
   }
 
   const profile: any = await reviewDriverDocument({
@@ -404,10 +553,10 @@ const bulkGenerateDriverInviteLinks = asyncHandler(async (req: Request, res: Res
   const { emails } = req.body;
 
   if (!Array.isArray(emails) || emails.length === 0) {
-    throw new ApiError(400, "emails must be a non-empty array");
+    throw new ApiError(400, "Enter at least one email address to send invites to.");
   }
   if (emails.length > MAX_BULK_EMAILS) {
-    throw new ApiError(400, `Cannot send more than ${MAX_BULK_EMAILS} invites at once`);
+    throw new ApiError(400, `You can send up to ${MAX_BULK_EMAILS} invites at a time. Split the list and send the rest separately.`);
   }
 
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);

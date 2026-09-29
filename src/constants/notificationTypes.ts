@@ -34,6 +34,8 @@ export const NOTIFICATION_TYPES = [
   'load_details_changed',
   'driver_tracker_geofence_alert', 'driver_tracker_offline_alert', 'driver_tracker_place_visit',
   'driver_dispatch_alert', 'driver_dispatch_message',
+  // Dispatch Chat channels: added, removed, role changed, suggestions.
+  'dispatch_channel',
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
   'driver_status_request_completed', 'driver_emergency_request',
   'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',

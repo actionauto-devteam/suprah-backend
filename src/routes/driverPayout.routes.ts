@@ -14,13 +14,20 @@ router.get('/my-payouts', driverPayoutController.getMyPayouts);
 
 router.use(requireOrg);
 
-router.get('/deliverable', driverPayoutController.getDeliverableLoads);
+// What each driver is paid, and their payout accounts, is for the
+// organization's staff. Drivers use /my-payouts above.
+const staffOnly = authorize(
+  ['super_admin', 'admin', 'employee'],
+  "Only your organization's staff can view driver payouts.",
+);
+
+router.get('/deliverable', staffOnly, driverPayoutController.getDeliverableLoads);
 router.get('/pending-proofs', driverPayoutController.getPendingProofs);
-router.get('/org-admins', driverPayoutController.getOrgAdmins);
-router.get('/stats', driverPayoutController.getPayoutStats);
+router.get('/org-admins', staffOnly, driverPayoutController.getOrgAdmins);
+router.get('/stats', staffOnly, driverPayoutController.getPayoutStats);
 router
   .route('/')
-  .get(driverPayoutController.getPayouts)
+  .get(staffOnly, driverPayoutController.getPayouts)
   .post(authorize(['admin', 'super_admin']), driverPayoutController.createPayout);
 
 export default router;

@@ -2,15 +2,13 @@ import { randomUUID } from "crypto";
 import mongoose from "mongoose";
 import Load from "../models/Load.model";
 import DriverProfile from "../models/DriverProfile.model";
+import User from "../models/User.model";
 import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
+import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 
-export const DRIVER_COMMITMENT_LOAD_STATUSES = [
-  "Assigned",
-  "Accepted",
-  "Picked Up",
-  "In-Transit",
-] as const;
+// Shared lifecycle list (constants/loadStatus.ts).
+export const DRIVER_COMMITMENT_LOAD_STATUSES = ACTIVE_LOAD_STATUSES;
 
 const DRIVER_COMMITMENT_LOCK_MS = 30_000;
 
@@ -194,6 +192,14 @@ async function acquireDriverCommitmentLock(driverId: string) {
     throw new ApiError(400, "That driver can't be found. Refresh the driver list and try again.");
   }
 
+  // The lock lives on the driver's profile. Create one only for a real driver
+  // account, never for an arbitrary id.
+  if (!(await DriverProfile.exists({ userId: driverId }))) {
+    if (!(await User.exists({ _id: driverId, role: "driver" }))) {
+      throw new ApiError(404, "That driver can't be found. Refresh the driver list and try again.");
+    }
+  }
+
   const token = randomUUID();
   const now = new Date();
   const lockedUntil = new Date(now.getTime() + DRIVER_COMMITMENT_LOCK_MS);
@@ -256,13 +262,41 @@ async function releaseDriverCommitmentLock(driverId: string, token: string) {
   }
 }
 
+export interface DriverCommitmentLockHandle {
+  /**
+   * Call right before the protected write. Confirms this action still holds
+   * the lock (it expires after 30 s) and extends it; refuses if another action
+   * has taken it over, so two actions never both write.
+   */
+  ensureHeld(): Promise<void>;
+}
+
 export async function withDriverCommitmentLock<T>(
   driverId: string,
-  work: () => Promise<T>,
+  work: (lock: DriverCommitmentLockHandle) => Promise<T>,
 ): Promise<T> {
   const token = await acquireDriverCommitmentLock(driverId);
+  const lock: DriverCommitmentLockHandle = {
+    async ensureHeld() {
+      const now = new Date();
+      const result = await DriverProfile.updateOne(
+        {
+          userId: driverId,
+          "commitmentLock.token": token,
+          "commitmentLock.lockedUntil": { $gt: now },
+        },
+        { $set: { "commitmentLock.lockedUntil": new Date(now.getTime() + DRIVER_COMMITMENT_LOCK_MS) } },
+      );
+      if (result.matchedCount === 0) {
+        throw new ApiError(
+          409,
+          "This took too long and another action changed this driver's assignments meanwhile, so nothing was saved. Refresh and try again.",
+        );
+      }
+    },
+  };
   try {
-    return await work();
+    return await work(lock);
   } finally {
     await releaseDriverCommitmentLock(driverId, token);
   }

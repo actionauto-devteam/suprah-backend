@@ -15,7 +15,7 @@ import activityService from '../services/activity.service';
 import logger from '../utils/logger';
 import { SystemLog } from '../models/SystemLog.model';
 
-import { metrics, getPercentile } from '../utils/metrics';
+import { metrics, getPercentile, driverTrackerMetrics, connectionMetrics } from '../utils/metrics';
 import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../config/subscriptionTiers';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { disconnectUserSockets } from '../utils/socketEmitter';
@@ -153,6 +153,8 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
         p99: getPercentile(metrics.latencies, 99)
       }
     },
+    driverTracker: driverTrackerMetrics,
+    connections: connectionMetrics,
     timestamp: new Date().toISOString()
   };
 

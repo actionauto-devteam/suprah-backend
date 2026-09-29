@@ -26,9 +26,9 @@ function matches(filter: any, doc: Record<string, any>): boolean {
 }
 
 describe('staff load deletion (DT-04)', () => {
-  it('allows unassigned Draft/Posted and closed loads, blocks active work', () => {
+  it('allows unassigned Draft/Posted and cancelled loads, blocks active work and delivered records', () => {
     const expected: Record<string, boolean> = {
-      Draft: true, Posted: true, Cancelled: true, Delivered: true,
+      Draft: true, Posted: true, Cancelled: true, Delivered: false,
       Assigned: false, Accepted: false, 'Picked Up': false, 'In-Transit': false,
     };
     for (const status of ALL_STATUSES) {
@@ -39,7 +39,7 @@ describe('staff load deletion (DT-04)', () => {
   it('blocks Draft/Posted loads that still have a driver attached', () => {
     expect(canStaffDeleteLoad({ status: 'Posted', assignedDriverId: DRIVER })).toBe(false);
     expect(canStaffDeleteLoad({ status: 'Draft', assignedDriverId: DRIVER })).toBe(false);
-    expect(canStaffDeleteLoad({ status: 'Delivered', assignedDriverId: DRIVER })).toBe(true);
+    expect(canStaffDeleteLoad({ status: 'Delivered', assignedDriverId: DRIVER })).toBe(false);
   });
 
   it('uses the same rule in the conditional delete filter', () => {

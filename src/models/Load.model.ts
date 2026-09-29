@@ -66,6 +66,8 @@ export interface ILoad extends Document {
   }>;
   /** True while lifecycleOutbox holds undelivered events (worker claim index). */
   lifecycleOutboxPending?: boolean;
+  /** Set while a driver payout for this load is being sent. */
+  payoutClaimedAt?: Date | null;
   assignmentHistory?: Array<Record<string, any>>;
   gpsGapEvents?: Array<{ step: string; recordedAt: Date; lastGpsAt?: Date | null }>;
   driverAmendments: Array<{
@@ -186,6 +188,7 @@ const loadLifecycleOutboxEventSchema = new Schema(
         "activity",
         "dispatch_chat_system",
         "release_request_resolution",
+        "inventory_status",
       ],
     },
     payload: { type: Schema.Types.Mixed, required: true },
@@ -409,6 +412,8 @@ const loadSchema = new Schema<ILoad>(
     // with undelivered events through a small partial index instead of
     // scanning every Load.
     lifecycleOutboxPending: { type: Boolean, select: false },
+    // Set while a driver payout for this load is being sent (driverPayout.controller).
+    payoutClaimedAt: { type: Date, select: false },
     // Material edits made after the driver has accepted are recorded in the
     // same Load document as the edit itself. This keeps the edit + amendment
     // requirement atomic without requiring Mongo multi-document transactions.

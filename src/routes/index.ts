@@ -14,6 +14,7 @@ import googleCalendarRoute from "./googleCalendar.routes";
 import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
+import dispatchChannelRoute from "./dispatchChannel.routes";
 import driverRequestRoute from "./driverRequest.routes";
 import driverProfileRoute from "./driverProfile.routes";
 import adminRoute from "./admin.routes";
@@ -289,6 +290,10 @@ const defaultRoutes = [
   {
     path: "/driver-tracking",
     route: driverTrackingRoute,
+  },
+  {
+    path: "/dispatch-channels",
+    route: dispatchChannelRoute,
   },
   {
     path: "/admin",

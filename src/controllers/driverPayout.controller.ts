@@ -25,16 +25,13 @@ const getUserId = (req: Request): string => {
 const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
+  // Ready to pay: the driver completed delivery and Dispatch confirmed the
+  // proof-of-delivery photo. Unconfirmed proofs are in Pending Proofs.
   const deliverableFilter = {
     organizationId: orgId,
     assignedDriverId: { $exists: true, $ne: null },
-    $or: [
-      { status: "Delivered" },
-      {
-        "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
-        "proofOfDelivery.confirmedAt": { $exists: true },
-      },
-    ],
+    status: "Delivered",
+    "proofOfDelivery.confirmedAt": { $exists: true, $ne: null },
   };
 
   const loads = await Load.find(deliverableFilter)
@@ -145,6 +142,10 @@ const getOrgAdmins = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, admins, "Org admins fetched"));
 });
 
+// A payout attempt that stopped without finishing (server restart) stops
+// blocking new attempts for the load after this long.
+const PAYOUT_CLAIM_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * POST /driver-payouts
  */
@@ -164,18 +165,44 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
 
   const load = await Load.findOne({ _id: loadId, organizationId: orgId, status: 'Delivered' });
   if (!load) throw new ApiError(404, 'This load can\'t be paid out yet. Payouts are only possible for loads that were delivered and confirmed in your organization.');
+  if (!load.proofOfDelivery?.confirmedAt) {
+    throw new ApiError(409, `Load ${load.loadNumber} can't be paid yet. Confirm the driver's proof-of-delivery photo first (Pending Proofs), then pay the driver.`);
+  }
 
   if (!load.assignedDriverId || load.assignedDriverId.toString() !== driverId) {
     throw new ApiError(400, 'Payouts can only go to the driver who delivered this load.');
   }
 
-  const duplicate = await DriverPayout.findOne({ organizationId: orgId, loadId, status: { $in: ['paid', 'processing'] } });
-  if (duplicate) throw new ApiError(400, 'A payout for this load is already being processed or was already paid.');
-
   // Drivers are a shared platform-wide pool — payable by any org that had them on a load.
   const driver = await User.findOne({ _id: driverId, role: 'driver' });
   if (!driver) throw new ApiError(404, "We couldn't find this driver's account. It may have been deactivated.");
   if (!driver.stripeConnectAccountId) throw new ApiError(400, 'This driver hasn\'t set up their payout account yet. Ask them to finish payout setup in the Driver Portal settings.');
+
+  // One payout attempt at a time per load, so two clicks (or two admins at
+  // once) can't both send money. Released when this attempt ends.
+  const claimed = await Load.findOneAndUpdate(
+    {
+      _id: load._id,
+      organizationId: orgId,
+      $or: [
+        { payoutClaimedAt: null },
+        { payoutClaimedAt: { $lt: new Date(Date.now() - PAYOUT_CLAIM_TIMEOUT_MS) } },
+      ],
+    },
+    { $set: { payoutClaimedAt: new Date() } },
+    { timestamps: false },
+  );
+  if (!claimed) {
+    throw new ApiError(409, `A payout for load ${load.loadNumber} is already being sent. Refresh the page to see its status.`);
+  }
+  const releaseClaim = () =>
+    Load.updateOne({ _id: load._id }, { $unset: { payoutClaimedAt: '' } }, { timestamps: false }).catch((error) => {
+      logger.error({ error, loadId: load._id }, 'Non-fatal: failed to release the payout claim on a load');
+    });
+
+  try {
+  const duplicate = await DriverPayout.findOne({ organizationId: orgId, loadId, status: { $in: ['paid', 'processing'] } });
+  if (duplicate) throw new ApiError(400, 'A payout for this load is already being processed or was already paid.');
 
   const payout = await DriverPayout.create({
     organizationId: orgId,
@@ -192,13 +219,17 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
   });
 
   try {
-    const transfer = await stripe.transfers.create({
-      amount: Math.round(numericAmount * 100),
-      currency: "usd",
-      destination: driver.stripeConnectAccountId,
-      description: payout.description,
-      metadata: { payoutId: payout._id.toString(), loadId: loadId.toString() },
-    });
+    const transfer = await stripe.transfers.create(
+      {
+        amount: Math.round(numericAmount * 100),
+        currency: "usd",
+        destination: driver.stripeConnectAccountId,
+        description: payout.description,
+        metadata: { payoutId: payout._id.toString(), loadId: loadId.toString() },
+      },
+      // A retried request for this same payout never sends a second transfer.
+      { idempotencyKey: `driver-payout-${payout._id.toString()}` },
+    );
 
     payout.stripeTransferId = transfer.id;
     payout.status = "paid";
@@ -227,6 +258,9 @@ const createPayout = asyncHandler(async (req: Request, res: Response) => {
     payout.failureReason = stripeError?.message || "Stripe transfer failed";
     await payout.save();
     throw new ApiError(402, 'The payout could not be sent. Check that the driver\'s payout account is fully set up, then try again. The failure was recorded on the payout.');
+  }
+  } finally {
+    await releaseClaim();
   }
 });
 

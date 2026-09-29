@@ -194,6 +194,28 @@ const normalizeCustomerVehicle = (
   };
 };
 
+// Set only by the server: ownership, deletion, audit history and timestamps.
+// Stripped from create/edit requests so a vehicle can't be moved to another
+// organization, hidden or un-deleted, or have its price history rewritten.
+const SERVER_MANAGED_VEHICLE_FIELDS = [
+  "_id",
+  "id",
+  "__v",
+  "organizationId",
+  "isDeleted",
+  "priceHistory",
+  "priceUpdatedAt",
+  "createdAt",
+  "updatedAt",
+];
+
+function withoutServerManagedFields(body: unknown): Record<string, any> {
+  const data: Record<string, any> =
+    body && typeof body === "object" && !Array.isArray(body) ? { ...(body as any) } : {};
+  for (const field of SERVER_MANAGED_VEHICLE_FIELDS) delete data[field];
+  return data;
+}
+
 const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
@@ -205,7 +227,7 @@ const createVehicle = asyncHandler(async (req: Request, res: Response) => {
   const createdAt = new Date();
 
   const vehicle = await Vehicle.create({
-    ...req.body,
+    ...withoutServerManagedFields(req.body),
     organizationId: orgId,
     priceUpdatedAt:
       initialPrice !== undefined && Number.isFinite(initialPrice)
@@ -729,12 +751,9 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(404, VEHICLE_NOT_FOUND);
   }
 
-  const updateData: Record<string, any> = { ...req.body };
+  // Price audit fields and ownership are server-managed.
+  const updateData: Record<string, any> = withoutServerManagedFields(req.body);
   const oldStatus = existingVehicle.status;
-
-  // Price audit fields are server-managed so clients cannot rewrite history.
-  delete updateData.priceHistory;
-  delete updateData.priceUpdatedAt;
 
   const requestedPrice =
     updateData.price !== undefined && updateData.price !== null

@@ -28,6 +28,7 @@ export interface IDispatchChatMessage extends Document {
   content: string;
   attachments: IDispatchChatAttachment[];
   readBy: mongoose.Types.ObjectId[];
+  clientMessageId?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -102,8 +103,21 @@ const dispatchChatMessageSchema = new Schema<IDispatchChatMessage>(
       ref: "User",
       default: [],
     },
+    // Set by the sender's app for each message. A retry of the same send
+    // (for example after a timeout) returns the first message instead of a copy.
+    clientMessageId: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
   },
   { timestamps: true },
+);
+
+// One message per sender per clientMessageId (older messages have none).
+dispatchChatMessageSchema.index(
+  { senderId: 1, clientMessageId: 1 },
+  { unique: true, partialFilterExpression: { clientMessageId: { $type: "string" } } },
 );
 
 // Private-thread indexes. Legacy records without threadId/dispatcherId remain

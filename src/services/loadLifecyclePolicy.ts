@@ -5,9 +5,10 @@
  * write filter (race protection).
  */
 
-// Must match DRIVER_ACTIVE_LOAD_STATUSES in driverReviewAccess.service (a unit
-// test enforces this); duplicated here to keep this module database-free.
-export const REASSIGNABLE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"] as const;
+import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
+
+// The shared lifecycle list (constants/loadStatus.ts has no database imports).
+export const REASSIGNABLE_LOAD_STATUSES = ACTIVE_LOAD_STATUSES;
 
 type LoadLike = {
   loadNumber?: string | null;
@@ -23,9 +24,11 @@ type LoadLike = {
 const hasId = (value: unknown) => String(value ?? "").trim() !== "";
 const loadRef = (load: LoadLike) => (load.loadNumber ? `load ${load.loadNumber}` : "this load");
 
-// Unassigned work that was never handed to a driver, plus closed records.
+// Unassigned work that was never handed to a driver, plus cancelled loads.
+// Delivered loads are never deleted: they are the record of the driver's work
+// and pay (Earnings and payouts are built from them).
 export const UNASSIGNED_DELETABLE_LOAD_STATUSES = ["Draft", "Posted"] as const;
-export const CLOSED_DELETABLE_LOAD_STATUSES = ["Cancelled", "Delivered"] as const;
+export const CLOSED_DELETABLE_LOAD_STATUSES = ["Cancelled"] as const;
 
 export function canStaffDeleteLoad(load: LoadLike): boolean {
   const status = String(load.status ?? "");

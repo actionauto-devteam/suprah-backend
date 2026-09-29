@@ -59,11 +59,17 @@ export async function touchDispatchChatThread(params: {
     String(params.content ?? "").trim() || params.fallbackPreview || "Message";
   const lastMessagePreview = previewSource.replace(/\s+/g, " ").slice(0, 280);
 
+  const at = params.at ?? new Date();
+  // Only move the preview forward: an older message finishing later must not
+  // replace the preview of a newer one.
   await DispatchChatThread.updateOne(
-    { _id: params.threadId },
+    {
+      _id: params.threadId,
+      $or: [{ lastMessageAt: null }, { lastMessageAt: { $lte: at } }],
+    },
     {
       $set: {
-        lastMessageAt: params.at ?? new Date(),
+        lastMessageAt: at,
         lastMessagePreview,
         lastMessageSenderId: params.senderId,
         lastMessageType: params.messageType,
