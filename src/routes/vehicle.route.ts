@@ -3,6 +3,7 @@ import vehicleController from '../controllers/vehicle.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 import { marketplaceLimiter } from '../middleware/rate-limit.middleware';
+import authorize from '../middleware/role.middleware';
 
 const router = express.Router();
 
@@ -19,38 +20,46 @@ const requireOrgForMutation = (req: express.Request, res: express.Response, next
 
 router.use(requireOrgForMutation);
 
+// Dealer inventory (cost, notes, exports and every change) is for the
+// organization's staff. Customers use the marketplace, public and
+// single-vehicle views below, which return the customer-safe fields only.
+const staffOnly = authorize(
+    ['super_admin', 'admin', 'employee'],
+    "Only your organization's staff can view or change inventory details.",
+);
+
 router.get('/marketplace', marketplaceLimiter, vehicleController.getMarketplaceVehicles);
 router.get('/marketplace/filters', vehicleController.getMarketplaceFilters);
 
-router.get('/filters', vehicleController.getFilters);
-router.get('/stats', vehicleController.getStats);
-router.get('/dashboard/graphs', vehicleController.getDashboardGraphs);
+router.get('/filters', staffOnly, vehicleController.getFilters);
+router.get('/stats', staffOnly, vehicleController.getStats);
+router.get('/dashboard/graphs', staffOnly, vehicleController.getDashboardGraphs);
 
-router.get('/dashboard', vehicleController.getDashboard);
-router.get('/export', vehicleController.exportVehicles);
+router.get('/dashboard', staffOnly, vehicleController.getDashboard);
+router.get('/export', staffOnly, vehicleController.exportVehicles);
 
-router.get('/search/autocomplete', vehicleController.autocomplete);
+router.get('/search/autocomplete', staffOnly, vehicleController.autocomplete);
 
 router
     .route('/')
-    .post(vehicleController.createVehicle)
-    .get(vehicleController.getVehicles);
+    .post(staffOnly, vehicleController.createVehicle)
+    .get(staffOnly, vehicleController.getVehicles);
 
-router.get('/:id/price-history', vehicleController.getVehiclePriceHistory);
+router.get('/:id/price-history', staffOnly, vehicleController.getVehiclePriceHistory);
 
 router
     .route('/:id')
     .get(vehicleController.getVehicleById)
-    .put(vehicleController.updateVehicle)
-    .delete(vehicleController.deleteVehicle);
+    .put(staffOnly, vehicleController.updateVehicle)
+    .delete(staffOnly, vehicleController.deleteVehicle);
 
 router
     .route('/:id/notes')
-    .post(vehicleController.addVehicleNote);
+    .post(staffOnly, vehicleController.addVehicleNote);
 
-router.patch('/:id/status', vehicleController.updateVehicleStatus);
+router.patch('/:id/status', staffOnly, vehicleController.updateVehicleStatus);
 
-router.get('/:id/availability', vehicleController.checkAvailability);
-router.post('/:id/reserve', vehicleController.reserveVehicle);
+router.get('/:id/availability', staffOnly, vehicleController.checkAvailability);
+router.post('/:id/reserve', staffOnly, vehicleController.reserveVehicle);
 
 export default router;

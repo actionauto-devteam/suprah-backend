@@ -12,7 +12,8 @@
     import Vehicle from "../models/Vehicle.model";
     import User, { IUser } from "../models/User.model";
     import logger from "../utils/logger";
-    import { createLoadSchema, calculateRateSchema } from "../validations/load.validation";
+    import { createLoadSchema, calculateRateSchema, updateLoadSchema } from "../validations/load.validation";
+    import { GPS_TRACKING_LOAD_STATUSES } from "../constants/loadStatus";
     import {
       getCoordinatesForPair,
       calculateDistance,
@@ -21,7 +22,7 @@
     } from "../utils/calculations";
     import { storageService, BucketType } from "../services/storage.service";
     import { getSignedProofUrl } from "../utils/signedUrlCache";
-    import { notifyOrgAdmins } from "../utils/safeNotification";
+    import { notifyOrgAdmins, safeCreateNotification } from "../utils/safeNotification";
     import { notificationTemplates } from "../utils/notificationTemplates";
     import { getSocketIO } from "../utils/socketEmitter";
     import activityService from "../services/activity.service";
@@ -34,7 +35,7 @@
     import {
       appendLoadLifecycleOutbox,
       createLoadLifecycleOutboxEvent,
-      processLoadLifecycleOutboxForLoad,
+      flushLoadLifecycleOutboxAfterRequest,
     } from "../services/loadLifecycleOutbox.service";
     import {
       canStaffDeleteLoad,
@@ -852,11 +853,7 @@
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
     });
 
-    const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set([
-      "Accepted",
-      "Picked Up",
-      "In-Transit",
-    ]);
+    const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set<string>(GPS_TRACKING_LOAD_STATUSES);
 
     // Driver-facing changes on these statuses are announced to the driver and
     // to the load creator / assigning dispatcher.
@@ -903,6 +900,18 @@
         );
       }
 
+      // Same field rules as Create Load; unknown fields are refused.
+      const parsed = updateLoadSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        const unknownField = parsed.error.issues.some((issue) => issue.code === "unrecognized_keys");
+        throw new ApiError(
+          400,
+          unknownField
+            ? "This edit includes a field that can't be changed here. Refresh the load and try again."
+            : describeValidationIssues(parsed.error.issues),
+        );
+      }
+
       const {
         postType,
         pickupLocation,
@@ -913,8 +922,36 @@
         pricing,
         additionalInfo,
         contract,
-        status
-      } = req.body;
+        status,
+        expectedUpdatedAt,
+      } = parsed.data;
+
+      // The dispatcher must be editing the current version. Otherwise someone
+      // else (or the driver) changed the load meanwhile, and saving would undo it.
+      const expectedVersion = new Date(expectedUpdatedAt).getTime();
+      if (!load.updatedAt || expectedVersion !== new Date(load.updatedAt).getTime()) {
+        const creatorId = String(load.createdBy ?? "");
+        const creator: any =
+          creatorId && creatorId !== user._id.toString()
+            ? await User.findById(creatorId).select("name").lean()
+            : null;
+        const creatorName = String(creator?.name ?? "").trim();
+        throw new ApiError(
+          409,
+          `Load ${load.loadNumber} was changed while you were editing it, so your changes weren't saved. ` +
+            (creatorName
+              ? `Refresh the load to see the latest version, and check with ${creatorName}, who created this load, before changing it again.`
+              : "Refresh the load to see the latest version, then make your change again."),
+        );
+      }
+
+      // Load Board vs Assign Carrier can't be switched once a driver has the load.
+      if (postType !== undefined && postType !== load.postType && (load.assignedDriverId || !["Draft", "Posted"].includes(load.status))) {
+        throw new ApiError(
+          409,
+          `You can't change load ${load.loadNumber} between Load Board and Assign Carrier after a driver has been assigned. Remove the driver in Driver Tracker first if you need to change it.`,
+        );
+      }
 
       const updateData: any = {};
       const effectivePostType = postType ?? load.postType;
@@ -925,7 +962,13 @@
       if (vehicles !== undefined) updateData.vehicles = vehicles;
       if (trailerType !== undefined) updateData.trailerType = trailerType;
       if (dates !== undefined) updateData.dates = dates;
-      if (additionalInfo !== undefined) updateData.additionalInfo = additionalInfo;
+      if (additionalInfo !== undefined) {
+        // Leaving visibility out keeps the load's current Public / Private setting.
+        updateData.additionalInfo = {
+          ...additionalInfo,
+          visibility: additionalInfo.visibility ?? (load as any).additionalInfo?.visibility ?? "public",
+        };
+      }
       if (contract !== undefined) {
         updateData.contract = {
           ...contract,
@@ -1299,7 +1342,7 @@
       if (changeOutbox.length > 0) {
         // Immediate delivery for UX; failures stay queued for the worker.
         try {
-          await processLoadLifecycleOutboxForLoad(loadId);
+          await flushLoadLifecycleOutboxAfterRequest(loadId);
         } catch (error) {
           logger.error(
             { error, loadId },
@@ -1357,6 +1400,12 @@
 
       // Active loads have a driver relying on them. Deleting one here would skip
       // the driver notification, GPS cleanup and outbox that Remove performs.
+      if (load.status === "Delivered") {
+        throw new ApiError(
+          409,
+          `Load ${load.loadNumber} is Delivered, so it's kept as the permanent record of the driver's work and pay. Delivered loads can't be deleted.`,
+        );
+      }
       if (!canStaffDeleteLoad(load)) {
         throw new ApiError(
           409,
@@ -1378,20 +1427,36 @@
         );
       }
 
+      // Drivers with a pending request must see the load disappear.
+      const requesterIds = new Set<string>(
+        ((load as any).driverRequests ?? [])
+          .map((request: any) => String(request?.driverId ?? "").trim())
+          .filter(Boolean),
+      );
       const _io = getSocketIO();
       if (_io) {
         _io.to(`org:${organizationId}`).emit("load:change", { action: "deleted", loadId: load._id.toString() });
 
-        // Drivers with a pending request must see the load disappear.
-        const requesterIds = new Set(
-          ((load as any).driverRequests ?? [])
-            .map((request: any) => String(request?.driverId ?? "").trim())
-            .filter(Boolean),
-        );
         for (const driverId of requesterIds) {
           _io.to(`user:${driverId}`).emit("driver:loads_updated", { reason: "load_deleted" });
           _io.to(`user:${driverId}`).emit("driver:load_request_updated", { reason: "load_deleted" });
         }
+      }
+
+      // ...and are told why, so the request doesn't just vanish.
+      for (const driverId of requesterIds) {
+        await safeCreateNotification({
+          userId: driverId,
+          organizationId,
+          type: "general",
+          title: "Requested Load Withdrawn",
+          message: `Load ${load.loadNumber} that you requested was withdrawn by Dispatch, so your request was closed.`,
+          metadata: {
+            loadId: load._id.toString(),
+            loadNumber: load.loadNumber,
+            route: "/driver/available-loads",
+          },
+        });
       }
 
       // Log activity — NON-FATAL. The load is already deleted at this point;
@@ -1571,7 +1636,7 @@
       if (proofOutbox.length > 0) {
         // Immediate delivery for UX; failures stay queued for the worker.
         try {
-          await processLoadLifecycleOutboxForLoad(load._id.toString());
+          await flushLoadLifecycleOutboxAfterRequest(load._id.toString());
         } catch (error) {
           logger.error(
             { error, loadId: load._id },
@@ -1720,7 +1785,7 @@
       if (confirmationOutbox.length > 0) {
         // Immediate delivery for UX; failures stay queued for the worker.
         try {
-          await processLoadLifecycleOutboxForLoad(load._id.toString());
+          await flushLoadLifecycleOutboxAfterRequest(load._id.toString());
         } catch (error) {
           logger.error(
             { error, loadId: load._id },
@@ -1789,7 +1854,16 @@
 
       const pickup = load.pickupLocation;
       const delivery = load.deliveryLocation;
-      const vehicles = load.vehicles.map(v => `${v.year} ${v.make} ${v.model} (${v.condition})`).join(", ");
+      const vehicles = load.vehicles.map(v => `${v.year ?? ""} ${v.make ?? ""} ${v.model ?? ""} (${v.condition})`.trim()).join(", ");
+      // Load fields are typed by people; escape them so they can't add links
+      // or other markup to an email that may go to any address.
+      const esc = (value: unknown) =>
+        String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
 
       const text = [
         "Load Details",
@@ -1805,12 +1879,12 @@
       const html = `
         <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
           <h2 style="margin-bottom: 12px;">Load Details</h2>
-          <p><strong>Load Number:</strong> ${load.loadNumber}</p>
-          <p><strong>Status:</strong> ${load.status}</p>
-          <p><strong>Vehicles:</strong> ${vehicles}</p>
-          <p><strong>Origin:</strong> ${pickup.city}, ${pickup.state} ${pickup.zip}</p>
-          <p><strong>Destination:</strong> ${delivery.city}, ${delivery.state} ${delivery.zip}</p>
-          <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? formatScheduleDate(load.dates.firstAvailable) : 'N/A'}</p>
+          <p><strong>Load Number:</strong> ${esc(load.loadNumber)}</p>
+          <p><strong>Status:</strong> ${esc(load.status)}</p>
+          <p><strong>Vehicles:</strong> ${esc(vehicles)}</p>
+          <p><strong>Origin:</strong> ${esc(pickup.city)}, ${esc(pickup.state)} ${esc(pickup.zip)}</p>
+          <p><strong>Destination:</strong> ${esc(delivery.city)}, ${esc(delivery.state)} ${esc(delivery.zip)}</p>
+          <p><strong>Pickup:</strong> ${load.dates?.firstAvailable ? esc(formatScheduleDate(load.dates.firstAvailable)) : 'N/A'}</p>
         </div>
       `;
 

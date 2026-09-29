@@ -87,6 +87,16 @@ export function emitToOrg(orgId: string, event: string, data: any) {
   supraSpaceIo?.to(`org:${orgId}`).emit(event, data);
 }
 
+// Staff sockets showing the shared driver pool ('join_driver_pool' in socket.ts).
+export const DRIVER_POOL_ROOM = 'driver-pool:staff';
+
+// A driver's Work Availability or new-work eligibility changed. Carries the
+// driver id only; each dispatcher re-reads the details through the API.
+export function emitDriverPoolChange(driverId: string) {
+  if (!io) return;
+  io.to(DRIVER_POOL_ROOM).emit('driver:directory_changed', { driverId });
+}
+
 export function streamLogToAdmins(log: any) {
   if (!io) return;
   io.to('admin:monitoring').emit('system:log:new', log);

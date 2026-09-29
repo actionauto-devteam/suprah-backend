@@ -6,19 +6,16 @@ import DriverStatusChangeRequest, {
 } from "../models/DriverStatusChangeRequest.model";
 import notificationService from "./notification.service";
 import { ApiError } from "../utils/ApiError";
-import { emitToOrg, emitToUser } from "../utils/socketEmitter";
+import { emitDriverPoolChange, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import {
   GPS_TRACKING_LOAD_STATUSES,
   emitDriverLocationToResponsibleDispatchers,
 } from "./driverLocationAccess.service";
 import logger from "../utils/logger";
+import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 
-export const ACTIVE_DRIVER_LOAD_STATUSES = [
-  "Assigned",
-  "Accepted",
-  "Picked Up",
-  "In-Transit",
-] as const;
+// Shared lifecycle list (constants/loadStatus.ts).
+export const ACTIVE_DRIVER_LOAD_STATUSES = ACTIVE_LOAD_STATUSES;
 
 export const OPEN_DRIVER_STATUS_REQUEST_STATES = [
   "pending",
@@ -389,6 +386,8 @@ export async function applyDriverOperationalStatus(params: {
   for (const orgId of orgIds) {
     emitToOrg(orgId, "driver:operational_status_updated", payload);
   }
+  // Other organizations show this driver in their shared directory too.
+  emitDriverPoolChange(driverId);
 
   if (location && forcedLiveStatus) {
     // Exact GPS remains restricted to dispatchers who own an Accepted,

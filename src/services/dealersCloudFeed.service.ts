@@ -7,6 +7,12 @@ import logger from "../utils/logger";
 import cacheService from "../services/cache.service";
 
 
+// A vehicle on a load is "In Transit" from pickup until delivery (see
+// deliverInventoryStatus in loadLifecycleOutbox.service). The feed never
+// changes its status, marks it sold or removes it; delivery puts it back to
+// Ready for Sale and later syncs update it as usual.
+const ON_A_LOAD_STATUS = "In Transit";
+
 const normKey = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -245,16 +251,29 @@ export const syncFeed = async (
     const now = new Date();
     const feedVins = records.map((r) => r.vin);
 
-    const ops = records.map((rec) => ({
-      updateOne: {
-        filter: { vin: rec.vin },
-        update: {
-          $set: { ...rec, organizationId: config.organizationId },
-          $setOnInsert: { dateAdded: now, daysOnLot: 0, isDeleted: false },
+    // The status is written separately so a vehicle on a load keeps it.
+    const ops = records.flatMap(({ status, ...rec }) => [
+      {
+        updateOne: {
+          filter: { vin: rec.vin },
+          update: {
+            $set: { ...rec, organizationId: config.organizationId },
+            $setOnInsert: { dateAdded: now, daysOnLot: 0, isDeleted: false, ...(status ? { status } : {}) },
+          },
+          upsert: true,
         },
-        upsert: true,
       },
-    }));
+      ...(status
+        ? [
+            {
+              updateOne: {
+                filter: { vin: rec.vin, status: { $nin: [ON_A_LOAD_STATUS, status] } },
+                update: { $set: { status } },
+              },
+            },
+          ]
+        : []),
+    ]);
 
     const result = await Vehicle.bulkWrite(ops, { ordered: false });
     const inserted = result.upsertedCount || 0;
@@ -266,6 +285,7 @@ export const syncFeed = async (
         organizationId: config.organizationId,
         isDeleted: false,
         vin: { $nin: feedVins },
+        status: { $ne: ON_A_LOAD_STATUS },
       };
       const update =
         config.missingStrategy === "mark-sold"

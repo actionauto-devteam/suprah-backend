@@ -8,7 +8,8 @@ import CrmUser from './models/CrmUser.model';
 import SupraSpaceConversation from './models/SupraSpaceConversation.model';
 import mongoose from 'mongoose';
 import { resolveCrmJwtSecret } from './utils/crmJwtSecret';
-import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard, emitPresenceUpdate } from './utils/socketEmitter';
+import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard, emitPresenceUpdate, DRIVER_POOL_ROOM } from './utils/socketEmitter';
+import { connectionMetrics, countBy } from './utils/metrics';
 
 interface AuthSocket extends Socket {
   userId?: string;
@@ -118,6 +119,8 @@ export const setupSocket = (io: Server) => {
 
   io.on('connection', (socket: AuthSocket) => {
     logger.info({ userId: socket.userId }, 'Socket connected');
+    connectionMetrics.socketConnections++;
+    socket.on('disconnect', (reason) => countBy(connectionMetrics.socketDisconnects, String(reason)));
 
     if (socket.userId) {
       socket.join(`user:${socket.userId}`);
@@ -189,6 +192,19 @@ export const setupSocket = (io: Server) => {
       socket.emit('monitoring_status', { joined: false });
     });
     // ----------------------------
+
+    // --- Shared driver pool (Driver Tracker) ---
+    // Every organization's dispatchers see the same drivers, so staff with
+    // the Driver Tracker open hear when any driver's status changes.
+    socket.on('join_driver_pool', () => {
+      if (['employee', 'admin', 'super_admin'].includes(String(socket.role))) {
+        socket.join(DRIVER_POOL_ROOM);
+      }
+    });
+
+    socket.on('leave_driver_pool', () => {
+      socket.leave(DRIVER_POOL_ROOM);
+    });
 
     // --- Admin Review Queue Room ---
     socket.on('join_review_queue', () => {

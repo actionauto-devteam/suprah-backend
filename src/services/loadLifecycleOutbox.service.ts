@@ -13,6 +13,10 @@
   } from "./dispatchChat.service";
   import { getSocketIO } from "../utils/socketEmitter";
   import logger from "../utils/logger";
+  import { driverTrackerMetrics, recordOutboxLag } from "../utils/metrics";
+  import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
+  import Vehicle from "../models/Vehicle.model";
+  import cacheService from "./cache.service";
   import mongoose from "mongoose";
   import {
     NonRetryableOutboxError,
@@ -25,7 +29,8 @@
     | "org_admin_notification"
     | "activity"
     | "dispatch_chat_system"
-    | "release_request_resolution";
+    | "release_request_resolution"
+    | "inventory_status";
 
   export type LoadLifecycleOutboxEvent = {
     eventId: string;
@@ -52,6 +57,9 @@
   let workerRunning = false;
   let workerTimer: NodeJS.Timeout | null = null;
   let lastCleanupAt = 0;
+  // Release-request notices not handed off within this time are recovered.
+  const RELEASE_NOTICE_RECOVERY_MS = 60_000;
+  let lastReleaseNoticeSweepAt = 0;
 
   export function createLoadLifecycleOutboxEvent(
     kind: LoadLifecycleOutboxKind,
@@ -643,8 +651,37 @@
         return deliverDispatchChatSystem(event);
       case "release_request_resolution":
         return deliverReleaseRequestResolution(event);
+      case "inventory_status":
+        return deliverInventoryStatus(event);
       default:
         throw new NonRetryableOutboxError(`Unsupported Load lifecycle outbox kind: ${event.kind}`);
+    }
+  }
+
+  /**
+   * Stock vehicles on a load follow it in Inventory: In Transit from pickup
+   * (so they can't be reserved or sold mid-trip), Ready for Sale again at
+   * delivery. Sold vehicles are never changed, and delivery only resets
+   * vehicles this load put In Transit.
+   */
+  async function deliverInventoryStatus(event: any) {
+    const payload = event.payload ?? {};
+    const organizationId = String(payload.organizationId ?? "").trim();
+    const toStatus = String(payload.toStatus ?? "");
+    const vehicleIds = (Array.isArray(payload.vehicleIds) ? payload.vehicleIds : [])
+      .map((id: unknown) => String(id ?? "").trim())
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+    if (!organizationId || !vehicleIds.length || !["In Transit", "Ready for Sale"].includes(toStatus)) {
+      throw new NonRetryableOutboxError("Inventory status update is missing its vehicles or target status");
+    }
+    const fromStatus =
+      toStatus === "In Transit" ? { $nin: ["Sold", "In Transit"] } : "In Transit";
+    const result = await Vehicle.updateMany(
+      { _id: { $in: vehicleIds }, organizationId, isDeleted: false, status: fromStatus },
+      { $set: { status: toStatus } },
+    );
+    if (result.modifiedCount > 0) {
+      await cacheService.invalidateByPrefix("veh:");
     }
   }
 
@@ -758,12 +795,14 @@
     };
 
     if (decision.action === "dead_letter") {
+      driverTrackerMetrics.outboxDeadLetters += 1;
       // Never logs the payload: it can contain recipients and message text.
       logger.error(
         { ...logContext, reason: decision.reason },
         "Load lifecycle outbox event dead-lettered; it will not be retried",
       );
     } else {
+      driverTrackerMetrics.outboxRetries += 1;
       logger.warn(
         { ...logContext, retryInMs: decision.delayMs },
         "Load lifecycle outbox event delivery failed; retry scheduled",
@@ -813,11 +852,46 @@
       await markFailed(claim.loadId, claim.event, claim.lockToken, error);
       return;
     }
+    driverTrackerMetrics.outboxDelivered += 1;
+    recordOutboxLag(claim.event?.createdAt);
     await markProcessed(
       claim.loadId,
       String(claim.event.eventId),
       claim.lockToken,
     );
+  }
+
+  // How a request delivers the notices it just queued. "background" answers
+  // the person who acted first and delivers right after; "inline" waits, which
+  // the integration tests use so they can check notices straight after a call.
+  let requestFlushMode: "background" | "inline" = "background";
+  const pendingRequestFlushes = new Set<Promise<void>>();
+
+  export function setLifecycleOutboxRequestFlushMode(mode: "background" | "inline") {
+    requestFlushMode = mode;
+  }
+
+  /** Waits for deliveries started by requests (tests and graceful shutdown). */
+  export async function waitForLifecycleOutboxRequestFlushes() {
+    while (pendingRequestFlushes.size > 0) {
+      await Promise.allSettled([...pendingRequestFlushes]);
+    }
+  }
+
+  /**
+   * Delivers a load's queued notices after a request changed the load. By
+   * default this doesn't hold up the response: the driver or dispatcher who
+   * acted isn't kept waiting while notices to other people go out. Anything
+   * that fails stays queued and the worker retries it.
+   */
+  export function flushLoadLifecycleOutboxAfterRequest(loadId: string): Promise<void> {
+    const run = processLoadLifecycleOutboxForLoad(loadId).catch((error) => {
+      logger.error({ error, loadId }, "Non-fatal: Load lifecycle outbox delivery after a request failed");
+    });
+    if (requestFlushMode === "inline") return run;
+    pendingRequestFlushes.add(run);
+    void run.finally(() => pendingRequestFlushes.delete(run));
+    return Promise.resolve();
   }
 
   export async function processLoadLifecycleOutboxForLoad(loadId: string) {
@@ -874,6 +948,69 @@
     );
   }
 
+  /**
+   * A release-request decline or cancel is saved together with its notices
+   * (pendingNotices on the request, one write). This moves them onto the
+   * load's outbox, which delivers and retries them. Safe to repeat: events
+   * already on the load aren't added again. They're dropped if the load is no
+   * longer active with that driver, because they'd say it still is.
+   */
+  export async function handOffReleaseRequestNotices(requestId: string) {
+    const request: any = await LoadReleaseRequest.findOne({
+      _id: requestId,
+      pendingNoticesAt: { $exists: true },
+    })
+      .select("+pendingNotices")
+      .lean();
+    if (!request) return;
+
+    const events = Array.isArray(request.pendingNotices) ? request.pendingNotices : [];
+    if (events.length) {
+      const eventIds = events.map((event: any) => String(event?.eventId ?? ""));
+      const result = await Load.updateOne(
+        {
+          _id: request.loadId,
+          assignedDriverId: request.driverId,
+          status: { $in: [...ACTIVE_LOAD_STATUSES] },
+          "lifecycleOutbox.eventId": { $nin: eventIds },
+        },
+        appendLoadLifecycleOutbox({}, events),
+        NO_TIMESTAMPS,
+      );
+      if (result.matchedCount === 0) {
+        logger.info(
+          { releaseRequestId: String(request._id), loadId: String(request.loadId) },
+          "Release request notices were already queued, or the load moved on; nothing added",
+        );
+      }
+    }
+
+    await LoadReleaseRequest.updateOne(
+      { _id: request._id },
+      { $unset: { pendingNotices: "", pendingNoticesAt: "" } },
+      NO_TIMESTAMPS,
+    );
+  }
+
+  /** Hands off release-request notices left behind when a request was cut short. */
+  export async function recoverStrandedReleaseRequestNotices() {
+    const stranded = await LoadReleaseRequest.find({
+      pendingNoticesAt: { $lte: new Date(Date.now() - RELEASE_NOTICE_RECOVERY_MS) },
+    })
+      .select("_id")
+      .limit(50)
+      .lean();
+    for (const request of stranded) {
+      await handOffReleaseRequestNotices(String(request._id));
+    }
+    if (stranded.length) {
+      logger.warn(
+        { count: stranded.length },
+        "Recovered release request notices that weren't handed off",
+      );
+    }
+  }
+
   async function runWorkerCycle() {
     if (workerRunning) return;
     workerRunning = true;
@@ -882,6 +1019,11 @@
         const claim = await claimNextEvent();
         if (!claim) break;
         await processClaim(claim);
+      }
+
+      if (Date.now() - lastReleaseNoticeSweepAt > RELEASE_NOTICE_RECOVERY_MS) {
+        lastReleaseNoticeSweepAt = Date.now();
+        await recoverStrandedReleaseRequestNotices();
       }
 
       if (Date.now() - lastCleanupAt > 60 * 60_000) {

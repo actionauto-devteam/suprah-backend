@@ -73,11 +73,29 @@ export const TRAILER_TYPES = [
   "other",
 ] as const;
 
+// Load schedule dates are calendar days (YYYY-MM-DD). A value with a time and
+// time zone could otherwise land on a different day once stored. The UTC
+// midnight form the API itself returns (…T00:00:00.000Z) is also accepted, so
+// re-saving a loaded form works; both are stored as the plain day.
+const BUSINESS_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?Z)?$/;
+const businessDateSchema = z
+  .string()
+  .trim()
+  .refine((value) => {
+    if (value === "") return true;
+    const match = value.match(BUSINESS_DATE_PATTERN);
+    if (!match) return false;
+    const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    const date = new Date(Date.UTC(year, month - 1, day));
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+  }, "Enter the date as a calendar day, for example 2026-09-04.")
+  .transform((value) => (value === "" ? value : value.slice(0, 10)));
+
 const datesSchema = z
   .object({
-    firstAvailable: z.string().trim().optional().or(z.literal("")),
-    pickupDeadline: z.string().trim().optional().or(z.literal("")),
-    deliveryDeadline: z.string().trim().optional().or(z.literal("")),
+    firstAvailable: businessDateSchema.optional(),
+    pickupDeadline: businessDateSchema.optional(),
+    deliveryDeadline: businessDateSchema.optional(),
     // Date Notes textarea from DatesSection — without this, zod's default
     // strip mode silently discards it
     notes: z.string().trim().max(1000).optional().or(z.literal("")),
@@ -189,6 +207,51 @@ export const createLoadSchema = z
   });
 
 export type CreateLoadInput = z.infer<typeof createLoadSchema>;
+
+// ─── Edit Load ────────────────────────────────────────────────────────────────
+// Same field rules as Create Load, every field optional, and nothing else
+// accepted. expectedUpdatedAt is the version of the load the dispatcher
+// started editing from, so a save never overwrites a change made meanwhile.
+
+const additionalInfoUpdateSchema = z
+  .object({
+    // No default here: leaving visibility out keeps the load's current setting.
+    visibility: z.enum(["public", "private"]).optional(),
+    notes: z.string().trim().max(4000).optional().or(z.literal("")),
+    instructions: z.string().trim().max(4000).optional().or(z.literal("")),
+    referenceNumber: z.string().trim().max(120).optional().or(z.literal("")),
+  })
+  .optional();
+
+export const updateLoadSchema = z
+  .object({
+    postType: z.enum(["load-board", "assign-carrier"], "Choose Load Board or Assign Carrier.").optional(),
+    pickupLocation: locationBlockSchema.optional(),
+    deliveryLocation: locationBlockSchema.optional(),
+    vehicles: z
+      .array(loadVehicleSchema)
+      .min(1, "Add at least one vehicle to the load.")
+      .max(MAX_VEHICLES_PER_LOAD, `A load can include at most ${MAX_VEHICLES_PER_LOAD} vehicles`)
+      .optional(),
+    trailerType: z.enum(TRAILER_TYPES, "Choose a trailer type from the list.").optional(),
+    dates: datesSchema,
+    additionalInfo: additionalInfoUpdateSchema,
+    contract: contractSchema,
+    pricing: pricingInputSchema,
+    // Echoing the current status is allowed; changing it is refused later.
+    status: z.string().trim().max(40).optional(),
+    expectedUpdatedAt: z
+      .string("This edit form is out of date. Refresh the load and make your change again.")
+      .trim()
+      .refine(
+        (value) => Number.isFinite(new Date(value).getTime()),
+        "This edit form is out of date. Refresh the load and make your change again.",
+      ),
+  })
+  // Unknown fields are refused (the controller words that message).
+  .strict();
+
+export type UpdateLoadInput = z.infer<typeof updateLoadSchema>;
 
 // ─── Rate Calculation ─────────────────────────────────────────────────────────
 

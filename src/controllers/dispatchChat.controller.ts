@@ -4,6 +4,8 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import { SELECT_ORGANIZATION } from "../utils/userMessages";
+import { parseClientRequestId } from "../utils/clientRequestId";
+import { ACTIVE_LOAD_STATUSES as SHARED_ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 import User, { IUser } from "../models/User.model";
 import Load from "../models/Load.model";
 import Notification from "../models/Notification.model";
@@ -23,7 +25,7 @@ const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const MAX_MESSAGE_LENGTH = 4000;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
-const ACTIVE_LOAD_STATUSES = ["Assigned", "Accepted", "Picked Up", "In-Transit"];
+const ACTIVE_LOAD_STATUSES: string[] = [...SHARED_ACTIVE_LOAD_STATUSES];
 
 const EXPLICIT_THREAD_SCOPED_NOTIFICATION_TYPES = [
   "driver_tracker_geofence_alert",
@@ -1286,11 +1288,25 @@ const getMessages = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     if (!Number.isNaN(candidate.getTime())) before = candidate;
   }
 
+  // Older pages use (createdAt, _id) as the cursor when beforeId is given, so
+  // messages created in the same millisecond are never skipped.
+  const beforeId =
+    typeof req.query.beforeId === "string" && mongoose.Types.ObjectId.isValid(req.query.beforeId)
+      ? new mongoose.Types.ObjectId(req.query.beforeId)
+      : null;
+
   const privateFilter: Record<string, unknown> = {
     organizationId,
     threadId: thread._id,
   };
-  if (before) privateFilter.createdAt = { $lt: before };
+  if (before && beforeId) {
+    privateFilter.$or = [
+      { createdAt: { $lt: before } },
+      { createdAt: before, _id: { $lt: beforeId } },
+    ];
+  } else if (before) {
+    privateFilter.createdAt = { $lt: before };
+  }
 
   const notificationVisibility: Record<string, unknown>[] = [
     // Manual Dispatch Alerts belong only to the exact dispatcher who sent them.
@@ -1338,7 +1354,7 @@ const getMessages = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     await Promise.all([
       DispatchChatMessage.find(privateFilter)
         .populate("senderId", "name email role")
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .limit(limit)
         .lean(),
 
@@ -1360,6 +1376,8 @@ const getMessages = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
         organizationId,
         type: { $in: TIMELINE_NOTIFICATION_TYPES },
         $or: notificationVisibility,
+        // System cards follow the page being loaded, not always the latest ones.
+        ...(before ? { createdAt: { $lte: before } } : {}),
       })
         .select("_id userId type title message metadata createdAt")
         .sort({ createdAt: -1 })
@@ -1580,17 +1598,44 @@ const sendMessage = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
     );
   }
 
-  const message = await DispatchChatMessage.create({
-    organizationId,
-    threadId: thread._id,
-    dispatcherId: thread.dispatcherId,
-    driverId: thread.driverId,
-    senderId: actor._id,
-    senderRole: actor.role === "driver" ? "driver" : "dispatcher",
-    content,
-    attachments: [],
-    readBy: [actor._id],
-  });
+  // Optional id the sender's app sets per message: a retry of the same send
+  // returns the message already saved instead of posting it twice.
+  const clientMessageId = parseClientRequestId(req.body?.clientMessageId);
+  const existing = clientMessageId
+    ? await DispatchChatMessage.findOne({ senderId: actor._id, clientMessageId })
+    : null;
+  if (existing) {
+    await existing.populate("senderId", "name email role");
+    return res
+      .status(200)
+      .json(new ApiResponse(200, await serializeMessage(existing.toObject(), actor), "Dispatch Chat message already sent"));
+  }
+
+  let message;
+  try {
+    message = await DispatchChatMessage.create({
+      organizationId,
+      threadId: thread._id,
+      dispatcherId: thread.dispatcherId,
+      driverId: thread.driverId,
+      senderId: actor._id,
+      senderRole: actor.role === "driver" ? "driver" : "dispatcher",
+      content,
+      attachments: [],
+      readBy: [actor._id],
+      ...(clientMessageId ? { clientMessageId } : {}),
+    });
+  } catch (error: any) {
+    // Two copies of the same send arrived at once: return the one that won.
+    const winner = clientMessageId && error?.code === 11000
+      ? await DispatchChatMessage.findOne({ senderId: actor._id, clientMessageId })
+      : null;
+    if (!winner) throw error;
+    await winner.populate("senderId", "name email role");
+    return res
+      .status(200)
+      .json(new ApiResponse(200, await serializeMessage(winner.toObject(), actor), "Dispatch Chat message already sent"));
+  }
 
   await touchDispatchChatThread({
     threadId: thread._id,
@@ -1764,11 +1809,17 @@ const markRead = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) 
     { createForDispatcher: true },
   );
 
+  // readUpTo: the newest message the reader actually has on screen. Anything
+  // that arrived after it stays unread.
+  const readUpToRaw = typeof req.body?.readUpTo === "string" ? new Date(req.body.readUpTo) : null;
+  const readUpTo = readUpToRaw && Number.isFinite(readUpToRaw.getTime()) ? readUpToRaw : null;
+
   await DispatchChatMessage.updateMany(
     {
       organizationId,
       threadId: thread._id,
       ...dispatchChatUnreadPredicate(actor._id),
+      ...(readUpTo ? { createdAt: { $lte: readUpTo } } : {}),
     },
     {
       $addToSet: { readBy: actor._id },

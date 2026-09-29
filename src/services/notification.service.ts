@@ -66,6 +66,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   driver_location_update: 'driverTracker', driver_tracker_geofence_alert: 'driverTracker',
   driver_tracker_offline_alert: 'driverTracker', driver_tracker_place_visit: 'driverTracker',
   driver_dispatch_alert: 'driverTracker', driver_dispatch_message: 'driverTracker',
+  dispatch_channel: 'driverTracker',
   driver_status_request: 'driverTracker', driver_status_request_approved: 'driverTracker',
   driver_status_request_rejected: 'driverTracker', driver_status_request_completed: 'driverTracker',
   driver_emergency_request: 'driverTracker',

@@ -3,6 +3,7 @@ import DriverLocation from "../models/DriverLocation.model";
 import { cacheService } from "./cache.service";
 import { calculateDistance, getCoordinatesFromZip } from "../utils/calculations";
 import logger from "../utils/logger";
+import { GPS_RECENT_FOR_DISTANCE_MS } from "../constants/driverGps";
 
 export type ServiceAreaCompatibilityStatus = "within" | "outside" | "unknown";
 export type PreferredRouteCompatibilityStatus =
@@ -40,7 +41,7 @@ interface CoordinatePair {
   lon: number;
 }
 
-const PRESENCE_STALE_MS = 5 * 60 * 1000;
+const PRESENCE_STALE_MS = GPS_RECENT_FOR_DISTANCE_MS;
 const homeBaseGeocodeInFlight = new Map<string, Promise<CoordinatePair | null>>();
 
 const STATE_NAME_TO_CODE: Record<string, string> = {

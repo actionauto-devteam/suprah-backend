@@ -59,6 +59,13 @@
     supersededStatus?: LoadReleaseRequestStatus;
     supersededDecision?: LoadReleaseDecision;
     supersededDecisionReason?: string;
+    /**
+     * Notices for a decline or a driver's cancel, saved in the same write as
+     * the decision, then moved onto the load's outbox (see
+     * handOffReleaseRequestNotices). Unset once handed off.
+     */
+    pendingNotices?: Record<string, any>[];
+    pendingNoticesAt?: Date;
     createdAt: Date;
     updatedAt: Date;
   }
@@ -108,6 +115,10 @@
         trim: true,
         maxlength: 1000,
       },
+      // Internal queue. select:false keeps recipients and message text out of
+      // ordinary reads.
+      pendingNotices: { type: [Schema.Types.Mixed], default: undefined, select: false },
+      pendingNoticesAt: { type: Date },
     },
     { timestamps: true },
   );

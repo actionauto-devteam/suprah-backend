@@ -1,13 +1,10 @@
 import mongoose from "mongoose";
 import Load from "../models/Load.model";
 import { ApiError } from "../utils/ApiError";
+import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 
-export const DRIVER_ACTIVE_LOAD_STATUSES = [
-  "Assigned",
-  "Accepted",
-  "Picked Up",
-  "In-Transit",
-] as const;
+// Shared lifecycle list (constants/loadStatus.ts).
+export const DRIVER_ACTIVE_LOAD_STATUSES = ACTIVE_LOAD_STATUSES;
 
 export type DriverReviewAccessLevel =
   | "ADMIN_REVIEW"

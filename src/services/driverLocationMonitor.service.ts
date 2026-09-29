@@ -12,13 +12,15 @@ import {
   emitDriverLocationToResponsibleDispatchers,
 } from "./driverLocationAccess.service";
 import logger from "../utils/logger";
+import { GPS_SILENCE_ALERT_MS } from "../constants/driverGps";
+import { VEHICLES_ON_BOARD_STATUSES as SHARED_VEHICLES_ON_BOARD_STATUSES } from "../constants/loadStatus";
 import { purgeUnneededDriverExactLocations } from "./driverLocationRetention.service";
 
-const LOCATION_SILENCE_MS = 10 * 60 * 1000;
+const LOCATION_SILENCE_MS = GPS_SILENCE_ALERT_MS;
 const MONITOR_INTERVAL_MS = 60 * 1000;
 const ALERT_REPEAT_MS = 10 * 60 * 1000;
 // Loads with vehicles on the trailer.
-const VEHICLES_ON_BOARD_STATUSES = new Set(["Picked Up", "In-Transit"]);
+const VEHICLES_ON_BOARD_STATUSES = new Set<string>(SHARED_VEHICLES_ON_BOARD_STATUSES);
 
 // GPS-silence monitoring uses the same accepted-load privacy boundary as
 // heartbeat/map visibility. Assigned-only loads never start GPS tracking.
@@ -113,6 +115,8 @@ async function backfillExplicitDispatchOwners(
     if (!dispatcherId) continue;
 
     // Persist only if another request has not already supplied an owner.
+    // timestamps:false: this background repair must not make a driver's or
+    // dispatcher's in-flight action look like a conflicting edit.
     const result = await Load.updateOne(
       {
         _id: load._id,
@@ -122,11 +126,19 @@ async function backfillExplicitDispatchOwners(
         ],
       },
       { $set: { dispatchOwnerId: dispatcherId } },
+      { timestamps: false },
     );
 
     if (result.modifiedCount > 0 || result.matchedCount > 0) {
       load.dispatchOwnerId = dispatcherId;
       resolvedLoadIds.add(loadId);
+    }
+    if (result.modifiedCount > 0) {
+      // Should stop appearing once migrate-load-dispatch-owner has run.
+      logger.warn(
+        { event: "dispatch_owner_recovered", loadId, dispatcherId },
+        "Recovered a missing responsible dispatcher from Dispatch Chat history",
+      );
     }
   }
 }

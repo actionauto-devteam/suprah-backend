@@ -4,11 +4,13 @@ import Vehicle from '../src/models/Vehicle.model';
 import User from '../src/models/User.model';
 import mongoose from 'mongoose';
 import tokenService from '../src/services/token.service';
+import Organization from '../src/models/Organization.model';
 
 describe('Vehicle API Endpoints', () => {
     let authToken: string;
     let testVehicleId: string;
     let testUser: any;
+    let testOrg: any;
 
     beforeAll(async () => {
         if (mongoose.connection.readyState === 0) {
@@ -17,12 +19,17 @@ describe('Vehicle API Endpoints', () => {
 
         // Clean up previous test users
         await User.deleteMany({ email: 'vehicle.tester@example.com' });
+        await Organization.deleteMany({ slug: 'vehicle-tester-org' });
+
+        // Inventory belongs to an organization, and only its staff can change it.
+        testOrg = await Organization.create({ name: 'Vehicle Tester Org', slug: 'vehicle-tester-org', status: 'active' });
 
         // Create a test user for auth
         testUser = new User({
             name: 'Vehicle Tester',
             email: 'vehicle.tester@example.com',
             role: 'admin',
+            organizationId: testOrg._id,
             emailVerified: true,
             onboardingCompleted: true
         });
@@ -39,6 +46,7 @@ describe('Vehicle API Endpoints', () => {
         // Create a test vehicle
         const vehicle = await Vehicle.create({
             vin: 'TEST123456789',
+            organizationId: String(testOrg._id),
             year: 2023,
             make: 'Toyota',
             modelName: 'Camry',
@@ -62,7 +70,8 @@ describe('Vehicle API Endpoints', () => {
         // Targeted clean up of test vehicles and user
         await Vehicle.deleteMany({ vin: { $regex: /^TEST/ } });
         await User.deleteMany({ email: 'vehicle.tester@example.com' });
-        
+        await Organization.deleteMany({ slug: 'vehicle-tester-org' });
+
         if (mongoose.connection.db?.databaseName === 'actionauto_test') {
             await mongoose.disconnect();
         }
@@ -372,6 +381,47 @@ describe('Vehicle API Endpoints', () => {
 
             const vehicle = await Vehicle.findById(testVehicleId);
             expect(vehicle).toBeNull();
+        });
+    });
+
+    describe('Inventory is for staff only', () => {
+        it('a driver linked to the organization cannot see dealer details or change inventory', async () => {
+            await User.deleteMany({ email: 'vehicle.driver@example.com' });
+            const driver = await User.create({
+                name: 'Vehicle Driver',
+                email: 'vehicle.driver@example.com',
+                role: 'driver',
+                organizationId: testOrg._id,
+                emailVerified: true,
+                onboardingCompleted: true,
+            });
+            const driverToken = tokenService.generateAccessToken(driver as any);
+            try {
+                await request(app).get('/api/vehicles').set('Authorization', `Bearer ${driverToken}`).expect(403);
+                await request(app).get('/api/vehicles/export').set('Authorization', `Bearer ${driverToken}`).expect(403);
+                await request(app)
+                    .put(`/api/vehicles/${testVehicleId}`)
+                    .set('Authorization', `Bearer ${driverToken}`)
+                    .send({ price: 1 })
+                    .expect(403);
+                await request(app).delete(`/api/vehicles/${testVehicleId}`).set('Authorization', `Bearer ${driverToken}`).expect(403);
+                expect((await Vehicle.findById(testVehicleId))?.price).toBe(25000);
+            } finally {
+                await User.deleteMany({ email: 'vehicle.driver@example.com' });
+            }
+        });
+
+        it('an edit cannot move a vehicle to another organization or hide it', async () => {
+            const otherOrgId = new mongoose.Types.ObjectId().toString();
+            await request(app)
+                .put(`/api/vehicles/${testVehicleId}`)
+                .set('Authorization', `Bearer ${authToken}`)
+                .send({ organizationId: otherOrgId, isDeleted: true, mileage: 17000 })
+                .expect(200);
+            const vehicle: any = await Vehicle.findById(testVehicleId).lean();
+            expect(vehicle.organizationId).toBe(String(testOrg._id));
+            expect(vehicle.isDeleted).toBe(false);
+            expect(vehicle.mileage).toBe(17000);
         });
     });
 });

@@ -730,8 +730,11 @@ export class SyncService {
     }
 
     // Manager overrides win: locked vehicles that are NOT Sold stay active.
+    // Vehicles on a load (In Transit from pickup to delivery) stay active too.
     const eligible = candidates.filter(
-      (v: any) => !(v.manualStatusLock && v.status !== "Sold"),
+      (v: any) =>
+        !(v.manualStatusLock && v.status !== "Sold") &&
+        v.status !== "In Transit",
     );
 
     const soldCandidates = eligible.filter((v: any) => v.status === "Sold");
