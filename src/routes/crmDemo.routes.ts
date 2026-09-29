@@ -17,5 +17,6 @@ router.post('/scenarios/:leadId/no-show-followup', ctrl.sendNoShowFollowUp);
 router.post('/scenarios/:leadId/complete', ctrl.markCompleted);
 router.post('/scenarios/:leadId/review-request', ctrl.sendReviewRequest);
 router.post('/scenarios/:leadId/nurture', ctrl.sendNurture);
+router.post('/scenarios/:leadId/vehicle-reengagement', ctrl.simulateVehicleReengagement);
 
 export default router;

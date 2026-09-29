@@ -14,6 +14,8 @@ import emailService, { isEmailOptedOut } from '../services/email.service';
 import * as telnyx from '../services/telnyx.service';
 import { sendReminderFor } from '../schedulers/appointmentReminder.scheduler';
 import { generateDemoPhone, isDemoPhone } from '../utils/demoPhone';
+import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
+import { processLeadForVehicle } from '../services/vehicleReengagement.service';
 
 const DEMO_SOURCE = 'Demo';
 const NURTURE_STEPS = 3;
@@ -79,6 +81,20 @@ async function serializeScenario(orgId: string, lead: any, appointment: any) {
       : null,
     optedOut: await comm.isSmsOptedOut(orgId, lead.phone),
     nurtureCount: lead.followUp?.nurtureCount || 0,
+    reengagement: await (async () => {
+      const log = await VehicleReengagementLog.findOne({ leadId: lead._id, organizationId: orgId })
+        .sort({ createdAt: -1 })
+        .lean();
+      if (!log) return null;
+      return {
+        status: log.status,
+        finalMessage: log.finalMessage || null,
+        blockedReason: log.blockedReason || null,
+        failureReason: log.failureReason || null,
+        classifierVerdict: log.classifierVerdict || null,
+        createdAt: log.createdAt,
+      };
+    })(),
   };
 }
 
@@ -356,6 +372,25 @@ export const sendNurture = asyncHandler(async (req: Request, res: Response) => {
   await respondWithScenario(res, orgId, lead._id, 'Follow-up text sent');
 });
 
+export const simulateVehicleReengagement = asyncHandler(async (req: Request, res: Response) => {
+  assertEnabled();
+  const { orgId, lead } = await loadScenario(req);
+
+  const leadYear = parseInt((lead as any).vehicle?.year, 10);
+  const syntheticVehicle: any = {
+    _id: new mongoose.Types.ObjectId(),
+    organizationId: orgId,
+    year: Number.isFinite(leadYear) ? leadYear : 2022,
+    make: (lead as any).vehicle?.make || 'Toyota',
+    modelName: (lead as any).vehicle?.model || 'Camry',
+    trim: '',
+  };
+
+  await processLeadForVehicle(lead, syntheticVehicle);
+
+  await respondWithScenario(res, orgId, lead._id, 'Vehicle arrival simulated');
+});
+
 export const resetDemoData = asyncHandler(async (req: Request, res: Response) => {
   assertEnabled();
   const orgId = orgOf(req);
@@ -392,6 +427,7 @@ export const resetDemoData = asyncHandler(async (req: Request, res: Response) =>
     CallLog.deleteMany({ orgId, leadId: { $in: leadIds } }),
     Conversation.deleteMany({ orgId, customerPhone: { $in: phones } }),
     SmsOptOut.deleteMany({ organizationId: orgId, phone: { $in: phones } }),
+    VehicleReengagementLog.deleteMany({ organizationId: orgId, leadId: { $in: leadIds } }),
     Notification.deleteMany({
       organizationId: orgId,
       $or: [

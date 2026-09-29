@@ -16,6 +16,8 @@ router.get("/calls", ctrl.listCalls);
 router.post("/rtc/token", ctrl.getRtcToken);
 router.get("/customers/:customerId/thread", ctrl.getCustomerThread);
 router.get("/leads/:leadId/timeline", ctrl.getLeadTimeline);
+router.post("/leads/:leadId/ai-pause", ctrl.pauseSmsAi);
+router.post("/leads/:leadId/ai-resume", ctrl.resumeSmsAi);
 
 router.get("/conversations/:id/messages", ctrl.getConversationMessages);
 router.post("/conversations/:id/reply", ctrl.replyToConversation);

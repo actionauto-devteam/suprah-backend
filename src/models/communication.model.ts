@@ -29,6 +29,9 @@ export interface IConversation extends Document {
   lastMessagePreview?: string;
   lastDirection?: "inbound" | "outbound";
   messageCount: number;
+  aiPausedAt?: Date | null;
+  aiPausedBy?: IActorRef | null;
+  aiGeneratingAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -44,6 +47,9 @@ const ConversationSchema = new Schema<IConversation>(
     lastMessagePreview: { type: String },
     lastDirection: { type: String, enum: ["inbound", "outbound"] },
     messageCount: { type: Number, default: 0 },
+    aiPausedAt: { type: Date, default: null },
+    aiPausedBy: { type: ActorRefSchema, default: null },
+    aiGeneratingAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

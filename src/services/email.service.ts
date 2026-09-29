@@ -1062,6 +1062,274 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         return true;
     }
 
+    async sendCampaignEmail(opts: {
+        to: string;
+        phone?: string;
+        customerName?: string;
+        subject: string;
+        greetingText: string;
+        bannerImageUrl?: string;
+        bodyText: string;
+        signOffText?: string;
+        organizationId: string;
+    }): Promise<boolean> {
+        const { to, organizationId } = opts;
+        if (!to) return false;
+        if (opts.phone && isDemoPhone(opts.phone)) return true;
+        if (await isEmailOptedOut(organizationId, to)) return false;
+
+        const firstName = String(opts.customerName || '').trim().split(/\s+/)[0] || 'there';
+        const interpolate = (text: string) => text.replace(/\{firstName\}/gi, firstName);
+
+        const dealerName = await this.resolveDealerName(organizationId, 'Suprah.AI');
+        const greeting = interpolate(opts.greetingText);
+        const body = interpolate(opts.bodyText);
+        const signOff = interpolate(opts.signOffText || '');
+
+        const unsubscribeToken = jwt.sign(
+            { organizationId: String(organizationId), email: to, purpose: 'automated_email_unsubscribe' },
+            config.jwt.emailOptOutSecret,
+            { expiresIn: '1y' },
+        );
+        const unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+
+        const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
+                        background-color: #f4f4f4;
+                        margin: 0;
+                        padding: 0;
+                    }
+                    .container {
+                        max-width: 600px;
+                        margin: 20px auto;
+                        background: white;
+                        border-radius: 8px;
+                        overflow: hidden;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
+                    .banner-image {
+                        width: 100%;
+                        max-height: 320px;
+                        object-fit: cover;
+                        display: block;
+                    }
+                    .content {
+                        padding: 30px;
+                        white-space: pre-line;
+                    }
+                    .footer {
+                        text-align: center;
+                        color: #6b7280;
+                        font-size: 12px;
+                        padding: 20px;
+                        background: #f9fafb;
+                        border-top: 1px solid #e5e7eb;
+                    }
+                    .footer a {
+                        color: #9ca3af;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="" class="banner-image" />` : ''}
+                    <div class="content">
+                        <p style="font-size: 16px;">${greeting}</p>
+                        <p style="font-size: 15px;">${body}</p>
+                        ${signOff ? `<p style="font-size: 15px;">${signOff}</p>` : ''}
+                    </div>
+                    <div class="footer">
+                        <p><strong>${dealerName}</strong></p>
+                        <p><a href="${unsubscribeUrl}">Unsubscribe from automated emails</a></p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        const text = `
+${greeting}
+
+${body}
+
+${signOff}
+
+${dealerName}
+
+Unsubscribe from automated emails: ${unsubscribeUrl}
+        `;
+
+        await this.sendEmail({ to, subject: opts.subject, text, html, organizationId });
+        return true;
+    }
+
+    async sendPriceDropEmail(opts: {
+        lead: any;
+        vehicle: any;
+        previousPrice: number;
+        newPrice: number;
+    }): Promise<boolean> {
+        const { lead, vehicle, previousPrice, newPrice } = opts;
+        const email = lead.email;
+        if (!email) return false;
+
+        if (lead.phone && isDemoPhone(lead.phone)) return true;
+
+        const orgId = vehicle.organizationId;
+        if (await isEmailOptedOut(orgId, email)) return false;
+
+        const firstName = String(lead.firstName || '').trim() || 'there';
+        const vehicleLabel = [vehicle.year, vehicle.make, vehicle.modelName, vehicle.trim]
+            .filter(Boolean)
+            .join(' ');
+
+        const dealerName = await this.resolveDealerName(orgId, 'Suprah.AI');
+
+        const vehicleImages = Array.isArray(vehicle.images) ? vehicle.images : [];
+        const imageUrl = vehicleImages.find((url: string) => /^https?:\/\//i.test(url || '')) || null;
+        const vehicleUrl = `${config.frontendUrl}/vehicle/${vehicle._id}`;
+
+        const unsubscribeToken = jwt.sign(
+            { organizationId: String(orgId), email, purpose: 'automated_email_unsubscribe' },
+            config.jwt.emailOptOutSecret,
+            { expiresIn: '1y' },
+        );
+        const unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+
+        const formatPrice = (value: number) => `$${Math.round(value).toLocaleString('en-US')}`;
+
+        const subject = `Price Drop: ${vehicleLabel} is now ${formatPrice(newPrice)}`;
+
+        const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
+                        background-color: #f4f4f4;
+                        margin: 0;
+                        padding: 0;
+                    }
+                    .container {
+                        max-width: 600px;
+                        margin: 20px auto;
+                        background: white;
+                        border-radius: 8px;
+                        overflow: hidden;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
+                    .vehicle-photo {
+                        width: 100%;
+                        max-height: 280px;
+                        object-fit: cover;
+                        display: block;
+                    }
+                    .header {
+                        background: #dc2626;
+                        color: white;
+                        padding: 30px 20px;
+                        text-align: center;
+                    }
+                    .header h1 {
+                        margin: 0;
+                        font-size: 24px;
+                    }
+                    .content {
+                        padding: 30px;
+                        text-align: center;
+                    }
+                    .price-row {
+                        margin: 16px 0;
+                    }
+                    .previous-price {
+                        text-decoration: line-through;
+                        color: #9ca3af;
+                        font-size: 18px;
+                        margin-right: 10px;
+                    }
+                    .new-price {
+                        color: #dc2626;
+                        font-size: 28px;
+                        font-weight: bold;
+                    }
+                    .cta {
+                        display: inline-block;
+                        margin-top: 16px;
+                        padding: 12px 28px;
+                        background: #dc2626;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 6px;
+                        font-weight: bold;
+                    }
+                    .footer {
+                        text-align: center;
+                        color: #6b7280;
+                        font-size: 12px;
+                        padding: 20px;
+                        background: #f9fafb;
+                        border-top: 1px solid #e5e7eb;
+                    }
+                    .footer a {
+                        color: #9ca3af;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    ${imageUrl ? `<img src="${imageUrl}" alt="" class="vehicle-photo" />` : ''}
+                    <div class="header">
+                        <h1>Price Drop Alert!</h1>
+                    </div>
+
+                    <div class="content">
+                        <p style="font-size: 16px;">Hi ${firstName},</p>
+                        <p style="font-size: 16px;">Good news — the ${vehicleLabel} you asked about just got a price cut.</p>
+                        <div class="price-row">
+                            <span class="previous-price">${formatPrice(previousPrice)}</span>
+                            <span class="new-price">${formatPrice(newPrice)}</span>
+                        </div>
+                        <div>
+                            <a href="${vehicleUrl}" class="cta">View this vehicle</a>
+                        </div>
+                    </div>
+
+                    <div class="footer">
+                        <p><strong>${dealerName}</strong></p>
+                        <p><a href="${unsubscribeUrl}">Unsubscribe from automated emails</a></p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        const text = `
+Hi ${firstName},
+
+Good news — the ${vehicleLabel} you asked about just got a price cut.
+Was ${formatPrice(previousPrice)}, now ${formatPrice(newPrice)}.
+
+View it here: ${vehicleUrl}
+
+${dealerName}
+
+Unsubscribe from automated emails: ${unsubscribeUrl}
+        `;
+
+        await this.sendEmail({ to: email, subject, text, html, organizationId: orgId });
+        return true;
+    }
+
     /**
      * Send CRM password reset OTP email
      */
@@ -1130,5 +1398,7 @@ export default {
     sendAppointmentCancellation: emailService.sendAppointmentCancellation.bind(emailService),
     sendAppointmentReminder: emailService.sendAppointmentReminder.bind(emailService),
     sendReviewRequestEmail: emailService.sendReviewRequestEmail.bind(emailService),
+    sendPriceDropEmail: emailService.sendPriceDropEmail.bind(emailService),
+    sendCampaignEmail: emailService.sendCampaignEmail.bind(emailService),
     sendCrmPasswordResetEmail: emailService.sendCrmPasswordResetEmail.bind(emailService),
 };

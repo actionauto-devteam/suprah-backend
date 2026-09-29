@@ -6,6 +6,39 @@ import crypto from 'crypto';
 // regardless of which caller built it — no per-call-site changes needed.
 const MAX_BODY_LENGTH = 150;
 
+const AVATAR_FALLBACK_COLORS = [
+  ['#075985', '#f0f9ff'],
+  ['#3730a3', '#eef2ff'],
+  ['#9f1239', '#fff1f2'],
+  ['#166534', '#f0fdf4'],
+  ['#9a3412', '#fff7ed'],
+  ['#6b21a8', '#faf5ff'],
+] as const;
+
+function stableHash(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+export function createPushAvatarFallback(identity: string, displayName?: string): string {
+  const normalizedIdentity = String(identity || displayName || 'suprah').trim();
+  const initials = String(displayName || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase() || 'S';
+  const [background, foreground] = AVATAR_FALLBACK_COLORS[stableHash(normalizedIdentity) % AVATAR_FALLBACK_COLORS.length];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><rect width="96" height="96" rx="48" fill="${background}"/><text x="48" y="58" text-anchor="middle" font-family="Arial,sans-serif" font-size="34" font-weight="700" fill="${foreground}">${initials.replace(/[&<>]/g, '')}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 // Browsers/OSes don't reliably ellipsize an overlong notification body
 // themselves (some hard-clip mid-word) — truncate here so it always ends
 // cleanly instead.

@@ -81,6 +81,9 @@ export interface IVehicle extends Document {
     /** Timestamp of the last confirmed feed that contained this VIN. */
     lastSeenInFeedAt?: Date;
 
+    reengagementSweptAt?: Date;
+    lastPriceDropEmailSweptAt?: Date;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -177,6 +180,8 @@ const VehicleSchema: Schema<IVehicle> = new Schema(
         archivedAt: { type: Date, default: null },
         archiveReason: { type: String, trim: true, default: null },
         lastSeenInFeedAt: { type: Date },
+        reengagementSweptAt: { type: Date },
+        lastPriceDropEmailSweptAt: { type: Date },
     },
     {
         timestamps: true,
@@ -188,6 +193,7 @@ VehicleSchema.index({ organizationId: 1, isArchived: 1, isDeleted: 1 });
 VehicleSchema.index({ isDeleted: 1, dealerState: 1, status: 1 });
 VehicleSchema.index({ isDeleted: 1, dateSold: -1 });
 VehicleSchema.index({ organizationId: 1, isDeleted: 1, status: 1 });
+VehicleSchema.index({ status: 1, isArchived: 1, isDeleted: 1, reengagementSweptAt: 1 });
 
 const Vehicle = mongoose.model<IVehicle, IVehicleModel>('Vehicle', VehicleSchema);
 

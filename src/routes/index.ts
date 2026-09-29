@@ -59,6 +59,8 @@ import savedVehicleRoute from "./savedVehicle.route";
 import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
 import auctionListingReviewRoute from "./auctionListingReview.route";
+import vehicleReengagementRoute from "./vehicleReengagement.route";
+import priceDropEmailRoute from "./priceDropEmail.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
 import customerInviteRoute from "./customerInvite.routes";
@@ -81,6 +83,8 @@ import webchatRoute from "./webchat.route";
 import crmWebchatRoute from "./crmWebchat.routes";
 import crmDemoRoute from "./crmDemo.routes";
 import smsCampaignRoute from "./smsCampaign.routes";
+import emailCampaignRoute from "./emailCampaign.routes";
+import aiAgentTaskRoute from "./aiAgentTask.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
@@ -236,6 +240,14 @@ const defaultRoutes = [
     route: smsCampaignRoute,
   },
   {
+    path: "/crm/email-campaigns",
+    route: emailCampaignRoute,
+  },
+  {
+    path: "/crm/ai-agent-tasks",
+    route: aiAgentTaskRoute,
+  },
+  {
     path: "/webchat",
     route: webchatRoute,
   },
@@ -262,6 +274,14 @@ const defaultRoutes = [
   {
     path: "/crm/auction-review",
     route: auctionListingReviewRoute,
+  },
+  {
+    path: "/crm/vehicle-reengagement",
+    route: vehicleReengagementRoute,
+  },
+  {
+    path: "/crm/price-drop-emails",
+    route: priceDropEmailRoute,
   },
   {
     path: "/aftermarket",

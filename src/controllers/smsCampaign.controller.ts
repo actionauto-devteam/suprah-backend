@@ -5,9 +5,10 @@ import { ApiError } from '../utils/ApiError';
 import Lead from '../models/lead.model';
 import SmsCampaign from '../models/SmsCampaign.model';
 import SmsCampaignRecipient from '../models/SmsCampaignRecipient.model';
+import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
 
 const MAX_RECIPIENTS = 500;
-const VALID_STATUSES = ['New', 'Contacted', 'Pending', 'Appointment Set', 'Closed'];
+const VALID_STATUSES = LEAD_STATUS_VALUES;
 const OPT_OUT_REMINDER = 'reply stop';
 
 function parseStatuses(raw: unknown): string[] {

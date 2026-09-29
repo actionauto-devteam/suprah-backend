@@ -25,6 +25,7 @@ import { IUser } from '../models/User.model';
 import { generateCrmToken } from '../middleware/crmAuth.middleware';
 import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
+import { createPushAvatarFallback } from '../utils/pushPayload';
 import { resolveNextEmployeeId } from '../utils/employeeId.util';
 
 
@@ -52,6 +53,8 @@ const DEFAULT_NOTIFICATION_PREF: SupraSpaceNotifPref = { type: 'all', muted: fal
 const SUPRA_SPACE_REPORT_TIME_ZONE = 'America/Denver';
 const SUPRA_SPACE_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpeg', '.mpg', '.ogv']);
 const SUPRA_SPACE_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.avif']);
+const SUPRA_SPACE_GIPHY_MAX_QUERY_LENGTH = 120;
+const SUPRA_SPACE_GIPHY_MAX_RESULTS = 48;
 const SUPRA_SPACE_EXTENSION_MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -421,19 +424,14 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
 
     const pushTitle = conv.type === 'group' && conv.emoji ? `${conv.emoji} ${title}` : title;
 
-    let iconUrl = '/icon-192x192.png';
-    let imageUrl: string | undefined;
-    const senderDoc = await CrmUser.findById(senderId).select('avatar').lean();
+    const senderDoc = await CrmUser.findById(senderId).select('fullName avatar').lean();
+    const senderName = (senderDoc as any)?.fullName || 'Someone';
     const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
-    if (conv.type === 'group') {
-      const freshGroupAvatar = conv.avatarKey
-        ? await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL)
-        : conv.avatar;
-      if (freshGroupAvatar) iconUrl = freshGroupAvatar;
-      if (senderAvatar) imageUrl = senderAvatar;
-    } else if (senderAvatar) {
-      iconUrl = senderAvatar;
-    }
+    const iconUrl = senderAvatar || createPushAvatarFallback(senderId, senderName);
+    const senderPrefix = new RegExp(`^${escapeRegex(senderName)}:\\s*`, 'i');
+    const singlePreview = body.replace(senderPrefix, '').trim() || 'New message';
+    const notificationTitle = conv.type === 'group' ? pushTitle : senderName;
+    const notificationMessage = conv.type === 'group' ? `${senderName}\n${singlePreview}` : singlePreview;
 
     const recentMessages = await SupraSpaceMessage.find({
       conversationId: conv._id,
@@ -471,8 +469,8 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           organizationId: (recipient as any).organizationId.toString(),
           type: 'crm_message',
           category: 'crm',
-          title,
-          message: body,
+          title: notificationTitle,
+          message: notificationMessage,
           metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
         })
           .then((notification) => emitNotificationToUser(memberId, notification))
@@ -503,7 +501,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         isDeleted: false,
         scheduledStatus: { $ne: 'pending' },
       });
-      let previewBody = body;
+      let previewBody = notificationMessage;
       if (unreadCount >= 2) {
         const n = Math.min(unreadCount, recentPreviewLines.length);
         const lines = recentPreviewLines.slice(-n);
@@ -515,7 +513,6 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
         title: pushTitle,
         body: previewBody,
         icon: iconUrl,
-        image: imageUrl,
         tag: conv._id?.toString() ?? 'supraspace',
         topic: conv._id?.toString(),
         actions: [
@@ -683,22 +680,27 @@ async function notifyMentionedMembers(params: {
 
     if (!uniqueRecipients.length) return;
 
-    const senderDoc = await CrmUser.findById(params.senderId).select('fullName').lean();
+    const senderDoc = await CrmUser.findById(params.senderId).select('fullName avatar').lean();
     const senderName = (senderDoc as any)?.fullName || 'Someone';
     const preview = truncateWithEllipsis(stripMessageFormatting(text), 100);
+    const isGroup = params.conversation.type === 'group';
+    const context = isGroup ? (params.conversation.name || 'Channel') : senderName;
+    const message = isGroup ? `${senderName}\nMentioned you: ${preview}` : `Mentioned you: ${preview}`;
+    const pushIcon = (senderDoc as any)?.avatar || createPushAvatarFallback(params.senderId.toString(), senderName);
 
     await Promise.allSettled(uniqueRecipients.map((memberId: string) =>
       notificationService.createNotification({
         userId: memberId,
         organizationId: params.organizationId,
         type: 'crm_message',
-        title: `${senderName} mentioned you`,
-        message: `"${preview}"`,
+        title: context,
+        message,
         metadata: {
           conversationId: params.conversation._id.toString(),
           messageId: params.messageId,
           route: params.route || supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
-          pushSource: 'SupraSpace',
+          pushPresentation: 'conversation',
+          pushIcon,
           kind: 'mention',
         },
       })
@@ -720,18 +722,25 @@ async function notifyMessageReaction(params: {
     if (!params.targetUserId || params.targetUserId === params.reactorId) return;
     const pref = getConversationNotificationPref(params.conversation, params.targetUserId);
     if (!shouldNotifyForPreference(pref, true)) return;
+    const reactor = await CrmUser.findById(params.reactorId).select('avatar').lean();
+    const isGroup = params.conversation.type === 'group';
+    const context = isGroup ? (params.conversation.name || 'Channel') : params.reactorName;
+    const message = isGroup
+      ? `${params.reactorName}\nReacted ${params.emoji} to your message`
+      : `Reacted ${params.emoji} to your message`;
 
     await notificationService.createNotification({
       userId: params.targetUserId,
       organizationId: params.organizationId,
       type: 'crm_message',
-      title: `${params.reactorName} reacted ${params.emoji}`,
-      message: `${params.emoji} to your message`,
+      title: context,
+      message,
       metadata: {
         conversationId: params.conversation._id.toString(),
         messageId: params.messageId,
         route: supraSpaceMessageUrl(params.conversation._id.toString(), params.messageId),
-        pushSource: 'SupraSpace',
+        pushPresentation: 'conversation',
+        pushIcon: (reactor as any)?.avatar || createPushAvatarFallback(params.reactorId, params.reactorName),
         kind: 'reaction',
         reaction: params.emoji,
         reactorId: params.reactorId,
@@ -2009,6 +2018,75 @@ const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, messages, 'Search results'));
 });
 
+const searchGifs = asyncHandler(async (req: Request, res: Response) => {
+  const apiKey = process.env.GIPHY_API_KEY;
+  if (!apiKey) throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+
+  if (Array.isArray(req.query.q) || Array.isArray(req.query.limit)) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (query.length > SUPRA_SPACE_GIPHY_MAX_QUERY_LENGTH) {
+    throw new ApiError(400, 'GIF search is too long');
+  }
+
+  const rawLimit = typeof req.query.limit === 'string' ? req.query.limit : '';
+  if (rawLimit && !/^\d+$/.test(rawLimit)) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+  const requestedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : 24;
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+    throw new ApiError(400, 'Invalid GIF search request');
+  }
+  const limit = Math.min(requestedLimit, SUPRA_SPACE_GIPHY_MAX_RESULTS);
+  const endpoint = new URL(`https://api.giphy.com/v1/gifs/${query ? 'search' : 'trending'}`);
+  endpoint.searchParams.set('api_key', apiKey);
+  endpoint.searchParams.set('limit', String(limit));
+  endpoint.searchParams.set('rating', 'pg-13');
+  endpoint.searchParams.set('lang', 'en');
+  if (query) endpoint.searchParams.set('q', query);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    if (!response.ok) {
+      logger.warn({ status: response.status }, '[SupraSpace] GIF search failed');
+      throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+    }
+
+    const payload = await response.json() as { data?: unknown[] };
+    const gifs = (Array.isArray(payload.data) ? payload.data : [])
+      .map((item: any) => {
+        const preview = item?.images?.fixed_width_small || item?.images?.fixed_height_small || item?.images?.fixed_width || item?.images?.fixed_height;
+        const originalUrl = typeof item?.images?.original?.url === 'string' ? item.images.original.url : '';
+        const previewUrl = typeof preview?.url === 'string' ? preview.url : '';
+        const isGiphyMediaUrl = (value: string) => /^https:\/\/(?:media\d*\.giphy\.com|i\.giphy\.com)\//i.test(value);
+        const url = isGiphyMediaUrl(originalUrl) ? originalUrl : isGiphyMediaUrl(previewUrl) ? previewUrl : '';
+        if (!url) return null;
+
+        const width = Number(preview?.width || item?.images?.original?.width);
+        const height = Number(preview?.height || item?.images?.original?.height);
+        return {
+          url,
+          width: Number.isFinite(width) && width > 0 ? width : undefined,
+          height: Number.isFinite(height) && height > 0 ? height : undefined,
+          title: typeof item?.title === 'string' ? item.title.slice(0, 280) : undefined,
+        };
+      })
+      .filter(Boolean);
+
+    res.json(new ApiResponse(200, gifs, 'GIFs loaded'));
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    logger.warn({ error }, '[SupraSpace] GIF search failed');
+    throw new ApiError(503, 'GIF search is temporarily unavailable. Please try again later.');
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 /** POST /api/supraspace/conversations/:id/messages  — text / gif / pre-uploaded attachments */
 const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
@@ -2084,9 +2162,10 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
 
   // Web Push to offline members (those whose socket has disconnected, e.g. mobile background)
   const senderName = (req.crmUser as any)?.fullName || 'Someone';
-  const pushBody = content?.trim()
+  const messagePreview = content?.trim()
     ? truncateWithEllipsis(stripMessageFormatting(content.trim()), 120)
     : hasGif ? 'Sent a GIF' : 'Sent an attachment';
+  const pushBody = replyTo ? `Replied: ${messagePreview}` : messagePreview;
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
@@ -3151,6 +3230,7 @@ const supraSpaceController = {
   getConversationAttachments,
   getConversationThreadReport,
   searchInConversation,
+  searchGifs,
   searchMessages,
   sendMessage,
   postDayPulseReport,
