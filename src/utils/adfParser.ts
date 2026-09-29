@@ -352,6 +352,7 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     if (!comments) {
       comments = deepFindComments(prospect);
     }
+    comments = decodeHtmlEntities(comments);
 
     // --- Extract source / provider / vendor ---
     const sourceName = extractText(provider?.name || provider?._ || provider) ||
@@ -382,8 +383,8 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
     });
 
     return {
-      firstName: cleanString(firstName),
-      lastName: cleanString(lastName),
+      firstName: cleanString(decodeHtmlEntities(firstName)),
+      lastName: cleanString(decodeHtmlEntities(lastName)),
       email: cleanString(email),
       phone: cleanString(phone),
       vehicle: vehicleInfo,

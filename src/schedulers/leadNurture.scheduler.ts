@@ -6,6 +6,7 @@ import { CommunicationMessage, CallLog } from '../models/communication.model';
 import { isSmsOptedOut, sendLeadNurtureText } from '../services/communication.service';
 import { getCentralOAuth2Client } from '../controllers/lead.controller';
 import { isWithinSendingHours } from '../utils/sendingWindow';
+import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import logger from '../utils/logger';
 
 const CRON_SCHEDULE = process.env.LEAD_NURTURE_CRON || '*/15 * * * *';
@@ -17,7 +18,6 @@ const MAX_LEAD_AGE_DAYS = parseInt(process.env.LEAD_NURTURE_MAX_LEAD_AGE_DAYS ||
 const MAX_ATTEMPTS = parseInt(process.env.LEAD_NURTURE_MAX_ATTEMPTS || '3', 10);
 const RETRY_MINUTES = parseInt(process.env.LEAD_NURTURE_RETRY_MINUTES || '15', 10);
 const PROCESSING_TIMEOUT_MINUTES = 10;
-const ELIGIBLE_STATUSES = ['New', 'Contacted', 'Pending'];
 const HOUR_MS = 60 * 60 * 1000;
 const CUSTOMER_ACTIVITY_GRACE_MS = 60 * 1000;
 const BATCH_LIMIT = 300;

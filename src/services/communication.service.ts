@@ -11,10 +11,20 @@ import { getSocketIO } from "../utils/socketEmitter";
 import Organization from "../models/Organization.model";
 import Appointment from "../models/Appointment.model";
 import { notifyOrgAdmins } from "../utils/safeNotification";
+import { createAiAgentTaskAndNotify } from "../utils/aiAgentTask";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
 import Vehicle from "../models/Vehicle.model";
+import {
+  resolveAiAgentSettings,
+  processAlexTurn,
+  AiAgentTranscriptEntry,
+  HISTORY_LIMIT,
+} from "./aiAgent.service";
+
+const AI_AGENT_ACTOR_ID = "ai-agent";
+const AI_STALE_LOCK_MS = 30_000;
 
 /** Emit through the platform's existing Socket.io instance (same one the
  *  lead:new / lead:update events use). Payload always carries orgId so the
@@ -267,14 +277,14 @@ function formatApptTimeForSms(date: Date): string {
   });
 }
 
-async function handleAppointmentSmsReply(orgId: any, from: string, body: string): Promise<void> {
+async function handleAppointmentSmsReply(orgId: any, from: string, body: string): Promise<boolean> {
   const command = normalizeSmsCommand(body);
   const isConfirm = CONFIRM_KEYWORDS.has(command);
   const isReschedule = RESCHEDULE_KEYWORDS.has(command);
-  if (!isConfirm && !isReschedule) return;
+  if (!isConfirm && !isReschedule) return false;
 
   const appointment = await findAppointmentForReply(orgId, from);
-  if (!appointment) return;
+  if (!appointment) return true;
 
   const customerName =
     [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName]
@@ -323,10 +333,15 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
         appointmentId: appointment._id.toString(),
       });
     } else {
+      await Appointment.updateOne(
+        { _id: appointment._id },
+        { $set: { rescheduleAwaitingReplyAt: new Date() } },
+      );
+
       await sendAutomatedSms({
         orgId,
         toPhone: from,
-        body: "Got it, we'll reach out shortly to find a better time.",
+        body: "Got it! What day and time works best for you? We'll get you rebooked.",
         leadId: appointment.leadId,
       });
 
@@ -341,13 +356,83 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
   } catch (err) {
     console.error("[comm] appointment SMS reply handling failed:", err);
   }
+
+  return true;
 }
 
-async function handleSmsOptCommand(orgId: any, from: string, body: string): Promise<void> {
+const RESCHEDULE_REPLY_CAPTURE_WINDOW_HOURS = parseInt(
+  process.env.RESCHEDULE_REPLY_CAPTURE_WINDOW_HOURS || "72",
+  10,
+);
+
+/** Captures a customer's freeform reply to the "what day and time works
+ *  best?" question sent after a RESCHEDULE keyword match. The raw text is
+ *  stored as-is for a human to read and book — never auto-parsed into a real
+ *  date/time, since a parsing error could create the wrong appointment slot.
+ *  Bounded by a capture window so a much-later unrelated text is never
+ *  misread as a stale reschedule answer. */
+async function captureRescheduleReply(orgId: any, from: string, body: string): Promise<boolean> {
+  const tail = last10(from);
+  if (tail.length < 7) return false;
+
+  const windowCutoff = new Date(Date.now() - RESCHEDULE_REPLY_CAPTURE_WINDOW_HOURS * 60 * 60 * 1000);
+  const appointment = await Appointment.findOne({
+    organizationId: orgId,
+    entryType: "appointment",
+    status: { $in: ["scheduled", "confirmed"] },
+    "customerBooking.phone": { $regex: `${tail.split("").join("[^0-9]*")}$` },
+    rescheduleAwaitingReplyAt: { $gte: windowCutoff },
+  })
+    .sort({ rescheduleAwaitingReplyAt: -1 })
+    .catch(() => null);
+
+  if (!appointment) return false;
+
+  const trimmedBody = String(body || "").trim().slice(0, 300);
+  if (!trimmedBody) return false;
+
+  try {
+    await Appointment.updateOne(
+      { _id: appointment._id },
+      {
+        $set: { rescheduleStatedPreference: trimmedBody },
+        $unset: { rescheduleAwaitingReplyAt: "" },
+      },
+    );
+
+    await sendAutomatedSms({
+      orgId,
+      toPhone: from,
+      body: "Thanks! We'll confirm your new time soon.",
+      leadId: appointment.leadId,
+    });
+
+    const customerName =
+      [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName]
+        .filter(Boolean)
+        .join(" ")
+        .trim() || "The customer";
+
+    const { title, message } = notificationTemplates.appointment_reschedule_preference_received({
+      customerName,
+      appointmentTitle: appointment.title,
+      preference: trimmedBody,
+    });
+    await notifyOrgAdmins(String(orgId), "appointment_reschedule_preference_received", title, message, {
+      appointmentId: appointment._id.toString(),
+    });
+  } catch (err) {
+    console.error("[comm] reschedule reply capture failed:", err);
+  }
+
+  return true;
+}
+
+async function handleSmsOptCommand(orgId: any, from: string, body: string): Promise<boolean> {
   const command = normalizeSmsCommand(body);
   const isOptOut = OPT_OUT_KEYWORDS.has(command);
   const isOptIn = OPT_IN_KEYWORDS.has(command);
-  if (!isOptOut && !isOptIn) return;
+  if (!isOptOut && !isOptIn) return false;
 
   await SmsOptOut.updateOne(
     { organizationId: String(orgId), phone: normalizePhone(from) },
@@ -355,7 +440,7 @@ async function handleSmsOptCommand(orgId: any, from: string, body: string): Prom
     { upsert: true }
   );
 
-  if (!isOptOut) return;
+  if (!isOptOut) return true;
 
   const lead = await findLeadByPhone(orgId, from);
   const customerName =
@@ -364,6 +449,8 @@ async function handleSmsOptCommand(orgId: any, from: string, body: string): Prom
   await notifyOrgAdmins(String(orgId), "sms_opt_out", title, message, {
     leadId: lead?._id ? String(lead._id) : undefined,
   });
+
+  return true;
 }
 
 export async function sendNoShowFollowUpText(appointment: any): Promise<boolean> {
@@ -607,6 +694,113 @@ async function bumpConversation(conversationId: any, message: any) {
   );
 }
 
+async function buildSmsTranscript(conversationId: any): Promise<AiAgentTranscriptEntry[]> {
+  const messages = await CommunicationMessage.find({ conversationId })
+    .sort({ createdAt: -1 })
+    .limit(HISTORY_LIMIT)
+    .lean();
+
+  return messages.reverse().map((m: any): AiAgentTranscriptEntry => {
+    if (m.direction === "inbound") return { from: "customer", body: m.body };
+    if (m.sentBy?.userId === AI_AGENT_ACTOR_ID) return { from: "ai", body: m.body };
+    return { from: "staff", staffName: m.sentBy?.name, body: m.body };
+  });
+}
+
+/** Fire-and-forget: generates and sends Alex's next SMS reply for this
+ *  conversation, if the org has Alex enabled, the number isn't paused, and
+ *  the inbound message wasn't already handled by the STOP or appointment
+ *  keyword handlers. Skipped entirely when the number doesn't match a Lead —
+ *  Alex only operates within a lead conversation. */
+async function triggerSmsAiReply(orgId: any, conversation: any, lead: any): Promise<void> {
+  if (!lead?._id) return;
+
+  try {
+    const { enabled, agentName } = await resolveAiAgentSettings(String(orgId));
+    if (!enabled) return;
+
+    const staleCutoff = new Date(Date.now() - AI_STALE_LOCK_MS);
+    const claimed = await Conversation.findOneAndUpdate(
+      {
+        _id: conversation._id,
+        aiPausedAt: null,
+        $or: [{ aiGeneratingAt: null }, { aiGeneratingAt: { $lt: staleCutoff } }],
+      },
+      { $set: { aiGeneratingAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) return;
+
+    try {
+      const [transcript, repliesSentToday, dealerName] = await Promise.all([
+        buildSmsTranscript(conversation._id),
+        CommunicationMessage.countDocuments({
+          conversationId: conversation._id,
+          direction: "outbound",
+          "sentBy.userId": AI_AGENT_ACTOR_ID,
+          createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        }),
+        resolveDealerName(orgId),
+      ]);
+
+      const vehicleInterest = lead.vehicle
+        ? [lead.vehicle.year, lead.vehicle.make, lead.vehicle.model].filter(Boolean).join(" ")
+        : undefined;
+
+      await processAlexTurn({
+        organizationId: String(orgId),
+        leadId: String(lead._id),
+        channel: "sms",
+        conversationId: String(conversation._id),
+        agentName,
+        dealerName,
+        customerFirstName: lead.firstName,
+        leadVehicleInterest: vehicleInterest,
+        transcript,
+        repliesSentToday,
+        send: async (text: string) => {
+          await sendStaffAttributedSms({
+            orgId,
+            toPhone: conversation.customerPhone,
+            body: text,
+            leadId: lead._id,
+            customerId: conversation.customerId,
+            actor: { userId: AI_AGENT_ACTOR_ID, name: agentName },
+          });
+        },
+        notifyHandoff: async (reason) => {
+          const customerName =
+            [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || "A customer";
+          await createAiAgentTaskAndNotify({
+            organizationId: String(orgId),
+            leadId: String(lead._id),
+            channel: "sms",
+            question: reason,
+            agentName,
+            customerName,
+            assignedTo: lead.assignedTo ? String(lead.assignedTo) : null,
+          });
+        },
+        onCapExceeded: async () => {
+          await Conversation.updateOne(
+            { _id: conversation._id },
+            { $set: { aiPausedAt: new Date(), aiPausedBy: { userId: "system", name: "Suprah AI" } } },
+          );
+          emitToOrg(orgId, "comm:ai_paused", {
+            conversationId: String(conversation._id),
+            paused: true,
+            pausedBy: "Suprah AI",
+          });
+        },
+      });
+    } finally {
+      await Conversation.updateOne({ _id: conversation._id }, { $unset: { aiGeneratingAt: "" } });
+    }
+  } catch (err) {
+    console.error("[comm] Alex trigger failed:", err);
+  }
+}
+
 /** Inbound SMS from Telnyx webhook (message.received). */
 export async function handleInboundSms(payload: any, orgOverride?: any) {
   const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
@@ -669,13 +863,29 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     },
   });
 
-  await handleSmsOptCommand(orgId, from, body).catch((err) => {
+  const optHandled = await handleSmsOptCommand(orgId, from, body).catch((err) => {
     console.error("[comm] handleSmsOptCommand failed:", err);
+    return false;
   });
 
-  await handleAppointmentSmsReply(orgId, from, body).catch((err) => {
+  const appointmentHandled = await handleAppointmentSmsReply(orgId, from, body).catch((err) => {
     console.error("[comm] handleAppointmentSmsReply failed:", err);
+    return false;
   });
+
+  const rescheduleReplyHandled =
+    !optHandled && !appointmentHandled
+      ? await captureRescheduleReply(orgId, from, body).catch((err) => {
+          console.error("[comm] captureRescheduleReply failed:", err);
+          return false;
+        })
+      : false;
+
+  if (!optHandled && !appointmentHandled && !rescheduleReplyHandled) {
+    triggerSmsAiReply(orgId, conversation, lead).catch((err) => {
+      console.error("[comm] triggerSmsAiReply failed:", err);
+    });
+  }
 
   return message;
 }

@@ -11,11 +11,13 @@ interface UnsubscribeTokenPayload {
   purpose: string;
 }
 
+const VALID_UNSUBSCRIBE_PURPOSES = new Set(['review_request_unsubscribe', 'automated_email_unsubscribe']);
+
 function verifyToken(token: unknown): UnsubscribeTokenPayload | null {
   if (typeof token !== 'string' || !token) return null;
   try {
     const payload = jwt.verify(token, config.jwt.emailOptOutSecret) as UnsubscribeTokenPayload;
-    if (payload?.purpose !== 'review_request_unsubscribe' || !payload.organizationId || !payload.email) {
+    if (!VALID_UNSUBSCRIBE_PURPOSES.has(payload?.purpose) || !payload.organizationId || !payload.email) {
       return null;
     }
     return payload;
@@ -49,7 +51,7 @@ export const renderUnsubscribeConfirm = asyncHandler(async (req: Request, res: R
   const payload = verifyToken(req.query.token);
   if (!payload) {
     res.type('html').status(400).send(
-      page('Link expired', '<h1>This link is no longer valid</h1><p>Please contact us directly if you no longer want to receive review request emails.</p>'),
+      page('Link expired', '<h1>This link is no longer valid</h1><p>Please contact us directly if you no longer want to receive automated emails from us.</p>'),
     );
     return;
   }
@@ -57,8 +59,8 @@ export const renderUnsubscribeConfirm = asyncHandler(async (req: Request, res: R
   res.type('html').send(
     page(
       'Unsubscribe',
-      `<h1>Stop review request emails?</h1>
-       <p>You'll no longer receive review request emails at ${payload.email}. This won't affect other emails from us.</p>
+      `<h1>Stop automated emails?</h1>
+       <p>You'll no longer receive automated emails (review requests, price alerts, and dealership updates) at ${payload.email}. This won't affect emails from a staff member replying to you directly.</p>
        <form method="POST" action="/api/email/unsubscribe?token=${encodeURIComponent(String(req.query.token))}">
          <button type="submit">Confirm unsubscribe</button>
        </form>`,
@@ -70,7 +72,7 @@ export const confirmUnsubscribe = asyncHandler(async (req: Request, res: Respons
   const payload = verifyToken(req.query.token);
   if (!payload) {
     res.type('html').status(400).send(
-      page('Link expired', '<h1>This link is no longer valid</h1><p>Please contact us directly if you no longer want to receive review request emails.</p>'),
+      page('Link expired', '<h1>This link is no longer valid</h1><p>Please contact us directly if you no longer want to receive automated emails from us.</p>'),
     );
     return;
   }
@@ -84,6 +86,6 @@ export const confirmUnsubscribe = asyncHandler(async (req: Request, res: Respons
   logger.info({ organizationId: payload.organizationId, email: payload.email }, '[EmailUnsubscribe] Opted out');
 
   res.type('html').send(
-    page('Unsubscribed', `<h1>You're unsubscribed</h1><p>${payload.email} will no longer receive review request emails.</p>`),
+    page('Unsubscribed', `<h1>You're unsubscribed</h1><p>${payload.email} will no longer receive automated emails from us.</p>`),
   );
 });

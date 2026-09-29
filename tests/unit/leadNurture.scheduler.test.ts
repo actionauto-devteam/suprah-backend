@@ -45,6 +45,7 @@ jest.mock('../../src/utils/logger', () => ({
 }));
 
 import { runLeadNurtureSweep } from '../../src/schedulers/leadNurture.scheduler';
+import { NURTURE_ELIGIBLE_STATUSES } from '../../src/constants/leadStatus';
 
 function oldLead() {
   return {
@@ -130,7 +131,7 @@ describe('lead nurture scheduler', () => {
     expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
     expect(mockSendLeadNurtureText).not.toHaveBeenCalled();
     expect(mockLeadUpdateOne).toHaveBeenCalledWith(
-      { _id: 'lead-1', status: { $in: ['New', 'Contacted', 'Pending'] } },
+      { _id: 'lead-1', status: { $in: NURTURE_ELIGIBLE_STATUSES } },
       expect.objectContaining({
         $set: expect.objectContaining({
           'followUp.nurtureStatus': 'skipped',

@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import Lead from '../models/lead.model';
 import NotificationService from '../services/notification.service';
+import { NURTURE_ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import logger from '../utils/logger';
 
 const CRON_SCHEDULE = process.env.LEAD_REMINDER_CRON || '0 */2 * * *';
@@ -22,7 +23,7 @@ async function runLeadInactivityCheck(): Promise<ReminderStats> {
 
   const staleLeads = await Lead.find({
     $and: [
-      { status: { $in: ['New', 'Contacted', 'Pending'] } },
+      { status: { $in: NURTURE_ELIGIBLE_STATUSES } },
       {
         $or: [
           { 'followUp.lastCustomerActivityAt': { $lte: inactivityCutoff } },

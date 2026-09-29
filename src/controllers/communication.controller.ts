@@ -14,6 +14,7 @@ import Appointment from "../models/Appointment.model";
 import WebChatMessage from "../models/WebChatMessage.model";
 import MailConversation from "../models/MailConversation.model";
 import MailMessage from "../models/MailMessage.model";
+import { emitToOrg } from "../utils/socketEmitter";
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
@@ -97,6 +98,46 @@ export const replyToConversation = asyncHandler(async (req: Request, res: Respon
   res.status(201).json(new ApiResponse(201, { message: result.message }, "Message sent"));
 });
 
+export const pauseSmsAi = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { leadId } = req.params;
+  const staff = actor(req);
+
+  const conversation = await Conversation.findOneAndUpdate(
+    { orgId, leadId },
+    { $set: { aiPausedAt: new Date(), aiPausedBy: { userId: staff.userId, name: staff.name } } },
+    { new: true },
+  );
+  if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
+
+  emitToOrg(String(orgId), "comm:ai_paused", {
+    conversationId: String(conversation._id),
+    leadId: String(leadId),
+    paused: true,
+    pausedBy: staff.name,
+  });
+  res.json(new ApiResponse(200, { paused: true }, "AI agent paused for this conversation"));
+});
+
+export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { leadId } = req.params;
+
+  const conversation = await Conversation.findOneAndUpdate(
+    { orgId, leadId },
+    { $unset: { aiPausedAt: "", aiPausedBy: "" } },
+    { new: true },
+  );
+  if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
+
+  emitToOrg(String(orgId), "comm:ai_paused", {
+    conversationId: String(conversation._id),
+    leadId: String(leadId),
+    paused: false,
+  });
+  res.json(new ApiResponse(200, { paused: false }, "AI agent resumed for this conversation"));
+});
+
 /** Start (or continue) a thread by phone/customer/lead — used by the leads
  *  page SMS Reply and the customer profile. */
 export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
@@ -164,7 +205,7 @@ export const getCustomerThread = asyncHandler(async (req: Request, res: Response
 
 type TimelineChannel = "sms" | "call" | "email" | "webchat" | "appointment" | "note";
 
-interface TimelineItem {
+export interface TimelineItem {
   id: string;
   channel: TimelineChannel;
   direction?: "inbound" | "outbound" | "system";
@@ -176,18 +217,31 @@ interface TimelineItem {
   metadata?: Record<string, unknown>;
 }
 
-export const getLeadTimeline = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = String(orgOf(req));
-  const { leadId } = req.params;
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "30"), 10)));
+export interface LeadTimelineResult {
+  items: TimelineItem[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  unavailableSources: string[];
+}
+
+/** Aggregates SMS/calls/webchat/email/appointments/notes/status-history for a
+ *  lead into one normalized, time-sorted, cursor-paginated timeline. Shared
+ *  by the `getLeadTimeline` HTTP handler and the AI conversation-summary
+ *  generator (leadAiSummary.service.ts) so both read the exact same source. */
+export async function buildLeadTimeline(
+  orgId: string,
+  leadId: string,
+  opts: { limit?: number; before?: string } = {},
+): Promise<LeadTimelineResult> {
+  const limit = Math.min(100, Math.max(1, opts.limit || 30));
   let cursor: { occurredAt: Date; id: string } | null = null;
-  if (req.query.before) {
+  if (opts.before) {
     try {
-      const parsed = JSON.parse(Buffer.from(String(req.query.before), "base64url").toString("utf8"));
+      const parsed = JSON.parse(Buffer.from(String(opts.before), "base64url").toString("utf8"));
       const occurredAt = new Date(parsed.occurredAt);
       if (!isNaN(occurredAt.getTime()) && typeof parsed.id === "string") cursor = { occurredAt, id: parsed.id };
     } catch {
-      const occurredAt = new Date(String(req.query.before));
+      const occurredAt = new Date(String(opts.before));
       if (!isNaN(occurredAt.getTime())) cursor = { occurredAt, id: "" };
     }
   }
@@ -415,12 +469,23 @@ export const getLeadTimeline = asyncHandler(async (req: Request, res: Response) 
     ? Buffer.from(JSON.stringify({ occurredAt: new Date(lastItem.occurredAt).toISOString(), id: lastItem.id })).toString("base64url")
     : null;
 
-  res.json(new ApiResponse(200, {
+  return {
     items: pageItems,
     nextCursor,
     hasMore,
     unavailableSources: Array.from(new Set(unavailableSources)),
-  }, "Lead timeline"));
+  };
+}
+
+export const getLeadTimeline = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String(orgOf(req));
+  const { leadId } = req.params;
+  const result = await buildLeadTimeline(orgId, leadId, {
+    limit: parseInt(String(req.query.limit || "30"), 10),
+    before: req.query.before ? String(req.query.before) : undefined,
+  });
+
+  res.json(new ApiResponse(200, result, "Lead timeline"));
 });
 
 /** Thread by phone (leads page SMS conversations). */

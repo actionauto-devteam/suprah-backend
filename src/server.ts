@@ -28,7 +28,10 @@ import { initAppointmentReminderScheduler } from "./schedulers/appointmentRemind
 import { initNoShowFollowUpScheduler } from "./schedulers/appointmentNoShowFollowUp.scheduler";
 import { initLeadNurtureScheduler } from "./schedulers/leadNurture.scheduler";
 import { initReviewRequestScheduler } from "./schedulers/reviewRequest.scheduler";
+import { initVehicleReengagementScheduler } from "./schedulers/vehicleReengagement.scheduler";
 import { initSmsCampaignScheduler } from "./schedulers/smsCampaign.scheduler";
+import { initPriceDropEmailScheduler } from "./schedulers/priceDropEmail.scheduler";
+import { initEmailCampaignScheduler } from "./schedulers/emailCampaign.scheduler";
 import { initWebchatSmsFallbackScheduler } from "./schedulers/webchatSmsFallback.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
@@ -223,7 +226,10 @@ if (require.main === module) {
       initNoShowFollowUpScheduler();
       initLeadNurtureScheduler();
       initReviewRequestScheduler();
+      initVehicleReengagementScheduler();
       initSmsCampaignScheduler();
+      initPriceDropEmailScheduler();
+      initEmailCampaignScheduler();
       initWebchatSmsFallbackScheduler();
       initSupraSpaceScheduledMessageScheduler();
       initStaleShiftAutoClockoutScheduler();

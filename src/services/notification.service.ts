@@ -47,12 +47,14 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   appointment_created: 'appointments', appointment_updated: 'appointments',
   appointment_cancelled: 'appointments', appointment_reminder: 'appointments', guest_response: 'appointments',
   appointment_confirmed_via_sms: 'appointments', appointment_reschedule_requested: 'appointments',
+  appointment_reschedule_preference_received: 'appointments',
 
   new_lead: 'crm', lead_assigned: 'crm', lead_status_changed: 'crm', crm_message: 'crm',
   crm_task_assigned: 'crm', crm_task_due: 'crm', crm_biometric: 'crm', crm_timeproof: 'crm',
   reminder: 'crm', location_share_requested: 'crm',
   aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
-  customer_call_requested: 'crm', sms_opt_out: 'crm',
+  customer_call_requested: 'crm', sms_opt_out: 'crm', vehicle_reengagement_blocked: 'crm',
+  ai_agent_handoff_needed: 'crm',
 
   feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
 
@@ -268,7 +270,10 @@ const createNotification = async (params: CreateNotificationParams) => {
       guest_response: '/crm/appointments',
       appointment_confirmed_via_sms: '/crm/appointments',
       appointment_reschedule_requested: '/crm/appointments',
+      appointment_reschedule_preference_received: '/crm/appointments',
       sms_opt_out: '/crm/leads',
+      vehicle_reengagement_blocked: metadata?.route || '/crm/vehicle-reengagement',
+      ai_agent_handoff_needed: metadata?.route || '/crm/leads',
       new_lead: '/crm/dashboard',
       lead_assigned: '/crm/dashboard',
       lead_status_changed: '/crm/dashboard',

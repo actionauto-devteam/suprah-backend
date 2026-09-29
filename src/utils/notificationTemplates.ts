@@ -246,9 +246,21 @@ export const notificationTemplates = {
     message: `${data.customerName} wants to reschedule "${data.appointmentTitle}" — reply by text, give them a call`,
   }),
 
+  appointment_reschedule_preference_received: (data: { customerName: string; appointmentTitle: string; preference: string }) => ({
+    title: 'Customer Sent a Reschedule Time',
+    message: `${data.customerName} replied about "${data.appointmentTitle}": "${data.preference}" — go ahead and book it`,
+  }),
+
   sms_opt_out: (data: { customerName: string; keyword: string }) => ({
     title: 'Customer Opted Out of Texts',
     message: `${data.customerName} replied ${data.keyword}. Automated texts to this number are now stopped`,
+  }),
+
+  ai_agent_handoff_needed: (data: { customerName: string; agentName: string; reason?: string }) => ({
+    title: `${data.agentName} needs your help`,
+    message: data.reason
+      ? `${data.customerName}'s conversation needs a human: ${data.reason}`
+      : `${data.customerName}'s conversation needs a human to step in`,
   }),
 
   // ==================== CRM & LEADS ====================
