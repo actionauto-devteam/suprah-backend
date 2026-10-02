@@ -44,7 +44,11 @@
           key === "__v" ||
           key === "inspectionPhotoUrl" ||
           key === "isVisibleToDriver" ||
-          key === "isPricingEnabled"
+          key === "isPricingEnabled" ||
+          // A stop's map pin only guides navigation; the address the driver
+          // accepted is unchanged, so moving the pin isn't an amendment.
+          key === "coordinates" ||
+          key === "placeId"
         ) {
           continue;
         }

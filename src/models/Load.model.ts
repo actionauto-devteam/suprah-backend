@@ -107,6 +107,7 @@ export interface ILoad extends Document {
   pickedUpAt?: Date;
   inTransitAt?: Date;
   deliveredAt?: Date;
+  deliveryOverride?: Record<string, any>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -132,6 +133,22 @@ const locationSchema = new Schema(
       default: undefined,
     },
     notes: { type: String, trim: true, maxlength: 1000, default: "" },
+    // Exact spot picked on the map in Create Load (Mirrored in
+    // validations/load.validation.ts). Driver navigation and the existing
+    // distance-to-pickup code (driverRouteMatching, driverDirectory) use it
+    // when present; loads without it keep using the address and ZIP.
+    coordinates: {
+      type: new Schema(
+        {
+          lat: { type: Number, required: true, min: -90, max: 90 },
+          lng: { type: Number, required: true, min: -180, max: 180 },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
+    // Google's place ID when the spot came from the map search unchanged.
+    placeId: { type: String, trim: true, maxlength: 300, default: undefined },
   },
   { _id: false },
 );
@@ -467,6 +484,22 @@ const loadSchema = new Schema<ILoad>(
     pickedUpAt: { type: Date },
     inTransitAt: { type: Date },
     deliveredAt: { type: Date },
+    // Set when Dispatch marked the load Delivered instead of the driver
+    // (markLoadDeliveredByDispatch): who, when, why and from which status.
+    deliveryOverride: {
+      type: new Schema(
+        {
+          by: { type: Schema.Types.ObjectId, ref: "User", required: true },
+          byName: { type: String, trim: true, maxlength: 200 },
+          at: { type: Date, required: true },
+          reason: { type: String, trim: true, maxlength: 500, required: true },
+          previousStatus: { type: String, trim: true, maxlength: 40 },
+          proofAdded: { type: Boolean, default: false },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
   },
   { timestamps: true },
 );

@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { ApiError } from '../utils/ApiError';
+import { getTraccarConfig } from '../config/traccar';
+import { isTrustedTraccarForward } from '../services/traccarForwardGuard';
 
 export const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -294,9 +296,19 @@ export const driverDocumentUploadLimiter = rateLimit({
  *   interpreted as "signed out" and caused forced logouts on page refresh.
  *   Subroutes like /api/users/me/organizations remain limited.
  */
+/**
+ * Requests allowed per 15 minutes by the global limit: 1000 for everyone.
+ * Position forwards from our own Traccar Server (allowed address and correct
+ * secret) carry every driver's positions in one stream, so they get the
+ * fleet's budget instead (TRACCAR_FORWARD_MAX_PER_MINUTE for 15 minutes).
+ */
+export function globalRequestLimit(req: any): number {
+    return isTrustedTraccarForward(req) ? getTraccarConfig().forwardMaxPerMinute * 15 : 1000;
+}
+
 export const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 1000,
+    max: (req: any) => globalRequestLimit(req),
     keyGenerator: (req: any) => {
         const authHeader = req.headers.authorization;
         if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
@@ -369,6 +381,27 @@ export const marketplaceLimiter = rateLimit({
     message: {
         success: false,
         message: 'You are browsing vehicles quite quickly. Please take a short break to ensure best performance for everyone.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+// Map place names and pins use paid Google Geocoding lookups, so each person
+// gets a generous but limited number.
+export const mapPlaceLookupLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 120,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'Place names are being looked up too quickly. Wait a few minutes; the map keeps working without them.',
     },
     handler: (req, res, next, options) => {
         next(new ApiError(429, options.message.message));

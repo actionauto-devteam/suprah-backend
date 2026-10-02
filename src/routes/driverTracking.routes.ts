@@ -10,12 +10,18 @@ import type {
 // records. It therefore uses auth(), which sets req.user and req.orgId.
 import auth from "../middleware/auth.middleware";
 import driverTrackingController from "../controllers/driverTracking.controller";
+import driverTrackingDeviceController from "../controllers/driverTrackingDevice.controller";
+import driverTrailController from "../controllers/driverTrail.controller";
+import mapPlacesController from "../controllers/mapPlaces.controller";
+import { startTraccarReconcileWorker } from "../services/traccar.service";
+import { retryFailedTraccarDeviceSyncs } from "../services/driverTrackingDevice.service";
 import loadController from "../controllers/load.controller";
 import driverDirectoryController from "../controllers/driverDirectory.controller";
 import dispatchChatController from "../controllers/dispatchChat.controller";
+import dispatchChatPinController from "../controllers/dispatchChatPin.controller";
 import { ApiError } from "../utils/ApiError";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
-import { uploadLimiter } from "../middleware/rate-limit.middleware";
+import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
@@ -100,6 +106,25 @@ router.use(auth());
 router.get("/org-drivers", staffOnly, trackingOrganizationOnly, noStoreSensitive, driverDirectoryController.getOrgDrivers);
 router.get("/active-drivers", staffOnly, trackingOrganizationOnly, noStoreSensitive, driverTrackingController.getActiveDrivers);
 router.post("/heartbeat", driverOnly, driverTrackingController.heartbeat);
+// Map labels from Google Geocoding (server key; empty when it isn't set up).
+router.get(
+  "/drivers/:driverId/area-name",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  mapPlaceLookupLimiter,
+  mapPlacesController.getDriverAreaName,
+);
+// Drivers (available-load pins, their next stop) and Tracker staff (the
+// selected driver's stops).
+router.get("/places/lookup", driverOrTrackingStaff, mapPlaceLookupLimiter, mapPlacesController.lookupPlacePosition);
+router.get(
+  "/drivers/:driverId/recent-trail",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  driverTrailController.getRecentTrail,
+);
 router.post(
   "/location-offline",
   driverOnly,
@@ -182,6 +207,22 @@ router.post(
   driverOnly,
   dispatchChatController.openLoadCreatorThread,
 );
+// The driver's Dispatch Chat page: dispatchers of their current and recent
+// loads, starting a conversation from one of those loads, and pins.
+router.get(
+  "/dispatch-chat/contacts",
+  driverOnly,
+  dispatchChatController.getMyLoadContacts,
+);
+router.post(
+  "/dispatch-chat/my-loads/:loadId/open",
+  driverOnly,
+  dispatchChatController.openMyLoadThread,
+);
+router
+  .route("/dispatch-chat/pins")
+  .get(driverOnly, dispatchChatPinController.listPins)
+  .put(driverOnly, dispatchChatPinController.setPin);
 router.get(
   "/dispatch-chat/threads",
   dispatchChatController.getThreads,
@@ -232,6 +273,12 @@ router.get(
   staffOnly,
   noStoreSensitive,
   driverTrackingController.getLoadAssignmentHistory,
+);
+router.get(
+  "/loads/:id/trip-history",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.getLoadTripHistory,
 );
 router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
 router.post(
@@ -288,6 +335,18 @@ router.post(
   loadController.submitProofOfDelivery,
 );
 router.post("/loads/:id/deliver", driverOnly, driverTrackingController.completeDelivery);
+// Dispatch override: the responsible dispatcher or an org admin marks an
+// active load Delivered, with a required reason and an optional photo.
+router.post(
+  "/loads/:id/mark-delivered",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  uploadLimiter,
+  uploadProofImage,
+  validateUploadedImageContent,
+  driverTrackingController.markLoadDeliveredByDispatch,
+);
 router.post(
   "/loads/:id/release-request",
   driverOnly,
@@ -308,12 +367,24 @@ router.post(
 // preserves the approval-based release-request workflow.
 router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
 
+// Phone tracking with Traccar Client: the driver's own link...
+router.get("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.getMyTrackingDevice);
+router.post("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.startMyTrackingDevice);
+router.delete("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.removeMyTrackingDevice);
+// ...and its review by the people who verify drivers.
+router.get("/drivers/:driverId/tracking-device", staffOnly, noStoreSensitive, driverTrackingDeviceController.getDriverTrackingDevice);
+router.post("/drivers/:driverId/tracking-device/approve", staffOnly, driverTrackingDeviceController.approveDriverTrackingDevice);
+router.post("/drivers/:driverId/tracking-device/revoke", staffOnly, driverTrackingDeviceController.revokeDriverTrackingDevice);
+router.post("/drivers/:driverId/tracking-device/sync", staffOnly, driverTrackingDeviceController.syncDriverTrackingDevice);
+
 // Start the organization-wide location-silence monitor once when Driver
 // Tracking routes are initialized. The service internally guards against
 // duplicate timers.
 if (!areBackgroundJobsDisabled()) {
   startDriverLocationMonitor();
   startLoadLifecycleOutboxWorker();
+  // Does nothing unless the Traccar integration is switched on and configured.
+  startTraccarReconcileWorker(retryFailedTraccarDeviceSyncs);
 }
 
 export default router;

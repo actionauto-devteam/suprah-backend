@@ -664,7 +664,14 @@
       }
 
       if (q) {
-        filter.$text = { $search: q };
+        // A full load number (LD-YYYYMMDD-###, e.g. from a Driver Tracker link)
+        // is matched exactly: text search splits it into words ("LD", the date,
+        // the counter) that other load numbers share.
+        if (/^LD-\d{8}-\d{3,}$/i.test(q)) {
+          filter.loadNumber = q.toUpperCase();
+        } else {
+          filter.$text = { $search: q };
+        }
       }
 
       if (andConditions.length > 0) {
@@ -1722,8 +1729,9 @@
       const load = await Load.findOne({ _id: req.params.id, organizationId });
       if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
-      // Delivered is set only by the driver's completeDelivery, which also
-      // clears GPS, resolves release requests and finalizes status changes.
+      // Delivered is set by the driver's completeDelivery (or Dispatch's
+      // markLoadDeliveredByDispatch override), which also clears GPS, resolves
+      // release requests and finalizes status changes.
       // Confirmation here is the staff sign-off on that proof, not a
       // status transition.
       const confirmationCheck = checkDeliveryConfirmation(load);

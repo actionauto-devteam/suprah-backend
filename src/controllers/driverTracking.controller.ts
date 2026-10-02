@@ -28,7 +28,9 @@ import User, { IUser } from "../models/User.model";
 import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import DriverLocation from "../models/DriverLocation.model";
+import LoadTripPoint, { TRIP_HISTORY_RETENTION_DAYS } from "../models/LoadTripPoint.model";
 import storageService from "../services/storage.service";
+import { BucketType } from "../services/storage.service";
 import DriverPayout from "../models/DriverPayout.model";
 import logger from "../utils/logger";
 import { getSignedProofUrl } from "../utils/signedUrlCache";
@@ -80,6 +82,11 @@ import {
 import {
   clearDriverExactLocationIfUnneeded,
 } from "../services/driverLocationRetention.service";
+import {
+  getDriverGpsPolicyAcrossOrganizations,
+  ingestDriverLocation,
+} from "../services/driverLocationIngest.service";
+import { isOrganizationAdminFor } from "../services/driverLocationAccess.service";
 import {
   appendLoadLifecycleOutbox,
   createLoadLifecycleOutboxEvent,
@@ -995,96 +1002,6 @@ async function resolveOriginalDispatcherIdForSupportAudit(
   return recovered ? String(recovered) : null;
 }
 
-async function getDriverGpsPolicyAcrossOrganizations(
-  driverId: string,
-  fallbackOrganizationId?: string,
-  // GPS heartbeats (up to 12 a minute) skip the lazy status finalization: it
-  // is a write, and it is already retried by the driver's status polling and
-  // the Driver Tracker directory.
-  options: { finalize?: boolean } = {},
-) {
-  const finalize = options.finalize !== false;
-  const trackingLoads = await getDriverGpsTrackingLoads(driverId);
-  const byOrg = new Map<string, string[]>();
-  for (const load of trackingLoads) {
-    const orgId = String(load.organizationId ?? "").trim();
-    if (!orgId) continue;
-    const ids = byOrg.get(orgId) ?? [];
-    ids.push(String(load._id));
-    byOrg.set(orgId, ids);
-  }
-
-  let operationalStatus: "active" | "on_leave" | "maintenance" = "active";
-  let required = false;
-  let reason: "active_load" | "dispatch_retained_load" | null = null;
-  const requiredLoadIds = new Set<string>();
-  const retainedLoadIds = new Set<string>();
-  let emergencyReleaseActive = false;
-
-  if (finalize) {
-    for (const organizationId of byOrg.keys()) {
-      await finalizeDriverStatusChangeIfClear(driverId, organizationId);
-    }
-  }
-  // Work Availability is platform-wide, so one read serves every organization.
-  const statusContext = byOrg.size > 0
-    ? await getDriverStatusContext(driverId)
-    : null;
-
-  for (const [organizationId, activeLoadIds] of byOrg.entries()) {
-    if (!statusContext) break;
-    operationalStatus = statusContext.operationalStatus;
-    if (statusContext.emergencyReleaseActive) emergencyReleaseActive = true;
-    const requirement = await getDriverLocationRequirement(
-      driverId,
-      organizationId,
-      {
-        operationalStatus: statusContext.operationalStatus,
-        emergencyReleaseActive: statusContext.emergencyReleaseActive,
-        activeLoadIds,
-      },
-    );
-
-    if (!requirement.required) continue;
-    required = true;
-    if (requirement.reason === "dispatch_retained_load") {
-      reason = "dispatch_retained_load";
-      for (const loadId of requirement.retainedLoadIds) {
-        retainedLoadIds.add(loadId);
-        requiredLoadIds.add(loadId);
-      }
-    } else {
-      if (!reason) reason = "active_load";
-      for (const loadId of activeLoadIds) requiredLoadIds.add(loadId);
-    }
-  }
-
-  if (byOrg.size === 0) {
-    if (fallbackOrganizationId) {
-      const statusContext = await getDriverStatusContext(driverId, fallbackOrganizationId);
-      operationalStatus = statusContext.operationalStatus;
-    } else {
-      const profile: any = await DriverProfile.findOne({ userId: driverId })
-        .select("operationalStatus")
-        .lean();
-      operationalStatus =
-        profile?.operationalStatus === "on_leave" || profile?.operationalStatus === "maintenance"
-          ? profile.operationalStatus
-          : "active";
-    }
-  }
-
-  return {
-    trackingLoads,
-    operationalStatus,
-    required,
-    reason,
-    requiredLoadIds: [...requiredLoadIds],
-    retainedLoadIds: [...retainedLoadIds],
-    emergencyReleaseActive,
-  };
-}
-
 // ─── Location Heartbeat ───────────────────────────────────────────────────────
 // POST /api/driver-tracking/heartbeat  { lat, lng, status? }
 
@@ -1132,105 +1049,43 @@ const heartbeat = asyncHandler(async (req: ExpressRequest, res: ExpressResponse)
   }
 
   const driverId = user._id.toString();
-  const policy = await getDriverGpsPolicyAcrossOrganizations(
-    driverId,
-    req.orgId as string | undefined,
-    { finalize: false },
-  );
-  const hasTrackingRelationship = policy.trackingLoads.length > 0;
   const manualSharingOptIn = manualSharingEnabled === true;
-
-  // A stale browser watcher can send one more heartbeat immediately after the
-  // last Load relationship disappears. Without an explicit Manual GPS opt-in,
-  // do not recreate exact coordinates that lifecycle cleanup just removed.
-  if (!hasTrackingRelationship && !manualSharingOptIn) {
-    countBy(driverTrackerMetrics.heartbeatRejects, "no_active_load");
-    await clearDriverExactLocationIfUnneeded(
-      driverId,
-      "heartbeat_without_tracking_relationship",
-    );
-
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          ok: true,
-          locationAccepted: false,
-          exactLocationRetained: false,
-          isSharing: false,
-          visibleToResponsibleDispatch: false,
-        },
-        "GPS is not retained because there is no active tracking relationship or Manual GPS opt-in",
-      ),
-    );
-  }
-
-  const allowedStatuses = ["on-route", "idle", "on-break", "waiting", "offline"];
-  const requestedStatus =
-    status && allowedStatuses.includes(status) ? status : undefined;
-  const nextStatus =
-    policy.operationalStatus === "on_leave"
-      ? "offline"
-      : policy.operationalStatus === "maintenance"
-        ? "waiting"
-        : requestedStatus;
-
-  // DriverLocation is a platform-wide driver record. organizationId remains a
-  // legacy hint only and is never used to authorize who may read coordinates.
-  const contextOrganizationId =
-    String(policy.trackingLoads[0]?.organizationId ?? req.orgId ?? "").trim() || undefined;
-  const locationSet: Record<string, any> = {
-    coords: { lat, lng },
-    locationRecordedAt: measuredAt,
+  // Same pipeline as every other location source (driverLocationIngest.service).
+  const result = await ingestDriverLocation({
+    driverId,
+    source: "browser",
+    lat,
+    lng,
+    measuredAt,
+    receivedAt,
     accuracy: accuracy ?? null,
-    lastSeenAt: new Date(),
-    isSharing: true,
     manualSharingOptIn,
-    offlineAlertSentAt: null,
-    ...(nextStatus ? { status: nextStatus } : {}),
-  };
-  if (contextOrganizationId) locationSet.organizationId = contextOrganizationId;
+    requestedStatus: status,
+    fallbackOrganizationId: req.orgId as string | undefined,
+  });
 
-  const locationUpdate: Record<string, any> = { $set: locationSet };
-  if (!nextStatus) locationUpdate.$setOnInsert = { status: "idle" };
-
-  let location;
-  try {
-    location = await DriverLocation.findOneAndUpdate(
-      {
-        userId: user._id,
-        $and: [
-          { $or: [{ locationRecordedAt: null }, { locationRecordedAt: { $lte: measuredAt } }] },
-          // A sample already on its way when the driver turned GPS off must
-          // not switch sharing back on.
-          { $or: [{ sharingStoppedAt: null }, { sharingStoppedAt: { $lte: receivedAt } }] },
-        ],
-      },
-      locationUpdate,
-      { new: true, upsert: true },
-    );
-  } catch (error: any) {
-    // A newer sample already owns the unique user row. Do not overwrite it.
-    if (error?.code === 11000) {
-      countBy(driverTrackerMetrics.heartbeatRejects, "older_than_stored");
-      return res.status(200).json(new ApiResponse(200, { ok: true, locationAccepted: false }, "A newer GPS measurement is already stored"));
+  if (!result.accepted) {
+    if (result.reason === "no_tracking_relationship") {
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          {
+            ok: true,
+            locationAccepted: false,
+            exactLocationRetained: false,
+            isSharing: false,
+            visibleToResponsibleDispatch: false,
+          },
+          "GPS is not retained because there is no active tracking relationship or Manual GPS opt-in",
+        ),
+      );
     }
-    throw error;
+    // A newer measurement, or a fresh one from the driver's primary GPS source
+    // (Traccar), already owns the stored location.
+    return res.status(200).json(new ApiResponse(200, { ok: true, locationAccepted: false }, "A newer GPS measurement is already stored"));
   }
-  if (!location) throw new ApiError(500, "We couldn't save your location right now. Check your internet connection and try again.");
 
-  // A heartbeat may be stored for the driver's own portal/manual sharing, but
-  // exact coordinates are emitted only to dispatchers who own an Accepted,
-  // Picked Up, or In-Transit load for this driver. Reuses the tracking loads
-  // read at the start of this same request.
-  await emitDriverLocationToResponsibleDispatchers(driverId, {
-    coords: location.coords,
-    status: location.status,
-    isSharing: true,
-    lastSeenAt: location.lastSeenAt,
-    locationRecordedAt: location.locationRecordedAt ?? null,
-    accuracy: location.accuracy ?? null,
-  }, policy.trackingLoads);
+  const { location, policy, hasTrackingRelationship } = result;
 
   return res.status(200).json(
     new ApiResponse(
@@ -1374,12 +1229,13 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   const organizationId = req.orgId as string;
   const dispatcherId = user._id.toString();
 
-  // Exact GPS is a dispatcher↔driver relationship, not an organization-wide
-  // permission. Assigned-only loads do not qualify because tracking begins
-  // only after the driver accepts.
+  // Exact GPS: the dispatcher responsible for the load, and the load
+  // organization's admins (business rule, 2026-09-30). Assigned-only loads do
+  // not qualify because tracking begins only after the driver accepts.
+  const viewerIsOrgAdmin = isOrganizationAdminFor(user, organizationId);
   const loads: any[] = await Load.find({
     organizationId,
-    dispatchOwnerId: user._id,
+    ...(viewerIsOrgAdmin ? {} : { dispatchOwnerId: user._id }),
     assignedDriverId: { $ne: null },
     status: { $in: GPS_TRACKING_LOAD_STATUSES },
   })
@@ -3936,6 +3792,76 @@ const getLoadAssignmentHistory = asyncHandler(async (req: ExpressRequest, res: E
 
   return res.status(200).json(
     new ApiResponse(200, { loadNumber: load.loadNumber, entries }, "Assignment history fetched"),
+  );
+});
+
+// GET /api/driver-tracking/loads/:id/trip-history
+// The positions the driver's phone reported while this load was tracked
+// (Accepted → Delivered), kept 30 days. Same viewers as live GPS: the load's
+// responsible dispatcher and its organization's admins.
+const TRIP_HISTORY_MAX_POINTS = 2_000;
+const TRIP_HISTORY_READ_LIMIT = 50_000;
+
+const getLoadTripHistory = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new ApiError(400, INVALID_LINK);
+  }
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId })
+    .select("loadNumber status dispatchOwnerId organizationId")
+    .lean();
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+
+  const isResponsibleDispatcher = String(load.dispatchOwnerId ?? "") === user._id.toString();
+  if (!isResponsibleDispatcher && !isOrganizationAdminFor(user, load.organizationId)) {
+    throw new ApiError(
+      403,
+      `You can't view the trip history of load ${load.loadNumber}. It's available to the load's responsible dispatcher and organization admins.`,
+    );
+  }
+
+  const rows: any[] = await LoadTripPoint.find({ loadId: load._id })
+    .sort({ measuredAt: 1 })
+    .limit(TRIP_HISTORY_READ_LIMIT)
+    .select("driverId lat lng measuredAt accuracy speed heading source loadStatus")
+    .lean();
+  // Long trips are thinned evenly (always keeping the first and last point)
+  // so the history stays quick to open.
+  const step = Math.max(1, Math.ceil(rows.length / TRIP_HISTORY_MAX_POINTS));
+  const points = step === 1 ? rows : rows.filter((_, index) => index % step === 0 || index === rows.length - 1);
+
+  const driverIds = [...new Set(rows.map((row) => String(row.driverId)))];
+  const drivers: any[] = driverIds.length
+    ? await User.find({ _id: { $in: driverIds } }).select("_id name").lean()
+    : [];
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        loadId: String(load._id),
+        loadNumber: load.loadNumber,
+        status: load.status,
+        retentionDays: TRIP_HISTORY_RETENTION_DAYS,
+        totalPoints: rows.length,
+        thinned: step > 1,
+        drivers: drivers.map((driver) => ({ id: String(driver._id), name: String(driver.name || "Driver") })),
+        points: points.map((point) => ({
+          driverId: String(point.driverId),
+          lat: point.lat,
+          lng: point.lng,
+          measuredAt: point.measuredAt,
+          accuracyMeters: point.accuracy ?? null,
+          speedMetersPerSecond: point.speed ?? null,
+          heading: point.heading ?? null,
+          source: point.source,
+          loadStatus: point.loadStatus,
+        })),
+      },
+      "Trip history fetched",
+    ),
   );
 });
 
@@ -6696,6 +6622,167 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
     .json(new ApiResponse(200, load, "Delivery completed"));
 });
 
+// POST /api/driver-tracking/loads/:id/mark-delivered
+// Dispatch override (business rule, 2026-10-01): the load's responsible
+// dispatcher or an admin of its organization marks an active load Delivered
+// when the driver can't complete it in the app. A reason is required and kept
+// on the load and in its activity. A delivery photo is optional; a photo the
+// driver already uploaded is kept. The driver isn't notified (their app just
+// refreshes). Otherwise the same follow-up as the driver's own delivery: GPS
+// tracking for the load stops, stock vehicles return to Ready for Sale, and a
+// pending release request is closed.
+const DELIVERY_OVERRIDE_REASON_MAX = 500;
+
+const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = req.orgId as string;
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new ApiError(400, INVALID_LINK);
+  }
+
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+  if (reason.length < 3) {
+    throw new ApiError(400, "Write why you're marking this load as delivered.");
+  }
+  if (reason.length > DELIVERY_OVERRIDE_REASON_MAX) {
+    throw new ApiError(400, `Keep the reason under ${DELIVERY_OVERRIDE_REASON_MAX} characters.`);
+  }
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+
+  const isResponsibleDispatcher = String(load.dispatchOwnerId ?? "") === user._id.toString();
+  if (!isResponsibleDispatcher && !isOrganizationAdminFor(user as any, load.organizationId)) {
+    throw new ApiError(
+      403,
+      `You can't mark load ${load.loadNumber} as delivered. Only its responsible dispatcher and organization admins can.`,
+    );
+  }
+
+  // Safe to retry after a lost response.
+  if (load.status === "Delivered") {
+    return res.status(200).json(new ApiResponse(200, load, "Load already delivered"));
+  }
+  const previousStatus = String(load.status ?? "");
+  if (!ACTIVE_LOAD_STATUSES.includes(previousStatus as any) || !load.assignedDriverId) {
+    throw new ApiError(
+      400,
+      `Load ${load.loadNumber} is ${previousStatus}. Only a load with a driver (Assigned, Accepted, Picked Up or In-Transit) can be marked as delivered.`,
+    );
+  }
+  const driverId = String(load.assignedDriverId);
+  const loadId = String(load._id);
+
+  const existingProof = load.proofOfDelivery?.imageUrl ? String(load.proofOfDelivery.imageUrl) : "";
+  const imageUrl = file && !existingProof
+    ? await storageService.upload(file, "proof-of-delivery", BucketType.PRIVATE)
+    : null;
+
+  const pendingReleaseRequest = await LoadReleaseRequest.findOne({
+    organizationId,
+    loadId: load._id,
+    driverId: load.assignedDriverId,
+    status: "pending",
+  });
+
+  const now = new Date();
+  const actorName = String(user.name || "Dispatch");
+  const outbox = [
+    ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
+    // Refreshes open screens (Transportation, Driver Tracker, the driver's
+    // app). Not a notification.
+    lifecycleSyncEvent(organizationId, [driverId], loadId),
+    lifecycleActivityEvent({
+      userId: user._id.toString(),
+      organizationId,
+      type: "load_delivered",
+      title: "Load marked delivered by dispatch",
+      description: `${actorName} marked load ${load.loadNumber} as delivered (it was ${previousStatus}). Reason: ${reason}`,
+      loadId,
+      metadata: { deliveryOverride: true, previousStatus, proofSubmitted: Boolean(imageUrl || existingProof) },
+    }),
+    ...(pendingReleaseRequest
+      ? [
+          lifecycleReleaseResolutionEvent({
+            request: pendingReleaseRequest,
+            organizationId,
+            loadId,
+            driverId,
+            status: "cancelled",
+            decision: "delivery_completed",
+            reviewedBy: user._id.toString(),
+          }),
+        ]
+      : []),
+  ];
+
+  const set: Record<string, unknown> = {
+    status: "Delivered",
+    deliveredAt: now,
+    deliveryOverride: {
+      by: user._id,
+      byName: actorName,
+      at: now,
+      reason,
+      previousStatus,
+      proofAdded: Boolean(imageUrl),
+    },
+  };
+  if (imageUrl) {
+    set.proofOfDelivery = {
+      imageUrl,
+      submittedAt: now,
+      submittedBy: user._id,
+      note: "Added by dispatch when marking the load delivered.",
+    };
+  }
+
+  const delivered = await Load.findOneAndUpdate(
+    expectedLoadRevisionFilter(load, {
+      organizationId,
+      status: previousStatus,
+      assignedDriverId: load.assignedDriverId,
+    }),
+    appendLoadLifecycleOutbox({ $set: set }, outbox) as any,
+    { new: true, runValidators: true },
+  );
+  if (!delivered) {
+    if (imageUrl) {
+      try { await storageService.delete(imageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+    }
+    throw new ApiError(
+      409,
+      `Load ${load.loadNumber} changed while it was being marked delivered, so nothing was changed. Refresh the load and try again.`,
+    );
+  }
+
+  logLoadTransition({
+    load: delivered,
+    from: previousStatus,
+    to: "Delivered",
+    actorId: user._id.toString(),
+    action: "marking delivered by dispatch",
+    outboxEventIds: outbox.map((event) => event.eventId),
+  });
+  await flushLifecycleOutbox(loadId);
+
+  try {
+    await clearDriverExactLocationIfUnneeded(driverId, "load_delivered");
+  } catch (err) {
+    logger.error({ err, driverId, loadId }, "Non-fatal: failed to clear exact GPS after dispatch delivery");
+  }
+  try {
+    await finalizeDriverStatusChangeIfClear(driverId, organizationId);
+  } catch (err) {
+    logger.error({ err, driverId }, "Non-fatal: failed to finalize driver status transition after dispatch delivery");
+  }
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, delivered, `Load ${load.loadNumber} marked as delivered`));
+});
+
 // POST /api/driver-tracking/loads/:id/release-request
 // POST /api/driver-tracking/loads/:id/drop (compatibility alias)
 // A driver can request release, but only Dispatch can change ownership/state.
@@ -8036,6 +8123,7 @@ export default {
   getAvailableLoads,
   getLoadDetail,
   getLoadAssignmentHistory,
+  getLoadTripHistory,
   requestLoad,
   approveLoadRequest,
   rejectLoadRequest,
@@ -8044,6 +8132,7 @@ export default {
   markPickedUp,
   startRoute,
   completeDelivery,
+  markLoadDeliveredByDispatch,
   requestLoadRelease,
   cancelReleaseRequest,
   rejectReleaseRequest,

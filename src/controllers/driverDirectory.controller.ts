@@ -10,7 +10,7 @@ import DriverLocation from "../models/DriverLocation.model";
 import Load from "../models/Load.model";
 import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
 import LoadReleaseRequest from "../models/LoadReleaseRequest.model";
-import { GPS_TRACKING_LOAD_STATUSES } from "../services/driverLocationAccess.service";
+import { GPS_TRACKING_LOAD_STATUSES, isOrganizationAdminFor } from "../services/driverLocationAccess.service";
 import { GPS_LIVE_MS } from "../constants/driverGps";
 import { ACTIVE_LOAD_STATUSES as SHARED_ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 import { getLoadAcceptanceMaterialVersion } from "../services/loadAcceptanceMaterial.service";
@@ -71,15 +71,20 @@ interface OrgDriver {
     trailerType: string | null;
     pickupDate: Date | null;
     pickupLocation: {
+      name: string | null;
+      address: string | null;
       city: string | null;
       state: string | null;
       zip: string | null;
       coordinates: { lat: number; lng: number } | null;
     };
     deliveryLocation: {
+      name: string | null;
+      address: string | null;
       city: string | null;
       state: string | null;
       zip: string | null;
+      coordinates: { lat: number; lng: number } | null;
     };
     requiresDispatchReconfirmation: boolean;
     assignmentMaterialVersion: string | null;
@@ -111,6 +116,15 @@ interface OrgDriver {
     submittedAt?: Date | null;
   } | null;
   warnings: string[];
+}
+
+/** A stop's map pin ({ lat, lng }), or null. */
+function stopCoordinates(location: any): { lat: number; lng: number } | null {
+  const coordinates = location?.coordinates;
+  if (!coordinates || typeof coordinates !== "object" || Array.isArray(coordinates)) return null;
+  const lat = Number(coordinates.lat);
+  const lng = Number(coordinates.lng ?? coordinates.lon);
+  return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
 }
 
 function getAssignmentReviewState(load: any, validDispatchOwnerIds: Set<string>) {
@@ -270,17 +284,18 @@ async function buildDirectoryEntries(
       .map((owner) => String(owner._id)),
   );
 
-  // Exact live GPS is private to the dispatcher who owns an accepted active
-  // load. Assigned-only loads and another dispatcher's loads do not grant
-  // location visibility, even inside the same organization.
+  // Exact live GPS: the dispatcher responsible for an accepted active load,
+  // and this organization's admins (business rule, 2026-09-30). Assigned-only
+  // loads never grant location visibility. Live updates use the same rule
+  // (driverLocationAccess.service).
+  const viewerIsOrgAdmin = isOrganizationAdminFor(req.user as any, organizationId);
   const gpsVisibleDriverIds = [
     ...new Set(
       (loads as any[])
         .filter(
           (load) =>
             GPS_TRACKING_LOAD_STATUSES.includes(load.status as any) &&
-            dispatcherId &&
-            String(load.dispatchOwnerId ?? "") === dispatcherId,
+            (viewerIsOrgAdmin || (dispatcherId && String(load.dispatchOwnerId ?? "") === dispatcherId)),
         )
         .map((load) => String(load.assignedDriverId ?? ""))
         .filter(Boolean),
@@ -490,6 +505,9 @@ async function buildDirectoryEntries(
         pickupDate:
           load.dates?.firstAvailable ?? load.dates?.pickupDeadline ?? null,
         pickupLocation: {
+          // Street and place name place the stop on the Driver Tracker map.
+          name: load.pickupLocation?.name || null,
+          address: load.pickupLocation?.address || null,
           city: load.pickupLocation?.city ?? null,
           state: load.pickupLocation?.state ?? null,
           zip: load.pickupLocation?.zip ?? null,
@@ -507,9 +525,12 @@ async function buildDirectoryEntries(
               : null,
         },
         deliveryLocation: {
+          name: load.deliveryLocation?.name || null,
+          address: load.deliveryLocation?.address || null,
           city: load.deliveryLocation?.city ?? null,
           state: load.deliveryLocation?.state ?? null,
           zip: load.deliveryLocation?.zip ?? null,
+          coordinates: stopCoordinates(load.deliveryLocation),
         },
         ...getAssignmentReviewState(load, validDispatchOwnerIds),
         releaseRequest: (() => {

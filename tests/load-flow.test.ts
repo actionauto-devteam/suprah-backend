@@ -33,6 +33,10 @@ import tokenService from '../src/services/token.service';
 import { storageService } from '../src/services/storage.service';
 import { invalidateActiveOrganizations } from '../src/services/activeOrganizations.service';
 import { setLifecycleOutboxRequestFlushMode } from '../src/services/loadLifecycleOutbox.service';
+import { ingestDriverLocation } from '../src/services/driverLocationIngest.service';
+import LoadTripPoint from '../src/models/LoadTripPoint.model';
+import * as socketEmitter from '../src/utils/socketEmitter';
+import { buildLoadMaterialChanges, getLoadAcceptanceMaterialVersion } from '../src/services/loadAcceptanceMaterial.service';
 
 const TEST_ORG_SLUG_A = 'load-flow-test-org-a';
 const TEST_ORG_SLUG_B = 'load-flow-test-org-b';
@@ -200,6 +204,19 @@ describe('Load CRUD and organization isolation', () => {
 
     expect(ids).toContain(String(own._id));
     expect(ids).not.toContain(String(foreign._id));
+  });
+
+  it('GET /api/loads?q=<load number> — finds that exact load on any page', async () => {
+    const target = await seedLoad({ loadNumber: 'LD-20200101-001' });
+    await seedLoad({ loadNumber: 'LD-20200101-002' });
+    await seedLoad({ loadNumber: 'LD-20200102-001' });
+
+    const res = await request(app)
+      .get('/api/loads')
+      .query({ q: 'ld-20200101-001', page: 1, limit: 1 })
+      .set(auth(dispatcherToken))
+      .expect(200);
+    expect(res.body.data.loads.map((l: any) => String(l._id))).toEqual([String(target._id)]);
   });
 
   it('GET /api/loads/:id — another organization\'s load is not found', async () => {
@@ -756,6 +773,63 @@ describe('Plain-English reasons when an edit is refused', () => {
       .send({ additionalInfo: { visibility: 'public', notes: 'Too late' }, expectedUpdatedAt: await currentVersion(load._id) })
       .expect(400);
     expect(res.body.message).toMatch(/because it is already Delivered/);
+  });
+});
+
+describe('Map pins on load stops (Create Load "Pick on map")', () => {
+  const pin = { lat: 40.760812, lng: -111.891047 };
+  const pickup = { address: '1 Pickup St', city: 'Salt Lake City', state: 'UT', zip: '84101' };
+  const delivery = { address: '2 Delivery Ave', city: 'Denver', state: 'CO', zip: '80202' };
+
+  it('saves the exact pin, drops empty pin values, and removes the pin when an edit leaves it out', async () => {
+    const res = await request(app)
+      .post('/api/loads')
+      .set(auth(dispatcherToken))
+      .send({
+        postType: 'load-board',
+        pickupLocation: { ...pickup, coordinates: pin, placeId: 'simulated-place-id' },
+        deliveryLocation: { ...delivery, coordinates: null, placeId: '' },
+        vehicles: [{ year: 2021, make: 'Honda', model: 'Civic', condition: 'Operable' }],
+        trailerType: 'open_2car',
+        additionalInfo: { visibility: 'public' },
+      })
+      .expect(201);
+    const id = res.body.data.load._id;
+
+    let stored: any = await Load.findById(id).lean();
+    expect(stored.pickupLocation.coordinates).toEqual(pin);
+    expect(stored.pickupLocation.placeId).toBe('simulated-place-id');
+    expect(stored.deliveryLocation.coordinates).toBeUndefined();
+    expect(stored.deliveryLocation.placeId).toBeUndefined();
+
+    // A position off the globe is refused.
+    await request(app)
+      .put(`/api/loads/${id}`)
+      .set(auth(dispatcherToken))
+      .send({ pickupLocation: { ...pickup, coordinates: { lat: 95, lng: 0 } }, expectedUpdatedAt: await currentVersion(id) })
+      .expect(400);
+
+    // Saving the stop without a pin removes it.
+    await request(app)
+      .put(`/api/loads/${id}`)
+      .set(auth(dispatcherToken))
+      .send({ pickupLocation: pickup, expectedUpdatedAt: await currentVersion(id) })
+      .expect(200);
+    stored = await Load.findById(id).lean();
+    expect(stored.pickupLocation.coordinates).toBeUndefined();
+    expect(stored.pickupLocation.placeId).toBeUndefined();
+  });
+
+  it('adding or moving only the pin never asks the driver to re-confirm the load', () => {
+    const before = { postType: 'load-board', pickupLocation: pickup, deliveryLocation: delivery };
+    const pinned = { ...before, pickupLocation: { ...pickup, coordinates: pin, placeId: 'simulated-place-id' } };
+    const moved = { ...before, pickupLocation: { ...pickup, coordinates: { lat: 40.7611, lng: -111.8915 } } };
+
+    expect(getLoadAcceptanceMaterialVersion(pinned)).toBe(getLoadAcceptanceMaterialVersion(before));
+    expect(buildLoadMaterialChanges(before, pinned)).toHaveLength(0);
+    expect(buildLoadMaterialChanges(pinned, moved)).toHaveLength(0);
+    // A change the driver can see is still an amendment.
+    expect(buildLoadMaterialChanges(pinned, { ...pinned, pickupLocation: { ...pinned.pickupLocation, address: '9 Other Rd' } })).toHaveLength(1);
   });
 });
 
@@ -2216,5 +2290,286 @@ describe('Batch 9 fixes', () => {
     expect(
       await Notification.countDocuments({ userId: driver._id, title: 'Requested Load Withdrawn', 'metadata.loadId': String(load._id) }),
     ).toBe(1);
+  });
+});
+
+// ─── One location pipeline: sources, late positions, who sees exact GPS ─────
+// Traccar readings here are simulated (no Traccar server is involved).
+
+describe('Location pipeline: sources, late positions and who sees exact GPS', () => {
+  const PREFIX = 'loc-pipeline';
+  let secondAdmin: any;
+  let secondAdminToken: string;
+  let employeeDispatcher: any;
+  let employeeToken: string;
+
+  beforeAll(async () => {
+    secondAdmin = await User.create({
+      email: `${PREFIX}-admin2${TEST_EMAIL_DOMAIN}`, name: 'Second Admin A', role: 'admin', organizationId: orgA._id,
+      emailVerified: true, onboardingCompleted: true, isActive: true,
+    });
+    // Has Dispatcher access here, but isn't responsible for the test loads.
+    employeeDispatcher = await User.create({
+      email: `${PREFIX}-employee${TEST_EMAIL_DOMAIN}`, name: 'Employee Dispatcher A', role: 'employee', organizationId: orgA._id,
+      dispatcherOrganizationIds: [orgA._id], emailVerified: true, onboardingCompleted: true, isActive: true,
+    });
+    secondAdminToken = tokenService.generateAccessToken(secondAdmin);
+    employeeToken = tokenService.generateAccessToken(employeeDispatcher);
+  });
+
+  afterAll(async () => {
+    if (mongoose.connection.readyState !== 1) return;
+    await LoadTripPoint.deleteMany({ organizationId: { $in: [orgA?._id, orgB?._id] } });
+  });
+
+  async function trackedDriver(label: string) {
+    const driver = await createDriver(`${PREFIX}-${label}`);
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app)
+      .post(`/api/driver-tracking/loads/${load._id}/accept`)
+      .set(auth(driver.token))
+      .send(signatureFor(`Driver ${label}`))
+      .expect(200);
+    return { ...driver, load };
+  }
+
+  const browserFix = (token: string, measuredAt = new Date(Date.now() - 2_000)) =>
+    request(app)
+      .post('/api/driver-tracking/heartbeat')
+      .set(auth(token))
+      .send({ lat: 40.76, lng: -111.89, accuracy: 12, locationRecordedAt: measuredAt.toISOString() });
+
+  const simulatedTraccarFix = (driverId: string, measuredAt: Date) =>
+    ingestDriverLocation({
+      driverId, source: 'traccar', sourceDeviceId: 'SIMULATED-TEST-DEVICE',
+      lat: 40.7, lng: -111.9, measuredAt, receivedAt: new Date(), accuracy: 8, speed: 20, heading: 90,
+    });
+
+  const exactGpsFor = async (token: string, driverId: string) => {
+    const res = await request(app).get('/api/driver-tracking/org-drivers').set(auth(token)).expect(200);
+    const row = res.body.data.drivers.find((item: any) => item.id === driverId);
+    return { canView: row?.presence?.canViewExactGps === true, coords: row?.presence?.coords ?? null };
+  };
+
+  const liveRecipients = (spy: jest.SpyInstance) =>
+    spy.mock.calls.filter(([, event]) => event === 'driver:location').map(([userId]) => String(userId));
+
+  it('the organization\'s admins see exact GPS as well as the responsible dispatcher; other staff do not', async () => {
+    const { user, token } = await trackedDriver('admins');
+    const driverId = String(user._id);
+    await browserFix(token).expect(200);
+
+    expect((await exactGpsFor(dispatcherToken, driverId)).canView).toBe(true);
+    const admin = await exactGpsFor(secondAdminToken, driverId);
+    expect(admin.canView).toBe(true);
+    expect(admin.coords).toEqual({ lat: 40.76, lng: -111.89 });
+    expect(await exactGpsFor(employeeToken, driverId)).toEqual({ canView: false, coords: null });
+
+    const emit = jest.spyOn(socketEmitter, 'emitToUser');
+    try {
+      await browserFix(token, new Date(Date.now() - 1_000)).expect(200);
+      const recipients = liveRecipients(emit);
+      expect(recipients).toEqual(expect.arrayContaining([String(dispatcher._id), String(secondAdmin._id)]));
+      expect(recipients).not.toContain(String(employeeDispatcher._id));
+      expect(recipients).not.toContain(String(dispatcherB._id));
+    } finally {
+      emit.mockRestore();
+    }
+  });
+
+  it('a fresh Traccar position stays primary, and the browser takes over once Traccar goes quiet', async () => {
+    const { user, token } = await trackedDriver('source-priority');
+    const driverId = String(user._id);
+    expect((await simulatedTraccarFix(driverId, new Date(Date.now() - 5_000))).accepted).toBe(true);
+
+    const blocked = await browserFix(token).expect(200);
+    expect(blocked.body.data.locationAccepted).toBe(false);
+    expect(await DriverLocation.findOne({ userId: user._id }).lean()).toMatchObject({
+      source: 'traccar', sourceDeviceId: 'SIMULATED-TEST-DEVICE', speed: 20, heading: 90, accuracy: 8,
+    });
+
+    // Traccar has been quiet for 90 seconds: the browser reading takes over.
+    await DriverLocation.updateOne({ userId: user._id }, { $set: { locationRecordedAt: new Date(Date.now() - 90_000) } });
+    const takenOver = await browserFix(token).expect(200);
+    expect(takenOver.body.data.locationAccepted).toBe(true);
+    expect((await DriverLocation.findOne({ userId: user._id }).lean() as any).source).toBe('browser');
+
+    // A newer Traccar reading is accepted again straight away.
+    expect((await simulatedTraccarFix(driverId, new Date(Date.now() - 500))).accepted).toBe(true);
+  });
+
+  it('a delayed Traccar position becomes Last known only when newer; old, future and untracked readings are refused', async () => {
+    const { user, token } = await trackedDriver('late-positions');
+    const driverId = String(user._id);
+    const twentyMinutesAgo = new Date(Date.now() - 20 * 60_000);
+    expect((await simulatedTraccarFix(driverId, twentyMinutesAgo)).accepted).toBe(true);
+    // Stored with its real measurement time, so it shows as Last known, not live.
+    expect((await DriverLocation.findOne({ userId: user._id }).lean() as any).locationRecordedAt.getTime())
+      .toBe(twentyMinutesAgo.getTime());
+
+    expect(await simulatedTraccarFix(driverId, new Date(Date.now() - 30 * 60_000))).toEqual({ accepted: false, reason: 'older_than_stored' });
+    expect(await simulatedTraccarFix(driverId, new Date(Date.now() + 5 * 60_000))).toEqual({ accepted: false, reason: 'future_reading' });
+    expect(await simulatedTraccarFix(driverId, new Date(Date.now() - 2 * 24 * 60 * 60_000))).toEqual({ accepted: false, reason: 'too_old' });
+    // Browser readings must still be current.
+    await browserFix(token, new Date(Date.now() - 5 * 60_000)).expect(400);
+
+    const { user: noLoad } = await createDriver(`${PREFIX}-no-load`);
+    expect(await simulatedTraccarFix(String(noLoad._id), new Date())).toEqual({ accepted: false, reason: 'no_tracking_relationship' });
+    expect(await DriverLocation.findOne({ userId: noLoad._id })).toBeNull();
+  });
+
+  it('when the load ends, the dispatcher and the admins lose exact GPS and stop receiving it', async () => {
+    const { user, token, load } = await trackedDriver('access-ends');
+    const driverId = String(user._id);
+    await browserFix(token).expect(200);
+    expect((await exactGpsFor(secondAdminToken, driverId)).canView).toBe(true);
+
+    await Load.updateOne({ _id: load._id }, { $set: { status: 'Cancelled' } });
+
+    expect(await exactGpsFor(secondAdminToken, driverId)).toEqual({ canView: false, coords: null });
+    expect(await exactGpsFor(dispatcherToken, driverId)).toEqual({ canView: false, coords: null });
+    const emit = jest.spyOn(socketEmitter, 'emitToUser');
+    try {
+      const late = await browserFix(token).expect(200);
+      expect(late.body.data.locationAccepted).toBe(false);
+      expect(liveRecipients(emit)).toHaveLength(0);
+    } finally {
+      emit.mockRestore();
+    }
+    expect(await DriverLocation.findOne({ userId: user._id })).toBeNull();
+  });
+
+  const tripHistory = (loadId: unknown, token: string) =>
+    request(app).get(`/api/driver-tracking/loads/${loadId}/trip-history`).set(auth(token));
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('trip history records each tracked position once, from acceptance on, and only its viewers can read it', async () => {
+    const { user, token, load } = await trackedDriver('trip-history');
+    const driverId = String(user._id);
+    const first = new Date();
+    await browserFix(token, first).expect(200);
+    await browserFix(token, first).expect(200); // the same reading sent again is stored once
+    await pause(15);
+    await browserFix(token, new Date()).expect(200);
+    // A reading from before the driver accepted isn't part of this trip.
+    const accepted: any = await reload(load._id);
+    await simulatedTraccarFix(driverId, new Date(accepted.acceptedAt.getTime() - 60_000));
+
+    const history = await tripHistory(load._id, dispatcherToken).expect(200);
+    expect(history.body.data).toMatchObject({ retentionDays: 30, totalPoints: 2, thinned: false });
+    const points = history.body.data.points;
+    expect(points.map((point: any) => point.source)).toEqual(['browser', 'browser']);
+    expect(new Date(points[0].measuredAt).getTime()).toBe(first.getTime());
+    expect(new Date(points[1].measuredAt).getTime()).toBeGreaterThan(first.getTime());
+    expect(points[0]).toMatchObject({ driverId, lat: 40.76, lng: -111.89, accuracyMeters: 12, loadStatus: 'Accepted' });
+    expect(history.body.data.drivers).toEqual([{ id: driverId, name: user.name }]);
+
+    await tripHistory(load._id, secondAdminToken).expect(200);
+    const refused = await tripHistory(load._id, employeeToken).expect(403);
+    expect(refused.body.message).toMatch(/responsible dispatcher and organization admins/);
+    await tripHistory(load._id, dispatcherBToken).expect(404);
+  });
+
+  it('a late Traccar position fills in the trip history without moving the live position back, and the history outlives the load', async () => {
+    const { user, load } = await trackedDriver('trip-backfill');
+    const driverId = String(user._id);
+    const accepted: any = await reload(load._id);
+    const whileOffline = new Date(accepted.acceptedAt.getTime() + 1);
+    await pause(15);
+    const latest = new Date();
+    expect((await simulatedTraccarFix(driverId, latest)).accepted).toBe(true);
+    expect(await simulatedTraccarFix(driverId, whileOffline)).toEqual({ accepted: false, reason: 'older_than_stored' });
+    expect((await DriverLocation.findOne({ userId: user._id }).lean() as any).locationRecordedAt.getTime()).toBe(latest.getTime());
+
+    const history = await tripHistory(load._id, secondAdminToken).expect(200);
+    expect(history.body.data.totalPoints).toBe(2);
+    expect(history.body.data.points.map((point: any) => new Date(point.measuredAt).getTime())).toEqual([
+      whileOffline.getTime(),
+      latest.getTime(),
+    ]);
+    expect(history.body.data.points[1]).toMatchObject({ source: 'traccar', speedMetersPerSecond: 20, heading: 90 });
+
+    // Kept after the load ends (deleted automatically after 30 days).
+    await Load.updateOne({ _id: load._id }, { $set: { status: 'Delivered' } });
+    expect((await tripHistory(load._id, secondAdminToken).expect(200)).body.data.totalPoints).toBe(2);
+  });
+
+  it('trip history points are set to delete themselves 30 days after they were measured', () => {
+    const ttl = (LoadTripPoint.schema.indexes() as any[]).find(([fields]) => fields.measuredAt === 1 && Object.keys(fields).length === 1);
+    expect(ttl?.[1]?.expireAfterSeconds).toBe(30 * 24 * 60 * 60);
+  });
+});
+
+describe('Dispatch marks a load as delivered (override)', () => {
+  const markDelivered = (loadId: unknown, token: string) =>
+    request(app).post(`/api/driver-tracking/loads/${loadId}/mark-delivered`).set(auth(token));
+
+  async function staffMember(label: string) {
+    const user = await User.create({
+      email: `override-${label}${TEST_EMAIL_DOMAIN}`,
+      name: `Override ${label}`,
+      role: 'employee',
+      organizationId: orgA._id,
+      dispatcherOrganizationIds: [orgA._id],
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    return { user, token: tokenService.generateAccessToken(user as any) };
+  }
+
+  it('the responsible dispatcher marks an Accepted load delivered with a reason, and the driver is not notified', async () => {
+    const { user: driver } = await createDriver('override-accepted');
+    const owner = await staffMember('owner');
+    const other = await staffMember('other');
+    const load = await seedLoad({
+      status: 'Accepted',
+      assignedDriverId: driver._id,
+      dispatchOwnerId: owner.user._id,
+      assignedAt: new Date(),
+      acceptedAt: new Date(),
+    });
+
+    await markDelivered(load._id, owner.token).send({}).expect(400);
+    const refused = await markDelivered(load._id, other.token).send({ reason: 'Driver called in' }).expect(403);
+    expect(refused.body.message).toMatch(/responsible dispatcher and organization admins/);
+
+    const reason = 'Driver lost their phone; customer confirmed delivery by phone.';
+    await markDelivered(load._id, owner.token).send({ reason }).expect(200);
+
+    const stored: any = await Load.findById(load._id).lean();
+    expect(stored.status).toBe('Delivered');
+    expect(stored.deliveredAt).toBeTruthy();
+    expect(stored.deliveryOverride).toMatchObject({ reason, previousStatus: 'Accepted', proofAdded: false, byName: 'Override owner' });
+    expect(String(stored.deliveryOverride.by)).toBe(String(owner.user._id));
+    expect(stored.proofOfDelivery?.imageUrl).toBeUndefined();
+    expect(await Notification.countDocuments({ userId: driver._id })).toBe(0);
+
+    // Repeating it is safe.
+    await markDelivered(load._id, owner.token).send({ reason }).expect(200);
+  });
+
+  it('an org admin can attach a delivery photo; a load without a driver cannot be marked', async () => {
+    const { user: driver } = await createDriver('override-photo');
+    const load = await seedLoad({ status: 'In-Transit', assignedDriverId: driver._id, assignedAt: new Date(), acceptedAt: new Date() });
+
+    await markDelivered(load._id, dispatcherToken)
+      .field('reason', 'Driver app crashed at the dealership.')
+      .attach('proof', PNG, 'delivery.png')
+      .expect(200);
+    const stored: any = await Load.findById(load._id).lean();
+    expect(stored.status).toBe('Delivered');
+    expect(stored.proofOfDelivery.imageUrl).toMatch(/^test\/proof-/);
+    expect(String(stored.proofOfDelivery.submittedBy)).toBe(String(dispatcher._id));
+    expect(stored.deliveryOverride).toMatchObject({ previousStatus: 'In-Transit', proofAdded: true });
+
+    const posted = await seedLoad();
+    const refused = await markDelivered(posted._id, dispatcherToken).send({ reason: 'No driver yet' }).expect(400);
+    expect(refused.body.message).toMatch(/Only a load with a driver/);
   });
 });

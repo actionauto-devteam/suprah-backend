@@ -4,7 +4,8 @@ import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
-import { uploadLimiter } from "../middleware/rate-limit.middleware";
+import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
+import mapPlacesController from "../controllers/mapPlaces.controller";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { ApiError } from "../utils/ApiError";
 
@@ -38,6 +39,8 @@ const staffOnly = authorize(["super_admin", "admin", "employee"]);
 router.get("/vin/:vin", staffOnly, loadController.lookupVin);
 router.get("/vehicles", staffOnly, loadController.getInventoryVehicles);
 router.post("/calculate-rate", staffOnly, loadController.calculateLoadRate);
+// Create Load's map picker: the street address at the picked spot (Google Geocoding, server key).
+router.get("/address-at", staffOnly, mapPlaceLookupLimiter, mapPlacesController.getAddressAtPosition);
 
 router.get("/stats", staffOnly, loadController.getLoadStats);
 
