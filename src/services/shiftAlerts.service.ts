@@ -124,6 +124,7 @@ async function postShiftAlertMessage(organizationId: string, text: string): Prom
       content: text,
       type: 'system',
       readBy: [sender._id],
+      metadata: { source: 'shift-alert' },
     });
     await message.populate('sender', 'fullName username avatar');
 
