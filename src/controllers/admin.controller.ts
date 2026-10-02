@@ -16,6 +16,9 @@ import logger from '../utils/logger';
 import { SystemLog } from '../models/SystemLog.model';
 
 import { metrics, getPercentile, driverTrackerMetrics, connectionMetrics } from '../utils/metrics';
+import { traccarHealthSnapshot } from "../services/traccar.service";
+import { googleGeocodingHealthSnapshot } from "../services/googleGeocoding.service";
+import DriverTrackingDevice from "../models/DriverTrackingDevice.model";
 import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../config/subscriptionTiers';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
 import { disconnectUserSockets } from '../utils/socketEmitter';
@@ -155,6 +158,15 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
     },
     driverTracker: driverTrackerMetrics,
     connections: connectionMetrics,
+    googleGeocoding: googleGeocodingHealthSnapshot(),
+    traccar: {
+      ...traccarHealthSnapshot(),
+      phones: {
+        waitingForApproval: await DriverTrackingDevice.countDocuments({ status: "pending" }),
+        approved: await DriverTrackingDevice.countDocuments({ status: "active" }),
+        traccarUpdateFailed: await DriverTrackingDevice.countDocuments({ traccarSyncStatus: "failed" }),
+      },
+    },
     timestamp: new Date().toISOString()
   };
 

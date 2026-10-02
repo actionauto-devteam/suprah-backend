@@ -26,6 +26,22 @@ const locationBlockSchema = z.object({
     .enum(["dealership", "auction", "residence", "business", "port", "other"])
     .optional(),
   notes: z.string().trim().max(1000).optional().or(z.literal("")),
+  // Exact spot picked on the map (Create Load). Empty values mean "no pin"
+  // and are dropped, so a saved load never carries a blank pin.
+  coordinates: z
+    .object({
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+    })
+    .nullable()
+    .optional()
+    .transform((value) => value ?? undefined),
+  placeId: z
+    .string()
+    .trim()
+    .max(300)
+    .optional()
+    .transform((value) => value || undefined),
 });
 
 const vehicleConditionSchema = z.enum(["Operable", "Inoperable"]);

@@ -15,6 +15,14 @@ export interface IDriverLocation extends Document {
   lastSeenAt: Date;
   locationRecordedAt?: Date | null;
   accuracy?: number | null;
+  /** Which provider measured the current position. */
+  source?: "browser" | "traccar";
+  /** Provider device id for Traccar positions. Identifies the phone, never the driver. */
+  sourceDeviceId?: string | null;
+  /** Metres per second, when the provider supplies it. */
+  speed?: number | null;
+  /** Degrees clockwise from north, when the provider supplies it. */
+  heading?: number | null;
   /** Independent GPS-sharing flag. A driver may share GPS while On Leave/In Shop even though live status stays Offline/Waiting. */
   isSharing: boolean;
   /**
@@ -62,6 +70,10 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     ],
     locationRecordedAt: { type: Date, default: null },
     accuracy: { type: Number, min: 0, default: null },
+    source: { type: String, enum: ["browser", "traccar"], default: "browser" },
+    sourceDeviceId: { type: String, default: null },
+    speed: { type: Number, min: 0, default: null },
+    heading: { type: Number, min: 0, max: 360, default: null },
     lastSeenAt: {
       type: Date,
       default: Date.now,

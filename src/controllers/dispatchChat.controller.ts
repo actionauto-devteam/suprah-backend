@@ -101,7 +101,7 @@ async function notifyDispatchChatRecipient(params: {
 
   const route = senderIsDriver
     ? `/driver-tracker?driverId=${encodeURIComponent(driverId)}&openDispatchChat=1`
-    : `/driver?openDispatchChat=1&threadId=${encodeURIComponent(threadId)}`;
+    : `/driver/channels?threadId=${encodeURIComponent(threadId)}`;
 
   const senderName =
     String(actor.name ?? "").trim() ||
@@ -1015,6 +1015,203 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
   );
 });
 
+// Loads a driver can message Dispatch about from their Dispatch Chat page:
+// loads they have now, and loads they delivered in the last 30 days.
+const RECENT_DELIVERED_LOAD_DAYS = 30;
+
+function myCurrentAndRecentLoadsFilter(driverId: mongoose.Types.ObjectId) {
+  const deliveredSince = new Date(Date.now() - RECENT_DELIVERED_LOAD_DAYS * 24 * 60 * 60 * 1000);
+  return {
+    assignedDriverId: driverId,
+    $or: [
+      { status: { $in: ACTIVE_LOAD_STATUSES } },
+      { status: "Delivered", deliveredAt: { $gte: deliveredSince } },
+    ],
+  };
+}
+
+/** The dispatcher responsible for a load, falling back to whoever created it. */
+function loadDispatcherId(load: any): string {
+  const id = String(load?.dispatchOwnerId || load?.createdBy || "").trim();
+  return mongoose.Types.ObjectId.isValid(id) ? id : "";
+}
+
+function loadRouteText(location: any): string {
+  return [location?.city, location?.state].filter(Boolean).join(", ");
+}
+
+// GET /api/driver-tracking/dispatch-chat/contacts
+// The dispatchers a driver can start a conversation with: the dispatcher of
+// each load they have now or delivered in the last 30 days. The same checks as
+// a private conversation apply: an active staff member of the load's
+// organization (or a super admin).
+const getMyLoadContacts = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const actor = getUser(req);
+  if (actor.role !== "driver") {
+    throw new ApiError(403, "Only drivers can see the dispatchers of their loads.");
+  }
+
+  const loads: any[] = await Load.find(myCurrentAndRecentLoadsFilter(actor._id))
+    .select("_id loadNumber status organizationId dispatchOwnerId createdBy pickupLocation deliveryLocation updatedAt")
+    .sort({ updatedAt: -1, _id: -1 })
+    .limit(100)
+    .lean();
+
+  const dispatcherIds = [...new Set(loads.map(loadDispatcherId).filter(Boolean))];
+  const dispatchers: any[] = dispatcherIds.length
+    ? await User.find({ _id: { $in: dispatcherIds }, role: { $in: STAFF_ROLES }, isActive: true })
+        .select("_id name avatar role organizationId isActive")
+        .lean()
+    : [];
+  const dispatcherById = new Map(dispatchers.map((dispatcher) => [String(dispatcher._id), dispatcher]));
+
+  // One entry per dispatcher and organization. Loads are newest first, so the
+  // first load seen is the latest; a load the driver has now wins over a
+  // delivered one.
+  const contacts = new Map<string, { organizationId: string; dispatcher: any; current: boolean; load: any; loadCount: number }>();
+  for (const load of loads) {
+    const organizationId = String(load.organizationId ?? "").trim();
+    const dispatcher = dispatcherById.get(loadDispatcherId(load));
+    if (!organizationId || !dispatcher || !isValidDispatcherReferenceForThread(dispatcher, organizationId)) continue;
+    const key = `${organizationId}:${dispatcher._id}`;
+    const current = ACTIVE_LOAD_STATUSES.includes(String(load.status));
+    const existing = contacts.get(key);
+    if (!existing) {
+      contacts.set(key, { organizationId, dispatcher, current, load, loadCount: 1 });
+    } else {
+      existing.loadCount += 1;
+      if (current && !existing.current) {
+        existing.current = true;
+        existing.load = load;
+      }
+    }
+  }
+
+  const entries = [...contacts.values()];
+  const threads: any[] = entries.length
+    ? await DispatchChatThread.find({
+        driverId: actor._id,
+        $or: entries.map((entry) => ({ organizationId: entry.organizationId, dispatcherId: entry.dispatcher._id })),
+      })
+        .select("_id organizationId dispatcherId")
+        .lean()
+    : [];
+  const threadByKey = new Map(threads.map((thread) => [`${thread.organizationId}:${thread.dispatcherId}`, String(thread._id)]));
+
+  const data = await Promise.all(
+    entries
+      .sort((a, b) => Number(b.current) - Number(a.current))
+      .map(async (entry) => ({
+        dispatcher: {
+          id: String(entry.dispatcher._id),
+          name: entry.dispatcher.name || "Dispatcher",
+          avatar: await resolveParticipantAvatar(entry.dispatcher.avatar),
+        },
+        current: entry.current,
+        load: {
+          id: String(entry.load._id),
+          loadNumber: entry.load.loadNumber || String(entry.load._id),
+          status: entry.load.status,
+          origin: loadRouteText(entry.load.pickupLocation),
+          destination: loadRouteText(entry.load.deliveryLocation),
+        },
+        loadCount: entry.loadCount,
+        threadId: threadByKey.get(`${entry.organizationId}:${entry.dispatcher._id}`) ?? null,
+      })),
+  );
+
+  return res.status(200).json(new ApiResponse(200, { contacts: data }, "Dispatchers of your loads fetched"));
+});
+
+// POST /api/driver-tracking/dispatch-chat/my-loads/:loadId/open
+// Opens (or reuses) the private conversation with the dispatcher of one of the
+// driver's current or recently delivered loads. The dispatcher comes from the
+// load, never from the request, so a driver can't open arbitrary staff chats.
+const openMyLoadThread = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const actor = getUser(req);
+  const loadId = String(req.params.loadId ?? "").trim();
+  if (actor.role !== "driver") {
+    throw new ApiError(403, "Only drivers can message the dispatcher of their load.");
+  }
+  if (!mongoose.Types.ObjectId.isValid(loadId)) {
+    throw new ApiError(400, "This load link isn't valid. Choose the dispatcher again from New message.");
+  }
+
+  const load: any = await Load.findOne({ _id: loadId, ...myCurrentAndRecentLoadsFilter(actor._id) })
+    .select("_id loadNumber organizationId dispatchOwnerId createdBy")
+    .lean();
+  if (!load) {
+    throw new ApiError(404, "This isn't one of your current or recent loads, so you can't message its dispatcher from here.");
+  }
+
+  const organizationId = String(load.organizationId ?? "").trim();
+  const dispatcherId = loadDispatcherId(load);
+  const [dispatcher, driver]: any[] = await Promise.all([
+    dispatcherId
+      ? User.findOne({ _id: dispatcherId, role: { $in: STAFF_ROLES }, isActive: true })
+          .select("_id name email avatar isActive role organizationId")
+          .lean()
+      : null,
+    User.findOne({ _id: actor._id, role: "driver", isActive: true })
+      .select("_id name email avatar isActive role")
+      .lean(),
+  ]);
+
+  if (!organizationId || !dispatcher || !isValidDispatcherReferenceForThread(dispatcher, organizationId)) {
+    throw new ApiError(409, "The dispatcher for this load isn't available in Dispatch Chat right now. Try again later.");
+  }
+  if (!driver) {
+    throw new ApiError(403, "Your account can't use Suprah Dispatch Chat right now. Refresh the page and try again.");
+  }
+
+  const ensuredThread = await ensureDispatchChatThread({
+    organizationId,
+    dispatcherId: dispatcher._id,
+    driverId: driver._id,
+  });
+  const thread: any = await seedThreadActivityFromSafeLegacy(ensuredThread);
+
+  const unreadCount = await DispatchChatMessage.countDocuments({
+    organizationId,
+    threadId: thread._id,
+    ...dispatchChatUnreadPredicate(actor._id),
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        load: {
+          id: String(load._id),
+          loadNumber: load.loadNumber || String(load._id),
+        },
+        thread: {
+          id: String(thread._id),
+          dispatcher: {
+            id: String(dispatcher._id),
+            name: dispatcher.name || "Dispatcher",
+            email: dispatcher.email || "",
+            avatar: await resolveParticipantAvatar(dispatcher.avatar),
+            isActive: dispatcher.isActive !== false,
+          },
+          driver: {
+            id: String(driver._id),
+            name: driver.name || "Driver",
+            email: driver.email || "",
+            avatar: await resolveParticipantAvatar(driver.avatar),
+            isActive: driver.isActive !== false,
+          },
+          unreadCount,
+          lastMessageAt: thread.lastMessageAt ?? null,
+          lastMessagePreview: thread.lastMessagePreview || "",
+          lastMessageType: thread.lastMessageType ?? null,
+        },
+      },
+      "Dispatch Chat ready",
+    ),
+  );
+});
+
 // GET /api/driver-tracking/dispatch-chat/threads
 const getThreads = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const actor = getUser(req);
@@ -1847,6 +2044,8 @@ const markRead = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) 
 
 export default {
   openLoadCreatorThread,
+  getMyLoadContacts,
+  openMyLoadThread,
   getThreads,
   getUnreadTotal,
   getMessages,

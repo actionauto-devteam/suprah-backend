@@ -15,6 +15,7 @@ import organizationRoute from "./organization.routes";
 import invitationRoute from "./invitation.routes";
 import driverTrackingRoute from "./driverTracking.routes";
 import dispatchChannelRoute from "./dispatchChannel.routes";
+import integrationsRoute from "./integrations.routes";
 import driverRequestRoute from "./driverRequest.routes";
 import driverProfileRoute from "./driverProfile.routes";
 import adminRoute from "./admin.routes";
@@ -294,6 +295,10 @@ const defaultRoutes = [
   {
     path: "/dispatch-channels",
     route: dispatchChannelRoute,
+  },
+  {
+    path: "/integrations",
+    route: integrationsRoute,
   },
   {
     path: "/admin",
