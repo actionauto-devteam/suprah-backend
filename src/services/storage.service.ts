@@ -5,6 +5,7 @@ import config from '../config';
 import path from 'path';
 import fs from 'fs/promises';
 import { existsSync, mkdirSync, createReadStream } from 'fs';
+import { sharedAwsHttpHandler } from '../config/awsHttpHandler';
 
 export enum BucketType {
     PUBLIC = 'public',
@@ -49,6 +50,7 @@ class StorageService {
             },
             requestChecksumCalculation: 'WHEN_REQUIRED',
             responseChecksumValidation: 'WHEN_REQUIRED',
+            requestHandler: sharedAwsHttpHandler,
         });
         this.isConfigured = true;
     }
