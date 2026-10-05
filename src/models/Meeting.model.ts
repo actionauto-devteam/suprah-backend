@@ -1,17 +1,23 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IMeetingParticipant {
-  crmUserId: mongoose.Types.ObjectId;
+  crmUserId?: mongoose.Types.ObjectId;   // absent for external guests
   fullName: string;
   avatar?: string;
   role: 'host' | 'participant';
   joinedAt: Date;
   leftAt?: Date;
+  isGuest?: boolean;
+  guestId?: string;                      // stable id from the guest pass (JWT)
+  guestEmail?: string;                   // collected at guest join, used for distribution
 }
 
 export interface IMeetingWaiting {
-  crmUserId: mongoose.Types.ObjectId;
+  crmUserId?: mongoose.Types.ObjectId;   // absent for external guests
   fullName: string;
+  isGuest?: boolean;
+  guestId?: string;
+  guestEmail?: string;
   avatar?: string;
   status: 'waiting' | 'admitted' | 'denied';
   requestedAt: Date;
@@ -62,6 +68,15 @@ export interface IMeeting extends Document {
     generatedAt?: Date;
     error?: string;
   };
+  distribution?: {
+    sentAt?: Date;
+    sentBy?: mongoose.Types.ObjectId;
+    recipients: {
+      email: string; name?: string;
+      kind: 'internal' | 'guest';
+      status: 'sent' | 'failed'; error?: string;
+    }[];
+  };
   startedAt?: Date;
   endedAt?: Date;
   createdAt: Date;
@@ -86,18 +101,24 @@ const MeetingSchema = new Schema<IMeeting>(
     mediaRegion: { type: String },
     participants: [
       {
-        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
+        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: false },
         fullName: { type: String, required: true },
         avatar: { type: String, default: null },
         role: { type: String, enum: ['host', 'participant'], default: 'participant' },
         joinedAt: { type: Date, default: Date.now },
         leftAt: { type: Date },
+        isGuest: { type: Boolean, default: false },
+        guestId: { type: String },
+        guestEmail: { type: String },
       },
     ],
     waiting: [
       {
-        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: true },
+        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', required: false },
         fullName: { type: String, required: true },
+        isGuest: { type: Boolean, default: false },
+        guestId: { type: String },
+        guestEmail: { type: String },
         avatar: { type: String, default: null },
         status: { type: String, enum: ['waiting', 'admitted', 'denied'], default: 'waiting' },
         requestedAt: { type: Date, default: Date.now },
@@ -127,6 +148,19 @@ const MeetingSchema = new Schema<IMeeting>(
       },
       generatedAt: { type: Date },
       error: { type: String },
+    },
+    distribution: {
+      sentAt: { type: Date },
+      sentBy: { type: Schema.Types.ObjectId, ref: 'CrmUser' },
+      recipients: [
+        {
+          email: { type: String, required: true },
+          name: { type: String },
+          kind: { type: String, enum: ['internal', 'guest'], default: 'internal' },
+          status: { type: String, enum: ['sent', 'failed'], default: 'sent' },
+          error: { type: String },
+        },
+      ],
     },
     startedAt: { type: Date },
     endedAt: { type: Date },

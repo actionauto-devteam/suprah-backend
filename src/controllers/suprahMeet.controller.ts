@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -13,6 +14,7 @@ import {
 import {
   startTranscription, getTranscriptionStatus, readTranscriptText, generateSummary,
 } from '../services/suprahMeetAI.service';
+import { mailConfigured, sendRecordingEmail } from '../services/suprahMeetMail.service';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
 const MAX_SERIES_SESSIONS = 30;
@@ -87,9 +89,9 @@ function isAllowedIn(user: any, meeting: IMeeting): boolean {
   if (meeting.inviteAll) return true;
   if (meeting.invitees.some((id) => id.toString() === uid)) return true;
   // Reconnect: anyone who has been in this meeting before may come back.
-  if (meeting.participants.some((p) => p.crmUserId.toString() === uid)) return true;
+  if (meeting.participants.some((p) => p.crmUserId && p.crmUserId.toString() === uid)) return true;
   return ((meeting as any).waiting ?? []).some(
-    (w: any) => w.crmUserId.toString() === uid && w.status === 'admitted'
+    (w: any) => w.crmUserId && w.crmUserId.toString() === uid && w.status === 'admitted'
   );
 }
 
@@ -260,6 +262,320 @@ const deleteMeeting = asyncHandler(async (req: Request, res: Response) => {
     wholeSeries ? 'Series deleted' : 'Meeting deleted'));
 });
 
+// ── External guests ─────────────────────────────────────────────────────────
+// Guests join with a shareable link (/meet/<code>) — no Suprah account. They
+// get a signed "guest pass" (JWT) that scopes them to ONE meeting code. Public
+// meetings admit them directly; private meetings put them in the waiting room,
+// where the host admits/denies exactly like internal join-by-code users.
+const GUEST_SECRET =
+  process.env.CRM_JWT_SECRET || process.env.JWT_SECRET || 'suprah-meet-guest-dev-secret';
+
+interface GuestPass {
+  guest: true; code: string; guestId: string;
+  name: string; email: string | null; organizationId: string;
+}
+const signGuest = (p: Omit<GuestPass, 'guest'>) =>
+  jwt.sign({ guest: true, ...p }, GUEST_SECRET, { expiresIn: '12h' });
+function verifyGuest(req: Request): GuestPass {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw) throw new ApiError(401, 'Missing guest pass.');
+  try {
+    const p = jwt.verify(raw, GUEST_SECRET) as any;
+    if (!p?.guest || !p?.guestId || !p?.code) throw new Error('not a guest pass');
+    return p as GuestPass;
+  } catch {
+    throw new ApiError(401, 'Your guest pass is invalid or expired. Re-enter your name to get a new one.');
+  }
+}
+// NOTE: codes are unique per organization; the platform currently runs a
+// single org, so a global lookup is safe. Revisit if multi-org goes live.
+const findMeetingByCodePublic = (code: string) =>
+  Meeting.findOne({ code: code.trim().toUpperCase() });
+
+const pubParticipants = (meeting: IMeeting) =>
+  meeting.participants.map((p: any) => ({
+    crmUserId: p.crmUserId ? p.crmUserId.toString() : `guest:${p.guestId}`,
+    fullName: p.fullName,
+    avatar: p.avatar ?? null,
+    role: p.role,
+    isGuest: Boolean(p.isGuest),
+  }));
+
+// POST /api/crm/meet/guest/:code/request   Body: { name, email? }   (public)
+const guestRequest = asyncHandler(async (req: Request, res: Response) => {
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
+  if (meeting.status === 'ended') {
+    return res.json(new ApiResponse(200, { ended: true }, 'Meeting already ended'));
+  }
+  const name = String(req.body?.name || '').trim().slice(0, 60);
+  if (name.length < 2) throw new ApiError(400, 'Please enter your name (at least 2 characters).');
+  const email = String(req.body?.email || '').trim().slice(0, 120) || null;
+
+  // Reuse the same guest identity across refreshes when the browser resends its pass.
+  let guestId: string | null = null;
+  try { guestId = verifyGuest(req).guestId; } catch { /* first visit — mint a new identity */ }
+  if (!guestId) guestId = 'g' + crypto.randomBytes(8).toString('hex');
+
+  const guestToken = signGuest({
+    code: meeting.code, guestId, name, email,
+    organizationId: meeting.organizationId.toString(),
+  });
+  const live = meeting.status === 'live';
+
+  if ((meeting as any).visibility !== 'private') {
+    return res.json(new ApiResponse(200,
+      { admitted: true, live, guestToken, title: meeting.title }, 'Admitted'));
+  }
+  const waiting: any[] = (meeting as any).waiting ?? ((meeting as any).waiting = []);
+  const entry = waiting.find((w) => w.guestId === guestId);
+  if (entry?.status === 'denied') {
+    return res.json(new ApiResponse(200, { denied: true, guestToken }, 'Declined by the host'));
+  }
+  if (entry?.status === 'admitted') {
+    return res.json(new ApiResponse(200,
+      { admitted: true, live, guestToken, title: meeting.title }, 'Admitted'));
+  }
+  if (!entry) {
+    waiting.push({
+      fullName: `${name} (guest)`, status: 'waiting', requestedAt: new Date(),
+      isGuest: true, guestId, guestEmail: email || undefined,
+    });
+    await meeting.save();
+  }
+  res.json(new ApiResponse(200, { waiting: true, guestToken, title: meeting.title }, 'Waiting for the host'));
+});
+
+// POST /api/crm/meet/guest/:code/join   (guest pass required)
+const guestJoin = asyncHandler(async (req: Request, res: Response) => {
+  const g = verifyGuest(req);
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
+  if (g.code !== meeting.code) throw new ApiError(401, 'This guest pass is for a different meeting.');
+  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  // Guests can never START a meeting — only join one that is live.
+  if (meeting.status === 'scheduled') {
+    throw new ApiError(409, "This meeting hasn't started yet. You'll join automatically once the host starts it.");
+  }
+  if ((meeting as any).visibility === 'private') {
+    const entry = (((meeting as any).waiting ?? []) as any[]).find((w) => w.guestId === g.guestId);
+    if (!entry || entry.status !== 'admitted') {
+      throw new ApiError(403, 'The host has not admitted you to this meeting yet.');
+    }
+  }
+
+  let chimeMeeting = meeting.chimeMeetingId ? await getChimeMeeting(meeting.chimeMeetingId) : null;
+  if (!chimeMeeting) {
+    chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
+    meeting.chimeMeetingId = chimeMeeting.MeetingId!;
+    meeting.mediaRegion = chimeMeeting.MediaRegion;
+  }
+  const externalUserId = `guest:${g.guestId}#${crypto.randomBytes(4).toString('hex')}`;
+  const attendee = await wrapAws(
+    createChimeAttendee(meeting.chimeMeetingId!, externalUserId),
+    'Joining the meeting'
+  );
+
+  const existing = meeting.participants.find((p: any) => p.guestId === g.guestId);
+  if (existing) {
+    existing.leftAt = undefined;
+    existing.fullName = g.name;
+    (existing as any).guestEmail = g.email || (existing as any).guestEmail;
+  } else {
+    meeting.participants.push({
+      fullName: g.name, role: 'participant', joinedAt: new Date(),
+      isGuest: true, guestId: g.guestId, guestEmail: g.email || undefined,
+    } as any);
+  }
+  await meeting.save();
+
+  res.json(new ApiResponse(200, {
+    chime: { Meeting: chimeMeeting, Attendee: attendee },
+    meeting: {
+      _id: meeting._id.toString(), code: meeting.code, title: meeting.title,
+      status: meeting.status, startedAt: meeting.startedAt ?? null,
+      participants: pubParticipants(meeting),
+      recording: { status: meeting.recording.status },
+    },
+    self: { crmUserId: `guest:${g.guestId}`, fullName: g.name, canControl: false, isGuest: true },
+  }, 'Joined as guest'));
+});
+
+// POST /api/crm/meet/guest/:code/leave   (guest pass required)
+const guestLeave = asyncHandler(async (req: Request, res: Response) => {
+  const g = verifyGuest(req);
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
+  const participant = meeting.participants.find((p: any) => p.guestId === g.guestId);
+  if (participant && !participant.leftAt) {
+    participant.leftAt = new Date();
+    await meeting.save();
+  }
+  res.json(new ApiResponse(200, {}, 'Left meeting'));
+});
+
+// GET /api/crm/meet/guest/:code/roster   (guest pass required)
+// Lets the guest UI show real names/avatars of people who join after them.
+const guestRoster = asyncHandler(async (req: Request, res: Response) => {
+  const g = verifyGuest(req);
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
+  res.json(new ApiResponse(200, { participants: pubParticipants(meeting) }, 'Roster'));
+});
+
+// ── Recording distribution (email the recording + AI summary) ───────────────
+const APP_URL = (process.env.MEET_APP_URL || process.env.APP_URL || 'https://www.suprah-app.com').replace(/\/$/, '');
+
+const whenStrMT = (d?: Date | null) =>
+  d ? new Intl.DateTimeFormat('en-US', {
+        timeZone: COMPANY_TZ, month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      }).format(d) + ' MT'
+    : '';
+
+/** Everyone who attended, deduped, with the best email we have for each. */
+async function buildRecipients(meeting: IMeeting) {
+  const internalIds = new Map<string, { name: string }>();
+  const guests = new Map<string, { name: string; email: string | null }>();
+  for (const p of meeting.participants as any[]) {
+    if (p.crmUserId) internalIds.set(p.crmUserId.toString(), { name: p.fullName });
+    else if (p.guestId) guests.set(p.guestId, { name: p.fullName, email: p.guestEmail || null });
+  }
+  const users = internalIds.size
+    ? await CrmUser.find({ _id: { $in: [...internalIds.keys()] } }).select('fullName email').lean()
+    : [];
+  const byId = new Map(users.map((u: any) => [u._id.toString(), u]));
+  const recipients: {
+    key: string; name: string; email: string | null; kind: 'internal' | 'guest';
+  }[] = [];
+  for (const [id, info] of internalIds) {
+    const u: any = byId.get(id);
+    recipients.push({ key: id, name: u?.fullName || info.name, email: u?.email || null, kind: 'internal' });
+  }
+  for (const [gid, g] of guests) {
+    recipients.push({ key: `guest:${gid}`, name: g.name, email: g.email, kind: 'guest' });
+  }
+  return recipients;
+}
+
+// GET /api/crm/meet/meetings/:code/distribution   (host / admin / manager)
+const getDistribution = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!canControl(user, meeting)) {
+    throw new ApiError(403, 'Only the host or an admin/manager can distribute the recording.');
+  }
+  const dist = (meeting as any).distribution;
+  res.json(new ApiResponse(200, {
+    recordingStatus: meeting.recording.status,
+    hasVideo: Boolean(meeting.recording.videoKey),
+    aiStatus: meeting.ai.status,
+    hasSummary: Boolean(meeting.ai.summary?.overview),
+    mailConfigured: mailConfigured(),
+    alreadySent: dist?.sentAt
+      ? { sentAt: dist.sentAt, count: (dist.recipients ?? []).length }
+      : null,
+    recipients: await buildRecipients(meeting),
+  }, 'Distribution state'));
+});
+
+// POST /api/crm/meet/meetings/:code/distribute
+// Body: { recipients: [{ email, name, kind }], resend?: boolean }
+const distributeRecording = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!canControl(user, meeting)) {
+    throw new ApiError(403, 'Only the host or an admin/manager can distribute the recording.');
+  }
+  if (!mailConfigured()) {
+    throw new ApiError(503, 'Email is not configured on the server (MEET_SMTP_* env vars).');
+  }
+  if (meeting.recording.status !== 'ready' || !meeting.recording.videoKey) {
+    throw new ApiError(409, 'The recording is not ready yet. Try again once processing finishes.');
+  }
+  const dist: any = (meeting as any).distribution;
+  if (dist?.sentAt && !req.body?.resend) {
+    throw new ApiError(409,
+      `This recording was already sent on ${whenStrMT(dist.sentAt)}. Confirm resend to send it again.`);
+  }
+  const list: { email: string; name?: string; kind?: string }[] = Array.isArray(req.body?.recipients)
+    ? req.body.recipients : [];
+  const clean = list
+    .map((r) => ({
+      email: String(r.email || '').trim().toLowerCase(),
+      name: String(r.name || '').trim().slice(0, 80),
+      kind: r.kind === 'guest' ? 'guest' as const : 'internal' as const,
+    }))
+    .filter((r) => /^\S+@\S+\.\S+$/.test(r.email));
+  if (clean.length === 0) throw new ApiError(400, 'Pick at least one recipient with a valid email.');
+  if (clean.length > 100) throw new ApiError(400, 'Too many recipients (max 100).');
+
+  const durationMin = meeting.startedAt && meeting.endedAt
+    ? Math.max(1, Math.round((meeting.endedAt.getTime() - meeting.startedAt.getTime()) / 60000))
+    : null;
+
+  const results: any[] = [];
+  for (const r of clean) {
+    // Personal, expiring link — the email never contains a raw file URL.
+    const token = jwt.sign(
+      { rec: true, code: meeting.code, email: r.email },
+      GUEST_SECRET, { expiresIn: '7d' }
+    );
+    const link = `${APP_URL}/meet/recording/${encodeURIComponent(meeting.code)}?t=${encodeURIComponent(token)}`;
+    try {
+      await sendRecordingEmail({
+        to: r.email, recipientName: r.name || r.email,
+        meetingTitle: meeting.title, code: meeting.code,
+        whenStr: whenStrMT(meeting.startedAt ?? meeting.endedAt),
+        durationMin, link, summary: meeting.ai.summary,
+      });
+      results.push({ email: r.email, name: r.name, kind: r.kind, status: 'sent' });
+    } catch (err: any) {
+      results.push({ email: r.email, name: r.name, kind: r.kind, status: 'failed', error: err?.message?.slice(0, 200) });
+    }
+  }
+  (meeting as any).distribution = { sentAt: new Date(), sentBy: user._id, recipients: results };
+  await meeting.save();
+  res.json(new ApiResponse(200, {
+    sent: results.filter((r) => r.status === 'sent').length,
+    failed: results.filter((r) => r.status === 'failed').length,
+    results,
+  }, 'Recording distributed'));
+});
+
+// GET /api/crm/meet/guest/recording/:code?t=...   (public — token-gated)
+// The email link lands here. Validates the personal token, then returns a
+// SHORT-LIVED presigned video URL + the AI summary. Expired/invalid links get
+// a clear error instead of the file.
+const recordingAccess = asyncHandler(async (req: Request, res: Response) => {
+  const raw = String(req.query.t || '');
+  if (!raw) throw new ApiError(401, 'This recording link is missing its access token.');
+  let payload: any;
+  try {
+    payload = jwt.verify(raw, GUEST_SECRET);
+  } catch (err: any) {
+    throw new ApiError(401, err?.name === 'TokenExpiredError'
+      ? 'This recording link has expired. Ask the meeting host to resend it.'
+      : 'This recording link is invalid. Ask the meeting host to resend it.');
+  }
+  if (!payload?.rec || !payload?.code) throw new ApiError(401, 'This recording link is invalid.');
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting || meeting.code !== payload.code) throw new ApiError(404, 'Recording not found.');
+  if (meeting.recording.status !== 'ready' || !meeting.recording.videoKey) {
+    throw new ApiError(409, 'This recording is not available yet.');
+  }
+  const videoUrl = await presignGet(meeting.recording.videoKey);
+  res.json(new ApiResponse(200, {
+    title: meeting.title,
+    code: meeting.code,
+    whenStr: whenStrMT(meeting.startedAt ?? meeting.endedAt),
+    durationMin: meeting.startedAt && meeting.endedAt
+      ? Math.max(1, Math.round((meeting.endedAt.getTime() - meeting.startedAt.getTime()) / 60000))
+      : null,
+    videoUrl,
+    summary: meeting.ai.summary ?? null,
+    viewer: payload.email ?? null,
+  }, 'Recording'));
+});
+
 // ── Waiting room ────────────────────────────────────────────────────────────
 // Tagged attendees, the host, and admins/managers never wait; anyone joining
 // purely by code asks first. The entry lives on the meeting doc, so waiting
@@ -276,7 +592,7 @@ const requestJoin = asyncHandler(async (req: Request, res: Response) => {
   }
   const uid = user._id.toString();
   const waiting: any[] = (meeting as any).waiting ?? ((meeting as any).waiting = []);
-  const entry = waiting.find((w) => w.crmUserId.toString() === uid);
+  const entry = waiting.find((w) => w.crmUserId && w.crmUserId.toString() === uid);
   if (entry?.status === 'denied') {
     return res.json(new ApiResponse(200, { denied: true }, 'Declined by the host'));
   }
@@ -302,9 +618,10 @@ const getWaiting = asyncHandler(async (req: Request, res: Response) => {
   const waiting = (((meeting as any).waiting ?? []) as any[])
     .filter((w) => w.status === 'waiting')
     .map((w) => ({
-      crmUserId: w.crmUserId.toString(),
+      crmUserId: w.crmUserId ? w.crmUserId.toString() : `guest:${w.guestId}`,
       fullName: w.fullName,
       avatar: w.avatar ?? null,
+      isGuest: Boolean(w.isGuest),
       requestedAt: w.requestedAt,
     }));
   res.json(new ApiResponse(200, { waiting }, 'Waiting room fetched'));
@@ -322,7 +639,7 @@ const respondWaiting = asyncHandler(async (req: Request, res: Response) => {
   }
   const target = String(req.params.userId || '');
   const entry = (((meeting as any).waiting ?? []) as any[]).find(
-    (w) => w.crmUserId.toString() === target
+    (w) => (w.crmUserId ? w.crmUserId.toString() === target : `guest:${w.guestId}` === target)
   );
   if (!entry) throw new ApiError(404, 'That person is not in the waiting room.');
   entry.status = action === 'admit' ? 'admitted' : 'denied';
@@ -483,7 +800,7 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
-  const existing = meeting.participants.find((p) => p.crmUserId.toString() === user._id.toString());
+  const existing = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
   if (existing) {
     existing.leftAt = undefined;
     existing.fullName = user.fullName;
@@ -519,7 +836,7 @@ const getMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── POST /api/crm/meet/meetings/:code/leave ─────────────────────────────────
 const leaveMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  const participant = meeting.participants.find((p) => p.crmUserId.toString() === user._id.toString());
+  const participant = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
   if (participant) {
     participant.leftAt = new Date();
     await meeting.save();
@@ -534,7 +851,7 @@ const endMeeting = asyncHandler(async (req: Request, res: Response) => {
   // end ONLY when the host is not currently in the room (host-absent fallback).
   const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
   const hostPresent = meeting.participants.some(
-    (p) => p.crmUserId.toString() === meeting.hostCrmUserId.toString() && !p.leftAt
+    (p) => p.crmUserId && p.crmUserId.toString() === meeting.hostCrmUserId.toString() && !p.leftAt
   );
   const isElevated = user.role === 'admin' || user.role === 'manager';
   if (!isHost && !(isElevated && !hostPresent)) {
@@ -697,8 +1014,9 @@ function serializeMeeting(m: any) {
     inviteDepartments: m.inviteDepartments ?? [],
     hostCrmUserId: m.hostCrmUserId?.toString?.() ?? m.hostCrmUserId,
     participants: (m.participants ?? []).map((p: any) => ({
-      crmUserId: p.crmUserId?.toString?.() ?? p.crmUserId,
+      crmUserId: p.crmUserId ? p.crmUserId.toString() : (p.guestId ? `guest:${p.guestId}` : null),
       fullName: p.fullName,
+      isGuest: Boolean((p as any).isGuest),
       avatar: p.avatar ?? null,
       role: p.role,
       joinedAt: p.joinedAt,
@@ -718,5 +1036,7 @@ function serializeMeeting(m: any) {
 
 export default {
   createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting,
-  deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
+  deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting,
+  guestRequest, guestJoin, guestLeave, guestRoster,
+  getDistribution, distributeRecording, recordingAccess, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
 };
