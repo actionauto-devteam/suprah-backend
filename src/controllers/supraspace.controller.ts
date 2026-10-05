@@ -998,6 +998,46 @@ async function signAttachments(message: any) {
   return message;
 }
 
+async function serializeDeliveredMessage(message: any, fallbackSender: any, replyTo?: string) {
+  try {
+    await message.populate('sender', 'fullName username avatar');
+    if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
+  } catch (error) {
+    logger.warn({ error, messageId: message._id?.toString() }, '[SupraSpace] Message presentation lookup failed');
+  }
+
+  const result = message.toObject() as any;
+  if (!result.sender || typeof result.sender.fullName !== 'string') {
+    result.sender = {
+      _id: fallbackSender._id?.toString(),
+      fullName: fallbackSender.fullName || 'Someone',
+      username: fallbackSender.username || 'user',
+      avatar: fallbackSender.avatar,
+    };
+  }
+
+  try {
+    return await signAttachments(result);
+  } catch (error) {
+    logger.warn({ error, messageId: message._id?.toString() }, '[SupraSpace] Message attachment signing failed');
+    return result;
+  }
+}
+
+async function updateDeliveredConversationSummary(conversation: any, message: any, senderId: string) {
+  conversation.lastMessage = message._id as any;
+  conversation.lastMessageAt = message.createdAt;
+  conversation.deletedFor = (conversation.deletedFor as any[])
+    .map(String)
+    .filter(id => id !== senderId);
+
+  try {
+    await conversation.save();
+  } catch (error) {
+    logger.error({ error, conversationId: conversation._id?.toString(), messageId: message._id?.toString() }, '[SupraSpace] Message saved but conversation summary update failed');
+  }
+}
+
 const AVATAR_SIGN_TTL = 7 * 24 * 60 * 60;
 
 async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: string | null }>(conv: T): Promise<T> {
@@ -1825,6 +1865,24 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, signed.reverse(), 'Messages fetched'));
 });
 
+/** GET /api/supraspace/conversations/:id/messages/:messageId — exact idempotent-send reconciliation */
+const getDeliveredMessage = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id, messageId } = req.params;
+  if (!mongoose.isValidObjectId(messageId)) throw new ApiError(400, 'Invalid message identifier');
+
+  const conversation = await SupraSpaceConversation.findById(id).lean();
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const message = await SupraSpaceMessage.findOne({ _id: messageId, conversationId: id, isDeleted: false })
+    .populate('sender', 'fullName username avatar')
+    .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
+  if (!message) throw new ApiError(404, 'Message not found');
+
+  res.json(new ApiResponse(200, await serializeDeliveredMessage(message, req.crmUser), 'Message found'));
+});
+
 const getConversationAttachments = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -2139,25 +2197,18 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     sentAt: isScheduled ? null : new Date(),
   }, clientMessageId);
 
-  await message.populate('sender', 'fullName username avatar');
-  if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
-
-  if (!created) return res.status(message.scheduledStatus === 'pending' ? 202 : 200).json(new ApiResponse(200, await signAttachments(message.toObject()), 'Message already accepted'));
+  if (!created) return res.status(message.scheduledStatus === 'pending' ? 202 : 200).json(new ApiResponse(200, await serializeDeliveredMessage(message, req.crmUser, replyTo), 'Message already accepted'));
 
   if (isScheduled) {
     return res.status(202).json(new ApiResponse(202, message.toObject(), 'Message scheduled'));
   }
 
-  conversation.lastMessage = message._id as any;
-  conversation.lastMessageAt = message.createdAt;
-
   const resurrectedFor = (conversation.deletedFor as any[])
     .map(String)
-    .filter(id => id !== userId.toString());
-  conversation.deletedFor = [];
-  await conversation.save();
+    .filter(memberId => memberId !== userId.toString());
+  await updateDeliveredConversationSummary(conversation, message, userId.toString());
 
-  const messageForClient = await signAttachments(message.toObject() as any);
+  const messageForClient = await serializeDeliveredMessage(message, req.crmUser, replyTo);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
 
   // Web Push to offline members (those whose socket has disconnected, e.g. mobile background)
@@ -2169,7 +2220,11 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const convName = (conversation as any).name;
   const pushTitle = convName ? convName : senderName;
   const pushBodyFinal = convName ? `${senderName}: ${pushBody}` : pushBody;
-  pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '', message._id.toString());
+  try {
+    pushToConversationMembers(conversation, userId.toString(), pushTitle, pushBodyFinal, content?.trim() || '', message._id.toString());
+  } catch (error) {
+    logger.warn({ error, conversationId: id, messageId: message._id.toString() }, '[SupraSpace] Message push dispatch failed');
+  }
 
   if (resurrectedFor.length > 0) {
     try {
@@ -2186,13 +2241,17 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // ── @mention notifications (fire-and-forget) ───────────────────────────
-  notifyMentionedMembers({
-    text: content?.trim() || '',
-    conversation,
-    senderId: userId,
-    organizationId: (req.crmUser!.organizationId as any).toString(),
-    messageId: message._id.toString(),
-  });
+  try {
+    notifyMentionedMembers({
+      text: content?.trim() || '',
+      conversation,
+      senderId: userId,
+      organizationId: (req.crmUser!.organizationId as any).toString(),
+      messageId: message._id.toString(),
+    });
+  } catch (error) {
+    logger.warn({ error, conversationId: id, messageId: message._id.toString() }, '[SupraSpace] Message mention notification dispatch failed');
+  }
 
   res.status(201).json(new ApiResponse(201, messageForClient, 'Message sent'));
 });
@@ -2392,35 +2451,31 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const { message, created } = delivery;
   if (!created) {
     await Promise.all(attachments.map(attachment => deleteSupraSpaceAttachmentFiles(attachment)));
-    await message.populate('sender', 'fullName username avatar');
-    return res.json(new ApiResponse(200, await signAttachments(message.toObject()), 'Message already accepted'));
+    return res.json(new ApiResponse(200, await serializeDeliveredMessage(message, req.crmUser, replyTo), 'Message already accepted'));
   }
-
-  await message.populate('sender', 'fullName username avatar');
-  if (replyTo) await message.populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
-
-  conversation.lastMessage = message._id as any;
-  conversation.lastMessageAt = message.createdAt;
 
   const resurrectedFor = (conversation.deletedFor as any[])
     .map(String)
-    .filter(id => id !== userId.toString());
-  conversation.deletedFor = [];
-  await conversation.save();
+    .filter(memberId => memberId !== userId.toString());
+  await updateDeliveredConversationSummary(conversation, message, userId.toString());
 
-  const messageForClient = await signAttachments(message.toObject() as any);
+  const messageForClient = await serializeDeliveredMessage(message, req.crmUser, replyTo);
   emitToConversation(conversation, 'message:new', { conversationId: id, message: messageForClient });
 
   const fileSenderName = (req.crmUser as any)?.fullName || 'Someone';
   const convNameFile = (conversation as any).name;
-  pushToConversationMembers(
-    conversation,
-    userId.toString(),
-    convNameFile ?? fileSenderName,
-    convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file',
-    content?.trim() || '',
-    message._id.toString()
-  );
+  try {
+    pushToConversationMembers(
+      conversation,
+      userId.toString(),
+      convNameFile ?? fileSenderName,
+      convNameFile ? `${fileSenderName}: Sent a file` : 'Sent a file',
+      content?.trim() || '',
+      message._id.toString()
+    );
+  } catch (error) {
+    logger.warn({ error, conversationId: id, messageId: message._id.toString() }, '[SupraSpace] Attachment push dispatch failed');
+  }
 
   if (resurrectedFor.length > 0) {
     try {
@@ -2436,13 +2491,17 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     } catch { /* non-critical */ }
   }
 
-  notifyMentionedMembers({
-    text: content?.trim() || '',
-    conversation,
-    senderId: userId,
-    organizationId: (req.crmUser!.organizationId as any).toString(),
-    messageId: message._id.toString(),
-  });
+  try {
+    notifyMentionedMembers({
+      text: content?.trim() || '',
+      conversation,
+      senderId: userId,
+      organizationId: (req.crmUser!.organizationId as any).toString(),
+      messageId: message._id.toString(),
+    });
+  } catch (error) {
+    logger.warn({ error, conversationId: id, messageId: message._id.toString() }, '[SupraSpace] Attachment mention notification dispatch failed');
+  }
 
   res.status(201).json(new ApiResponse(201, messageForClient, 'File sent'));
 });
@@ -3227,6 +3286,7 @@ const supraSpaceController = {
   setTheme,
   updateMemberSettings,
   getMessages,
+  getDeliveredMessage,
   getConversationAttachments,
   getConversationThreadReport,
   searchInConversation,

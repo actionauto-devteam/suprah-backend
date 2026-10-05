@@ -122,6 +122,7 @@ router.patch('/conversations/:id/member-settings', supraSpaceController.updateMe
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
 router.get('/conversations/:id/messages',   supraSpaceController.getMessages);
+router.get('/conversations/:id/messages/:messageId', supraSpaceController.getDeliveredMessage);
 router.get('/conversations/:id/attachments', supraSpaceController.getConversationAttachments);
 router.get('/conversations/:id/thread-report', supraSpaceController.getConversationThreadReport);
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
