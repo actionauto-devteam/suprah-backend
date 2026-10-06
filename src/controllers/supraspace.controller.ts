@@ -427,7 +427,12 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
     const senderDoc = await CrmUser.findById(senderId).select('fullName avatar').lean();
     const senderName = (senderDoc as any)?.fullName || 'Someone';
     const senderAvatar = (senderDoc as any)?.avatar as string | undefined;
-    const iconUrl = senderAvatar || createPushAvatarFallback(senderId, senderName);
+    const channelAvatar = conv.type === 'group'
+      ? (conv.avatarKey
+        ? await getCachedSignedUrl('supraspace-avatar', conv.avatarKey, AVATAR_SIGN_TTL)
+        : conv.avatar)
+      : undefined;
+    const iconUrl = channelAvatar || senderAvatar || createPushAvatarFallback(senderId, senderName);
     const senderPrefix = new RegExp(`^${escapeRegex(senderName)}:\\s*`, 'i');
     const singlePreview = body.replace(senderPrefix, '').trim() || 'New message';
     const notificationTitle = conv.type === 'group' ? pushTitle : senderName;
