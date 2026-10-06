@@ -1,6 +1,6 @@
-const DOUBLE_BRACE_CONTROL_TAG = /\{\{\s*(\/?)\s*(color|font|size)(?:\s*:\s*([^{}\n]+?))?\s*\}\}/gi;
-const SINGLE_BRACE_CONTROL_TAG = /\{\s*(?:color|font|size)\s*:\s*[^{}\n]+\s*\}|\{\s*\/\s*(?:color|font|size)\s*\}/gi;
-const EMPTY_CONTROL_WRAPPER = /\{\s*(color|font|size)\s*:\s*([^{}\n]+?)\s*\}([\s*_~`]*)\{\s*\/\s*\1\s*\}/gi;
+const DOUBLE_BRACE_CONTROL_TAG = /\{\{\s*(\/?)\s*(color|highlight|font|size)(?:\s*:\s*([^{}\n]+?))?\s*\}\}/gi;
+const SINGLE_BRACE_CONTROL_TAG = /\{\s*(?:color|highlight|font|size)\s*:\s*[^{}\n]+\s*\}|\{\s*\/\s*(?:color|highlight|font|size)\s*\}/gi;
+const EMPTY_CONTROL_WRAPPER = /\{\s*(color|highlight|font|size)\s*:\s*([^{}\n]+?)\s*\}([\s*_~`]*)\{\s*\/\s*\1\s*\}/gi;
 const FORMAT_ONLY_LINE = /(^|\n)[ \t]*(?:\*{2,}|_{2,}|~{2,})[ \t]*(?=\n|$)/g;
 
 
@@ -45,6 +45,11 @@ function normalizeLegacyMessageMarkup(content: string): string {
       if (kind === 'color') {
         return /^#[0-9a-f]{3,8}$/i.test(value)
           ? `{color:${value.toLowerCase()}}`
+          : '';
+      }
+      if (kind === 'highlight') {
+        return /^#[0-9a-f]{3,8}$/i.test(value)
+          ? `{highlight:${value.toLowerCase()}}`
           : '';
       }
       if (kind === 'font') {
