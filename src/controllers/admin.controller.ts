@@ -18,6 +18,8 @@ import { SystemLog } from '../models/SystemLog.model';
 import { metrics, getPercentile, driverTrackerMetrics, connectionMetrics } from '../utils/metrics';
 import { traccarHealthSnapshot } from "../services/traccar.service";
 import { googleGeocodingHealthSnapshot } from "../services/googleGeocoding.service";
+import { amazonLocationRoutesHealthSnapshot } from "../services/amazonLocationRoutes.service";
+import { loadEtaHealthSnapshot } from "../services/loadEta.service";
 import DriverTrackingDevice from "../models/DriverTrackingDevice.model";
 import { isValidTier, TIER_SEAT_LIMITS, TIER_PRICES, TIER_LABELS } from '../config/subscriptionTiers';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
@@ -159,6 +161,8 @@ export const getProcessStats = asyncHandler(async (req: Request, res: Response) 
     driverTracker: driverTrackerMetrics,
     connections: connectionMetrics,
     googleGeocoding: googleGeocodingHealthSnapshot(),
+    amazonLocationRoutes: amazonLocationRoutesHealthSnapshot(),
+    amazonLocationEta: loadEtaHealthSnapshot(),
     traccar: {
       ...traccarHealthSnapshot(),
       phones: {

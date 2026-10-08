@@ -171,7 +171,10 @@ export async function disableTraccarDevice(traccarDeviceId: number): Promise<voi
 export type TraccarPositionOutcome = { accepted: boolean; reason?: string };
 
 async function ingestTraccarPosition(uniqueId: string, position: TraccarPosition): Promise<TraccarPositionOutcome> {
-  const link: any = await DriverTrackingDevice.findOne({ uniqueId, status: "active" }).select("_id driverId").lean();
+  // Traccar phones only: a tracking-app device never sends through Traccar.
+  const link: any = await DriverTrackingDevice.findOne({ uniqueId, status: "active", provider: { $ne: "app" } })
+    .select("_id driverId")
+    .lean();
   if (!link) {
     health.counts.unknownDevice += 1;
     return { accepted: false, reason: "unknown_or_unapproved_device" };

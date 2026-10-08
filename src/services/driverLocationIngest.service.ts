@@ -18,13 +18,21 @@ import {
 
 /*
  * One pipeline for every driver location source: the Driver Portal in the
- * browser today, Traccar Client (through the company's Traccar Server) next.
+ * browser, Traccar Client (through the company's Traccar Server) and the
+ * Suprah Driver Tracker app (source "app").
  * Each source only has to turn its message into a NormalizedDriverLocation;
  * validation, the tracking-relationship rule, ordering, source priority,
  * storage and delivery to authorized viewers all happen here.
  */
 
-export type DriverLocationSource = "browser" | "traccar";
+export type DriverLocationSource = "browser" | "traccar" | "app";
+
+/**
+ * Phone sources (Traccar Client and the Suprah Driver Tracker app) keep
+ * reporting in the background and buffer while offline, so they are the
+ * primary source over the browser.
+ */
+export const PHONE_SOURCES: DriverLocationSource[] = ["traccar", "app"];
 
 /**
  * A single measurement, already tied to a Suprah driver through trusted
@@ -77,7 +85,8 @@ export const BROWSER_MAX_AGE_MS = 120_000;
  */
 export const BUFFERED_MAX_AGE_MS = 24 * 60 * 60_000;
 /**
- * Traccar is the primary source (business rule, 2026-09-30). While its latest
+ * Phone sources (Traccar, the tracking app) are primary (business rule,
+ * 2026-09-30). While their latest
  * reading is this recent, a browser reading doesn't replace it.
  */
 export const PRIMARY_SOURCE_FRESH_MS = 60_000;
@@ -327,11 +336,11 @@ export async function ingestDriverLocation(
     { $or: [{ sharingStoppedAt: null }, { sharingStoppedAt: { $lte: input.receivedAt } }] },
   ];
   if (source === "browser") {
-    // A browser reading only replaces a Traccar one after Traccar has been
+    // A browser reading only replaces a phone one after the phone has been
     // quiet for a while, so the marker doesn't jump between the two.
     conditions.push({
       $or: [
-        { source: { $ne: "traccar" } },
+        { source: { $nin: PHONE_SOURCES } },
         { locationRecordedAt: null },
         { locationRecordedAt: { $lte: new Date(measuredMs - PRIMARY_SOURCE_FRESH_MS) } },
       ],
@@ -355,12 +364,12 @@ export async function ingestDriverLocation(
         return rejected(source, "sharing_stopped");
       }
       const storedMs = stored?.locationRecordedAt ? new Date(stored.locationRecordedAt).getTime() : Number.NaN;
-      if (source === "browser" && stored?.source === "traccar" && Number.isFinite(storedMs) && storedMs <= measuredMs) {
+      if (source === "browser" && PHONE_SOURCES.includes(stored?.source) && Number.isFinite(storedMs) && storedMs <= measuredMs) {
         return rejected(source, "primary_source_fresh");
       }
-      // A late Traccar reading (the phone was offline) doesn't move the live
+      // A late phone reading (the phone was offline) doesn't move the live
       // position backwards, but it still fills in the trip history.
-      if (source === "traccar") await recordTripHistory(input, measuredAt, policy.trackingLoads);
+      if (PHONE_SOURCES.includes(source)) await recordTripHistory(input, measuredAt, policy.trackingLoads);
       return rejected(source, "older_than_stored");
     }
     throw error;

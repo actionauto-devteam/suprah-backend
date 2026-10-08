@@ -5,11 +5,14 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import LoadTripPoint from "../models/LoadTripPoint.model";
 import { canViewDriverExactGps, getDriverGpsTrackingLoads } from "../services/driverLocationAccess.service";
+import { buildRouteLine, routePieceStart } from "../services/routeLine.service";
 
 const DEFAULT_TRAIL_MINUTES = 120;
 const MIN_TRAIL_MINUTES = 15;
 const MAX_TRAIL_MINUTES = 360;
 const MAX_TRAIL_POINTS = 600;
+/** Readings read at most (newest kept): 6 hours at one every 5 seconds per load. */
+const MAX_TRAIL_READINGS = 10_000;
 
 /**
  * GET /api/driver-tracking/drivers/:driverId/recent-trail?minutes=120
@@ -18,6 +21,9 @@ const MAX_TRAIL_POINTS = 600;
  * the current organization that this person may see exactly: the load's
  * responsible dispatcher and the organization's admins, the same rule as live
  * GPS.
+ *
+ * The line is cleaned (rough readings, glitches and duplicate readings left
+ * out) and, when Amazon Location is switched on, follows the roads driven.
  */
 const getRecentTrail = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const driverId = String(req.params.driverId ?? "");
@@ -38,23 +44,42 @@ const getRecentTrail = asyncHandler(async (req: ExpressRequest, res: ExpressResp
     );
   }
 
+  // Start at a 15-minute boundary so finished pieces of the route stay the
+  // same between refreshes (their road match is reused).
+  const since = new Date(routePieceStart(Date.now() - minutes * 60_000));
   const rows: any[] = await LoadTripPoint.find({
     driverId,
     loadId: { $in: visibleLoadIds },
-    measuredAt: { $gte: new Date(Date.now() - minutes * 60_000) },
+    measuredAt: { $gte: since },
   })
-    .sort({ measuredAt: 1 })
-    .limit(MAX_TRAIL_POINTS * 5)
-    .select("lat lng measuredAt")
+    .sort({ measuredAt: -1 })
+    .limit(MAX_TRAIL_READINGS)
+    .select("lat lng measuredAt accuracy speed heading source")
     .lean();
-  // Evenly thinned, always keeping the newest point.
-  const step = Math.max(1, Math.ceil(rows.length / MAX_TRAIL_POINTS));
-  const points = step === 1 ? rows : rows.filter((_, index) => index % step === 0 || index === rows.length - 1);
+  rows.reverse();
+
+  const route = await buildRouteLine(
+    rows.map((row) => ({
+      lat: row.lat,
+      lng: row.lng,
+      measuredAt: new Date(row.measuredAt),
+      accuracy: row.accuracy ?? null,
+      speed: row.speed ?? null,
+      heading: row.heading ?? null,
+      source: row.source ?? null,
+    })),
+    MAX_TRAIL_POINTS,
+  );
 
   return res.status(200).json(
     new ApiResponse(200, {
       minutes,
-      points: points.map((point) => ({ lat: point.lat, lng: point.lng, measuredAt: point.measuredAt })),
+      // The line to draw, in order.
+      points: route.points,
+      // "roads" (matched to roads), "gps" (cleaned readings), "mixed" or "none".
+      routeSource: route.source,
+      // Newer live positions extend the line on the map.
+      throughMeasuredAt: route.throughMeasuredAt,
     }),
   );
 });

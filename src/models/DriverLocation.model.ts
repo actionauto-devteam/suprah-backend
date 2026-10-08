@@ -16,7 +16,7 @@ export interface IDriverLocation extends Document {
   locationRecordedAt?: Date | null;
   accuracy?: number | null;
   /** Which provider measured the current position. */
-  source?: "browser" | "traccar";
+  source?: "browser" | "traccar" | "app";
   /** Provider device id for Traccar positions. Identifies the phone, never the driver. */
   sourceDeviceId?: string | null;
   /** Metres per second, when the provider supplies it. */
@@ -70,7 +70,7 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
     ],
     locationRecordedAt: { type: Date, default: null },
     accuracy: { type: Number, min: 0, default: null },
-    source: { type: String, enum: ["browser", "traccar"], default: "browser" },
+    source: { type: String, enum: ["browser", "traccar", "app"], default: "browser" },
     sourceDeviceId: { type: String, default: null },
     speed: { type: Number, min: 0, default: null },
     heading: { type: Number, min: 0, max: 360, default: null },

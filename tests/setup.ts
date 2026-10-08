@@ -1,5 +1,16 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+
+// Tests use the local test database unless this terminal sets another one
+// (TEST_MONGODB_URI, or MONGODB_URI as before). Decided BEFORE reading .env,
+// so the app's own database address in .env is never picked up by accident.
+process.env.MONGODB_URI =
+    process.env.TEST_MONGODB_URI ||
+    process.env.MONGODB_URI ||
+    'mongodb://localhost:27017/action-auto-test';
+// Schedulers and background workers stay off in tests: they kept every test
+// process busy and stopped Jest from finishing.
+process.env.DISABLE_SCHEDULERS = 'true';
 dotenv.config();
 
 // Mock Clerk SDK

@@ -12,6 +12,7 @@ import auth from "../middleware/auth.middleware";
 import driverTrackingController from "../controllers/driverTracking.controller";
 import driverTrackingDeviceController from "../controllers/driverTrackingDevice.controller";
 import driverTrailController from "../controllers/driverTrail.controller";
+import loadEtaController from "../controllers/loadEta.controller";
 import mapPlacesController from "../controllers/mapPlaces.controller";
 import { startTraccarReconcileWorker } from "../services/traccar.service";
 import { retryFailedTraccarDeviceSyncs } from "../services/driverTrackingDevice.service";
@@ -21,7 +22,7 @@ import dispatchChatController from "../controllers/dispatchChat.controller";
 import dispatchChatPinController from "../controllers/dispatchChatPin.controller";
 import { ApiError } from "../utils/ApiError";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
-import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
+import { etaLookupLimiter, mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
@@ -264,10 +265,22 @@ router.get("/dashboard-stats", driverOnly, noStoreSensitive, driverTrackingContr
 
 // Driver load lists
 router.get("/my-loads", driverOnly, noStoreSensitive, driverTrackingController.getMyLoads);
+// Arrival time at the driver's next stop (Amazon Location, live traffic).
+router.get("/my-loads/:id/eta", driverOnly, noStoreSensitive, etaLookupLimiter, loadEtaController.getMyLoadEta);
 router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingController.getMyRequests);
 router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 
 router.get("/loads/:id", driverOrTrackingStaff, noStoreSensitive, driverTrackingController.getLoadDetail);
+// Arrival time at the load's next stop, for the people who can see the
+// driver's exact location (Amazon Location, live traffic).
+router.get(
+  "/loads/:id/eta",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  etaLookupLimiter,
+  loadEtaController.getLoadEtaForStaff,
+);
 router.get(
   "/loads/:id/assignment-history",
   staffOnly,
@@ -370,6 +383,7 @@ router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
 // Phone tracking with Traccar Client: the driver's own link...
 router.get("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.getMyTrackingDevice);
 router.post("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.startMyTrackingDevice);
+router.post("/tracking-device/pairing-code", driverOnly, noStoreSensitive, driverTrackingDeviceController.renewMyPairingCode);
 router.delete("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.removeMyTrackingDevice);
 // ...and its review by the people who verify drivers.
 router.get("/drivers/:driverId/tracking-device", staffOnly, noStoreSensitive, driverTrackingDeviceController.getDriverTrackingDevice);

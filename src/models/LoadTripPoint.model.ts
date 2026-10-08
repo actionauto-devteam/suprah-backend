@@ -25,7 +25,7 @@ export interface ILoadTripPoint extends Document {
   speed?: number | null;
   /** Degrees clockwise from north. */
   heading?: number | null;
-  source: "browser" | "traccar";
+  source: "browser" | "traccar" | "app";
   /** The load's status when the position arrived. */
   loadStatus: string;
   createdAt: Date;
@@ -43,7 +43,7 @@ const loadTripPointSchema = new Schema<ILoadTripPoint>(
     accuracy: { type: Number, min: 0, default: null },
     speed: { type: Number, min: 0, default: null },
     heading: { type: Number, min: 0, max: 360, default: null },
-    source: { type: String, enum: ["browser", "traccar"], required: true },
+    source: { type: String, enum: ["browser", "traccar", "app"], required: true },
     loadStatus: { type: String, required: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } },

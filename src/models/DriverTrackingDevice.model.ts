@@ -1,7 +1,12 @@
 import mongoose, { Document, Model, Schema } from "mongoose";
 
 /*
- * A driver's phone running Traccar Client, linked to their Suprah account.
+ * A driver's phone linked to their Suprah account: Traccar Client
+ * (provider "traccar") or the Suprah Driver Tracker app (provider "app").
+ *
+ * The app pairs with a short one-time code the driver gets in the Driver
+ * Portal, then authenticates every request with its own random device key.
+ * Suprah stores only hashes of the code and the key.
  *
  * Rules (business decisions, 2026-09-30):
  * - The driver starts setup in the Driver Portal; Suprah generates a long
@@ -19,11 +24,12 @@ import mongoose, { Document, Model, Schema } from "mongoose";
 
 export type DriverTrackingDeviceStatus = "pending" | "active" | "revoked";
 export type TraccarSyncStatus = "not_synced" | "synced" | "failed";
+export type DriverTrackingDeviceProvider = "traccar" | "app";
 
 export interface IDriverTrackingDevice extends Document {
   driverId: mongoose.Types.ObjectId;
-  provider: "traccar";
-  /** Identifier the driver enters in Traccar Client. */
+  provider: DriverTrackingDeviceProvider;
+  /** Traccar: the identifier entered in Traccar Client. App: its public device id. */
   uniqueId: string;
   status: DriverTrackingDeviceStatus;
   /** true while pending or active: one current link per driver. */
@@ -41,6 +47,17 @@ export interface IDriverTrackingDevice extends Document {
   traccarSyncError?: string | null;
   /** Measurement time of the newest position received from this phone. */
   lastPositionAt?: Date | null;
+  /** App only: hash of the one-time pairing code, until the app uses it. */
+  pairingCodeHash?: string | null;
+  pairingCodeExpiresAt?: Date | null;
+  /** App only: when the app paired with the code. */
+  claimedAt?: Date | null;
+  /** App only: hash of the device key the app signs requests with. */
+  deviceSecretHash?: string | null;
+  /** App only: the phone model and app version it reported when pairing. */
+  deviceName?: string | null;
+  devicePlatform?: "android" | "ios" | null;
+  appVersion?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,7 +65,7 @@ export interface IDriverTrackingDevice extends Document {
 const driverTrackingDeviceSchema = new Schema<IDriverTrackingDevice>(
   {
     driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    provider: { type: String, enum: ["traccar"], default: "traccar" },
+    provider: { type: String, enum: ["traccar", "app"], default: "traccar" },
     uniqueId: { type: String, required: true, trim: true },
     status: { type: String, enum: ["pending", "active", "revoked"], required: true, default: "pending" },
     isCurrent: { type: Boolean, required: true, default: true },
@@ -62,6 +79,13 @@ const driverTrackingDeviceSchema = new Schema<IDriverTrackingDevice>(
     traccarSyncStatus: { type: String, enum: ["not_synced", "synced", "failed"], default: "not_synced" },
     traccarSyncError: { type: String, default: null, maxlength: 300 },
     lastPositionAt: { type: Date, default: null },
+    pairingCodeHash: { type: String, default: null, select: false },
+    pairingCodeExpiresAt: { type: Date, default: null },
+    claimedAt: { type: Date, default: null },
+    deviceSecretHash: { type: String, default: null, select: false },
+    deviceName: { type: String, default: null, maxlength: 80 },
+    devicePlatform: { type: String, enum: ["android", "ios", null], default: null },
+    appVersion: { type: String, default: null, maxlength: 40 },
   },
   { timestamps: true },
 );
@@ -74,6 +98,8 @@ driverTrackingDeviceSchema.index(
   { unique: true, partialFilterExpression: { isCurrent: true } },
 );
 driverTrackingDeviceSchema.index({ status: 1, traccarSyncStatus: 1 });
+// The app pairs by its code (only unused codes are stored).
+driverTrackingDeviceSchema.index({ pairingCodeHash: 1 }, { sparse: true });
 
 const DriverTrackingDevice: Model<IDriverTrackingDevice> =
   (mongoose.models.DriverTrackingDevice as Model<IDriverTrackingDevice>) ||

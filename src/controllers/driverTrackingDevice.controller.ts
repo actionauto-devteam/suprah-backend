@@ -5,6 +5,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import { IUser } from "../models/User.model";
 import { getTraccarConfig } from "../config/traccar";
+import { getTrackingAppConfig } from "../config/trackingApp";
 import {
   assertDriverReviewCenterAccess,
   assertDriverReviewMutationAccess,
@@ -14,8 +15,10 @@ import {
   approveDeviceLink,
   currentDeviceLink,
   driverLinkView,
+  phoneTrackingProvider,
   phoneTrackingReminder,
   removeOwnDeviceLink,
+  renewPairingCode,
   retryDeviceLinkSync,
   reviewerLinkView,
   revokeDeviceLinkByStaff,
@@ -24,9 +27,10 @@ import {
 import { processTraccarForward } from "../services/traccar.service";
 
 /*
- * Phone tracking with Traccar Client: the driver's own setup, reviewer
- * approval (the same people who verify drivers), and the endpoint Traccar
- * Server forwards positions to.
+ * Phone tracking (Traccar Client or the Suprah Driver Tracker app): the
+ * driver's own setup, reviewer approval (the same people who verify
+ * drivers), and the endpoint Traccar Server forwards positions to. The app's
+ * own endpoints are in trackingApp.controller.ts.
  */
 
 function getUser(req: ExpressRequest): IUser {
@@ -35,14 +39,21 @@ function getUser(req: ExpressRequest): IUser {
   return user;
 }
 
-async function driverPayload(driverId: string) {
+async function driverPayload(driverId: string, pairingCode: string | null = null) {
   const config = getTraccarConfig();
+  const provider = phoneTrackingProvider();
   const link = await currentDeviceLink(driverId);
   return {
-    available: config.usable,
-    // The server address the driver enters once in Traccar Client.
-    serverUrl: config.usable ? config.deviceServerUrl : null,
+    available: provider !== null,
+    /** What new setups use: "app" (Suprah Driver Tracker), "traccar", or null. */
+    provider,
+    // Traccar: the server address the driver enters once in Traccar Client.
+    serverUrl: provider === "traccar" ? config.deviceServerUrl : null,
+    // App: where drivers install it, when the company has set a link.
+    downloadUrl: provider === "app" ? getTrackingAppConfig().downloadUrl : null,
     device: driverLinkView(link),
+    // App: the one-time pairing code, only in the response that created it.
+    pairingCode,
     reminder: await phoneTrackingReminder(driverId, link),
   };
 }
@@ -56,16 +67,23 @@ const getMyTrackingDevice = asyncHandler(async (req: ExpressRequest, res: Expres
 // POST /api/driver-tracking/tracking-device  (driver: set up a first or replacement phone)
 const startMyTrackingDevice = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const user = getUser(req);
-  await startDeviceLink(String(user._id));
+  const { pairingCode } = await startDeviceLink(String(user._id));
   res
     .status(201)
     .json(
       new ApiResponse(
         201,
-        await driverPayload(String(user._id)),
+        await driverPayload(String(user._id), pairingCode),
         "Phone tracking setup started. A dispatcher or admin will approve it before your phone's positions are used.",
       ),
     );
+});
+
+// POST /api/driver-tracking/tracking-device/pairing-code  (driver: a fresh code for the app)
+const renewMyPairingCode = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const { pairingCode } = await renewPairingCode(String(user._id));
+  res.status(200).json(new ApiResponse(200, await driverPayload(String(user._id), pairingCode), "New pairing code ready"));
 });
 
 // DELETE /api/driver-tracking/tracking-device  (driver: stop using the linked phone)
@@ -95,9 +113,12 @@ async function reviewer(req: ExpressRequest, mutate: boolean) {
 }
 
 async function reviewerPayload(driverId: string) {
+  const link = await currentDeviceLink(driverId);
+  const provider = link?.provider ?? phoneTrackingProvider();
   return {
-    available: getTraccarConfig().usable,
-    device: await reviewerLinkView(await currentDeviceLink(driverId)),
+    available: provider === "app" ? getTrackingAppConfig().enabled : provider === "traccar" ? getTraccarConfig().usable : false,
+    provider,
+    device: await reviewerLinkView(link),
   };
 }
 
@@ -137,6 +158,7 @@ const receiveTraccarPosition = asyncHandler(async (req: ExpressRequest, res: Exp
 export default {
   getMyTrackingDevice,
   startMyTrackingDevice,
+  renewMyPairingCode,
   removeMyTrackingDevice,
   getDriverTrackingDevice,
   approveDriverTrackingDevice,
