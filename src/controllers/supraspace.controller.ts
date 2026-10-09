@@ -43,6 +43,11 @@ const getConversationLeftAt = (conversation: any, userId: any) => {
 };
 const canReadConversationHistory = (conversation: any, userId: any) =>
   idIn(conversation.members as any, userId) || Boolean(getConversationLeftAt(conversation, userId));
+const assertConversationWritable = (conversation: any, userId: any) => {
+  if (idIn(conversation.archivedBy as any, userId)) {
+    throw new ApiError(403, 'This conversation is archived. Unarchive it to send messages.');
+  }
+};
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAYPULSE_REPORT_CHANNEL_NAME = 'DayPulse Reports';
 const DAYPULSE_REPORT_CHANNEL_NAME_REGEX = /^DayPulse Reports$/i;
@@ -210,7 +215,11 @@ function emitToConversation(conv: any, event: string, payload: any) {
   try {
     const io = getIO();
     (conv.members || []).forEach((m: any) => {
-      io.to(`user:${m.toString ? m.toString() : m}`).emit(event, payload);
+      const memberId = m.toString ? m.toString() : String(m);
+      // Personal archives keep history and membership intact, but should not
+      // receive newly delivered conversation activity until unarchived.
+      if (event === 'message:new' && idIn(conv.archivedBy as any, memberId)) return;
+      io.to(`user:${memberId}`).emit(event, payload);
     });
   } catch (err) {
     console.warn(`[SupraSpace] Socket emit failed on ${event}:`, err);
@@ -418,7 +427,7 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
   try {
     const recipientIds = (conv.members || [])
       .map((m: any) => (m.toString ? m.toString() : String(m)))
-      .filter((id: string) => id !== senderId);
+      .filter((id: string) => id !== senderId && !idIn(conv.archivedBy as any, id));
 
     if (!recipientIds.length) return;
 
@@ -641,7 +650,7 @@ async function notifyMentionedMembers(params: {
     const hasAll = /(^|[^\p{L}\p{N}_@])@\s*all(?=$|[^\p{L}\p{N}_])/iu.test(text);
     const memberIds = (params.conversation.members as any[])
       .map((x: any) => x.toString())
-      .filter((x: string) => x !== params.senderId.toString());
+      .filter((x: string) => x !== params.senderId.toString() && !idIn(params.conversation.archivedBy as any, x));
     if (!memberIds.length) return;
 
     const members = await CrmUser.find({ _id: { $in: memberIds } }).select('_id fullName username notificationPreferences').lean();
@@ -2176,6 +2185,7 @@ const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
@@ -2391,6 +2401,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
@@ -2533,6 +2544,7 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   let reactionAdded = false;
   let reactionRemoved = false;
@@ -2647,6 +2659,7 @@ const pinMessage = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const alreadyPinned = idIn(message.pinnedBy as any, userId);
   if (pinned) {
@@ -2679,6 +2692,10 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
   if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only delete your own messages');
   if (message.isDeleted) return res.json(new ApiResponse(200, null, 'Message already deleted'));
 
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
+
   await SupraSpaceMessage.findByIdAndUpdate(
     messageId,
     { $set: { isDeleted: true, deletedAt: new Date(), content: '', attachments: [], gif: null, poll: null, event: null } },
@@ -2691,7 +2708,6 @@ const deleteMessage = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
-  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (conversation) {
     const summary = await recomputeConversationLastMessage(message.conversationId, message._id);
     const unreadUserIds = (conversation.members || [])
@@ -2723,6 +2739,9 @@ const editMessage = asyncHandler(async (req: Request, res: Response) => {
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
   if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (message.type === 'voice' || message.type === 'poll' || message.type === 'event') {
     throw new ApiError(400, 'This message type cannot be edited');
   }
@@ -2732,7 +2751,6 @@ const editMessage = asyncHandler(async (req: Request, res: Response) => {
   message.isEdited = true;
   await message.save();
 
-  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (conversation) {
     emitToConversation(conversation, 'message:edited', {
       conversationId: message.conversationId.toString(),
@@ -2759,6 +2777,9 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
   if (message.sender.toString() !== userId.toString()) throw new ApiError(403, 'You can only edit your own messages');
+  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (message.type === 'voice' || message.type === 'poll' || message.type === 'event' || message.type === 'gif') {
     throw new ApiError(400, 'This message type cannot have its attachments replaced');
   }
@@ -2833,7 +2854,6 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
 
   await Promise.all(removedAttachments.map(a => deleteSupraSpaceAttachmentFiles(a, { messageId })));
 
-  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   const messageForClient = await signAttachments(message.toObject() as any);
   if (conversation) {
     emitToConversation(conversation, 'message:edited', {
@@ -2863,6 +2883,7 @@ const createPoll = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
@@ -2918,6 +2939,7 @@ const votePoll = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const uid = userId.toString();
   message.poll.options = message.poll.options.map((o) => {
@@ -2951,6 +2973,7 @@ const createEvent = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (isDayPulseReportConversation(conversation)) {
     throw new ApiError(403, 'DayPulse Reports is read-only. Reports are posted automatically from DayPulse.');
   }
@@ -3010,6 +3033,7 @@ const rsvpEvent = asyncHandler(async (req: Request, res: Response) => {
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const uid = userId.toString();
   (['going', 'maybe', 'declined'] as const).forEach((key) => {

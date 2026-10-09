@@ -105,7 +105,9 @@ function emitToConversation(conv: any, event: string, payload: any) {
   try {
     const io = getIO();
     (conv.members || []).forEach((m: any) => {
-      io.to(`user:${m.toString ? m.toString() : m}`).emit(event, payload);
+      const memberId = m.toString ? m.toString() : String(m);
+      if (event === 'message:new' && (conv.archivedBy || []).some((archived: any) => archived.toString() === memberId)) return;
+      io.to(`user:${memberId}`).emit(event, payload);
     });
   } catch {
     // Socket not initialized yet (e.g. during a one-off script run) — the
