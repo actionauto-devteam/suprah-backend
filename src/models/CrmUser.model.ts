@@ -41,6 +41,9 @@ export interface ICrmUser extends Document {
   locationSharingOptOut?: boolean;
   pushSubscriptions: ICrmPushSubscription[];
   notificationPreferences: NotificationPreferences;
+  supraSpacePreferences: {
+    messageTextSize: 'small' | 'default' | 'medium' | 'large' | 'extra-large';
+  };
   department?: string;
   screenshotExempt?: boolean;
   hourlyTrackingExempt?: boolean;
@@ -200,6 +203,13 @@ const CrmUserSchema = new Schema<ICrmUser>(
     notificationPreferences: {
       type: notificationPreferencesSchema,
       default: () => ({}),
+    },
+    supraSpacePreferences: {
+      messageTextSize: {
+        type: String,
+        enum: ['small', 'default', 'medium', 'large', 'extra-large'],
+        default: 'default',
+      },
     },
     department: {
       type: String,

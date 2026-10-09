@@ -287,10 +287,11 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
     });
 
     // ── Mark messages as read ─────────────────────────────────────────────
-    socket.on('mark:read', async ({ conversationId }: { conversationId: string }) => {
+    socket.on('mark:read', async ({ conversationId }: { conversationId: string }, acknowledge?: (result: { ok: boolean }) => void) => {
       try {
         if (!(await isConversationMember(conversationId, userId))) {
           logger.warn({ userId, conversationId }, '[SupraSpace] Blocked unauthorized mark:read');
+          acknowledge?.({ ok: false });
           return;
         }
         await SupraSpaceMessage.updateMany(
@@ -314,8 +315,10 @@ export function initSupraSpaceSocket(server: HttpServer): IOServer {
           conversationId,
           userId,
         });
+        acknowledge?.({ ok: true });
       } catch (err: any) {
         logger.error(err, '[SupraSpace] mark:read error');
+        acknowledge?.({ ok: false });
       }
     });
 

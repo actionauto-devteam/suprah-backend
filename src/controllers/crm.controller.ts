@@ -253,6 +253,35 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
 });
 
+const MESSAGE_TEXT_SIZES = new Set(['small', 'default', 'medium', 'large', 'extra-large']);
+
+const getMySupraSpacePreferences = asyncHandler(async (req: Request, res: Response) => {
+  const user = await CrmUser.findById(req.crmUser!._id).select('supraSpacePreferences').lean();
+  if (!user) throw new ApiError(404, 'CRM account not found');
+
+  res.json(new ApiResponse(200, {
+    messageTextSize: user.supraSpacePreferences?.messageTextSize || 'default',
+  }, 'SupraSpace preferences fetched'));
+});
+
+const updateMySupraSpacePreferences = asyncHandler(async (req: Request, res: Response) => {
+  const { messageTextSize } = req.body;
+  if (!MESSAGE_TEXT_SIZES.has(messageTextSize)) {
+    throw new ApiError(400, 'Invalid message text size');
+  }
+
+  const user = await CrmUser.findByIdAndUpdate(
+    req.crmUser!._id,
+    { $set: { 'supraSpacePreferences.messageTextSize': messageTextSize } },
+    { new: true, runValidators: true },
+  ).select('supraSpacePreferences');
+  if (!user) throw new ApiError(404, 'CRM account not found');
+
+  res.json(new ApiResponse(200, {
+    messageTextSize: user.supraSpacePreferences?.messageTextSize || 'default',
+  }, 'SupraSpace preferences updated'));
+});
+
 const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   if (!orgId) throw new ApiError(400, 'Organization context missing');
@@ -1423,6 +1452,8 @@ export default {
   forgotPassword,
   confirmResetPassword,
   getMe,
+  getMySupraSpacePreferences,
+  updateMySupraSpacePreferences,
   getOrgSettings,
   updateOrgSettings,
   timeClock,

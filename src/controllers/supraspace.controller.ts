@@ -1679,6 +1679,15 @@ const archiveConversation = asyncHandler(async (req: Request, res: Response) => 
     conversation.archivedBy = conversation.archivedBy.filter((m) => m.toString() !== userId.toString()) as any;
   }
   await conversation.save();
+  try {
+    // Archive state is personal, so sync only this member's open sessions.
+    getIO().to(`user:${userId.toString()}`).emit('conversation:archive', {
+      conversationId: id,
+      archived,
+    });
+  } catch {
+    // The persisted archive state remains authoritative if Socket.IO is unavailable.
+  }
   res.json(new ApiResponse(200, { conversationId: id, archived }, archived ? 'Conversation archived' : 'Conversation unarchived'));
 });
 
