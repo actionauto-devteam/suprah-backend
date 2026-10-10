@@ -383,6 +383,47 @@ export function describeComplianceItems(items: ComplianceExpiryItem[]): string {
     .join(", ");
 }
 
+/** The stored credential date each credential document type renews. */
+const CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE = new Map<string, (typeof COMPLIANCE_EXPIRY_FIELDS)[number]>([
+  ["drivers_license", "licenseExpirationDate"],
+  ["medical_card", "medicalCardExpirationDate"],
+  ["insurance_certificate", "insuranceExpirationDate"],
+]);
+
+/** Document types whose approval can renew a stored credential date. */
+export const CREDENTIAL_DOCUMENT_TYPES = [...CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE.keys()];
+
+type CredentialDocument = Pick<IDriverDocument, "type" | "expiresAt" | "reviewStatus">;
+
+/**
+ * The credential dates that approved documents renew. Replacing a document
+ * never overwrites the stored date on its own (the driver may have typed a
+ * different one), but once a reviewer approves a renewed CDL, medical card or
+ * insurance document, its expiration is the one Dispatch should see. For each
+ * credential this returns the latest approved document expiration when it's
+ * later than the stored date (or there is none); a date never moves backwards.
+ */
+export function approvedCredentialExpiryUpdates(
+  profile: ComplianceDates & { documents?: CredentialDocument[] | null },
+): Partial<Record<(typeof COMPLIANCE_EXPIRY_FIELDS)[number], Date>> {
+  const updates: Partial<Record<(typeof COMPLIANCE_EXPIRY_FIELDS)[number], Date>> = {};
+  for (const document of profile.documents ?? []) {
+    const field = CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE.get(String(document.type));
+    if (!field || document.reviewStatus !== "approved" || !document.expiresAt) continue;
+    const documentTime = new Date(document.expiresAt).getTime();
+    if (!Number.isFinite(documentTime)) continue;
+    const current = updates[field] ?? profile[field];
+    const currentTime =
+      current === null || current === undefined || current === ""
+        ? Number.NaN
+        : new Date(current as string | Date).getTime();
+    if (!Number.isFinite(currentTime) || documentTime > currentTime) {
+      updates[field] = new Date(documentTime);
+    }
+  }
+  return updates;
+}
+
 // Keep the compliance flag current whenever a profile is saved.
 driverProfileSchema.pre("save", function (next) {
   this.isComplianceExpired = isComplianceExpiredAt(this);

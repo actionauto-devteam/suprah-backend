@@ -1513,6 +1513,18 @@
       const imageUrl = await storageService.upload(file, "proof-of-pickup", BucketType.PRIVATE);
       const submittedAt = new Date();
       const previousImageUrl = (load as any).proofOfPickup?.imageUrl as string | undefined;
+      // Pages showing this load (payout review, load details, Tracker) refresh
+      // as soon as the pickup photo is saved.
+      const pickupOrgId = load.organizationId?.toString();
+      const pickupOutbox = pickupOrgId
+        ? [
+            createLoadLifecycleOutboxEvent("load_sync", {
+              organizationId: pickupOrgId,
+              driverIds: [userId],
+              loadId: load._id.toString(),
+            }),
+          ]
+        : [];
 
       const updated = await Load.findOneAndUpdate(
         {
@@ -1520,16 +1532,19 @@
           status: "Accepted",
           assignedDriverId: user._id,
         },
-        {
-          $set: {
-            proofOfPickup: {
-              imageUrl,
-              submittedAt,
-              note: String(note ?? "").trim().slice(0, 2000) || undefined,
-              submittedBy: user._id,
+        appendLoadLifecycleOutbox(
+          {
+            $set: {
+              proofOfPickup: {
+                imageUrl,
+                submittedAt,
+                note: String(note ?? "").trim().slice(0, 2000) || undefined,
+                submittedBy: user._id,
+              },
             },
           },
-        },
+          pickupOutbox,
+        ),
         { new: true, runValidators: true },
       );
 
@@ -1540,6 +1555,18 @@
 
       if (previousImageUrl && previousImageUrl !== imageUrl) {
         try { await storageService.delete(previousImageUrl, BucketType.PRIVATE); } catch { /* non-fatal cleanup */ }
+      }
+
+      if (pickupOutbox.length > 0) {
+        // Immediate delivery for UX; failures stay queued for the worker.
+        try {
+          await flushLoadLifecycleOutboxAfterRequest(load._id.toString());
+        } catch (error) {
+          logger.error(
+            { error, loadId: load._id },
+            "Non-fatal: immediate pickup-proof load sync flush failed",
+          );
+        }
       }
 
       const signed = await getSignedProofUrl(imageUrl);
@@ -1603,6 +1630,13 @@
                 route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
               },
               excludeUserId: userId,
+            }),
+            // Pages showing this load (payout review, load details, Tracker)
+            // refresh as soon as the delivery photo is saved.
+            createLoadLifecycleOutboxEvent("load_sync", {
+              organizationId: orgId,
+              driverIds: [userId],
+              loadId: load._id.toString(),
             }),
           ]
         : [];
@@ -1743,8 +1777,9 @@
       }
 
       const confirmedAt = new Date();
-      const confirmationOutbox = load.assignedDriverId
-        ? [
+      const confirmationOutbox = [
+        ...(load.assignedDriverId
+          ? [
             createLoadLifecycleOutboxEvent("user_notification", {
               userId: load.assignedDriverId.toString(),
               organizationId,
@@ -1759,7 +1794,15 @@
               },
             }),
           ]
-        : [];
+          : []),
+        // The payout review and load pages, and the driver's own pages, show
+        // the confirmation without a manual refresh.
+        createLoadLifecycleOutboxEvent("load_sync", {
+          organizationId,
+          driverIds: [load.assignedDriverId?.toString()],
+          loadId: load._id.toString(),
+        }),
+      ];
 
       const updated = await Load.findOneAndUpdate(
         {

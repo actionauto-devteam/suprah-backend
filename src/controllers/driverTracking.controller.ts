@@ -7734,7 +7734,7 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
   const complianceWarnings = [
     ...(expiredItems.length
       ? [
-          `Expired: ${describeComplianceItems(expiredItems)}. Ask the driver to upload the renewed ${expiredItems.length > 1 ? "documents" : "document"} and update the expiration date on the Documents page of the Driver Portal.`,
+          `Expired: ${describeComplianceItems(expiredItems)}. Ask the driver to replace the expired ${expiredItems.length > 1 ? "documents with the renewed ones" : "document with the renewed one"} on the Documents page of the Driver Portal. This warning clears once the renewal is approved.`,
         ]
       : []),
     ...(requiredReviewNeedsAttention

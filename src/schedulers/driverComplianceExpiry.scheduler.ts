@@ -1,6 +1,10 @@
 import cron from 'node-cron';
 import logger from '../utils/logger';
-import DriverProfile, { COMPLIANCE_EXPIRY_FIELDS } from '../models/DriverProfile.model';
+import DriverProfile, {
+  COMPLIANCE_EXPIRY_FIELDS,
+  CREDENTIAL_DOCUMENT_TYPES,
+  approvedCredentialExpiryUpdates,
+} from '../models/DriverProfile.model';
 
 /*
  * A CDL, medical card or insurance expires with the passing of time, not when
@@ -9,9 +13,41 @@ import DriverProfile, { COMPLIANCE_EXPIRY_FIELDS } from '../models/DriverProfile
  * counts and the assign warnings read that flag, so this keeps it current:
  * newly expired profiles are flagged, renewed ones are cleared.
  */
+
+/**
+ * Profiles whose approved renewal (a later CDL, medical card or insurance
+ * document) was never copied to the stored credential date get that date,
+ * so a renewed driver isn't shown as expired. Covers approvals made before
+ * approval started copying the date, and any update that bypassed it.
+ */
+export async function syncApprovedCredentialExpiries(): Promise<number> {
+  const profiles = await DriverProfile.find({
+    documents: {
+      $elemMatch: {
+        type: { $in: CREDENTIAL_DOCUMENT_TYPES },
+        reviewStatus: 'approved',
+        expiresAt: { $ne: null },
+      },
+    },
+  })
+    .select(['documents.type', 'documents.expiresAt', 'documents.reviewStatus', ...COMPLIANCE_EXPIRY_FIELDS])
+    .lean<Array<{ _id: unknown } & Parameters<typeof approvedCredentialExpiryUpdates>[0]>>();
+
+  const operations = profiles.flatMap((profile) => {
+    const updates = approvedCredentialExpiryUpdates(profile);
+    return Object.keys(updates).length
+      ? [{ updateOne: { filter: { _id: profile._id }, update: { $set: updates } } }]
+      : [];
+  });
+  if (operations.length) await DriverProfile.bulkWrite(operations);
+  return operations.length;
+}
+
 export async function runDriverComplianceExpirySweep(
   nowMs = Date.now(),
-): Promise<{ flagged: number; cleared: number }> {
+): Promise<{ renewed: number; flagged: number; cleared: number }> {
+  // Renewals first, so a renewed driver is cleared in this same run.
+  const renewed = await syncApprovedCredentialExpiries();
   const now = new Date(nowMs);
   const anyExpired = COMPLIANCE_EXPIRY_FIELDS.map((field) => ({ [field]: { $lt: now } }));
 
@@ -25,14 +61,14 @@ export async function runDriverComplianceExpirySweep(
     { $set: { isComplianceExpired: false } },
   );
 
-  return { flagged: flagged.modifiedCount, cleared: cleared.modifiedCount };
+  return { renewed, flagged: flagged.modifiedCount, cleared: cleared.modifiedCount };
 }
 
 async function sweep() {
   try {
-    const { flagged, cleared } = await runDriverComplianceExpirySweep();
-    if (flagged || cleared) {
-      logger.info({ flagged, cleared }, '[DriverComplianceExpiry] Compliance flags updated');
+    const { renewed, flagged, cleared } = await runDriverComplianceExpirySweep();
+    if (renewed || flagged || cleared) {
+      logger.info({ renewed, flagged, cleared }, '[DriverComplianceExpiry] Compliance flags updated');
     }
   } catch (error) {
     logger.error({ error }, '[DriverComplianceExpiry] Compliance sweep failed');

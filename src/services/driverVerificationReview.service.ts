@@ -1,5 +1,6 @@
 import DriverProfile, {
   REQUIRED_COMPLIANCE_DOCS,
+  approvedCredentialExpiryUpdates,
 } from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import DriverReviewEvent from "../models/DriverReviewEvent.model";
@@ -236,6 +237,9 @@ export async function reviewDriverDocument(args: {
     document.verifiedAt = now;
     document.rejectionReason = undefined;
     document.rejectedAt = undefined;
+    // An approved renewal (a later CDL, medical card or insurance date) becomes
+    // the credential date Dispatch sees, so the expired warning clears.
+    Object.assign(profile, approvedCredentialExpiryUpdates(profile));
   } else if (args.decision === "rejected") {
     const reason = String(args.reason || "").trim();
     if (reason.length < 3) {
