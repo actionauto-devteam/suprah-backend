@@ -5,7 +5,7 @@ import { ApiError } from "../utils/ApiError";
 import { ApiResponse } from "../utils/ApiResponse";
 import User from "../models/User.model";
 import CrmUser from "../models/CrmUser.model";
-import DriverProfile from "../models/DriverProfile.model";
+import DriverProfile, { isComplianceExpiredAt } from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import Load from "../models/Load.model";
 import DriverStatusChangeRequest from "../models/DriverStatusChangeRequest.model";
@@ -199,7 +199,7 @@ async function buildDirectoryEntries(
     // records and review data, which made this platform-wide list heavy.
     DriverProfile.find({ userId: { $in: ids } })
       .select(
-        "userId operationalStatus maxVehicleCapacity trailerType truckMake truckModel isComplianceExpired profileCompletionScore availableDays serviceRadius preferredRoutes homeBase.city homeBase.state homeBase.zip",
+        "userId operationalStatus maxVehicleCapacity trailerType truckMake truckModel isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate profileCompletionScore availableDays serviceRadius preferredRoutes homeBase.city homeBase.state homeBase.zip",
       )
       .lean(),
     !includeActivity ? Promise.resolve([] as any[]) : Load.find({
@@ -422,7 +422,7 @@ async function buildDirectoryEntries(
     const warnings: string[] = [];
     if (!u.isActive) warnings.push("inactive_account");
     if (!profile) warnings.push("no_driver_profile");
-    if (profile?.isComplianceExpired) warnings.push("compliance_expired");
+    if (isComplianceExpiredAt(profile)) warnings.push("compliance_expired");
     const canViewExactGps = gpsVisibleDriverIds.includes(key);
     if (canViewExactGps && operationalStatus === "active" && !isSharing) warnings.push("offline_or_stale_location");
     if (operationalStatus === "on_leave") warnings.push("on_leave");
@@ -455,7 +455,7 @@ async function buildDirectoryEntries(
             operationalStatus,
             truckMake: profile.truckMake ?? null,
             truckModel: profile.truckModel ?? null,
-            isComplianceExpired: Boolean(profile.isComplianceExpired),
+            isComplianceExpired: isComplianceExpiredAt(profile),
             profileCompletionScore: Number(profile.profileCompletionScore ?? 0),
           }
         : null,

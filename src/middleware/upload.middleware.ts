@@ -13,7 +13,7 @@ const imageFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.Fi
   if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new ApiError(400, 'Only image files (jpg, jpeg, png) are allowed') as any, false);
+    cb(new ApiError(400, 'Only JPG and PNG images can be uploaded here. Choose a JPG or PNG file and try again.') as any, false);
   }
 };
 
@@ -25,7 +25,7 @@ const avatarFileFilter = (_req: Request, file: Express.Multer.File, cb: multer.F
   if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new ApiError(400, 'Only image files (jpg, jpeg, png, webp) are allowed for avatars') as any, false);
+    cb(new ApiError(400, 'Only JPG, PNG or WebP images can be uploaded here. Choose an image in one of these formats and try again.') as any, false);
   }
 };
 
@@ -65,7 +65,7 @@ const driverDocumentFilter = (_req: Request, file: Express.Multer.File, cb: mult
   if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new ApiError(400, 'Only images (jpg, png, webp) and PDF files are allowed') as any, false);
+    cb(new ApiError(400, 'Only JPG, PNG or WebP images and PDF files can be uploaded here. Choose a file in one of these formats and try again.') as any, false);
   }
 };
 
@@ -147,7 +147,7 @@ const validateFilesByMagicBytes = (
     return next(
       new ApiError(
         400,
-        `The contents of ${invalid.originalname || 'the uploaded file'} do not match its declared file type`,
+        `${invalid.originalname ? `"${invalid.originalname}"` : 'This file'} couldn't be uploaded because its contents don't match its file type. It may be damaged or renamed. Choose the original photo or file and try again.`,
       ),
     );
   }

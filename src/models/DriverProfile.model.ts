@@ -312,14 +312,80 @@ const driverProfileSchema = new Schema<IDriverProfile>(
 
 driverProfileSchema.index({ organizationId: 1, operationalStatus: 1 });
 
+/** The credential dates that decide whether a driver's compliance has expired. */
+export const COMPLIANCE_EXPIRY_FIELDS = [
+  "licenseExpirationDate",
+  "medicalCardExpirationDate",
+  "insuranceExpirationDate",
+] as const;
+
+type ComplianceDates = Partial<Record<(typeof COMPLIANCE_EXPIRY_FIELDS)[number], unknown>>;
+
+/** How each credential is named in messages to drivers and Dispatch. */
+const COMPLIANCE_EXPIRY_LABELS: Record<(typeof COMPLIANCE_EXPIRY_FIELDS)[number], string> = {
+  licenseExpirationDate: "CDL",
+  medicalCardExpirationDate: "medical card",
+  insuranceExpirationDate: "insurance",
+};
+
+export type ComplianceExpiryItem = {
+  label: string;
+  /** The expiration day, YYYY-MM-DD. */
+  date: string;
+  expired: boolean;
+  /** Whole days until it expires (0 or less once the day has come). */
+  daysLeft: number;
+};
+
+/** Each credential that has an expiration date, with whether it has expired as of `nowMs`. */
+export function complianceExpiryItems(
+  profile: ComplianceDates | null | undefined,
+  nowMs = Date.now(),
+): ComplianceExpiryItem[] {
+  if (!profile) return [];
+  return COMPLIANCE_EXPIRY_FIELDS.flatMap((field) => {
+    const value = profile[field];
+    if (value === null || value === undefined || value === "") return [];
+    const time = new Date(value as string | Date).getTime();
+    if (!Number.isFinite(time)) return [];
+    return [
+      {
+        label: COMPLIANCE_EXPIRY_LABELS[field],
+        date: new Date(time).toISOString().slice(0, 10),
+        expired: time < nowMs,
+        daysLeft: Math.ceil((time - nowMs) / 86_400_000),
+      },
+    ];
+  });
+}
+
+/**
+ * Whether the CDL, medical card or insurance has expired as of `nowMs`. The
+ * stored `isComplianceExpired` flag can lag behind (it's set on save and by the
+ * hourly compliance sweep), so screens that must be exact use this.
+ */
+export function isComplianceExpiredAt(profile: ComplianceDates | null | undefined, nowMs = Date.now()): boolean {
+  return complianceExpiryItems(profile, nowMs).some((item) => item.expired);
+}
+
+/** "CDL (Oct 1, 2026), medical card (Sep 28, 2026)" for messages. Dates are calendar days, shown as stored. */
+export function describeComplianceItems(items: ComplianceExpiryItem[]): string {
+  return items
+    .map((item) => {
+      const day = new Date(`${item.date}T00:00:00Z`).toLocaleDateString("en-US", {
+        timeZone: "UTC",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+      return `${item.label} (${day})`;
+    })
+    .join(", ");
+}
+
 // Keep the compliance flag current whenever a profile is saved.
 driverProfileSchema.pre("save", function (next) {
-  const now = Date.now();
-  const expired = (d?: Date) => d != null && new Date(d).getTime() < now;
-  this.isComplianceExpired =
-    expired(this.licenseExpirationDate) ||
-    expired(this.medicalCardExpirationDate) ||
-    expired(this.insuranceExpirationDate);
+  this.isComplianceExpired = isComplianceExpiredAt(this);
   next();
 });
 
