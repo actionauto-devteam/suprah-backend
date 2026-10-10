@@ -3,6 +3,12 @@ import mongoose, { Document, Schema } from 'mongoose';
 export type AiAgentLogStatus = 'sent' | 'blocked' | 'failed' | 'skipped' | 'fallback_sent';
 export type AiAgentLogChannel = 'webchat' | 'sms';
 export type AiAgentLogClassifierVerdict = 'SAFE' | 'UNSAFE' | 'ERROR';
+export type AiAgentCoachingComplianceVerdict =
+  | 'not_checked'
+  | 'compliant'
+  | 'violates'
+  | 'not_applicable'
+  | 'error';
 
 export interface IAiAgentLog extends Document {
   organizationId: string;
@@ -19,6 +25,17 @@ export interface IAiAgentLog extends Document {
   failureReason?: string;
   handoffTriggered?: boolean;
   handoffReason?: string;
+  coachingRuleIds?: mongoose.Types.ObjectId[];
+  coachingRuleIdsConsidered?: mongoose.Types.ObjectId[];
+  coachingRuleIdsRelevant?: mongoose.Types.ObjectId[];
+  coachingRuleIdsApplied?: mongoose.Types.ObjectId[];
+  coachingRuleIdsSuppressed?: mongoose.Types.ObjectId[];
+  coachingSuppressionReasons?: Array<{ ruleId: mongoose.Types.ObjectId; reason: string }>;
+  coachingFirstDraftVerdict?: AiAgentCoachingComplianceVerdict;
+  coachingFinalVerdict?: AiAgentCoachingComplianceVerdict;
+  coachingViolatedRuleIds?: mongoose.Types.ObjectId[];
+  coachingRegenerated?: boolean;
+  coachingRegenerationReason?: string;
   sentAt?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -45,6 +62,29 @@ const AiAgentLogSchema: Schema<IAiAgentLog> = new Schema(
     failureReason: { type: String, trim: true, maxlength: 500 },
     handoffTriggered: { type: Boolean, default: false },
     handoffReason: { type: String, trim: true, maxlength: 300 },
+    coachingRuleIds: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingRuleIdsConsidered: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingRuleIdsRelevant: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingRuleIdsApplied: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingRuleIdsSuppressed: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingSuppressionReasons: [
+      {
+        _id: false,
+        ruleId: { type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule', required: true },
+        reason: { type: String, trim: true, maxlength: 500 },
+      },
+    ],
+    coachingFirstDraftVerdict: {
+      type: String,
+      enum: ['not_checked', 'compliant', 'violates', 'not_applicable', 'error'],
+    },
+    coachingFinalVerdict: {
+      type: String,
+      enum: ['not_checked', 'compliant', 'violates', 'not_applicable', 'error'],
+    },
+    coachingViolatedRuleIds: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    coachingRegenerated: { type: Boolean, default: false },
+    coachingRegenerationReason: { type: String, trim: true, maxlength: 500 },
     sentAt: { type: Date },
   },
   { timestamps: true },

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { isDemoPhone } from "../utils/demoPhone";
+import { isLocalUiAcceptanceMode } from "../utils/aiOutboundSafety";
 
 const API_BASE = "https://api.telnyx.com/v2";
 
@@ -23,11 +24,20 @@ class TelnyxError extends Error {
   }
 }
 
+export class LocalUiAcceptanceModeBlockedError extends Error {
+  constructor(method: string, path: string) {
+    super(`[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Telnyx request: ${method} ${path}`);
+  }
+}
+
 async function tx<T = any>(
   method: "GET" | "POST" | "DELETE" | "PATCH",
   path: string,
-  body?: any
+  body?: any,
+  timeoutMs?: number
 ): Promise<T> {
+  if (isLocalUiAcceptanceMode()) throw new LocalUiAcceptanceModeBlockedError(method, path);
+
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -36,6 +46,7 @@ async function tx<T = any>(
       Accept: "application/json",
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   const text = await res.text();
@@ -80,11 +91,32 @@ export async function transferToAgent(
     from: TELNYX_PHONE_NUMBER,
     client_state: Buffer.from(JSON.stringify(clientState)).toString("base64"),
     timeout_secs: 45,
-  });
+  }, clientState.revision !== undefined ? 8000 : undefined);
 }
 
-export async function answerCall(callControlId: string) {
-  return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/answer`, {});
+export async function answerCall(callControlId: string, clientState?: Record<string, unknown>) {
+  return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/answer`, clientState ? {
+    client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
+    command_id: `ivr-answer-${callControlId}`,
+  } : {}, clientState ? 8000 : undefined);
+}
+
+export async function gatherIvr(callControlId: string, payload: string, digits: string, clientState: Record<string, unknown>) {
+  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/gather_using_speak`, {
+    payload, voice: 'female', language: 'en-US',
+    minimum_digits: 1, maximum_digits: 1, maximum_tries: 1,
+    valid_digits: digits, timeout_millis: 10000,
+    client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
+    command_id: `ivr-menu-${clientState.callLogId}-${clientState.revision}`,
+  }, 8000);
+}
+
+export async function speakIvr(callControlId: string, payload: string, clientState: Record<string, unknown>) {
+  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
+    payload, voice: 'female', language: 'en-US',
+    client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
+    command_id: `ivr-speak-${clientState.callLogId}-${clientState.revision}-${clientState.kind}`,
+  }, 8000);
 }
 
 export async function speak(callControlId: string, payload: string) {
@@ -97,6 +129,33 @@ export async function speak(callControlId: string, payload: string) {
 
 export async function hangupCall(callControlId: string) {
   return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/hangup`, {});
+}
+
+export async function recordingCommand(callControlId: string, action: 'start' | 'pause' | 'resume' | 'stop', commandId: string) {
+  const response = await tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/record_${action}`, {
+    command_id: commandId,
+    ...(action === 'start' ? { format: 'mp3', channels: 'dual', recording_track: 'both', transcription: false, play_beep: false } : {}),
+  }, 8000);
+  if (response?.data?.result !== 'ok') throw new Error('Provider recording command was not acknowledged');
+  return response;
+}
+
+export async function recordingDisclosure(callControlId: string, text: string, language: string, commandId: string, clientState: string) {
+  const response = await tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
+    payload: text, language, voice: 'female', target_legs: 'both', command_id: commandId, client_state: clientState,
+  }, 8000);
+  if (response?.data?.result !== 'ok') throw new Error('Provider disclosure command was not acknowledged');
+  return response;
+}
+
+export async function findRecordings(callSessionId: string) {
+  const result = await tx('GET', `/recordings?filter[call_session_id]=${encodeURIComponent(callSessionId)}&page[size]=50`, undefined, 8000);
+  if (!Array.isArray(result?.data)) throw new Error('Provider recording list is malformed');
+  return result.data;
+}
+
+export async function deleteProviderRecording(id: string) {
+  return tx('DELETE', `/recordings/${encodeURIComponent(id)}`, undefined, 8000);
 }
 
 /** Answer + play an "we missed you" message + hang up (missed-call path). */
@@ -129,6 +188,8 @@ export async function createTelephonyCredential(tagName: string) {
 
 /** Short-lived JWT the browser uses to log the TelnyxRTC client in. */
 export async function createRtcLoginToken(credentialId: string): Promise<string> {
+  if (isLocalUiAcceptanceMode()) throw new LocalUiAcceptanceModeBlockedError("POST", `/telephony_credentials/${credentialId}/token`);
+
   const res = await fetch(
     `${API_BASE}/telephony_credentials/${encodeURIComponent(credentialId)}/token`,
     {

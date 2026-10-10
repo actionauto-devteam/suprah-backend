@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { AiHumanAttention, aiHumanAttentionFields } from './aiHumanAttention';
 
 interface IAiPausedBy {
   userId: string;
@@ -28,6 +29,11 @@ export interface IWebChatSession extends Document {
   aiPausedAt?: Date;
   aiPausedBy?: IAiPausedBy;
   aiGeneratingAt?: Date;
+  aiAutoPausedUntil?: Date;
+  aiResponseVersion?: number;
+  aiLastDispatchVersion?: number;
+  aiAttentionPendingIds?: string[];
+  aiHumanAttention?: AiHumanAttention;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,6 +54,8 @@ const WebChatSessionSchema: Schema<IWebChatSession> = new Schema(
     aiPausedAt: { type: Date },
     aiPausedBy: { type: AiPausedBySchema },
     aiGeneratingAt: { type: Date },
+    aiAutoPausedUntil: { type: Date },
+    ...aiHumanAttentionFields,
   },
   { timestamps: true },
 );

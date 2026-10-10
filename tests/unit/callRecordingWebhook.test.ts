@@ -1,0 +1,24 @@
+import express from 'express';
+import request from 'supertest';
+jest.mock('../../src/services/telnyx.service', () => ({ verifyWebhookSignature: jest.fn().mockReturnValue(true) }));
+jest.mock('../../src/services/communication.service', () => ({ handleCallInitiated: jest.fn(), handleCallAnswered: jest.fn(), handleCallHangup: jest.fn(), handleSpeakEnded: jest.fn(), handleCallGatherEnded: jest.fn() }));
+jest.mock('../../src/services/callRecording.service', () => ({ enqueueRecordingEvent: jest.fn().mockResolvedValue(true), observeRecordingCall: jest.fn(), finishRecordingDisclosure: jest.fn().mockResolvedValue(false), decodeRecordingState: (s: string) => { try { return JSON.parse(Buffer.from(s, 'base64').toString()); } catch { return null; } } }));
+import { telnyxWebhook } from '../../src/controllers/communication.controller';
+import * as provider from '../../src/services/telnyx.service';
+import * as comm from '../../src/services/communication.service';
+import * as recording from '../../src/services/callRecording.service';
+const app = express(); app.use(express.json()); app.post('/webhook', telnyxWebhook);
+app.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode || 500).json({ message: err.message }));
+const send = (type: string, payload: any = {}) => request(app).post('/webhook').send({ data: { id: 'fixture-event', event_type: type, payload } });
+const tag = (kind: string, extra: any = {}) => Buffer.from(JSON.stringify({ kind, ...extra })).toString('base64');
+beforeEach(() => { jest.clearAllMocks(); (provider.verifyWebhookSignature as jest.Mock).mockReturnValue(true); (recording.enqueueRecordingEvent as jest.Mock).mockResolvedValue(true); });
+describe('Recording webhook compatibility', () => {
+  it('invalid signature never enters recording processing', async () => { (provider.verifyWebhookSignature as jest.Mock).mockReturnValue(false); expect((await send('call.recording.saved')).status).toBe(401); expect(recording.enqueueRecordingEvent).not.toHaveBeenCalled(); });
+  it('saved webhook is durably accepted', async () => { expect((await send('call.recording.saved', { recording_id: 'file' })).status).toBe(200); expect(recording.enqueueRecordingEvent).toHaveBeenCalledWith('fixture-event', 'call.recording.saved', { recording_id: 'file' }); });
+  it('durability failure requests provider retry for saved recordings', async () => { (recording.enqueueRecordingEvent as jest.Mock).mockRejectedValue(new Error('database unavailable')); expect((await send('call.recording.saved')).status).toBe(500); });
+  it('recording disclosure callback never enters unconditional hangup handling', async () => { const payload = { client_state: tag('ivr-menu', { recordingDisclosureId: 'recording' }) }; expect((await send('call.speak.ended', payload)).status).toBe(200); expect(recording.finishRecordingDisclosure).toHaveBeenCalledWith(payload); expect(comm.handleSpeakEnded).not.toHaveBeenCalled(); });
+  it('IVR missed-call speech still enters existing handler', async () => { const payload = { client_state: tag('ivr-missed') }; expect((await send('call.speak.ended', payload)).status).toBe(200); expect(comm.handleSpeakEnded).toHaveBeenCalledWith(payload); });
+  it('IVR answer preserves existing lifecycle before recording observes it', async () => { const payload = { client_state: tag('ivr-menu') }; await send('call.answered', payload); expect(comm.handleCallAnswered).toHaveBeenCalledWith(payload); expect(recording.observeRecordingCall).toHaveBeenCalledWith('call.answered', payload); });
+  it('outbound correlation events are validated by recording path, not unverified legacy tag lookup', async () => { const payload = { client_state: tag('recording-outbound') }; await send('call.answered', payload); expect(comm.handleCallAnswered).not.toHaveBeenCalled(); expect(recording.observeRecordingCall).toHaveBeenCalledWith('call.answered', payload); });
+  it('recording evidence storage failure does not interrupt legacy inbound calls', async () => { const log = jest.spyOn(console, 'error').mockImplementation(() => {}); (recording.enqueueRecordingEvent as jest.Mock).mockRejectedValue(new Error('storage failed')); try { expect((await send('call.initiated')).status).toBe(200); expect(comm.handleCallInitiated).toHaveBeenCalled(); } finally { log.mockRestore(); } });
+});

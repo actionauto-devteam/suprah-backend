@@ -1,7 +1,11 @@
 import Customer, { ICustomer, ICustomerTransaction, ICustomerConversation } from '../models/Customer.model';
 import Lead from '../models/lead.model';
 import mongoose from 'mongoose';
-import logger from '../utils/logger';
+import { createHash } from 'crypto';
+import { contactIdentity } from '../utils/contactIdentity';
+import { evaluateCustomerIdentity, findIdentityCustomers, syncLeadCustomer, syncLeadCustomerSafely } from './customerIdentity.service';
+import { withCustomerIdentityLock } from './customerIdentityLock.service';
+import { ApiError } from '../utils/ApiError';
 
 
 export interface CreateCustomerInput {
@@ -74,274 +78,53 @@ export interface DuplicateCheckResult {
 }
 
 
-function normalisePhone(phone: string): string {
-  return (phone || '').replace(/\D/g, '');
-}
-
-function normaliseEmail(email: string): string {
-  return (email || '').toLowerCase().trim();
-}
-
-
-async function checkDuplicate(
-  orgId: string,
-  email: string,
-  phone: string,
-  excludeId?: string,
-): Promise<DuplicateCheckResult> {
-  const normEmail = normaliseEmail(email);
-  const normPhone = normalisePhone(phone);
-
-  const baseQuery: any = { organizationId: orgId };
-  if (excludeId) {
-    baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
+function validateContact(input: { email?: unknown; phone?: unknown; alternatePhone?: unknown }) {
+  const identity = contactIdentity(input);
+  if ((!identity.normalizedEmail && !identity.normalizedPhone)
+    || (String(input.email || '').trim() && !identity.normalizedEmail)
+    || (String(input.phone || '').trim() && !identity.normalizedPhone)
+    || (String(input.alternatePhone || '').trim() && !identity.normalizedAlternatePhone)) {
+    throw new ApiError(400, 'Provide a valid email or full phone number');
   }
+  return identity;
+}
 
-  if (normEmail) {
-    const emailMatch = await Customer.findOne({
-      ...baseQuery,
-      email: normEmail,
-    }).lean();
+async function checkDuplicate(orgId: string, email: string, phone: string, excludeId?: string): Promise<DuplicateCheckResult> {
+  const candidates = (await findIdentityCustomers(orgId, { email, phone })).filter(customer => String(customer._id) !== excludeId);
+  const result = evaluateCustomerIdentity({ email, phone }, candidates);
+  if (result.status === 'ambiguous' || result.status === 'conflict') {
+    throw new ApiError(409, 'Customer identity requires review', [{ reason: result.reason, candidateIds: result.candidateIds }]);
+  }
+  if (!result.customerId) return { isDuplicate: false };
+  const customer = await Customer.findOne({ _id: result.customerId, organizationId: orgId });
+  return { isDuplicate: true, existingCustomer: customer, matchType: email && phone ? 'email_and_phone' : email ? 'email_only' : 'phone_only' };
+}
 
-    if (emailMatch) {
-      const existingNorm = normalisePhone(emailMatch.phone || '');
-      const matchType =
-        normPhone.length >= 7 && existingNorm === normPhone
-          ? 'email_and_phone'
-          : 'email_only';
-
-      logger.info(
-        { customerId: emailMatch._id, matchType },
-        'Duplicate detected via email'
-      );
-      return {
-        isDuplicate: true,
-        existingCustomer: emailMatch as any,
-        matchType,
-        confidence: matchType === 'email_and_phone' ? 100 : 95,
-      };
+async function createCustomer(input: CreateCustomerInput): Promise<{ customer: ICustomer; isNew: boolean; duplicateType?: string }> {
+  const identity = validateContact(input);
+  return withCustomerIdentityLock(input.organizationId, async renew => {
+    const duplicate = await checkDuplicate(input.organizationId, input.email, input.phone);
+    if (identity.normalizedAlternatePhone) {
+      const alternate = await findIdentityCustomers(input.organizationId, { phone: input.alternatePhone });
+      if (alternate.some(customer => String(customer._id) !== String(duplicate.existingCustomer?._id))) throw new ApiError(409, 'Alternate phone matches another customer; review required');
     }
-  }
-
-  if (normPhone.length >= 7) {
-    const candidates = await Customer.find({
-      ...baseQuery,
-      phone: { $exists: true, $ne: '' },
-    })
-      .select('_id phone firstName lastName email source isActive')
-      .limit(500)
-      .lean();
-
-    const phoneMatch = candidates.find(
-      (c) => normalisePhone(c.phone || '') === normPhone,
-    );
-
-    if (phoneMatch) {
-      logger.info(
-        { customerId: phoneMatch._id, matchType: 'phone_only' },
-        'Duplicate detected via phone'
-      );
-      return {
-        isDuplicate: true,
-        existingCustomer: phoneMatch as any,
-        matchType: 'phone_only',
-        confidence: 90,
-      };
-    }
-  }
-
-  return { isDuplicate: false, confidence: 0 };
-}
-
-
-async function createCustomer(
-  input: CreateCustomerInput,
-): Promise<{ customer: ICustomer; isNew: boolean; duplicateType?: string }> {
-  const {
-    organizationId, createdBy, firstName, lastName, email, phone,
-    source = 'manual', sourceLeadId, ...rest
-  } = input;
-
-  const normEmail = normaliseEmail(email);
-
-  const dupCheck = await checkDuplicate(organizationId, normEmail, phone);
-  if (dupCheck.isDuplicate && dupCheck.existingCustomer) {
-    logger.info(
-      { customerId: dupCheck.existingCustomer._id, matchType: dupCheck.matchType },
-      'Duplicate customer detected — returning existing record',
-    );
-    return {
-      customer: dupCheck.existingCustomer as ICustomer,
-      isNew: false,
-      duplicateType: dupCheck.matchType,
-    };
-  }
-
-  const customer = new Customer({
-    organizationId,
-    createdBy: new mongoose.Types.ObjectId(createdBy),
-    firstName: firstName.trim(),
-    lastName: (lastName || '').trim(),
-    email: normEmail,
-    phone: phone.trim(),
-    source,
-    sourceLeadId: sourceLeadId ? new mongoose.Types.ObjectId(sourceLeadId) : undefined,
-    isActive: true,
-    stats: {
-      totalTransactions: 0,
-      totalConversations: 0,
-      totalAppointments: 0,
-    },
-    ...rest,
+    if (duplicate.existingCustomer) return { customer: duplicate.existingCustomer, isNew: false, duplicateType: duplicate.matchType };
+    await renew();
+    const customer = await Customer.create({
+      ...input, email: identity.normalizedEmail || undefined, phone: input.phone?.trim() || undefined,
+      ...identity, identityVersion: 1,
+      identityCreationKey: createHash('sha256').update(identity.normalizedEmail ? `email:${identity.normalizedEmail}` : `phone:${identity.normalizedPhone}`).digest('hex'),
+    });
+    return { customer, isNew: true };
   });
-
-  await customer.save();
-  logger.info({ customerId: customer._id, orgId: organizationId, source }, 'Customer created');
-  return { customer, isNew: true };
 }
 
 async function upsertFromLead(input: UpsertFromLeadInput): Promise<ICustomer> {
-  const {
-    organizationId, createdBy, leadId,
-    firstName, lastName, email, phone,
-    vehicleInterest, channel, comments, source,
-  } = input;
-
-  const normEmail = normaliseEmail(email);
-  const normPhone = (phone || '').trim();
-
-  const vehicleTitle = vehicleInterest
-    ? `${vehicleInterest.year || ''} ${vehicleInterest.make || ''} ${vehicleInterest.model || ''}`.trim()
-    : 'Vehicle Inquiry';
-
-  const transactionEntry = {
-    type: 'lead' as const,
-    status: 'pending' as const,
-    title: vehicleTitle || 'Lead Inquiry',
-    description: comments || `Lead from ${source || 'Unknown source'}`,
-    referenceId: leadId,
-    referenceModel: 'Lead',
-    metadata: { channel, source },
-    occurredAt: new Date(),
-  };
-
-  const now = new Date();
-
-  // ── Try to find existing customer by email first (fastest path) ────────────
-  let existing = await Customer.findOne({ organizationId, email: normEmail });
-
-  // ── If not found by email, try phone ───────────────────────────────────────
-  if (!existing && normPhone) {
-    const candidates = await Customer.find({
-      organizationId,
-      phone: { $exists: true, $ne: '' },
-    })
-      .select('_id phone')
-      .limit(500)
-      .lean();
-
-    const match = candidates.find((c) => normalisePhone(c.phone || '') === normalisePhone(normPhone));
-    if (match) {
-      existing = await Customer.findById(match._id);
-    }
-  }
-
-  // ── Existing customer: enrich and link ─────────────────────────────────────
-  if (existing) {
-    // Prevent duplicate lead transactions for the same leadId
-    const alreadyLinked = existing.transactions.some(
-      (tx) => tx.referenceId === leadId,
-    );
-
-    if (!alreadyLinked) {
-      existing.transactions.push(transactionEntry as any);
-      existing.stats.totalTransactions = existing.transactions.length;
-    }
-
-    // Enrich vehicle interest if currently empty
-    if (vehicleInterest?.make && !existing.vehicleInterest?.make) {
-      existing.vehicleInterest = {
-        year: vehicleInterest.year,
-        make: vehicleInterest.make,
-        model: vehicleInterest.model,
-      };
-    }
-
-    // Enrich phone if currently empty
-    if (normPhone && !existing.phone) {
-      existing.phone = normPhone;
-    }
-
-    // Update contact timestamps
-    if (!existing.stats.firstContactedAt) {
-      existing.stats.firstContactedAt = now;
-    }
-    existing.stats.lastContactedAt = now;
-
-    // Link source lead if not already set
-    if (!existing.sourceLeadId) {
-      existing.sourceLeadId = new mongoose.Types.ObjectId(leadId);
-    }
-
-    await existing.save();
-    logger.info(
-      { customerId: existing._id, leadId, orgId: organizationId },
-      '[UPSERT] Lead linked to existing customer',
-    );
-    return existing;
-  }
-
-  // ── New customer — use findOneAndUpdate with upsert for race-condition safety ──
-  // This ensures two concurrent syncs for the same email never produce two records.
-  try {
-    const upserted = await Customer.findOneAndUpdate(
-      { organizationId, email: normEmail },
-      {
-        $setOnInsert: {
-          organizationId,
-          createdBy: new mongoose.Types.ObjectId(createdBy),
-          firstName: (firstName || 'Unknown').trim(),
-          lastName: (lastName || '').trim(),
-          email: normEmail,
-          phone: normPhone,
-          source: 'lead',
-          sourceLeadId: new mongoose.Types.ObjectId(leadId),
-          vehicleInterest: vehicleInterest
-            ? {
-                year: vehicleInterest.year,
-                make: vehicleInterest.make,
-                model: vehicleInterest.model,
-              }
-            : undefined,
-          isActive: true,
-          transactions: [transactionEntry],
-          conversations: [],
-          stats: {
-            totalTransactions: 1,
-            totalConversations: 0,
-            totalAppointments: 0,
-            firstContactedAt: now,
-            lastContactedAt: now,
-          },
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-
-    logger.info(
-      { customerId: upserted._id, leadId, orgId: organizationId },
-      '[UPSERT] New customer created from lead',
-    );
-    return upserted;
-  } catch (err: any) {
-    // Handle rare duplicate key race on the unique email index
-    if (err.code === 11000) {
-      logger.warn({ leadId, normEmail }, '[UPSERT] Race condition on email unique index — fetching existing');
-      const fallback = await Customer.findOne({ organizationId, email: normEmail });
-      if (fallback) return fallback;
-    }
-    throw err;
-  }
+  const result = await syncLeadCustomer(input.organizationId, input.leadId);
+  if (!result.customerId || result.status !== 'linked') throw new ApiError(409, 'Lead customer relationship requires review', [result]);
+  const customer = await Customer.findOne({ _id: result.customerId, organizationId: input.organizationId });
+  if (!customer) throw new ApiError(409, 'Linked customer is unavailable');
+  return customer;
 }
 
 /**
@@ -430,23 +213,48 @@ async function updateCustomer(
   orgId: string,
   data: Partial<ICustomer> & { updatedBy?: string },
 ): Promise<ICustomer | null> {
-  const { updatedBy, ...rest } = data;
-  const update: any = { ...rest };
-  if (updatedBy) update.updatedBy = new mongoose.Types.ObjectId(updatedBy);
-
-  return Customer.findOneAndUpdate(
-    { _id: id, organizationId: orgId },
-    { $set: update },
-    { new: true },
-  ).lean() as any;
+  const allowed = ['firstName', 'lastName', 'email', 'phone', 'alternatePhone', 'dateOfBirth', 'address', 'notes', 'tags', 'preferredContactMethod', 'vehicleInterest', 'isActive'];
+  const updated = await withCustomerIdentityLock(orgId, async renew => {
+    const existing = await Customer.findOne({ _id: id, organizationId: orgId }).lean();
+    if (!existing) return null;
+    const update: any = Object.fromEntries(Object.entries(data).filter(([key]) => allowed.includes(key)));
+    const contactChanged = ['email', 'phone', 'alternatePhone'].some(key => Object.prototype.hasOwnProperty.call(update, key));
+    if (contactChanged) {
+      const identity = validateContact({ ...existing, ...update });
+      const candidates = (await findIdentityCustomers(orgId, { ...existing, ...update })).filter(customer => String(customer._id) !== id);
+      if (candidates.length) throw new ApiError(409, 'Contact details match another customer; review required');
+      const alternate = identity.normalizedAlternatePhone ? await findIdentityCustomers(orgId, { phone: (update.alternatePhone ?? existing.alternatePhone) }) : [];
+      if (alternate.some(customer => String(customer._id) !== id)) throw new ApiError(409, 'Alternate phone matches another customer; review required');
+      Object.assign(update, identity, { identityVersion: 1 });
+      update.identityCreationKey = createHash('sha256').update(identity.normalizedEmail ? `email:${identity.normalizedEmail}` : `phone:${identity.normalizedPhone}`).digest('hex');
+      if (Object.prototype.hasOwnProperty.call(update, 'email')) update.email = identity.normalizedEmail || undefined;
+      await Lead.updateMany({ organizationId: orgId, customerId: id }, { $set: { 'customerLink.status': 'pending', 'customerLink.nextRetryAt': new Date() } }, { timestamps: false });
+    }
+    if (!contactChanged && Object.prototype.hasOwnProperty.call(update, 'isActive')) await Lead.updateMany({ organizationId: orgId, customerId: id }, { $set: { 'customerLink.status': 'pending', 'customerLink.nextRetryAt': new Date() } }, { timestamps: false });
+    if (data.updatedBy) update.updatedBy = new mongoose.Types.ObjectId(data.updatedBy);
+    await renew();
+    const unset = Object.prototype.hasOwnProperty.call(update, 'email') && !update.email;
+    if (unset) delete update.email;
+    return Customer.findOneAndUpdate({ _id: id, organizationId: orgId }, {
+      $set: update, ...(unset ? { $unset: { email: 1 } } : {}),
+    }, { new: true, runValidators: true }).lean();
+  });
+  if (updated) {
+    const leads = await Lead.find({ organizationId: orgId, customerId: id, 'customerLink.status': 'pending' }).select('_id').lean();
+    for (const lead of leads) await syncLeadCustomerSafely(orgId, String(lead._id));
+  }
+  return updated as any;
 }
 
 /**
  * Hard delete a customer record.
  */
 async function deleteCustomer(id: string, orgId: string): Promise<boolean> {
-  const result = await Customer.findOneAndDelete({ _id: id, organizationId: orgId });
-  return !!result;
+  return withCustomerIdentityLock(orgId, async renew => {
+    if (await Lead.exists({ organizationId: orgId, customerId: id })) throw new ApiError(409, 'Customer has linked Leads and cannot be deleted');
+    await renew();
+    return Boolean(await Customer.findOneAndDelete({ _id: id, organizationId: orgId }));
+  });
 }
 
 // ─── Embedded sub-document helpers ───────────────────────────────────────────

@@ -16,8 +16,9 @@ import { sendReminderFor } from '../schedulers/appointmentReminder.scheduler';
 import { generateDemoPhone, isDemoPhone } from '../utils/demoPhone';
 import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
 import { processLeadForVehicle } from '../services/vehicleReengagement.service';
+import { LEAD_SOURCE } from '../constants/leadSource';
 
-const DEMO_SOURCE = 'Demo';
+const DEMO_SOURCE = LEAD_SOURCE.DEMO;
 const NURTURE_STEPS = 3;
 const SCENARIO_LIMIT = 10;
 const FALLBACK_COMPANY_NUMBER = '+18015550100';

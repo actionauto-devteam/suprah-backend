@@ -94,8 +94,14 @@ export const setupSocket = (io: Server) => {
         try {
           const CRM_SECRET = resolveCrmJwtSecret(config.jwt.crmJwtSecret);
           decoded = jwt.verify(token, CRM_SECRET) as any;
+          if (decoded.type !== 'crm' || !decoded.id) throw new Error('Invalid CRM identity');
+          const currentCrmUser: any = await CrmUser.findById(decoded.id)
+            .select('_id role organizationId isActive')
+            .lean();
+          if (!currentCrmUser || currentCrmUser.isActive === false) throw new Error('CRM account unavailable');
           socket.userId = decoded.id;
           socket.crmUserId = decoded.id;
+          socket.organizationId = currentCrmUser.organizationId?.toString();
           socket.role = 'crm';
         } catch (crmErr: any) {
           if (config.env === 'development' && process.env.ALLOW_INSECURE_SOCKET_DEV_FALLBACK === 'true') {
@@ -156,10 +162,6 @@ export const setupSocket = (io: Server) => {
           if (!crmUser) return;
           if (['admin', 'manager'].includes(crmUser.role)) {
             socket.join('crm:shift-board');
-          }
-          // Join org room so CRM staff receive org-wide real-time events
-          if (crmUser.organizationId) {
-            socket.join(`org:${crmUser.organizationId}`);
           }
           emitToShiftBoard('crm:presence', { userId: socket.userId, online: true });
         })

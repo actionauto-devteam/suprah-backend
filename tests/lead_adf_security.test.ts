@@ -6,6 +6,7 @@ import Organization from '../src/models/Organization.model';
 import { encrypt, decrypt } from '../src/utils/crypto';
 import User from '../src/models/User.model';
 import Lead from '../src/models/lead.model';
+import Vehicle from '../src/models/Vehicle.model';
 
 describe('ADF Webhook Security (HMAC)', () => {
     let testOrg: any;
@@ -188,5 +189,131 @@ describe('ADF Webhook Security (HMAC)', () => {
             .expect(200);
 
         expect(res.text).toContain('Lead processed successfully');
+    });
+
+    it('stores a third-party ADF lead with the canonical source and the real vendor recovered into sourceProvider', async () => {
+        const email = `vendor-${Date.now()}@example.com`;
+        const xmlPayload = `<?xml version="1.0" encoding="UTF-8"?>
+        <adf>
+            <prospect>
+                <vendor>
+                    <vendorname>AutoTrader</vendorname>
+                </vendor>
+                <customer>
+                    <contact>
+                        <name part="full">Vendor Test Lead</name>
+                        <email>${email}</email>
+                    </contact>
+                </customer>
+                <vehicle>
+                    <year>2024</year>
+                    <make>Honda</make>
+                    <model>Civic</model>
+                </vehicle>
+            </prospect>
+        </adf>`;
+
+        const signature = crypto.createHmac('sha256', webhookSecret)
+            .update(xmlPayload)
+            .digest('hex');
+
+        await request(app)
+            .post('/api/leads/adf')
+            .query({ orgId })
+            .set('X-ADF-Signature', signature)
+            .set('Content-Type', 'application/xml')
+            .send(xmlPayload)
+            .expect(200);
+
+        const lead = await Lead.findOne({ organizationId: testOrg._id, email });
+        expect(lead?.source).toBe('Third-Party Lead');
+        expect(lead?.sourceProvider).toBe('AutoTrader');
+        expect(lead?.channel).toBe('adf');
+    });
+
+    it('resolves vehicleId and a location snapshot when the ADF VIN matches real inventory', async () => {
+        const email = `vin-match-${Date.now()}@example.com`;
+        const vin = `TESTVIN${Date.now()}`.slice(0, 17).toUpperCase();
+        const testVehicle = await Vehicle.create({
+            organizationId: testOrg._id,
+            vin,
+            year: 2024,
+            make: 'Honda',
+            modelName: 'Civic',
+            dealerCity: 'Lehi',
+        });
+
+        const xmlPayload = `<?xml version="1.0" encoding="UTF-8"?>
+        <adf>
+            <prospect>
+                <customer>
+                    <contact>
+                        <name part="full">VIN Match Lead</name>
+                        <email>${email}</email>
+                    </contact>
+                </customer>
+                <vehicle>
+                    <vin>${vin}</vin>
+                    <year>2024</year>
+                    <make>Honda</make>
+                    <model>Civic</model>
+                </vehicle>
+            </prospect>
+        </adf>`;
+
+        const signature = crypto.createHmac('sha256', webhookSecret)
+            .update(xmlPayload)
+            .digest('hex');
+
+        await request(app)
+            .post('/api/leads/adf')
+            .query({ orgId })
+            .set('X-ADF-Signature', signature)
+            .set('Content-Type', 'application/xml')
+            .send(xmlPayload)
+            .expect(200);
+
+        const lead = await Lead.findOne({ organizationId: testOrg._id, email });
+        expect(String(lead?.vehicleId)).toBe(String(testVehicle._id));
+        expect(lead?.location).toBe('Lehi');
+
+        await Vehicle.deleteOne({ _id: testVehicle._id });
+    });
+
+    it('creates the Lead successfully with no vehicleId/location when the ADF vehicle has no match in inventory', async () => {
+        const email = `no-vin-match-${Date.now()}@example.com`;
+        const xmlPayload = `<?xml version="1.0" encoding="UTF-8"?>
+        <adf>
+            <prospect>
+                <customer>
+                    <contact>
+                        <name part="full">No Match Lead</name>
+                        <email>${email}</email>
+                    </contact>
+                </customer>
+                <vehicle>
+                    <year>2099</year>
+                    <make>Nonexistent</make>
+                    <model>Vehicle</model>
+                </vehicle>
+            </prospect>
+        </adf>`;
+
+        const signature = crypto.createHmac('sha256', webhookSecret)
+            .update(xmlPayload)
+            .digest('hex');
+
+        await request(app)
+            .post('/api/leads/adf')
+            .query({ orgId })
+            .set('X-ADF-Signature', signature)
+            .set('Content-Type', 'application/xml')
+            .send(xmlPayload)
+            .expect(200);
+
+        const lead = await Lead.findOne({ organizationId: testOrg._id, email });
+        expect(lead).toBeTruthy();
+        expect(lead?.vehicleId).toBeFalsy();
+        expect(lead?.location).toBeFalsy();
     });
 });

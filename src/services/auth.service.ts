@@ -411,7 +411,7 @@ class AuthService {
         const payload = tokenService.verifyRefreshToken(refreshToken);
         const refreshTokenHash = this.hashToken(refreshToken);
 
-        const session = await Session.findOne({ refreshTokenHash, userId: payload.sub });
+        const session = await Session.findOne({ refreshTokenHash, userId: payload.sub, revokedAt: { $exists: false }, expiresAt: { $gt: new Date() } });
         if (!session) {
             throw new ApiError(401, 'Invalid refresh token');
         }
@@ -433,7 +433,7 @@ class AuthService {
 
             // Benign concurrent reuse (another tab just rotated this token).
             // Issue fresh tokens; do NOT touch rotatedAt again.
-            return await this.generateAuthTokens(user);
+            return await this.generateAuthTokens(user, session.familyId || session._id as mongoose.Types.ObjectId);
         }
 
         // First use: mark as rotated and let the TTL index clean it up
@@ -442,7 +442,7 @@ class AuthService {
         session.expiresAt = new Date(Date.now() + REUSE_GRACE_MS + 10 * 1000);
         await session.save();
 
-        return await this.generateAuthTokens(user);
+        return await this.generateAuthTokens(user, session.familyId || session._id as mongoose.Types.ObjectId);
     }
 
     /**
@@ -450,7 +450,8 @@ class AuthService {
      */
     async logout(refreshToken: string) {
         const refreshTokenHash = this.hashToken(refreshToken);
-        await Session.findOneAndDelete({ refreshTokenHash });
+        const session = await Session.findOne({ refreshTokenHash });
+        if (session) await Session.updateMany({ $or: [{ _id: session._id }, { familyId: session.familyId || session._id }] }, { $set: { revokedAt: new Date(), expiresAt: new Date(Date.now() + 7 * 86400000) } });
     }
 
     /**
@@ -624,7 +625,8 @@ class AuthService {
         }
     }
 
-    private async generateAuthTokens(user: IUser) {
+    private async generateAuthTokens(user: IUser, familyId?: mongoose.Types.ObjectId) {
+        if (familyId && await Session.exists({ $or: [{ familyId }, { _id: familyId }], revokedAt: { $exists: true } })) throw new ApiError(401, 'Login session revoked');
         const accessToken = tokenService.generateAccessToken(user);
         const refreshToken = tokenService.generateRefreshToken(user);
 
@@ -633,9 +635,12 @@ class AuthService {
 
         await Session.create({
             userId: user._id,
+            familyId: familyId || new mongoose.Types.ObjectId(),
             refreshTokenHash,
             expiresAt
         });
+
+        if (familyId && await Session.exists({ $or: [{ familyId }, { _id: familyId }], revokedAt: { $exists: true } })) throw new ApiError(401, 'Login session revoked');
 
         return { accessToken, refreshToken };
     }

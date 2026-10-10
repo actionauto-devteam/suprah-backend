@@ -76,7 +76,7 @@ describe('Multi-Tenant Gmail Sync Service', () => {
         // 2. Setup System User for createdBy
         testUser = await User.create({
             email: `sync-admin-${Date.now()}@example.com`,
-            role: 'super_admin',
+            role: 'admin',
             organizationId: testOrg._id,
             password: 'Password123!',
             name: 'Sync Admin'
@@ -122,7 +122,7 @@ describe('Multi-Tenant Gmail Sync Service', () => {
         expect(lead).toBeDefined();
         expect(lead?.firstName).toBe('Mocked');
         expect(lead?.messageId).toBe('msg123');
-        expect(lead?.source).toBe('Gmail Sync');
+        expect(lead?.source).toBe('Third-Party Lead');
     });
 
     it('should skip sync if org Gmail is not connected', async () => {

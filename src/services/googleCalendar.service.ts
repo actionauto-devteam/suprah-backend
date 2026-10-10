@@ -8,6 +8,7 @@ import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import CrmUser, { ICrmUser } from '../models/CrmUser.model';
 import { IUser } from '../models/User.model';
 import { IAppointment } from '../models/Appointment.model';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 interface GoogleTokens {
   access_token: string;
@@ -412,6 +413,10 @@ class GoogleCalendarService {
   }
 
   async syncAllEvents(orgId: string, triggeringUserId?: string, forceFullSync?: boolean): Promise<number> {
+    if (isLocalUiAcceptanceMode()) {
+      console.log(`[GoogleCalendar] Skipping org ${orgId}: blocked by LOCAL_UI_ACCEPTANCE_MODE.`);
+      return 0;
+    }
     return this.syncInternal({ type: 'org', id: orgId }, triggeringUserId, forceFullSync);
   }
 

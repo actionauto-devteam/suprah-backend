@@ -19,6 +19,7 @@ import FeedComment from '../models/FeedComment.model';
 import Appointment from '../models/Appointment.model';
 import Organization from '../models/Organization.model';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 /**
  * Placeholder credential.
@@ -85,7 +86,11 @@ function getAiErrorMessage(error: any): string {
   return error?.message || 'Autrix could not generate a response. Please try again.';
 }
 
-async function createAnthropicFallbackCompletion(options: any): Promise<any> {
+export async function createAnthropicFallbackCompletion(options: any): Promise<any> {
+  if (isLocalUiAcceptanceMode()) {
+    throw new ApiError(500, '[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Anthropic request.');
+  }
+
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || NO_KEY_PLACEHOLDER });
   const sourceMessages = Array.isArray(options.messages) ? options.messages : [];
   const systemMessage = sourceMessages
@@ -149,7 +154,11 @@ async function createAnthropicFallbackCompletion(options: any): Promise<any> {
   };
 }
 
-async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
+export async function createGeminiCompletion(options: any, retries = 1): Promise<any> {
+  if (isLocalUiAcceptanceMode()) {
+    throw new ApiError(500, '[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Gemini request.');
+  }
+
   if (!process.env.GEMINI_API_KEY) {
     throw new ApiError(500, 'AI service not configured');
   }
@@ -922,6 +931,9 @@ export const draftLeadReply = asyncHandler(async (req: Request, res: Response) =
 export const refineMessage = asyncHandler(async (req: Request, res: Response) => {
   const { text } = req.body;
   if (!text?.trim()) throw new ApiError(400, 'text is required');
+  if (isLocalUiAcceptanceMode()) {
+    throw new ApiError(500, '[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Anthropic request.');
+  }
   if (!process.env.ANTHROPIC_API_KEY) throw new ApiError(500, 'AI service not configured');
 
   try {
@@ -1141,6 +1153,9 @@ Response guidelines:
  * Expects multipart/form-data with field 'audio'.
  */
 export const transcribeChunk = asyncHandler(async (req: Request, res: Response) => {
+  if (isLocalUiAcceptanceMode()) {
+    return res.json(new ApiResponse(200, { text: '' }, 'Transcription blocked in local UI acceptance mode'));
+  }
   if (!process.env.GROQ_API_KEY) {
     return res.json(new ApiResponse(200, { text: '' }, 'Transcription service not configured'));
   }

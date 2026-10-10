@@ -2,6 +2,7 @@ import express from 'express';
 import customerController from '../controllers/customer.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
+import { requireAdmin } from '../middleware/rbac.middleware';
 
 const router = express.Router();
 
@@ -18,7 +19,7 @@ router
 
 router.post('/sync-from-lead', customerController.syncFromLead);
 router.post('/sync-from-leads', customerController.syncFromLeads);
-router.post('/backfill-from-leads', customerController.backfillFromLeads);
+router.post('/backfill-from-leads', requireAdmin, customerController.backfillFromLeads);
 
 router
   .route('/:id')

@@ -16,7 +16,9 @@ import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { userAuthCache } from '../utils/cache.util';
 import CrmUser from '../models/CrmUser.model';
-import { generateCrmToken } from '../middleware/crmAuth.middleware';
+import { issueCrmSessionToken, revokeCrmSession, authTokenHash } from '../middleware/crmAuth.middleware';
+import Session from '../models/Session.model';
+import { revokeRecordingMediaForLogin } from '../services/recordingMediaAuth.service';
 
 /**
  * Shared cookie options for the refresh token. Centralized so that
@@ -157,6 +159,8 @@ class AuthController {
     });
 
     logout = asyncHandler(async (req: Request, res: Response) => {
+        await revokeRecordingMediaForLogin(req);
+        await revokeCrmSession(req, res);
         const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
         const user = req.user as any;
 
@@ -234,13 +238,15 @@ class AuthController {
         const mainUser = (req as any).user;
         if (!mainUser?.email) throw new ApiError(401, 'Unauthorized');
 
-        const crmUser = await CrmUser.findOne({ email: mainUser.email })
+        const crmUser = await CrmUser.findOne({ email: mainUser.email, organizationId: mainUser.organizationId, isActive: true })
             .select('_id email fullName role')
             .lean();
 
         if (!crmUser) throw new ApiError(404, 'No CRM account found for this user. Contact your admin.');
 
-        const token = generateCrmToken(crmUser._id.toString(), '30d');
+        const parent = req.cookies?.refreshToken ? await Session.findOne({ refreshTokenHash: authTokenHash(req.cookies.refreshToken), userId: mainUser._id, expiresAt: { $gt: new Date() }, revokedAt: { $exists: false } }) : null;
+        if (!parent) throw new ApiError(401, 'Active login session required');
+        const token = await issueCrmSessionToken(crmUser._id.toString(), '30d', (parent.familyId || parent._id) as any);
 
         res.json(new ApiResponse(200, { token, crmUserId: crmUser._id.toString() }, 'CRM token issued'));
     });

@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
-import { sendReviewRequestText } from '../services/communication.service';
+import { sendReviewRequestText, checkConversationPauseForLead, shouldDeferAutomatedFollowUp } from '../services/communication.service';
 import emailService from '../services/email.service';
 import logger from '../utils/logger';
 import { isWithinSendingHours } from '../utils/sendingWindow';
@@ -84,6 +84,16 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
 
     for (const appointment of candidates as any[]) {
       try {
+        const earlyPauseCheck = await checkConversationPauseForLead({
+          organizationId: appointment.organizationId,
+          phone: appointment.customerBooking?.phone,
+          leadId: appointment.leadId,
+        });
+        if (shouldDeferAutomatedFollowUp(earlyPauseCheck)) {
+          stats.skipped++;
+          continue;
+        }
+
         const claimed = await Appointment.findOneAndUpdate(
           {
             _id: appointment._id,
@@ -116,6 +126,27 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
           { new: true, timestamps: false },
         );
         if (!claimed) continue;
+
+        const latePauseCheck = await checkConversationPauseForLead({
+          organizationId: appointment.organizationId,
+          phone: appointment.customerBooking?.phone,
+          leadId: appointment.leadId,
+        });
+        if (shouldDeferAutomatedFollowUp(latePauseCheck)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestStatus: 'processing' },
+            {
+              $set: {
+                reviewRequestFailureReason: `Suppressed: ${latePauseCheck.reason || 'AI conversation is currently paused'}`,
+              },
+              $unset: { reviewRequestStatus: 1, reviewRequestLastAttemptAt: 1 },
+              $inc: { reviewRequestAttemptCount: -1 },
+            },
+            { timestamps: false },
+          );
+          stats.skipped++;
+          continue;
+        }
 
         if (await sendReviewRequestText(appointment)) {
           await Appointment.updateOne(
@@ -206,6 +237,16 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
 
     for (const appointment of emailCandidates as any[]) {
       try {
+        const earlyPauseCheck = await checkConversationPauseForLead({
+          organizationId: appointment.organizationId,
+          phone: appointment.customerBooking?.phone,
+          leadId: appointment.leadId,
+        });
+        if (shouldDeferAutomatedFollowUp(earlyPauseCheck)) {
+          stats.emailSkipped++;
+          continue;
+        }
+
         const claimed = await Appointment.findOneAndUpdate(
           {
             _id: appointment._id,
@@ -238,6 +279,27 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
           { new: true, timestamps: false },
         );
         if (!claimed) continue;
+
+        const latePauseCheck = await checkConversationPauseForLead({
+          organizationId: appointment.organizationId,
+          phone: appointment.customerBooking?.phone,
+          leadId: appointment.leadId,
+        });
+        if (shouldDeferAutomatedFollowUp(latePauseCheck)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestEmailStatus: 'processing' },
+            {
+              $set: {
+                reviewRequestEmailFailureReason: `Suppressed: ${latePauseCheck.reason || 'AI conversation is currently paused'}`,
+              },
+              $unset: { reviewRequestEmailStatus: 1, reviewRequestEmailLastAttemptAt: 1 },
+              $inc: { reviewRequestEmailAttemptCount: -1 },
+            },
+            { timestamps: false },
+          );
+          stats.emailSkipped++;
+          continue;
+        }
 
         if (await emailService.sendReviewRequestEmail(appointment)) {
           await Appointment.updateOne(

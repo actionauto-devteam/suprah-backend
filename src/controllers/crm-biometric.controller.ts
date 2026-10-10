@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { generateCrmToken } from '../middleware/crmAuth.middleware';
+import { issueCrmSessionToken } from '../middleware/crmAuth.middleware';
 import * as webauthnService from '../services/webauthn.service';
 import * as sshKeyService from '../services/sshKey.service';
 import * as sshAuthService from '../services/sshAuth.service';
@@ -80,7 +80,7 @@ export async function verifyAuthentication(req: Request, res: Response, next: Ne
       getUserAgent(req)
     );
 
-    const token = generateCrmToken(user._id.toString());
+    const token = await issueCrmSessionToken(user._id.toString());
 
     res.json({
       success: true,

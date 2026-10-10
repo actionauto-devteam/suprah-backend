@@ -87,6 +87,22 @@ describe('tray socket rooms', () => {
     expect(rooms.filter((room) => room.startsWith('user:'))).toEqual([`user:${MAIN_ID}`]);
   });
 
+  it('uses persisted organization membership instead of a forged main token tenant', async () => {
+    mockJwtVerify.mockReturnValue({ sub: MAIN_ID, orgId: 'org2' });
+    const rooms = joinedRooms(await connect({ token: 'main-jwt' }));
+    expect(rooms).toContain('org:org1');
+    expect(rooms).not.toContain('org:org2');
+  });
+
+  it('rejects a deactivated CRM identity before joining any user or organization room', async () => {
+    mockJwtVerify.mockImplementation((_token: string, secret: string) => {
+      if (secret === 'crm-secret') return { id: CRM_ID, type: 'crm' };
+      throw new Error('not a main token');
+    });
+    mockCrmFindById.mockImplementation(() => leanChain({ isActive: false, organizationId: 'org1' }));
+    await expect(connect({ token: 'crm-jwt' })).rejects.toThrow('Authentication error');
+  });
+
   it('a tray signed in with a CRM token joins its CRM user room exactly once', async () => {
     mockJwtVerify.mockImplementation((_token: string, secret: string) => {
       if (secret === 'crm-secret') return { id: CRM_ID, type: 'crm' };

@@ -1,4 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { contactIdentity } from '../utils/contactIdentity';
+import { CUSTOMER_IDENTITY_INDEXES, IDENTITY_SCHEMA_OPTIONS } from '../constants/customerIdentityIndexes';
 
 
 export interface ICustomerTransaction {
@@ -42,6 +44,11 @@ export interface ICustomer extends Document {
   email: string;
   phone: string;
   alternatePhone?: string;
+  normalizedEmail?: string | null;
+  normalizedPhone?: string | null;
+  normalizedAlternatePhone?: string | null;
+  identityVersion?: number;
+  identityCreationKey?: string;
   avatarInitials?: string;
 
   dateOfBirth?: Date;
@@ -143,16 +150,20 @@ const CustomerSchema = new Schema<ICustomer>(
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
 
     firstName: { type: String, required: true, trim: true },
-    lastName: { type: String, required: true, trim: true },
+    lastName: { type: String, trim: true, default: '' },
     email: {
       type: String,
-      required: true,
       lowercase: true,
       trim: true,
       index: true,
     },
-    phone: { type: String, required: true, trim: true, index: true },
+    phone: { type: String, trim: true, index: true },
     alternatePhone: { type: String, trim: true },
+    normalizedEmail: { type: String },
+    normalizedPhone: { type: String },
+    normalizedAlternatePhone: { type: String },
+    identityVersion: { type: Number },
+    identityCreationKey: { type: String },
 
     dateOfBirth: { type: Date },
     address: {
@@ -200,11 +211,17 @@ const CustomerSchema = new Schema<ICustomer>(
       lifetimeValue: { type: Number, default: 0 },
     },
   },
-  { timestamps: true }
+  { timestamps: true, ...IDENTITY_SCHEMA_OPTIONS }
 );
 
 
-CustomerSchema.index({ organizationId: 1, email: 1 }, { unique: true });
+CustomerSchema.pre('validate', function () {
+  Object.assign(this, contactIdentity(this), { identityVersion: 1 });
+});
+
+for (const { collection, key, name, unique, partialFilterExpression } of CUSTOMER_IDENTITY_INDEXES) {
+  if (collection === 'customers') CustomerSchema.index(key, { name, ...(unique ? { unique } : {}), ...(partialFilterExpression ? { partialFilterExpression } : {}) });
+}
 CustomerSchema.index({ organizationId: 1, phone: 1 });
 CustomerSchema.index({ organizationId: 1, createdAt: -1 });
 CustomerSchema.index({ organizationId: 1, isActive: 1, createdAt: -1 });

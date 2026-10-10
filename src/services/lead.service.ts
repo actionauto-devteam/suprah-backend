@@ -3,11 +3,18 @@ import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import FinanceApplication, { IFinanceApplication } from '../models/FinanceApplication.model';
 import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
-import orgGmailService from './orgGmail.service';
+import Lead from '../models/lead.model';
+import IntakeClaim from '../models/IntakeClaim.model';
 import notificationService from './notification.service';
 import { generateADF, ADFLeadData } from '../utils/adfGenerator';
+import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
+import { LEAD_SOURCE } from '../constants/leadSource';
+import { emitToOrg } from '../utils/socketEmitter';
+import { triggerAiReplyForNewInquiry } from './communication.service';
 import logger from '../utils/logger';
 import { ApiError } from '../utils/ApiError';
+
+const VEHICLE_INQUIRY_DEDUP_WINDOW_MS = 15 * 60 * 1000;
 
 export interface InquiryDTO {
   organizationId: string;
@@ -48,7 +55,7 @@ export interface FinanceAppDTO {
 
 class LeadService {
   async processInquiry(dto: InquiryDTO): Promise<void> {
-    const { organizationId, vehicleId } = dto;
+    const { organizationId, vehicleId, customerId } = dto;
 
     const config = await OrgLeadConfig.findOne({ organizationId, isActive: true });
     if (!config || !config.gmailConnected) {
@@ -65,6 +72,28 @@ class LeadService {
     }
     if (!org) {
       throw new ApiError(404, 'Organization not found');
+    }
+
+    const claimKey = `${customerId}:${vehicleId}`;
+    const claimResult = await IntakeClaim.findOneAndUpdate(
+      { organizationId, kind: 'vehicle_inquiry', claimKey },
+      {
+        $setOnInsert: {
+          organizationId,
+          kind: 'vehicle_inquiry',
+          claimKey,
+          expiresAt: new Date(Date.now() + VEHICLE_INQUIRY_DEDUP_WINDOW_MS),
+        },
+      },
+      { new: true, upsert: true, includeResultMetadata: true },
+    );
+
+    if (claimResult.lastErrorObject?.updatedExisting) {
+      logger.info(
+        { organizationId, customerId, vehicleId },
+        'Duplicate on-site vehicle inquiry ignored (already processed within the dedup window)',
+      );
+      return;
     }
 
     const adfData: ADFLeadData = {
@@ -119,21 +148,56 @@ class LeadService {
 
     const adfXml = generateADF(adfData);
 
-    const vehicleFull = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
-    const subject = `vehicle lead for ${org.name}-${vehicleFull} (www.suprah.ai)`;
+    try {
+      const systemUserId = await resolveOrgSystemUserId(organizationId);
+      if (!systemUserId) {
+        throw new ApiError(400, 'This dealership is not yet set up to receive online inquiries');
+      }
 
-    // 6. Send Email (The "Bounce" Flow)
-    await orgGmailService.sendEmail(
-      organizationId,
-      config.leadSourceEmail,
-      subject,
-      adfXml
-    );
+      const lead = await Lead.create({
+        organizationId,
+        createdBy: systemUserId,
+        firstName: dto.customerName.first,
+        lastName: dto.customerName.last,
+        email: dto.customerEmail,
+        phone: dto.customerPhone,
+        vehicle: {
+          year: vehicle.year?.toString(),
+          make: vehicle.make,
+          model: vehicle.modelName,
+          vin: vehicle.vin,
+          stock: vehicle.stockNumber,
+          trim: vehicle.trim,
+          price: vehicle.price?.toString(),
+        },
+        vehicleId: vehicle._id,
+        location: vehicle.dealerCity || undefined,
+        comments: dto.comments,
+        parsedContent: adfXml,
+        channel: 'web',
+        source: LEAD_SOURCE.WEBSITE_INQUIRY,
+        status: 'New',
+      });
 
-    logger.info(
-      { organizationId, customerId: dto.customerId, vehicleId, destination: config.leadSourceEmail },
-      'Vehicle inquiry processed and ADF email dispatched'
-    );
+      await IntakeClaim.updateOne(
+        { organizationId, kind: 'vehicle_inquiry', claimKey },
+        { $set: { leadId: lead._id } },
+      );
+
+      triggerAiReplyForNewInquiry(organizationId, lead, lead.phone, lead.comments).catch((err) => {
+        logger.error({ err, organizationId, leadId: lead._id }, '[LeadService] triggerAiReplyForNewInquiry failed');
+      });
+
+      emitToOrg(String(organizationId), 'lead:new', lead.toObject());
+
+      logger.info(
+        { organizationId, customerId: dto.customerId, vehicleId, leadId: lead._id },
+        'Vehicle inquiry processed and Lead created directly (no bounce email)'
+      );
+    } catch (error) {
+      await IntakeClaim.deleteOne({ organizationId, kind: 'vehicle_inquiry', claimKey }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /**

@@ -3,11 +3,18 @@ import { OAuth2Client } from 'google-auth-library';
 import mongoose from 'mongoose';
 import OrgLeadConfig, { IOrgLeadConfig } from '../models/OrgLeadConfig.model';
 import Lead from '../models/lead.model';
-import User from '../models/User.model';
+import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
+import { normalizeIdentityEmail } from '../utils/contactIdentity';
 import { decrypt, encrypt } from '../utils/crypto';
 import { ApiError } from '../utils/ApiError';
 import { parseEmailBody, extractADFFromBody, parseADF, detectChannel } from '../utils/adfParser';
 import { getSocketIO } from '../utils/socketEmitter';
+import { withRetry } from '../utils/withRetry';
+import { LEAD_SOURCE } from '../constants/leadSource';
+import { resolveVehicleContextForLead } from './leadLocation.service';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
+import { triggerAiReplyForNewInquiry } from './communication.service';
+import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
 
 class OrgGmailService {
     private createOAuth2Client(): OAuth2Client {
@@ -52,6 +59,11 @@ class OrgGmailService {
      * Syncs leads from Gmail for a specific organization
      */
     async syncLeadsForOrg(orgId: string): Promise<{ total: number; synced: number }> {
+        if (isLocalUiAcceptanceMode()) {
+            console.log(`[OrgSync] Skipping org ${orgId}: blocked by LOCAL_UI_ACCEPTANCE_MODE.`);
+            return { total: 0, synced: 0 };
+        }
+
         const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true });
         if (!config || !config.gmailConnected) {
             console.log(`[OrgSync] Skipping org ${orgId}: Gmail not connected or inactive.`);
@@ -100,12 +112,12 @@ class OrgGmailService {
             let nextPageToken: string | undefined = undefined;
 
             do {
-                const response = await gmail.users.messages.list({ 
-                    userId: 'me', 
-                    q: query, 
-                    maxResults: 100, 
-                    pageToken: nextPageToken 
-                });
+                const response = await withRetry(() => gmail.users.messages.list({
+                    userId: 'me',
+                    q: query,
+                    maxResults: 100,
+                    pageToken: nextPageToken
+                }));
                 if (response.data.messages) {
                     messages.push(...response.data.messages);
                 }
@@ -113,22 +125,24 @@ class OrgGmailService {
             } while (nextPageToken && messages.length < 2000); // Safety cap at 2000
 
             let syncedCount = 0;
-            const systemUser = await User.findOne({ role: 'super_admin' }) || await User.findOne({ role: 'admin' });
+            const systemUserId = await resolveOrgSystemUserId(orgId);
+            if (!systemUserId) throw new ApiError(400, 'This dealership has no intake user configured');
 
             for (const msg of messages) {
                 try {
-                    const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id! });
+                    const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: msg.id! }));
                     const rawBody = this.extractBody(detail.data);
 
                     // Skip empty emails
                     if (!rawBody || !rawBody.trim()) continue;
 
-                    // Check if lead already exists by messageId/threadId to avoid duplicates
-                    const exists = await Lead.findOne({
-                        $or: [{ messageId: detail.data.id }, { threadId: detail.data.threadId }]
-                    });
-
-                    if (exists) continue;
+                    // A message already imported into this thread is skipped up front —
+                    // this is a best-effort secondary check (threadId has no unique index),
+                    // the real dedup guarantee is the atomic messageId upsert below.
+                    const alreadyImportedInThread = detail.data.threadId
+                        ? await Lead.findOne({ organizationId: orgId, threadId: detail.data.threadId }).select('_id').lean()
+                        : null;
+                    if (alreadyImportedInThread) continue;
 
                     // Extract email headers for better channel detection
                     const headers = detail.data.payload?.headers || [];
@@ -137,29 +151,63 @@ class OrgGmailService {
 
                     // Use parseEmailBody which gracefully falls back to plain text
                     const { parsedContent, channel, adfData } = await parseEmailBody(rawBody, subject, from);
+                    const senderAddress = normalizeIdentityEmail(from.match(/<([^<>]+)>/)?.[1] || from);
 
-                    const newLead = new Lead({
-                        organizationId: orgId,
-                        createdBy: systemUser?._id,
-                        firstName: adfData?.firstName || '',
-                        lastName: adfData?.lastName || '',
-                        email: adfData?.email || '',
-                        phone: adfData?.phone || '',
-                        vehicle: adfData?.vehicle || {},
-                        comments: adfData?.comments || '',
-                        subject, // Store the email subject
-                        body: rawBody, // Store the raw/plain body
-                        parsedContent,
-                        messageId: detail.data.id,
-                        threadId: detail.data.threadId,
-                        channel,
-                        source: adfData?.source || 'Gmail Sync',
-                        senderEmail: config.gmailAddress,
-                        centralIngestion: true,
-                    });
+                    const sourceSubmittedAt = detail.data.internalDate
+                        ? new Date(Number(detail.data.internalDate))
+                        : undefined;
 
-                    await newLead.save();
+                    const vehicleContext = adfData
+                        ? await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null)
+                        : null;
+
+                    const upsertResult = await Lead.findOneAndUpdate(
+                        { organizationId: orgId, messageId: detail.data.id },
+                        {
+                            $setOnInsert: {
+                                organizationId: orgId,
+                                createdBy: systemUserId,
+                                firstName: adfData?.firstName || '',
+                                lastName: adfData?.lastName || '',
+                                email: adfData ? (adfData.email || '') : (senderAddress || ''),
+                                identityEmailExcluded: !adfData && (channel === 'adf' || Boolean(config.leadSourceEmail)),
+                                phone: adfData?.phone || '',
+                                vehicle: adfData?.vehicle || {},
+                                vehicleId: vehicleContext?.vehicleId,
+                                location: vehicleContext?.location,
+                                comments: adfData?.comments || '',
+                                subject,
+                                body: rawBody,
+                                parsedContent,
+                                messageId: detail.data.id,
+                                threadId: detail.data.threadId,
+                                channel,
+                                source: adfData ? LEAD_SOURCE.THIRD_PARTY_LEAD : LEAD_SOURCE.EMAIL_INQUIRY,
+                                sourceProvider: adfData ? (adfData.provider || adfData.vendor || undefined) : undefined,
+                                senderEmail: from,
+                                sourceSubmittedAt,
+                                centralIngestion: true,
+                            },
+                        },
+                        { new: true, upsert: true, includeResultMetadata: true, setDefaultsOnInsert: true },
+                    );
+
+                    if (upsertResult.lastErrorObject?.updatedExisting) {
+                        // Another sync run already won this message — nothing left to do.
+                        continue;
+                    }
+
+                    const newLead = upsertResult.value;
                     syncedCount++;
+
+                    if (newLead) {
+                        triggerAiReplyForNewInquiry(orgId, newLead, newLead.phone, newLead.comments).catch((err) => {
+                            console.error('[OrgSync] triggerAiReplyForNewInquiry failed:', err);
+                        });
+                        triggerAiEmailReplyForNewInquiry(orgId, newLead, newLead.comments).catch((err) => {
+                            console.error('[OrgSync] triggerAiEmailReplyForNewInquiry failed:', err);
+                        });
+                    }
 
                     // Real-time notify
                     const io = getSocketIO();

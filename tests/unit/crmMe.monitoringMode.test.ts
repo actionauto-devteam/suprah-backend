@@ -57,6 +57,13 @@ jest.mock('../../src/config/subscriptionTiers', () => ({
 
 import crmController from '../../src/controllers/crm.controller';
 
+test('organization settings reject a non-admin CRM actor before any database update', async () => {
+  const next = jest.fn();
+  crmController.updateOrgSettings({ orgId: 'org1', crmUser: { role: 'employee' }, body: {} } as any, {} as any, next);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(next.mock.calls[0][0].statusCode).toBe(403);
+});
+
 const crmUser = (overrides: Record<string, unknown> = {}) => ({
   _id: { toString: () => '64a1b2c3d4e5f60718293a4b' },
   fullName: 'Pat Example',

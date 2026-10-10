@@ -1,4 +1,6 @@
 import mongoose, { Schema, Document, Types } from "mongoose";
+import { IvrRoutingState } from './CallRoutingConfig.model';
+import { AiHumanAttention, aiHumanAttentionFields } from './aiHumanAttention';
 
 /* ----------------------------- shared types ----------------------------- */
 
@@ -8,7 +10,7 @@ export interface IActorRef {
   email?: string;
 }
 
-const ActorRefSchema = new Schema<IActorRef>(
+export const ActorRefSchema = new Schema<IActorRef>(
   {
     userId: { type: Schema.Types.Mixed, required: true },
     name: { type: String },
@@ -32,6 +34,11 @@ export interface IConversation extends Document {
   aiPausedAt?: Date | null;
   aiPausedBy?: IActorRef | null;
   aiGeneratingAt?: Date | null;
+  aiAutoPausedUntil?: Date | null;
+  aiResponseVersion?: number;
+  aiLastDispatchVersion?: number;
+  aiAttentionPendingIds?: string[];
+  aiHumanAttention?: AiHumanAttention;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -50,6 +57,8 @@ const ConversationSchema = new Schema<IConversation>(
     aiPausedAt: { type: Date, default: null },
     aiPausedBy: { type: ActorRefSchema, default: null },
     aiGeneratingAt: { type: Date, default: null },
+    ...aiHumanAttentionFields,
+    aiAutoPausedUntil: { type: Date },
   },
   { timestamps: true }
 );
@@ -65,7 +74,8 @@ export type MessageStatus =
   | "sent"       // Telnyx accepted / sent to carrier
   | "delivered"  // carrier delivery receipt
   | "failed"     // send or delivery failed
-  | "received";  // inbound message
+  | "received"   // inbound message
+  | "pending_reconciliation";
 
 export interface ICommunicationMessage extends Document {
   orgId: Types.ObjectId | string;
@@ -98,7 +108,7 @@ const CommunicationMessageSchema = new Schema<ICommunicationMessage>(
     to: { type: String, required: true },
     status: {
       type: String,
-      enum: ["queued", "sent", "delivered", "failed", "received"],
+      enum: ["queued", "sent", "delivered", "failed", "received", "pending_reconciliation"],
       default: "queued",
       index: true,
     },
@@ -116,6 +126,7 @@ CommunicationMessageSchema.index({ conversationId: 1, createdAt: -1 });
 /* --------------------------------- CallLog ------------------------------ */
 
 export type CallStatus =
+  | "ivr"
   | "ringing"     // inbound, waiting for an agent to claim
   | "answering"   // an agent claimed it; bridging in progress
   | "in-progress" // bridged / live
@@ -125,6 +136,8 @@ export type CallStatus =
   | "canceled";   // caller hung up before answer / outbound aborted
 
 export interface ICallLog extends Document {
+  recordingCorrelation?: { tokenHash?: string; connectionId?: string; verified?: boolean; answerControlId?: string; bridged?: boolean; customerControlId?: string; legId?: string; customerLegId?: string; clientState?: string };
+  routing?: IvrRoutingState;
   orgId: Types.ObjectId | string;
   customerId?: Types.ObjectId | null;
   leadId?: Types.ObjectId | null;
@@ -161,7 +174,7 @@ const CallLogSchema = new Schema<ICallLog>(
     to: { type: String, required: true },
     status: {
       type: String,
-      enum: ["ringing", "answering", "in-progress", "completed", "missed", "failed", "canceled"],
+      enum: ["ivr", "ringing", "answering", "in-progress", "completed", "missed", "failed", "canceled"],
       default: "ringing",
       index: true,
     },
@@ -178,12 +191,15 @@ const CallLogSchema = new Schema<ICallLog>(
     hangupCause: { type: String },
     customerName: { type: String },
     textBackSentAt: { type: Date, default: null },
+    routing: { type: Schema.Types.Mixed },
+    recordingCorrelation: { type: Schema.Types.Mixed, select: false },
   },
   { timestamps: true }
 );
 
 CallLogSchema.index({ orgId: 1, createdAt: -1 });
 CallLogSchema.index({ orgId: 1, customerId: 1, createdAt: -1 });
+CallLogSchema.index({ 'routing.deadline': 1 }, { partialFilterExpression: { 'routing.deadline': { $type: 'date' } } });
 
 /* -------------------------- TelephonyCredential -------------------------- */
 /** One Telnyx on-demand credential per user, so each browser registers with

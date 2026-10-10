@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Redis from 'ioredis';
 import config from '../config';
 import logger from '../utils/logger';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 const router = Router();
 
@@ -10,7 +11,8 @@ router.get('/healthz', (req: Request, res: Response) => {
   res.status(200).json({
     status: 'ok',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    localUiAcceptanceMode: isLocalUiAcceptanceMode(),
   });
 });
 
