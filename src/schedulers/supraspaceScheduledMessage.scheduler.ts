@@ -32,7 +32,9 @@ async function emitScheduledMessage(messageId: string) {
   try {
     const io = getIO();
     (conversation.members || []).forEach((member: any) => {
-      io.to(`user:${member.toString ? member.toString() : member}`).emit(
+      const memberId = member.toString ? member.toString() : String(member);
+      if ((conversation.archivedBy || []).some((archived: any) => archived.toString() === memberId)) return;
+      io.to(`user:${memberId}`).emit(
         "message:new",
         payload,
       );
