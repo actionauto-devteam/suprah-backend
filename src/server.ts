@@ -9,6 +9,8 @@ import path from "path";
 import { Server } from "socket.io";
 import { setupSocket } from "./socket";
 import { setSocketIO, streamLogToAdmins } from "./utils/socketEmitter";
+import { recoverPendingIvrCalls } from './services/communication.service';
+import { recoverRecordings } from './services/callRecording.service';
 import cors from "cors";
 import helmet from "helmet";
 import mongoSanitize from "express-mongo-sanitize";
@@ -27,6 +29,7 @@ import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivity
 import { initAppointmentReminderScheduler } from "./schedulers/appointmentReminder.scheduler";
 import { initNoShowFollowUpScheduler } from "./schedulers/appointmentNoShowFollowUp.scheduler";
 import { initLeadNurtureScheduler } from "./schedulers/leadNurture.scheduler";
+import { initAiLeadFollowupScheduler } from "./schedulers/aiLeadFollowup.scheduler";
 import { initReviewRequestScheduler } from "./schedulers/reviewRequest.scheduler";
 import { initVehicleReengagementScheduler } from "./schedulers/vehicleReengagement.scheduler";
 import { initSmsCampaignScheduler } from "./schedulers/smsCampaign.scheduler";
@@ -225,6 +228,7 @@ if (require.main === module) {
       initAppointmentReminderScheduler();
       initNoShowFollowUpScheduler();
       initLeadNurtureScheduler();
+      initAiLeadFollowupScheduler();
       initReviewRequestScheduler();
       initVehicleReengagementScheduler();
       initSmsCampaignScheduler();
@@ -251,12 +255,31 @@ if (require.main === module) {
       logger.info("✓ Suprah Mail sync engine started.");
     }
 
+    let recoveringIvr = false;
+    const ivrRecoveryTimer = setInterval(() => {
+      if (recoveringIvr) return;
+      recoveringIvr = true;
+      recoverPendingIvrCalls().catch(err => logger.error({ err }, 'IVR recovery failed')).finally(() => { recoveringIvr = false; });
+    }, 5000);
+    ivrRecoveryTimer.unref();
+    const recordingRecoveryTimer = setInterval(() => { recoverRecordings().catch(err => logger.error({ err }, 'Recording recovery failed')); }, 5000);
+    recordingRecoveryTimer.unref();
     const server = httpServer.listen(config.port, () => {
       logger.info(`Server running on port ${config.port}`);
     });
+    let syncingCustomers = false;
+    const customerIdentityTimer = areBackgroundJobsDisabled() ? undefined : setInterval(() => {
+      if (syncingCustomers) return;
+      syncingCustomers = true;
+      retryPendingLeadCustomers().catch(error => logger.error({ error }, 'Customer identity retry failed')).finally(() => { syncingCustomers = false; });
+    }, 60000);
+    customerIdentityTimer?.unref();
 
     // ─── Graceful Shutdown ────────────────────────────────────────────────────
     const shutdown = async (signal: string) => {
+      clearInterval(ivrRecoveryTimer);
+      clearInterval(recordingRecoveryTimer);
+      if (customerIdentityTimer) clearInterval(customerIdentityTimer);
       logger.info(`[${signal}] Received. Starting graceful shutdown...`);
 
       // 1. Stop accepting new requests
@@ -328,3 +351,4 @@ if (require.main === module) {
 }
 
 export default app;
+import { retryPendingLeadCustomers } from './services/customerIdentity.service';

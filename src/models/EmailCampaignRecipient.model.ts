@@ -5,7 +5,8 @@ export type EmailCampaignRecipientStatus = 'pending' | 'sent' | 'failed' | 'skip
 export interface IEmailCampaignRecipient extends Document {
   campaignId: mongoose.Types.ObjectId;
   organizationId: string;
-  leadId: mongoose.Types.ObjectId;
+  leadId?: mongoose.Types.ObjectId;
+  marketingContactId?: mongoose.Types.ObjectId;
   email: string;
   phone?: string;
   customerName: string;
@@ -20,7 +21,8 @@ const EmailCampaignRecipientSchema: Schema<IEmailCampaignRecipient> = new Schema
   {
     campaignId: { type: Schema.Types.ObjectId, required: true, ref: 'EmailCampaign', index: true },
     organizationId: { type: String, required: true },
-    leadId: { type: Schema.Types.ObjectId, required: true, ref: 'Lead' },
+    leadId: { type: Schema.Types.ObjectId, ref: 'Lead' },
+    marketingContactId: { type: Schema.Types.ObjectId, ref: 'MarketingContact' },
     email: { type: String, required: true, trim: true, lowercase: true },
     phone: { type: String, trim: true },
     customerName: { type: String, trim: true },
@@ -35,6 +37,16 @@ const EmailCampaignRecipientSchema: Schema<IEmailCampaignRecipient> = new Schema
   },
   { timestamps: true },
 );
+
+EmailCampaignRecipientSchema.pre('validate', function (next) {
+  const hasLead = !!this.leadId;
+  const hasMarketingContact = !!this.marketingContactId;
+  if (hasLead === hasMarketingContact) {
+    next(new Error('Exactly one of leadId or marketingContactId must be set'));
+    return;
+  }
+  next();
+});
 
 EmailCampaignRecipientSchema.index({ campaignId: 1, status: 1 });
 

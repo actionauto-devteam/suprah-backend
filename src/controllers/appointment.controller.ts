@@ -5,6 +5,8 @@ import ServiceSlot from '../models/ServiceSlot.model';
 import User from '../models/User.model';
 import Vehicle from '../models/Vehicle.model';
 import Lead from '../models/lead.model';
+import IntakeClaim from '../models/IntakeClaim.model';
+import { LEAD_SOURCE } from '../constants/leadSource';
 import appointmentService from '../services/appointment.service';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
 import customerBookingService from '../services/customerbooking.service';
@@ -17,6 +19,7 @@ import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
+import { triggerAiReplyForNewInquiry } from '../services/communication.service';
 import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
 
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
@@ -457,6 +460,7 @@ const handleGuestResponse = asyncHandler(async (req: Request, res: Response) => 
 
 const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Response) => {
     const { vehicleId, firstName, lastName, email, phone, startTime, notes } = req.body || {};
+    const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 80);
 
     if (!vehicleId || !firstName || !lastName || !email || !phone || !startTime) {
         return res.status(400).json(
@@ -499,6 +503,37 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
     const end = new Date(start.getTime() + 60 * 60 * 1000);
     const vehicleLabel = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
 
+    if (clientRequestId) {
+        const claimResult = await IntakeClaim.findOneAndUpdate(
+            { organizationId: orgId, kind: 'test_drive_booking', claimKey: clientRequestId },
+            {
+                $setOnInsert: {
+                    organizationId: orgId,
+                    kind: 'test_drive_booking',
+                    claimKey: clientRequestId,
+                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                },
+            },
+            { new: true, upsert: true, includeResultMetadata: true },
+        );
+
+        if (claimResult.lastErrorObject?.updatedExisting) {
+            const claim = claimResult.value;
+            if (claim?.leadId && claim?.appointmentId) {
+                return res.status(201).json(
+                    new ApiResponse(
+                        201,
+                        { leadId: claim.leadId, appointmentId: claim.appointmentId },
+                        'Test drive request submitted',
+                    )
+                );
+            }
+            return res.status(409).json(
+                new ApiResponse(409, null, 'This request is already being processed.')
+            );
+        }
+    }
+
     const lead = await Lead.create({
         organizationId: orgId,
         createdBy: systemUserId,
@@ -512,8 +547,10 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
             model: vehicle.model,
             stock: vehicle.stockNumber,
         },
+        vehicleId: vehicle._id,
+        location: vehicle.dealerCity || undefined,
         comments: notes || `Requested a test drive for ${vehicleLabel} via the website.`,
-        source: 'Website Booking',
+        source: LEAD_SOURCE.WEBSITE_BOOKING,
         channel: 'web',
         status: 'New',
     });
@@ -556,6 +593,17 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
         changedBy: systemUserId,
     });
     await lead.save();
+
+    triggerAiReplyForNewInquiry(orgId, lead, lead.phone, lead.comments).catch((err) => {
+        console.error('[public-booking] triggerAiReplyForNewInquiry failed:', err);
+    });
+
+    if (clientRequestId) {
+        await IntakeClaim.updateOne(
+            { organizationId: orgId, kind: 'test_drive_booking', claimKey: clientRequestId },
+            { $set: { leadId: lead._id, appointmentId: appointment._id } },
+        );
+    }
 
     emitToOrg(String(orgId), 'lead:new', lead.toObject());
     emitToOrg(String(orgId), 'appointment:new', {

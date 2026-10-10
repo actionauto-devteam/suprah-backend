@@ -6,6 +6,7 @@ export interface IWebChatMessage extends Document {
   leadId: mongoose.Types.ObjectId;
   direction: 'inbound' | 'outbound';
   body: string;
+  aiDispatchPending?: boolean;
   sentBy?: { userId: string; name?: string };
   createdAt: Date;
   updatedAt: Date;
@@ -18,6 +19,7 @@ const WebChatMessageSchema: Schema<IWebChatMessage> = new Schema(
     leadId: { type: Schema.Types.ObjectId, ref: 'Lead', required: true },
     direction: { type: String, enum: ['inbound', 'outbound'], required: true },
     body: { type: String, required: true, maxlength: 1000 },
+    aiDispatchPending: { type: Boolean, default: false },
     sentBy: {
       type: new Schema({ userId: String, name: String }, { _id: false }),
     },

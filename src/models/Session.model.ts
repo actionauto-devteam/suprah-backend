@@ -2,6 +2,11 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ISession extends Document {
     userId: mongoose.Types.ObjectId;
+    authKind?: 'main' | 'crm';
+    crmUserId?: mongoose.Types.ObjectId;
+    familyId?: mongoose.Types.ObjectId;
+    revokedAt?: Date;
+    parentSessionFamilyId?: mongoose.Types.ObjectId;
     refreshTokenHash: string;
     deviceHeader?: string;
     ip?: string;
@@ -23,9 +28,14 @@ const SessionSchema = new Schema(
         userId: {
             type: Schema.Types.ObjectId,
             ref: 'User',
-            required: true,
+            required: function (this: any) { return this.authKind !== 'crm'; },
             index: true,
         },
+        authKind: { type: String, enum: ['main', 'crm'], default: 'main' },
+        crmUserId: { type: Schema.Types.ObjectId, ref: 'CrmUser', index: true },
+        familyId: { type: Schema.Types.ObjectId, index: true },
+        revokedAt: Date,
+        parentSessionFamilyId: { type: Schema.Types.ObjectId },
         refreshTokenHash: {
             type: String,
             required: true,

@@ -69,7 +69,7 @@ export async function generateLeadSummary(
 
   const userPrompt = [
     `Lead: ${leadName}`,
-    `Source: ${lead.source || lead.channel || 'unknown'}`,
+    `Source: ${[lead.source, lead.sourceProvider].filter(Boolean).join(' — ') || lead.channel || 'unknown'}`,
     vehicleLabel ? `Vehicle interest on file: ${vehicleLabel}` : '',
     '',
     'Activity log (oldest to newest):',

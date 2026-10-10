@@ -263,6 +263,11 @@ export const notificationTemplates = {
       : `${data.customerName}'s conversation needs a human to step in`,
   }),
 
+  lead_note_mention: (data: { customerName: string; authorName: string }) => ({
+    title: 'You were mentioned in a note',
+    message: `${data.authorName} mentioned you on ${data.customerName}'s lead`,
+  }),
+
   // ==================== CRM & LEADS ====================
   new_lead: (data: LeadData) => ({
     title: 'New Lead Received',

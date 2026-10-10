@@ -1,9 +1,28 @@
 import OpenAI from 'openai';
 import logger from './logger';
+import { isDemoPhone } from './demoPhone';
+import { isLocalMongoTarget } from './productionDbGuard.util';
 
 const NO_KEY_PLACEHOLDER = 'disabled-no-key';
 
-export function hasGeminiApiKey(): boolean {
+export function isLocalUiAcceptanceMode(): boolean {
+  return (process.env.LOCAL_UI_ACCEPTANCE_MODE || '').trim().toLowerCase() === 'true';
+}
+
+export function isGeminiQaModeActive(): boolean {
+  if (!isLocalUiAcceptanceMode()) return false;
+  if ((process.env.LOCAL_GEMINI_QA_MODE || '').trim().toLowerCase() !== 'true') return false;
+  if ((process.env.NODE_ENV || '').trim().toLowerCase() === 'production') return false;
+  if (!isLocalMongoTarget(process.env.MONGODB_URI)) return false;
+  return true;
+}
+
+export function hasGeminiApiKey(phone?: string): boolean {
+  if (isLocalUiAcceptanceMode()) {
+    if (!isGeminiQaModeActive()) return false;
+    if (!phone || !isDemoPhone(phone)) return false;
+    return !!process.env.GEMINI_API_KEY;
+  }
   return !!process.env.GEMINI_API_KEY;
 }
 
@@ -49,14 +68,28 @@ const PROHIBITED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bdiscount(s|ed)?\b|\bpromo(tion)?(al)?\b|\bincentive[s]?\b|\brebate[s]?\b|\bon sale\b|\bsale price\b|\bclearance\b|\bspecial offer\b/i, reason: 'discount/incentive language' },
   { pattern: /\bfinanc(e|ing)\b|\bloan[s]?\b|\blease[ds]?\b|\bAPR\b|\bdown payment\b|\bmonthly payment[s]?\b|\bcredit approv(al|ed)\b|\/\s?mo\b/i, reason: 'financing/payment language' },
   { pattern: /\btrade[\s-]?in\b/i, reason: 'trade-in mention' },
-  { pattern: /\bguarantee(d)?\b|\bstill available\b|\bin stock\b|\bavailable now\b|\bact fast\b|\bwon'?t last\b|\blimited (time|availability|stock)\b|\bhurry\b|\bfirst come\b/i, reason: 'guaranteed-availability language' },
   { pattern: /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/, reason: 'unexpected phone number' },
   { pattern: /https?:\/\/|www\.|[a-z0-9-]+\.(com|net|org|io)\b/i, reason: 'unexpected link' },
   { pattern: /[\w.+-]+@[\w-]+\.[a-z]{2,}/i, reason: 'unexpected email address' },
 ];
 
+const ALWAYS_UNSAFE_AVAILABILITY = /\bguarantee(d)?\b|\bact fast\b|\bwon'?t last\b|\blimited (time|availability|stock)\b|\bhurry\b|\bfirst come\b/i;
+const CONDITIONAL_AVAILABILITY_PHRASES = /\bstill available\b|\bin stock\b|\bavailable now\b/gi;
+const AVAILABILITY_HEDGE_WORDS = /\b(if|whether|check|confirm(ing)?|verify|verifying|see|seeing|find out|let me|i'll|we'll|will|going to)\b/i;
+
+export function hasGuaranteedAvailabilityLanguage(text: string): boolean {
+  if (ALWAYS_UNSAFE_AVAILABILITY.test(text)) return true;
+  for (const match of text.matchAll(CONDITIONAL_AVAILABILITY_PHRASES)) {
+    const start = Math.max(0, (match.index ?? 0) - 30);
+    const context = text.slice(start, match.index);
+    if (!AVAILABILITY_HEDGE_WORDS.test(context)) return true;
+  }
+  return false;
+}
+
 export function validateOutboundMessage(text: string): { ok: boolean; reasons: string[] } {
   const reasons = PROHIBITED_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason);
+  if (hasGuaranteedAvailabilityLanguage(text)) reasons.push('guaranteed-availability language');
   if (text.trim().length < 10) reasons.push('message too short or malformed');
   return { ok: reasons.length === 0, reasons: Array.from(new Set(reasons)) };
 }
@@ -90,9 +123,9 @@ export function stripDraftArtifacts(text: string): string {
 export async function classifySafety(
   client: OpenAI,
   text: string,
-  opts: { model: string; fallbackModel: string; timeoutMs: number; systemPrompt: string; logLabel: string },
+  opts: { model: string; fallbackModel: string; timeoutMs: number; systemPrompt: string; logLabel: string; phone?: string },
 ): Promise<'SAFE' | 'UNSAFE' | 'ERROR'> {
-  if (!hasGeminiApiKey()) return 'ERROR';
+  if (!hasGeminiApiKey(opts.phone)) return 'ERROR';
 
   const call = createCompletionWithFallback(
     client,

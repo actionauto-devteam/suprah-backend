@@ -1,11 +1,12 @@
 import Appointment from '../models/Appointment.model';
 import User from '../models/User.model';
 import Lead from '../models/lead.model';
-import { getSocketIO } from '../utils/socketEmitter';
+import { getSocketIO, emitToOrg } from '../utils/socketEmitter';
 import notificationService from './notification.service';
 import emailService from './email.service';
 import googleCalendarService from './googleCalendar.service';
 import customerBookingService from './customerbooking.service';
+import { notifyCustomerOfReschedule } from './communication.service';
 import { ApiError } from '../utils/ApiError';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
@@ -395,6 +396,7 @@ const updateAppointment = async (
   }
 
   const previousStatus = appointment.status;
+  const previousStartTime = appointment.startTime;
   Object.assign(appointment, updateData);
   if (updateData.status && updateData.status !== previousStatus) {
     appointment.statusHistory = appointment.statusHistory || [];
@@ -405,9 +407,34 @@ const updateAppointment = async (
       changedBy: userId,
     });
   }
+
+  const startTimeChanged = Boolean(updateData.startTime) &&
+    new Date(updateData.startTime as any).getTime() !== new Date(previousStartTime).getTime();
+  if (startTimeChanged) {
+    appointment.reminderSent = false;
+    appointment.reminderSentAt = undefined;
+    appointment.reminderTime = undefined;
+    appointment.rescheduleAwaitingReplyAt = undefined;
+    appointment.rescheduleStatedPreference = undefined;
+  }
+
   console.log(`[AppointmentService] Saving appointment ${appointmentId}...`);
   await appointment.save();
   console.log(`[AppointmentService] Saved. Starting sync...`);
+
+  emitToOrg(orgId, 'appointment:status_updated', {
+    _id: appointment._id,
+    orgId,
+    leadId: appointment.leadId,
+    status: appointment.status,
+    startTime: appointment.startTime,
+  });
+
+  if (startTimeChanged) {
+    notifyCustomerOfReschedule(appointment).catch((error: any) => {
+      console.error('[AppointmentService] Failed to notify customer of reschedule:', error.message);
+    });
+  }
 
   try {
     const target = await resolveCalendarTarget(userId, orgId);

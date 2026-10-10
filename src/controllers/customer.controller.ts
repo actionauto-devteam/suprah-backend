@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import { Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
@@ -7,7 +7,7 @@ import customerService from '../services/customer.service';
 import activityService from '../services/activity.service';
 import logger from '../utils/logger';
 import Lead from '../models/lead.model';
-import User from '../models/User.model';
+import { reconcileHistoricalLeads, syncLeadCustomerSafely } from '../services/customerIdentity.service';
 
 
 export const createCustomer = asyncHandler(async (req: Request, res: Response) => {
@@ -20,8 +20,8 @@ export const createCustomer = asyncHandler(async (req: Request, res: Response) =
     vehicleInterest,
   } = req.body;
 
-  if (!firstName?.trim() || !email?.trim() || !phone?.trim()) {
-    throw new ApiError(400, 'firstName, email, and phone are required');
+  if (!firstName?.trim() || (!email?.trim() && !phone?.trim())) {
+    throw new ApiError(400, 'firstName and an email or phone are required');
   }
 
   const { customer, isNew, duplicateType } = await customerService.createCustomer({
@@ -249,7 +249,7 @@ export const syncFromLead = asyncHandler(async (req: Request, res: Response) => 
   const userId = (req.user as IUser)._id.toString();
   const { leadId, firstName, lastName, email, phone, vehicleInterest, channel, comments, source } = req.body;
 
-  if (!leadId || !email) throw new ApiError(400, 'leadId and email are required');
+  if (!leadId) throw new ApiError(400, 'leadId is required');
 
   const customer = await customerService.upsertFromLead({
     organizationId: orgId, createdBy: userId, leadId,
@@ -262,154 +262,38 @@ export const syncFromLead = asyncHandler(async (req: Request, res: Response) => 
 
 // ─── Sync All Leads → Customers (incremental, safe to call repeatedly) ───────
 
-/**
- * POST /api/customers/sync-from-leads
- *
- * Syncs ALL leads in the org that don't yet have a corresponding customer.
- * Uses sourceLeadId to detect already-synced leads — skips them efficiently.
- * Safe to call multiple times (idempotent via upsert logic in service).
- *
- * Returns { total, synced, skipped, failed, alreadySynced }
- */
 export const syncFromLeads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
-  const userId = (req.user as IUser)._id.toString();
-
-  logger.info({ orgId, userId }, '[SYNC] Starting incremental lead→customer sync');
-
-  // Find the best available user for createdBy
-  let systemUserId = userId;
-  if (!systemUserId) {
-    const fallback =
-      await User.findOne({ role: 'super_admin' }).lean() ||
-      await User.findOne({ role: 'admin' }).lean() ||
-      await User.findOne({}).lean();
-    if (!fallback) throw new ApiError(500, 'No users found in system');
-    systemUserId = (fallback as any)._id.toString();
-  }
-
-  // Get all leads for this org that have an email (required for customer creation)
-  const total = await Lead.countDocuments({ organizationId: orgId, email: { $exists: true, $ne: '' } });
-
-  if (total === 0) {
-    return res.json(new ApiResponse(200, {
-      total: 0, synced: 0, skipped: 0, failed: 0, alreadySynced: 0,
-    }, 'No leads with email found to sync'));
-  }
-
-  logger.info({ orgId, total }, '[SYNC] Total leads to process');
-
-  const BATCH_SIZE = 50;
+  const total = await Lead.countDocuments({ organizationId: orgId });
+  const cursor = Lead.find({ organizationId: orgId, 'customerLink.status': { $exists: true } }).select('_id customerLink').lean().cursor();
   let synced = 0;
   let skipped = 0;
   let failed = 0;
   let alreadySynced = 0;
-  let skip = 0;
-
-  // Get all sourceLeadIds already in customers to skip efficiently
-  const existingSourceLeadIds = new Set(
-    (await Lead.find({ organizationId: orgId })
-      .select('_id')
-      .lean()
-      // We cross-reference against customers that already have a sourceLeadId
-      .then(async () => {
-        const { default: Customer } = await import('../models/Customer.model');
-        return Customer.find({ organizationId: orgId, sourceLeadId: { $exists: true } })
-          .select('sourceLeadId')
-          .lean();
-      })
-    ).map((c: any) => c.sourceLeadId?.toString()).filter(Boolean)
-  );
-
-  while (skip < total) {
-    const batch = await Lead.find({
-      organizationId: orgId,
-      email: { $exists: true, $ne: '' },
-    })
-      .select('_id firstName lastName email phone vehicle comments source channel createdAt')
-      .sort({ createdAt: 1 })
-      .skip(skip)
-      .limit(BATCH_SIZE)
-      .lean();
-
-    if (batch.length === 0) break;
-
-    for (const lead of batch) {
-      try {
-        const leadIdStr = (lead as any)._id.toString();
-
-        // Fast-skip leads that are already linked to a customer via sourceLeadId
-        if (existingSourceLeadIds.has(leadIdStr)) {
-          alreadySynced++;
-          continue;
-        }
-
-        if (!lead.email || !lead.email.trim()) {
-          skipped++;
-          continue;
-        }
-
-        await customerService.upsertFromLead({
-          organizationId: orgId,
-          createdBy: systemUserId,
-          leadId: leadIdStr,
-          firstName: (lead as any).firstName || 'Unknown',
-          lastName: (lead as any).lastName || '',
-          email: lead.email,
-          phone: (lead as any).phone || '',
-          vehicleInterest: (lead as any).vehicle
-            ? {
-                year: (lead as any).vehicle.year,
-                make: (lead as any).vehicle.make,
-                model: (lead as any).vehicle.model,
-              }
-            : undefined,
-          channel: (lead as any).channel,
-          comments: (lead as any).comments || '',
-          source: (lead as any).source || 'lead',
-        });
-
-        synced++;
-        existingSourceLeadIds.add(leadIdStr); // prevent re-processing in same run
-      } catch (err) {
-        logger.error({ err, leadId: (lead as any)._id }, '[SYNC] Failed to sync lead');
-        failed++;
-      }
+  let processed = 0;
+  try {
+    for await (const lead of cursor) {
+      processed++;
+      if (lead.customerLink?.status === 'linked') { alreadySynced++; continue; }
+      if (!['pending', 'retry'].includes(lead.customerLink?.status || '')) { skipped++; continue; }
+      const result = await syncLeadCustomerSafely(orgId, String(lead._id));
+      if (result.status === 'linked') synced++;
+      else if (result.status === 'retry') failed++;
+      else skipped++;
     }
-
-    skip += BATCH_SIZE;
-    logger.info({ orgId, skip, total, synced, failed, alreadySynced }, '[SYNC] Batch progress');
-  }
-
-  await activityService.createActivity({
-    userId,
-    organizationId: orgId,
-    type: 'other',
-    title: 'Lead Sync Completed',
-    description: `Synced ${synced} new customers from ${total} leads (${alreadySynced} already synced, ${skipped} skipped, ${failed} failed)`,
-    metadata: { total, synced, skipped, failed, alreadySynced },
-  });
-
-  logger.info({ orgId, total, synced, skipped, failed, alreadySynced }, '[SYNC] Sync complete');
-
-  res.json(new ApiResponse(200, {
-    total,
-    synced,
-    skipped,
-    failed,
-    alreadySynced,
-  }, `Sync complete. ${synced} new customers synced, ${alreadySynced} already existed.`));
+  } finally { await cursor.close(); }
+  skipped += Math.max(0, total - processed);
+  res.json(new ApiResponse(200, { total, synced, skipped, failed, alreadySynced }, 'Current Lead synchronization processed; historical reconciliation requires an explicit backfill'));
 });
 
-// ─── Backfill: Sync ALL existing leads → Customers (alias for sync-from-leads) ──
-
-/**
- * POST /api/customers/backfill-from-leads
- * Kept for backwards compatibility — delegates to syncFromLeads logic.
- */
-export const backfillFromLeads = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  // Delegate to the unified sync handler
-  return syncFromLeads(req, res, next);
+export const backfillFromLeads = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = req.orgId as string;
+  const report = await reconcileHistoricalLeads(orgId, {
+    apply: req.body?.apply === true,
+    after: req.body?.after,
+    limit: req.body?.limit,
+  });
+  res.json(new ApiResponse(200, report, report.dryRun ? 'Reconciliation preview; no records changed' : 'Reconciliation page processed'));
 });
 
 export default {

@@ -13,20 +13,29 @@ import Lead from "../models/lead.model";
 import Appointment from "../models/Appointment.model";
 import WebChatMessage from "../models/WebChatMessage.model";
 import MailConversation from "../models/MailConversation.model";
+import { describeSmsFailure } from "../utils/smsFailure";
+import { recordHumanTakeover } from "../utils/aiAutoPause";
 import MailMessage from "../models/MailMessage.model";
 import { emitToOrg } from "../utils/socketEmitter";
+import { canReceiveIvrCall } from '../services/ivr.service';
+import * as recording from '../services/callRecording.service';
+import { recordingPrincipal } from '../services/callRecordingAccess.service';
+import { attentionOrgIds } from '../services/aiHumanAttention.service';
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
-function actor(req: Request) {
+export function actor(req: Request) {
   const u: any = (req as any).user || (req as any).crmUser || {};
+  const fromParts = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
+  const name =
+    (typeof u.name === "string" && u.name.trim()) ||
+    (typeof u.fullName === "string" && u.fullName.trim()) ||
+    fromParts ||
+    (typeof u.email === "string" && u.email.trim()) ||
+    "Team member";
   return {
     userId: u._id || u.id || u.userId,
-    name:
-      u.name ||
-      [u.firstName, u.lastName].filter(Boolean).join(" ") ||
-      u.email ||
-      "Team member",
+    name,
     email: u.email,
   };
 }
@@ -95,6 +104,13 @@ export const replyToConversation = asyncHandler(async (req: Request, res: Respon
     customerName: conversation.customerName,
   });
 
+  await recordHumanTakeover({
+    kind: "sms",
+    organizationId: orgId,
+    conversationId: conversation._id,
+    leadId: (conversation as any).leadId,
+  });
+
   res.status(201).json(new ApiResponse(201, { message: result.message }, "Message sent"));
 });
 
@@ -102,10 +118,15 @@ export const pauseSmsAi = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { leadId } = req.params;
   const staff = actor(req);
+  if (!staff.userId) throw new ApiError(401, 'Please authenticate');
 
   const conversation = await Conversation.findOneAndUpdate(
-    { orgId, leadId },
-    { $set: { aiPausedAt: new Date(), aiPausedBy: { userId: staff.userId, name: staff.name } } },
+    { orgId: { $in: attentionOrgIds(String(orgId)) }, leadId },
+    {
+      $set: { aiPausedAt: new Date(), aiPausedBy: { userId: staff.userId, name: staff.name } },
+      $unset: { aiAutoPausedUntil: "" },
+      $inc: { aiResponseVersion: 1 },
+    },
     { new: true },
   );
   if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
@@ -122,10 +143,12 @@ export const pauseSmsAi = asyncHandler(async (req: Request, res: Response) => {
 export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { leadId } = req.params;
+  if (!actor(req).userId) throw new ApiError(401, 'Please authenticate');
 
   const conversation = await Conversation.findOneAndUpdate(
-    { orgId, leadId },
-    { $unset: { aiPausedAt: "", aiPausedBy: "" } },
+    { orgId: { $in: attentionOrgIds(String(orgId)) }, leadId },
+    { $unset: { aiPausedAt: "", aiPausedBy: "", aiAutoPausedUntil: "", aiHumanAttention: "", aiAttentionPendingIds: "" },
+      $inc: { aiResponseVersion: 1 } },
     { new: true },
   );
   if (!conversation) throw new ApiError(404, "No SMS conversation found for this lead");
@@ -153,6 +176,13 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     customerId,
     customerName,
     leadId,
+  });
+
+  await recordHumanTakeover({
+    kind: "sms",
+    organizationId: orgId,
+    conversationId: result.conversation._id,
+    leadId: (result.conversation as any).leadId || leadId,
   });
 
   res
@@ -289,6 +319,7 @@ export async function buildLeadTimeline(
     safe("webchat", () => WebChatMessage.find({
       organizationId: orgId,
       leadId,
+      aiDispatchPending: { $ne: true },
       ...(timeFilter ? { createdAt: timeFilter } : {}),
     }).sort({ createdAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
     safe("appointment", () => Appointment.find({
@@ -315,6 +346,7 @@ export async function buildLeadTimeline(
   const items: TimelineItem[] = [];
 
   for (const message of messages as any[]) {
+    const failure = message.status === "failed" && message.errorDetail ? describeSmsFailure(message.errorDetail) : null;
     items.push({
       id: `sms:${message._id}`,
       channel: "sms",
@@ -324,7 +356,13 @@ export async function buildLeadTimeline(
       status: message.status,
       actor: message.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : message.sentBy?.name || "Team member",
       occurredAt: message.createdAt,
-      metadata: message.errorDetail ? { error: message.errorDetail } : undefined,
+      metadata: message.errorDetail
+        ? {
+            error: message.errorDetail,
+            smsFailureMessage: failure?.friendlyMessage,
+            smsFailureCategory: failure?.category,
+          }
+        : undefined,
     });
   }
 
@@ -416,10 +454,16 @@ export async function buildLeadTimeline(
       id: `note:${note._id || new Date(note.createdAt).getTime()}`,
       channel: "note",
       direction: "system",
-      title: "Internal note",
+      title: note.milestone ? "Milestone note" : "Internal note",
       body: note.text,
-      actor: "Team member",
+      actor: note.authorName || "Team member",
       occurredAt: note.createdAt,
+      metadata: {
+        authorType: note.authorType || "user",
+        mentionedUserIds: (note.mentionedUserIds || []).map((mid: any) => String(mid)),
+        mentionedGroupIds: (note.mentionedGroupIds || []).map((gid: any) => String(gid)),
+        milestone: !!note.milestone,
+      },
     });
   }
 
@@ -529,10 +573,19 @@ export const listCalls = asyncHandler(async (req: Request, res: Response) => {
 /** Ringing inbound calls (page-load recovery if a socket event was missed). */
 export const listRingingCalls = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
-  const items = await CallLog.find({ orgId, status: "ringing", direction: "inbound" })
+  await comm.recoverPendingIvrCalls(String(orgId));
+  const userId = String(actor(req).userId);
+  const candidates = await CallLog.find({ orgId, status: "ringing", direction: "inbound", $or: [
+    { routing: { $exists: false } }, { 'routing.allOrg': true }, { 'routing.recipientIds': userId },
+  ] })
     .sort({ createdAt: -1 })
-    .limit(5)
+    .limit(50)
     .lean();
+  const items = [];
+  for (const call of candidates) {
+    if (await canReceiveIvrCall(call, userId)) items.push(call);
+    if (items.length === 5) break;
+  }
   res.json(new ApiResponse(200, { items }, "Ringing calls"));
 });
 
@@ -560,7 +613,12 @@ export const logClientCall = asyncHandler(async (req: Request, res: Response) =>
     leadId,
     hangupCause,
   });
-  res.json(new ApiResponse(200, { call }, "Call logged"));
+  let correlation;
+  if (event === 'start' && call) {
+    try { correlation = await recording.createOutboundCorrelation(call, await recordingPrincipal(String(actor(req).userId), String(orgId))); }
+    catch { correlation = undefined; }
+  }
+  res.json(new ApiResponse(200, { call, correlation }, "Call logged"));
 });
 
 /* ------------------------------ WebRTC token ---------------------------- */
@@ -588,6 +646,24 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
   const type: string = event?.event_type || "";
   const payload = event?.payload || {};
 
+  if (type.startsWith('call.recording.')) {
+    await recording.enqueueRecordingEvent(event.id, type, payload);
+    res.status(200).json({ received: true });
+    return;
+  }
+  const disclosure = type === 'call.speak.ended' && recording.decodeRecordingState(payload.client_state)?.recordingDisclosureId;
+  if (disclosure) {
+    await recording.enqueueRecordingEvent(event.id, type, payload);
+    res.status(200).json({ received: true });
+    try { await recording.finishRecordingDisclosure(payload); }
+    catch (err) { console.error('[recording] Disclosure recovery pending', err); }
+    return;
+  }
+  if (['call.initiated', 'call.answered', 'call.bridged', 'call.hangup'].includes(type)) {
+    try { await recording.enqueueRecordingEvent(event.id, type, payload); }
+    catch (err) { console.error('[recording] Unable to persist call evidence', err); }
+  }
+
   // Respond fast; process async. Telnyx retries on non-2xx/timeouts.
   res.status(200).json({ received: true });
 
@@ -604,17 +680,21 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
         await comm.handleCallInitiated(payload);
         break;
       case "call.answered":
-        await comm.handleCallAnswered(payload);
+        if (recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallAnswered(payload);
         break;
       case "call.hangup":
-        await comm.handleCallHangup(payload);
+        if (recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallHangup(payload);
         break;
       case "call.speak.ended":
-        await comm.handleSpeakEnded(payload);
+        if (!await recording.finishRecordingDisclosure(payload)) await comm.handleSpeakEnded(payload);
+        break;
+      case 'call.gather.ended':
+        await comm.handleCallGatherEnded(payload);
         break;
       default:
         break; // ignore everything else
     }
+    if (['call.initiated', 'call.answered', 'call.bridged', 'call.hangup'].includes(type)) await recording.observeRecordingCall(type, payload);
   } catch (err) {
     console.error(`[comm] webhook handler error for ${type}:`, err);
   }

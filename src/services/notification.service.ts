@@ -7,6 +7,8 @@ import { ApiError } from '../utils/ApiError';
 import { emitToCrmUser, emitToUser } from '../utils/socketEmitter';
 import UnifiedPushService from './unifiedPush.service';
 import logger from '../utils/logger';
+import { createHash } from 'crypto';
+import { Types } from 'mongoose';
 
 interface CreateNotificationParams {
   userId: string;
@@ -17,6 +19,7 @@ interface CreateNotificationParams {
   metadata?: any;
   dedupeKey?: string;
   groupWindowMinutes?: number;
+  idempotencyKey?: string;
 }
 
 const formatOccurrenceTime = (date: Date) =>
@@ -56,6 +59,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
   customer_call_requested: 'crm', sms_opt_out: 'crm', vehicle_reengagement_blocked: 'crm',
   ai_agent_handoff_needed: 'crm',
+  lead_note_mention: 'crm',
 
   feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
 
@@ -176,7 +180,7 @@ function resolveMetadataRoute(type: string, metadata?: any): string | undefined 
 }
 
 const createNotification = async (params: CreateNotificationParams) => {
-  const { userId, organizationId, type, title, message, metadata, dedupeKey, groupWindowMinutes } = params;
+  const { userId, organizationId, type, title, message, metadata, dedupeKey, groupWindowMinutes, idempotencyKey } = params;
 
   if (!userId || !type || !title || !message) {
     throw new ApiError(400, 'Missing required notification fields');
@@ -197,6 +201,9 @@ const createNotification = async (params: CreateNotificationParams) => {
   const crmUser = mainUser ? null : await CrmUser.findById(userId);
   const user = mainUser || crmUser;
   if (!user) throw new ApiError(404, 'Notification target user not found');
+  if (idempotencyKey && String(user.organizationId) !== String(organizationId)) {
+    throw new ApiError(403, 'Notification target is outside this organization');
+  }
 
   const isCrmTarget = Boolean(crmUser);
   const category = TYPE_CATEGORY_MAP[type] || 'system';
@@ -211,7 +218,18 @@ const createNotification = async (params: CreateNotificationParams) => {
   let notification: any = null;
   let isGroupedUpdate = false;
 
-  if (dedupeKey) {
+  if (idempotencyKey) {
+    const id = new Types.ObjectId(createHash('sha256')
+      .update(JSON.stringify([organizationId, userId, type, idempotencyKey])).digest('hex').slice(0, 24));
+    const result = await Notification.findOneAndUpdate({ _id: id, organizationId, userId }, {
+      $setOnInsert: { userId, organizationId, type, category, title, message,
+        metadata: metadata || {}, isRead: false },
+    }, { new: true, upsert: true, includeResultMetadata: true });
+    if (result.lastErrorObject?.updatedExisting) return result.value;
+    notification = result.value;
+  }
+
+  if (!notification && dedupeKey) {
     const windowMinutes = groupWindowMinutes ?? 20;
     const windowStart = new Date(Date.now() - windowMinutes * 60_000);
     const existing = await Notification.findOne({
@@ -275,6 +293,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       sms_opt_out: '/crm/leads',
       vehicle_reengagement_blocked: metadata?.route || '/crm/vehicle-reengagement',
       ai_agent_handoff_needed: metadata?.route || '/crm/leads',
+      lead_note_mention: metadata?.route || '/crm/leads',
       new_lead: '/crm/dashboard',
       lead_assigned: '/crm/dashboard',
       lead_status_changed: '/crm/dashboard',

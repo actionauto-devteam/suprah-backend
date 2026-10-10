@@ -83,7 +83,10 @@ import crmWebchatRoute from "./crmWebchat.routes";
 import crmDemoRoute from "./crmDemo.routes";
 import smsCampaignRoute from "./smsCampaign.routes";
 import emailCampaignRoute from "./emailCampaign.routes";
+import marketingContactRoute from "./marketingContact.routes";
 import aiAgentTaskRoute from "./aiAgentTask.routes";
+import aiAgentCoachingRoute from "./aiAgentCoaching.routes";
+import crmLeadGroupRoute from "./crmLeadGroup.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
@@ -243,8 +246,20 @@ const defaultRoutes = [
     route: emailCampaignRoute,
   },
   {
+    path: "/crm/marketing-contacts",
+    route: marketingContactRoute,
+  },
+  {
     path: "/crm/ai-agent-tasks",
     route: aiAgentTaskRoute,
+  },
+  {
+    path: "/crm/ai-coaching",
+    route: aiAgentCoachingRoute,
+  },
+  {
+    path: "/crm/lead-groups",
+    route: crmLeadGroupRoute,
   },
   {
     path: "/webchat",

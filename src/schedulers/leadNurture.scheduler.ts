@@ -3,10 +3,11 @@ import { google } from 'googleapis';
 import Lead from '../models/lead.model';
 import Appointment from '../models/Appointment.model';
 import { CommunicationMessage, CallLog } from '../models/communication.model';
-import { isSmsOptedOut, sendLeadNurtureText } from '../services/communication.service';
+import { isSmsOptedOut, sendLeadNurtureText, checkConversationPauseForLead, shouldDeferAutomatedFollowUp, SmsDeliveryUncertainError } from '../services/communication.service';
 import { getCentralOAuth2Client } from '../controllers/lead.controller';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/leadStatus';
+import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
 
 const CRON_SCHEDULE = process.env.LEAD_NURTURE_CRON || '*/15 * * * *';
@@ -21,6 +22,14 @@ const PROCESSING_TIMEOUT_MINUTES = 10;
 const HOUR_MS = 60 * 60 * 1000;
 const CUSTOMER_ACTIVITY_GRACE_MS = 60 * 1000;
 const BATCH_LIMIT = 300;
+/** Shared same-day dedup window with the AI follow-up scheduler (aiLeadFollowup.scheduler.ts)
+ *  — both schedulers read and atomically set followUp.lastAutomatedOutreachAt on every
+ *  claim, so whichever one claims a lead first blocks the other from also claiming it for
+ *  roughly a day. DB-state-based, so it survives restarts/concurrent workers unchanged.
+ *  Safely smaller than either scheduler's own minimum legitimate re-touch interval (this
+ *  scheduler's smallest step is 24h; the AI follow-up scheduler's smallest is 48h), so it
+ *  never delays either system's own next legitimate send — only a cross-system pile-on. */
+const CROSS_SCHEDULER_LOCK_MINUTES = 24 * 60;
 
 interface NurtureStats {
   scanned: number;
@@ -29,7 +38,7 @@ interface NurtureStats {
   errors: number;
 }
 
-async function latestContactTimes(leadId: any): Promise<{ human: number; customerCall: number }> {
+export async function latestContactTimes(leadId: any): Promise<{ human: number; customerCall: number }> {
   const [humanMessage, outboundCall, inboundCall]: any[] = await Promise.all([
     CommunicationMessage.findOne({
       leadId,
@@ -57,7 +66,7 @@ async function latestContactTimes(leadId: any): Promise<{ human: number; custome
   };
 }
 
-async function customerEmailedSince(lead: any, sinceMs: number): Promise<boolean> {
+export async function customerEmailedSince(lead: any, sinceMs: number): Promise<boolean> {
   if (!lead.threadId) return false;
 
   const addresses = [lead.email, lead.channel === 'email' ? lead.senderEmail : null]
@@ -84,7 +93,7 @@ async function customerEmailedSince(lead: any, sinceMs: number): Promise<boolean
   });
 }
 
-async function hasActiveAppointment(leadId: any, now: Date): Promise<boolean> {
+export async function hasActiveAppointment(leadId: any, now: Date): Promise<boolean> {
   const active = await Appointment.exists({
     leadId,
     status: { $in: ['scheduled', 'confirmed'] },
@@ -103,6 +112,7 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
     phone: { $exists: true, $ne: '' },
     createdAt: { $gte: new Date(now.getTime() - MAX_LEAD_AGE_DAYS * 24 * HOUR_MS) },
     'followUp.nurtureCount': { $not: { $gte: STEP_INTERVALS_HOURS.length } },
+    'followUp.nurtureStatus': { $ne: 'pending_reconciliation' },
     $and: [
       {
         $or: [
@@ -123,6 +133,17 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
           {
             'followUp.nurtureLastAttemptAt': {
               $lte: new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000),
+            },
+          },
+        ],
+      },
+      {
+        $or: [
+          { 'followUp.lastAutomatedOutreachAt': null },
+          { 'followUp.lastAutomatedOutreachAt': { $exists: false } },
+          {
+            'followUp.lastAutomatedOutreachAt': {
+              $lte: new Date(now.getTime() - CROSS_SCHEDULER_LOCK_MINUTES * 60 * 1000),
             },
           },
         ],
@@ -153,6 +174,12 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
 
       const baseAnchor = Math.max(createdAt, lastRep, lastNurture);
       if (now.getTime() - baseAnchor < intervalMs) continue;
+
+      const earlyPauseCheck = await checkConversationPauseForLead({ organizationId: lead.organizationId, phone: lead.phone, leadId: lead._id });
+      if (shouldDeferAutomatedFollowUp(earlyPauseCheck)) {
+        stats.skipped++;
+        continue;
+      }
 
       const contacts = await latestContactTimes(lead._id);
       const lastOurTouch = Math.max(baseAnchor, contacts.human);
@@ -195,6 +222,7 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
           _id: lead._id,
           status: { $in: ELIGIBLE_STATUSES },
           'followUp.nurtureCount': step === 0 ? { $in: [null, 0] } : step,
+          'followUp.nurtureStatus': { $ne: 'pending_reconciliation' },
           $and: [
             {
               $or: [
@@ -208,12 +236,20 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
                 { 'followUp.nurtureLastAttemptAt': { $lte: staleBefore } },
               ],
             },
+            {
+              $or: [
+                { 'followUp.lastAutomatedOutreachAt': null },
+                { 'followUp.lastAutomatedOutreachAt': { $exists: false } },
+                { 'followUp.lastAutomatedOutreachAt': { $lte: new Date(now.getTime() - CROSS_SCHEDULER_LOCK_MINUTES * 60 * 1000) } },
+              ],
+            },
           ],
         },
         {
           $set: {
             'followUp.nurtureStatus': 'processing',
             'followUp.nurtureLastAttemptAt': now,
+            'followUp.lastAutomatedOutreachAt': now,
           },
           $inc: { 'followUp.nurtureAttemptCount': 1 },
           $unset: {
@@ -225,24 +261,61 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
       );
       if (!claimed) continue;
 
-      if (await sendLeadNurtureText(lead, step)) {
+      const latePauseCheck = await checkConversationPauseForLead({ organizationId: lead.organizationId, phone: lead.phone, leadId: lead._id });
+      if (shouldDeferAutomatedFollowUp(latePauseCheck)) {
         await Lead.updateOne(
           { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
           {
             $set: {
-              'followUp.nurtureStatus': 'sent',
-              'followUp.lastNurtureAt': new Date(),
-              'followUp.nurtureAttemptCount': 0,
+              'followUp.nurtureStatus': 'skipped',
+              'followUp.nurtureFailureReason': `Suppressed: ${latePauseCheck.reason || 'AI conversation is currently paused'}`,
             },
-            $inc: { 'followUp.nurtureCount': 1 },
-            $unset: {
-              'followUp.nurtureFailureReason': 1,
-              'followUp.nurtureNextRetryAt': 1,
-            },
+            $inc: { 'followUp.nurtureAttemptCount': -1 },
           },
           { timestamps: false },
         );
-        stats.sent++;
+        stats.skipped++;
+        continue;
+      }
+
+      if (await sendLeadNurtureText(lead, step)) {
+        try {
+          await Lead.updateOne(
+            { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+            {
+              $set: {
+                'followUp.nurtureStatus': 'sent',
+                'followUp.lastNurtureAt': new Date(),
+                'followUp.nurtureAttemptCount': 0,
+              },
+              $inc: { 'followUp.nurtureCount': 1 },
+              $unset: {
+                'followUp.nurtureFailureReason': 1,
+                'followUp.nurtureNextRetryAt': 1,
+              },
+            },
+            { timestamps: false },
+          );
+          stats.sent++;
+        } catch (recordErr) {
+          await retryDbWrite(() =>
+            Lead.updateOne(
+              { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+              {
+                $set: {
+                  'followUp.nurtureStatus': 'pending_reconciliation',
+                  'followUp.nurtureFailureReason': 'SMS was sent successfully but the nurture count could not be recorded',
+                },
+                $unset: { 'followUp.nurtureNextRetryAt': 1 },
+              },
+              { timestamps: false },
+            ),
+          ).catch((retryErr) => {
+            logger.error({ err: retryErr, leadId: lead._id }, '[LeadNurture] Could not record pending_reconciliation after a confirmed send — lead remains "processing" and may be reclaimed and re-sent once the stale-processing timeout elapses. Not guaranteed exactly-once under a sustained DB outage.');
+          });
+          stats.errors++;
+          logger.error({ err: recordErr, leadId: lead._id }, '[LeadNurture] SMS sent successfully but nurture bookkeeping failed — marked pending_reconciliation, will not auto-retry');
+        }
       } else {
         await Lead.updateOne(
           { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
@@ -258,6 +331,27 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
         stats.skipped++;
       }
     } catch (err) {
+      if (err instanceof SmsDeliveryUncertainError) {
+        await retryDbWrite(() =>
+          Lead.updateOne(
+            { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+            {
+              $set: {
+                'followUp.nurtureStatus': 'pending_reconciliation',
+                'followUp.nurtureFailureReason': err.message,
+                'followUp.nurturePendingProviderMessageId': err.providerMessageId,
+              },
+              $unset: { 'followUp.nurtureNextRetryAt': 1 },
+            },
+            { timestamps: false },
+          ),
+        ).catch((retryErr) => {
+          logger.error({ err: retryErr, leadId: lead._id, providerMessageId: err.providerMessageId }, '[LeadNurture] Could not record pending_reconciliation after an ambiguous send outcome — lead remains "processing" and may be reclaimed and re-sent once the stale-processing timeout elapses. Not guaranteed exactly-once under a sustained DB outage.');
+        });
+        stats.errors++;
+        logger.error({ leadId: lead._id, providerMessageId: err.providerMessageId }, '[LeadNurture] SMS delivery outcome uncertain after provider acceptance — marked pending_reconciliation, will not auto-retry');
+        continue;
+      }
       const attempts = (lead.followUp?.nurtureAttemptCount || 0) + 1;
       const exhausted = attempts >= MAX_ATTEMPTS;
       await Lead.updateOne(

@@ -7,6 +7,9 @@ yarn-error.log*
 .git
 .gitignore
 .env
+**/.env
+**/.env.*
+!**/.env.example
 .idea
 .vscode
 dist

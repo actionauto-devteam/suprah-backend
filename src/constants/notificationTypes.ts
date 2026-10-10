@@ -18,7 +18,7 @@ export const NOTIFICATION_TYPES = [
   'appointment_reminder', 'guest_response',
   'appointment_confirmed_via_sms', 'appointment_reschedule_requested', 'appointment_reschedule_preference_received', 'sms_opt_out',
   'vehicle_reengagement_blocked',
-  'ai_agent_handoff_needed',
+  'ai_agent_handoff_needed', 'lead_note_mention',
   'new_lead', 'lead_assigned', 'lead_status_changed',
   'crm_message', 'crm_task_assigned', 'crm_task_due', 'crm_biometric', 'crm_timeproof',
   'feed_mention_post', 'feed_mention_comment', 'feed_comment_on_post', 'feed_announcement',

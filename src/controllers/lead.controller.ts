@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import appointmentService from '../services/appointment.service';
 import googleCalendarService from '../services/googleCalendar.service';
 import Lead from '../models/lead.model';
+import Appointment from '../models/Appointment.model';
 import User, { IUser } from '../models/User.model';
 import { google } from 'googleapis';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -23,10 +24,21 @@ import { getSocketIO, emitToUser } from '../utils/socketEmitter';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
-import customerService from '../services/customer.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import { UNANSWERED_LEAD_STATUSES } from '../constants/leadStatus';
+import { addLeadNoteAndNotify } from '../utils/leadNote';
+import { withRetry } from '../utils/withRetry';
+import {
+  LEAD_SOURCE,
+  buildLeadSourceFilterCondition,
+  normalizeLeadSourceForDisplay,
+  isGenuineDemoLead,
+} from '../constants/leadSource';
+import { resolveVehicleContextForLead, UNMAPPED_LEAD_LOCATION_LABEL } from '../services/leadLocation.service';
+import { triggerAiReplyForNewInquiry } from '../services/communication.service';
+import { triggerAiEmailReplyForNewInquiry } from '../services/aiEmailReply.service';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
@@ -42,6 +54,37 @@ function createAdfIngestionFingerprint(xmlData: string) {
 
 function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function appendLeadCondition(query: any, condition: Record<string, unknown>) {
+  if (!condition || Object.keys(condition).length === 0) return;
+  if (!query.$and) query.$and = [];
+  query.$and.push(condition);
+}
+
+function parseDateOnlyBoundary(value: unknown, boundary: 'start' | 'end'): Date | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date =
+    boundary === 'start'
+      ? new Date(year, month - 1, day, 0, 0, 0, 0)
+      : new Date(year, month - 1, day, 23, 59, 59, 999);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return date;
 }
 
 function parseReminderThreshold(value: unknown) {
@@ -178,13 +221,18 @@ export async function getCentralOAuth2Client(orgId: string) {
  * threading it onto the original inquiry when possible. Shared by single-reply
  * and bulk-reply flows so the MIME/threading logic only lives in one place.
  */
-async function sendLeadReplyEmail(
+export async function sendLeadReplyEmail(
   lead: any,
   message: string,
   userId: any,
   orgId: string,
   attachments: Express.Multer.File[] = [],
+  forcedSenderEmail?: string,
 ) {
+  if (isLocalUiAcceptanceMode()) {
+    throw new Error('[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Gmail send.');
+  }
+
   const config = await OrgLeadConfig.findOne({
     organizationId: orgId,
     isActive: true,
@@ -196,9 +244,10 @@ async function sendLeadReplyEmail(
     auth: oauth2Client,
   });
 
-  const replyingUser = await User.findById(userId);
+  const replyingUser = forcedSenderEmail ? null : await User.findById(userId);
 
   const senderDisplay =
+    forcedSenderEmail ||
     replyingUser?.email ||
     config?.gmailAddress ||
     'actionautoutah.dev@gmail.com';
@@ -316,6 +365,14 @@ async function sendLeadReplyEmail(
     );
   }
 
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit('email:message:new', {
+      leadId: String(lead._id),
+      threadId: sentThreadId || lead.threadId,
+    });
+  }
+
   console.log(
     `[REPLY] Email sent to ${recipientEmail} with ${attachments.length} attachment(s)`,
   );
@@ -338,82 +395,12 @@ function pushStatusHistory(lead: any, from: string, to: string, userId: any, rea
   });
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDelay = 1000): Promise<T> {
-  let lastError: any;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      lastError = error;
-      const isQuotaError = error.code === 403 && error.message?.includes('Quota exceeded');
-      const isRateLimitError = error.code === 429;
-
-      if ((isQuotaError || isRateLimitError) && attempt < maxRetries) {
-        const delay = initialDelay * Math.pow(2, attempt);
-        console.warn(`[GMAIL-RETRY] Quota hit. Retrying in ${delay}ms (Attempt ${attempt + 1}/${maxRetries})...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw lastError;
-}
-
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AUTO-SYNC: Convert Lead to Customer immediately on lead creation.
 // Non-fatal — a sync failure NEVER blocks lead creation.
 // ─────────────────────────────────────────────────────────────────────────────
-async function autoSyncLeadToCustomer(
-  orgId: string,
-  leadId: string,
-  firstName: string,
-  lastName: string,
-  email: string,
-  phone: string,
-  vehicleInfo?: { year?: string; make?: string; model?: string },
-  channel?: string,
-  comments?: string,
-  source?: string,
-): Promise<void> {
-  try {
-    // Guard: skip leads with no email — no useful customer record possible
-    if (!email || !email.trim()) {
-      logger.warn({ leadId }, '[AUTO-SYNC] Skipping — lead has no email');
-      return;
-    }
-
-    const systemUserId = await getSystemUserId(orgId);
-    if (!systemUserId) {
-      // Logged inside getSystemUserId; just bail silently here
-      return;
-    }
-
-    logger.info({ leadId, email, orgId }, '[AUTO-SYNC] Syncing lead to customer database');
-
-    await customerService.upsertFromLead({
-      organizationId: orgId,
-      createdBy: systemUserId,
-      leadId,
-      firstName: (firstName || 'Unknown').trim(),
-      lastName: (lastName || '').trim(),
-      email: email.trim(),
-      phone: (phone || '').trim(),
-      vehicleInterest: vehicleInfo
-        ? { year: vehicleInfo.year, make: vehicleInfo.make, model: vehicleInfo.model }
-        : undefined,
-      channel,
-      comments,
-      source,
-    });
-
-    logger.info({ leadId, email }, '[AUTO-SYNC] Lead successfully synced to customer credentials');
-  } catch (error) {
-    logger.error({ error, leadId, orgId }, '[AUTO-SYNC] Lead-to-customer sync failed (non-fatal)');
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Handle incoming ADF XML (public endpoint for email webhooks)
@@ -465,6 +452,8 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(200).send('Lead already processed');
     }
 
+    const vehicleContext = await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null);
+
     const leadToInsert = {
       organizationId: orgId,
       createdBy: systemUserId,
@@ -473,13 +462,17 @@ export const receiveADF = async (req: Request, res: Response) => {
       email: adfData.email,
       phone: adfData.phone,
       vehicle: adfData.vehicle,
+      vehicleId: vehicleContext?.vehicleId,
+      location: vehicleContext?.location,
       comments: adfData.comments,
       parsedContent: adfData.parsedContent,
       channel: 'adf',
-      source: adfData.source || 'ADF Email',
+      source: LEAD_SOURCE.THIRD_PARTY_LEAD,
+      sourceProvider: adfData.provider || adfData.vendor || undefined,
       senderEmail: config?.leadSourceEmail || LEADS_SOURCE_EMAIL,
       centralIngestion: true,
       ingestionFingerprint,
+      sourceSubmittedAt: adfData.requestDate ? new Date(adfData.requestDate) : undefined,
       followUp: {
         lastCustomerActivityAt: new Date(),
         reminderCount: 0,
@@ -513,19 +506,14 @@ export const receiveADF = async (req: Request, res: Response) => {
 
     console.log(`[ADF] New Lead Saved: ${adfData.firstName} ${adfData.lastName}`);
 
+    triggerAiReplyForNewInquiry(orgId, newLead, newLead.phone, newLead.comments).catch((err) => {
+      console.error('[ADF] triggerAiReplyForNewInquiry failed:', err);
+    });
+    triggerAiEmailReplyForNewInquiry(orgId, newLead, newLead.comments).catch((err) => {
+      console.error('[ADF] triggerAiEmailReplyForNewInquiry failed:', err);
+    });
+
     // ✨ AUTO-SYNC: Immediately add to customer database
-    await autoSyncLeadToCustomer(
-      orgId as string,
-      newLead._id.toString(),
-      adfData.firstName,
-      adfData.lastName,
-      adfData.email,
-      adfData.phone,
-      adfData.vehicle,
-      'adf',
-      adfData.comments,
-      adfData.source || 'ADF Email'
-    );
 
     const io = getSocketIO();
     if (io) {
@@ -594,6 +582,18 @@ export const getAllLeads = async (req: Request, res: Response) => {
         : '';
     const status = req.query.status as string;
     const assignedTo = req.query.assignedTo as string;
+    const location = req.query.location as string;
+    const source = typeof req.query.source === 'string' ? req.query.source.trim() : '';
+    const dateFrom = parseDateOnlyBoundary(req.query.dateFrom, 'start');
+    const dateTo = parseDateOnlyBoundary(req.query.dateTo, 'end');
+
+    if ((req.query.dateFrom && !dateFrom) || (req.query.dateTo && !dateTo)) {
+      return res.status(400).json({ message: 'Date filters must use YYYY-MM-DD format' });
+    }
+
+    if (dateFrom && dateTo && dateFrom.getTime() > dateTo.getTime()) {
+      return res.status(400).json({ message: 'Start date must be before or equal to end date' });
+    }
 
     const sortBy =
       req.query.sortBy === "oldest" ||
@@ -609,14 +609,18 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     if (search) {
       const escapedSearch = escapeRegex(search);
-      query.$or = [
-        { firstName: { $regex: escapedSearch, $options: 'i' } },
-        { lastName: { $regex: escapedSearch, $options: 'i' } },
-        { email: { $regex: escapedSearch, $options: 'i' } },
-        { phone: { $regex: escapedSearch, $options: 'i' } },
-        { 'vehicle.make': { $regex: escapedSearch, $options: 'i' } },
-        { 'vehicle.model': { $regex: escapedSearch, $options: 'i' } },
-      ];
+      appendLeadCondition(query, {
+        $or: [
+          { firstName: { $regex: escapedSearch, $options: 'i' } },
+          { lastName: { $regex: escapedSearch, $options: 'i' } },
+          { email: { $regex: escapedSearch, $options: 'i' } },
+          { phone: { $regex: escapedSearch, $options: 'i' } },
+          { source: { $regex: escapedSearch, $options: 'i' } },
+          { sourceProvider: { $regex: escapedSearch, $options: 'i' } },
+          { 'vehicle.make': { $regex: escapedSearch, $options: 'i' } },
+          { 'vehicle.model': { $regex: escapedSearch, $options: 'i' } },
+        ],
+      });
     }
 
     if (status && status !== 'All') {
@@ -625,6 +629,32 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     if (assignedTo) {
       query.assignedTo = assignedTo;
+    }
+
+    if (location && location !== 'All') {
+      if (location === UNMAPPED_LEAD_LOCATION_LABEL) {
+        appendLeadCondition(query, {
+          $or: [
+            { location: { $exists: false } },
+            { location: null },
+            { location: '' },
+          ],
+        });
+      } else {
+        query.location = { $regex: `^${escapeRegex(location)}$`, $options: 'i' };
+      }
+    }
+
+    const sourceCondition = buildLeadSourceFilterCondition(source);
+    if (sourceCondition) {
+      appendLeadCondition(query, sourceCondition);
+    }
+
+    if (dateFrom || dateTo) {
+      query.createdAt = {
+        ...(dateFrom ? { $gte: dateFrom } : {}),
+        ...(dateTo ? { $lte: dateTo } : {}),
+      };
     }
 
     let sort: Record<string, 1 | -1>;
@@ -657,18 +687,30 @@ export const getAllLeads = async (req: Request, res: Response) => {
     const leads = await Lead.find(query)
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
+        'customerId customerLink normalizedEmail normalizedPhone ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt'
+        'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
+        'aiPausedAt aiPausedBy aiAutoPausedUntil'
       )
       .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean();
 
+    const normalizedLeads = leads.map((lead: any) => {
+      const isDemoLead = isGenuineDemoLead(lead.source, lead.phone);
+      const normalized = normalizeLeadSourceForDisplay({
+        source: lead.source,
+        channel: lead.channel,
+        sourceProvider: lead.sourceProvider,
+      });
+      return { ...lead, source: normalized.source, sourceProvider: normalized.sourceProvider, isDemoLead };
+    });
+
     res.json(
       new ApiResponse(200, {
-        leads,
+        leads: normalizedLeads,
         total: totalLeads,
         page,
         pages: Math.ceil(totalLeads / limit),
@@ -713,23 +755,109 @@ export const getLeadStatusCounts = async (req: Request, res: Response) => {
   }
 };
 
+export const getLeadLocationCounts = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
+    }
+
+    const results = await Lead.aggregate([
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId) } },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $in: ['$location', [null, '']] },
+              UNMAPPED_LEAD_LOCATION_LABEL,
+              '$location',
+            ],
+          },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const counts: Record<string, number> = {};
+    for (const row of results) {
+      if (row._id) counts[row._id] = row.count;
+    }
+
+    res.json(new ApiResponse(200, { counts }));
+  } catch (error) {
+    console.error('[ERROR] Error fetching lead location counts:', error);
+
+    res.status(500).json({
+      message: 'Error fetching lead location counts',
+    });
+  }
+};
+
+export const getAppointmentsForLead = async (req: Request, res: Response) => {
+  try {
+    const orgId = req.orgId;
+    const { id } = req.params;
+
+    if (!orgId) {
+      return res.status(400).json({
+        message: 'Organization context missing',
+      });
+    }
+
+    const appointments = await Appointment.find({
+      organizationId: orgId,
+      leadId: id,
+      status: { $in: ['scheduled', 'confirmed'] },
+    })
+      .populate('createdBy participants', 'fullName name email avatar')
+      .sort({ startTime: 1 })
+      .lean();
+
+    res.json(new ApiResponse(200, { appointments }));
+  } catch (error) {
+    console.error('[ERROR] Error fetching appointments for lead:', error);
+
+    res.status(500).json({
+      message: 'Error fetching appointments for lead',
+    });
+  }
+};
+
 export const getLeadById = async (req: Request, res: Response) => {
   try {
     const orgId = req.orgId;
     const { id } = req.params;
 
-    const lead = await Lead.findOne({ _id: id, organizationId: orgId })
+    const lead: any = await Lead.findOne({ _id: id, organizationId: orgId })
       .select(
         'firstName lastName email phone senderEmail senderName subject ' +
+        'customerId customerLink normalizedEmail normalizedPhone ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source status vehicle comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt'
+        'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
+        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
+        'aiPausedAt aiPausedBy aiAutoPausedUntil'
       )
       .lean();
 
     if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
-    res.json(new ApiResponse(200, lead));
+    const isDemoLead = isGenuineDemoLead(lead.source, lead.phone);
+    const normalized = normalizeLeadSourceForDisplay({
+      source: lead.source,
+      channel: lead.channel,
+      sourceProvider: lead.sourceProvider,
+    });
+    res.json(
+      new ApiResponse(200, {
+        ...lead,
+        source: normalized.source,
+        sourceProvider: normalized.sourceProvider,
+        isDemoLead,
+      }),
+    );
   } catch (error) {
     console.error('[ERROR] Error fetching lead by id:', error);
     res.status(500).json({ message: 'Error fetching lead' });
@@ -880,6 +1008,7 @@ export const updateLeadContact = async (req: Request, res: Response) => {
     const lastName = String(req.body?.lastName || '').trim();
     const email = String(req.body?.email || '').trim().toLowerCase();
     const phone = String(req.body?.phone || '').trim();
+    const previousContact = await Lead.findOne({ _id: id, organizationId: orgId }).select('email identityEmailExcluded').lean();
 
     if (!firstName) {
       return res.status(400).json({
@@ -904,6 +1033,7 @@ export const updateLeadContact = async (req: Request, res: Response) => {
           lastName,
           email,
           phone,
+          ...(previousContact?.identityEmailExcluded && email !== String(previousContact.email || '').trim().toLowerCase() ? { identityEmailExcluded: false } : {}),
         },
       },
       {
@@ -995,6 +1125,7 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
         return res.status(400).json({ message: 'A valid email address is required' });
       }
       setValues.email = email;
+      if (currentLead.identityEmailExcluded && email !== String(currentLead.email || '').trim().toLowerCase()) setValues.identityEmailExcluded = false;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'phone')) {
       setValues.phone = String(body.phone || '').trim();
@@ -1011,7 +1142,10 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
       );
     }
     if (Object.prototype.hasOwnProperty.call(body, 'source')) {
-      setValues.source = String(body.source || '').trim() || 'Manual Entry';
+      setValues.source = String(body.source || '').trim() || LEAD_SOURCE.MANUAL_ENTRY;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'location')) {
+      setValues.location = String(body.location || '').trim();
     }
     if (Object.prototype.hasOwnProperty.call(body, 'opportunityValue')) {
       if (body.opportunityValue === null || body.opportunityValue === '') {
@@ -1251,14 +1385,17 @@ export const createInquiry = async (req: Request, res: Response) => {
     if (!user) throw new ApiError(401, 'Please authenticate');
     const userId = user._id;
 
-    if (!firstName || !email || !phone) {
+    if (!firstName || (!email && !phone)) {
       return res.status(400).json({
-        message: 'Missing required fields: firstName, email, phone',
+        message: 'First name and an email or phone are required',
         received: { firstName, email, phone },
       });
     }
 
     const detectedChannel = channel || detectChannel('', comments || '', '', source || '');
+    const vehicleContext = vehicle
+      ? await resolveVehicleContextForLead(req.orgId, vehicle).catch(() => null)
+      : null;
 
     const newLead = new Lead({
       organizationId: req.orgId,
@@ -1272,8 +1409,10 @@ export const createInquiry = async (req: Request, res: Response) => {
         make: vehicle?.make || '',
         model: vehicle?.model || '',
       },
+      vehicleId: vehicleContext?.vehicleId,
+      location: vehicleContext?.location,
       comments: comments || '',
-      source: source || 'Manual Entry',
+      source: source || LEAD_SOURCE.MANUAL_ENTRY,
       channel: detectedChannel,
       status: 'New',
       followUp: {
@@ -1285,19 +1424,14 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const savedLead = await newLead.save();
 
+    triggerAiReplyForNewInquiry(req.orgId, savedLead, savedLead.phone, savedLead.comments).catch((err) => {
+      console.error('[createInquiry] triggerAiReplyForNewInquiry failed:', err);
+    });
+    triggerAiEmailReplyForNewInquiry(req.orgId, savedLead, savedLead.comments).catch((err) => {
+      console.error('[createInquiry] triggerAiEmailReplyForNewInquiry failed:', err);
+    });
+
     // ✨ AUTO-SYNC: Immediately add to customer database
-    await autoSyncLeadToCustomer(
-      req.orgId as string,
-      savedLead._id.toString(),
-      firstName,
-      lastName || '',
-      email,
-      phone,
-      vehicle,
-      detectedChannel,
-      comments || '',
-      source || 'Manual Entry'
-    );
 
     console.log(`[SUCCESS] New Inquiry Created: ${firstName} ${lastName} (ID: ${savedLead._id})`);
 
@@ -1312,7 +1446,7 @@ export const createInquiry = async (req: Request, res: Response) => {
         : undefined;
       const { title, message } = notificationTemplates.new_lead({
         customerName: `${firstName} ${lastName || ''}`.trim(),
-        source: source || 'Manual Entry',
+        source: source || LEAD_SOURCE.MANUAL_ENTRY,
         vehicleInterest: vehicleInterest || undefined,
       });
 
@@ -1325,7 +1459,7 @@ export const createInquiry = async (req: Request, res: Response) => {
           leadId: savedLead._id.toString(),
           customerName: `${firstName} ${lastName || ''}`.trim(),
           email,
-          source: source || 'Manual Entry',
+          source: source || LEAD_SOURCE.MANUAL_ENTRY,
           channel: detectedChannel,
         }
       );
@@ -1407,7 +1541,7 @@ export const addLeadNote = async (
 ) => {
   try {
     const { id } = req.params;
-    const { note } = req.body;
+    const { note, mentionedUserIds, mentionedGroupIds } = req.body;
 
     const orgId = req.orgId;
     const user = req.user || req.crmUser;
@@ -1431,61 +1565,33 @@ export const addLeadNote = async (
       });
     }
 
-    const trimmedNote = note.trim();
+    const authorName = (user as any).fullName || (user as any).name || 'Team member';
 
-    if (trimmedNote.length > 5000) {
-      return res.status(400).json({
-        message: 'Note cannot exceed 5000 characters',
+    let result;
+    try {
+      result = await addLeadNoteAndNotify({
+        organizationId: String(orgId),
+        leadId: String(id),
+        text: note,
+        authorType: 'user',
+        createdBy: String(user._id),
+        authorName,
+        mentionedUserIds: Array.isArray(mentionedUserIds) ? mentionedUserIds.map(String) : [],
+        mentionedGroupIds: Array.isArray(mentionedGroupIds) ? mentionedGroupIds.map(String) : [],
       });
-    }
-
-    const lead = await Lead.findOne({
-      _id: id,
-      organizationId: orgId,
-    });
-
-    if (!lead) {
-      return res.status(404).json({
-        message: 'Lead not found',
-      });
-    }
-
-    lead.notes = lead.notes || [];
-
-    lead.notes.push({
-      text: trimmedNote,
-      createdAt: new Date(),
-      createdBy: user._id,
-    });
-
-    await lead.save();
-
-    await activityService.createActivity({
-      userId: user._id.toString(),
-      organizationId: orgId,
-      type: 'other',
-      title: 'Note added',
-      description: trimmedNote,
-      metadata: {
-        leadId: lead._id.toString(),
-        activityKind: 'lead_note',
-        note: trimmedNote,
-      },
-      ipAddress: req.ip,
-    });
-
-    const io = getSocketIO();
-
-    if (io) {
-      io.to(`org:${orgId}`).emit(
-        'lead:update',
-        lead,
-      );
+    } catch (err: any) {
+      if (err?.message === 'Lead not found') {
+        return res.status(404).json({ message: 'Lead not found' });
+      }
+      if (err?.message === 'Note cannot exceed 5000 characters') {
+        return res.status(400).json({ message: err.message });
+      }
+      throw err;
     }
 
     logger.info(
       {
-        leadId: lead._id,
+        leadId: id,
         userId: user._id,
         orgId,
       },
@@ -1496,8 +1602,8 @@ export const addLeadNote = async (
       new ApiResponse(
         201,
         {
-          lead,
-          note: lead.notes[lead.notes.length - 1],
+          lead: result.lead,
+          note: result.note,
         },
         'Note added successfully',
       ),
@@ -1512,6 +1618,60 @@ export const addLeadNote = async (
       message: 'Error adding lead note',
     });
   }
+};
+
+export const pauseEmailAi = async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  const { id } = req.params;
+  const user = req.user || req.crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+
+  const lead = await Lead.findOneAndUpdate(
+    { _id: id, organizationId: orgId },
+    {
+      $set: { aiPausedAt: new Date(), aiPausedBy: { userId: String(user._id), name: (user as any).fullName || (user as any).name } },
+      $unset: { aiAutoPausedUntil: '' },
+      $inc: { aiResponseVersion: 1 },
+    },
+    { new: true },
+  );
+  if (!lead) throw new ApiError(404, 'Lead not found');
+
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit('email:ai_paused', {
+      leadId: String(lead._id),
+      paused: true,
+      pausedBy: (user as any).fullName || (user as any).name,
+    });
+  }
+  res.json(new ApiResponse(200, { paused: true }, 'AI agent paused for this lead'));
+};
+
+export const resumeEmailAi = async (req: Request, res: Response) => {
+  const orgId = req.orgId;
+  const { id } = req.params;
+  const user = req.user || req.crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+
+  const lead = await Lead.findOneAndUpdate(
+    { _id: id, organizationId: orgId },
+    {
+      $unset: { aiPausedAt: '', aiPausedBy: '', aiAutoPausedUntil: '', aiHumanAttention: '', aiAttentionPendingIds: '' },
+      $inc: { aiResponseVersion: 1 },
+    },
+    { new: true },
+  );
+  if (!lead) throw new ApiError(404, 'Lead not found');
+
+  const io = getSocketIO();
+  if (io) {
+    io.to(`org:${orgId}`).emit('email:ai_paused', {
+      leadId: String(lead._id),
+      paused: false,
+    });
+  }
+  res.json(new ApiResponse(200, { paused: false }, 'AI agent resumed for this lead'));
 };
 
 export const replyToInquiry = async (
@@ -1881,7 +2041,8 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         let leadPhone = '';
         let vehicleInfo = { year: '', make: '', model: '' };
         let comments = '';
-        let leadSource = 'ADF Lead (DealersCloud)';
+        let leadSource: string = LEAD_SOURCE.THIRD_PARTY_LEAD;
+        let leadSourceProvider: string | undefined;
 
         if (parsed.adfData) {
           firstName = parsed.adfData.firstName;
@@ -1894,7 +2055,8 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
             model: parsed.adfData.vehicle.model,
           };
           comments = parsed.adfData.comments || (parsed as any).comments || '';
-          leadSource = parsed.adfData.source || 'ADF Lead (DealersCloud)';
+          leadSource = LEAD_SOURCE.THIRD_PARTY_LEAD;
+          leadSourceProvider = parsed.adfData.provider || parsed.adfData.vendor || undefined;
         } else {
           const nameParts = senderName.split(' ').filter((p: string) => p.length > 0);
           firstName = nameParts[0] || emailAddr.split('@')[0];
@@ -1902,8 +2064,12 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           // FIX: plain-text (non-ADF) lead emails can still carry the
           // customer's message — recovered by extractPlainTextInquiry.
           comments = (parsed as any).comments || '';
-          leadSource = 'DealersCloud Lead';
+          leadSource = LEAD_SOURCE.EMAIL_INQUIRY;
         }
+
+        const vehicleContext = parsed.adfData
+          ? await resolveVehicleContextForLead(req.orgId, parsed.adfData.vehicle).catch(() => null)
+          : null;
 
         const newLead = new Lead({
           organizationId: req.orgId,
@@ -1911,6 +2077,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           firstName,
           lastName,
           email: leadEmail,
+          identityEmailExcluded: !parsed.adfData?.email,
           phone: leadPhone,
           senderName,
           senderEmail: LEADS_SOURCE_EMAIL,
@@ -1921,6 +2088,9 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
           threadId: details.data.threadId,
           messageId: message.id,
           source: leadSource,
+          sourceProvider: leadSourceProvider,
+          vehicleId: vehicleContext?.vehicleId,
+          location: vehicleContext?.location,
           status: 'New',
           isRead: false,
           centralIngestion: true,
@@ -1936,19 +2106,14 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
         try {
           await newLead.save();
 
+          triggerAiReplyForNewInquiry(req.orgId, newLead, newLead.phone, newLead.comments).catch((err) => {
+            console.error('[CENTRAL-SYNC] triggerAiReplyForNewInquiry failed:', err);
+          });
+          triggerAiEmailReplyForNewInquiry(req.orgId, newLead, newLead.comments).catch((err) => {
+            console.error('[CENTRAL-SYNC] triggerAiEmailReplyForNewInquiry failed:', err);
+          });
+
           // ✨ AUTO-SYNC: Immediately add to customer database
-          await autoSyncLeadToCustomer(
-            req.orgId as string,
-            newLead._id.toString(),
-            firstName,
-            lastName,
-            leadEmail,
-            leadPhone,
-            vehicleInfo,
-            parsed.channel,
-            comments,
-            leadSource
-          );
 
           existingThreadIds.add(details.data.threadId);
           syncedCount++;
@@ -2102,11 +2267,64 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
   res.json(new ApiResponse(200, { lead, appointment }, 'Appointment scheduled and synced successfully'));
 });
 
+export async function fetchGmailThreadMessages(orgId: string, threadId: string | undefined | null, excludeMessageId?: string | null): Promise<any[]> {
+  if (isLocalUiAcceptanceMode()) return [];
+  if (!threadId) return [];
+
+  const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true });
+  const oauth2Client = await getCentralOAuth2Client(orgId);
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+  const threadData = await withRetry(() => gmail.users.threads.get({
+    userId: 'me',
+    id: threadId,
+    format: 'full',
+  }));
+
+  return (threadData.data.messages || [])
+    .filter((msg: any) => msg.id !== excludeMessageId)
+    .map((msg: any) => {
+      const hdrs = msg.payload?.headers || [];
+      const getHeader = (name: string) =>
+        hdrs.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+
+      const from = getHeader('from');
+      const email = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
+      const sender = from.replace(/<[^>]*>/g, '').trim() || email;
+
+      let body = '';
+      if (msg.payload?.parts) {
+        const textPart = msg.payload.parts.find((p: any) => p.mimeType === 'text/plain');
+        if (textPart?.body?.data) {
+          body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+        }
+      } else if (msg.payload?.body?.data) {
+        body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
+      }
+
+      const isOwn = config?.gmailAddress === email;
+
+      return {
+        id: msg.id,
+        _id: msg.id,
+        messageId: msg.id,
+        sender,
+        senderName: sender,
+        senderEmail: email,
+        message: body,
+        body,
+        direction: isOwn ? 'outbound' : 'inbound',
+        timestamp: new Date(parseInt(msg.internalDate || Date.now())),
+        createdAt: new Date(parseInt(msg.internalDate || Date.now())),
+        isOwn,
+      };
+    });
+}
+
 export const getThreadMessages = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = req.user || req.crmUser;
   if (!user) throw new ApiError(401, 'Please authenticate');
-  const userId = user._id;
 
   const lead = await Lead.findOne({ _id: id, organizationId: req.orgId });
   if (!lead) {
@@ -2118,6 +2336,10 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
     return res.json(new ApiResponse(200, { messages: [] }, 'No email thread yet'));
   }
 
+  if (isLocalUiAcceptanceMode()) {
+    return res.json(new ApiResponse(200, { messages: [] }, '[LOCAL_UI_ACCEPTANCE_MODE] Live Gmail thread fetch blocked'));
+  }
+
   try {
     const threadCacheKey = `lead:thread:${id}`;
     const cachedThread = await cacheService.get(threadCacheKey);
@@ -2125,62 +2347,7 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
       return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
     }
 
-    const config = await OrgLeadConfig.findOne({ organizationId: req.orgId, isActive: true });
-    const oauth2Client = await getCentralOAuth2Client(req.orgId as string);
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-
-    const threadData = await withRetry(() => gmail.users.threads.get({
-      userId: 'me',
-      id: lead.threadId!,
-      format: 'full',
-    }));
-
-    const threadUser = await User.findById(userId);
-
-    const messages = (threadData.data.messages || [])
-      .filter((msg: any) => msg.id !== lead.messageId)
-      .map((msg: any) => {
-        const hdrs = msg.payload?.headers || [];
-        const getHeader = (name: string) =>
-          hdrs.find((h: any) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
-
-        const from = getHeader('from');
-        const email = from.match(/([^\s<]+@[^\s>]+)/)?.[0] || '';
-        const sender = from.replace(/<[^>]*>/g, '').trim() || email;
-
-        let body = '';
-        if (msg.payload?.parts) {
-          const textPart = msg.payload.parts.find((p: any) => p.mimeType === 'text/plain');
-          if (textPart?.body?.data) {
-            body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
-          }
-        } else if (msg.payload?.body?.data) {
-          body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
-        }
-
-        const isOwn =
-          email === threadUser?.email || (config?.gmailAddress === email);
-
-        /*
-         * FIX: ConversationView reads message text via body/text/snippet/
-         * content and direction via `direction` — the old shape only exposed
-         * `message` + `isOwn`, so even loaded threads rendered blank bubbles.
-         */
-        return {
-          id: msg.id,
-          _id: msg.id,
-          messageId: msg.id,
-          sender,
-          senderName: sender,
-          senderEmail: email,
-          message: body,
-          body,
-          direction: isOwn ? 'outbound' : 'inbound',
-          timestamp: new Date(parseInt(msg.internalDate || Date.now())),
-          createdAt: new Date(parseInt(msg.internalDate || Date.now())),
-          isOwn,
-        };
-      });
+    const messages = await fetchGmailThreadMessages(req.orgId as string, lead.threadId, lead.messageId);
 
     // FIX: was 1800s (30 min) — customer replies took up to half an hour to
     // appear while the UI polls every 15s. 45s keeps Gmail quota safe and

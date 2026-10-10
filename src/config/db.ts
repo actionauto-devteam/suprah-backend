@@ -5,11 +5,19 @@ import config from './index';
 import seedCrmUsers from '../utils/seedCrmUsers';
 import CrmUser from '../models/CrmUser.model';
 import { initTrayDeviceAuth } from '../utils/initTrayDeviceAuth';
+import { verifyCustomerIdentityIndexes } from '../services/customerIdentityIndexes.service';
 
 const connectDB = async () => {
   try {
     await mongoose.connect(config.mongoose.url);
     logger.info('MongoDB Connected successfully');
+    try {
+      const identityIndexes = await verifyCustomerIdentityIndexes();
+      if (identityIndexes.ready) logger.info('Customer identity indexes verified');
+      else logger.error({ identityIndexes }, 'Customer identity writes require explicit index preparation; calling remains available');
+    } catch (error) {
+      logger.error({ error }, 'Customer identity index verification unavailable; identity writes remain guarded');
+    }
 
     // Only ever run on a genuinely empty database (first-ever boot of a new
     // environment) — this used to run unconditionally on every connect,

@@ -3,6 +3,7 @@ import {
   receiveADF,
   getAllLeads,
   getLeadStatusCounts,
+  getLeadLocationCounts,
   getLeadById,
   getUnansweredInquiryReminders,
   runUnansweredInquiryReminderCheck,
@@ -18,9 +19,12 @@ import {
   syncCentralGmail,
   syncGmailInquiries,
   setAppointmentForLead,
+  getAppointmentsForLead,
   getThreadMessages,
   getCentralSyncStatus,
   addLeadNote,
+  pauseEmailAi,
+  resumeEmailAi,
 } from "../controllers/lead.controller";
 import { getLeadAiSummary, regenerateLeadAiSummary } from "../controllers/leadAiSummary.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
@@ -54,6 +58,7 @@ router.get("/", getAllLeads);
 router.post("/", syncLimiter, createInquiry);
 
 router.get("/status-counts", getLeadStatusCounts);
+router.get("/location-counts", getLeadLocationCounts);
 
 router.post(
   "/bulk-reply",
@@ -68,6 +73,7 @@ router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
 router.patch("/:id/read", markAsRead);
 router.patch("/:id/pending", markAsPending);
 router.post("/:id/appointment", setAppointmentForLead);
+router.get("/:id/appointments", getAppointmentsForLead);
 
 router.post(
   "/:id/reply",
@@ -77,6 +83,8 @@ router.post(
 );
 
 router.post("/:id/notes", addLeadNote);
+router.post("/:id/ai-pause", pauseEmailAi);
+router.post("/:id/ai-resume", resumeEmailAi);
 router.patch("/:id/contact", updateLeadContact);
 router.patch("/:id/details", updateLeadDetails);
 router.patch("/:id/assign", assignLead);

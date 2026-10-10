@@ -14,6 +14,7 @@ import { decrypt } from '../utils/crypto';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
 import { resolveReviewLink } from './communication.service';
 import { isDemoPhone } from '../utils/demoPhone';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 interface EmailOptions {
     to: string;
@@ -59,6 +60,16 @@ class EmailService {
      * (email templates, calendar invites, etc). Falls back when no
      * organizationId is provided or the org/name can't be found.
      */
+    private async resolveMailingAddress(organizationId?: string): Promise<string> {
+        if (!organizationId) return '';
+        try {
+            const org = await Organization.findById(organizationId).select('metadata').lean();
+            return String((org?.metadata as any)?.physicalMailingAddress || '').trim();
+        } catch {
+            return '';
+        }
+    }
+
     private async resolveDealerName(organizationId?: string, fallback: string = 'Your Dealership'): Promise<string> {
         if (!organizationId) return fallback;
         try {
@@ -143,6 +154,10 @@ class EmailService {
      * Generic email sending method with ICS support
      */
     async sendEmail(options: EmailOptions): Promise<void> {
+        if (isLocalUiAcceptanceMode()) {
+            throw new ApiError(500, '[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound email send.');
+        }
+
         // Attempt Org-Level Gmail API first
         if (options.organizationId) {
             try {
@@ -1078,6 +1093,11 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         if (opts.phone && isDemoPhone(opts.phone)) return true;
         if (await isEmailOptedOut(organizationId, to)) return false;
 
+        const mailingAddress = await this.resolveMailingAddress(organizationId);
+        if (!mailingAddress) {
+            throw new ApiError(500, 'A verified business mailing address is required before sending email campaigns. Add one in Settings.');
+        }
+
         const firstName = String(opts.customerName || '').trim().split(/\s+/)[0] || 'there';
         const interpolate = (text: string) => text.replace(/\{firstName\}/gi, firstName);
 
@@ -1147,6 +1167,7 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
                     </div>
                     <div class="footer">
                         <p><strong>${dealerName}</strong></p>
+                        <p>${mailingAddress}</p>
                         <p><a href="${unsubscribeUrl}">Unsubscribe from automated emails</a></p>
                     </div>
                 </div>
@@ -1162,6 +1183,7 @@ ${body}
 ${signOff}
 
 ${dealerName}
+${mailingAddress}
 
 Unsubscribe from automated emails: ${unsubscribeUrl}
         `;

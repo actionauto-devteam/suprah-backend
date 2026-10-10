@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { Request, Response } from "express";
+import { revokeRecordingMediaForLogin } from '../services/recordingMediaAuth.service';
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -8,7 +9,9 @@ import User, { IUser } from "../models/User.model";
 import Organization from "../models/Organization.model";
 import TimeLog from "../models/TimeLog.model";
 import {
-  generateCrmToken,
+  issueCrmSessionToken,
+  revokeCrmSession,
+  renewCrmSessionToken,
   CRM_TOKEN_COOKIE,
 } from "../middleware/crmAuth.middleware";
 import emailService from "../services/email.service";
@@ -107,7 +110,7 @@ const login = asyncHandler(async (req: Request, res: Response) => {
   user.lastLoginAt = new Date();
   await user.save({ validateModifiedOnly: true });
 
-  const token = generateCrmToken(user._id.toString());
+  const token = await issueCrmSessionToken(user._id.toString());
 
   res.cookie(CRM_TOKEN_COOKIE, token, COOKIE_OPTIONS);
 
@@ -124,6 +127,8 @@ const login = asyncHandler(async (req: Request, res: Response) => {
 });
 
 const logout = asyncHandler(async (req: Request, res: Response) => {
+  await revokeRecordingMediaForLogin(req);
+  await revokeCrmSession(req, res);
   res.clearCookie(CRM_TOKEN_COOKIE, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -265,6 +270,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const webchatGreeting = metadata.webchatGreeting || '';
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
   const aiAgentName = metadata.aiAgentName || 'Alex';
+  const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || '';
+  const physicalMailingAddress = metadata.physicalMailingAddress || '';
 
   res.json(new ApiResponse(200, {
     reviewLink,
@@ -273,6 +280,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     webchatGreeting,
     aiAgentEnabled,
     aiAgentName,
+    aiHandoffFallbackGroupId,
+    physicalMailingAddress,
   }, 'Organization settings fetched'));
 });
 
@@ -282,7 +291,16 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (!orgId || !user) throw new ApiError(401, 'Please authenticate');
   if (user.role !== 'admin') throw new ApiError(403, 'Only admins can update organization settings');
 
-  const { reviewLink, reviewLinks, webchatEnabled, webchatGreeting, aiAgentEnabled, aiAgentName } = req.body;
+  const {
+    reviewLink,
+    reviewLinks,
+    webchatEnabled,
+    webchatGreeting,
+    aiAgentEnabled,
+    aiAgentName,
+    aiHandoffFallbackGroupId,
+    physicalMailingAddress,
+  } = req.body;
   const org = await Organization.findById(orgId);
   if (!org) throw new ApiError(404, 'Organization not found');
 
@@ -315,6 +333,12 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (aiAgentName !== undefined) {
     metadata.aiAgentName = String(aiAgentName || '').trim().slice(0, 40) || 'Alex';
   }
+  if (aiHandoffFallbackGroupId !== undefined) {
+    metadata.aiHandoffFallbackGroupId = String(aiHandoffFallbackGroupId || '').trim();
+  }
+  if (physicalMailingAddress !== undefined) {
+    metadata.physicalMailingAddress = String(physicalMailingAddress || '').trim().slice(0, 300);
+  }
 
   org.metadata = metadata;
   await org.save();
@@ -326,6 +350,8 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     webchatGreeting: org.metadata.webchatGreeting,
     aiAgentEnabled: org.metadata.aiAgentEnabled,
     aiAgentName: org.metadata.aiAgentName,
+    aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
+    physicalMailingAddress: org.metadata.physicalMailingAddress,
   }, 'Organization settings updated'));
 });
 
@@ -1412,7 +1438,7 @@ const updateMyScreenshotPrivacy = asyncHandler(async (req: Request, res: Respons
  */
 const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const newToken = generateCrmToken(user._id.toString());
+  const newToken = req.crmAuthToken ? await renewCrmSessionToken(req.crmAuthToken, user._id.toString()) : await issueCrmSessionToken(user._id.toString());
   res.cookie(CRM_TOKEN_COOKIE, newToken, COOKIE_OPTIONS);
   res.json(new ApiResponse(200, { token: newToken }, "Token refreshed"));
 });

@@ -1772,8 +1772,11 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
 
   const { userId, date, action, logId, type, timestamp, reason } = req.body as {
     userId?: string; date?: string; action?: 'edit' | 'delete' | 'create';
-    logId?: string; type?: 'time-in' | 'time-out'; timestamp?: string; reason?: string;
+    logId?: string; type?: 'time-in' | 'time-out' | 'break-in' | 'break-out'; timestamp?: string; reason?: string;
   };
+  if (action === 'create' && type && !['time-in', 'time-out', 'break-in', 'break-out'].includes(type)) {
+    throw new ApiError(400, 'type must be time-in, time-out, break-in, or break-out');
+  }
   if (!userId || !date || !action) {
     throw new ApiError(400, 'userId, date and action are all required');
   }
