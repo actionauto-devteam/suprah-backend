@@ -1,6 +1,7 @@
 import express from "express";
 import notificationController from "../controllers/notification.controller";
 import auth from "../middleware/auth.middleware";
+import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
 const router = express.Router();
 
@@ -20,6 +21,7 @@ router.delete("/read/all", notificationController.deleteAllRead);
 
 router.post("/broadcast", notificationController.broadcastNotification);
 
-router.post("/create-test", notificationController.createTestNotification);
+// A testing tool the app itself never calls: only super admins may use it.
+router.post("/create-test", requireSuperAdmin, notificationController.createTestNotification);
 
 export default router;

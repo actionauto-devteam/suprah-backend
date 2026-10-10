@@ -9,6 +9,7 @@ import emailService from "../services/email.service";
 import logger from "../utils/logger";
 import activityService from "../services/activity.service";
 import { approveDriverVerification } from "../services/driverVerificationReview.service";
+import { SUPPORT_EMAIL } from "../utils/userMessages";
 
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
@@ -288,9 +289,8 @@ const rejectDriverRequest = asyncHandler(
           userId: driverUser._id.toString(),
           organizationId: "global",
           type: "driver_request_rejected",
-          title: "Request Rejected",
-          message:
-            "Your driver request has been rejected. Please contact the administrator for more information.",
+          title: "Application Not Approved",
+          message: `Your driver application wasn't approved. To find out why, or if you think this is a mistake, email ${SUPPORT_EMAIL}.`,
           metadata: {
             driverRequestId: request._id.toString(),
           },
@@ -300,7 +300,7 @@ const rejectDriverRequest = asyncHandler(
           await emailService.sendEmail({
             to: driverUser.email,
             subject: "Update on Your Driver Application - Suprah.AI",
-            text: `Hi ${driverUser.name},\n\nThank you for applying to join Suprah.AI as a driver. After review, we're unable to approve your application at this time.\n\nIf you believe this was a mistake or would like more information, please contact your administrator.\n\n— Suprah.AI Team`,
+            text: `Hi ${driverUser.name},\n\nThank you for applying to join Suprah.AI as a driver. After review, we're unable to approve your application at this time.\n\nTo find out why, or if you believe this was a mistake, email us at ${SUPPORT_EMAIL}.\n\n— Suprah.AI Team`,
             html: `
               <!DOCTYPE html>
               <html>
@@ -325,7 +325,7 @@ const rejectDriverRequest = asyncHandler(
                     <p style="font-size: 16px;">Hi <strong>${driverUser.name}</strong>,</p>
                     <div class="notice-box">
                       <p style="margin: 0; font-size: 16px; font-weight: bold; color: #374151;">We're unable to approve your driver application at this time.</p>
-                      <p style="margin: 8px 0 0 0; color: #4b5563;">If you believe this was a mistake or would like more information, please contact your administrator.</p>
+                      <p style="margin: 8px 0 0 0; color: #4b5563;">To find out why, or if you believe this was a mistake, email us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
                     </div>
                   </div>
                   <div class="footer">

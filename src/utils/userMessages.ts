@@ -9,6 +9,9 @@ import User from '../models/User.model';
  *   - driver-facing messages refer to "Dispatch", not to named staff.
  */
 
+/** Where drivers and other users without an organization admin get help. */
+export const SUPPORT_EMAIL = 'support@suprahai.com';
+
 export const LOAD_NOT_FOUND =
   "We couldn't find this load. It may have been deleted, or you may not have access to it. Refresh the page and try again.";
 

@@ -37,6 +37,24 @@ describe('mapKnownError', () => {
     expect(mapped?.errors).toEqual([{ fields: ['organizationId', 'loadNumber'] }]);
   });
 
+  it('tells the user a file is too large instead of blaming the server', () => {
+    const mapped = mapKnownError({ name: 'MulterError', code: 'LIMIT_FILE_SIZE', message: 'File too large', field: 'proof' });
+    expect(mapped?.statusCode).toBe(413);
+    expect(mapped?.errorType).toBe('FILE_TOO_LARGE');
+    expect(mapped?.message).toMatch(/too large.*Choose a smaller file/);
+    expect(mapped?.message).not.toMatch(/on our side/);
+  });
+
+  it('maps other upload problems to a 400 the user can act on', () => {
+    expect(mapKnownError({ name: 'MulterError', code: 'LIMIT_FILE_COUNT' })).toMatchObject({
+      statusCode: 400,
+      errorType: 'TOO_MANY_FILES',
+    });
+    const unexpected = mapKnownError({ name: 'MulterError', code: 'LIMIT_UNEXPECTED_FILE', field: 'file' });
+    expect(unexpected).toMatchObject({ statusCode: 400, errorType: 'UPLOAD_INVALID' });
+    expect(unexpected?.message).toMatch(/contact support/);
+  });
+
   it('leaves explicit ApiError-style errors and unknown errors alone', () => {
     expect(mapKnownError({ name: 'CastError', statusCode: 404 })).toBeNull();
     expect(mapKnownError(new Error('boom'))).toBeNull();

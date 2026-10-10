@@ -41,6 +41,7 @@ import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAuto
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
 import { initLotTechLocationEscalationScheduler } from "./schedulers/lotTechLocationEscalation.scheduler";
 import { initPresenceOfflineScheduler } from "./schedulers/presenceOffline.scheduler";
+import { initDriverComplianceExpiryScheduler } from "./schedulers/driverComplianceExpiry.scheduler";
 // Driver GPS silence is monitored by startDriverLocationMonitor in driverTracking.routes.
 import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
 import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
@@ -240,6 +241,7 @@ if (require.main === module) {
       initConnectionLossShiftAlertScheduler();
       initLotTechLocationEscalationScheduler();
       initPresenceOfflineScheduler();
+      initDriverComplianceExpiryScheduler();
       // Do not also start the legacy org-wide driver alert scheduler.
       startProjectDeadlineReminders();
       startCalendarReminderSweep();

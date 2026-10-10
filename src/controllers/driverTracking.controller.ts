@@ -25,7 +25,12 @@ import {
   withDriverCommitmentLock,
 } from "../services/driverWorkCommitment.service";
 import User, { IUser } from "../models/User.model";
-import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
+import DriverProfile, {
+  REQUIRED_COMPLIANCE_DOCS,
+  complianceExpiryItems,
+  describeComplianceItems,
+  isComplianceExpiredAt,
+} from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import DriverLocation from "../models/DriverLocation.model";
 import LoadTripPoint, { TRIP_HISTORY_RETENTION_DAYS } from "../models/LoadTripPoint.model";
@@ -1318,7 +1323,7 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
               operationalStatus: p.operationalStatus ?? "active",
               truckMake: p.truckMake ?? undefined,
               truckModel: p.truckModel ?? undefined,
-              isComplianceExpired: Boolean(p.isComplianceExpired),
+              isComplianceExpired: isComplianceExpiredAt(p),
             }
           : null,
         availability: {
@@ -3320,7 +3325,7 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
       DriverProfile.findOne({
         userId: user._id,
       })
-        .select("profileCompletionScore isComplianceExpired")
+        .select("profileCompletionScore isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate")
         .lean(),
 
       // Earnings are authoritative only after a payout reaches paid. Because
@@ -3351,7 +3356,11 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
     pendingRequests,
     totalEarnings,
     profileCompletionScore: profile?.profileCompletionScore ?? 0,
-    isComplianceExpired: Boolean(profile?.isComplianceExpired),
+    isComplianceExpired: isComplianceExpiredAt(profile),
+    // The driver's own credentials that have expired, so the Driver Page can say which.
+    complianceExpiredItems: complianceExpiryItems(profile)
+      .filter((item) => item.expired)
+      .map(({ label, date }) => ({ label, date })),
     completedLoads,
   };
 
@@ -4726,7 +4735,7 @@ const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: Exp
               trailerType: profile.trailerType ?? undefined,
               maxVehicleCapacity: profile.maxVehicleCapacity ?? undefined,
               operationalStatus: profile.operationalStatus ?? "active",
-              isComplianceExpired: Boolean(profile.isComplianceExpired),
+              isComplianceExpired: isComplianceExpiredAt(profile),
               truckMake: profile.truckMake ?? undefined,
               truckModel: profile.truckModel ?? undefined,
               profileCompletionScore: Number(profile.profileCompletionScore ?? 0),
@@ -7704,15 +7713,41 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
     const days = daysUntil(value);
     return days != null && days >= 0 && days <= 30;
   });
+  // Worked out from the dates now: once a date has passed it's "expired",
+  // even if the profile hasn't been saved since (the stored flag can lag).
+  const complianceExpired = isComplianceExpiredAt(profile);
+  const expiryItems = complianceExpiryItems(profile);
+  const expiredItems = expiryItems.filter((item) => item.expired);
+  const expiringSoonItems = expiryItems.filter((item) => !item.expired && item.daysLeft <= 30);
 
   const requiredReviewNeedsAttention = REQUIRED_COMPLIANCE_DOCS.some(
     (type) => documentFact(type).status !== "approved",
   );
-  const complianceState = profile.isComplianceExpired || requiredReviewNeedsAttention
+  const complianceState = complianceExpired || requiredReviewNeedsAttention
     ? "needs_attention"
     : expiringSoon
       ? "expiring_soon"
       : "valid";
+  // Each warning names the credential and says what to do next. Both the
+  // operational and the full (administrative) review views include them; only
+  // people allowed to open the Driver Review Center see either view.
+  const complianceWarnings = [
+    ...(expiredItems.length
+      ? [
+          `Expired: ${describeComplianceItems(expiredItems)}. Ask the driver to upload the renewed ${expiredItems.length > 1 ? "documents" : "document"} and update the expiration date on the Documents page of the Driver Portal.`,
+        ]
+      : []),
+    ...(requiredReviewNeedsAttention
+      ? [
+          "Some required documents are missing, waiting for review, or were rejected. Review the documents below, and ask the driver to upload any that are missing or rejected.",
+        ]
+      : []),
+    ...(expiringSoonItems.length
+      ? [
+          `Expiring within 30 days: ${describeComplianceItems(expiringSoonItems)}. Remind the driver to renew and upload the new ${expiringSoonItems.length > 1 ? "documents" : "document"} before then.`,
+        ]
+      : []),
+  ];
 
   const userObject = profile.userId && typeof profile.userId === "object"
     ? profile.userId
@@ -7741,7 +7776,7 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
     verificationStatus: profile.verificationStatus,
     operationalStatus: profile.operationalStatus,
     profileCompletionScore: Number(profile.profileCompletionScore ?? 0),
-    isComplianceExpired: Boolean(profile.isComplianceExpired),
+    isComplianceExpired: complianceExpired,
     complianceState,
     equipment: {
       trailerType: profile.trailerType,
@@ -7783,11 +7818,7 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
           expiresAt: profile.insuranceExpirationDate ?? null,
         },
       },
-      complianceWarnings: [
-        ...(profile.isComplianceExpired ? ["One or more compliance credentials are expired"] : []),
-        ...(requiredReviewNeedsAttention ? ["One or more required compliance documents need review or correction"] : []),
-        ...(expiringSoon ? ["One or more compliance credentials expire within 30 days"] : []),
-      ],
+      complianceWarnings,
     };
 
     const relationshipLoad = access.activeLoads[0];
@@ -7929,6 +7960,7 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
         : undefined,
     },
     complianceSummary,
+    complianceWarnings,
     documents,
     eligibility,
     accountApplicationStatus: latestDriverRequest?.status ?? null,

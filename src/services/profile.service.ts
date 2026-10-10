@@ -14,6 +14,7 @@ import { NOTIFICATION_CATEGORIES } from '../models/Notification.model';
 
 const VALID_PREFERENCE_KEYS = new Set<string>([...NOTIFICATION_CATEGORIES, 'mutedTypes']);
 import { invalidateUserCache } from '../utils/cache.util';
+import { syncAccountPhoneToVerification } from './driverContactSync.service';
 
 const updateAvatar = async (userId: string, file: Express.Multer.File, orgId?: string) => {
   const existingUser = await User.findById(userId).select('avatar email');
@@ -248,6 +249,8 @@ const updatePersonalInfo = async (userId: string, personalInfo: Partial<IPersona
     }
   }
 
+  const before = await User.findById(userId).select('role personalInfo.phone personalInfo.phoneCountryCode').lean();
+
   const user = await User.findByIdAndUpdate(
     userId,
     { $set: updateFields },
@@ -256,6 +259,17 @@ const updatePersonalInfo = async (userId: string, personalInfo: Partial<IPersona
 
   if (!user) {
     throw new ApiError(404, 'User not found');
+  }
+
+  // Drivers: Dispatch reads the phone from the verification record, so a
+  // changed phone is copied there too (driverContactSync.service).
+  if (before?.role === 'driver' && personalInfo.phone !== undefined) {
+    await syncAccountPhoneToVerification({
+      userId: String(userId),
+      previousPhone: before.personalInfo?.phone,
+      newPhone: personalInfo.phone,
+      countryCode: personalInfo.phoneCountryCode ?? before.personalInfo?.phoneCountryCode,
+    });
   }
 
   // Log activity

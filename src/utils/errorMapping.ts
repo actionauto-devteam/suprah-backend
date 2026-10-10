@@ -46,6 +46,32 @@ export function mapKnownError(err: any): MappedError | null {
   // Explicit ApiError / http-errors style status wins.
   if (Number.isInteger(err.statusCode) && err.statusCode >= 400) return null;
 
+  // Upload limits (file too large, too many files) are the user's to fix, not
+  // a server fault, so they must not read as "something went wrong on our side".
+  if (err.name === "MulterError") {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return {
+        statusCode: 413,
+        message:
+          "This file is too large to upload. Choose a smaller file, or for a photo, take a new one with your camera, and try again.",
+        errorType: "FILE_TOO_LARGE",
+      };
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return {
+        statusCode: 400,
+        message: "Too many files were sent at once. Choose fewer files and try again.",
+        errorType: "TOO_MANY_FILES",
+      };
+    }
+    return {
+      statusCode: 400,
+      message:
+        "This upload couldn't be read. Choose the file again and try once more. If it keeps happening, contact support.",
+      errorType: "UPLOAD_INVALID",
+    };
+  }
+
   if (err.name === "CastError") {
     const path = String(err.path ?? "");
     const isIdentifier = path === "_id" || /Id$/.test(path) || err.kind === "ObjectId";

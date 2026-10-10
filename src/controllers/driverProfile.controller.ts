@@ -19,6 +19,7 @@ import {
   getOpenDriverStatusRequest,
 } from "../services/driverStatusTransition.service";
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
+import { syncVerificationContactToAccount } from "../services/driverContactSync.service";
 import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
 
 const getDriverUser = (req: Request): IUser => {
@@ -637,6 +638,7 @@ const updatePersonalInfo = asyncHandler(
     const user = getDriverUser(req);
     const profile = await getOrCreateProfile(user._id.toString());
     const previousCriticalSnapshot = verificationCriticalSnapshot(profile);
+    const previousContact = { phone: profile.phone, city: profile.city, state: profile.state };
 
     const {
       firstName,
@@ -789,6 +791,13 @@ const updatePersonalInfo = asyncHandler(
     );
 
     await profile.save();
+
+    // Keep the Profile page's phone and location in step with this form.
+    await syncVerificationContactToAccount({
+      userId: user._id.toString(),
+      previous: previousContact,
+      current: { phone: profile.phone, city: profile.city, state: profile.state },
+    });
 
     if (changedVerificationFields.length > 0) {
       await recordDriverReviewEvent({
