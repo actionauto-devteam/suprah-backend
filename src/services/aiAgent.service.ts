@@ -25,6 +25,8 @@ const CLASSIFIER_TIMEOUT_MS = parseInt(process.env.AI_AGENT_CLASSIFIER_TIMEOUT_M
 const COACHING_CLASSIFIER_TIMEOUT_MS = parseInt(process.env.AI_AGENT_COACHING_CLASSIFIER_TIMEOUT_MS || '9000', 10);
 const MAX_REPLIES_PER_DAY = parseInt(process.env.AI_AGENT_MAX_REPLIES_PER_DAY || '40', 10);
 const MAX_CONSECUTIVE_REPLIES = parseInt(process.env.AI_AGENT_MAX_CONSECUTIVE_REPLIES || '6', 10);
+export const FOLLOWUP_INTERVAL_OPTIONS_HOURS = [24, 48, 72] as const;
+const DEFAULT_FOLLOWUP_INTERVAL_HOURS = parseInt(process.env.AI_LEAD_FOLLOWUP_INTERVAL_HOURS || '24', 10);
 const MAX_REPLY_LENGTH_SMS = 300;
 const MAX_REPLY_LENGTH_WEBCHAT = 600;
 const MAX_APPLIED_COACHING_RULES = 8;
@@ -43,17 +45,21 @@ function createCompletionWithFallback(options: any): Promise<any> {
  *  toggle. Both must be on for a given org to get live AI replies. */
 export async function resolveAiAgentSettings(
   organizationId: string,
-): Promise<{ enabled: boolean; agentName: string }> {
+): Promise<{ enabled: boolean; agentName: string; followUpIntervalHours: number }> {
   if (process.env.AI_AGENT_ENABLED !== 'true') {
-    return { enabled: false, agentName: DEFAULT_AGENT_NAME };
+    return { enabled: false, agentName: DEFAULT_AGENT_NAME, followUpIntervalHours: DEFAULT_FOLLOWUP_INTERVAL_HOURS };
   }
   try {
     const org = await Organization.findById(organizationId).select('metadata').lean();
     const metadata = (org?.metadata as any) || {};
     const agentName = (metadata.aiAgentName && String(metadata.aiAgentName).trim()) || DEFAULT_AGENT_NAME;
-    return { enabled: metadata.aiAgentEnabled === true, agentName };
+    const parsedInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
+    const followUpIntervalHours = (FOLLOWUP_INTERVAL_OPTIONS_HOURS as readonly number[]).includes(parsedInterval)
+      ? parsedInterval
+      : DEFAULT_FOLLOWUP_INTERVAL_HOURS;
+    return { enabled: metadata.aiAgentEnabled === true, agentName, followUpIntervalHours };
   } catch {
-    return { enabled: false, agentName: DEFAULT_AGENT_NAME };
+    return { enabled: false, agentName: DEFAULT_AGENT_NAME, followUpIntervalHours: DEFAULT_FOLLOWUP_INTERVAL_HOURS };
   }
 }
 

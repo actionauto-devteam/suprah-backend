@@ -8,7 +8,7 @@ import {
   resolveDealerName,
   SmsDeliveryUncertainError,
 } from '../services/communication.service';
-import { hasActiveAppointment, latestContactTimes, customerEmailedSince } from './leadNurture.scheduler';
+import { hasActiveAppointment, latestContactTimes, latestCustomerEmailReplyAt } from './leadNurture.scheduler';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import { resolveAiAgentSettings, generateProactiveFollowUp, classifyAlexReplySafety } from '../services/aiAgent.service';
@@ -28,25 +28,15 @@ import logger from '../utils/logger';
  *  are both real, independently enforced, not merged into a single timestamp.  */
 const CRON_SCHEDULE = process.env.AI_LEAD_FOLLOWUP_CRON || '*/15 8-20 * * *';
 const CRON_TIMEZONE = 'America/Denver';
-const STEP_INTERVALS_HOURS = [48, 120, 216]; // Day 2, Day 5, Day 9 since the FIXED cadence anchor (see cadenceAnchor below) — never since the previous automated touch
-const MAX_FOLLOWUPS = STEP_INTERVALS_HOURS.length;
 const MAX_LEAD_AGE_DAYS = parseInt(process.env.AI_LEAD_FOLLOWUP_MAX_LEAD_AGE_DAYS || '14', 10);
 const MAX_ATTEMPTS = parseInt(process.env.AI_LEAD_FOLLOWUP_MAX_ATTEMPTS || '3', 10);
 const RETRY_MINUTES = parseInt(process.env.AI_LEAD_FOLLOWUP_RETRY_MINUTES || '15', 10);
 const PROCESSING_TIMEOUT_MINUTES = 10;
-/** Shared same-day dedup window with leadNurture.scheduler.ts on the same
- *  followUp.lastAutomatedOutreachAt field (set by both schedulers on every claim). 24h —
- *  not just a same-tick race window — so if EITHER scheduler has touched this lead at all
- *  in roughly the last day, the OTHER scheduler will not also claim it, closing the
- *  "duplicate later the same day" gap. This is DB-state-based (not in-memory), so it
- *  survives scheduler restarts and concurrent workers unchanged — there is nothing to
- *  "lose" on restart, the next tick re-reads the same persisted field. Safely smaller than
- *  either scheduler's own minimum legitimate re-touch interval (nurture's smallest step is
- *  24h; this scheduler's smallest is 48h), so it never delays either system's own next
- *  legitimate send — it only blocks a cross-system pile-on. */
+/** Same-tick/restart race guard on followUp.lastAutomatedOutreachAt — DB-state-based, so
+ *  it survives restarts and concurrent workers unchanged. No shorter than the shortest
+ *  configurable follow-up interval (24h), so it never delays a legitimate next send. */
 const CROSS_SCHEDULER_LOCK_MINUTES = 24 * 60;
 const HOUR_MS = 60 * 60 * 1000;
-const CUSTOMER_ACTIVITY_GRACE_MS = 60 * 1000;
 const BATCH_LIMIT = 100;
 
 interface AiFollowUpStats {
@@ -78,7 +68,6 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
     status: { $in: ELIGIBLE_STATUSES },
     phone: { $exists: true, $ne: '' },
     createdAt: { $gte: new Date(now.getTime() - MAX_LEAD_AGE_DAYS * 24 * HOUR_MS) },
-    'followUp.aiFollowUpCount': { $not: { $gte: MAX_FOLLOWUPS } },
     'followUp.aiFollowUpStatus': { $ne: 'pending_reconciliation' },
     $and: [
       {
@@ -118,36 +107,24 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
 
   for (const lead of candidates as any[]) {
     try {
-      const { enabled: aiEnabled, agentName } = await resolveAiAgentSettings(String(lead.organizationId));
+      const { enabled: aiEnabled, agentName, followUpIntervalHours } = await resolveAiAgentSettings(String(lead.organizationId));
       if (!aiEnabled) { stats.skipped++; continue; }
 
       const step: number = lead.followUp?.aiFollowUpCount || 0;
-      const intervalMs = STEP_INTERVALS_HOURS[step] * HOUR_MS;
+      const intervalMs = followUpIntervalHours * HOUR_MS;
       const createdAt = new Date(lead.createdAt).getTime();
-      // Fixed cadence anchor — deliberately excludes lastAutomatedOutreachAt so Day 2/5/9
-      // are always measured from the original customer activity (creation or a human
-      // rep's response), never reset or pushed later by this system's own prior sends.
-      // The cross-scheduler duplicate check is handled separately below, via the DB-level
-      // lastAutomatedOutreachAt recency filter in the candidate query and claim query —
-      // not by folding it into this timing math.
       const lastRep = lead.followUp?.lastRepResponseAt ? new Date(lead.followUp.lastRepResponseAt).getTime() : 0;
-      const cadenceAnchor = Math.max(createdAt, lastRep);
-      if (now.getTime() - cadenceAnchor < intervalMs) continue;
+      const lastCustomerActivity = lead.followUp?.lastCustomerActivityAt ? new Date(lead.followUp.lastCustomerActivityAt).getTime() : createdAt;
+      const cheapAnchor = Math.max(createdAt, lastRep, lastCustomerActivity);
+      if (now.getTime() - cheapAnchor < intervalMs) continue;
 
       const earlyPauseCheck = await checkConversationPauseForLead({ organizationId: lead.organizationId, phone: lead.phone, leadId: lead._id });
       if (shouldDeferAutomatedFollowUp(earlyPauseCheck)) { stats.skipped++; continue; }
 
       const contacts = await latestContactTimes(lead._id);
-      const lastOurTouch = Math.max(cadenceAnchor, contacts.human);
-      if (now.getTime() - lastOurTouch < intervalMs) continue;
-
-      const customerSince = lastOurTouch + CUSTOMER_ACTIVITY_GRACE_MS;
-      const lastCustomer = lead.followUp?.lastCustomerActivityAt ? new Date(lead.followUp.lastCustomerActivityAt).getTime() : createdAt;
-      const waitingOnUs =
-        lastCustomer > customerSince ||
-        contacts.customerCall > customerSince ||
-        (await customerEmailedSince(lead, customerSince));
-      if (waitingOnUs) { stats.skipped++; continue; }
+      const emailReplyAt = await latestCustomerEmailReplyAt(lead);
+      const lastActivity = Math.max(cheapAnchor, contacts.human, contacts.customerCall, emailReplyAt);
+      if (now.getTime() - lastActivity < intervalMs) continue;
 
       if (await hasActiveAppointment(lead._id, now)) { stats.skipped++; continue; }
 

@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type EmailCampaignRecipientStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+export type EmailCampaignRecipientStatus = 'pending' | 'processing' | 'sent' | 'failed' | 'skipped' | 'uncertain';
 
 export interface IEmailCampaignRecipient extends Document {
   campaignId: mongoose.Types.ObjectId;
@@ -13,6 +13,8 @@ export interface IEmailCampaignRecipient extends Document {
   status: EmailCampaignRecipientStatus;
   failureReason?: string;
   sentAt?: Date;
+  processingStartedAt?: Date;
+  attemptCount?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -28,12 +30,14 @@ const EmailCampaignRecipientSchema: Schema<IEmailCampaignRecipient> = new Schema
     customerName: { type: String, trim: true },
     status: {
       type: String,
-      enum: ['pending', 'sent', 'failed', 'skipped'],
+      enum: ['pending', 'processing', 'sent', 'failed', 'skipped', 'uncertain'],
       default: 'pending',
       index: true,
     },
     failureReason: { type: String, trim: true, maxlength: 500 },
     sentAt: { type: Date },
+    processingStartedAt: { type: Date },
+    attemptCount: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

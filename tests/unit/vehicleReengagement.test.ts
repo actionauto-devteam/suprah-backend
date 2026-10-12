@@ -9,11 +9,18 @@ jest.mock('openai', () => {
 process.env.GEMINI_API_KEY = 'test-key';
 process.env.VEHICLE_REENGAGEMENT_CLASSIFIER_TIMEOUT_MS = '50';
 
+const mockOrganizationFindById = jest.fn();
+jest.mock('../../src/models/Organization.model', () => ({
+  __esModule: true,
+  default: { findById: mockOrganizationFindById },
+}));
+
 import {
   validateOutboundMessage,
   normalizeToken,
   matchesVehicle,
   classifyMessageSafety,
+  generateReengagementMessage,
 } from '../../src/services/vehicleReengagement.service';
 
 // Full validateOutboundMessage / classifier cases now live in aiOutboundSafety.test.ts
@@ -92,5 +99,35 @@ describe('classifyMessageSafety (delegates to the shared classifier)', () => {
   it('resolves to ERROR on timeout rather than hanging', async () => {
     mockCreate.mockImplementationOnce(() => new Promise(() => {}));
     await expect(classifyMessageSafety('hello')).resolves.toBe('ERROR');
+  });
+});
+
+describe('generateReengagementMessage (sender identity)', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockOrganizationFindById.mockReset();
+    mockOrganizationFindById.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto Utah' }) }),
+    });
+  });
+
+  const lead = { _id: 'lead-1', firstName: 'Jordan', vehicle: { year: '2022', make: 'Toyota', model: 'Camry' } };
+  const vehicle = { _id: 'vehicle-1', organizationId: 'org-1', year: 2022, make: 'Toyota', modelName: 'Camry SE' } as any;
+
+  it('uses the configurable AI agent name, never the old hardcoded "Suprah Autrix" identity', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'Hi Jordan, a matching Camry just arrived!' } }] });
+    await generateReengagementMessage(lead, vehicle);
+
+    const systemPrompt = mockCreate.mock.calls[0][0].messages[0].content as string;
+    expect(systemPrompt).toContain('You are Alex, writing on behalf of Action Auto Utah');
+    expect(systemPrompt).not.toContain('Autrix');
+  });
+
+  it('includes an explicit instruction against self-labeling as a virtual assistant/bot', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'Hi Jordan, a matching Camry just arrived!' } }] });
+    await generateReengagementMessage(lead, vehicle);
+
+    const systemPrompt = mockCreate.mock.calls[0][0].messages[0].content as string;
+    expect(systemPrompt).toMatch(/never describe yourself with a label/i);
   });
 });

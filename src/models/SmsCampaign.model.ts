@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type SmsCampaignStatus = 'queued' | 'sending' | 'completed' | 'cancelled' | 'failed';
+export type SmsCampaignStatus = 'scheduled' | 'queued' | 'sending' | 'completed' | 'cancelled' | 'failed';
 
 export interface ISmsCampaign extends Document {
   organizationId: string;
@@ -8,6 +8,7 @@ export interface ISmsCampaign extends Document {
   message: string;
   audienceStatuses: string[];
   status: SmsCampaignStatus;
+  scheduledAt?: Date;
   totalRecipients: number;
   sentCount: number;
   failedCount: number;
@@ -28,10 +29,11 @@ const SmsCampaignSchema: Schema<ISmsCampaign> = new Schema(
     audienceStatuses: [{ type: String }],
     status: {
       type: String,
-      enum: ['queued', 'sending', 'completed', 'cancelled', 'failed'],
+      enum: ['scheduled', 'queued', 'sending', 'completed', 'cancelled', 'failed'],
       default: 'queued',
       index: true,
     },
+    scheduledAt: { type: Date },
     totalRecipients: { type: Number, default: 0 },
     sentCount: { type: Number, default: 0 },
     failedCount: { type: Number, default: 0 },

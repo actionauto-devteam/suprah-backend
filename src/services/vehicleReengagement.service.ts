@@ -4,6 +4,7 @@ import Vehicle, { IVehicle } from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
 import { sendAutomatedSms, isSmsOptedOut } from './communication.service';
+import { resolveAiAgentSettings } from './aiAgent.service';
 import logger from '../utils/logger';
 import {
   createGeminiClient,
@@ -94,8 +95,8 @@ export async function findMatchingLeads(vehicle: IVehicle) {
   return matched.slice(0, MAX_MATCHES_PER_VEHICLE);
 }
 
-function describeGenerationError(err: any): string {
-  return describeGenerationErrorShared(err, 'Autrix');
+function describeGenerationError(err: any, agentName: string): string {
+  return describeGenerationErrorShared(err, agentName);
 }
 
 async function resolveDealerName(organizationId: string): Promise<string> {
@@ -111,8 +112,10 @@ export async function generateReengagementMessage(
   lead: any,
   vehicle: IVehicle,
 ): Promise<{ text: string | null; error?: string }> {
+  const { agentName } = await resolveAiAgentSettings(String(vehicle.organizationId));
+
   if (!hasGeminiApiKey()) {
-    return { text: null, error: "Autrix isn't set up on this backend yet. Contact your developer." };
+    return { text: null, error: `${agentName} isn't set up on this backend yet. Contact your developer.` };
   }
 
   const dealerName = await resolveDealerName(vehicle.organizationId);
@@ -121,7 +124,9 @@ export async function generateReengagementMessage(
   const arrivedVehicle = [vehicle.year, vehicle.make, vehicle.modelName, vehicle.trim].filter(Boolean).join(' ');
 
   const systemPrompt = [
-    `You are Suprah Autrix, writing on behalf of ${dealerName} to a past customer who previously asked about a vehicle.`,
+    `You are ${agentName}, writing on behalf of ${dealerName} to a past customer who previously asked about a vehicle.`,
+    `Briefly and naturally introduce yourself by name as part of the message — for example, mention that you're ${agentName} with ${dealerName} — before getting to the point. Keep it to one short, natural phrase, not a scripted greeting.`,
+    'Never describe yourself with a label like "virtual assistant", "AI assistant", "bot", or similar — introduce yourself only by name and dealership.',
     'Write ONE short SMS text message: plain text, under 260 characters, warm and professional, no subject line, no signature block, no emoji.',
     'Use only the facts provided below. Never invent or quote prices, monthly payments, trade-in values, financing terms, or discounts, and never promise that a vehicle is still available; say you will confirm with the team instead.',
     'Do not include any opt-out language ("reply stop" etc.) — that is appended separately by the system.',
@@ -151,12 +156,12 @@ export async function generateReengagementMessage(
     const text = stripDraftArtifacts(completion?.choices?.[0]?.message?.content || '');
     if (!text) {
       logger.warn({ leadId: lead._id, vehicleId: vehicle._id }, '[VehicleReengagement] Generation returned an empty message');
-      return { text: null, error: "Autrix didn't write anything usable that time. Try again." };
+      return { text: null, error: `${agentName} didn't write anything usable that time. Try again.` };
     }
     return { text };
   } catch (err: any) {
     logger.error({ err, leadId: lead._id, vehicleId: vehicle._id }, '[VehicleReengagement] Generation failed');
-    return { text: null, error: describeGenerationError(err) };
+    return { text: null, error: describeGenerationError(err, agentName) };
   }
 }
 
@@ -223,7 +228,7 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
 
   const generation = await generateReengagementMessage(lead, vehicle);
   if (!generation.text) {
-    await writeLog({ ...base, status: 'failed', failureReason: generation.error || 'Autrix could not generate a draft' });
+    await writeLog({ ...base, status: 'failed', failureReason: generation.error || 'Draft generation failed' });
     return;
   }
   const draft = generation.text;
