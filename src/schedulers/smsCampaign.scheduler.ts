@@ -20,7 +20,7 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
   if (budget <= 0) return 0;
 
   await SmsCampaign.updateOne(
-    { _id: campaign._id, status: 'queued' },
+    { _id: campaign._id, status: { $in: ['queued', 'scheduled'] } },
     { $set: { status: 'sending', startedAt: new Date() } },
   );
 
@@ -89,7 +89,13 @@ export async function runSmsCampaignSweep(): Promise<CampaignSweepStats> {
   const stats: CampaignSweepStats = { campaignsProcessed: 0, sent: 0, failed: 0, skipped: 0 };
   if (!isWithinSendingHours(new Date())) return stats;
 
-  const campaigns = await SmsCampaign.find({ status: { $in: ['queued', 'sending'] } })
+  const now = new Date();
+  const campaigns = await SmsCampaign.find({
+    $or: [
+      { status: { $in: ['queued', 'sending'] } },
+      { status: 'scheduled', scheduledAt: { $lte: now } },
+    ],
+  })
     .sort({ createdAt: 1 })
     .limit(ACTIVE_CAMPAIGN_LIMIT)
     .lean();

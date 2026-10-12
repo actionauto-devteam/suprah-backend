@@ -26,6 +26,20 @@ function audienceQuery(orgId: string, statuses: string[]) {
   return query;
 }
 
+const MIN_SCHEDULE_LEAD_MS = 30 * 1000;
+
+function resolveScheduling(rawScheduledAt: unknown): { status: 'queued' | 'scheduled'; scheduledAt?: Date } {
+  if (!rawScheduledAt) return { status: 'queued' };
+  const scheduledAt = new Date(String(rawScheduledAt));
+  if (Number.isNaN(scheduledAt.getTime())) {
+    throw new ApiError(400, 'scheduledAt is not a valid date');
+  }
+  if (scheduledAt.getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+    throw new ApiError(400, 'scheduledAt must be at least 30 seconds in the future');
+  }
+  return { status: 'scheduled', scheduledAt };
+}
+
 export const getAudienceCount = asyncHandler(async (req: Request, res: Response) => {
   const orgId = String((req as any).orgId);
   const statuses = parseStatuses(req.query.statuses);
@@ -78,6 +92,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
   const name = String(req.body?.name || '').trim();
   const message = String(req.body?.message || '').trim();
   const statuses = parseStatuses(req.body?.statuses);
+  const { status: initialStatus, scheduledAt } = resolveScheduling(req.body?.scheduledAt);
 
   if (!name) throw new ApiError(400, 'Campaign name is required');
   if (!message) throw new ApiError(400, 'Message is required');
@@ -98,7 +113,8 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
     name,
     message,
     audienceStatuses: statuses,
-    status: 'queued',
+    status: initialStatus,
+    scheduledAt,
     totalRecipients: leads.length,
     createdBy: user._id,
     createdByName: user.fullName || user.name || user.email || 'Staff',
@@ -115,7 +131,9 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
     })),
   );
 
-  res.status(201).json(new ApiResponse(201, { campaign }, 'Campaign queued'));
+  res
+    .status(201)
+    .json(new ApiResponse(201, { campaign }, initialStatus === 'scheduled' ? 'Campaign scheduled' : 'Campaign queued'));
 });
 
 export const cancelCampaign = asyncHandler(async (req: Request, res: Response) => {
@@ -126,7 +144,7 @@ export const cancelCampaign = asyncHandler(async (req: Request, res: Response) =
 
   const { id } = req.params;
   const campaign = await SmsCampaign.findOneAndUpdate(
-    { _id: id, organizationId: orgId, status: { $in: ['queued', 'sending'] } },
+    { _id: id, organizationId: orgId, status: { $in: ['scheduled', 'queued', 'sending'] } },
     { $set: { status: 'cancelled', completedAt: new Date() } },
     { new: true },
   );

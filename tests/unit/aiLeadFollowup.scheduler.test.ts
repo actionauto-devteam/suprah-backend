@@ -111,7 +111,7 @@ describe('AI lead follow-up scheduler', () => {
     mockCheckConversationPauseForLead.mockResolvedValue({ status: 'unpaused' });
     mockIsSmsOptedOut.mockResolvedValue(false);
     mockAppointmentExists.mockResolvedValue(false);
-    mockResolveAiAgentSettings.mockResolvedValue({ enabled: true, agentName: 'Alex' });
+    mockResolveAiAgentSettings.mockResolvedValue({ enabled: true, agentName: 'Alex', followUpIntervalHours: 24 });
     mockResolveDealerName.mockResolvedValue('Action Auto Utah');
     mockGenerateProactiveFollowUp.mockResolvedValue({ text: 'Hi Jamie, just checking in on the CR-V!' });
     mockValidateOutboundMessage.mockReturnValue({ ok: true, reasons: [] });
@@ -192,17 +192,14 @@ describe('AI lead follow-up scheduler', () => {
 
   it('cadence is measured from the fixed original anchor (creation/last rep response), not reset by this system\'s own prior automated send', async () => {
     const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
-    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000); // past the 24h lock, so it reaches the cadence math
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
     seedCandidates([baseLead({
       createdAt: tenDaysAgo,
-      followUp: { aiFollowUpCount: 1, lastAutomatedOutreachAt: threeDaysAgo }, // step 1 = Day 5 (120h) interval
+      followUp: { aiFollowUpCount: 1, lastAutomatedOutreachAt: threeDaysAgo },
     })]);
 
     const stats = await runAiLeadFollowupSweep();
 
-    // Fixed-anchor math: 10 days since creation >= 120h (Day 5) -> due, sent.
-    // The old rolling-anchor bug would have anchored to the 3-day-old automated touch
-    // instead (72h since then < 120h), incorrectly treating it as not yet due.
     expect(stats.sent).toBe(1);
   });
 
@@ -217,12 +214,159 @@ describe('AI lead follow-up scheduler', () => {
     expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
   });
 
-  it('excludes a lead that already reached the maximum follow-up count via the query itself', async () => {
+  it('has no max-count cap at all: a lead many follow-ups deep, still silent, is still sent as long as the interval has elapsed', async () => {
+    seedCandidates([baseLead({
+      createdAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+      followUp: { aiFollowUpCount: 9 },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+  });
+
+  it('is not due before the configured interval elapses (default: Daily / 24h)', async () => {
+    seedCandidates([baseLead({
+      createdAt: new Date(Date.now() - 23 * 60 * 60 * 1000),
+      followUp: { aiFollowUpCount: 0 },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(0);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('is due once the configured interval has elapsed (default: Daily / 24h)', async () => {
+    seedCandidates([baseLead({
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      followUp: { aiFollowUpCount: 0 },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+  });
+
+  it('honors a longer admin-configured interval (Every 3 days / 72h): not due at 48h even though the default 24h would have fired', async () => {
+    mockResolveAiAgentSettings.mockResolvedValue({ enabled: true, agentName: 'Alex', followUpIntervalHours: 72 });
+    seedCandidates([baseLead({
+      createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+      followUp: { aiFollowUpCount: 0 },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(0);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('applies the same configured interval regardless of how many follow-ups have already gone out (no special first-touch interval)', async () => {
+    mockResolveAiAgentSettings.mockResolvedValue({ enabled: true, agentName: 'Alex', followUpIntervalHours: 48 });
+    seedCandidates([baseLead({
+      createdAt: new Date(Date.now() - 50 * 24 * 60 * 60 * 1000),
+      followUp: { aiFollowUpCount: 4, lastRepResponseAt: new Date(Date.now() - 40 * 60 * 60 * 1000) },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(0);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('a customer SMS reply resets the inactivity timer — not due immediately after the reply, even though the lead\'s original creation date is long overdue on its own', async () => {
+    const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    seedCandidates([baseLead({
+      createdAt,
+      followUp: { aiFollowUpCount: 0, lastCustomerActivityAt: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(0);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockLeadUpdateOne).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'stopped' }) }),
+      expect.anything(),
+    );
+  });
+
+  it('becomes due again once the configured interval has elapsed since that reply — a reply only resets the clock, it does not stop follow-ups permanently', async () => {
+    const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    seedCandidates([baseLead({
+      createdAt,
+      followUp: { aiFollowUpCount: 0, lastCustomerActivityAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+  });
+
+  it('an inbound call also resets the inactivity timer, same as an SMS reply', async () => {
+    const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    seedCandidates([baseLead({ createdAt, followUp: { aiFollowUpCount: 0 } })]);
+    const callLean = jest.fn().mockResolvedValue({ createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) });
+    mockCallFindOne.mockReturnValue({ sort: jest.fn(() => ({ select: jest.fn(() => ({ lean: callLean })) })) });
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(0);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not falsely treat the lead-creation timestamp itself as a reply: lastCustomerActivityAt set only a few seconds after createdAt (normal creation bookkeeping, not a real reply) does not block sending once genuinely overdue', async () => {
+    const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    seedCandidates([baseLead({
+      createdAt,
+      followUp: { aiFollowUpCount: 0, lastCustomerActivityAt: new Date(createdAt.getTime() + 5 * 1000) },
+    })]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+  });
+
+  it('a reply never sets a permanent "stopped" status — only an explicit SMS opt-out does', async () => {
+    const createdAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    seedCandidates([baseLead({
+      createdAt,
+      followUp: { aiFollowUpCount: 0, lastCustomerActivityAt: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+    })]);
+
+    await runAiLeadFollowupSweep();
+
+    const stoppedCall = mockLeadUpdateOne.mock.calls.find(
+      (call: any) => call[1]?.$set?.['followUp.aiFollowUpStatus'] === 'stopped',
+    );
+    expect(stoppedCall).toBeUndefined();
+  });
+
+  it('the candidate query only excludes pending_reconciliation leads — there is no permanent reply-based exclusion', async () => {
     seedCandidates([]);
     await runAiLeadFollowupSweep();
 
     const query = mockLeadFind.mock.calls[0][0];
-    expect(query['followUp.aiFollowUpCount']).toEqual({ $not: { $gte: 3 } });
+    expect(query['followUp.aiFollowUpStatus']).toEqual({ $ne: 'pending_reconciliation' });
+  });
+
+  it('still stops normally on an SMS opt-out, independent of the reply-based stop', async () => {
+    mockIsSmsOptedOut.mockResolvedValue(true);
+    seedCandidates([baseLead()]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.skipped).toBe(1);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
+    expect(mockLeadUpdateOne).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: 'lead-1' }),
+      expect.objectContaining({
+        $set: expect.objectContaining({ 'followUp.aiFollowUpFailureReason': 'Customer opted out of SMS' }),
+      }),
+      { timestamps: false },
+    );
   });
 
   it('skips a lead with an unresolved pause/human-attention state without sending', async () => {
@@ -298,14 +442,6 @@ describe('AI lead follow-up scheduler', () => {
       (call: any) => call[1]?.$set?.['followUp.aiFollowUpStatus'] === 'pending_reconciliation',
     );
     expect(reconciliationUpdateCall).toBeUndefined();
-  });
-
-  it('excludes a pending_reconciliation lead from the candidate query itself, so a restart or a later tick can never pick it up for an automatic resend', async () => {
-    seedCandidates([]);
-    await runAiLeadFollowupSweep();
-
-    const query = mockLeadFind.mock.calls[0][0];
-    expect(query['followUp.aiFollowUpStatus']).toEqual({ $ne: 'pending_reconciliation' });
   });
 
   it('excludes a pending_reconciliation lead from the atomic claim filter too, so two concurrent workers (or a worker racing a fresh restart) can never both claim it for a resend', async () => {

@@ -15,6 +15,8 @@ import { CALENDAR_TZ } from '../constants/calendarTimezone';
 import { resolveReviewLink } from './communication.service';
 import { isDemoPhone } from '../utils/demoPhone';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
+import { withRetry } from '../utils/withRetry';
+import logger from '../utils/logger';
 
 interface EmailOptions {
     to: string;
@@ -144,10 +146,10 @@ class EmailService {
             .replace(/\//g, '_')
             .replace(/=+$/, '');
 
-        await gmail.users.messages.send({
+        await withRetry(() => gmail.users.messages.send({
             userId: 'me',
             requestBody: { raw }
-        });
+        }));
     }
 
     /**
@@ -163,12 +165,12 @@ class EmailService {
             try {
                 const oauth2Client = await this.getOrgOAuth2Client(options.organizationId);
                 if (oauth2Client) {
-                    console.log(`[EmailService] Sending via Gmail API for org: ${options.organizationId}`);
+                    logger.info({ organizationId: options.organizationId, to: options.to }, '[EmailService] Sending via Gmail API');
                     await this.sendEmailViaGmailApi(oauth2Client, options);
                     return;
                 }
             } catch (apiError: any) {
-                console.warn(`[EmailService] Gmail API send failed, falling back to SMTP:`, apiError.message);
+                logger.warn({ err: apiError, organizationId: options.organizationId, to: options.to }, '[EmailService] Gmail API send failed, falling back to SMTP');
             }
         }
 
@@ -201,9 +203,9 @@ class EmailService {
 
         try {
             const info = await this.transporter.sendMail(mailOptions);
-            console.log('Message sent via SMTP: %s', info.messageId);
+            logger.info({ messageId: info.messageId, to: options.to }, '[EmailService] Message sent via SMTP');
         } catch (error) {
-            console.error('Error sending email via SMTP:', error);
+            logger.error({ err: error, to: options.to }, '[EmailService] Error sending email via SMTP');
             throw new ApiError(500, 'There was an error sending the email.');
         }
     }
@@ -1102,6 +1104,7 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         const interpolate = (text: string) => text.replace(/\{firstName\}/gi, firstName);
 
         const dealerName = await this.resolveDealerName(organizationId, 'Suprah.AI');
+        const subject = interpolate(opts.subject);
         const greeting = interpolate(opts.greetingText);
         const body = interpolate(opts.bodyText);
         const signOff = interpolate(opts.signOffText || '');
@@ -1188,7 +1191,7 @@ ${mailingAddress}
 Unsubscribe from automated emails: ${unsubscribeUrl}
         `;
 
-        await this.sendEmail({ to, subject: opts.subject, text, html, organizationId });
+        await this.sendEmail({ to, subject, text, html, organizationId });
         return true;
     }
 

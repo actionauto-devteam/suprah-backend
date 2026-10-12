@@ -1380,7 +1380,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
 export const createInquiry = async (req: Request, res: Response) => {
   try {
-    const { firstName, lastName, email, phone, vehicle, comments, source, channel } = req.body;
+    const { firstName, lastName, email, phone, vehicle, comments, source, channel, location } = req.body;
     const user = req.user || req.crmUser;
     if (!user) throw new ApiError(401, 'Please authenticate');
     const userId = user._id;
@@ -1396,6 +1396,7 @@ export const createInquiry = async (req: Request, res: Response) => {
     const vehicleContext = vehicle
       ? await resolveVehicleContextForLead(req.orgId, vehicle).catch(() => null)
       : null;
+    const manualLocation = String(location || '').trim();
 
     const newLead = new Lead({
       organizationId: req.orgId,
@@ -1410,7 +1411,7 @@ export const createInquiry = async (req: Request, res: Response) => {
         model: vehicle?.model || '',
       },
       vehicleId: vehicleContext?.vehicleId,
-      location: vehicleContext?.location,
+      location: manualLocation || vehicleContext?.location,
       comments: comments || '',
       source: source || LEAD_SOURCE.MANUAL_ENTRY,
       channel: detectedChannel,
