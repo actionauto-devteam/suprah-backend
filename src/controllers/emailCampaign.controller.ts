@@ -30,6 +30,20 @@ function audienceQuery(orgId: string, statuses: string[]) {
   return query;
 }
 
+const MIN_SCHEDULE_LEAD_MS = 30 * 1000;
+
+function resolveScheduling(rawScheduledAt: unknown): { status: 'queued' | 'scheduled'; scheduledAt?: Date } {
+  if (!rawScheduledAt) return { status: 'queued' };
+  const scheduledAt = new Date(String(rawScheduledAt));
+  if (Number.isNaN(scheduledAt.getTime())) {
+    throw new ApiError(400, 'scheduledAt is not a valid date');
+  }
+  if (scheduledAt.getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+    throw new ApiError(400, 'scheduledAt must be at least 30 seconds in the future');
+  }
+  return { status: 'scheduled', scheduledAt };
+}
+
 export const getAudienceCount = asyncHandler(async (req: Request, res: Response) => {
   const orgId = String((req as any).orgId);
   const statuses = parseStatuses(req.query.statuses);
@@ -62,15 +76,18 @@ export const getCampaign = asyncHandler(async (req: Request, res: Response) => {
   const campaign = await EmailCampaign.findOne({ _id: id, organizationId: orgId }).lean();
   if (!campaign) throw new ApiError(404, 'Campaign not found');
 
-  const failedSample = await EmailCampaignRecipient.find({
-    campaignId: id,
-    status: 'failed',
-  })
-    .select('customerName email failureReason')
-    .limit(20)
-    .lean();
+  const [failedSample, uncertainSample] = await Promise.all([
+    EmailCampaignRecipient.find({ campaignId: id, status: 'failed' })
+      .select('customerName email failureReason')
+      .limit(20)
+      .lean(),
+    EmailCampaignRecipient.find({ campaignId: id, status: 'uncertain' })
+      .select('customerName email failureReason')
+      .limit(20)
+      .lean(),
+  ]);
 
-  res.json(new ApiResponse(200, { campaign, failedSample }, 'Campaign fetched'));
+  res.json(new ApiResponse(200, { campaign, failedSample, uncertainSample }, 'Campaign fetched'));
 });
 
 export const createCampaign = asyncHandler(async (req: Request, res: Response) => {
@@ -86,6 +103,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
   const bannerImageUrl = String(req.body?.bannerImageUrl || '').trim();
   const signOffText = String(req.body?.signOffText || '').trim();
   const audienceSource = req.body?.audienceSource === 'marketingContacts' ? 'marketingContacts' : 'leadStatus';
+  const { status: initialStatus, scheduledAt } = resolveScheduling(req.body?.scheduledAt);
 
   if (!name) throw new ApiError(400, 'Campaign name is required');
   if (!subject) throw new ApiError(400, 'Subject is required');
@@ -202,7 +220,8 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
     bannerImageUrl: bannerImageUrl || undefined,
     signOffText: signOffText || undefined,
     audienceStatuses,
-    status: 'queued',
+    status: initialStatus,
+    scheduledAt,
     totalRecipients,
     createdBy: user._id,
     createdByName: user.fullName || user.name || user.email || 'Staff',
@@ -218,7 +237,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
       new ApiResponse(
         201,
         { campaign, ...(selectionSummary ? { selection: selectionSummary } : {}) },
-        'Campaign queued',
+        initialStatus === 'scheduled' ? 'Campaign scheduled' : 'Campaign queued',
       ),
     );
 });
@@ -231,7 +250,7 @@ export const cancelCampaign = asyncHandler(async (req: Request, res: Response) =
 
   const { id } = req.params;
   const campaign = await EmailCampaign.findOneAndUpdate(
-    { _id: id, organizationId: orgId, status: { $in: ['queued', 'sending'] } },
+    { _id: id, organizationId: orgId, status: { $in: ['scheduled', 'queued', 'sending'] } },
     { $set: { status: 'cancelled', completedAt: new Date() } },
     { new: true },
   );

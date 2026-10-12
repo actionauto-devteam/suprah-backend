@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type EmailCampaignStatus = 'queued' | 'sending' | 'completed' | 'cancelled' | 'failed';
+export type EmailCampaignStatus = 'scheduled' | 'queued' | 'sending' | 'completed' | 'cancelled' | 'failed';
 
 export interface IEmailCampaign extends Document {
   organizationId: string;
@@ -12,10 +12,12 @@ export interface IEmailCampaign extends Document {
   signOffText?: string;
   audienceStatuses: string[];
   status: EmailCampaignStatus;
+  scheduledAt?: Date;
   totalRecipients: number;
   sentCount: number;
   failedCount: number;
   skippedCount: number;
+  uncertainCount: number;
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
   startedAt?: Date;
@@ -36,14 +38,16 @@ const EmailCampaignSchema: Schema<IEmailCampaign> = new Schema(
     audienceStatuses: [{ type: String }],
     status: {
       type: String,
-      enum: ['queued', 'sending', 'completed', 'cancelled', 'failed'],
+      enum: ['scheduled', 'queued', 'sending', 'completed', 'cancelled', 'failed'],
       default: 'queued',
       index: true,
     },
+    scheduledAt: { type: Date },
     totalRecipients: { type: Number, default: 0 },
     sentCount: { type: Number, default: 0 },
     failedCount: { type: Number, default: 0 },
     skippedCount: { type: Number, default: 0 },
+    uncertainCount: { type: Number, default: 0 },
     createdBy: { type: Schema.Types.ObjectId, required: true },
     createdByName: { type: String, trim: true },
     startedAt: { type: Date },

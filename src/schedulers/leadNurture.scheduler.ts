@@ -1,4 +1,3 @@
-import cron from 'node-cron';
 import { google } from 'googleapis';
 import Lead from '../models/lead.model';
 import Appointment from '../models/Appointment.model';
@@ -10,7 +9,6 @@ import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/lea
 import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
 
-const CRON_SCHEDULE = process.env.LEAD_NURTURE_CRON || '*/15 * * * *';
 const STEP_INTERVALS_HOURS = (process.env.LEAD_NURTURE_INTERVALS_HOURS || '24,48,96')
   .split(',')
   .map((value) => parseInt(value.trim(), 10))
@@ -91,6 +89,36 @@ export async function customerEmailedSince(lead: any, sinceMs: number): Promise<
         ?.value?.toLowerCase() || '';
     return addresses.some((address) => from.includes(address));
   });
+}
+
+export async function latestCustomerEmailReplyAt(lead: any): Promise<number> {
+  if (!lead.threadId) return 0;
+
+  const addresses = [lead.email, lead.channel === 'email' ? lead.senderEmail : null]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toLowerCase());
+  if (addresses.length === 0) return Date.now();
+
+  const oauth2Client = await getCentralOAuth2Client(String(lead.organizationId));
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const thread = await gmail.users.threads.get({
+    userId: 'me',
+    id: lead.threadId,
+    format: 'metadata',
+    metadataHeaders: ['From'],
+  });
+
+  let latest = 0;
+  for (const message of thread.data.messages || []) {
+    const from =
+      (message.payload?.headers || [])
+        .find((header) => header.name?.toLowerCase() === 'from')
+        ?.value?.toLowerCase() || '';
+    if (!addresses.some((address) => from.includes(address))) continue;
+    const ts = parseInt(message.internalDate || '0', 10);
+    if (ts > latest) latest = ts;
+  }
+  return latest;
 }
 
 export async function hasActiveAppointment(leadId: any, now: Date): Promise<boolean> {
@@ -381,25 +409,5 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
 }
 
 export function initLeadNurtureScheduler(): void {
-  if (process.env.LEAD_NURTURE_ENABLED !== 'true') {
-    logger.info('[LeadNurture] Disabled. Set LEAD_NURTURE_ENABLED=true to enable');
-    return;
-  }
-
-  runLeadNurtureSweep().catch((err) => logger.error(err, '[LeadNurture] Startup sweep failed'));
-
-  cron.schedule(CRON_SCHEDULE, async () => {
-    try {
-      const stats = await runLeadNurtureSweep();
-      if (stats.sent > 0 || stats.errors > 0) {
-        logger.info(stats, '[LeadNurture] Sweep complete');
-      }
-    } catch (err) {
-      logger.error(err, '[LeadNurture] Sweep failed');
-    }
-  });
-
-  logger.info(
-    `[LeadNurture] Initialized. Schedule: ${CRON_SCHEDULE}, step intervals (hours): ${STEP_INTERVALS_HOURS.join(',')}, max lead age: ${MAX_LEAD_AGE_DAYS}d`,
-  );
+  logger.info('[LeadNurture] Retired — superseded by aiLeadFollowup.scheduler.ts. This cron will not register even if LEAD_NURTURE_ENABLED=true.');
 }

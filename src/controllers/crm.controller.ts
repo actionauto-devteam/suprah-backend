@@ -300,6 +300,9 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
   const aiAgentName = metadata.aiAgentName || 'Alex';
   const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || '';
+  const FOLLOWUP_INTERVAL_OPTIONS_HOURS = [24, 48, 72];
+  const parsedFollowUpInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
+  const aiFollowUpIntervalHours = FOLLOWUP_INTERVAL_OPTIONS_HOURS.includes(parsedFollowUpInterval) ? parsedFollowUpInterval : 24;
   const physicalMailingAddress = metadata.physicalMailingAddress || '';
 
   res.json(new ApiResponse(200, {
@@ -310,6 +313,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiAgentEnabled,
     aiAgentName,
     aiHandoffFallbackGroupId,
+    aiFollowUpIntervalHours,
     physicalMailingAddress,
   }, 'Organization settings fetched'));
 });
@@ -328,6 +332,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiAgentEnabled,
     aiAgentName,
     aiHandoffFallbackGroupId,
+    aiFollowUpIntervalHours,
     physicalMailingAddress,
   } = req.body;
   const org = await Organization.findById(orgId);
@@ -365,6 +370,10 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (aiHandoffFallbackGroupId !== undefined) {
     metadata.aiHandoffFallbackGroupId = String(aiHandoffFallbackGroupId || '').trim();
   }
+  if (aiFollowUpIntervalHours !== undefined) {
+    const parsed = parseInt(aiFollowUpIntervalHours, 10);
+    metadata.aiFollowUpIntervalHours = [24, 48, 72].includes(parsed) ? parsed : 24;
+  }
   if (physicalMailingAddress !== undefined) {
     metadata.physicalMailingAddress = String(physicalMailingAddress || '').trim().slice(0, 300);
   }
@@ -380,6 +389,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiAgentEnabled: org.metadata.aiAgentEnabled,
     aiAgentName: org.metadata.aiAgentName,
     aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
+    aiFollowUpIntervalHours: org.metadata.aiFollowUpIntervalHours,
     physicalMailingAddress: org.metadata.physicalMailingAddress,
   }, 'Organization settings updated'));
 });

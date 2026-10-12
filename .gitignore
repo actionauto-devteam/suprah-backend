@@ -4,6 +4,7 @@ dist
 .env.prod
 .env.dev
 .env.local
+.env.example
 
 # FTP Server Credentials - DO NOT COMMIT
 SERVER.md
