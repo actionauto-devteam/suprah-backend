@@ -2548,18 +2548,26 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
 
   let reactionAdded = false;
   let reactionRemoved = false;
-  const existing = message.reactions.find((r) => r.emoji === emojiValue);
-  if (existing) {
-    if (idIn(existing.users as any, userId)) {
-      existing.users = existing.users.filter((u) => u.toString() !== userId.toString()) as any;
-      if (existing.users.length === 0) message.reactions = message.reactions.filter((r) => r.emoji !== emojiValue) as any;
-      reactionRemoved = true;
-    } else {
-      existing.users.push(userId as any);
-      reactionAdded = true;
-    }
+  const alreadySelected = message.reactions.some(
+    (reaction) => reaction.emoji === emojiValue && idIn(reaction.users as any, userId),
+  );
+
+  message.reactions = message.reactions
+    .map((reaction) => {
+      if (!idIn(reaction.users as any, userId)) return reaction;
+      return {
+        emoji: reaction.emoji,
+        users: reaction.users.filter((reactionUserId) => reactionUserId.toString() !== userId.toString()),
+      };
+    })
+    .filter((reaction) => reaction.users.length > 0) as any;
+
+  if (alreadySelected) {
+    reactionRemoved = true;
   } else {
-    message.reactions.push({ emoji: emojiValue, users: [userId] } as any);
+    const selectedReaction = message.reactions.find((reaction) => reaction.emoji === emojiValue);
+    if (selectedReaction) selectedReaction.users.push(userId as any);
+    else message.reactions.push({ emoji: emojiValue, users: [userId] } as any);
     reactionAdded = true;
   }
   message.markModified('reactions');
@@ -2609,8 +2617,7 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
     const storedReaction = (conversation as any).lastReaction;
     const shouldClearLastReaction =
       storedReaction?.messageId?.toString?.() === messageIdString &&
-      storedReaction?.userId?.toString?.() === userId.toString() &&
-      storedReaction?.emoji === emojiValue;
+      storedReaction?.userId?.toString?.() === userId.toString();
 
     if (shouldClearLastReaction) {
       const lastMessageDoc = (conversation as any).lastMessage
@@ -2629,7 +2636,6 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
           _id: message.conversationId,
           'lastReaction.messageId': message._id,
           'lastReaction.userId': userId,
-          'lastReaction.emoji': emojiValue,
         },
         clearUpdate,
       );
