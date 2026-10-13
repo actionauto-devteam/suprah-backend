@@ -16,13 +16,30 @@ interface CampaignSweepStats {
   skipped: number;
 }
 
+async function claimCampaignForSending(campaignId: any): Promise<any | null> {
+  const now = new Date();
+
+  const freshlyClaimed = await SmsCampaign.findOneAndUpdate(
+    {
+      _id: campaignId,
+      $or: [
+        { status: 'queued' },
+        { status: 'scheduled', scheduledAt: { $lte: now } },
+      ],
+    },
+    { $set: { status: 'sending', startedAt: now } },
+    { new: true },
+  );
+  if (freshlyClaimed) return freshlyClaimed;
+
+  return SmsCampaign.findOne({ _id: campaignId, status: 'sending' });
+}
+
 async function processCampaign(campaign: any, budget: number): Promise<number> {
   if (budget <= 0) return 0;
 
-  await SmsCampaign.updateOne(
-    { _id: campaign._id, status: { $in: ['queued', 'scheduled'] } },
-    { $set: { status: 'sending', startedAt: new Date() } },
-  );
+  const claimed = await claimCampaignForSending(campaign._id);
+  if (!claimed) return 0;
 
   const recipients = await SmsCampaignRecipient.find({
     campaignId: campaign._id,

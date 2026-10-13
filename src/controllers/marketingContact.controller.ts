@@ -4,6 +4,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import MarketingContact, { MarketingContactConsentStatus } from '../models/MarketingContact.model';
 import EmailOptOut from '../models/EmailOptOut.model';
+import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import {
   previewMarketingContactImport,
   commitMarketingContactImport,
@@ -11,15 +12,38 @@ import {
   MarketingContactImportError,
   ImportSettings,
   SEND_ELIGIBLE_CONSENT_STATUSES,
+  isConsentEligibleForSend,
 } from '../services/marketingContact.service';
 
 const VALID_CONSENT_STATUSES: MarketingContactConsentStatus[] = ['unknown', 'claimed_verbal', 'documented'];
+const MAX_SELECT_ALL_RECIPIENTS = 500;
 
 function requireAdmin(req: Request) {
   const user = (req as any).crmUser;
   if (!user) throw new ApiError(401, 'Please authenticate');
   if (user.role !== 'admin') throw new ApiError(403, 'Only admins can manage Marketing Contacts');
   return user;
+}
+
+async function buildMarketingContactQuery(
+  orgId: string,
+  opts: { search?: string; importLabel?: string; eligibleOnly?: boolean },
+): Promise<Record<string, unknown>> {
+  const query: Record<string, unknown> = { organizationId: orgId };
+  if (opts.search) {
+    const escaped = opts.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'i');
+    query.$or = [{ email: regex }, { firstName: regex }, { lastName: regex }];
+  }
+  if (opts.importLabel) query.importLabel = opts.importLabel;
+  if (opts.eligibleOnly) {
+    query.consentStatus = { $in: SEND_ELIGIBLE_CONSENT_STATUSES };
+    const suppressedEmails = await EmailOptOut.find({ organizationId: orgId, optedOut: true }).distinct('email');
+    if (suppressedEmails.length > 0) {
+      query.email = { $nin: suppressedEmails };
+    }
+  }
+  return query;
 }
 
 function parseSettings(body: any): ImportSettings {
@@ -92,20 +116,7 @@ export const listMarketingContacts = asyncHandler(async (req: Request, res: Resp
   const importLabel = String(req.query.importLabel || '').trim();
   const eligibleOnly = String(req.query.eligibleOnly || '').trim() === 'true';
 
-  const query: Record<string, unknown> = { organizationId: orgId };
-  if (search) {
-    const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(escaped, 'i');
-    query.$or = [{ email: regex }, { firstName: regex }, { lastName: regex }];
-  }
-  if (importLabel) query.importLabel = importLabel;
-  if (eligibleOnly) {
-    query.consentStatus = { $in: SEND_ELIGIBLE_CONSENT_STATUSES };
-    const suppressedEmails = await EmailOptOut.find({ organizationId: orgId, optedOut: true }).distinct('email');
-    if (suppressedEmails.length > 0) {
-      query.email = { $nin: suppressedEmails };
-    }
-  }
+  const query = await buildMarketingContactQuery(orgId, { search, importLabel, eligibleOnly });
 
   const [contacts, total] = await Promise.all([
     MarketingContact.find(query)
@@ -117,6 +128,85 @@ export const listMarketingContacts = asyncHandler(async (req: Request, res: Resp
   ]);
 
   res.json(new ApiResponse(200, { contacts, total, page, limit }, 'Marketing contacts fetched'));
+});
+
+export const getEligibleMarketingContactIds = asyncHandler(async (req: Request, res: Response) => {
+  requireAdmin(req);
+  const orgId = String((req as any).orgId);
+
+  const search = String(req.query.search || '').trim();
+  const importLabel = String(req.query.importLabel || '').trim();
+
+  const query = await buildMarketingContactQuery(orgId, { search, importLabel, eligibleOnly: true });
+
+  const [contacts, total] = await Promise.all([
+    MarketingContact.find(query).select('_id email firstName lastName').limit(MAX_SELECT_ALL_RECIPIENTS).lean(),
+    MarketingContact.countDocuments(query),
+  ]);
+
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        contacts,
+        total,
+        capped: total > MAX_SELECT_ALL_RECIPIENTS,
+      },
+      'Eligible contacts fetched',
+    ),
+  );
+});
+
+export const createManualMarketingContact = asyncHandler(async (req: Request, res: Response) => {
+  const user = requireAdmin(req);
+  const orgId = String((req as any).orgId);
+
+  const email = normalizeIdentityEmail(req.body?.email);
+  if (!email) throw new ApiError(400, 'A valid email address is required');
+
+  const firstName = String(req.body?.firstName || '').trim().slice(0, 120) || undefined;
+  const lastName = String(req.body?.lastName || '').trim().slice(0, 120) || undefined;
+  const phone = normalizeIdentityPhone(req.body?.phone) || undefined;
+
+  let contact: any = await MarketingContact.findOne({ organizationId: orgId, email }).lean();
+  let created = false;
+
+  if (!contact) {
+    contact = (
+      await MarketingContact.create({
+        organizationId: orgId,
+        email,
+        firstName,
+        lastName,
+        phone,
+        source: 'Manual Entry',
+        consentStatus: 'unknown',
+        importLabel: 'Manual Entry',
+        importedBy: user._id,
+      })
+    ).toObject();
+    created = true;
+  }
+
+  const isSuppressed = Boolean(
+    await EmailOptOut.findOne({ organizationId: orgId, email, optedOut: true }).select('_id').lean(),
+  );
+  const isEligible = isConsentEligibleForSend((contact as any).consentStatus) && !isSuppressed;
+  const reason = isSuppressed
+    ? 'This address has opted out of automated emails'
+    : !isConsentEligibleForSend((contact as any).consentStatus)
+      ? 'Consent is not documented for this address — it will not be sent to until consent is recorded'
+      : undefined;
+
+  res
+    .status(created ? 201 : 200)
+    .json(
+      new ApiResponse(
+        created ? 201 : 200,
+        { contact, created, isEligible, reason },
+        created ? 'Marketing contact created' : 'Existing marketing contact found',
+      ),
+    );
 });
 
 export const listMarketingContactImportLabels = asyncHandler(async (req: Request, res: Response) => {
