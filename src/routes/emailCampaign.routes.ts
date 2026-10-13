@@ -11,5 +11,6 @@ router.get('/', ctrl.listCampaigns);
 router.post('/', ctrl.createCampaign);
 router.get('/:id', ctrl.getCampaign);
 router.post('/:id/cancel', ctrl.cancelCampaign);
+router.patch('/:id/reschedule', ctrl.rescheduleCampaign);
 
 export default router;

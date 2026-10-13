@@ -1,5 +1,7 @@
 const mockEmailCampaignFind = jest.fn();
 const mockEmailCampaignUpdateOne = jest.fn().mockResolvedValue({});
+const mockEmailCampaignFindOneAndUpdate = jest.fn();
+const mockEmailCampaignFindOne = jest.fn();
 const mockRecipientFind = jest.fn();
 const mockRecipientFindOneAndUpdate = jest.fn();
 const mockRecipientUpdateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
@@ -19,6 +21,8 @@ jest.mock('../../src/models/EmailCampaign.model', () => ({
   default: {
     find: mockEmailCampaignFind,
     updateOne: mockEmailCampaignUpdateOne,
+    findOneAndUpdate: mockEmailCampaignFindOneAndUpdate,
+    findOne: mockEmailCampaignFindOne,
   },
 }));
 jest.mock('../../src/models/EmailCampaignRecipient.model', () => ({
@@ -60,6 +64,7 @@ describe('emailCampaign.scheduler — Marketing Contact recipient compatibility'
     mockRecipientUpdateOne.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
     mockRecipientUpdateMany.mockResolvedValue({});
     mockEmailCampaignUpdateOne.mockResolvedValue({});
+    mockEmailCampaignFindOneAndUpdate.mockResolvedValue({ _id: 'campaign-1', status: 'sending' });
     mockRecipientCountDocuments.mockResolvedValue(0);
   });
 

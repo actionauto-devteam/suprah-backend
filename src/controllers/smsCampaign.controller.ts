@@ -101,12 +101,19 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
     throw new ApiError(400, 'Message must include an opt-out instruction, e.g. "Reply STOP to opt out."');
   }
 
+  const audienceTotal = await Lead.countDocuments(audienceQuery(orgId, statuses));
+  if (audienceTotal === 0) throw new ApiError(400, 'No leads with a phone number match this audience');
+  if (audienceTotal > MAX_RECIPIENTS) {
+    throw new ApiError(
+      400,
+      `This audience has ${audienceTotal} eligible leads, which is over the current ${MAX_RECIPIENTS}-recipient safe sending limit. Narrow your status filter to ${MAX_RECIPIENTS} or fewer leads before sending.`,
+    );
+  }
+
   const leads = await Lead.find(audienceQuery(orgId, statuses))
     .select('_id firstName lastName phone')
     .limit(MAX_RECIPIENTS)
     .lean();
-
-  if (leads.length === 0) throw new ApiError(400, 'No leads with a phone number match this audience');
 
   const campaign = await SmsCampaign.create({
     organizationId: orgId,
@@ -156,4 +163,26 @@ export const cancelCampaign = asyncHandler(async (req: Request, res: Response) =
   );
 
   res.json(new ApiResponse(200, { campaign }, 'Campaign cancelled'));
+});
+
+export const rescheduleCampaign = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const user = (req as any).crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can reschedule SMS campaigns');
+
+  const { id } = req.params;
+  const { scheduledAt } = resolveScheduling(req.body?.scheduledAt);
+  if (!scheduledAt) throw new ApiError(400, 'scheduledAt is required to reschedule a campaign');
+
+  const campaign = await SmsCampaign.findOneAndUpdate(
+    { _id: id, organizationId: orgId, status: { $in: ['queued', 'scheduled'] } },
+    { $set: { status: 'scheduled', scheduledAt } },
+    { new: true },
+  );
+  if (!campaign) {
+    throw new ApiError(404, 'Campaign not found, or it has already started sending and can no longer be rescheduled');
+  }
+
+  res.json(new ApiResponse(200, { campaign }, 'Campaign rescheduled'));
 });

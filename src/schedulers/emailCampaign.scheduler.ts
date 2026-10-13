@@ -64,13 +64,30 @@ async function reclaimStaleProcessingRecipients(): Promise<number> {
   return staleRows.length;
 }
 
+async function claimCampaignForSending(campaignId: any): Promise<any | null> {
+  const now = new Date();
+
+  const freshlyClaimed = await EmailCampaign.findOneAndUpdate(
+    {
+      _id: campaignId,
+      $or: [
+        { status: 'queued' },
+        { status: 'scheduled', scheduledAt: { $lte: now } },
+      ],
+    },
+    { $set: { status: 'sending', startedAt: now } },
+    { new: true },
+  );
+  if (freshlyClaimed) return freshlyClaimed;
+
+  return EmailCampaign.findOne({ _id: campaignId, status: 'sending' });
+}
+
 async function processCampaign(campaign: any, budget: number): Promise<number> {
   if (budget <= 0) return 0;
 
-  await EmailCampaign.updateOne(
-    { _id: campaign._id, status: { $in: ['queued', 'scheduled'] } },
-    { $set: { status: 'sending', startedAt: new Date() } },
-  );
+  const claimed = await claimCampaignForSending(campaign._id);
+  if (!claimed) return 0;
 
   const recipients = await EmailCampaignRecipient.find({
     campaignId: campaign._id,

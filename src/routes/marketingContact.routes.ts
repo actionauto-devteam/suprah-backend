@@ -8,7 +8,9 @@ const router = express.Router();
 router.use(crmAuth());
 
 router.get('/import-labels', ctrl.listMarketingContactImportLabels);
+router.get('/eligible-ids', ctrl.getEligibleMarketingContactIds);
 router.get('/', ctrl.listMarketingContacts);
+router.post('/manual-entry', ctrl.createManualMarketingContact);
 router.post('/import', uploadMarketingContactCsv, ctrl.importMarketingContacts);
 router.delete('/:id', ctrl.deleteMarketingContact);
 
