@@ -26,7 +26,7 @@ function requireAdmin(req: Request) {
   return user;
 }
 
-async function buildMarketingContactQuery(
+export async function buildMarketingContactQuery(
   orgId: string,
   opts: { search?: string; importLabel?: string; eligibleOnly?: boolean },
 ): Promise<Record<string, unknown>> {
@@ -40,8 +40,6 @@ async function buildMarketingContactQuery(
   }
   if (opts.importLabel) query.importLabel = opts.importLabel;
   if (opts.eligibleOnly) {
-    // Eligible = documented consent, OR a specific admin has personally
-    // confirmed permission for this one address (permissionOverride).
     andClauses.push({
       $or: [
         { consentStatus: { $in: SEND_ELIGIBLE_CONSENT_STATUSES } },
@@ -54,9 +52,6 @@ async function buildMarketingContactQuery(
     }
   }
 
-  // Composing two independent $or clauses (search, eligibility) as sibling
-  // top-level keys would silently clobber one of them — only the second
-  // assignment would survive. $and keeps both conditions in force together.
   if (andClauses.length === 1) {
     Object.assign(query, andClauses[0]);
   } else if (andClauses.length > 1) {
@@ -150,6 +145,19 @@ export const listMarketingContacts = asyncHandler(async (req: Request, res: Resp
   res.json(new ApiResponse(200, { contacts, total, page, limit }, 'Marketing contacts fetched'));
 });
 
+export const getMarketingContactEligibleCount = asyncHandler(async (req: Request, res: Response) => {
+  requireAdmin(req);
+  const orgId = String((req as any).orgId);
+
+  const search = String(req.query.search || '').trim();
+  const importLabel = String(req.query.importLabel || '').trim();
+
+  const query = await buildMarketingContactQuery(orgId, { search, importLabel, eligibleOnly: true });
+  const count = await MarketingContact.countDocuments(query);
+
+  res.json(new ApiResponse(200, { count }, 'Eligible contact count fetched'));
+});
+
 export const getEligibleMarketingContactIds = asyncHandler(async (req: Request, res: Response) => {
   requireAdmin(req);
   const orgId = String((req as any).orgId);
@@ -209,10 +217,6 @@ export const createManualMarketingContact = asyncHandler(async (req: Request, re
     created = true;
   }
 
-  // An admin personally vouching for this one address is a separate,
-  // audited exception — never upgrades consentStatus itself, only
-  // permissionOverride (see hasSendPermission). Already-overridden
-  // contacts keep their original confirmation; this never un-confirms one.
   if (confirmedPermission && !(contact as any).permissionOverride && !isConsentEligibleForSend((contact as any).consentStatus)) {
     const permissionOverride = {
       confirmedBy: user._id,

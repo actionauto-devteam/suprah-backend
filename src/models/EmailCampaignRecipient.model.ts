@@ -16,6 +16,7 @@ export interface IEmailCampaignRecipient extends Document {
   sentAt?: Date;
   processingStartedAt?: Date;
   attemptCount?: number;
+  providerMessageId?: string;
   deliveryStatus?: EmailCampaignRecipientDeliveryStatus;
   deliveryStatusUpdatedAt?: Date;
   createdAt: Date;
@@ -41,6 +42,7 @@ const EmailCampaignRecipientSchema: Schema<IEmailCampaignRecipient> = new Schema
     sentAt: { type: Date },
     processingStartedAt: { type: Date },
     attemptCount: { type: Number, default: 0 },
+    providerMessageId: { type: String, index: true, sparse: true },
     deliveryStatus: { type: String, enum: ['accepted', 'delivered', 'bounced', 'complained'] },
     deliveryStatusUpdatedAt: { type: Date },
   },

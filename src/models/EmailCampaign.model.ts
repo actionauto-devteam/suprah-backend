@@ -8,6 +8,7 @@ export interface IEmailCampaign extends Document {
   subject: string;
   greetingText: string;
   bodyText: string;
+  bodyHtml?: string;
   bannerImageUrl?: string;
   signOffText?: string;
   audienceStatuses: string[];
@@ -33,6 +34,7 @@ const EmailCampaignSchema: Schema<IEmailCampaign> = new Schema(
     subject: { type: String, required: true, trim: true, maxlength: 200 },
     greetingText: { type: String, required: true, trim: true, maxlength: 500 },
     bodyText: { type: String, required: true, trim: true, maxlength: 5000 },
+    bodyHtml: { type: String, trim: true, maxlength: 50000 },
     bannerImageUrl: { type: String, trim: true },
     signOffText: { type: String, trim: true, maxlength: 300 },
     audienceStatuses: [{ type: String }],

@@ -1,7 +1,9 @@
 import cron from 'node-cron';
 import EmailCampaign from '../models/EmailCampaign.model';
 import EmailCampaignRecipient from '../models/EmailCampaignRecipient.model';
+import MarketingContact from '../models/MarketingContact.model';
 import emailService from '../services/email.service';
+import { hasSendPermission } from '../services/marketingContact.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
@@ -19,12 +21,6 @@ interface EmailCampaignSweepStats {
   reclaimedUncertain: number;
 }
 
-/** Recovers recipient rows left stuck in 'processing' by a crash/restart mid-send.
- *  We have no reliable signal either way for these (unlike a thrown send error, which
- *  at least tells us the attempt did not resolve as a confirmed success), so they are
- *  marked 'uncertain' for human review rather than assumed sent or auto-retried —
- *  retrying blindly risks a duplicate customer email if the original attempt actually
- *  went through before the crash. */
 async function reclaimStaleProcessingRecipients(): Promise<number> {
   const staleBefore = new Date(Date.now() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
   const staleRows = await EmailCampaignRecipient.find({
@@ -107,6 +103,22 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
     if (!claimed) continue;
     spent += 1;
 
+    if (recipient.marketingContactId) {
+      const contact = await MarketingContact.findOne({ _id: recipient.marketingContactId, organizationId: campaign.organizationId })
+        .select('consentStatus permissionOverride')
+        .lean();
+      if (!contact || !hasSendPermission(contact as any)) {
+        const updateResult = await EmailCampaignRecipient.updateOne(
+          { _id: recipient._id, status: 'processing' },
+          { $set: { status: 'skipped', failureReason: 'Contact is no longer eligible (consent changed before send)' } },
+        ).catch(() => null);
+        if (updateResult && updateResult.matchedCount > 0) {
+          await EmailCampaign.updateOne({ _id: campaign._id }, { $inc: { skippedCount: 1 } }).catch(() => undefined);
+        }
+        continue;
+      }
+    }
+
     let delivered: boolean;
     try {
       delivered = await emailService.sendCampaignEmail({
@@ -117,6 +129,7 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
         greetingText: campaign.greetingText,
         bannerImageUrl: campaign.bannerImageUrl,
         bodyText: campaign.bodyText,
+        bodyHtml: campaign.bodyHtml,
         signOffText: campaign.signOffText,
         organizationId: campaign.organizationId,
       });

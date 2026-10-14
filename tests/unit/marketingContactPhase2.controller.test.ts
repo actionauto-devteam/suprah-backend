@@ -21,7 +21,7 @@ jest.mock('../../src/models/EmailOptOut.model', () => ({
   default: { findOne: mockOptOutFindOne, find: mockOptOutFind },
 }));
 
-import { createManualMarketingContact, getEligibleMarketingContactIds } from '../../src/controllers/marketingContact.controller';
+import { createManualMarketingContact, getEligibleMarketingContactIds, getMarketingContactEligibleCount } from '../../src/controllers/marketingContact.controller';
 
 async function invoke(fn: any, req: any) {
   const json = jest.fn();
@@ -276,5 +276,56 @@ describe('marketingContact.controller — admin permission override (new)', () =
     const payload = json.mock.calls[0][0];
     expect(payload.data.contact.permissionOverride).toEqual(existingOverride);
     expect(payload.data.isEligible).toBe(true);
+  });
+});
+
+describe('marketingContact.controller — getMarketingContactEligibleCount (Phase 4A large-audience preparation)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue([]) });
+  });
+
+  it('returns the true, uncapped count even when it is far larger than the 500 selection limit', async () => {
+    mockMcCountDocuments.mockResolvedValue(18204);
+
+    const req = adminReq({}, { importLabel: 'Big List' });
+    const { json } = await invoke(getMarketingContactEligibleCount, req);
+
+    const payload = json.mock.calls[0][0];
+    expect(payload.data.count).toBe(18204);
+  });
+
+  it('never fetches or returns individual contact records — count only', async () => {
+    mockMcCountDocuments.mockResolvedValue(42);
+
+    const req = adminReq();
+    await invoke(getMarketingContactEligibleCount, req);
+
+    expect(mockMcFind).not.toHaveBeenCalled();
+  });
+
+  it('applies the same eligibility (consent OR override) + suppression filter as every other eligible-only query', async () => {
+    mockMcCountDocuments.mockResolvedValue(0);
+    mockOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue(['suppressed@example.com']) });
+
+    const req = adminReq();
+    await invoke(getMarketingContactEligibleCount, req);
+
+    const countQuery = mockMcCountDocuments.mock.calls[0][0];
+    expect(countQuery.$or).toEqual([
+      { consentStatus: { $in: ['documented'] } },
+      { 'permissionOverride.confirmedAt': { $exists: true } },
+    ]);
+    expect(countQuery.email).toEqual({ $nin: ['suppressed@example.com'] });
+  });
+
+  it('rejects a non-admin user without querying the database', async () => {
+    const req = { orgId: 'org-1', crmUser: { _id: 'u1', role: 'employee' }, query: {} };
+
+    const { next } = await invoke(getMarketingContactEligibleCount, req);
+
+    expect(next).toHaveBeenCalled();
+    expect(next.mock.calls[0][0].statusCode).toBe(403);
+    expect(mockMcCountDocuments).not.toHaveBeenCalled();
   });
 });

@@ -1087,6 +1087,7 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         greetingText: string;
         bannerImageUrl?: string;
         bodyText: string;
+        bodyHtml?: string;
         signOffText?: string;
         organizationId: string;
     }): Promise<boolean> {
@@ -1101,13 +1102,24 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         }
 
         const firstName = String(opts.customerName || '').trim().split(/\s+/)[0] || 'there';
+        const firstNameHtmlSafe = firstName
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
         const interpolate = (text: string) => text.replace(/\{firstName\}/gi, firstName);
+        const interpolateHtml = (text: string) => text.replace(/\{firstName\}/gi, firstNameHtmlSafe);
 
         const dealerName = await this.resolveDealerName(organizationId, 'Suprah.AI');
         const subject = interpolate(opts.subject);
         const greeting = interpolate(opts.greetingText);
         const body = interpolate(opts.bodyText);
         const signOff = interpolate(opts.signOffText || '');
+        const greetingHtml = interpolateHtml(opts.greetingText);
+        const bodyTextHtml = interpolateHtml(opts.bodyText);
+        const bodyHtml = opts.bodyHtml ? interpolateHtml(opts.bodyHtml) : undefined;
+        const signOffHtml = interpolateHtml(opts.signOffText || '');
 
         const unsubscribeToken = jwt.sign(
             { organizationId: String(organizationId), email: to, purpose: 'automated_email_unsubscribe' },
@@ -1164,9 +1176,9 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
                 <div class="container">
                     ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="" class="banner-image" />` : ''}
                     <div class="content">
-                        <p style="font-size: 16px;">${greeting}</p>
-                        <p style="font-size: 15px;">${body}</p>
-                        ${signOff ? `<p style="font-size: 15px;">${signOff}</p>` : ''}
+                        <p style="font-size: 16px;">${greetingHtml}</p>
+                        ${bodyHtml ? `<div style="font-size: 15px;">${bodyHtml}</div>` : `<p style="font-size: 15px;">${bodyTextHtml}</p>`}
+                        ${signOffHtml ? `<p style="font-size: 15px;">${signOffHtml}</p>` : ''}
                     </div>
                     <div class="footer">
                         <p><strong>${dealerName}</strong></p>

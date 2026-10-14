@@ -5,6 +5,7 @@ const mockEmailCampaignFindOneAndUpdate = jest.fn();
 const mockRecipientInsertMany = jest.fn();
 const mockOrgFindById = jest.fn();
 const mockMarketingContactFind = jest.fn();
+const mockMarketingContactCountDocuments = jest.fn();
 const mockEmailOptOutFind = jest.fn();
 
 jest.mock('../../src/models/lead.model', () => ({
@@ -25,7 +26,7 @@ jest.mock('../../src/models/Organization.model', () => ({
 }));
 jest.mock('../../src/models/MarketingContact.model', () => ({
   __esModule: true,
-  default: { find: mockMarketingContactFind },
+  default: { find: mockMarketingContactFind, countDocuments: mockMarketingContactCountDocuments },
 }));
 jest.mock('../../src/models/EmailOptOut.model', () => ({
   __esModule: true,
@@ -61,6 +62,8 @@ describe('emailCampaign.controller — Phase 2 (scheduling + audience limit)', (
     mockLeadCountDocuments.mockResolvedValue(0);
     mockEmailCampaignCreate.mockResolvedValue({ _id: 'campaign-1' });
     mockRecipientInsertMany.mockResolvedValue([]);
+    mockMarketingContactCountDocuments.mockResolvedValue(0);
+    mockEmailOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue([]) });
   });
 
   describe('createCampaign (leadStatus audience) — no silent audience truncation', () => {
@@ -193,6 +196,163 @@ describe('emailCampaign.controller — Phase 2 (scheduling + audience limit)', (
 
       expect(next).toHaveBeenCalled();
       expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createCampaign — bodyHtml sanitization and plain-text derivation (Phase 4A)', () => {
+    beforeEach(() => {
+      mockLeadCountDocuments.mockResolvedValue(1);
+      mockLeadFind.mockReturnValue({
+        select: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue([{ _id: 'lead-1', firstName: 'Jamie', email: 'jamie@example.com' }]) })) })),
+      });
+    });
+
+    it('sanitizes bodyHtml, strips a script tag, and derives bodyText from the sanitized HTML — ignoring any bodyText the client also sent', async () => {
+      const req = adminReq({
+        name: 'Rich campaign', subject: 'Hi', greetingText: 'Hi {firstName}',
+        bodyHtml: '<p>Real content</p><script>alert(1)</script>',
+        bodyText: 'this stale client value must never be trusted',
+        statuses: [],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).not.toHaveBeenCalled();
+      const created = mockEmailCampaignCreate.mock.calls[0][0];
+      expect(created.bodyHtml).toBe('<p>Real content</p>');
+      expect(created.bodyHtml).not.toContain('script');
+      expect(created.bodyText).toBe('Real content');
+    });
+
+    it('rejects when the sanitized HTML has no real text content', async () => {
+      const req = adminReq({
+        name: 'Empty campaign', subject: 'Hi', greetingText: 'Hi {firstName}',
+        bodyHtml: '<p></p><script>alert(1)</script>',
+        statuses: [],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+
+    it('preserves the legacy plain-text path exactly (no bodyHtml field stored) when bodyHtml is not provided', async () => {
+      const req = adminReq({
+        name: 'Plain campaign', subject: 'Hi', greetingText: 'Hi {firstName}',
+        bodyText: 'Just plain text, no HTML at all',
+        statuses: [],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).not.toHaveBeenCalled();
+      const created = mockEmailCampaignCreate.mock.calls[0][0];
+      expect(created.bodyHtml).toBeUndefined();
+      expect(created.bodyText).toBe('Just plain text, no HTML at all');
+    });
+
+    it('still enforces the 5000-character limit on legacy plain-text bodies (unaffected by the new 50000-char HTML limit)', async () => {
+      const req = adminReq({
+        name: 'Too long', subject: 'Hi', greetingText: 'Hi {firstName}',
+        bodyText: 'x'.repeat(5001),
+        statuses: [],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createCampaign (marketingContacts audience, filter mode) — Phase 4A large-audience preparation', () => {
+    beforeEach(() => {
+      mockEmailOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue([]) });
+    });
+
+    it('creates a campaign from a filter match within the 500 limit, counting before fetching', async () => {
+      mockMarketingContactCountDocuments.mockResolvedValue(2);
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          limit: jest.fn(() => ({
+            lean: jest.fn().mockResolvedValue([
+              { _id: 'mc-1', email: 'a@example.com', consentStatus: 'documented' },
+              { _id: 'mc-2', email: 'b@example.com', consentStatus: 'documented' },
+            ]),
+          })),
+        })),
+      });
+      const req = adminReq({
+        name: 'Filter blast', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactsMode: 'filter', importLabel: 'Raffle 2026',
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(mockRecipientInsertMany).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ email: 'a@example.com' }),
+          expect.objectContaining({ email: 'b@example.com' }),
+        ]),
+      );
+    });
+
+    it('rejects a filter matching more than 500 contacts WITHOUT fetching any records — count-first, same safe limit as every other audience source', async () => {
+      mockMarketingContactCountDocuments.mockResolvedValue(812);
+      const req = adminReq({
+        name: 'Huge filter', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactsMode: 'filter', search: 'a',
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      const err = next.mock.calls[0][0];
+      expect(err.statusCode).toBe(400);
+      expect(err.message).toContain('812');
+      expect(err.message).toContain('500');
+      expect(mockMarketingContactFind).not.toHaveBeenCalled();
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+
+    it('rejects a filter matching zero contacts', async () => {
+      mockMarketingContactCountDocuments.mockResolvedValue(0);
+      const req = adminReq({
+        name: 'No match', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactsMode: 'filter',
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+
+    it('applies the same consent/suppression eligibility filtering in filter mode as in explicit-id mode', async () => {
+      mockMarketingContactCountDocuments.mockResolvedValue(1);
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          limit: jest.fn(() => ({
+            lean: jest.fn().mockResolvedValue([{ _id: 'mc-3', email: 'unknown@example.com', consentStatus: 'unknown' }]),
+          })),
+        })),
+      });
+      const req = adminReq({
+        name: 'Ineligible filter', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactsMode: 'filter',
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(next.mock.calls[0][0].message).toContain('consent not documented');
       expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
     });
   });

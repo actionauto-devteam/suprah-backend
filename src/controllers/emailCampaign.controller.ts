@@ -7,10 +7,12 @@ import Lead from '../models/lead.model';
 import EmailCampaign from '../models/EmailCampaign.model';
 import EmailCampaignRecipient from '../models/EmailCampaignRecipient.model';
 import MarketingContact from '../models/MarketingContact.model';
+import { buildMarketingContactQuery } from './marketingContact.controller';
 import EmailOptOut from '../models/EmailOptOut.model';
 import Organization from '../models/Organization.model';
 import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
 import { hasSendPermission } from '../services/marketingContact.service';
+import { sanitizeEmailHtml, htmlToPlainText } from '../utils/emailHtmlSanitizer';
 
 const MAX_RECIPIENTS = 500;
 const VALID_STATUSES = LEAD_STATUS_VALUES;
@@ -42,6 +44,22 @@ function resolveScheduling(rawScheduledAt: unknown): { status: 'queued' | 'sched
     throw new ApiError(400, 'scheduledAt must be at least 30 seconds in the future');
   }
   return { status: 'scheduled', scheduledAt };
+}
+
+async function filterEligibleContacts(contacts: any[], orgId: string) {
+  const consentEligible = contacts.filter((c: any) => hasSendPermission(c));
+  const consentExcludedCount = contacts.length - consentEligible.length;
+
+  const eligibleEmails = consentEligible.map((c: any) => c.email);
+  const suppressedEmails =
+    eligibleEmails.length > 0
+      ? await EmailOptOut.find({ organizationId: orgId, email: { $in: eligibleEmails }, optedOut: true }).distinct('email')
+      : [];
+  const suppressedSet = new Set(suppressedEmails);
+
+  const finalContacts = consentEligible.filter((c: any) => !suppressedSet.has(c.email));
+
+  return { finalContacts, consentExcludedCount, suppressedCount: suppressedSet.size };
 }
 
 export const getAudienceCount = asyncHandler(async (req: Request, res: Response) => {
@@ -99,17 +117,25 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
   const name = String(req.body?.name || '').trim();
   const subject = String(req.body?.subject || '').trim();
   const greetingText = String(req.body?.greetingText || '').trim();
-  const bodyText = String(req.body?.bodyText || '').trim();
+  const rawBodyHtml = String(req.body?.bodyHtml || '').trim();
   const bannerImageUrl = String(req.body?.bannerImageUrl || '').trim();
   const signOffText = String(req.body?.signOffText || '').trim();
   const audienceSource = req.body?.audienceSource === 'marketingContacts' ? 'marketingContacts' : 'leadStatus';
   const { status: initialStatus, scheduledAt } = resolveScheduling(req.body?.scheduledAt);
 
+  let bodyHtml = '';
+  let bodyText = String(req.body?.bodyText || '').trim();
+  if (rawBodyHtml) {
+    bodyHtml = sanitizeEmailHtml(rawBodyHtml);
+    if (bodyHtml.length > 50000) throw new ApiError(400, 'Message body is limited to 50000 characters');
+    bodyText = htmlToPlainText(bodyHtml);
+  }
+
   if (!name) throw new ApiError(400, 'Campaign name is required');
   if (!subject) throw new ApiError(400, 'Subject is required');
   if (!greetingText) throw new ApiError(400, 'Greeting is required');
   if (!bodyText) throw new ApiError(400, 'Message body is required');
-  if (bodyText.length > 5000) throw new ApiError(400, 'Message body is limited to 5000 characters');
+  if (!bodyHtml && bodyText.length > 5000) throw new ApiError(400, 'Message body is limited to 5000 characters');
   if (bannerImageUrl && !/^https?:\/\//i.test(bannerImageUrl)) {
     throw new ApiError(400, 'Banner image must be a valid http(s) URL');
   }
@@ -129,67 +155,103 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
   let selectionSummary: Record<string, number> | undefined;
 
   if (audienceSource === 'marketingContacts') {
-    const requestedRaw = Array.isArray(req.body?.marketingContactIds) ? req.body.marketingContactIds : [];
-    const requestedIds: string[] = Array.from(
-      new Set<string>(
-        requestedRaw.map((id: unknown) => String(id).trim()).filter((id: string) => id.length > 0),
-      ),
-    );
+    const marketingContactsMode = req.body?.marketingContactsMode === 'filter' ? 'filter' : 'ids';
 
-    if (requestedIds.length === 0) throw new ApiError(400, 'Select at least one Marketing Contact');
-    if (requestedIds.length > MAX_RECIPIENTS) {
-      throw new ApiError(400, `You can select at most ${MAX_RECIPIENTS} recipients per campaign`);
-    }
+    if (marketingContactsMode === 'filter') {
+      const search = String(req.body?.search || '').trim();
+      const importLabel = String(req.body?.importLabel || '').trim();
+      const query = await buildMarketingContactQuery(orgId, { search, importLabel, eligibleOnly: false });
 
-    const validObjectIds = requestedIds.filter((id) => mongoose.isValidObjectId(id));
+      const audienceTotal = await MarketingContact.countDocuments(query);
+      if (audienceTotal === 0) throw new ApiError(400, 'No Marketing Contacts match this filter');
+      if (audienceTotal > MAX_RECIPIENTS) {
+        throw new ApiError(
+          400,
+          `This filter matches ${audienceTotal} contacts, which is over the current ${MAX_RECIPIENTS}-recipient safe sending limit. Narrow your filter to ${MAX_RECIPIENTS} or fewer contacts before sending.`,
+        );
+      }
 
-    const matchedContacts = await MarketingContact.find({
-      _id: { $in: validObjectIds },
-      organizationId: orgId,
-    })
-      .select('_id email firstName lastName phone consentStatus permissionOverride')
-      .lean();
+      const matchedContacts = await MarketingContact.find(query)
+        .select('_id email firstName lastName phone consentStatus permissionOverride')
+        .limit(MAX_RECIPIENTS)
+        .lean();
 
-    const matchedIdSet = new Set(matchedContacts.map((c: any) => String(c._id)));
-    const notFoundOrWrongOrg = requestedIds.filter((id) => !matchedIdSet.has(id)).length;
+      const { finalContacts, consentExcludedCount, suppressedCount } = await filterEligibleContacts(matchedContacts, orgId);
 
-    const consentEligible = matchedContacts.filter((c: any) => hasSendPermission(c));
-    const consentExcludedCount = matchedContacts.length - consentEligible.length;
+      if (finalContacts.length === 0) {
+        throw new ApiError(
+          400,
+          'None of the contacts matching this filter are eligible to receive this campaign (consent not documented, or suppressed)',
+        );
+      }
 
-    const eligibleEmails = consentEligible.map((c: any) => c.email);
-    const suppressedEmails =
-      eligibleEmails.length > 0
-        ? await EmailOptOut.find({ organizationId: orgId, email: { $in: eligibleEmails }, optedOut: true }).distinct(
-            'email',
-          )
-        : [];
-    const suppressedSet = new Set(suppressedEmails);
-
-    const finalContacts = consentEligible.filter((c: any) => !suppressedSet.has(c.email));
-
-    if (finalContacts.length === 0) {
-      throw new ApiError(
-        400,
-        'None of the selected contacts are eligible to receive this campaign (consent not documented, or suppressed)',
+      totalRecipients = finalContacts.length;
+      recipientDocs = finalContacts.map((c: any) => ({
+        organizationId: orgId,
+        marketingContactId: c._id,
+        email: c.email,
+        phone: c.phone || undefined,
+        customerName: [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || 'there',
+        status: 'pending',
+      }));
+      selectionSummary = {
+        requested: matchedContacts.length,
+        notFoundOrWrongOrg: 0,
+        excludedConsentNotEligible: consentExcludedCount,
+        excludedSuppressed: suppressedCount,
+        included: finalContacts.length,
+      };
+    } else {
+      const requestedRaw = Array.isArray(req.body?.marketingContactIds) ? req.body.marketingContactIds : [];
+      const requestedIds: string[] = Array.from(
+        new Set<string>(
+          requestedRaw.map((id: unknown) => String(id).trim()).filter((id: string) => id.length > 0),
+        ),
       );
-    }
 
-    totalRecipients = finalContacts.length;
-    recipientDocs = finalContacts.map((c: any) => ({
-      organizationId: orgId,
-      marketingContactId: c._id,
-      email: c.email,
-      phone: c.phone || undefined,
-      customerName: [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || 'there',
-      status: 'pending',
-    }));
-    selectionSummary = {
-      requested: requestedIds.length,
-      notFoundOrWrongOrg,
-      excludedConsentNotEligible: consentExcludedCount,
-      excludedSuppressed: suppressedSet.size,
-      included: finalContacts.length,
-    };
+      if (requestedIds.length === 0) throw new ApiError(400, 'Select at least one Marketing Contact');
+      if (requestedIds.length > MAX_RECIPIENTS) {
+        throw new ApiError(400, `You can select at most ${MAX_RECIPIENTS} recipients per campaign`);
+      }
+
+      const validObjectIds = requestedIds.filter((id) => mongoose.isValidObjectId(id));
+
+      const matchedContacts = await MarketingContact.find({
+        _id: { $in: validObjectIds },
+        organizationId: orgId,
+      })
+        .select('_id email firstName lastName phone consentStatus permissionOverride')
+        .lean();
+
+      const matchedIdSet = new Set(matchedContacts.map((c: any) => String(c._id)));
+      const notFoundOrWrongOrg = requestedIds.filter((id) => !matchedIdSet.has(id)).length;
+
+      const { finalContacts, consentExcludedCount, suppressedCount } = await filterEligibleContacts(matchedContacts, orgId);
+
+      if (finalContacts.length === 0) {
+        throw new ApiError(
+          400,
+          'None of the selected contacts are eligible to receive this campaign (consent not documented, or suppressed)',
+        );
+      }
+
+      totalRecipients = finalContacts.length;
+      recipientDocs = finalContacts.map((c: any) => ({
+        organizationId: orgId,
+        marketingContactId: c._id,
+        email: c.email,
+        phone: c.phone || undefined,
+        customerName: [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || 'there',
+        status: 'pending',
+      }));
+      selectionSummary = {
+        requested: requestedIds.length,
+        notFoundOrWrongOrg,
+        excludedConsentNotEligible: consentExcludedCount,
+        excludedSuppressed: suppressedCount,
+        included: finalContacts.length,
+      };
+    }
   } else {
     const statuses = parseStatuses(req.body?.statuses);
     const audienceTotal = await Lead.countDocuments(audienceQuery(orgId, statuses));
@@ -224,6 +286,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
     subject,
     greetingText,
     bodyText,
+    bodyHtml: bodyHtml || undefined,
     bannerImageUrl: bannerImageUrl || undefined,
     signOffText: signOffText || undefined,
     audienceStatuses,

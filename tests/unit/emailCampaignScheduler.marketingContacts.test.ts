@@ -8,6 +8,7 @@ const mockRecipientUpdateOne = jest.fn().mockResolvedValue({ matchedCount: 1, mo
 const mockRecipientUpdateMany = jest.fn().mockResolvedValue({});
 const mockRecipientCountDocuments = jest.fn().mockResolvedValue(0);
 const mockSendCampaignEmail = jest.fn().mockResolvedValue(true);
+const mockMarketingContactFindOne = jest.fn();
 
 jest.mock('node-cron', () => ({ schedule: jest.fn() }));
 jest.mock('../../src/utils/sendingWindow', () => ({ isWithinSendingHours: jest.fn().mockReturnValue(true) }));
@@ -33,6 +34,12 @@ jest.mock('../../src/models/EmailCampaignRecipient.model', () => ({
     updateOne: mockRecipientUpdateOne,
     updateMany: mockRecipientUpdateMany,
     countDocuments: mockRecipientCountDocuments,
+  },
+}));
+jest.mock('../../src/models/MarketingContact.model', () => ({
+  __esModule: true,
+  default: {
+    findOne: mockMarketingContactFindOne,
   },
 }));
 
@@ -66,6 +73,9 @@ describe('emailCampaign.scheduler — Marketing Contact recipient compatibility'
     mockEmailCampaignUpdateOne.mockResolvedValue({});
     mockEmailCampaignFindOneAndUpdate.mockResolvedValue({ _id: 'campaign-1', status: 'sending' });
     mockRecipientCountDocuments.mockResolvedValue(0);
+    mockMarketingContactFindOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ consentStatus: 'documented' }) }),
+    });
   });
 
   it('processes a marketingContactId-sourced pending recipient identically to a leadId-sourced one', async () => {
@@ -130,5 +140,67 @@ describe('emailCampaign.scheduler — Marketing Contact recipient compatibility'
     );
     expect(mockSendCampaignEmail).not.toHaveBeenCalled();
     expect(stats.campaignsProcessed).toBe(1);
+  });
+
+  it('rechecks a marketingContactId-sourced recipient\'s consent at send time and skips without sending if it is no longer eligible', async () => {
+    const campaign = { _id: 'campaign-3', organizationId: 'org-1', subject: 's', greetingText: 'g', bodyText: 'b' };
+    mockEmailCampaignFind.mockReturnValue({
+      sort: jest.fn().mockReturnValue({ limit: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([campaign]) }) }),
+    });
+
+    const recipient = { _id: 'recipient-3', email: 'revoked@example.com', customerName: 'Revoked Contact', marketingContactId: 'mc-3' };
+    seedRecipientFind([recipient]);
+    mockRecipientFindOneAndUpdate.mockResolvedValue(recipient);
+    mockMarketingContactFindOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ consentStatus: 'unknown', permissionOverride: null }) }),
+    });
+
+    const stats = await runEmailCampaignSweep();
+
+    expect(mockSendCampaignEmail).not.toHaveBeenCalled();
+    expect(mockRecipientUpdateOne).toHaveBeenCalledWith(
+      { _id: 'recipient-3', status: 'processing' },
+      { $set: { status: 'skipped', failureReason: 'Contact is no longer eligible (consent changed before send)' } },
+    );
+    expect(mockEmailCampaignUpdateOne).toHaveBeenCalledWith({ _id: 'campaign-3' }, { $inc: { skippedCount: 1 } });
+    expect(stats.campaignsProcessed).toBe(1);
+  });
+
+  it('skips a marketingContactId-sourced recipient without sending if the contact was deleted before send', async () => {
+    const campaign = { _id: 'campaign-4', organizationId: 'org-1', subject: 's', greetingText: 'g', bodyText: 'b' };
+    mockEmailCampaignFind.mockReturnValue({
+      sort: jest.fn().mockReturnValue({ limit: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([campaign]) }) }),
+    });
+
+    const recipient = { _id: 'recipient-4', email: 'deleted@example.com', customerName: 'Deleted Contact', marketingContactId: 'mc-4' };
+    seedRecipientFind([recipient]);
+    mockRecipientFindOneAndUpdate.mockResolvedValue(recipient);
+    mockMarketingContactFindOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }),
+    });
+
+    await runEmailCampaignSweep();
+
+    expect(mockSendCampaignEmail).not.toHaveBeenCalled();
+    expect(mockRecipientUpdateOne).toHaveBeenCalledWith(
+      { _id: 'recipient-4', status: 'processing' },
+      { $set: { status: 'skipped', failureReason: 'Contact is no longer eligible (consent changed before send)' } },
+    );
+  });
+
+  it('does not attempt a MarketingContact recheck for a leadId-sourced recipient', async () => {
+    const campaign = { _id: 'campaign-5', organizationId: 'org-1', subject: 's', greetingText: 'g', bodyText: 'b' };
+    mockEmailCampaignFind.mockReturnValue({
+      sort: jest.fn().mockReturnValue({ limit: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([campaign]) }) }),
+    });
+
+    const recipient = { _id: 'recipient-5', email: 'lead@example.com', customerName: 'Lead Person', leadId: 'lead-1' };
+    seedRecipientFind([recipient]);
+    mockRecipientFindOneAndUpdate.mockResolvedValue(recipient);
+
+    await runEmailCampaignSweep();
+
+    expect(mockMarketingContactFindOne).not.toHaveBeenCalled();
+    expect(mockSendCampaignEmail).toHaveBeenCalledTimes(1);
   });
 });
