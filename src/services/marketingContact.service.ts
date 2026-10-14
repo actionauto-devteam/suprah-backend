@@ -1,6 +1,6 @@
 import { parse } from 'csv-parse/sync';
 import { createHash } from 'crypto';
-import MarketingContact, { MarketingContactConsentStatus } from '../models/MarketingContact.model';
+import MarketingContact, { MarketingContactConsentStatus, IMarketingContactPermissionOverride } from '../models/MarketingContact.model';
 import EmailOptOut from '../models/EmailOptOut.model';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 
@@ -10,8 +10,22 @@ const SAMPLE_LIMIT = 10;
 
 export const SEND_ELIGIBLE_CONSENT_STATUSES: MarketingContactConsentStatus[] = ['documented'];
 
+/** Whether this contact's consentStatus alone is real import-time evidence
+ *  of opt-in. Does not consider an admin's per-address permissionOverride —
+ *  use hasSendPermission() for the actual send-eligibility decision. */
 export function isConsentEligibleForSend(consentStatus: MarketingContactConsentStatus): boolean {
   return SEND_ELIGIBLE_CONSENT_STATUSES.includes(consentStatus);
+}
+
+/** The real send-eligibility decision: documented consent, OR a specific
+ *  admin has personally confirmed permission for this one address. An
+ *  override never upgrades consentStatus itself — it's a separate,
+ *  audited exception recorded on permissionOverride. */
+export function hasSendPermission(contact: {
+  consentStatus: MarketingContactConsentStatus;
+  permissionOverride?: IMarketingContactPermissionOverride | null;
+}): boolean {
+  return isConsentEligibleForSend(contact.consentStatus) || Boolean(contact.permissionOverride?.confirmedAt);
 }
 
 export type ImportRowCategory =

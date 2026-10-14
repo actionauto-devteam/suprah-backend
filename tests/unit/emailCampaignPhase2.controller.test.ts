@@ -99,6 +99,104 @@ describe('emailCampaign.controller — Phase 2 (scheduling + audience limit)', (
     });
   });
 
+  describe('createCampaign (marketingContacts audience) — consent + permission-override recheck', () => {
+    beforeEach(() => {
+      mockEmailOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue([]) });
+    });
+
+    it('includes a documented-consent contact (baseline, unchanged behavior)', async () => {
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          lean: jest.fn().mockResolvedValue([
+            { _id: 'mc-1', email: 'a@example.com', firstName: 'A', consentStatus: 'documented' },
+          ]),
+        })),
+      });
+      const req = adminReq({
+        name: 'MC blast', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactIds: ['mc-1'],
+      });
+
+      const { next, json } = await invoke(createCampaign, req);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(mockRecipientInsertMany).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ email: 'a@example.com' })]),
+      );
+      expect(json).toHaveBeenCalled();
+    });
+
+    it('excludes an unknown-consent contact with no permission override (the exact case the user hit live)', async () => {
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          lean: jest.fn().mockResolvedValue([
+            { _id: 'mc-2', email: 'new@example.com', consentStatus: 'unknown' },
+          ]),
+        })),
+      });
+      const req = adminReq({
+        name: 'MC blast', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactIds: ['mc-2'],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      const err = next.mock.calls[0][0];
+      expect(err.statusCode).toBe(400);
+      expect(err.message).toContain('consent not documented');
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+
+    it('includes an unknown-consent contact once an admin has set a permissionOverride', async () => {
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          lean: jest.fn().mockResolvedValue([
+            {
+              _id: 'mc-3', email: 'confirmed@example.com', consentStatus: 'unknown',
+              permissionOverride: { confirmedBy: 'user-9', confirmedByName: 'Jordan', confirmedAt: new Date() },
+            },
+          ]),
+        })),
+      });
+      const req = adminReq({
+        name: 'MC blast', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactIds: ['mc-3'],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(mockRecipientInsertMany).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ email: 'confirmed@example.com' })]),
+      );
+    });
+
+    it('still excludes a permission-overridden contact who has separately opted out — suppression always wins over an override', async () => {
+      mockMarketingContactFind.mockReturnValue({
+        select: jest.fn(() => ({
+          lean: jest.fn().mockResolvedValue([
+            {
+              _id: 'mc-4', email: 'stopped@example.com', consentStatus: 'unknown',
+              permissionOverride: { confirmedBy: 'user-9', confirmedByName: 'Jordan', confirmedAt: new Date() },
+            },
+          ]),
+        })),
+      });
+      mockEmailOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue(['stopped@example.com']) });
+      const req = adminReq({
+        name: 'MC blast', subject: 'Hi', greetingText: 'Hi {firstName}', bodyText: 'Body',
+        audienceSource: 'marketingContacts', marketingContactIds: ['mc-4'],
+      });
+
+      const { next } = await invoke(createCampaign, req);
+
+      expect(next).toHaveBeenCalled();
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+      expect(mockEmailCampaignCreate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('rescheduleCampaign', () => {
     it('reschedules a queued campaign to a new future time', async () => {
       mockEmailCampaignFindOneAndUpdate.mockResolvedValue({ _id: 'campaign-1', status: 'scheduled' });

@@ -2,6 +2,7 @@ const mockMcFindOne = jest.fn();
 const mockMcCreate = jest.fn();
 const mockMcFind = jest.fn();
 const mockMcCountDocuments = jest.fn();
+const mockMcUpdateOne = jest.fn();
 const mockOptOutFindOne = jest.fn();
 const mockOptOutFind = jest.fn();
 
@@ -12,6 +13,7 @@ jest.mock('../../src/models/MarketingContact.model', () => ({
     create: mockMcCreate,
     find: mockMcFind,
     countDocuments: mockMcCountDocuments,
+    updateOne: mockMcUpdateOne,
   },
 }));
 jest.mock('../../src/models/EmailOptOut.model', () => ({
@@ -159,7 +161,7 @@ describe('marketingContact.controller — select-all eligible ids (Phase 2)', ()
     expect(payload.data.contacts).toHaveLength(500);
   });
 
-  it('always applies eligibleOnly filtering (consent + suppression) regardless of query params', async () => {
+  it('always applies eligibleOnly filtering (documented consent OR a confirmed permission override, plus suppression) regardless of query params', async () => {
     mockMcFind.mockReturnValue({ select: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue([]) })) })) });
     mockMcCountDocuments.mockResolvedValue(0);
     mockOptOutFind.mockReturnValue({ distinct: jest.fn().mockResolvedValue(['suppressed@example.com']) });
@@ -168,7 +170,111 @@ describe('marketingContact.controller — select-all eligible ids (Phase 2)', ()
     await invoke(getEligibleMarketingContactIds, req);
 
     const findQuery = mockMcFind.mock.calls[0][0];
-    expect(findQuery.consentStatus).toEqual({ $in: ['documented'] });
+    expect(findQuery.$or).toEqual([
+      { consentStatus: { $in: ['documented'] } },
+      { 'permissionOverride.confirmedAt': { $exists: true } },
+    ]);
     expect(findQuery.email).toEqual({ $nin: ['suppressed@example.com'] });
+  });
+
+  it('composes the eligibility $or together with a search $or via $and, instead of one clobbering the other', async () => {
+    mockMcFind.mockReturnValue({ select: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue([]) })) })) });
+    mockMcCountDocuments.mockResolvedValue(0);
+
+    const req = adminReq({}, { search: 'jordan' });
+    await invoke(getEligibleMarketingContactIds, req);
+
+    const findQuery = mockMcFind.mock.calls[0][0];
+    expect(findQuery.$or).toBeUndefined();
+    expect(findQuery.$and).toHaveLength(2);
+    expect(findQuery.$and[0].$or).toEqual([
+      { email: expect.any(RegExp) },
+      { firstName: expect.any(RegExp) },
+      { lastName: expect.any(RegExp) },
+    ]);
+    expect(findQuery.$and[1].$or).toEqual([
+      { consentStatus: { $in: ['documented'] } },
+      { 'permissionOverride.confirmedAt': { $exists: true } },
+    ]);
+  });
+});
+
+describe('marketingContact.controller — admin permission override (new)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockOptOutFindOne.mockReturnValue({ select: jest.fn(() => ({ lean: jest.fn().mockResolvedValue(null) })) });
+  });
+
+  it('does NOT set an override when confirmedPermission is omitted — existing "ineligible" behavior is unchanged', async () => {
+    mockMcFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    mockMcCreate.mockResolvedValue({
+      toObject: () => ({ _id: 'mc-10', email: 'new@example.com', consentStatus: 'unknown' }),
+    });
+
+    const req = adminReq({ email: 'new@example.com' });
+    const { json } = await invoke(createManualMarketingContact, req);
+
+    const payload = json.mock.calls[0][0];
+    expect(payload.data.isEligible).toBe(false);
+    expect(payload.data.contact.permissionOverride).toBeUndefined();
+  });
+
+  it('sets a permissionOverride (with the confirming admin and timestamp) and flips isEligible to true when confirmedPermission is true on an unknown-consent contact', async () => {
+    mockMcFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    mockMcCreate.mockResolvedValue({
+      toObject: () => ({ _id: 'mc-11', email: 'new2@example.com', consentStatus: 'unknown' }),
+    });
+    mockMcUpdateOne.mockResolvedValue({});
+
+    const req = adminReq({ email: 'new2@example.com', confirmedPermission: true });
+    (req as any).crmUser.fullName = 'Alex Rivera';
+    const { json } = await invoke(createManualMarketingContact, req);
+
+    expect(mockMcUpdateOne).toHaveBeenCalledWith(
+      { _id: 'mc-11' },
+      {
+        $set: {
+          permissionOverride: expect.objectContaining({
+            confirmedBy: 'user-1',
+            confirmedByName: 'Alex Rivera',
+            confirmedAt: expect.any(Date),
+          }),
+        },
+      },
+    );
+    const payload = json.mock.calls[0][0];
+    expect(payload.data.isEligible).toBe(true);
+    expect(payload.data.reason).toBeUndefined();
+    expect(payload.data.contact.permissionOverride.confirmedByName).toBe('Alex Rivera');
+  });
+
+  it('never bypasses an explicit email opt-out, even with confirmedPermission true — suppression always wins', async () => {
+    mockMcFindOne.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({ _id: 'mc-12', email: 'stopped@example.com', consentStatus: 'unknown' }),
+    });
+    mockOptOutFindOne.mockReturnValue({ select: jest.fn(() => ({ lean: jest.fn().mockResolvedValue({ _id: 'opt-9' }) })) });
+    mockMcUpdateOne.mockResolvedValue({});
+
+    const req = adminReq({ email: 'stopped@example.com', confirmedPermission: true });
+    const { json } = await invoke(createManualMarketingContact, req);
+
+    const payload = json.mock.calls[0][0];
+    expect(payload.data.isEligible).toBe(false);
+    expect(payload.data.reason).toContain('opted out');
+  });
+
+  it('does not overwrite an existing permissionOverride on a repeat Add (idempotent, preserves the original confirmation)', async () => {
+    const existingOverride = { confirmedBy: 'user-99', confirmedByName: 'Original Admin', confirmedAt: new Date('2026-01-01') };
+    mockMcFindOne.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({ _id: 'mc-13', email: 'already@example.com', consentStatus: 'unknown', permissionOverride: existingOverride }),
+    });
+
+    const req = adminReq({ email: 'already@example.com', confirmedPermission: true });
+    const { json } = await invoke(createManualMarketingContact, req);
+
+    expect(mockMcUpdateOne).not.toHaveBeenCalled();
+    const payload = json.mock.calls[0][0];
+    expect(payload.data.contact.permissionOverride).toEqual(existingOverride);
+    expect(payload.data.isEligible).toBe(true);
   });
 });

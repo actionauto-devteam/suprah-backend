@@ -72,15 +72,23 @@ export const getCampaign = asyncHandler(async (req: Request, res: Response) => {
   const campaign = await SmsCampaign.findOne({ _id: id, organizationId: orgId }).lean();
   if (!campaign) throw new ApiError(404, 'Campaign not found');
 
-  const failedSample = await SmsCampaignRecipient.find({
-    campaignId: id,
-    status: 'failed',
-  })
-    .select('customerName phone failureReason')
-    .limit(20)
-    .lean();
+  const [failedSample, deliveryStatusRows] = await Promise.all([
+    SmsCampaignRecipient.find({ campaignId: id, status: 'failed' })
+      .select('customerName phone failureReason')
+      .limit(20)
+      .lean(),
+    SmsCampaignRecipient.aggregate([
+      { $match: { campaignId: campaign._id, status: 'sent' } },
+      { $group: { _id: '$deliveryStatus', count: { $sum: 1 } } },
+    ]),
+  ]);
 
-  res.json(new ApiResponse(200, { campaign, failedSample }, 'Campaign fetched'));
+  const deliveryStatusCounts: Record<string, number> = {};
+  for (const row of deliveryStatusRows as Array<{ _id: string | null; count: number }>) {
+    deliveryStatusCounts[row._id || 'accepted'] = row.count;
+  }
+
+  res.json(new ApiResponse(200, { campaign, failedSample, deliveryStatusCounts }, 'Campaign fetched'));
 });
 
 export const createCampaign = asyncHandler(async (req: Request, res: Response) => {

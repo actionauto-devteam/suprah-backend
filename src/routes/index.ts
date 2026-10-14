@@ -85,6 +85,7 @@ import crmWebchatRoute from "./crmWebchat.routes";
 import crmDemoRoute from "./crmDemo.routes";
 import smsCampaignRoute from "./smsCampaign.routes";
 import emailCampaignRoute from "./emailCampaign.routes";
+import crmReportsRoute from "./crmReports.routes";
 import marketingContactRoute from "./marketingContact.routes";
 import aiAgentTaskRoute from "./aiAgentTask.routes";
 import aiAgentCoachingRoute from "./aiAgentCoaching.routes";
@@ -298,6 +299,10 @@ const defaultRoutes = [
   {
     path: "/crm/price-drop-emails",
     route: priceDropEmailRoute,
+  },
+  {
+    path: "/crm/reports",
+    route: crmReportsRoute,
   },
   {
     path: "/aftermarket",

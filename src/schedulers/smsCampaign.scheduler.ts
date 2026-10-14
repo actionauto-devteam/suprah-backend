@@ -70,6 +70,16 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
       });
 
       if (delivered) {
+        await SmsCampaignRecipient.updateOne(
+          { _id: recipient._id },
+          {
+            $set: {
+              providerMessageId: delivered.message?.providerMessageId,
+              deliveryStatus: 'accepted',
+              deliveryStatusUpdatedAt: new Date(),
+            },
+          },
+        );
         await SmsCampaign.updateOne({ _id: campaign._id }, { $inc: { sentCount: 1 } });
       } else {
         await SmsCampaignRecipient.updateOne(

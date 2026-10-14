@@ -4,6 +4,7 @@ const mockSmsCampaignFindOne = jest.fn();
 const mockSmsCampaignUpdateOne = jest.fn().mockResolvedValue({});
 const mockSmsRecipientFind = jest.fn();
 const mockSmsRecipientFindOneAndUpdate = jest.fn();
+const mockSmsRecipientUpdateOne = jest.fn().mockResolvedValue({});
 const mockSmsRecipientCountDocuments = jest.fn().mockResolvedValue(0);
 const mockSendStaffAttributedSms = jest.fn();
 
@@ -38,6 +39,7 @@ jest.mock('../../src/models/SmsCampaignRecipient.model', () => ({
   default: {
     find: mockSmsRecipientFind,
     findOneAndUpdate: mockSmsRecipientFindOneAndUpdate,
+    updateOne: mockSmsRecipientUpdateOne,
     countDocuments: mockSmsRecipientCountDocuments,
   },
 }));

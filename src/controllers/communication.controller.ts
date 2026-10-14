@@ -16,6 +16,9 @@ import MailConversation from "../models/MailConversation.model";
 import { describeSmsFailure } from "../utils/smsFailure";
 import { recordHumanTakeover } from "../utils/aiAutoPause";
 import MailMessage from "../models/MailMessage.model";
+import EmailCampaignRecipient from "../models/EmailCampaignRecipient.model";
+import EmailCampaign from "../models/EmailCampaign.model";
+import PriceDropEmailLog from "../models/PriceDropEmailLog.model";
 import { emitToOrg } from "../utils/socketEmitter";
 import { canReceiveIvrCall } from '../services/ivr.service';
 import * as recording from '../services/callRecording.service';
@@ -233,7 +236,7 @@ export const getCustomerThread = asyncHandler(async (req: Request, res: Response
   res.json(new ApiResponse(200, { conversation, messages, calls }, "Customer thread"));
 });
 
-type TimelineChannel = "sms" | "call" | "email" | "webchat" | "appointment" | "note";
+type TimelineChannel = "sms" | "call" | "email" | "webchat" | "appointment" | "note" | "campaign_email" | "price_drop";
 
 export interface TimelineItem {
   id: string;
@@ -305,7 +308,7 @@ export async function buildLeadTimeline(
   const callOr: any[] = [{ leadId }];
   if (phone) callOr.push({ from: phone }, { to: phone });
 
-  const [messages, calls, webchat, appointments, mailConversations] = await Promise.all([
+  const [messages, calls, webchat, appointments, mailConversations, campaignRecipients, priceDropLogs] = await Promise.all([
     safe("sms", () => CommunicationMessage.find({
       orgId,
       $or: messageOr,
@@ -332,7 +335,29 @@ export async function buildLeadTimeline(
           "participants.email": String(lead.email).toLowerCase(),
         }).select("_id").lean(), [])
       : Promise.resolve([]),
+    safe("campaign_email", () => EmailCampaignRecipient.find({
+      organizationId: orgId,
+      leadId,
+      status: { $in: ["sent", "failed", "uncertain"] },
+      ...(timeFilter ? { updatedAt: timeFilter } : {}),
+    }).sort({ updatedAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
+    safe("price_drop", () => PriceDropEmailLog.find({
+      organizationId: orgId,
+      leadId,
+      status: { $in: ["sent", "failed"] },
+      ...(timeFilter ? { updatedAt: timeFilter } : {}),
+    }).sort({ updatedAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
   ]);
+
+  const campaignIds = Array.from(new Set((campaignRecipients as any[]).map((r) => String(r.campaignId))));
+  const campaignsById = new Map<string, any>();
+  if (campaignIds.length) {
+    const campaigns = await safe("campaign_email", () => EmailCampaign.find({
+      _id: { $in: campaignIds },
+      organizationId: orgId,
+    }).select("name subject createdByName").lean(), []);
+    for (const campaign of campaigns as any[]) campaignsById.set(String(campaign._id), campaign);
+  }
 
   const mailConversationIds = (mailConversations as any[]).map((item) => item._id);
   const emails: any[] = mailConversationIds.length
@@ -405,6 +430,46 @@ export async function buildLeadTimeline(
       actor: message.direction === "inbound" ? message.fromName || message.fromEmail : "Team member",
       occurredAt: message.sentAt || message.createdAt,
       metadata: message.errorMessage ? { error: message.errorMessage } : undefined,
+    });
+  }
+
+  for (const recipient of campaignRecipients as any[]) {
+    const campaign = campaignsById.get(String(recipient.campaignId));
+    items.push({
+      id: `campaign_email:${recipient._id}`,
+      channel: "campaign_email",
+      direction: "outbound",
+      title: recipient.status === "sent" ? "Marketing email sent" : recipient.status === "uncertain" ? "Marketing email status uncertain" : "Marketing email failed",
+      body: campaign?.subject,
+      status: recipient.status,
+      actor: campaign?.createdByName || "Marketing campaign",
+      occurredAt: recipient.sentAt || recipient.updatedAt,
+      metadata: {
+        campaignId: String(recipient.campaignId),
+        campaignName: campaign?.name,
+        failureReason: recipient.failureReason,
+      },
+    });
+  }
+
+  for (const log of priceDropLogs as any[]) {
+    items.push({
+      id: `price_drop:${log._id}`,
+      channel: "price_drop",
+      direction: "outbound",
+      title: log.status === "sent" ? "Price drop email sent" : "Price drop email failed",
+      body: `${log.vehicleLabel}: $${log.previousPrice} -> $${log.newPrice}`,
+      status: log.status,
+      actor: "System",
+      occurredAt: log.sentAt || log.updatedAt,
+      metadata: {
+        vehicleId: String(log.vehicleId),
+        vehicleLabel: log.vehicleLabel,
+        previousPrice: log.previousPrice,
+        newPrice: log.newPrice,
+        matchMethod: log.matchMethod,
+        failureReason: log.failureReason,
+      },
     });
   }
 
@@ -507,7 +572,7 @@ export async function buildLeadTimeline(
       return byTime || b.id.localeCompare(a.id);
     });
   const pageItems = sorted.slice(0, limit);
-  const hasMore = sorted.length > limit || [messages, calls, webchat, appointments, emails].some((source) => source.length === sourceLimit);
+  const hasMore = sorted.length > limit || [messages, calls, webchat, appointments, emails, campaignRecipients, priceDropLogs].some((source) => source.length === sourceLimit);
   const lastItem = pageItems[pageItems.length - 1];
   const nextCursor = hasMore && lastItem
     ? Buffer.from(JSON.stringify({ occurredAt: new Date(lastItem.occurredAt).toISOString(), id: lastItem.id })).toString("base64url")

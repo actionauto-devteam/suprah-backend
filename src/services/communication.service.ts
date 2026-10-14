@@ -18,6 +18,7 @@ import { describeSmsFailure } from "../utils/smsFailure";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
+import SmsCampaignRecipient from "../models/SmsCampaignRecipient.model";
 import Vehicle from "../models/Vehicle.model";
 import {
   resolveAiAgentSettings,
@@ -1307,6 +1308,14 @@ export async function handleSmsStatus(payload: any) {
       conversationId: message.conversationId,
       status: message.status,
     });
+  }
+
+  if (status === "delivered" || status === "failed") {
+    const deliveryStatus = status === "delivered" ? "delivered" : "delivery_failed";
+    await SmsCampaignRecipient.updateOne(
+      { providerMessageId },
+      { $set: { deliveryStatus, deliveryStatusUpdatedAt: new Date() } },
+    ).catch(() => undefined);
   }
 }
 

@@ -1,6 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type SmsCampaignRecipientStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+export type SmsCampaignRecipientDeliveryStatus = 'accepted' | 'delivered' | 'delivery_failed';
 
 export interface ISmsCampaignRecipient extends Document {
   campaignId: mongoose.Types.ObjectId;
@@ -11,6 +12,9 @@ export interface ISmsCampaignRecipient extends Document {
   status: SmsCampaignRecipientStatus;
   failureReason?: string;
   sentAt?: Date;
+  providerMessageId?: string;
+  deliveryStatus?: SmsCampaignRecipientDeliveryStatus;
+  deliveryStatusUpdatedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +34,9 @@ const SmsCampaignRecipientSchema: Schema<ISmsCampaignRecipient> = new Schema(
     },
     failureReason: { type: String, trim: true, maxlength: 500 },
     sentAt: { type: Date },
+    providerMessageId: { type: String, index: true, sparse: true },
+    deliveryStatus: { type: String, enum: ['accepted', 'delivered', 'delivery_failed'] },
+    deliveryStatusUpdatedAt: { type: Date },
   },
   { timestamps: true },
 );
