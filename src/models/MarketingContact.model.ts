@@ -2,6 +2,12 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export type MarketingContactConsentStatus = 'unknown' | 'claimed_verbal' | 'documented';
 
+export interface IMarketingContactPermissionOverride {
+  confirmedBy: mongoose.Types.ObjectId;
+  confirmedByName: string;
+  confirmedAt: Date;
+}
+
 export interface IMarketingContact extends Document {
   organizationId: string;
   email: string;
@@ -13,6 +19,11 @@ export interface IMarketingContact extends Document {
   consentNote?: string;
   importLabel: string;
   importedBy: mongoose.Types.ObjectId;
+  /** A specific admin personally vouching permission exists for this one
+   *  address, distinct from consentStatus "documented" (which means real
+   *  import-time evidence). Used only to unblock a deliberately-confirmed
+   *  manual send; never set automatically. */
+  permissionOverride?: IMarketingContactPermissionOverride;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -34,6 +45,17 @@ const MarketingContactSchema: Schema<IMarketingContact> = new Schema(
     consentNote: { type: String, trim: true, maxlength: 1000 },
     importLabel: { type: String, required: true, trim: true, maxlength: 120, index: true },
     importedBy: { type: Schema.Types.ObjectId, required: true },
+    permissionOverride: {
+      type: new Schema(
+        {
+          confirmedBy: { type: Schema.Types.ObjectId, required: true },
+          confirmedByName: { type: String, required: true, trim: true, maxlength: 160 },
+          confirmedAt: { type: Date, required: true },
+        },
+        { _id: false },
+      ),
+      required: false,
+    },
   },
   { timestamps: true },
 );

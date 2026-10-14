@@ -13,6 +13,7 @@ import {
   ImportSettings,
   SEND_ELIGIBLE_CONSENT_STATUSES,
   isConsentEligibleForSend,
+  hasSendPermission,
 } from '../services/marketingContact.service';
 
 const VALID_CONSENT_STATUSES: MarketingContactConsentStatus[] = ['unknown', 'claimed_verbal', 'documented'];
@@ -30,19 +31,38 @@ async function buildMarketingContactQuery(
   opts: { search?: string; importLabel?: string; eligibleOnly?: boolean },
 ): Promise<Record<string, unknown>> {
   const query: Record<string, unknown> = { organizationId: orgId };
+  const andClauses: Record<string, unknown>[] = [];
+
   if (opts.search) {
     const escaped = opts.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escaped, 'i');
-    query.$or = [{ email: regex }, { firstName: regex }, { lastName: regex }];
+    andClauses.push({ $or: [{ email: regex }, { firstName: regex }, { lastName: regex }] });
   }
   if (opts.importLabel) query.importLabel = opts.importLabel;
   if (opts.eligibleOnly) {
-    query.consentStatus = { $in: SEND_ELIGIBLE_CONSENT_STATUSES };
+    // Eligible = documented consent, OR a specific admin has personally
+    // confirmed permission for this one address (permissionOverride).
+    andClauses.push({
+      $or: [
+        { consentStatus: { $in: SEND_ELIGIBLE_CONSENT_STATUSES } },
+        { 'permissionOverride.confirmedAt': { $exists: true } },
+      ],
+    });
     const suppressedEmails = await EmailOptOut.find({ organizationId: orgId, optedOut: true }).distinct('email');
     if (suppressedEmails.length > 0) {
       query.email = { $nin: suppressedEmails };
     }
   }
+
+  // Composing two independent $or clauses (search, eligibility) as sibling
+  // top-level keys would silently clobber one of them — only the second
+  // assignment would survive. $and keeps both conditions in force together.
+  if (andClauses.length === 1) {
+    Object.assign(query, andClauses[0]);
+  } else if (andClauses.length > 1) {
+    query.$and = andClauses;
+  }
+
   return query;
 }
 
@@ -167,6 +187,7 @@ export const createManualMarketingContact = asyncHandler(async (req: Request, re
   const firstName = String(req.body?.firstName || '').trim().slice(0, 120) || undefined;
   const lastName = String(req.body?.lastName || '').trim().slice(0, 120) || undefined;
   const phone = normalizeIdentityPhone(req.body?.phone) || undefined;
+  const confirmedPermission = req.body?.confirmedPermission === true;
 
   let contact: any = await MarketingContact.findOne({ organizationId: orgId, email }).lean();
   let created = false;
@@ -188,13 +209,27 @@ export const createManualMarketingContact = asyncHandler(async (req: Request, re
     created = true;
   }
 
+  // An admin personally vouching for this one address is a separate,
+  // audited exception — never upgrades consentStatus itself, only
+  // permissionOverride (see hasSendPermission). Already-overridden
+  // contacts keep their original confirmation; this never un-confirms one.
+  if (confirmedPermission && !(contact as any).permissionOverride && !isConsentEligibleForSend((contact as any).consentStatus)) {
+    const permissionOverride = {
+      confirmedBy: user._id,
+      confirmedByName: user.fullName || user.name || user.email || 'Staff',
+      confirmedAt: new Date(),
+    };
+    await MarketingContact.updateOne({ _id: contact._id }, { $set: { permissionOverride } });
+    contact.permissionOverride = permissionOverride;
+  }
+
   const isSuppressed = Boolean(
     await EmailOptOut.findOne({ organizationId: orgId, email, optedOut: true }).select('_id').lean(),
   );
-  const isEligible = isConsentEligibleForSend((contact as any).consentStatus) && !isSuppressed;
+  const isEligible = hasSendPermission(contact as any) && !isSuppressed;
   const reason = isSuppressed
     ? 'This address has opted out of automated emails'
-    : !isConsentEligibleForSend((contact as any).consentStatus)
+    : !hasSendPermission(contact as any)
       ? 'Consent is not documented for this address — it will not be sent to until consent is recorded'
       : undefined;
 

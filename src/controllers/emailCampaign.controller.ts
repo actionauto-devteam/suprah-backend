@@ -10,7 +10,7 @@ import MarketingContact from '../models/MarketingContact.model';
 import EmailOptOut from '../models/EmailOptOut.model';
 import Organization from '../models/Organization.model';
 import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
-import { isConsentEligibleForSend } from '../services/marketingContact.service';
+import { hasSendPermission } from '../services/marketingContact.service';
 
 const MAX_RECIPIENTS = 500;
 const VALID_STATUSES = LEAD_STATUS_VALUES;
@@ -147,13 +147,13 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
       _id: { $in: validObjectIds },
       organizationId: orgId,
     })
-      .select('_id email firstName lastName phone consentStatus')
+      .select('_id email firstName lastName phone consentStatus permissionOverride')
       .lean();
 
     const matchedIdSet = new Set(matchedContacts.map((c: any) => String(c._id)));
     const notFoundOrWrongOrg = requestedIds.filter((id) => !matchedIdSet.has(id)).length;
 
-    const consentEligible = matchedContacts.filter((c: any) => isConsentEligibleForSend(c.consentStatus));
+    const consentEligible = matchedContacts.filter((c: any) => hasSendPermission(c));
     const consentExcludedCount = matchedContacts.length - consentEligible.length;
 
     const eligibleEmails = consentEligible.map((c: any) => c.email);
