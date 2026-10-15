@@ -102,6 +102,8 @@ interface OrgDriver {
   // Deprecated compatibility field. Vehicle capacity is per load, so there is
   // no meaningful "remaining" value obtained by subtracting active load count.
   remainingCapacity: number | null;
+  /** False while the driver's account application awaits the Suprah team's approval. */
+  accountApproved: boolean;
   assignable: boolean;
   messagingAvailable: boolean;
   crmUserId: string | null;
@@ -165,7 +167,7 @@ function getAssignmentReviewState(load: any, validDispatchOwnerIds: Set<string>)
 const DIRECTORY_PAGE_SIZE = 50;
 const DIRECTORY_MAX_PAGE_SIZE = 100;
 const DIRECTORY_MAX_IDS = 50;
-const DIRECTORY_USER_FIELDS = "name email avatar isActive createdAt";
+const DIRECTORY_USER_FIELDS = "name email avatar isActive isApproved createdAt";
 
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -554,8 +556,11 @@ async function buildDirectoryEntries(
       })),
       activeLoadCount,
       remainingCapacity: null,
+      // Accounts from before approval existed have no flag and count as approved.
+      accountApproved: u.isApproved !== false,
       assignable:
         Boolean(u.isActive) &&
+        u.isApproved !== false &&
         operationalStatus === "active" &&
         !requestBlocksNewWork &&
         !blockedByAnyRequest.has(key),

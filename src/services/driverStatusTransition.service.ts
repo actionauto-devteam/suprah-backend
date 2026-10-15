@@ -1,4 +1,5 @@
 import Load from "../models/Load.model";
+import User from "../models/User.model";
 import DriverProfile from "../models/DriverProfile.model";
 import DriverLocation from "../models/DriverLocation.model";
 import DriverStatusChangeRequest, {
@@ -283,11 +284,32 @@ export async function getDriverWorkEligibility(
   };
 }
 
+/**
+ * Whether this driver's account application was approved by the Suprah team.
+ * Accounts from before approval existed have no flag and count as approved
+ * (the model's default), so only an explicit "not approved" blocks work.
+ */
+export async function isDriverAccountApproved(driverId: string): Promise<boolean> {
+  const account = await User.findById(driverId).select("isApproved").lean<{ isApproved?: boolean } | null>();
+  return Boolean(account) && account?.isApproved !== false;
+}
+
 export async function assertDriverCanTakeNewWork(
   driverId: string,
   organizationId: string,
   action: "assign" | "reassign" | "request" | "approve" | "accept",
 ) {
+  // Only drivers whose account application was approved can be given or take
+  // work, whatever an open screen still shows.
+  if (!(await isDriverAccountApproved(driverId))) {
+    throw new ApiError(
+      409,
+      action === "accept" || action === "request"
+        ? "Your driver account hasn't been approved yet, so you can't take loads. You'll be notified as soon as the Suprah team approves it. Questions? support@suprahai.com"
+        : "This driver's account application hasn't been approved yet, so they can't be given loads. You can assign them once the Suprah team approves it.",
+    );
+  }
+
   const eligibility = await getDriverWorkEligibility(
     driverId,
     organizationId,

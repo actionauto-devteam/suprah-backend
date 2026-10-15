@@ -22,6 +22,16 @@
     } from "../utils/calculations";
     import { storageService, BucketType } from "../services/storage.service";
     import { getSignedProofUrl } from "../utils/signedUrlCache";
+    import {
+      omitConditionReportsFromList,
+      presentConditionReportsForStaff,
+    } from "../services/loadConditionReport.service";
+    import {
+      collectLoadPhotoKeys,
+      deletePhotosOfDeletedLoad,
+      keyFromSignedPhotoUrl,
+      restoreInspectionPhotoKeys,
+    } from "../services/loadPhotoStorage.service";
     import { notifyOrgAdmins, safeCreateNotification } from "../utils/safeNotification";
     import { notificationTemplates } from "../utils/notificationTemplates";
     import { getSocketIO } from "../utils/socketEmitter";
@@ -175,7 +185,10 @@
       await Promise.all(
         vehicles.map(async (v: any) => {
           if (v?.inspectionPhotoUrl) {
-            const signed = await getSignedProofUrl(v.inspectionPhotoUrl);
+            // Loads edited before the fix below may have stored an (expired)
+            // signed link; sign its storage key again so the photo still opens.
+            const key = keyFromSignedPhotoUrl(v.inspectionPhotoUrl) ?? v.inspectionPhotoUrl;
+            const signed = await getSignedProofUrl(key);
             if (signed) v.inspectionPhotoUrl = signed;
           }
         }),
@@ -694,6 +707,11 @@
 
       const [rawLoads, total, summaryRows] = await Promise.all([
         Load.find(filter)
+          // Lists never show the drawn signatures (each can be up to 200 KB):
+          // only the load details page does, through getLoadById. Leaving them
+          // out keeps Transportation and the Driver Tracker's 15-second
+          // refresh light.
+          .select("-contract.signatureDataUrl -driverContract.signatureDataUrl")
           .populate("assignedDriverId", "name email phone avatar")
           .sort({ createdAt: -1 })
           .skip(skip)
@@ -732,6 +750,7 @@
           }
           await signPickupProof(load);
           await signInspectionPhotos(load);
+          omitConditionReportsFromList(load);
           return load;
         }),
       );
@@ -856,6 +875,7 @@
       }
       await signPickupProof(loadObj);
       await signInspectionPhotos(loadObj);
+      await presentConditionReportsForStaff(loadObj);
 
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
     });
@@ -966,7 +986,9 @@
       if (postType !== undefined) updateData.postType = postType;
       if (pickupLocation !== undefined) updateData.pickupLocation = pickupLocation;
       if (deliveryLocation !== undefined) updateData.deliveryLocation = deliveryLocation;
-      if (vehicles !== undefined) updateData.vehicles = vehicles;
+      // The edit form sends inspection photos back as signed links (they expire
+      // in an hour); store their storage keys instead so the photos keep working.
+      if (vehicles !== undefined) updateData.vehicles = restoreInspectionPhotoKeys(vehicles, (load as any).vehicles);
       if (trailerType !== undefined) updateData.trailerType = trailerType;
       if (dates !== undefined) updateData.dates = dates;
       if (additionalInfo !== undefined) {
@@ -1402,7 +1424,8 @@
       const user = getUser(req);
       const organizationId = req.orgId as string;
 
-      const load = await Load.findOne({ _id: req.params.id, organizationId });
+      // Earlier drivers' proof photos live in assignmentHistory (hidden by default).
+      const load = await Load.findOne({ _id: req.params.id, organizationId }).select("+assignmentHistory");
       if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
 
       // Active loads have a driver relying on them. Deleting one here would skip
@@ -1433,6 +1456,10 @@
           `Load ${load.loadNumber} changed while it was being deleted, so it was not deleted. Refresh and try again.`,
         );
       }
+
+      // Its photos (inspection, pickup, delivery, condition) go with it; nothing
+      // could open them once the load is gone. Never fails the delete.
+      await deletePhotosOfDeletedLoad(collectLoadPhotoKeys(load.toObject()), load._id);
 
       // Drivers with a pending request must see the load disappear.
       const requesterIds = new Set<string>(

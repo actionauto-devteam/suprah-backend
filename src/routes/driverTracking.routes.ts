@@ -21,6 +21,8 @@ import dispatchChatController from "../controllers/dispatchChat.controller";
 import dispatchChatPinController from "../controllers/dispatchChatPin.controller";
 import { ApiError } from "../utils/ApiError";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
+import loadConditionReportController from "../controllers/loadConditionReport.controller";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
@@ -325,6 +327,47 @@ router.post(
 );
 router.post("/loads/:id/pickup", driverOnly, driverTrackingController.markPickedUp);
 router.post("/loads/:id/start-route", driverOnly, driverTrackingController.startRoute);
+// "I've arrived" at the pickup or delivery (records waiting time; no status change).
+router.post("/loads/:id/arrive", driverOnly, noStoreSensitive, driverTrackingController.markArrived);
+// Vehicle condition reports (optional): photos and damage per vehicle at
+// pickup and delivery, and the customer's signature at delivery.
+//
+// Condition photos have their own allowance. A report can need a dozen photos
+// per vehicle, and they must never use up the general upload limit (5 per 10
+// minutes) that the pickup and delivery proof photos depend on.
+const conditionPhotoLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 120,
+  skip: () => process.env.SKIP_RATE_LIMIT === "true",
+  keyGenerator: (req: any) => req.user?._id?.toString() ?? ipKeyGenerator(req.ip ?? "unknown"),
+  message: {
+    success: false,
+    message: "You've added a lot of photos in the last few minutes. Wait a few minutes, then add the rest.",
+  },
+  handler: (req, res, next, options) => {
+    next(new ApiError(429, options.message.message));
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+router.get("/loads/:id/condition", driverOnly, noStoreSensitive, loadConditionReportController.getMyConditionReport);
+router.put("/loads/:id/condition/signature", driverOnly, noStoreSensitive, loadConditionReportController.saveDeliverySignature);
+router.post(
+  "/loads/:id/condition/:stop/:vehicleIndex/photos",
+  driverOnly,
+  noStoreSensitive,
+  conditionPhotoLimiter,
+  uploadProofImage,
+  validateUploadedImageContent,
+  loadConditionReportController.uploadConditionPhoto,
+);
+router.delete(
+  "/loads/:id/condition/:stop/:vehicleIndex/photos/:photoId",
+  driverOnly,
+  noStoreSensitive,
+  loadConditionReportController.deleteConditionPhoto,
+);
+router.put("/loads/:id/condition/:stop/:vehicleIndex", driverOnly, noStoreSensitive, loadConditionReportController.saveConditionDetails);
 router.post(
   "/loads/:id/submit-proof",
   driverOnly,

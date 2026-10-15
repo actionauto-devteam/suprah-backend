@@ -54,6 +54,11 @@ const DriverRequestSchema = new Schema<IDriverRequest>(
 );
 
 DriverRequestSchema.index({ driverUserId: 1, status: 1 });
+// One pending application per driver: the unique partial index
+// driverUserId_1_one_pending is created by
+// scripts/migrate-driver-request-one-pending.ts (it first removes existing
+// duplicates). Applications are created through
+// services/driverApplication.service.ts.
 DriverRequestSchema.index({ organizationId: 1, status: 1 });
 
 const DriverRequest = mongoose.model<IDriverRequest>(

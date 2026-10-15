@@ -4,6 +4,7 @@ import DriverProfile, {
   COMPLIANCE_EXPIRY_FIELDS,
   CREDENTIAL_DOCUMENT_TYPES,
   approvedCredentialExpiryUpdates,
+  complianceExpiryCutoff,
 } from '../models/DriverProfile.model';
 
 /*
@@ -48,8 +49,9 @@ export async function runDriverComplianceExpirySweep(
 ): Promise<{ renewed: number; flagged: number; cleared: number }> {
   // Renewals first, so a renewed driver is cleared in this same run.
   const renewed = await syncApprovedCredentialExpiries();
-  const now = new Date(nowMs);
-  const anyExpired = COMPLIANCE_EXPIRY_FIELDS.map((field) => ({ [field]: { $lt: now } }));
+  // Expired from the expiration day on, on the Mountain Time calendar.
+  const cutoff = complianceExpiryCutoff(nowMs);
+  const anyExpired = COMPLIANCE_EXPIRY_FIELDS.map((field) => ({ [field]: { $lt: cutoff } }));
 
   const flagged = await DriverProfile.updateMany(
     { isComplianceExpired: { $ne: true }, $or: anyExpired },

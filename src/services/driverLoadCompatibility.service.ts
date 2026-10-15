@@ -299,16 +299,26 @@ export async function assertDriverLoadCompatibility(params: {
   const compatibility = evaluateDriverLoadCompatibility(profile, load);
 
   if (actor === "driver") {
-    if (compatibility.capacity.status === "exceeded") {
+    // A driver who never set up their trailer still has the profile's default
+    // capacity of 1, so ask them to set it up instead of quoting that number.
+    if (compatibility.capacity.status !== "match" && !compatibility.trailer.driverTrailerType) {
       throw compatibilityError(
-        `This load requires capacity for ${compatibility.capacity.requiredVehicles} vehicle${compatibility.capacity.requiredVehicles === 1 ? "" : "s"}, but your configured equipment capacity is ${compatibility.capacity.maxVehicles ?? "not available"}. Contact Dispatch if your equipment profile needs to be updated.`,
+        "Set up your trailer first. On the Equipment page, choose your trailer type and how many vehicles it carries, then request this load again.",
+        compatibility,
+      );
+    }
+
+    if (compatibility.capacity.status === "exceeded") {
+      const required = compatibility.capacity.requiredVehicles;
+      throw compatibilityError(
+        `This load has ${required} vehicle${required === 1 ? "" : "s"}, but your trailer is set to carry ${compatibility.capacity.maxVehicles}. If your trailer can carry more, update it on the Equipment page, then request this load again.`,
         compatibility,
       );
     }
 
     if (compatibility.capacity.status === "unknown") {
       throw compatibilityError(
-        "Your vehicle capacity is not configured clearly enough to verify this load. Update your Equipment profile or contact Dispatch before requesting it.",
+        "We couldn't check this load against your trailer. Check your trailer details on the Equipment page, or message Dispatch about this load.",
         compatibility,
       );
     }
