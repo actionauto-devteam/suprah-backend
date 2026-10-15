@@ -31,6 +31,8 @@ import {
   correctTimeLog,
   getAdminDayLogs,
   adminTimeOverride,
+  getFormerEmployees,
+  deleteFormerEmployeeTimeproof,
   excludeScreenshots,
   getMyIdleLog,
   getUserIdleLog,
@@ -87,6 +89,8 @@ router.post('/screenshots/exclude', excludeScreenshots);
 router.patch('/correct-time', correctTimeLog);
 router.get('/admin/day-logs', getAdminDayLogs);
 router.post('/admin/time-override', adminTimeOverride);
+router.get('/former-employees', getFormerEmployees);
+router.delete('/former-employees/:userId', deleteFormerEmployeeTimeproof);
 router.post('/users/:userId/clock-out', clockOutUser);
 
 router.patch('/user/:userId/hourly-rate', updateHourlyRate);

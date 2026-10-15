@@ -43,6 +43,7 @@ router.patch('/users/:id',                crmController.updateUser);
 router.patch('/users/:id/status',         crmController.toggleUserStatus);
 router.patch('/users/:id/reset-password', crmController.resetPassword);
 router.post('/users/:id/offboard',        crmController.offboardUser);
+router.post('/users/:id/undo-offboard',   crmController.undoOffboardUser);
 router.delete('/users/:id',               crmController.deleteUser);
 
 router.get('/departments',                       departmentController.listAllDepartments);

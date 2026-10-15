@@ -6,6 +6,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
 import User, { IUser } from "../models/User.model";
+import TimeproofArchive from "../models/TimeproofArchive.model";
 import Organization from "../models/Organization.model";
 import TimeLog from "../models/TimeLog.model";
 import {
@@ -1220,11 +1221,36 @@ const deleteUser = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "You cannot delete your own account");
   }
 
-  const user = await CrmUser.findOneAndDelete({
+  const user = await CrmUser.findOne({
     _id: id,
     organizationId: actor.organizationId,
   });
   if (!user) throw new ApiError(404, "User not found");
+
+  const deletedAt = new Date();
+  await TimeproofArchive.findByIdAndUpdate(
+    user._id,
+    {
+      $setOnInsert: {
+        _id: user._id,
+        organizationId: user.organizationId,
+        fullName: user.fullName,
+        username: user.username,
+        email: user.email,
+        avatar: user.avatar,
+        role: user.role,
+        department: user.department,
+        hireDate: user.hireDate,
+        offboardedAt: user.offboardedAt ?? deletedAt,
+        archivedBy: actor._id,
+        autoDeleteEligible: true,
+      },
+      $set: { accountDeletedAt: deletedAt },
+    },
+    { upsert: true },
+  ).catch(() => {});
+
+  await CrmUser.deleteOne({ _id: user._id });
 
   res.json(new ApiResponse(200, null, "User deleted successfully"));
 });
@@ -1368,7 +1394,55 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
   await user.save({ validateModifiedOnly: true });
   revokeUserTrayDevices(user._id, "user_offboarded").catch(() => {});
 
+  await TimeproofArchive.findByIdAndUpdate(
+    user._id,
+    {
+      _id: user._id,
+      organizationId: user.organizationId,
+      fullName: user.fullName,
+      username: user.username,
+      email: user.email,
+      avatar: user.avatar,
+      role: user.role,
+      department: user.department,
+      hireDate: user.hireDate,
+      offboardedAt: user.offboardedAt,
+      archivedBy: actor._id,
+      autoDeleteEligible: true,
+    },
+    { upsert: true },
+  ).catch(() => {});
+
   res.json(new ApiResponse(200, null, "User offboarded successfully"));
+});
+
+const undoOffboardUser = asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.crmUser;
+
+  if (!actor || actor.role !== "admin") {
+    throw new ApiError(403, "Only admins can undo an offboard");
+  }
+
+  const { id } = req.params;
+
+  const user = await CrmUser.findOne({
+    _id: id,
+    organizationId: actor.organizationId,
+  });
+  if (!user) throw new ApiError(404, "User not found");
+
+  if (!user.isOffboarded) {
+    throw new ApiError(409, "User is not offboarded");
+  }
+
+  user.isActive = true;
+  user.isOffboarded = false;
+  user.offboardedAt = undefined;
+  await user.save({ validateModifiedOnly: true });
+
+  await TimeproofArchive.deleteOne({ _id: user._id }).catch(() => {});
+
+  res.json(new ApiResponse(200, null, "Offboard undone successfully"));
 });
 
 const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
@@ -1502,6 +1576,7 @@ export default {
   deleteUser,
   resetPassword,
   offboardUser,
+  undoOffboardUser,
   tokenRefresh,
   updateMeAvatar,
   getAvatar,
