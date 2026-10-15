@@ -24,6 +24,7 @@ import { initSyncScheduler } from "./schedulers/sync.scheduler";
 import { initCleanupScheduler } from "./schedulers/cleanup.scheduler";
 import { initMilestoneScheduler } from "./schedulers/milestone.scheduler";
 import { initScreenshotRetentionScheduler } from "./schedulers/screenshotRetention.scheduler";
+import { initTimeproofArchiveRetentionScheduler } from "./schedulers/timeproofArchiveRetention.scheduler";
 import { initIdleRecordingRetentionScheduler } from "./schedulers/idleRecordingRetention.scheduler";
 import { initLeadInactivityReminderScheduler } from "./schedulers/leadInactivityReminder.scheduler";
 import { initAppointmentReminderScheduler } from "./schedulers/appointmentReminder.scheduler";
@@ -224,6 +225,7 @@ if (require.main === module) {
       initCleanupScheduler();
       initMilestoneScheduler();
       initScreenshotRetentionScheduler();
+      initTimeproofArchiveRetentionScheduler();
       initIdleRecordingRetentionScheduler();
       initLeadInactivityReminderScheduler();
       initAppointmentReminderScheduler();

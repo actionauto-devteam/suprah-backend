@@ -220,7 +220,7 @@ describe('emailCampaign.controller — Phase 2 (scheduling + audience limit)', (
 
       expect(next).not.toHaveBeenCalled();
       const created = mockEmailCampaignCreate.mock.calls[0][0];
-      expect(created.bodyHtml).toBe('<p>Real content</p>');
+      expect(created.bodyHtml).toBe('<p style="margin:0 0 12px 0">Real content</p>');
       expect(created.bodyHtml).not.toContain('script');
       expect(created.bodyText).toBe('Real content');
     });

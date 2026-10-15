@@ -8,6 +8,7 @@ import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
+import TimeproofArchive from '../models/TimeproofArchive.model';
 import AgentHeartbeat from '../models/AgentHeartbeat.model';
 import ActivityInterval from '../models/ActivityInterval.model';
 import { storageService, BucketType } from '../services/storage.service';
@@ -17,6 +18,7 @@ import CrmPushService from '../services/crmPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
+import { purgeArchivedTimeproof } from '../utils/timeproofArchivePurge.util';
 import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
@@ -393,7 +395,11 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
   const { userId } = req.params;
   const { range = '90' } = req.query;
 
-  let targetPerson: { _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string; accountModel: 'CrmUser' | 'User'; hourlyRate?: number | null } | null = null;
+  let targetPerson: {
+    _id: any; fullName: string; username?: string; avatar?: string; role: string; department?: string;
+    accountModel: 'CrmUser' | 'User' | 'Archived'; hourlyRate?: number | null;
+    isOffboarded?: boolean; isArchived?: boolean; offboardedAt?: Date | null;
+  } | null = null;
   const crmTargetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('-password').lean();
   if (crmTargetUser) {
     targetPerson = {
@@ -405,6 +411,9 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       department: crmTargetUser.department,
       accountModel: 'CrmUser',
       hourlyRate: crmTargetUser.hourlyRate ?? null,
+      isOffboarded: !!crmTargetUser.isOffboarded,
+      isArchived: false,
+      offboardedAt: crmTargetUser.offboardedAt ?? null,
     };
   } else {
     const mainTargetUser = await User.findOne({ _id: userId }).lean();
@@ -416,7 +425,24 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
         role: mainTargetUser.role,
         department: (mainTargetUser.personalInfo as any)?.department,
         accountModel: 'User',
+        isArchived: false,
       };
+    } else {
+      const archived = await TimeproofArchive.findOne({ _id: userId, organizationId: requestor.organizationId }).lean();
+      if (archived) {
+        targetPerson = {
+          _id: archived._id,
+          fullName: archived.fullName,
+          username: archived.username,
+          avatar: archived.avatar,
+          role: archived.role,
+          department: archived.department,
+          accountModel: 'Archived',
+          isOffboarded: true,
+          isArchived: true,
+          offboardedAt: archived.offboardedAt,
+        };
+      }
     }
   }
   if (!targetPerson) throw new ApiError(404, 'User not found');
@@ -489,6 +515,38 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       range: { startDate, endDate },
     }, 'User timeproof fetched')
   );
+});
+
+export const getFormerEmployees = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (!['admin', 'manager'].includes(requestor.role)) {
+    throw new ApiError(403, 'Access denied');
+  }
+  const archives = await TimeproofArchive.find({ organizationId: requestor.organizationId })
+    .sort({ offboardedAt: -1 })
+    .lean();
+  res.json(new ApiResponse(200, { users: archives }, 'Former employees fetched'));
+});
+
+export const deleteFormerEmployeeTimeproof = asyncHandler(async (req: Request, res: Response) => {
+  const requestor = req.crmUser!;
+  if (requestor.role !== 'admin') {
+    throw new ApiError(403, 'Only admins can permanently delete Timeproof records');
+  }
+  const { userId } = req.params;
+  const { reason } = req.body as { reason?: string };
+  if (!reason?.trim()) {
+    throw new ApiError(400, 'A reason is required to permanently delete Timeproof records');
+  }
+
+  const archived = await TimeproofArchive.findOne({ _id: userId, organizationId: requestor.organizationId });
+  if (!archived) {
+    throw new ApiError(404, 'This user is not in the former-employees archive — only offboarded or deleted accounts can have their Timeproof records purged');
+  }
+
+  const result = await purgeArchivedTimeproof(archived, { reason: reason.trim(), performedBy: requestor._id });
+
+  res.json(new ApiResponse(200, result, `Permanently deleted Timeproof records for ${archived.fullName}`));
 });
 
 export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) => {
@@ -2766,6 +2824,8 @@ export default {
   getBlurredScreenshot,
   deleteMyScreenshot,
   wipeAllScreenshotsHandler,
+  getFormerEmployees,
+  deleteFormerEmployeeTimeproof,
   subscribeCrmPush,
   unsubscribeCrmPush,
   getCrmPushStatus,

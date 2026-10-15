@@ -1131,59 +1131,19 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         const html = `
             <!DOCTYPE html>
             <html>
-            <head>
-                <style>
-                    body {
-                        font-family: Arial, sans-serif;
-                        line-height: 1.6;
-                        color: #333;
-                        background-color: #f4f4f4;
-                        margin: 0;
-                        padding: 0;
-                    }
-                    .container {
-                        max-width: 600px;
-                        margin: 20px auto;
-                        background: white;
-                        border-radius: 8px;
-                        overflow: hidden;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    }
-                    .banner-image {
-                        width: 100%;
-                        max-height: 320px;
-                        object-fit: cover;
-                        display: block;
-                    }
-                    .content {
-                        padding: 30px;
-                        white-space: pre-line;
-                    }
-                    .footer {
-                        text-align: center;
-                        color: #6b7280;
-                        font-size: 12px;
-                        padding: 20px;
-                        background: #f9fafb;
-                        border-top: 1px solid #e5e7eb;
-                    }
-                    .footer a {
-                        color: #9ca3af;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="" class="banner-image" />` : ''}
-                    <div class="content">
-                        <p style="font-size: 16px;">${greetingHtml}</p>
-                        ${bodyHtml ? `<div style="font-size: 15px;">${bodyHtml}</div>` : `<p style="font-size: 15px;">${bodyTextHtml}</p>`}
-                        ${signOffHtml ? `<p style="font-size: 15px;">${signOffHtml}</p>` : ''}
+            <head></head>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; background-color: #f4f4f4; margin: 0; padding: 0;">
+                <div style="max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="" style="width: 100%; max-height: 320px; object-fit: cover; display: block;" />` : ''}
+                    <div style="padding: 30px;">
+                        <p style="font-size: 16px; margin: 0 0 16px 0;">${greetingHtml}</p>
+                        ${bodyHtml ? `<div style="font-size: 15px;">${bodyHtml}</div>` : `<p style="font-size: 15px; white-space: pre-line; margin: 0;">${bodyTextHtml}</p>`}
+                        ${signOffHtml ? `<p style="font-size: 15px; margin: 16px 0 0 0;">${signOffHtml}</p>` : ''}
                     </div>
-                    <div class="footer">
-                        <p><strong>${dealerName}</strong></p>
-                        <p>${mailingAddress}</p>
-                        <p><a href="${unsubscribeUrl}">Unsubscribe from automated emails</a></p>
+                    <div style="text-align: center; color: #6b7280; font-size: 12px; padding: 20px; background: #f9fafb; border-top: 1px solid #e5e7eb;">
+                        <p style="margin: 0 0 4px 0;"><strong>${dealerName}</strong></p>
+                        <p style="margin: 0 0 8px 0;">${mailingAddress}</p>
+                        <p style="margin: 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af;">Unsubscribe from automated emails</a></p>
                     </div>
                 </div>
             </body>

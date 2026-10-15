@@ -75,6 +75,29 @@ describe('email.service — sendCampaignEmail {firstName} personalization', () =
     expect(mailOptions.html).toContain('<p>Hi <strong>Jordan</strong>, here is an <a href="https://example.com">update</a>.</p>');
   });
 
+  it('carries an inline image inserted into bodyHtml straight through to the final email, alongside a top banner image', async () => {
+    await emailService.sendCampaignEmail({
+      to: 'jordan@example.com',
+      customerName: 'Jordan',
+      subject: 'Subject',
+      greetingText: 'Hi {firstName},',
+      bodyText: 'Thanks, {firstName}.',
+      bodyHtml: '<h2>New arrival</h2><p>Check it out, {firstName}.</p><img src="https://example.com/car.png" alt="New car" style="max-width:100%;height:auto;display:block;margin:8px 0;border-radius:4px" /><ul><li>Feature one</li><li>Feature two</li></ul>',
+      bannerImageUrl: 'https://example.com/banner.png',
+      organizationId: 'org-1',
+    });
+
+    const mailOptions = mockSendMail.mock.calls[0][0];
+    expect(mailOptions.html).toContain('<img src="https://example.com/banner.png"');
+    expect(mailOptions.html).toContain('<h2>New arrival</h2>');
+    expect(mailOptions.html).toContain('Check it out, Jordan.');
+    expect(mailOptions.html).toContain('<img src="https://example.com/car.png" alt="New car"');
+    expect(mailOptions.html).toContain('<li>Feature one</li>');
+    expect(mailOptions.html).not.toContain('<style>');
+    expect(mailOptions.html).not.toContain('class="content"');
+    expect(mailOptions.html).not.toContain('class="banner-image"');
+  });
+
   it('HTML-escapes a crafted contact name before inserting it into the HTML body, but keeps it literal in the subject and plain-text body', async () => {
     await emailService.sendCampaignEmail({
       to: 'attacker@example.com',
