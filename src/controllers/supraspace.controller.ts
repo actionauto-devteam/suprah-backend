@@ -1318,6 +1318,7 @@ const updateConversationNotifications = asyncHandler(async (req: Request, res: R
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const userKey = userId.toString();
   const nextPref: SupraSpaceNotifPref = { type, muted: !!muted, muteUntil: muteUntil ? new Date(muteUntil).toISOString() : null };
@@ -1473,6 +1474,7 @@ const updateConversation = asyncHandler(async (req: Request, res: Response) => {
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be updated');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const isAdmin = canManageConversation(conversation, req.crmUser!);
 
@@ -1597,6 +1599,7 @@ const updateAvatar = asyncHandler(async (req: Request, res: Response) => {
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (conversation.type !== 'group') throw new ApiError(400, 'Only channels support custom photos');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const file = (req.file as Express.Multer.File) || (req.files as Express.Multer.File[] | undefined)?.[0];
   if (!file) throw new ApiError(400, 'No image uploaded');
@@ -1631,6 +1634,7 @@ const deleteConversation = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   const isAdmin = canManageConversation(conversation, req.crmUser!);
 
@@ -1703,16 +1707,24 @@ const archiveConversation = asyncHandler(async (req: Request, res: Response) => 
   const { id } = req.params;
   const archived = req.body?.archived !== false;
 
-  const conversation = await SupraSpaceConversation.findById(id);
-  if (!conversation) throw new ApiError(404, 'Conversation not found');
-  if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  if (!mongoose.isValidObjectId(id)) throw new ApiError(400, 'Invalid conversation identifier');
 
-  if (archived) {
-    if (!idIn(conversation.archivedBy as any, userId)) conversation.archivedBy.push(userId as any);
-  } else {
-    conversation.archivedBy = conversation.archivedBy.filter((m) => m.toString() !== userId.toString()) as any;
+  // Do not read, mutate, and save the whole document here: members archiving
+  // the same conversation from different devices could otherwise overwrite
+  // each other's `archivedBy` update. These per-user transitions are
+  // deliberately atomic and idempotent.
+  const conversation = await SupraSpaceConversation.findOneAndUpdate(
+    { _id: id, members: userId, isActive: true },
+    archived
+      ? { $addToSet: { archivedBy: userId } }
+      : { $pull: { archivedBy: userId } },
+    { new: true },
+  ).select('_id');
+  if (!conversation) {
+    const exists = await SupraSpaceConversation.exists({ _id: id });
+    if (!exists) throw new ApiError(404, 'Conversation not found');
+    throw new ApiError(403, 'Not a member of this conversation');
   }
-  await conversation.save();
   try {
     // Archive state is personal, so sync only this member's open sessions.
     getIO().to(`user:${userId.toString()}`).emit('conversation:archive', {
@@ -1734,6 +1746,7 @@ const pinConversation = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   if (pinned) {
     if (!idIn(conversation.pinnedBy as any, userId)) conversation.pinnedBy.push(userId as any);
@@ -1753,6 +1766,7 @@ const markConversationUnread = asyncHandler(async (req: Request, res: Response) 
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   if (unread) {
     if (!idIn(conversation.manualUnreadBy as any, userId)) conversation.manualUnreadBy.push(userId as any);
@@ -1779,6 +1793,7 @@ const setTheme = asyncHandler(async (req: Request, res: Response) => {
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   conversation.theme = {
     accent: theme?.accent ?? null,
@@ -1803,6 +1818,7 @@ const updateMemberSettings = asyncHandler(async (req: Request, res: Response) =>
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
 
   if (nickname !== undefined && nickname !== null && typeof nickname !== 'string') {
     throw new ApiError(400, 'Invalid nickname');
@@ -3318,6 +3334,7 @@ const moveConversationToSpace = asyncHandler(async (req: Request, res: Response)
   const conversation = await SupraSpaceConversation.findById(id);
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
+  assertConversationWritable(conversation, userId);
   if (conversation.type !== 'group') throw new ApiError(400, 'Only group conversations can be moved to a space');
 
   if (spaceId) {
