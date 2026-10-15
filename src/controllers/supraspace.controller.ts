@@ -261,8 +261,10 @@ async function recomputeConversationLastMessage(conversationId: any, expectedLas
     .populate('sender', 'fullName username avatar')
     .lean();
   const storedReaction = (current as any)?.lastReaction;
-  const reactionTargetsDeletedMessage = storedReaction?.messageId?.toString?.() === lastMessageId?.toString?.();
-  const reactionMessage = !reactionTargetsDeletedMessage && storedReaction?.messageId
+  // A reaction may belong to the current latest message. Its own visibility
+  // determines whether it remains valid; comparing it with `lastMessageId`
+  // would incorrectly clear that still-visible reaction during a summary repair.
+  const reactionMessage = storedReaction?.messageId
     ? await SupraSpaceMessage.exists({
       _id: storedReaction.messageId,
       conversationId,
@@ -270,14 +272,13 @@ async function recomputeConversationLastMessage(conversationId: any, expectedLas
       scheduledStatus: { $ne: 'pending' },
     })
     : null;
-  const reactionAt = reactionMessage && storedReaction?.createdAt ? new Date(storedReaction.createdAt) : null;
-  const lastMessageAt = reactionAt && !Number.isNaN(reactionAt.getTime()) && (!latest?.createdAt || reactionAt > latest.createdAt)
-    ? reactionAt
-    : latest?.createdAt || null;
   const update: any = {
     $set: {
       lastMessage: latest?._id || null,
-      lastMessageAt,
+      // This is the shared message-ordering timestamp. Reactions are personal
+      // activity (for the reactor and message author), so they must never make
+      // the entire channel look more recent for every member.
+      lastMessageAt: latest?.createdAt || null,
     },
   };
   if (!reactionMessage) {
@@ -1088,6 +1089,30 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
     ...(deprecated.length ? { name: { $nin: deprecated } } : {}),
   };
+
+  // Reactions used to overwrite `lastMessageAt`. Repair only those legacy
+  // summaries before applying the database sort, otherwise an old reaction can
+  // still displace a genuinely recent conversation after this release.
+  const reactionSummaryCandidates = await SupraSpaceConversation.find({
+    ...baseConversationQuery,
+    lastReaction: { $ne: null },
+  })
+    .select('lastMessage lastMessageAt lastReaction')
+    .populate('lastMessage', 'createdAt isDeleted scheduledStatus')
+    .lean();
+  const staleReactionSummaryIds = reactionSummaryCandidates
+    .filter((conversation: any) => {
+      const reactionAt = new Date(conversation.lastReaction?.createdAt || 0).getTime();
+      const messageAt = new Date(conversation.lastMessage?.createdAt || 0).getTime();
+      const summaryAt = new Date(conversation.lastMessageAt || 0).getTime();
+      return Number.isFinite(reactionAt)
+        && reactionAt > messageAt
+        && summaryAt === reactionAt;
+    })
+    .map((conversation: any) => conversation._id);
+  if (staleReactionSummaryIds.length) {
+    await Promise.all(staleReactionSummaryIds.map((conversationId: any) => recomputeConversationLastMessage(conversationId)));
+  }
 
   let conversationQuery = SupraSpaceConversation.find(baseConversationQuery)
     .populate('members', 'fullName username avatar role')
@@ -2570,7 +2595,8 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
   const targetUserId = message.sender.toString();
   const reactorName = (req.crmUser as any)?.fullName || 'Someone';
   let reactionActivity: any = undefined;
-  let conversationLastMessageAt: string | null | undefined = undefined;
+  let reactionActorId: string | undefined;
+  let reactionTargetUserId: string | undefined;
 
   if (reactionAdded) {
     const dbReactionActivity = {
@@ -2583,10 +2609,9 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
     };
     await SupraSpaceConversation.updateOne(
       { _id: message.conversationId },
-      { $set: { lastReaction: dbReactionActivity, lastMessageAt: reactionCreatedAt } }
+      { $set: { lastReaction: dbReactionActivity } }
     );
     (conversation as any).lastReaction = dbReactionActivity;
-    (conversation as any).lastMessageAt = reactionCreatedAt;
     reactionActivity = {
       messageId: messageIdString,
       userId: userId.toString(),
@@ -2595,7 +2620,6 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
       targetUserId,
       createdAt: reactionCreatedAt.toISOString(),
     };
-    conversationLastMessageAt = reactionCreatedAt.toISOString();
     notifyMessageReaction({
       conversation,
       targetUserId,
@@ -2613,17 +2637,6 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
       storedReaction?.emoji === emojiValue;
 
     if (shouldClearLastReaction) {
-      const lastMessageDoc = (conversation as any).lastMessage
-        ? await SupraSpaceMessage.findById((conversation as any).lastMessage).select('createdAt').lean()
-        : await SupraSpaceMessage.findOne({
-          conversationId: message.conversationId,
-          isDeleted: false,
-          scheduledStatus: { $ne: 'pending' },
-        }).sort({ createdAt: -1 }).select('createdAt').lean();
-      const restoredLastMessageAt = (lastMessageDoc as any)?.createdAt || null;
-      const clearUpdate: any = { $unset: { lastReaction: '' } };
-      if (restoredLastMessageAt) clearUpdate.$set = { lastMessageAt: restoredLastMessageAt };
-      else clearUpdate.$unset.lastMessageAt = '';
       await SupraSpaceConversation.updateOne(
         {
           _id: message.conversationId,
@@ -2631,10 +2644,11 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
           'lastReaction.userId': userId,
           'lastReaction.emoji': emojiValue,
         },
-        clearUpdate,
+        { $unset: { lastReaction: '' } },
       );
       reactionActivity = null;
-      conversationLastMessageAt = restoredLastMessageAt ? restoredLastMessageAt.toISOString() : null;
+      reactionActorId = userId.toString();
+      reactionTargetUserId = targetUserId;
     }
   }
 
@@ -2643,7 +2657,8 @@ const reactToMessage = asyncHandler(async (req: Request, res: Response) => {
     messageId: messageIdString,
     reactions: message.reactions,
     reactionActivity,
-    conversationLastMessageAt,
+    reactionActorId,
+    reactionTargetUserId,
   };
   emitToConversation(conversation, 'message:reaction', payload);
   res.json(new ApiResponse(200, payload, 'Reaction updated'));
