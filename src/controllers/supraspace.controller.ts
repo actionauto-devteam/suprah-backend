@@ -1992,7 +1992,54 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
   }, 'Attachments fetched'));
 });
 
-/** GET /api/supraspace/conversations/:id/search?q=  — search inside a conversation */
+/** GET /api/supraspace/conversations/:id/pinned-messages
+ *
+ * Pins belong to the conversation, not to the device that created them. Keep
+ * this separate from the paginated timeline so older pins remain discoverable
+ * after a refresh or on another client.
+ */
+const getPinnedMessages = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.crmUser!._id;
+  const { id } = req.params;
+  const requestedLimit = Math.min(Math.max(parseInt(String(req.query.limit ?? '100'), 10) || 100, 1), 250);
+
+  const conversation = await SupraSpaceConversation.findById(id).lean();
+  if (!conversation) throw new ApiError(404, 'Conversation not found');
+  if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
+
+  const filter: any = {
+    conversationId: id,
+    isDeleted: false,
+    scheduledStatus: { $ne: 'pending' },
+    pinnedBy: { $exists: true, $ne: [] },
+  };
+  const createdAtFilter: any = {};
+  const rawClearedAt = (conversation as any).clearedAt?.[userId.toString()];
+  if (rawClearedAt) createdAtFilter.$gt = rawClearedAt instanceof Date ? rawClearedAt : new Date(rawClearedAt);
+  const leftAt = getConversationLeftAt(conversation, userId);
+  if (leftAt) createdAtFilter.$lte = leftAt;
+  if (Object.keys(createdAtFilter).length > 0) filter.createdAt = createdAtFilter;
+
+  const messages = await SupraSpaceMessage.find(filter)
+    .populate('sender', 'fullName username avatar')
+    .sort({ pinnedAt: -1, _id: -1 })
+    .limit(requestedLimit)
+    .lean();
+  const fallbackSender = (message: any) => ({
+    _id: message.metadata?.customerUserId || 'unknown',
+    fullName: message.metadata?.customerName || 'Customer',
+    username: message.metadata?.customerUserId || 'customer',
+    avatar: message.metadata?.customerAvatar || null,
+    isCustomer: true,
+  });
+  const signed = await Promise.all(messages.map((message: any) => signAttachments({
+    ...message,
+    sender: message.sender || fallbackSender(message),
+  })));
+
+  res.json(new ApiResponse(200, { items: signed }, 'Pinned messages fetched'));
+});
+
 const getConversationThreadReport = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
   const { id } = req.params;
@@ -2670,19 +2717,25 @@ const pinMessage = asyncHandler(async (req: Request, res: Response) => {
   const pinned = req.body?.pinned !== false;
 
   const message = await SupraSpaceMessage.findById(messageId);
-  if (!message || message.isDeleted) throw new ApiError(404, 'Message not found');
+  if (!message || message.isDeleted || message.scheduledStatus === 'pending') throw new ApiError(404, 'Message not found');
 
   const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
   assertConversationWritable(conversation, userId);
 
-  const alreadyPinned = idIn(message.pinnedBy as any, userId);
+  const alreadyPinned = (message.pinnedBy || []).length > 0;
   if (pinned) {
-    if (!alreadyPinned) message.pinnedBy.push(userId as any);
-    message.pinnedAt = message.pinnedAt || new Date();
+    // A message pin is shared by the whole conversation. `pinnedBy` is the
+    // actor audit field, not a collection of per-member pin votes.
+    if (!alreadyPinned) {
+      message.pinnedBy = [userId as any];
+      message.pinnedAt = new Date();
+    }
   } else {
-    message.pinnedBy = message.pinnedBy.filter((u) => u.toString() !== userId.toString()) as any;
-    if (message.pinnedBy.length === 0) message.pinnedAt = null;
+    // Every member who can see the shared pin can remove it from the
+    // conversation, matching the controls exposed by the clients.
+    message.pinnedBy = [];
+    message.pinnedAt = null;
   }
   await message.save();
 
@@ -3341,6 +3394,7 @@ const supraSpaceController = {
   getMessages,
   getDeliveredMessage,
   getConversationAttachments,
+  getPinnedMessages,
   getConversationThreadReport,
   searchInConversation,
   searchGifs,

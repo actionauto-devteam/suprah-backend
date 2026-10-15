@@ -124,6 +124,7 @@ router.patch('/conversations/:id/member-settings', supraSpaceController.updateMe
 router.get('/conversations/:id/messages',   supraSpaceController.getMessages);
 router.get('/conversations/:id/messages/:messageId', supraSpaceController.getDeliveredMessage);
 router.get('/conversations/:id/attachments', supraSpaceController.getConversationAttachments);
+router.get('/conversations/:id/pinned-messages', supraSpaceController.getPinnedMessages);
 router.get('/conversations/:id/thread-report', supraSpaceController.getConversationThreadReport);
 router.get('/conversations/:id/search',     supraSpaceController.searchInConversation);
 router.post('/conversations/:id/messages',  supraSpaceController.sendMessage);
