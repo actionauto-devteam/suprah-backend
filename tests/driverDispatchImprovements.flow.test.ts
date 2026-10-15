@@ -239,6 +239,57 @@ describe('Driver account approval', () => {
     const load = await seedLoad();
     await assign(load._id, applicant.user._id).expect(200);
   });
+
+  it('approve, then reject from another admin: the second decision is refused and names who decided', async () => {
+    const applicant = await createDriver('decided-once', false);
+    const pending = await DriverRequest.create({ driverUserId: applicant.user._id, status: 'pending' });
+    const otherAdmin = await User.create({
+      email: `superadmin-2${TEST_EMAIL_DOMAIN}`,
+      name: 'Second Super Admin',
+      role: 'super_admin',
+      organizationId: org._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const otherToken = tokenService.generateAccessToken(otherAdmin as any);
+
+    await request(app).patch(`/api/driver-requests/${pending._id}/approve`).set(auth(superAdminToken)).expect(200);
+    const refused = await request(app)
+      .patch(`/api/driver-requests/${pending._id}/reject`)
+      .set(auth(otherToken))
+      .expect(409);
+    expect(refused.body.message).toBe(
+      'This application was already approved by Suprah Super Admin. Refresh to see the latest status.',
+    );
+    expect((await DriverRequest.findById(pending._id))!.status).toBe('approved');
+    expect(((await User.findById(applicant.user._id)) as any).isApproved).toBe(true);
+  });
+
+  it('approve and reject at the same moment: exactly one wins and the driver ends up consistent', async () => {
+    for (let round = 0; round < 5; round++) {
+      const applicant = await createDriver(`same-moment-${round}`, false);
+      const pending = await DriverRequest.create({ driverUserId: applicant.user._id, status: 'pending' });
+      const [approve, reject] = await Promise.all([
+        request(app).patch(`/api/driver-requests/${pending._id}/approve`).set(auth(superAdminToken)),
+        request(app).patch(`/api/driver-requests/${pending._id}/reject`).set(auth(superAdminToken)),
+      ]);
+      expect([approve.status, reject.status].sort()).toEqual([200, 409]);
+
+      const approvedWon = approve.status === 200;
+      const finalRequest: any = await DriverRequest.findById(pending._id);
+      const finalUser: any = await User.findById(applicant.user._id);
+      expect(finalRequest.status).toBe(approvedWon ? 'approved' : 'rejected');
+      expect(finalUser.isApproved).toBe(approvedWon);
+      // The driver is told about one decision only.
+      expect(
+        await Notification.countDocuments({
+          userId: applicant.user._id,
+          type: { $in: ['driver_request_approved', 'driver_request_rejected'] },
+        }),
+      ).toBe(1);
+    }
+  });
 });
 
 // ─── Load lifecycle with the new driver features ────────────────────────────

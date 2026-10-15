@@ -479,10 +479,20 @@ export async function approveDriverVerification(args: {
     invalidateUserCache(args.driverId);
 
     if (driverRequest?.status === "pending") {
-      driverRequest.status = "approved";
-      driverRequest.reviewedBy = args.reviewer._id as any;
-      driverRequest.reviewedAt = new Date();
-      await driverRequest.save();
+      // Only while still pending: another super admin may have rejected the
+      // application a moment ago. Losing that race undoes this approval below.
+      const settled = await DriverRequest.findOneAndUpdate(
+        { _id: driverRequest._id, status: "pending" },
+        { $set: { status: "approved", reviewedBy: args.reviewer._id, reviewedAt: new Date() } },
+        { new: true },
+      );
+      if (!settled) {
+        throw new ApiError(
+          409,
+          "Another admin decided this driver's application a moment ago. Refresh the driver's page to see the latest status before approving.",
+        );
+      }
+      driverRequest = settled;
     } else if (!driverRequest) {
       // Driver invite-link registration can legitimately reach verification
       // without a pre-existing DriverRequest. The driver dashboard still uses

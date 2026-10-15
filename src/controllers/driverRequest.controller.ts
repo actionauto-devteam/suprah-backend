@@ -135,34 +135,76 @@ const getDriverRequestByDriver = asyncHandler(
   },
 );
 
+// Why an application can't be decided: it doesn't exist, or another super
+// admin already approved or rejected it (possibly a moment ago).
+async function alreadyDecidedError(requestId: string) {
+  const existing: any = await DriverRequest.findById(requestId)
+    .select("status reviewedBy")
+    .populate("reviewedBy", "name")
+    .lean();
+  if (!existing) return new ApiError(404, "Driver request not found");
+  if (existing.status === "pending") {
+    return new ApiError(409, "This application is being decided right now. Refresh and try again.");
+  }
+  const by = existing.reviewedBy?.name ? ` by ${existing.reviewedBy.name}` : "";
+  return new ApiError(
+    409,
+    `This application was already ${existing.status}${by}. Refresh to see the latest status.`,
+  );
+}
+
 const approveDriverRequest = asyncHandler(
   async (req: Request, res: Response) => {
     // Route is super_admin-only (see driverRequest.routes.ts).
     const adminUser = req.user as IUser;
 
-    let request = await DriverRequest.findOne({
+    const pending = await DriverRequest.findOne({
       _id: req.params.id,
       status: "pending",
-    });
+    })
+      .select("driverUserId")
+      .lean<{ driverUserId: unknown } | null>();
 
-    if (!request) {
-      throw new ApiError(404, "Driver request not found or already processed");
+    if (!pending) {
+      throw await alreadyDecidedError(req.params.id);
     }
 
-    const driverUser = await User.findById(request.driverUserId);
+    const driverUser = await User.findById(pending.driverUserId);
     if (!driverUser) {
       throw new ApiError(404, "Driver user not found");
+    }
+
+    // Take the decision in one step, and only while the application is still
+    // pending, so an approve and a reject made at the same moment can't both
+    // succeed: the second one is refused.
+    const request = await DriverRequest.findOneAndUpdate(
+      { _id: req.params.id, status: "pending" },
+      { $set: { status: "approved", reviewedBy: adminUser._id, reviewedAt: new Date() } },
+      { new: true },
+    );
+    if (!request) {
+      throw await alreadyDecidedError(req.params.id);
     }
 
     // A super admin approves the account right away, without waiting for
     // documents: the driver can sign in and be given loads. Document
     // verification stays its own review (Driver Review Center / Approve
     // Driver), so the verification status and compliance warnings don't change.
-    const approvalResult = await approveDriverAccount({
-      driverId: driverUser._id.toString(),
-      reviewer: adminUser,
-      organizationId: "global",
-    });
+    let approvalResult: Awaited<ReturnType<typeof approveDriverAccount>>;
+    try {
+      approvalResult = await approveDriverAccount({
+        driverId: driverUser._id.toString(),
+        reviewer: adminUser,
+        organizationId: "global",
+      });
+    } catch (error) {
+      // The account wasn't approved, so the application goes back to pending.
+      await DriverRequest.updateOne(
+        { _id: request._id, status: "approved" },
+        { $set: { status: "pending" }, $unset: { reviewedBy: 1, reviewedAt: 1 } },
+      ).catch(() => {});
+      throw error;
+    }
 
     // Keep a non-null request reference after the shared approval service.
     // The service approves the pending request (or creates the approved one
@@ -264,19 +306,16 @@ const rejectDriverRequest = asyncHandler(
     // Route is super_admin-only (see driverRequest.routes.ts).
     const adminUser = req.user as IUser;
 
-    const request = await DriverRequest.findOne({
-      _id: req.params.id,
-      status: "pending",
-    });
+    // One step, only while still pending: see approveDriverRequest.
+    const request = await DriverRequest.findOneAndUpdate(
+      { _id: req.params.id, status: "pending" },
+      { $set: { status: "rejected", reviewedBy: adminUser._id, reviewedAt: new Date() } },
+      { new: true },
+    );
 
     if (!request) {
-      throw new ApiError(404, "Driver request not found or already processed");
+      throw await alreadyDecidedError(req.params.id);
     }
-
-    request.status = "rejected";
-    request.reviewedBy = adminUser._id as any;
-    request.reviewedAt = new Date();
-    await request.save();
     // Dispatch screens already showing this driver update right away.
     emitDriverPoolChange(String(request.driverUserId));
 
