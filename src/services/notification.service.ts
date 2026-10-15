@@ -43,6 +43,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   load_details_changed: 'transportation',
   driver_payout: 'transportation',
   driver_document_verified: 'transportation', driver_document_rejected: 'transportation',
+  driver_document_expiring: 'transportation',
   driver_profile_approved: 'transportation',
 
   vehicle_added: 'inventory', vehicle_updated: 'inventory', vehicle_sold: 'inventory',
@@ -316,6 +317,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       load_delivered: metadata?.route || '/transportation',
       load_details_changed: metadata?.route || '/driver-tracker',
       driver_payout: '/driver/earnings',
+      driver_document_expiring: metadata?.route || '/driver/documents',
       payment_request: metadata?.route || '/customer/payments',
       payment_received: metadata?.route || '/billing',
       payment_pending: metadata?.route || '/billing',

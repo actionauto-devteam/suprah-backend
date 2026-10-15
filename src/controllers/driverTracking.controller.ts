@@ -28,6 +28,7 @@ import User, { IUser } from "../models/User.model";
 import DriverProfile, {
   REQUIRED_COMPLIANCE_DOCS,
   complianceExpiryItems,
+  expiringSoonItems,
   describeComplianceItems,
   isComplianceExpiredAt,
 } from "../models/DriverProfile.model";
@@ -295,8 +296,22 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
     driverRequests: _driverRequests,
     pricing: _pricing,
     notes: _staffNotes,
+    arrivals: _arrivals,
+    // Drivers read their condition report (with photo links) from /condition.
+    conditionReports: _conditionReports,
+    deliverySignature: _deliverySignature,
     ...rest
   } = source;
+
+  // Only this driver's own "I've arrived" taps (an earlier driver's don't count).
+  const myArrivals = Object.fromEntries(
+    (["pickup", "delivery"] as const).flatMap((stop) => {
+      const arrival = source.arrivals?.[stop];
+      return arrival?.at && String(arrival.driverId ?? "") === String(driverId)
+        ? [[stop, { at: arrival.at }]]
+        : [];
+    }),
+  );
 
   return {
     ...rest,
@@ -306,6 +321,7 @@ function sanitizeLoadForDriver(load: any, driverId: string) {
     ...(driverContract ? { driverContract } : {}),
     ...(proofOfPickup ? { proofOfPickup } : {}),
     ...(proofOfDelivery ? { proofOfDelivery } : {}),
+    ...(Object.keys(myArrivals).length ? { arrivals: myArrivals } : {}),
     // Opaque material version only; internal assignment fingerprints and
     // dispatcher override decisions never leave the server.
     acceptanceMaterialVersion: getLoadAcceptanceMaterialVersion(source),
@@ -753,12 +769,16 @@ function compatibilityNoticeMessages(compatibility: any): string[] {
       `Pickup is outside your regular Work Availability${pickupDay ? ` (${pickupDay})` : ""}.`,
     );
   }
-  if (compatibility.capacity?.status === "exceeded") {
+  if (compatibility.capacity?.status !== "match" && !compatibility.trailer?.driverTrailerType) {
     messages.push(
-      `This load has ${compatibility.capacity.requiredVehicles} vehicle(s), above your configured capacity of ${compatibility.capacity.maxVehicles}.`,
+      "You haven't set up your trailer yet. On the Equipment page, choose your trailer type and how many vehicles it carries, so Dispatch can see which loads fit.",
+    );
+  } else if (compatibility.capacity?.status === "exceeded") {
+    messages.push(
+      `This load has ${compatibility.capacity.requiredVehicles} vehicles, more than the ${compatibility.capacity.maxVehicles} your trailer is set to carry. If your trailer can carry more, update it on the Equipment page.`,
     );
   } else if (compatibility.capacity?.status === "unknown") {
-    messages.push("Your vehicle capacity could not be verified for this load.");
+    messages.push("We couldn't check this load against your trailer. Check your trailer details on the Equipment page.");
   }
   if (compatibility.trailer?.status === "mismatch") {
     messages.push(
@@ -3325,7 +3345,7 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
       DriverProfile.findOne({
         userId: user._id,
       })
-        .select("profileCompletionScore isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate")
+        .select("profileCompletionScore isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate documents.type documents.label documents.expiresAt documents.reviewStatus trailerType")
         .lean(),
 
       // Earnings are authoritative only after a payout reaches paid. Because
@@ -3352,16 +3372,28 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
       ? payoutTotals[0].total
       : 0;
 
+  const complianceExpiredItems = complianceExpiryItems(profile)
+    .filter((item) => item.expired)
+    .map(({ label, date }) => ({ label, date }));
+  const expiredLabels = new Set(complianceExpiredItems.map((item) => item.label));
+
   const data = {
     pendingRequests,
     totalEarnings,
     profileCompletionScore: profile?.profileCompletionScore ?? 0,
     isComplianceExpired: isComplianceExpiredAt(profile),
     // The driver's own credentials that have expired, so the Driver Page can say which.
-    complianceExpiredItems: complianceExpiryItems(profile)
-      .filter((item) => item.expired)
-      .map(({ label, date }) => ({ label, date })),
+    complianceExpiredItems,
+    // Credentials and documents expiring within 30 days (the same items the
+    // Documents page shows as "Xd left"), so the Driver Page can remind them
+    // to renew. One already shown as expired isn't repeated.
+    complianceExpiringItems: expiringSoonItems(profile, 30)
+      .filter((item) => !expiredLabels.has(item.label))
+      .map(({ label, date, daysLeft }) => ({ label, date, daysLeft })),
     completedLoads,
+    // Whether the driver has told us their trailer (type and how many vehicles
+    // it carries). Until then their capacity is the default of 1 vehicle.
+    trailerSetUp: Boolean(profile?.trailerType),
   };
 
   return res
@@ -6453,6 +6485,88 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   return res.status(200).json(new ApiResponse(200, load, "Route started"));
 });
 
+// Which load statuses each "I've arrived" stop applies to.
+const ARRIVAL_STOP_STATUSES: Record<"pickup" | "delivery", readonly string[]> = {
+  pickup: ["Accepted"],
+  delivery: ["Picked Up", "In-Transit"],
+};
+
+// POST /api/driver-tracking/loads/:id/arrive   { stop: "pickup" | "delivery" }
+// The driver tells Dispatch they've arrived at the pickup or the delivery. The
+// time is kept (with the driver) so Dispatch can see how long the driver
+// waited there before pickup or delivery. It doesn't change the load status.
+const markArrived = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const stop: unknown = req.body?.stop;
+  if (stop !== "pickup" && stop !== "delivery") {
+    throw new ApiError(400, "Choose whether you've arrived at the pickup or the delivery.");
+  }
+
+  let load = await Load.findOne({ _id: req.params.id });
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+  const organizationId = load.organizationId as unknown as string;
+  requireAssignedDriver(load, user._id.toString());
+
+  // A repeat (double tap, or a retry after a lost response) is a success.
+  const existing = (load as any).arrivals?.[stop];
+  if (existing?.at && String(existing.driverId ?? "") === user._id.toString()) {
+    return res
+      .status(200)
+      .json(new ApiResponse(200, sanitizeLoadForDriver(load, user._id.toString()), "Arrival already recorded"));
+  }
+  if (!ARRIVAL_STOP_STATUSES[stop].includes(load.status)) {
+    throw new ApiError(
+      400,
+      stop === "pickup"
+        ? `You can tell Dispatch you've arrived at the pickup after accepting load ${load.loadNumber} and before picking it up.`
+        : `You can tell Dispatch you've arrived at the delivery once load ${load.loadNumber} is picked up.`,
+    );
+  }
+
+  const place = stop === "pickup" ? load.pickupLocation : load.deliveryLocation;
+  const where = [place?.city, place?.state].filter(Boolean).join(", ");
+  const notice = {
+    organizationId,
+    type: stop === "pickup" ? "shipment_arrived_at_pickup" : "shipment_arrived_at_delivery",
+    title: stop === "pickup" ? "Driver Arrived at Pickup" : "Driver Arrived at Delivery",
+    message: `${user.name} arrived at the ${stop}${where ? ` in ${where}` : ""} for load ${load.loadNumber}`,
+    metadata: {
+      loadId: load._id.toString(),
+      loadNumber: load.loadNumber,
+      route: `/transportation/load/${encodeURIComponent(load._id.toString())}`,
+    },
+  };
+  // The dispatcher in charge hears about it; without one, the org admins do.
+  const dispatchOwnerId = String((load as any).dispatchOwnerId ?? "").trim();
+  const arrivalOutbox = [
+    lifecycleSyncEvent(organizationId, [user._id.toString()], load._id.toString()),
+    dispatchOwnerId && dispatchOwnerId !== user._id.toString()
+      ? lifecycleUserNotificationEvent({ userId: dispatchOwnerId, ...notice })
+      : lifecycleAdminNotificationEvent({ ...notice, excludeUserId: user._id.toString() }),
+  ];
+
+  load = await updateLoadIfCurrent({
+    load,
+    actorId: user._id.toString(),
+    expected: {
+      organizationId,
+      status: load.status,
+      assignedDriverId: user._id,
+    },
+    update: appendLoadLifecycleOutbox(
+      { $set: { [`arrivals.${stop}`]: { at: new Date(), driverId: user._id } } },
+      arrivalOutbox,
+    ),
+    action: "recording your arrival",
+  });
+
+  await flushLifecycleOutbox(load._id.toString());
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, sanitizeLoadForDriver(load, user._id.toString()), "Arrival recorded"));
+});
+
 // POST /api/driver-tracking/loads/:id/deliver
 // Driver completes an in-transit load only after the existing proof-of-delivery
 // upload flow has successfully stored a proof image. Proof verification remains
@@ -8163,6 +8277,7 @@ export default {
   acceptLoad,
   markPickedUp,
   startRoute,
+  markArrived,
   completeDelivery,
   markLoadDeliveredByDispatch,
   requestLoadRelease,

@@ -8,6 +8,8 @@ import User from "../models/User.model";
 import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
 import notificationService from "./notification.service";
+import { emitDriverPoolChange } from "../utils/socketEmitter";
+import { invalidateUserCache } from "../utils/cache.util";
 
 export interface DriverVerificationEligibility {
   eligible: boolean;
@@ -324,6 +326,77 @@ export async function reviewDriverDocument(args: {
   return profile;
 }
 
+/**
+ * Approves a driver's account right away (super admin only, enforced by the
+ * route), without waiting for documents: the driver can sign in, use the
+ * Driver Portal and be given loads. Document verification stays its own
+ * review, so the verification status and Dispatch's compliance warnings are
+ * unchanged. Every pending application of this driver is approved together,
+ * which also settles any duplicate pending copies.
+ */
+export async function approveDriverAccount(args: {
+  driverId: string;
+  reviewer: any;
+  organizationId?: string | null;
+}) {
+  const driverUser: any = await User.findById(args.driverId);
+  if (!driverUser) throw new ApiError(404, "We couldn't find this driver's account. It may have been deactivated.");
+
+  const previousUserState = {
+    role: driverUser.role,
+    isApproved: driverUser.isApproved,
+    onboardingCompleted: driverUser.onboardingCompleted,
+  };
+  const reviewedAt = new Date();
+
+  driverUser.role = "driver";
+  driverUser.isApproved = true;
+  driverUser.onboardingCompleted = true;
+  await driverUser.save();
+  // Sign-in checks read a cached copy of the account for up to a minute; drop
+  // it so the driver's next request already counts as approved.
+  invalidateUserCache(args.driverId);
+
+  let request: any;
+  try {
+    await DriverRequest.updateMany(
+      { driverUserId: args.driverId, status: "pending" },
+      { $set: { status: "approved", reviewedBy: args.reviewer._id, reviewedAt } },
+    );
+    // The Driver Portal reads the latest application, so it must be approved.
+    request = await DriverRequest.findOne({ driverUserId: args.driverId }).sort({ createdAt: -1 });
+    if (!request || request.status !== "approved") {
+      request = await DriverRequest.create({
+        driverUserId: args.driverId,
+        status: "approved",
+        reviewedBy: args.reviewer._id,
+        reviewedAt,
+      });
+    }
+  } catch (error) {
+    // No transactions here: undo the account change so it never stands alone.
+    await User.findByIdAndUpdate(args.driverId, { $set: previousUserState }).catch(() => {});
+    invalidateUserCache(args.driverId);
+    throw error;
+  }
+
+  await recordDriverReviewEvent({
+    driverId: args.driverId,
+    actor: args.reviewer,
+    action: "account_approved",
+    targetType: "access",
+    targetId: String(request._id),
+    previousStatus: previousUserState.isApproved === false ? "pending" : "approved",
+    newStatus: "approved",
+    organizationId: args.organizationId,
+  });
+
+  // Dispatch screens already showing this driver update right away.
+  emitDriverPoolChange(args.driverId);
+
+  return { user: driverUser, request };
+}
+
 export async function approveDriverVerification(args: {
   driverId: string;
   reviewer: any;
@@ -403,6 +476,7 @@ export async function approveDriverVerification(args: {
     driverUser.onboardingCompleted = true;
     await driverUser.save();
     userApprovalSaved = true;
+    invalidateUserCache(args.driverId);
 
     if (driverRequest?.status === "pending") {
       driverRequest.status = "approved";
@@ -434,6 +508,7 @@ export async function approveDriverVerification(args: {
       await User.findByIdAndUpdate(args.driverId, {
         $set: previousUserState,
       }).catch(() => {});
+      invalidateUserCache(args.driverId);
     }
 
     throw error;
@@ -452,6 +527,9 @@ export async function approveDriverVerification(args: {
       driverRequestId: driverRequest?._id?.toString?.(),
     },
   });
+
+  // Dispatch screens already showing this driver update right away.
+  emitDriverPoolChange(args.driverId);
 
   try {
     await notificationService.createNotification({

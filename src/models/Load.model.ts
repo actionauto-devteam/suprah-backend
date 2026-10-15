@@ -1,5 +1,11 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 import { businessDateCompactKey } from "../utils/businessDate";
+import {
+  CONDITION_AREAS,
+  CONDITION_DAMAGE_TYPES,
+  CONDITION_STOPS,
+  SIGNATURE_DATA_URL_MAX_LENGTH,
+} from "../constants/conditionReport";
 
 export type LoadStatus =
   | "Draft"
@@ -107,6 +113,32 @@ export interface ILoad extends Document {
   pickedUpAt?: Date;
   inTransitAt?: Date;
   deliveredAt?: Date;
+  /** "I've arrived" taps, with the driver who tapped (see the schema). */
+  arrivals?: {
+    pickup?: { at?: Date; driverId?: mongoose.Types.ObjectId };
+    delivery?: { at?: Date; driverId?: mongoose.Types.ObjectId };
+  };
+  /** Driver's vehicle condition reports (see conditionReportSchema). */
+  conditionReports?: Array<{
+    _id: mongoose.Types.ObjectId;
+    stop: "pickup" | "delivery";
+    vehicleIndex: number;
+    driverId: mongoose.Types.ObjectId;
+    driverName?: string;
+    photos: Array<{ _id: mongoose.Types.ObjectId; key: string; uploadedAt?: Date }>;
+    damageAreas: string[];
+    damageTypes: string[];
+    note?: string;
+    updatedAt?: Date;
+  }>;
+  /** The customer's signature at delivery, taken on the driver's phone. */
+  deliverySignature?: {
+    signerName: string;
+    signatureDataUrl: string;
+    signedAt: Date;
+    driverId: mongoose.Types.ObjectId;
+    driverName?: string;
+  };
   deliveryOverride?: Record<string, any>;
   createdAt: Date;
   updatedAt: Date;
@@ -304,6 +336,36 @@ const loadAssignmentHistorySchema = new Schema(
   { _id: true },
 );
 
+// One vehicle's condition at one stop, as recorded by the assigned driver:
+// photos (private storage keys, signed when shown), the damaged areas tapped
+// on the outline, the kinds of damage, and a note. Kept with the driver, so
+// a reassigned load's new driver starts their own report.
+const conditionReportSchema = new Schema(
+  {
+    stop: { type: String, enum: CONDITION_STOPS, required: true },
+    vehicleIndex: { type: Number, min: 0, max: 19, required: true },
+    driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    driverName: { type: String, trim: true, maxlength: 200 },
+    photos: {
+      type: [
+        new Schema(
+          {
+            key: { type: String, required: true },
+            uploadedAt: { type: Date, default: Date.now },
+          },
+          { _id: true },
+        ),
+      ],
+      default: [],
+    },
+    damageAreas: { type: [{ type: String, enum: CONDITION_AREAS }], default: [] },
+    damageTypes: { type: [{ type: String, enum: CONDITION_DAMAGE_TYPES }], default: [] },
+    note: { type: String, trim: true, maxlength: 1000, default: "" },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: true },
+);
+
 const loadSchema = new Schema<ILoad>(
   {
     organizationId: { type: String, required: true, index: true },
@@ -484,6 +546,34 @@ const loadSchema = new Schema<ILoad>(
     pickedUpAt: { type: Date },
     inTransitAt: { type: Date },
     deliveredAt: { type: Date },
+    // When the assigned driver said they arrived at each stop, so Dispatch can
+    // see how long they waited before pickup or delivery. Kept with the
+    // driver who tapped: after a reassignment, an earlier driver's arrival
+    // no longer counts and the new driver starts fresh.
+    arrivals: {
+      pickup: {
+        at: { type: Date },
+        driverId: { type: Schema.Types.ObjectId, ref: "User" },
+      },
+      delivery: {
+        at: { type: Date },
+        driverId: { type: Schema.Types.ObjectId, ref: "User" },
+      },
+    },
+    conditionReports: { type: [conditionReportSchema], default: undefined },
+    deliverySignature: {
+      type: new Schema(
+        {
+          signerName: { type: String, trim: true, maxlength: 200, required: true },
+          signatureDataUrl: { type: String, maxlength: SIGNATURE_DATA_URL_MAX_LENGTH, required: true },
+          signedAt: { type: Date, required: true },
+          driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+          driverName: { type: String, trim: true, maxlength: 200 },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
     // Set when Dispatch marked the load Delivered instead of the driver
     // (markLoadDeliveredByDispatch): who, when, why and from which status.
     deliveryOverride: {

@@ -8,7 +8,7 @@ import membershipService from './membership.service';
 import { ApiError } from '../utils/ApiError';
 import mongoose from 'mongoose';
 import Organization from '../models/Organization.model';
-import DriverRequest from '../models/DriverRequest.model';
+import { findOrCreatePendingDriverRequest } from './driverApplication.service';
 import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
 
@@ -594,13 +594,10 @@ class AuthService {
     // can reuse the same DriverRequest + super_admin notification flow.
     async ensureDriverRequest(user: IUser) {
         try {
-            const existingRequest = await DriverRequest.findOne({ driverUserId: user._id, status: 'pending' });
-            if (!existingRequest) {
-                const driverRequest = await DriverRequest.create({
-                    driverUserId: user._id,
-                    status: 'pending'
-                });
-
+            // One step, so two sign-up attempts at once can't create two
+            // applications; admins are notified only when one is created.
+            const { request: driverRequest, created } = await findOrCreatePendingDriverRequest(user._id);
+            if (created) {
                 // Drivers are a shared platform-wide pool — only the SUPRAH.AI
                 // super_admin reviews and approves new driver applications.
                 const recipients = await User.find({ role: 'super_admin' });

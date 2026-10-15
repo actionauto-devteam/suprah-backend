@@ -25,8 +25,10 @@ import { runDriverComplianceExpirySweep } from '../../src/schedulers/driverCompl
 // The hourly sweep that keeps the stored isComplianceExpired flag current for
 // driver lists, counts and assign warnings.
 describe('runDriverComplianceExpirySweep', () => {
+  // Oct 8, 6:00 AM MDT: credentials dated Oct 8 or earlier have expired, so
+  // anything stored before the start of Oct 9 counts.
   const now = Date.parse('2026-10-08T12:00:00Z');
-  const cutoff = new Date(now);
+  const cutoff = new Date('2026-10-09T00:00:00Z');
   const anyExpired = [
     { licenseExpirationDate: { $lt: cutoff } },
     { medicalCardExpirationDate: { $lt: cutoff } },

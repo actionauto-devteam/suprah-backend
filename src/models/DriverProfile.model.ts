@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
+import { businessDateParts } from "../utils/businessDate";
 
 // The compliance meter currently requires only the driver's license.
 // Keep this synchronized with REQUIRED_DOCUMENTS on the frontend.
@@ -135,6 +136,8 @@ export interface IDriverProfile extends Document {
   // ── Scores / flags ──
   profileCompletionScore: number;
   isComplianceExpired: boolean;
+  /** Expiry reminders already sent ("CDL:2026-11-12:14"), so each goes out once. */
+  complianceRemindersSent?: string[];
 
   // ── Review claim/ownership (superadmin review queue) ──
   claimedBy?: mongoose.Types.ObjectId;
@@ -302,6 +305,8 @@ const driverProfileSchema = new Schema<IDriverProfile>(
 
     profileCompletionScore: { type: Number, min: 0, max: 100, default: 0 },
     isComplianceExpired: { type: Boolean, default: false },
+    // Internal bookkeeping for the expiry reminder scheduler; never sent to clients.
+    complianceRemindersSent: { type: [String], default: undefined, select: false },
 
     claimedBy: { type: Schema.Types.ObjectId, ref: "User" },
     claimedAt: { type: Date },
@@ -328,12 +333,43 @@ const COMPLIANCE_EXPIRY_LABELS: Record<(typeof COMPLIANCE_EXPIRY_FIELDS)[number]
   insuranceExpirationDate: "insurance",
 };
 
+const DAY_MS = 86_400_000;
+const dayNumber = (dateKey: string) => Date.parse(`${dateKey}T00:00:00Z`) / DAY_MS;
+
+/** Today's day number on the Mountain Time (America/Denver) calendar. */
+function mountainToday(nowMs: number): number {
+  const { year, month, day } = businessDateParts(new Date(nowMs));
+  return dayNumber(`${year}-${month}-${day}`);
+}
+
+/**
+ * Whole days from today (Mountain Time calendar) to a stored expiration day:
+ * 0 on the day itself, negative once it's past. Expiration dates are calendar
+ * days, stored as midnight UTC of that day.
+ */
+export function mountainDaysUntil(value: unknown, nowMs = Date.now()): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const time = new Date(value as string | Date).getTime();
+  if (!Number.isFinite(time)) return null;
+  return dayNumber(new Date(time).toISOString().slice(0, 10)) - mountainToday(nowMs);
+}
+
+/**
+ * Stored expiration dates before this instant have expired: the start of
+ * tomorrow on the Mountain Time calendar, as stored. A credential counts as
+ * expired from its expiration day on, so database queries agree with
+ * complianceExpiryItems.
+ */
+export function complianceExpiryCutoff(nowMs = Date.now()): Date {
+  return new Date((mountainToday(nowMs) + 1) * DAY_MS);
+}
+
 export type ComplianceExpiryItem = {
   label: string;
   /** The expiration day, YYYY-MM-DD. */
   date: string;
   expired: boolean;
-  /** Whole days until it expires (0 or less once the day has come). */
+  /** Whole days until it expires on the Mountain Time calendar (0 or less once the day has come). */
   daysLeft: number;
 };
 
@@ -348,12 +384,14 @@ export function complianceExpiryItems(
     if (value === null || value === undefined || value === "") return [];
     const time = new Date(value as string | Date).getTime();
     if (!Number.isFinite(time)) return [];
+    // Counted on the Mountain Time calendar: expired from its expiration day on.
+    const daysLeft = mountainDaysUntil(time, nowMs) as number;
     return [
       {
         label: COMPLIANCE_EXPIRY_LABELS[field],
         date: new Date(time).toISOString().slice(0, 10),
-        expired: time < nowMs,
-        daysLeft: Math.ceil((time - nowMs) / 86_400_000),
+        expired: daysLeft <= 0,
+        daysLeft,
       },
     ];
   });
@@ -392,6 +430,66 @@ const CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE = new Map<string, (typeof COMPLIA
 
 /** Document types whose approval can renew a stored credential date. */
 export const CREDENTIAL_DOCUMENT_TYPES = [...CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE.keys()];
+
+/** How each dated document type is named in messages to drivers and Dispatch. */
+const DOCUMENT_EXPIRY_LABELS: Record<string, string> = {
+  drivers_license: "CDL",
+  medical_card: "medical card",
+  insurance_certificate: "insurance",
+  vehicle_registration: "vehicle registration",
+  dot_inspection: "DOT inspection",
+  w9_form: "W-9 form",
+  operating_authority: "operating authority",
+  cargo_insurance: "cargo insurance",
+  liability_insurance: "liability insurance",
+};
+
+type ExpiringSoonDocument = Partial<Pick<IDriverDocument, "type" | "label" | "expiresAt" | "reviewStatus">>;
+
+/**
+ * The credentials and documents that expire within `withinDays` but haven't
+ * expired yet, as the driver sees them on the Documents page: for each type,
+ * the latest expiration among its documents that weren't rejected (so an
+ * uploaded renewal replaces the old one), or, for the CDL, medical card and
+ * insurance when no such document has a date, the date on the profile.
+ * Days are counted on the Mountain Time (America/Denver) calendar; a document
+ * counts as expired on its expiration date, the same as everywhere else.
+ */
+export function expiringSoonItems(
+  profile: (ComplianceDates & { documents?: readonly unknown[] | null }) | null | undefined,
+  withinDays = 30,
+  nowMs = Date.now(),
+): ComplianceExpiryItem[] {
+  if (!profile) return [];
+  const latestByType = new Map<string, { label: string; time: number }>();
+  for (const document of (profile.documents ?? []) as ExpiringSoonDocument[]) {
+    if (!document?.expiresAt || document.reviewStatus === "rejected") continue;
+    const time = new Date(document.expiresAt).getTime();
+    if (!Number.isFinite(time)) continue;
+    const type = String(document.type ?? "");
+    const known = DOCUMENT_EXPIRY_LABELS[type];
+    const label = known ?? (String(document.label ?? "").trim() || "document");
+    // "Other" documents are told apart by their own name.
+    const key = known ? type : `other:${label.toLowerCase()}`;
+    const current = latestByType.get(key);
+    if (!current || time > current.time) latestByType.set(key, { label, time });
+  }
+  for (const [type, field] of CREDENTIAL_EXPIRY_FIELD_BY_DOCUMENT_TYPE) {
+    if (latestByType.has(type)) continue;
+    const value = profile[field];
+    if (value === null || value === undefined || value === "") continue;
+    const time = new Date(value as string | Date).getTime();
+    if (Number.isFinite(time)) latestByType.set(type, { label: COMPLIANCE_EXPIRY_LABELS[field], time });
+  }
+
+  return [...latestByType.values()]
+    .flatMap(({ label, time }) => {
+      const date = new Date(time).toISOString().slice(0, 10);
+      const daysLeft = mountainDaysUntil(time, nowMs) as number;
+      return daysLeft >= 1 && daysLeft <= withinDays ? [{ label, date, expired: false, daysLeft }] : [];
+    })
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+}
 
 type CredentialDocument = Pick<IDriverDocument, "type" | "expiresAt" | "reviewStatus">;
 

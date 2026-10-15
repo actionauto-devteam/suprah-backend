@@ -22,6 +22,12 @@ const getUserId = (req: Request): string => {
   return userId;
 };
 
+// The payout lists never show drawn signatures or condition-report photos
+// (the review page loads one load in full), so they are left out to keep the
+// lists light.
+const PAYOUT_LIST_OMITTED_FIELDS =
+  "-contract.signatureDataUrl -driverContract.signatureDataUrl -conditionReports -deliverySignature.signatureDataUrl";
+
 const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId as string;
 
@@ -35,6 +41,7 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   };
 
   const loads = await Load.find(deliverableFilter)
+    .select(PAYOUT_LIST_OMITTED_FIELDS)
     .populate('assignedDriverId', 'name email stripeConnectAccountId')
     .sort({ deliveredAt: -1, createdAt: -1 })
     .lean();
@@ -92,6 +99,7 @@ const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const loads = await Load.find(proofFilter)
+    .select(PAYOUT_LIST_OMITTED_FIELDS)
     .populate('assignedDriverId', 'name email')
     .sort({ 'proofOfDelivery.submittedAt': -1 })
     .lean();

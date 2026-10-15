@@ -8,7 +8,9 @@ import notificationService from "../services/notification.service";
 import emailService from "../services/email.service";
 import logger from "../utils/logger";
 import activityService from "../services/activity.service";
-import { approveDriverVerification } from "../services/driverVerificationReview.service";
+import { approveDriverAccount } from "../services/driverVerificationReview.service";
+import { emitDriverPoolChange } from "../utils/socketEmitter";
+import { findOrCreatePendingDriverRequest } from "../services/driverApplication.service";
 import { SUPPORT_EMAIL } from "../utils/userMessages";
 
 const getUserId = (req: Request): string => {
@@ -24,15 +26,6 @@ const createDriverRequest = asyncHandler(
     const userId = getUserId(req);
     const currentUser = req.user as IUser;
 
-    const existingRequest = await DriverRequest.findOne({
-      driverUserId: userId,
-      status: "pending",
-    });
-
-    if (existingRequest) {
-      throw new ApiError(400, "You already have a pending driver request");
-    }
-
     const approvedRequest = await DriverRequest.findOne({
       driverUserId: userId,
       status: "approved",
@@ -42,10 +35,12 @@ const createDriverRequest = asyncHandler(
       throw new ApiError(400, "Your driver account is already approved");
     }
 
-    const driverRequest = await DriverRequest.create({
-      driverUserId: userId,
-      status: "pending",
-    });
+    // One step: a second device submitting at the same moment finds this
+    // application instead of creating another.
+    const { request: driverRequest, created } = await findOrCreatePendingDriverRequest(userId);
+    if (!created) {
+      throw new ApiError(400, "You already have a pending driver request");
+    }
 
     // Drivers are a shared platform-wide pool — only the SUPRAH.AI
     // super_admin reviews and approves new driver applications.
@@ -159,18 +154,19 @@ const approveDriverRequest = asyncHandler(
       throw new ApiError(404, "Driver user not found");
     }
 
-    // One final-approval boundary for DriverRequest, User.isApproved and
-    // DriverProfile.verificationStatus. The shared service revalidates every
-    // required item and rejects a stale reviewer screen before changing state.
-    const approvalResult = await approveDriverVerification({
+    // A super admin approves the account right away, without waiting for
+    // documents: the driver can sign in and be given loads. Document
+    // verification stays its own review (Driver Review Center / Approve
+    // Driver), so the verification status and compliance warnings don't change.
+    const approvalResult = await approveDriverAccount({
       driverId: driverUser._id.toString(),
       reviewer: adminUser,
       organizationId: "global",
     });
 
     // Keep a non-null request reference after the shared approval service.
-    // The service either updates the existing pending request or creates the
-    // synchronized approved request required by the driver dashboard gate.
+    // The service approves the pending request (or creates the approved one
+    // required by the driver dashboard gate).
     const approvedRequest = approvalResult.request ?? request;
     if (!approvedRequest) {
       throw new ApiError(500, "Driver approval completed without a DriverRequest record");
@@ -281,6 +277,8 @@ const rejectDriverRequest = asyncHandler(
     request.reviewedBy = adminUser._id as any;
     request.reviewedAt = new Date();
     await request.save();
+    // Dispatch screens already showing this driver update right away.
+    emitDriverPoolChange(String(request.driverUserId));
 
     try {
       const driverUser = await User.findById(request.driverUserId);

@@ -5,7 +5,7 @@ import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import { IUser } from "../models/User.model";
 import User from "../models/User.model";
-import DriverProfile, { REQUIRED_COMPLIANCE_DOCS } from "../models/DriverProfile.model";
+import DriverProfile, { REQUIRED_COMPLIANCE_DOCS, mountainDaysUntil } from "../models/DriverProfile.model";
 import DriverRequest from "../models/DriverRequest.model";
 import CustomerInviteToken from "../models/CustomerInviteToken.model";
 import activityService from "../services/activity.service";
@@ -300,14 +300,15 @@ const getExpiringCompliance = asyncHandler(async (req: Request, res: Response) =
       .map((doc: any) => ({ kind: doc.label || doc.type, expiresAt: doc.expiresAt }));
 
     return [...fromCredentials, ...fromDocuments].map((entry) => {
-      const daysRemaining = Math.ceil((new Date(entry.expiresAt).getTime() - now) / 86400000);
+      // Mountain Time calendar days; expired from the expiration day on.
+      const daysRemaining = mountainDaysUntil(entry.expiresAt, now) ?? 0;
       return {
         driverId,
         driverName,
         kind: entry.kind,
         expiresAt: entry.expiresAt,
         daysRemaining,
-        expired: daysRemaining < 0,
+        expired: daysRemaining <= 0,
       };
     });
   });

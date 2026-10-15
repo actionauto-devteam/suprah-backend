@@ -1,5 +1,6 @@
 import express from "express";
 import loadController from "../controllers/load.controller";
+import loadAttentionController from "../controllers/loadAttention.controller";
 import auth from "../middleware/auth.middleware";
 import { requireOrg } from "../middleware/org.middleware";
 import authorize from "../middleware/role.middleware";
@@ -43,6 +44,8 @@ router.post("/calculate-rate", staffOnly, loadController.calculateLoadRate);
 router.get("/address-at", staffOnly, mapPlaceLookupLimiter, mapPlacesController.getAddressAtPosition);
 
 router.get("/stats", staffOnly, loadController.getLoadStats);
+// Transportation's "Needs attention" list. Declared before /:id so it isn't read as a load id.
+router.get("/attention", staffOnly, loadAttentionController.getLoadAttention);
 
 router
   .route("/")

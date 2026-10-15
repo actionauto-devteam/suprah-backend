@@ -39,6 +39,8 @@ export const NOTIFICATION_TYPES = [
   'driver_status_request', 'driver_status_request_approved', 'driver_status_request_rejected',
   'driver_status_request_completed', 'driver_emergency_request',
   'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',
+  // Reminder to a driver that a CDL, medical card or insurance expires soon.
+  'driver_document_expiring',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',
