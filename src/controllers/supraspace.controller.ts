@@ -1898,18 +1898,25 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     .lean();
 
   if (!leftAt) {
-    SupraSpaceMessage.updateMany(
-      { conversationId: id, readBy: { $ne: userId } },
-      { $addToSet: { readBy: userId } }
-    ).catch(() => {});
-    SupraSpaceConversation.updateOne(
-      { _id: id, manualUnreadBy: userId },
-      { $pull: { manualUnreadBy: userId } }
-    ).catch(() => {});
-    Notification.updateMany(
-      { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
-      { $set: { isRead: true } }
-    ).catch(() => {});
+    // Complete the receipt before returning the message snapshot. Previously
+    // these writes were fire-and-forget, so an immediate conversation refresh
+    // could count the just-opened messages as unread again. Each operation is
+    // intentionally failure-tolerant: a notification-cleanup issue must not
+    // prevent an authorized member from reading their conversation.
+    await Promise.all([
+      SupraSpaceMessage.updateMany(
+        { conversationId: id, readBy: { $ne: userId } },
+        { $addToSet: { readBy: userId } }
+      ).catch(() => undefined),
+      SupraSpaceConversation.updateOne(
+        { _id: id, manualUnreadBy: userId },
+        { $pull: { manualUnreadBy: userId } }
+      ).catch(() => undefined),
+      Notification.updateMany(
+        { userId, type: 'crm_message', 'metadata.conversationId': id, isRead: false },
+        { $set: { isRead: true } }
+      ).catch(() => undefined),
+    ]);
   }
 
   const fallbackSender = (m: any) => ({
