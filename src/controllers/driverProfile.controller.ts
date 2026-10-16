@@ -1328,33 +1328,31 @@ const updateIdentityVerification = asyncHandler(
     // The Agreement action is the actual submission transition. Revalidate
     // all prerequisites on the server so the frontend cannot bypass them.
     if (verificationAgreement === true) {
+      // Require exactly what the application form asks for. The name comes
+      // from the account when the profile has none; VIN and insurance are
+      // optional here and are filled in later on Equipment and Documents.
+      if (!profile.firstName?.trim() && !profile.lastName?.trim()) {
+        const [first, ...rest] = String(user.name ?? "").trim().split(/\s+/).filter(Boolean);
+        if (first) profile.firstName = first;
+        if (rest.length) profile.lastName = rest.join(" ");
+      }
       const missing: string[] = [];
-      if (!profile.firstName?.trim()) missing.push("First Name");
-      if (!profile.lastName?.trim()) missing.push("Last Name");
-      if (!profile.driversLicenseNumber?.trim()) missing.push("CDL Number");
-      if (!profile.licenseState?.trim()) missing.push("License State");
-      if (!profile.licenseExpirationDate) missing.push("CDL Expiration");
-      if (!profile.insuranceProvider?.trim()) {
-        missing.push("Insurance Provider");
-      }
-      if (!profile.insurancePolicyNumber?.trim()) {
-        missing.push("Policy Number");
-      }
-      if (!profile.vin?.trim()) missing.push("VIN");
+      if (!profile.firstName?.trim() && !profile.lastName?.trim()) missing.push("your full name");
+      if (!allUploaded) missing.push("a photo of your CDL");
+      if (!profile.driversLicenseNumber?.trim()) missing.push("CDL number");
+      if (!profile.licenseState?.trim()) missing.push("license state");
+      if (!profile.licenseExpirationDate) missing.push("CDL expiration date");
       if (!profile.ssnLast4 || profile.ssnLast4.length !== 4) {
-        missing.push("SSN Last 4");
+        missing.push("the last 4 digits of your SSN");
       }
       if (!profile.backgroundCheckConsent) {
-        missing.push("Background Check Authorization");
+        missing.push("background check consent");
       }
-      if (!allUploaded) missing.push("Required Documents");
 
       if (missing.length > 0) {
         throw new ApiError(
           400,
-          `Your Driver Verification can't be submitted yet. Complete these first: ${missing.join(
-            ", ",
-          )}`,
+          `Your application can't be submitted yet. Please add ${missing.join(", ")}.`,
         );
       }
 

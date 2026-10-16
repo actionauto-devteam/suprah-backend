@@ -150,7 +150,47 @@ describe('A new driver signs up, is approved and completes a load', () => {
     expect(refused.body.message).toMatch(/pending approval/);
   });
 
-  it('a super admin approves without documents, and the driver can work right away', async () => {
+  it('submits the application with only what the form asks for', async () => {
+    // Pressing Submit too early says what's missing, in plain words.
+    const early = await request(app)
+      .patch('/api/driver-profile/identity-verification')
+      .set(auth(driverToken))
+      .send({ ssnLast4: '1234', backgroundCheckConsent: true, verificationAgreement: true })
+      .expect(400);
+    expect(early.body.message).toBe(
+      "Your application can't be submitted yet. Please add a photo of your CDL, CDL number, license state, CDL expiration date.",
+    );
+
+    // Documents step: the CDL only. Compliance step: no insurance and no VIN.
+    await request(app)
+      .post('/api/driver-profile/documents')
+      .set(auth(driverToken))
+      .field('type', 'drivers_license')
+      .field('label', 'CDL')
+      .field('expiresAt', '2030-01-31')
+      .attach('document', PNG, 'cdl.png')
+      .expect(200);
+    await request(app)
+      .patch('/api/driver-profile/compliance')
+      .set(auth(driverToken))
+      .send({ driversLicenseNumber: 'DL-12345678', licenseState: 'UT', licenseExpirationDate: '2030-01-31', insuranceProvider: '', insurancePolicyNumber: '' })
+      .expect(200);
+
+    // Agreement step: Submit goes through, with the name taken from the account.
+    await request(app)
+      .patch('/api/driver-profile/identity-verification')
+      .set(auth(driverToken))
+      .send({ ssnLast4: '1234', backgroundCheckConsent: true, verificationAgreement: true })
+      .expect(200);
+    const profile: any = await DriverProfile.findOne({ userId: driverId });
+    expect(profile).toMatchObject({ verificationStatus: 'under_review', firstName: 'New', lastName: 'Driver' });
+
+    // Signing in again waits for approval; the open session keeps working.
+    await request(app).post('/api/auth/login').send({ email: DRIVER_EMAIL, password: 'Journey-Passw0rd!' }).expect(403);
+    await request(app).get('/api/driver-requests/my-status').set(auth(driverToken)).expect(200);
+  });
+
+  it('a super admin approves right away, and the driver can work immediately', async () => {
     const application: any = await DriverRequest.findOne({ driverUserId: driverId, status: 'pending' });
     expect(application).toBeTruthy();
     await request(app)
@@ -184,13 +224,19 @@ describe('A new driver signs up, is approved and completes a load', () => {
   let load: any;
 
   it('assigning asks Dispatch to confirm capacity until the driver sets it, then assigns', async () => {
-    load = await seedLoad();
+    // A new driver's trailer counts as carrying 1 vehicle until they set it up.
+    load = await seedLoad({
+      vehicles: [
+        { year: 2020, make: 'Toyota', model: 'Camry', condition: 'Operable' },
+        { year: 2019, make: 'Honda', model: 'Civic', condition: 'Operable' },
+      ],
+    });
     const ask = await request(app)
       .post('/api/driver-tracking/assign-load')
       .set(auth(dispatcherToken))
       .send({ loadId: String(load._id), driverId })
       .expect(409);
-    expect(ask.body.message).toMatch(/capacity could not be verified/);
+    expect(ask.body.message).toMatch(/requires 2 vehicles/);
 
     await request(app)
       .post('/api/driver-tracking/assign-load')
@@ -281,5 +327,29 @@ describe('A new driver signs up, is approved and completes a load', () => {
     expect(res.body.message).toBe(
       'This load has 3 vehicles, but your trailer is set to carry 2. If your trailer can carry more, update it on the Equipment page, then request this load again.',
     );
+  });
+});
+
+describe('Starting an application while waiting for approval', () => {
+  it('a pending driver without an application can start one, only once', async () => {
+    const user = await User.create({
+      email: `no-application${TEST_EMAIL_DOMAIN}`,
+      name: 'No Application',
+      role: 'driver',
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+      isApproved: false,
+    });
+    const token = tokenService.generateAccessToken(user as any);
+    const before = await request(app).get('/api/driver-requests/my-status').set(auth(token)).expect(200);
+    expect(before.body.data.status).toBe('no-request');
+
+    await request(app).post('/api/driver-requests').set(auth(token)).send({}).expect(201);
+    await request(app).post('/api/driver-requests').set(auth(token)).send({}).expect(400);
+    expect(await DriverRequest.countDocuments({ driverUserId: user._id, status: 'pending' })).toBe(1);
+
+    // Everything else still waits for approval.
+    await request(app).get('/api/driver-tracking/my-loads').set(auth(token)).expect(403);
   });
 });

@@ -136,7 +136,14 @@ const auth = () => async (req: Request, res: Response, next: NextFunction) => {
             throw new ApiError(403, 'Please verify your email address to use this feature. Check your inbox for the verification link.');
         }
 
-        if (user.role === 'driver' && !user.isApproved && !isWhitelisted) {
+        // A pending driver may start their own application: the waiting page
+        // creates it when one is missing, and the handler allows only one
+        // pending application per driver. The email and onboarding checks
+        // above still apply.
+        const isStartingOwnApplication =
+            req.method === 'POST' && url.split('?')[0].replace(/\/+$/, '') === '/api/driver-requests';
+
+        if (user.role === 'driver' && !user.isApproved && !isWhitelisted && !isStartingOwnApplication) {
             throw new ApiError(403, 'Your driver account is pending approval by an administrator.');
         }
 
