@@ -353,3 +353,42 @@ describe('Starting an application while waiting for approval', () => {
     await request(app).get('/api/driver-tracking/my-loads').set(auth(token)).expect(403);
   });
 });
+
+describe('The onboarding role step only finishes new customer accounts', () => {
+  const makeUser = (label: string, fields: Record<string, unknown>) =>
+    User.create({
+      email: `${label}${TEST_EMAIL_DOMAIN}`,
+      name: label,
+      emailVerified: true,
+      isActive: true,
+      ...fields,
+    });
+  const chooseRole = (token: string, role: string) =>
+    request(app).post('/api/users/me/complete-onboarding').set(auth(token)).send({ role });
+
+  it("a driver waiting for approval can't change their account type", async () => {
+    for (const onboardingCompleted of [false, true]) {
+      const driver = await makeUser(`pending-role-${onboardingCompleted}`, { role: 'driver', isApproved: false, onboardingCompleted });
+      const token = tokenService.generateAccessToken(driver as any);
+      expect((await chooseRole(token, 'dealership')).status).toBe(403);
+      expect((await chooseRole(token, 'customer')).status).toBe(onboardingCompleted ? 400 : 403);
+      expect(await User.findById(driver._id).lean()).toMatchObject({ role: 'driver', isApproved: false, onboardingCompleted });
+    }
+  });
+
+  it("staff can't use it to change their role either", async () => {
+    const employee = await makeUser('staff-role', { role: 'employee', organizationId: org._id, onboardingCompleted: false });
+    const token = tokenService.generateAccessToken(employee as any);
+    expect((await chooseRole(token, 'customer')).status).toBe(403);
+    expect(((await User.findById(employee._id).lean()) as any).role).toBe('employee');
+  });
+
+  it('a new customer still finishes the step', async () => {
+    const customer = await makeUser('new-customer-role', { role: 'customer', onboardingCompleted: false });
+    const token = tokenService.generateAccessToken(customer as any);
+    const res = await chooseRole(token, 'customer');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ role: 'customer', skipOrgSelect: false });
+    expect((await chooseRole(token, 'dealership')).status).toBe(403);
+  });
+});

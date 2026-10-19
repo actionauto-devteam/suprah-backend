@@ -7,6 +7,7 @@ import Organization from '../models/Organization.model';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { invalidateUserCache } from '../utils/cache.util';
+import { ApiError } from '../utils/ApiError';
 
 const searchUsers = asyncHandler(async (req: Request, res: Response) => {
     const { q, limit = 10, excludeSelf = 'true' } = req.query;
@@ -237,25 +238,44 @@ const completeOnboarding = asyncHandler(async (req: Request, res: Response) => {
     const { role } = req.body;
     const userId = (req.user as IUser)._id;
 
-    const validRoles = ['customer', 'dealership'];
-    if (!role || !validRoles.includes(role)) {
-        return res.status(400).json(new ApiResponse(400, null, 'Invalid role. Must be "customer" or "dealership"'));
+    // This step only finishes a new customer's account (the role page offers
+    // nothing else). It must never change any other kind of account: a driver
+    // waiting for approval, staff or an admin could otherwise give themselves
+    // another role and skip approval. Dealership accounts are invite-only
+    // (same rule as authService.completeOnboarding).
+    if (role === 'dealership') {
+        throw new ApiError(403, 'Dealership accounts are created by invite only. Request one from the dealership sign-up page.');
+    }
+    if (role !== 'customer') {
+        throw new ApiError(400, 'Choose "I am a Customer" to continue.');
     }
 
-    const mappedRole = role === 'dealership' ? 'employee' : 'customer';
-    const skipOrgSelect = role === 'dealership';
+    const account = await User.findById(userId).select('role onboardingCompleted').lean<{ role?: string; onboardingCompleted?: boolean } | null>();
+    if (!account) {
+        throw new ApiError(404, "We couldn't find your account. Sign in again and try once more.");
+    }
+    if (account.onboardingCompleted) {
+        throw new ApiError(400, 'Your account setup is already complete. Refresh the page to continue.');
+    }
+    if (account.role !== 'customer') {
+        throw new ApiError(
+            403,
+            "This step is only for new customer accounts, so your account wasn't changed. If you need a different kind of account, contact support@suprahai.com.",
+        );
+    }
 
-    const user = await User.findByIdAndUpdate(
-        userId,
-        {
-            role: mappedRole,
-            ...(skipOrgSelect && { onboardingCompleted: true }),
-        },
+    const mappedRole = 'customer';
+    const skipOrgSelect = false;
+
+    // Conditional, so a role change made meanwhile can't be overwritten.
+    const user = await User.findOneAndUpdate(
+        { _id: userId, role: 'customer', onboardingCompleted: { $ne: true } },
+        { role: mappedRole },
         { new: true }
     ).select('-password');
 
     if (!user) {
-        return res.status(404).json(new ApiResponse(404, null, 'User not found'));
+        throw new ApiError(409, 'Your account changed while this was being saved. Refresh the page and try again.');
     }
 
     invalidateUserCache(userId.toString());
