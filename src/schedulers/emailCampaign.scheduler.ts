@@ -125,6 +125,7 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
         to: recipient.email,
         phone: recipient.phone,
         customerName: recipient.customerName,
+        greetingName: recipient.greetingName,
         subject: campaign.subject,
         greetingText: campaign.greetingText,
         bannerImageUrl: campaign.bannerImageUrl,

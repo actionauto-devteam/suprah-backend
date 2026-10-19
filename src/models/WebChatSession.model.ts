@@ -25,6 +25,7 @@ export interface IWebChatSession extends Document {
   pageUrl?: string;
   lastMessageAt: Date;
   smsFallbackSentAt?: Date;
+  aiUnavailableAckSentAt?: Date;
   staffTypingAt?: Date;
   aiPausedAt?: Date;
   aiPausedBy?: IAiPausedBy;
@@ -50,6 +51,7 @@ const WebChatSessionSchema: Schema<IWebChatSession> = new Schema(
     pageUrl: { type: String, trim: true },
     lastMessageAt: { type: Date, default: Date.now },
     smsFallbackSentAt: { type: Date },
+    aiUnavailableAckSentAt: { type: Date },
     staffTypingAt: { type: Date },
     aiPausedAt: { type: Date },
     aiPausedBy: { type: AiPausedBySchema },

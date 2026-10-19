@@ -4,7 +4,11 @@ import Vehicle, { IVehicle } from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
 import { sendAutomatedSms, isSmsOptedOut } from './communication.service';
+import { decideAiDelivery, AI_NOT_LIVE_REASON } from './aiOperatingMode.service';
+import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { resolveAiAgentSettings } from './aiAgent.service';
+import { resolvePinnedVehicleContext, latestSharedConversationActivity } from './vehicleInquiryContext.service';
+import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import logger from '../utils/logger';
 import {
   createGeminiClient,
@@ -35,6 +39,8 @@ const CANDIDATE_SCAN_LIMIT = 2000;
 
 const STOP_SUFFIX = ' Reply STOP to opt out.';
 const MAX_FINAL_LENGTH = 320;
+const ACTIVE_CONVERSATION_WINDOW_MS =
+  parseInt(process.env.VEHICLE_REENGAGEMENT_ACTIVE_CONVERSATION_HOURS || '48', 10) * 60 * 60 * 1000;
 
 export function normalizeToken(value: unknown): string {
   return String(value || '')
@@ -199,7 +205,7 @@ interface IVehicleReengagementLogInput {
   leadPhone: string;
   generatedMessage?: string;
   finalMessage?: string;
-  status: 'blocked' | 'sent' | 'failed' | 'skipped';
+  status: 'blocked' | 'sent' | 'failed' | 'skipped' | 'skipped_ai_not_live';
   blockedReason?: string;
   classifierVerdict?: 'SAFE' | 'UNSAFE' | 'ERROR';
   failureReason?: string;
@@ -221,9 +227,34 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
     leadPhone: lead.phone,
   };
 
+  const delivery = await decideAiDelivery({
+    organizationId: vehicle.organizationId,
+    channel: 'sms',
+    workflow: 'vehicle_reengagement',
+    toPhone: lead.phone,
+    leadId: lead._id,
+  });
+  if (delivery.action !== 'send') {
+    await writeLog({ ...base, status: 'skipped_ai_not_live', failureReason: `${AI_NOT_LIVE_REASON} (sms: ${delivery.mode})` });
+    return;
+  }
+
   if (await isSmsOptedOut(vehicle.organizationId, lead.phone)) {
     await writeLog({ ...base, status: 'skipped', failureReason: 'Customer opted out of SMS' });
     return;
+  }
+
+  const vehicleContext = await resolvePinnedVehicleContext({ organizationId: vehicle.organizationId, lead, phone: lead.phone });
+  if (vehicleContext.multipleInquiries) {
+    const sharedActivityAt = await latestSharedConversationActivity(vehicle.organizationId, lead.phone).catch(() => null);
+    if (sharedActivityAt && Date.now() - sharedActivityAt.getTime() < ACTIVE_CONVERSATION_WINDOW_MS) {
+      await writeLog({
+        ...base,
+        status: 'skipped',
+        failureReason: 'Customer has other open vehicle inquiries and an active text conversation — left for staff',
+      });
+      return;
+    }
   }
 
   const generation = await generateReengagementMessage(lead, vehicle);
@@ -271,12 +302,27 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
     return;
   }
 
-  const sent = await sendAutomatedSms({
-    orgId: vehicle.organizationId,
-    toPhone: lead.phone,
-    body: finalMessage,
-    leadId: lead._id,
-  });
+  let sent: boolean;
+  try {
+    sent = await sendAutomatedSms({
+      orgId: vehicle.organizationId,
+      toPhone: lead.phone,
+      body: finalMessage,
+      leadId: lead._id,
+      aiWorkflow: 'vehicle_reengagement',
+    });
+  } catch (err) {
+    if (!(err instanceof AiReplySuppressedError)) throw err;
+    await writeLog({
+      ...base,
+      generatedMessage: draft,
+      finalMessage,
+      status: 'skipped_ai_not_live',
+      classifierVerdict: verdict,
+      failureReason: `${AI_NOT_LIVE_REASON} (changed before send)`,
+    });
+    return;
+  }
 
   if (!sent) {
     await writeLog({
@@ -311,7 +357,24 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
 
 export async function processVehicleForReengagement(vehicle: IVehicle): Promise<{ matched: number }> {
   const leads = await findMatchingLeads(vehicle);
+  const contactedPhones = new Set<string>();
   for (const lead of leads) {
+    const phoneKey = normalizeIdentityPhone(lead.phone) || String(lead.phone || '').replace(/\D/g, '');
+    if (phoneKey && contactedPhones.has(phoneKey)) {
+      await writeLog({
+        organizationId: vehicle.organizationId,
+        vehicleId: vehicle._id,
+        leadId: lead._id,
+        vehicleLabel: [vehicle.year, vehicle.make, vehicle.modelName, vehicle.trim].filter(Boolean).join(' '),
+        leadVehicleLabel: [lead.vehicle?.year, lead.vehicle?.make, lead.vehicle?.model].filter(Boolean).join(' '),
+        leadName: [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || 'Customer',
+        leadPhone: lead.phone,
+        status: 'skipped',
+        failureReason: 'Same customer was already matched to this vehicle through another inquiry',
+      });
+      continue;
+    }
+    if (phoneKey) contactedPhones.add(phoneKey);
     await processLeadForVehicle(lead, vehicle);
   }
   return { matched: leads.length };

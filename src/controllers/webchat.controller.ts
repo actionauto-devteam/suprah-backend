@@ -29,6 +29,9 @@ import {
 import { getRelevantAiCoaching } from '../services/aiAgentCoaching.service';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, claimAiGeneration, claimAiReplyDispatch } from '../services/aiHumanAttention.service';
+import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from '../services/aiOperatingMode.service';
+import { resolveDealerName as resolveTrustedDealerName } from '../services/communication.service';
+import { WEBCHAT_ACK_ACTOR_ID, buildWebchatUnavailableAck } from '../utils/webchatAck';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 
@@ -65,7 +68,9 @@ const serializeForVisitor = (message: any) => ({
   body: message.body,
   createdAt: message.createdAt,
   agentName:
-    message.direction === 'outbound' ? firstNameOf(message.sentBy?.name) || undefined : undefined,
+    message.direction === 'outbound' && message.sentBy?.userId !== WEBCHAT_ACK_ACTOR_ID
+      ? firstNameOf(message.sentBy?.name) || undefined
+      : undefined,
 });
 
 function actor(req: Request) {
@@ -137,11 +142,73 @@ async function buildWebchatTranscript(sessionId: any): Promise<AiAgentTranscript
  *  after every inbound visitor message (first message and every follow-up),
  *  never awaited by the caller so LLM latency never blocks the visitor's
  *  own HTTP response. */
+export async function sendWebchatUnavailableAck(session: any): Promise<boolean> {
+  try {
+    const hasOutbound = await WebChatMessage.exists({
+      sessionId: session._id,
+      organizationId: session.organizationId,
+      direction: 'outbound',
+    });
+    if (hasOutbound) return false;
+    const claimed = await WebChatSession.findOneAndUpdate(
+      {
+        _id: session._id,
+        organizationId: session.organizationId,
+        $or: [{ aiUnavailableAckSentAt: null }, { aiUnavailableAckSentAt: { $exists: false } }],
+      },
+      { $set: { aiUnavailableAckSentAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) return false;
+    const dealerName = await resolveTrustedDealerName(session.organizationId);
+    const message = await WebChatMessage.create({
+      organizationId: session.organizationId,
+      sessionId: session._id,
+      leadId: session.leadId,
+      direction: 'outbound',
+      body: buildWebchatUnavailableAck(dealerName),
+      sentBy: { userId: WEBCHAT_ACK_ACTOR_ID, name: dealerName },
+    });
+    await WebChatSession.updateOne(
+      { _id: session._id, organizationId: session.organizationId },
+      { $set: { lastMessageAt: new Date() } },
+    );
+    emitToOrg(String(session.organizationId), 'webchat:message', {
+      leadId: String(session.leadId),
+      message: serializeForStaff(message),
+    });
+    return true;
+  } catch (err) {
+    logger.error({ err, sessionId: session?._id }, '[Webchat] Could not send the AI-unavailable acknowledgement');
+    return false;
+  }
+}
+
 async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: string): Promise<void> {
   try {
-    const { enabled, agentName } = await resolveAiAgentSettings(session.organizationId);
-    if (!enabled) { await finishAiAttentionCheck(check); return; }
-    if (!(await screenAiHumanAttention({ ...check, leadId: String(session.leadId), body, agentName, phone: session.visitorPhone }))) return;
+    const { agentName } = await resolveAiAgentSettings(session.organizationId);
+    const { mode: webchatMode, source: webchatSource } = await resolveAiChannelMode(session.organizationId, 'webchat');
+    if (!isAttentionScreeningMode(webchatMode)) {
+      await finishAiAttentionCheck(check);
+      if (webchatSource === 'configured') await sendWebchatUnavailableAck(session);
+      return;
+    }
+    if (!(await screenAiHumanAttention({ ...check, leadId: String(session.leadId), body, agentName, phone: session.visitorPhone }))) {
+      if (webchatMode !== 'live') await sendWebchatUnavailableAck(session);
+      return;
+    }
+
+    const delivery = await decideAiDelivery({
+      organizationId: session.organizationId,
+      channel: 'webchat',
+      workflow: 'webchat_reply',
+      leadId: session.leadId,
+    });
+    if (delivery.action !== 'send') {
+      await finishAiAttentionCheck(check);
+      await sendWebchatUnavailableAck(session);
+      return;
+    }
 
     const claimed = await claimAiGeneration(check);
     if (!claimed) return;
@@ -199,7 +266,15 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
             sentBy: { userId: AI_AGENT_ACTOR_ID, name: agentName },
             aiDispatchPending: true,
           });
-          try { await claimAiReplyDispatch(check); }
+          try {
+            await assertAiDispatchAllowed({
+              organizationId: session.organizationId,
+              channel: 'webchat',
+              workflow: 'webchat_reply',
+              leadId: session.leadId,
+            });
+            await claimAiReplyDispatch(check);
+          }
           catch (error) {
             await WebChatMessage.deleteOne({ _id: message._id, organizationId: session.organizationId });
             throw error;

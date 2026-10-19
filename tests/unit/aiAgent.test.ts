@@ -9,6 +9,8 @@ jest.mock('openai', () => {
 process.env.GEMINI_API_KEY = 'test-key';
 process.env.AI_AGENT_GENERATION_TIMEOUT_MS = '50';
 process.env.AI_AGENT_CLASSIFIER_TIMEOUT_MS = '50';
+process.env.AI_AGENT_CLASSIFIER_RETRY_TIMEOUT_MS = '50';
+process.env.AI_AGENT_COACHING_CLASSIFIER_TIMEOUT_MS = '50';
 
 const mockLogCreate = jest.fn().mockResolvedValue({});
 jest.mock('../../src/models/AiAgentLog.model', () => ({
@@ -32,6 +34,7 @@ import {
 } from '../../src/services/aiAgent.service';
 import { validateOutboundMessage } from '../../src/utils/aiOutboundSafety';
 import { AiReplySuppressedError } from '../../src/utils/aiReplySuppressed';
+import { buildVehicleCandidate, CLARIFYING_QUESTION_MARKER } from '../../src/services/vehicleInquiryContext.service';
 
 describe('ALEX_FALLBACK_MESSAGE', () => {
   it('passes the deterministic validator on its own (it is sent with no further checks)', () => {
@@ -798,5 +801,233 @@ describe('generateAlexReply / classifyAlexReplySafety — Gemini QA-mode phone w
     expect(result.text).toBe('Hi there!');
     mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
     await expect(classifyAlexReplySafety('hello there', REAL_LOOKING_PHONE)).resolves.toBe('SAFE');
+  });
+});
+
+describe('processAlexTurn — bounded safety-check retry and contextual fallback', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockLogCreate.mockClear();
+    mockMarkAiCoachingUsed.mockClear();
+  });
+
+  function buildCtx(overrides: Partial<AiAgentTurnContext> = {}): AiAgentTurnContext {
+    return {
+      organizationId: 'org-1',
+      leadId: 'lead-1',
+      channel: 'sms',
+      conversationId: 'conv-1',
+      agentName: 'Anna',
+      dealerName: 'Action Auto Utah',
+      customerFirstName: 'Jordan',
+      transcript: [],
+      repliesSentToday: 0,
+      send: jest.fn().mockResolvedValue({ messageId: 'msg-1' }),
+      notifyHandoff: jest.fn().mockResolvedValue(undefined),
+      notifyMilestone: jest.fn().mockResolvedValue(undefined),
+      onCapExceeded: jest.fn().mockResolvedValue(undefined),
+      isPausedNow: jest.fn().mockResolvedValue(false),
+      ...overrides,
+    };
+  }
+
+  const draft = 'Happy to set that up for Friday, I will confirm the time with our team.';
+  const testDriveRequest =
+    "Shopper requested to schedule a test drive for Friday, October 16th during Action Auto's open hours (10 AM–7 PM). Strong intent signal.";
+
+  it('retries a timed-out safety check once and sends the approved draft when the retry returns SAFE', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: draft } }] });
+    mockCreate.mockImplementationOnce(() => new Promise(() => {}));
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+    const ctx = buildCtx();
+
+    await processAlexTurn(ctx);
+
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+    expect(ctx.send).toHaveBeenCalledTimes(1);
+    expect(ctx.send).toHaveBeenCalledWith(draft);
+    expect(ctx.notifyHandoff).not.toHaveBeenCalled();
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'sent', classifierVerdict: 'SAFE', classifierRetried: true }),
+    );
+  });
+
+  it('never retries an UNSAFE verdict and never sends the unapproved draft', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: draft } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'UNSAFE' } }] });
+    const ctx = buildCtx();
+
+    await processAlexTurn(ctx);
+
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(ctx.send).toHaveBeenCalledTimes(1);
+    expect(ctx.send).not.toHaveBeenCalledWith(draft);
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'fallback_sent', classifierVerdict: 'UNSAFE', blockedReason: 'safety check flagged this message' }),
+    );
+  });
+
+  it('sends a safe, request-aware test-drive fallback (not the draft) when the retry also times out', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: draft } }] });
+    mockCreate.mockImplementationOnce(() => new Promise(() => {}));
+    mockCreate.mockImplementationOnce(() => new Promise(() => {}));
+    const ctx = buildCtx({ transcript: [{ from: 'customer', body: testDriveRequest }] });
+
+    await processAlexTurn(ctx);
+
+    expect(ctx.send).toHaveBeenCalledTimes(1);
+    const sent = (ctx.send as jest.Mock).mock.calls[0][0] as string;
+    expect(sent).not.toBe(draft);
+    expect(sent).not.toBe(ALEX_FALLBACK_MESSAGE);
+    expect(sent).toMatch(/test drive/i);
+    expect(sent).toContain('Friday, October 16th');
+    expect(sent).not.toMatch(/10 AM|7 PM/);
+    expect(validateOutboundMessage(sent).ok).toBe(true);
+    expect(ctx.notifyHandoff).toHaveBeenCalledWith('safety check unavailable or timed out');
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'fallback_sent',
+        classifierVerdict: 'ERROR',
+        classifierRetried: true,
+        fallbackKind: 'test_drive_with_time',
+        generatedMessage: draft,
+        finalMessage: sent,
+      }),
+    );
+  });
+
+  it('names the resolved vehicle in an availability fallback without claiming it is available', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: draft } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'UNSAFE' } }] });
+    const ctx = buildCtx({
+      transcript: [{ from: 'customer', body: 'Is the Jeep still available?' }],
+      fallbackVehicleLabel: '2022 Jeep Grand Cherokee 4XE',
+    });
+
+    await processAlexTurn(ctx);
+
+    const sent = (ctx.send as jest.Mock).mock.calls[0][0] as string;
+    expect(sent).toContain('2022 Jeep Grand Cherokee 4XE');
+    expect(sent).not.toMatch(/\bis available\b|\bstill available\b|\bin stock\b/i);
+    expect(validateOutboundMessage(sent).ok).toBe(true);
+  });
+
+  it('rotates to a different generic fallback instead of repeating the one it just sent', async () => {
+    mockCreate.mockImplementationOnce(() => new Promise(() => {}));
+    const ctx = buildCtx({
+      transcript: [
+        { from: 'customer', body: 'hello?' },
+        { from: 'ai', body: ALEX_FALLBACK_MESSAGE },
+        { from: 'customer', body: 'anyone there' },
+      ],
+    });
+
+    await processAlexTurn(ctx);
+
+    const sent = (ctx.send as jest.Mock).mock.calls[0][0] as string;
+    expect(sent).not.toBe(ALEX_FALLBACK_MESSAGE);
+    expect(validateOutboundMessage(sent).ok).toBe(true);
+  });
+});
+
+describe('processAlexTurn — multiple vehicle inquiries on one phone', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockLogCreate.mockClear();
+  });
+
+  const jeep = buildVehicleCandidate({ _id: 'lead-jeep', vehicle: { year: '2022', make: 'JEEP', model: 'GRAND CHEROKEE 4XE' } })!;
+  const civic = buildVehicleCandidate({ _id: 'lead-civic', vehicle: { year: '2022', make: 'Honda', model: 'Civic Sport' } })!;
+
+  function buildCtx(overrides: Partial<AiAgentTurnContext> = {}): AiAgentTurnContext {
+    return {
+      organizationId: 'org-1',
+      leadId: 'lead-jeep',
+      channel: 'sms',
+      conversationId: 'conv-1',
+      agentName: 'Anna',
+      dealerName: 'Action Auto Utah',
+      customerFirstName: 'Test',
+      transcript: [{ from: 'customer', body: 'Is it still there?' }],
+      repliesSentToday: 0,
+      send: jest.fn().mockResolvedValue({ messageId: 'msg-1' }),
+      notifyHandoff: jest.fn().mockResolvedValue(undefined),
+      notifyMilestone: jest.fn().mockResolvedValue(undefined),
+      onCapExceeded: jest.fn().mockResolvedValue(undefined),
+      isPausedNow: jest.fn().mockResolvedValue(false),
+      vehicleResolution: 'ambiguous',
+      vehicleClarification: [jeep, civic],
+      ...overrides,
+    };
+  }
+
+  it('asks which vehicle the customer means, without calling the model or guessing', async () => {
+    const ctx = buildCtx();
+
+    await processAlexTurn(ctx);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(ctx.send).toHaveBeenCalledTimes(1);
+    const sent = (ctx.send as jest.Mock).mock.calls[0][0] as string;
+    expect(sent).toContain(CLARIFYING_QUESTION_MARKER);
+    expect(sent).toContain('2022 Jeep Grand Cherokee 4XE');
+    expect(sent).toContain('2022 Honda Civic Sport');
+    expect(sent.length).toBeLessThanOrEqual(300);
+    expect(validateOutboundMessage(sent).ok).toBe(true);
+    expect(ctx.notifyHandoff).not.toHaveBeenCalled();
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'sent', fallbackKind: 'vehicle_clarification', vehicleContextResolution: 'ambiguous' }),
+    );
+  });
+
+  it('hands off to staff instead of asking the same clarifying question twice', async () => {
+    const ctx = buildCtx({
+      transcript: [
+        { from: 'customer', body: 'Is it still there?' },
+        { from: 'ai', body: `Thanks, Test! ${CLARIFYING_QUESTION_MARKER} — are you asking about the 2022 Jeep Grand Cherokee 4XE or the 2022 Honda Civic Sport?` },
+        { from: 'customer', body: 'yes' },
+      ],
+    });
+
+    await processAlexTurn(ctx);
+
+    expect(mockCreate).not.toHaveBeenCalled();
+    const sent = (ctx.send as jest.Mock).mock.calls[0][0] as string;
+    expect(sent).not.toContain(CLARIFYING_QUESTION_MARKER);
+    expect(sent).not.toMatch(/Jeep|Civic/);
+    expect(ctx.notifyHandoff).toHaveBeenCalledWith(expect.stringMatching(/more than one vehicle inquiry/i));
+  });
+
+  it('does not send the clarification when a human has already taken over', async () => {
+    const ctx = buildCtx({ isPausedNow: jest.fn().mockResolvedValue(true) });
+
+    await processAlexTurn(ctx);
+
+    expect(ctx.send).not.toHaveBeenCalled();
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped' }));
+  });
+
+  it('still honors the reply cap before asking a clarifying question', async () => {
+    const ctx = buildCtx({ repliesSentToday: 999 });
+
+    await processAlexTurn(ctx);
+
+    expect(ctx.send).not.toHaveBeenCalled();
+    expect(ctx.onCapExceeded).toHaveBeenCalled();
+  });
+
+  it('passes the vehicle-context instruction into the generation prompt when an inquiry was resolved', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'I will check on the Jeep with our team.' } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+    const note = 'This reply is about the 2022 Jeep Grand Cherokee 4XE only.';
+    const ctx = buildCtx({ vehicleClarification: undefined, vehicleResolution: 'explicit_mention', vehicleContextNote: note });
+
+    await processAlexTurn(ctx);
+
+    const systemPrompt = mockCreate.mock.calls[0][0].messages.find((m: any) => m.role === 'system').content;
+    expect(systemPrompt).toContain(note);
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'sent', vehicleContextResolution: 'explicit_mention' }),
+    );
   });
 });

@@ -27,6 +27,13 @@ import {
   HISTORY_LIMIT,
 } from "./aiAgent.service";
 import { getRelevantAiCoaching } from "./aiAgentCoaching.service";
+import {
+  resolveVehicleContextForReply,
+  buildVehicleContextNote,
+  formatVehicleLabel,
+  loadPhoneLeads,
+  classifyInquiryScope,
+} from "./vehicleInquiryContext.service";
 import { resolveOrgSystemUserId } from "../utils/orgSystemUser";
 import { retryDbWrite } from "../utils/retryDbWrite";
 import { LEAD_SOURCE } from "../constants/leadSource";
@@ -35,6 +42,7 @@ import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, AiReplySuppressedError, claimAiGeneration, claimAiReplyDispatch,
   attentionOrgIds, recoverAiHumanAttention } from './aiHumanAttention.service';
+import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode, AiWorkflow } from './aiOperatingMode.service';
 import { initializeIvr, handleIvrGather, emitIvrCall, clearIvrTimer, canReceiveIvrCall, ivrAgentFailed, recoverIvrCalls } from './ivr.service';
 
 const AI_AGENT_ACTOR_ID = "ai-agent";
@@ -141,10 +149,22 @@ export async function sendAutomatedSms(opts: {
   customerId?: any;
   customerName?: string;
   leadId?: any;
+  aiWorkflow?: AiWorkflow;
 }): Promise<boolean> {
   if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
-  await sendSmsFromUser({ ...opts, user: SYSTEM_ACTOR });
+  const { aiWorkflow, ...rest } = opts;
+  await sendSmsFromUser({
+    ...rest,
+    user: SYSTEM_ACTOR,
+    beforeDispatch: aiWorkflow ? aiSmsDispatchGuard(opts.orgId, aiWorkflow, opts.toPhone, opts.leadId) : undefined,
+  });
   return true;
+}
+
+function aiSmsDispatchGuard(orgId: any, workflow: AiWorkflow, toPhone: string, leadId?: any) {
+  return async () => {
+    await assertAiDispatchAllowed({ organizationId: orgId, channel: "sms", workflow, toPhone, leadId });
+  };
 }
 
 /** Same opt-out guard as sendAutomatedSms, but attributed to the staff
@@ -160,10 +180,21 @@ export async function sendStaffAttributedSms(opts: {
   actor: IActorRef;
   beforeSend?: () => Promise<void>;
   beforeDispatch?: () => Promise<void>;
+  aiWorkflow?: AiWorkflow;
 }): Promise<false | Awaited<ReturnType<typeof sendSmsFromUser>>> {
   if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
-  const { actor, ...rest } = opts;
-  return sendSmsFromUser({ ...rest, user: actor });
+  const { actor, aiWorkflow, beforeDispatch, ...rest } = opts;
+  const aiGuard = aiWorkflow ? aiSmsDispatchGuard(opts.orgId, aiWorkflow, opts.toPhone, opts.leadId) : undefined;
+  return sendSmsFromUser({
+    ...rest,
+    user: actor,
+    beforeDispatch: aiGuard || beforeDispatch
+      ? async () => {
+          await beforeDispatch?.();
+          await aiGuard?.();
+        }
+      : undefined,
+  });
 }
 
 async function sendMissedCallTextBack(call: any): Promise<void> {
@@ -465,21 +496,33 @@ export async function notifyCustomerOfReschedule(appointment: any): Promise<bool
   if (!phone) return false;
 
   const firstName = appointment.customerBooking?.firstName?.trim() || "there";
-  const [dealerName, { enabled, agentName }] = await Promise.all([
+  const [dealerName, { agentName }, delivery] = await Promise.all([
     resolveDealerName(appointment.organizationId),
     resolveAiAgentSettings(String(appointment.organizationId)),
+    decideAiDelivery({
+      organizationId: appointment.organizationId,
+      channel: "sms",
+      workflow: "reschedule_notice",
+      toPhone: phone,
+      leadId: appointment.leadId,
+    }),
   ]);
   const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
 
-  if (enabled) {
-    const result = await sendStaffAttributedSms({
-      orgId: appointment.organizationId,
-      toPhone: phone,
-      body: `Hi ${firstName}, it's ${agentName} from ${dealerName}. Quick update — your appointment has been moved to ${timeLabel}. See you then! Reply STOP to opt out.`,
-      leadId: appointment.leadId,
-      actor: { userId: AI_AGENT_ACTOR_ID, name: agentName },
-    });
-    return Boolean(result);
+  if (delivery.action === "send") {
+    try {
+      const result = await sendStaffAttributedSms({
+        orgId: appointment.organizationId,
+        toPhone: phone,
+        body: `Hi ${firstName}, it's ${agentName} from ${dealerName}. Quick update — your appointment has been moved to ${timeLabel}. See you then! Reply STOP to opt out.`,
+        leadId: appointment.leadId,
+        actor: { userId: AI_AGENT_ACTOR_ID, name: agentName },
+        aiWorkflow: "reschedule_notice",
+      });
+      return Boolean(result);
+    } catch (err) {
+      if (!(err instanceof AiReplySuppressedError)) throw err;
+    }
   }
 
   return sendAutomatedSms({
@@ -936,13 +979,31 @@ async function buildSmsTranscript(conversationId: any): Promise<AiAgentTranscrip
  *  the inbound message wasn't already handled by the STOP or appointment
  *  keyword handlers. Skipped entirely when the number doesn't match a Lead —
  *  Alex only operates within a lead conversation. */
-export async function triggerSmsAiReply(orgId: any, conversation: any, lead: any, check: AttentionCheck, body: string, screened = false): Promise<void> {
+export async function triggerSmsAiReply(
+  orgId: any,
+  conversation: any,
+  lead: any,
+  check: AttentionCheck,
+  body: string,
+  screened = false,
+  options: { isNewInquiry?: boolean } = {},
+): Promise<void> {
   if (!lead?._id) return;
 
   try {
-    const { enabled, agentName } = await resolveAiAgentSettings(String(orgId));
-    if (!enabled) { await finishAiAttentionCheck(check); return; }
+    const { agentName } = await resolveAiAgentSettings(String(orgId));
+    const { mode: smsMode } = await resolveAiChannelMode(orgId, "sms");
+    if (!isAttentionScreeningMode(smsMode)) { await finishAiAttentionCheck(check); return; }
     if (!screened && !(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) return;
+
+    const delivery = await decideAiDelivery({
+      organizationId: orgId,
+      channel: "sms",
+      workflow: "sms_reply",
+      toPhone: conversation.customerPhone,
+      leadId: lead._id,
+    });
+    if (delivery.action !== "send") { await finishAiAttentionCheck(check); return; }
 
     const claimed = await claimAiGeneration(check);
     if (!claimed) return;
@@ -965,18 +1026,26 @@ export async function triggerSmsAiReply(orgId: any, conversation: any, lead: any
         getRelevantAiCoaching({ organizationId: String(orgId), channel: "sms" }),
       ]);
 
-      const vehicleInterest = lead.vehicle
-        ? [lead.vehicle.year, lead.vehicle.make, lead.vehicle.model].filter(Boolean).join(" ")
+      const vehicleContext = await resolveVehicleContextForReply({
+        organizationId: orgId,
+        phone: conversation.customerPhone,
+        triggerLead: lead,
+        isNewInquiry: options.isNewInquiry,
+        transcript,
+      });
+      const replyLead = vehicleContext.lead || lead;
+      const vehicleInterest = replyLead.vehicle
+        ? [replyLead.vehicle.year, replyLead.vehicle.make, replyLead.vehicle.model].filter(Boolean).join(" ")
         : undefined;
 
       await processAlexTurn({
         organizationId: String(orgId),
-        leadId: String(lead._id),
+        leadId: String(replyLead._id),
         channel: "sms",
         conversationId: String(conversation._id),
         agentName,
         dealerName,
-        customerFirstName: lead.firstName,
+        customerFirstName: replyLead.firstName || lead.firstName,
         leadVehicleInterest: vehicleInterest,
         phone: conversation.customerPhone,
         transcript,
@@ -985,14 +1054,19 @@ export async function triggerSmsAiReply(orgId: any, conversation: any, lead: any
         coachingNotes: coaching.notes,
         coachingRuleIds: coaching.ids,
         coachingRules: coaching.rules,
+        vehicleResolution: vehicleContext.resolution,
+        vehicleContextNote: buildVehicleContextNote(vehicleContext),
+        vehicleClarification: vehicleContext.resolution === "ambiguous" ? vehicleContext.ambiguousCandidates : undefined,
+        fallbackVehicleLabel: vehicleContext.resolution === "ambiguous" ? undefined : formatVehicleLabel(replyLead.vehicle) || undefined,
         send: async (text: string) => {
           const result = await sendStaffAttributedSms({
             orgId,
             toPhone: conversation.customerPhone,
             body: text,
-            leadId: lead._id,
+            leadId: replyLead._id,
             customerId: conversation.customerId,
             actor: { userId: AI_AGENT_ACTOR_ID, name: agentName },
+            aiWorkflow: "sms_reply",
             beforeSend: async () => {
               if (await isSmsOptedOut(orgId, conversation.customerPhone)) throw new AiReplySuppressedError();
               await assertAiReplyAllowed(check);
@@ -1004,33 +1078,33 @@ export async function triggerSmsAiReply(orgId: any, conversation: any, lead: any
         },
         notifyHandoff: async (reason) => {
           const customerName =
-            [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || "A customer";
+            [replyLead.firstName, replyLead.lastName].filter(Boolean).join(" ").trim() || "A customer";
           const taskResult = await createAiAgentTaskAndNotify({
             organizationId: String(orgId),
-            leadId: String(lead._id),
+            leadId: String(replyLead._id),
             channel: "sms",
             question: reason,
             agentName,
             customerName,
-            assignedTo: lead.assignedTo ? String(lead.assignedTo) : null,
+            assignedTo: replyLead.assignedTo ? String(replyLead.assignedTo) : null,
           });
           try {
-            const mentionedUserIds = lead.assignedTo ? [String(lead.assignedTo)] : [];
+            const mentionedUserIds = replyLead.assignedTo ? [String(replyLead.assignedTo)] : [];
             let mentionedGroupIds: string[] = [];
-            if (!lead.assignedTo) {
+            if (!replyLead.assignedTo) {
               const org = await Organization.findById(orgId).select("metadata").lean();
               const fallbackGroupId = (org?.metadata as any)?.aiHandoffFallbackGroupId;
               if (fallbackGroupId) mentionedGroupIds = [String(fallbackGroupId)];
             }
             await addLeadNoteAndNotify({
               organizationId: String(orgId),
-              leadId: String(lead._id),
+              leadId: String(replyLead._id),
               text: reason || "Needs human follow-up",
               authorType: "ai",
               authorName: agentName,
               mentionedUserIds,
               mentionedGroupIds,
-              suppressNotification: shouldSuppressHandoffNoteNotification(lead.assignedTo, Boolean(taskResult?.notified)),
+              suppressNotification: shouldSuppressHandoffNoteNotification(replyLead.assignedTo, Boolean(taskResult?.notified)),
             });
           } catch (err) {
             console.error("[comm] Alex handoff note failed:", err);
@@ -1040,7 +1114,7 @@ export async function triggerSmsAiReply(orgId: any, conversation: any, lead: any
           try {
             await addLeadNoteAndNotify({
               organizationId: String(orgId),
-              leadId: String(lead._id),
+              leadId: String(replyLead._id),
               text: note,
               authorType: "ai",
               authorName: agentName,
@@ -1127,7 +1201,7 @@ export async function triggerAiReplyForNewInquiry(orgId: any, lead: any, phone: 
       },
     });
 
-    await triggerSmsAiReply(orgId, conversation, lead, check, text);
+    await triggerSmsAiReply(orgId, conversation, lead, check, text, false, { isNewInquiry: true });
   } catch (err) {
     console.error("[comm] triggerAiReplyForNewInquiry failed:", err);
   }
@@ -1155,8 +1229,9 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     const dupe = await CommunicationMessage.findOne({ providerMessageId,
       orgId: { $in: attentionOrgIds(String(orgId)) } }).lean<ICommunicationMessage>();
     if (dupe) {
-      const { enabled, agentName } = await resolveAiAgentSettings(String(orgId));
-      if (enabled) await recoverAiHumanAttention({ organizationId: String(orgId), channel: 'sms',
+      const { agentName } = await resolveAiAgentSettings(String(orgId));
+      const { mode: recoveryMode } = await resolveAiChannelMode(orgId, 'sms');
+      if (isAttentionScreeningMode(recoveryMode)) await recoverAiHumanAttention({ organizationId: String(orgId), channel: 'sms',
         targetId: String(dupe.conversationId), messageId: String(dupe._id), body: dupe.body, createdAt: dupe.createdAt, agentName });
       return dupe;
     }
@@ -1215,8 +1290,9 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
   });
   let screened = false;
   if (!optHandled && !appointmentHandled && lead?._id) {
-    const { enabled, agentName } = await resolveAiAgentSettings(String(orgId));
-    if (enabled) {
+    const { agentName } = await resolveAiAgentSettings(String(orgId));
+    const { mode: screeningMode } = await resolveAiChannelMode(orgId, "sms");
+    if (isAttentionScreeningMode(screeningMode)) {
       if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) return message;
       screened = true;
     }
@@ -1775,7 +1851,36 @@ export async function getThreadByPhone(orgId: any, phone: string, leadId?: strin
     if (!failure) return message;
     return { ...message, smsFailureMessage: failure.friendlyMessage, smsFailureCategory: failure.category };
   });
-  return { conversation, messages: withFailureInfo.reverse() };
+  const annotated = leadId
+    ? await annotateInquiryScope(orgId, phone, leadId, withFailureInfo)
+    : withFailureInfo;
+  return { conversation, messages: annotated.reverse() };
+}
+
+export async function annotateInquiryScope<T extends { leadId?: any; body?: string }>(
+  orgId: any,
+  phone: string,
+  leadId: string,
+  messages: T[],
+): Promise<T[]> {
+  if (!messages.length) return messages;
+  try {
+    const LeadModel = mongoose.model("Lead");
+    const viewedLead: any = await LeadModel.findOne({ _id: leadId, organizationId: orgId })
+      .select("_id phone vehicle createdAt updatedAt")
+      .lean();
+    if (!viewedLead) return messages;
+    const siblings = (await loadPhoneLeads(orgId, viewedLead.phone || phone))
+      .filter((sibling: any) => String(sibling._id) !== String(viewedLead._id));
+    if (!siblings.length) return messages;
+    return messages.map((message) => {
+      const scope = classifyInquiryScope({ leadId: message.leadId, body: message.body }, viewedLead, siblings);
+      return scope ? { ...message, ...scope } : message;
+    });
+  } catch (err) {
+    console.error("[comm] annotateInquiryScope failed:", err);
+    return messages;
+  }
 }
 
 /** CustomerRecord-shaped lookup for the calls workspace info panel. */

@@ -8,8 +8,9 @@ import {
   generateAlexEmailReply,
   classifyAlexEmailReplySafety,
   AiAgentTranscriptEntry,
-  ALEX_FALLBACK_MESSAGE,
 } from './aiAgent.service';
+import { resolvePinnedVehicleContext, buildVehicleContextNote, formatVehicleLabel } from './vehicleInquiryContext.service';
+import { buildContextualFallback } from '../utils/aiFallbackMessage';
 import {
   beginAiAttentionCheck,
   finishAiAttentionCheck,
@@ -19,6 +20,8 @@ import {
 import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
 import { sendLeadReplyEmail, fetchGmailThreadMessages } from '../controllers/lead.controller';
+import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from './aiOperatingMode.service';
+import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { hasGuaranteedAvailabilityLanguage } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
 
@@ -101,8 +104,9 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
     );
     if (!claimed) return;
 
-    const { enabled, agentName } = await resolveAiAgentSettings(String(orgId));
-    if (!enabled) return;
+    const { agentName } = await resolveAiAgentSettings(String(orgId));
+    const { mode: emailMode } = await resolveAiChannelMode(orgId, 'email');
+    if (!isAttentionScreeningMode(emailMode)) return;
 
     const messageId = new mongoose.Types.ObjectId();
     check = await beginAiAttentionCheck({
@@ -114,14 +118,21 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
 
     if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body: text, agentName }))) return;
 
+    const delivery = await decideAiDelivery({ organizationId: orgId, channel: 'email', workflow: 'email_reply', leadId: lead._id });
+    if (delivery.action !== 'send') {
+      await finishAiAttentionCheck(check);
+      return;
+    }
+
     claimedForGen = await claimAiGeneration(check);
     if (!claimedForGen) return;
 
     try {
-      const [org, priceContext, transcript] = await Promise.all([
+      const [org, priceContext, transcript, vehicleContext] = await Promise.all([
         Organization.findById(orgId).select('name').lean(),
         resolveCurrentVehicleAndPrice(lead),
         buildEmailTranscript(lead),
+        resolvePinnedVehicleContext({ organizationId: orgId, lead, email: lead.email }),
       ]);
       const dealerName = (org as any)?.name || 'Your Dealership';
       const vehicleInterest = lead.vehicle
@@ -137,13 +148,20 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
         isFirstReply: true,
         confirmedPrice: priceContext?.price,
         confirmedPreviousPrice: priceContext?.previousPrice,
+        vehicleContextNote: buildVehicleContextNote(vehicleContext),
       });
 
       const customerName = [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || 'A customer';
 
       const sendFallback = async (reason: string) => {
         const fallbackConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).select('gmailAddress').lean();
-        await sendLeadReplyEmail(lead, ALEX_FALLBACK_MESSAGE, AI_AGENT_ACTOR_ID, String(orgId), [], (fallbackConfig as any)?.gmailAddress);
+        const fallback = buildContextualFallback({
+          transcript: transcript.length ? transcript : [{ from: 'customer', body: text }],
+          vehicleLabel: formatVehicleLabel(lead.vehicle) || undefined,
+        });
+        await sendLeadReplyEmail(lead, fallback.text, AI_AGENT_ACTOR_ID, String(orgId), [], (fallbackConfig as any)?.gmailAddress, {
+          beforeDispatch: emailDispatchGuard(orgId, lead._id),
+        });
         const taskResult = await createAiAgentTaskAndNotify({
           organizationId: String(orgId),
           leadId: String(lead._id),
@@ -195,7 +213,9 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       }
 
       const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).select('gmailAddress').lean();
-      await sendLeadReplyEmail(lead, generation.text, AI_AGENT_ACTOR_ID, String(orgId), [], (config as any)?.gmailAddress);
+      await sendLeadReplyEmail(lead, generation.text, AI_AGENT_ACTOR_ID, String(orgId), [], (config as any)?.gmailAddress, {
+        beforeDispatch: emailDispatchGuard(orgId, lead._id),
+      });
 
       if (generation.handoffReason) {
         const taskResult = await createAiAgentTaskAndNotify({
@@ -250,6 +270,17 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       ).catch(() => undefined);
     }
   } catch (err) {
+    if (err instanceof AiReplySuppressedError) {
+      if (check) await finishAiAttentionCheck(check).catch(() => undefined);
+      logger.info({ leadId: lead?._id }, '[AiEmailReply] AI email suppressed before dispatch');
+      return;
+    }
     logger.error({ err, leadId: lead?._id }, '[AiEmailReply] triggerAiEmailReplyForNewInquiry failed');
   }
+}
+
+function emailDispatchGuard(orgId: any, leadId: any) {
+  return async () => {
+    await assertAiDispatchAllowed({ organizationId: orgId, channel: 'email', workflow: 'email_reply', leadId });
+  };
 }

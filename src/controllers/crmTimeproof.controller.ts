@@ -19,6 +19,7 @@ import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { purgeArchivedTimeproof } from '../utils/timeproofArchivePurge.util';
+import { hasPayrollAccess } from '../utils/payrollAccess.util';
 import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
 import { PayPeriodLock } from '../models/PayPeriodLock.model';
@@ -410,7 +411,7 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
       role: crmTargetUser.role,
       department: crmTargetUser.department,
       accountModel: 'CrmUser',
-      hourlyRate: crmTargetUser.hourlyRate ?? null,
+      hourlyRate: hasPayrollAccess(requestor) ? (crmTargetUser.hourlyRate ?? null) : null,
       isOffboarded: !!crmTargetUser.isOffboarded,
       isArchived: false,
       offboardedAt: crmTargetUser.offboardedAt ?? null,
@@ -1899,8 +1900,8 @@ export const adminTimeOverride = asyncHandler(async (req: Request, res: Response
  */
 export const updateHourlyRate = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Only admins/managers can set hourly rates');
+  if (!hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'You do not have payroll access');
   }
   const { userId } = req.params;
   const { rate } = req.body as { rate?: number };
@@ -1936,8 +1937,8 @@ export const updateHourlyRate = asyncHandler(async (req: Request, res: Response)
  */
 export const getHourlyRateHistory = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Only admins/managers can view rate history');
+  if (!hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'You do not have payroll access');
   }
   const { userId } = req.params;
   const history = await HourlyRateChangeLog.find({ userId, organizationId: requestor.organizationId })
@@ -1951,8 +1952,8 @@ export const getHourlyRateHistory = asyncHandler(async (req: Request, res: Respo
  */
 export const markPeriodPaid = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Only admins/managers can mark payroll as paid');
+  if (!hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'You do not have payroll access');
   }
   const { userId } = req.params;
   const { year, month, periodNumber } = req.body as { year?: number; month?: number; periodNumber?: 1 | 2 };
@@ -1992,8 +1993,8 @@ export const markPeriodPaid = asyncHandler(async (req: Request, res: Response) =
  */
 export const unlockPayPeriod = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (requestor.role !== 'admin') {
-    throw new ApiError(403, 'Only admins can use the emergency unlock');
+  if (requestor.role !== 'admin' || !hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'Only admins with payroll access can use the emergency unlock');
   }
   const { userId } = req.params;
   const { year, month, periodNumber, reason } = req.body as {
@@ -2051,8 +2052,8 @@ function computeExactPayout(totalSeconds: number, hourlyRate: number): number {
 
 export const getPayrollStatus = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Only admins/managers can view payroll status');
+  if (!hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'You do not have payroll access');
   }
   const now = new Date();
   const year = req.query.year ? parseInt(req.query.year as string, 10) : now.getUTCFullYear();
@@ -2125,8 +2126,8 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
  */
 export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Response) => {
   const requestor = req.crmUser!;
-  if (!['admin', 'manager'].includes(requestor.role)) {
-    throw new ApiError(403, 'Only admins/managers can view the weekly overtime report');
+  if (!hasPayrollAccess(requestor)) {
+    throw new ApiError(403, 'You do not have payroll access');
   }
 
   const weekStartStr = req.query.weekStart as string | undefined;

@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import MailComposer from 'nodemailer/lib/mail-composer';
 import jwt from 'jsonwebtoken';
 import config from '../config';
 import { ApiError } from '../utils/ApiError';
@@ -25,6 +26,85 @@ interface EmailOptions {
     html?: string;
     icalEvent?: any;
     organizationId?: string;
+    headers?: Record<string, string>;
+}
+
+export interface CampaignEmailInput {
+    to: string;
+    phone?: string;
+    customerName?: string;
+    greetingName?: string;
+    subject: string;
+    greetingText: string;
+    bannerImageUrl?: string;
+    bodyText: string;
+    bodyHtml?: string;
+    signOffText?: string;
+    organizationId: string;
+}
+
+export interface RenderedCampaignEmail {
+    subject: string;
+    html: string;
+    text: string;
+    headers: Record<string, string>;
+    greetingName: string;
+    imageCount: number;
+    missingMailingAddress: boolean;
+}
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+export function resolveCampaignGreetingName(opts: { greetingName?: string; customerName?: string }): string {
+    const explicit = String(opts.greetingName || '').trim();
+    if (explicit) return explicit;
+    return String(opts.customerName || '').trim().split(/\s+/)[0] || 'there';
+}
+
+export function campaignGreetingNameFor(firstName: unknown): string {
+    return String(firstName ?? '').trim() || 'there';
+}
+
+export function withImageAltText(html: string, altText: string): string {
+    return html.replace(/<img\b([^>]*?)\s*\/?>/gi, (tag, attrs: string) => {
+        if (/\balt\s*=\s*"[^"]+"/i.test(attrs)) return tag;
+        const withoutEmptyAlt = attrs.replace(/\s+alt\s*=\s*"[^"]*"/i, '');
+        return `<img${withoutEmptyAlt} alt="${altText}" />`;
+    });
+}
+
+export async function buildGmailRawMessage(options: EmailOptions): Promise<string> {
+    const composer = new MailComposer({
+        to: options.to,
+        subject: options.subject,
+        text: options.text,
+        html: options.html || options.text,
+        headers: options.headers,
+        alternatives: options.icalEvent
+            ? [{ contentType: 'text/calendar; charset="utf-8"; method=REQUEST', content: options.icalEvent.toString() }]
+            : undefined,
+        disableFileAccess: true,
+        disableUrlAccess: true,
+    });
+    const message: Buffer = await new Promise((resolve, reject) => {
+        composer.compile().build((err, built) => (err ? reject(err) : resolve(built)));
+    });
+    const rendered = message.toString('utf8');
+    const headerEnd = rendered.indexOf('\r\n\r\n');
+    const headerBlock = rendered.slice(0, headerEnd).replace(/^Message-ID:.*(?:\r\n[ \t].*)*\r\n?/im, '');
+    const finalMessage = `${headerBlock.replace(/\r\n$/, '')}${rendered.slice(headerEnd)}`;
+    return Buffer.from(finalMessage, 'utf8')
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
 }
 
 interface IEmailOrganizer {
@@ -108,43 +188,7 @@ class EmailService {
 
     private async sendEmailViaGmailApi(oauth2Client: any, options: EmailOptions): Promise<void> {
         const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-        
-        const boundary = "__suprah_boundary__";
-        const parts = [
-            `To: ${options.to}`,
-            `Subject: ${options.subject}`,
-            `MIME-Version: 1.0`,
-            `Content-Type: multipart/alternative; boundary="${boundary}"`,
-            ``,
-            `--${boundary}`,
-            `Content-Type: text/plain; charset="utf-8"`,
-            `Content-Transfer-Encoding: 7bit`,
-            ``,
-            options.text,
-            ``,
-            `--${boundary}`,
-            `Content-Type: text/html; charset="utf-8"`,
-            `Content-Transfer-Encoding: 7bit`,
-            ``,
-            options.html || options.text,
-            ``
-        ];
-
-        if (options.icalEvent) {
-            parts.push(`--${boundary}`);
-            parts.push(`Content-Type: text/calendar; charset="utf-8"; method=REQUEST`);
-            parts.push(`Content-Transfer-Encoding: 7bit`);
-            parts.push(``);
-            parts.push(options.icalEvent.toString());
-        }
-
-        parts.push(`--${boundary}--`);
-
-        const raw = Buffer.from(parts.join('\r\n'))
-            .toString('base64')
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=+$/, '');
+        const raw = await buildGmailRawMessage(options);
 
         await withRetry(() => gmail.users.messages.send({
             userId: 'me',
@@ -186,6 +230,7 @@ class EmailService {
             subject: options.subject,
             text: options.text,
             html: options.html,
+            ...(options.headers ? { headers: options.headers } : {}),
         };
 
         // Add ICS attachment if provided
@@ -1079,54 +1124,39 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
         return true;
     }
 
-    async sendCampaignEmail(opts: {
-        to: string;
-        phone?: string;
-        customerName?: string;
-        subject: string;
-        greetingText: string;
-        bannerImageUrl?: string;
-        bodyText: string;
-        bodyHtml?: string;
-        signOffText?: string;
-        organizationId: string;
-    }): Promise<boolean> {
+    async renderCampaignEmail(opts: CampaignEmailInput, mode: 'send' | 'preview' = 'send'): Promise<RenderedCampaignEmail> {
         const { to, organizationId } = opts;
-        if (!to) return false;
-        if (opts.phone && isDemoPhone(opts.phone)) return true;
-        if (await isEmailOptedOut(organizationId, to)) return false;
-
         const mailingAddress = await this.resolveMailingAddress(organizationId);
-        if (!mailingAddress) {
+        if (!mailingAddress && mode === 'send') {
             throw new ApiError(500, 'A verified business mailing address is required before sending email campaigns. Add one in Settings.');
         }
 
-        const firstName = String(opts.customerName || '').trim().split(/\s+/)[0] || 'there';
-        const firstNameHtmlSafe = firstName
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+        const firstName = resolveCampaignGreetingName(opts);
+        const firstNameHtmlSafe = escapeHtml(firstName);
         const interpolate = (text: string) => text.replace(/\{firstName\}/gi, firstName);
         const interpolateHtml = (text: string) => text.replace(/\{firstName\}/gi, firstNameHtmlSafe);
 
         const dealerName = await this.resolveDealerName(organizationId, 'Suprah.AI');
+        const dealerNameHtmlSafe = escapeHtml(dealerName);
         const subject = interpolate(opts.subject);
         const greeting = interpolate(opts.greetingText);
         const body = interpolate(opts.bodyText);
         const signOff = interpolate(opts.signOffText || '');
         const greetingHtml = interpolateHtml(opts.greetingText);
         const bodyTextHtml = interpolateHtml(opts.bodyText);
-        const bodyHtml = opts.bodyHtml ? interpolateHtml(opts.bodyHtml) : undefined;
+        const bodyHtml = opts.bodyHtml ? withImageAltText(interpolateHtml(opts.bodyHtml), `Image from ${dealerNameHtmlSafe}`) : undefined;
         const signOffHtml = interpolateHtml(opts.signOffText || '');
 
-        const unsubscribeToken = jwt.sign(
-            { organizationId: String(organizationId), email: to, purpose: 'automated_email_unsubscribe' },
-            config.jwt.emailOptOutSecret,
-            { expiresIn: '1y' },
-        );
-        const unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+        let unsubscribeUrl = '#';
+        if (mode === 'send') {
+            const unsubscribeToken = jwt.sign(
+                { organizationId: String(organizationId), email: to, purpose: 'automated_email_unsubscribe' },
+                config.jwt.emailOptOutSecret,
+                { expiresIn: '1y' },
+            );
+            unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+        }
+        const footerAddress = mailingAddress ? escapeHtml(mailingAddress) : '[Add your business mailing address in Settings]';
 
         const html = `
             <!DOCTYPE html>
@@ -1134,15 +1164,15 @@ Unsubscribe from review request emails: ${unsubscribeUrl}
             <head></head>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333333; background-color: #f4f4f4; margin: 0; padding: 0;">
                 <div style="max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="" style="width: 100%; max-height: 320px; object-fit: cover; display: block;" />` : ''}
+                    ${opts.bannerImageUrl ? `<img src="${opts.bannerImageUrl}" alt="${dealerNameHtmlSafe}" style="width: 100%; max-height: 320px; object-fit: cover; display: block;" />` : ''}
                     <div style="padding: 30px;">
                         <p style="font-size: 16px; margin: 0 0 16px 0;">${greetingHtml}</p>
                         ${bodyHtml ? `<div style="font-size: 15px;">${bodyHtml}</div>` : `<p style="font-size: 15px; white-space: pre-line; margin: 0;">${bodyTextHtml}</p>`}
                         ${signOffHtml ? `<p style="font-size: 15px; margin: 16px 0 0 0;">${signOffHtml}</p>` : ''}
                     </div>
                     <div style="text-align: center; color: #6b7280; font-size: 12px; padding: 20px; background: #f9fafb; border-top: 1px solid #e5e7eb;">
-                        <p style="margin: 0 0 4px 0;"><strong>${dealerName}</strong></p>
-                        <p style="margin: 0 0 8px 0;">${mailingAddress}</p>
+                        <p style="margin: 0 0 4px 0;"><strong>${dealerNameHtmlSafe}</strong></p>
+                        <p style="margin: 0 0 8px 0;">${footerAddress}</p>
                         <p style="margin: 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af;">Unsubscribe from automated emails</a></p>
                     </div>
                 </div>
@@ -1163,7 +1193,43 @@ ${mailingAddress}
 Unsubscribe from automated emails: ${unsubscribeUrl}
         `;
 
-        await this.sendEmail({ to, subject, text, html, organizationId });
+        const headers: Record<string, string> = {};
+        if (mode === 'send' && /^https:\/\//i.test(unsubscribeUrl)) {
+            headers['List-Unsubscribe'] = `<${unsubscribeUrl}>`;
+            headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+        }
+
+        return {
+            subject,
+            html,
+            text,
+            headers,
+            greetingName: firstName,
+            imageCount: (html.match(/<img\b/gi) || []).length,
+            missingMailingAddress: !mailingAddress,
+        };
+    }
+
+    async sendCampaignEmail(opts: CampaignEmailInput): Promise<boolean> {
+        const { to, organizationId } = opts;
+        if (!to) return false;
+        if (opts.phone && isDemoPhone(opts.phone)) return true;
+        if (await isEmailOptedOut(organizationId, to)) return false;
+
+        const rendered = await this.renderCampaignEmail(opts, 'send');
+        logger.info(
+            { organizationId, imageCount: rendered.imageCount, listUnsubscribe: Boolean(rendered.headers['List-Unsubscribe']) },
+            '[EmailService] Campaign email rendered',
+        );
+
+        await this.sendEmail({
+            to,
+            subject: rendered.subject,
+            text: rendered.text,
+            html: rendered.html,
+            organizationId,
+            ...(Object.keys(rendered.headers).length ? { headers: rendered.headers } : {}),
+        });
         return true;
     }
 
@@ -1397,5 +1463,6 @@ export default {
     sendReviewRequestEmail: emailService.sendReviewRequestEmail.bind(emailService),
     sendPriceDropEmail: emailService.sendPriceDropEmail.bind(emailService),
     sendCampaignEmail: emailService.sendCampaignEmail.bind(emailService),
+    renderCampaignEmail: emailService.renderCampaignEmail.bind(emailService),
     sendCrmPasswordResetEmail: emailService.sendCrmPasswordResetEmail.bind(emailService),
 };

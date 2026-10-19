@@ -43,7 +43,7 @@ passport.use(
                 // 3. Process Invitation if present. An invite only applies if it
                 // was actually sent to the Google account that's signing in —
                 // otherwise anyone holding a still-pending invite link could get
-                // promoted into (or create an account inside) someone else's org.
+                // promoted into (or create an 3account inside) someone else's org.
                 if (inviteToken) {
                     const InvitationModel = mongoose.model('Invitation');
                     const invite: any = await InvitationModel.findOne({ token: inviteToken, status: 'pending' });

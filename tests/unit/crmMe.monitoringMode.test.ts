@@ -206,3 +206,43 @@ describe('GET /me monitoringMode', () => {
     expect(data.screenshotsRequired).toBe(true);
   });
 });
+
+describe('organization settings — the old AI toggle can no longer turn live AI on', () => {
+  const OrganizationModel = jest.requireMock('../../src/models/Organization.model').default;
+
+  function orgDoc(metadata: any) {
+    const doc: any = { metadata, save: jest.fn().mockResolvedValue(undefined) };
+    OrganizationModel.findById = jest.fn().mockResolvedValue(doc);
+    return doc;
+  }
+
+  async function patch(body: any) {
+    const next = jest.fn();
+    const json = jest.fn();
+    crmController.updateOrgSettings({ orgId: 'org1', crmUser: { role: 'admin' }, body } as any, { json } as any, next);
+    await new Promise(resolve => setImmediate(resolve));
+    return { next, json };
+  }
+
+  it('rejects aiAgentEnabled: true from an old cached page instead of going live without confirmation', async () => {
+    const doc = orgDoc({ aiAgentEnabled: false });
+    const { next } = await patch({ aiAgentEnabled: true, aiAgentName: 'Alex' });
+    expect(next.mock.calls[0][0].statusCode).toBe(409);
+    expect(doc.save).not.toHaveBeenCalled();
+  });
+
+  it('still lets a legacy org turn the old toggle off', async () => {
+    const doc = orgDoc({ aiAgentEnabled: true });
+    const { json } = await patch({ aiAgentEnabled: false });
+    expect(doc.save).toHaveBeenCalled();
+    expect(doc.metadata.aiAgentEnabled).toBe(false);
+    expect(json).toHaveBeenCalled();
+  });
+
+  it('ignores the old toggle once per-channel modes are configured, so the rollback mirror stays accurate', async () => {
+    const doc = orgDoc({ aiAgentEnabled: true, aiAgentModes: { sms: 'live', email: 'training', webchat: 'training' } });
+    await patch({ aiAgentEnabled: false, aiAgentName: 'Alex' });
+    expect(doc.metadata.aiAgentEnabled).toBe(true);
+    expect(doc.metadata.aiAgentModes.sms).toBe('live');
+  });
+});

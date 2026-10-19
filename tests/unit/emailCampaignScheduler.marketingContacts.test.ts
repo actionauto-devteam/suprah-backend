@@ -97,6 +97,7 @@ describe('emailCampaign.scheduler — Marketing Contact recipient compatibility'
       email: 'marketing-contact@example.com',
       phone: undefined,
       customerName: 'Synthetic Contact',
+      greetingName: 'Synthetic',
       marketingContactId: 'mc-1',
       leadId: undefined,
     };
@@ -111,6 +112,7 @@ describe('emailCampaign.scheduler — Marketing Contact recipient compatibility'
       expect.objectContaining({
         to: 'marketing-contact@example.com',
         customerName: 'Synthetic Contact',
+        greetingName: 'Synthetic',
         organizationId: 'org-1',
       }),
     );

@@ -19,6 +19,7 @@ import { emitToOrg } from '../utils/socketEmitter';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 export { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { fetchGmailThreadMessages } from '../controllers/lead.controller';
+import { recordAiUsage } from './aiOperatingMode.service';
 
 export type AttentionIntent = 'none' | 'ai_identity_concern' | 'human_request' | 'unavailable';
 export interface AttentionContext {
@@ -334,6 +335,7 @@ export async function screenAiHumanAttention(input: AttentionCheck & { leadId: s
       const emailHistory = await fetchGmailThreadMessages(input.organizationId, (state as any).threadId, (state as any).messageId);
       history = emailHistory.slice(-6);
     }
+    if (hasGeminiApiKey(input.phone)) await recordAiUsage(input.organizationId, 'attention_screen');
     const intent = await classifyHumanAttention(input.body, history.map((message: any) => ({
       from: message.direction === 'inbound' ? 'customer' : 'assistant', body: message.body,
     })), input.phone);

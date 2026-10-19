@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type VehicleReengagementStatus = 'blocked' | 'sent' | 'failed' | 'skipped';
+export type VehicleReengagementStatus = 'blocked' | 'sent' | 'failed' | 'skipped' | 'skipped_ai_not_live';
 export type VehicleReengagementClassifierVerdict = 'SAFE' | 'UNSAFE' | 'ERROR';
 
 export interface IVehicleReengagementLog extends Document {
@@ -37,7 +37,7 @@ const VehicleReengagementLogSchema: Schema<IVehicleReengagementLog> = new Schema
     finalMessage: { type: String, trim: true },
     status: {
       type: String,
-      enum: ['blocked', 'sent', 'failed', 'skipped'],
+      enum: ['blocked', 'sent', 'failed', 'skipped', 'skipped_ai_not_live'],
       required: true,
       index: true,
     },

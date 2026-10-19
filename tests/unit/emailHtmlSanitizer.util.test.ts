@@ -120,3 +120,11 @@ describe('emailHtmlSanitizer — htmlToPlainText', () => {
     expect(htmlToPlainText('')).toBe('');
   });
 });
+
+describe('sanitizeEmailHtml — images without a usable source', () => {
+  it('drops an image whose only source was unsafe, instead of leaving an empty broken image', () => {
+    const out = sanitizeEmailHtml('<p>Before</p><img src="data:image/png;base64,AAAA" alt="x" /><img src="javascript:alert(1)" /><img src="https://example.com/ok.png" />');
+    expect((out.match(/<img/g) || []).length).toBe(1);
+    expect(out).toContain('<img src="https://example.com/ok.png"');
+  });
+});

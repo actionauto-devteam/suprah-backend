@@ -33,11 +33,11 @@ jest.mock('../../src/models/Organization.model', () => ({
 jest.mock('../../src/services/vehicleReengagement.service', () => ({
   matchesVehicle: mockMatchesVehicle,
 }));
+jest.mock('../../src/services/aiOperatingMode.service', () => require('./helpers/legacyAiModeMock').legacyAiModeMock((orgId: any) => mockResolveAiAgentSettings(orgId)));
 jest.mock('../../src/services/aiAgent.service', () => ({
   resolveAiAgentSettings: mockResolveAiAgentSettings,
   generateAlexEmailReply: mockGenerateAlexEmailReply,
   classifyAlexEmailReplySafety: mockClassifyAlexEmailReplySafety,
-  ALEX_FALLBACK_MESSAGE: "Let me get someone from our team to help you with that — they'll be right with you!",
 }));
 jest.mock('../../src/services/aiHumanAttention.service', () => ({
   beginAiAttentionCheck: mockBeginAiAttentionCheck,
@@ -63,6 +63,7 @@ jest.mock('../../src/utils/logger', () => ({
 
 import mongoose from 'mongoose';
 import { validateOutboundEmailMessage, triggerAiEmailReplyForNewInquiry } from '../../src/services/aiEmailReply.service';
+import { GENERIC_FALLBACK_MESSAGES } from '../../src/utils/aiFallbackMessage';
 
 describe('validateOutboundEmailMessage', () => {
   it('blocks percent-off language', () => {
@@ -186,6 +187,39 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     expect(mockScreenAiHumanAttention).not.toHaveBeenCalled();
   });
 
+  it('in Training mode, still runs the customer-attention check but never generates or emails', async () => {
+    const modeMock = jest.requireMock('../../src/services/aiOperatingMode.service');
+    modeMock.resolveAiChannelMode.mockResolvedValueOnce({ mode: 'training', source: 'configured' });
+    modeMock.decideAiDelivery.mockResolvedValueOnce({ action: 'skip', mode: 'training', source: 'configured' });
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
+    expect(mockScreenAiHumanAttention).toHaveBeenCalledTimes(1);
+    expect(modeMock.decideAiDelivery).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', workflow: 'email_reply' }));
+    expect(mockClaimAiGeneration).not.toHaveBeenCalled();
+    expect(mockGenerateAlexEmailReply).not.toHaveBeenCalled();
+    expect(mockSendLeadReplyEmail).not.toHaveBeenCalled();
+    expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
+  });
+
+  it('passes a dispatch guard that re-checks the email mode right before Gmail', async () => {
+    const modeMock = jest.requireMock('../../src/services/aiOperatingMode.service');
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
+    const options = mockSendLeadReplyEmail.mock.calls[0][6];
+    modeMock.assertAiDispatchAllowed.mockClear();
+    await options.beforeDispatch();
+    expect(modeMock.assertAiDispatchAllowed).toHaveBeenCalledWith({
+      organizationId: 'org-1', channel: 'email', workflow: 'email_reply', leadId: 'lead-1',
+    });
+  });
+
+  it('if the mode leaves Live while the email is being written, nothing is sent and no fallback is attempted', async () => {
+    const { AiReplySuppressedError } = jest.requireActual('../../src/utils/aiReplySuppressed');
+    mockSendLeadReplyEmail.mockRejectedValueOnce(new AiReplySuppressedError());
+    await expect(triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo')).resolves.toBeUndefined();
+    expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
+    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
+  });
+
   it('on a clean happy path, sends the generated reply via sendLeadReplyEmail using the org central Gmail address', async () => {
     await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
 
@@ -196,6 +230,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
+      { beforeDispatch: expect.any(Function) },
     );
   });
 
@@ -215,35 +250,87 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     );
   });
 
-  it('sends the fixed fallback (never the blocked draft) when the deterministic validator blocks the draft', async () => {
+  it('sends a safe fallback (never the blocked draft) when the deterministic validator blocks the draft', async () => {
     mockGenerateAlexEmailReply.mockResolvedValue({ text: 'The price is $99,999 for this one, act fast!' });
     await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
     expect(mockClassifyAlexEmailReplySafety).not.toHaveBeenCalled();
     expect(mockSendLeadReplyEmail).toHaveBeenCalledWith(
       lead,
-      "Let me get someone from our team to help you with that — they'll be right with you!",
+      GENERIC_FALLBACK_MESSAGES[0],
       'ai-agent',
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
+      { beforeDispatch: expect.any(Function) },
     );
     expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
     expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
   });
 
-  it('sends the fixed fallback (never the blocked draft) when the email safety classifier returns UNSAFE', async () => {
+  it('sends a safe fallback (never the blocked draft) when the email safety classifier returns UNSAFE', async () => {
     mockClassifyAlexEmailReplySafety.mockResolvedValue('UNSAFE');
     await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
     expect(mockSendLeadReplyEmail).toHaveBeenCalledWith(
       lead,
-      "Let me get someone from our team to help you with that — they'll be right with you!",
+      GENERIC_FALLBACK_MESSAGES[0],
       'ai-agent',
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
+      { beforeDispatch: expect.any(Function) },
     );
     expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
     expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
+  });
+
+  it('acknowledges a specific test-drive request in the email fallback, naming this inquiry\'s vehicle only', async () => {
+    mockClassifyAlexEmailReplySafety.mockResolvedValue('UNSAFE');
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Can I test drive it Saturday at 11am?');
+    expect(mockSendLeadReplyEmail).toHaveBeenCalledWith(
+      lead,
+      'Thanks for your test drive request for the 2023 Volvo XC40! A member of our team will follow up to confirm whether Saturday at 11 AM works.',
+      'ai-agent',
+      'org-1',
+      [],
+      'actionautoutah.dev@gmail.com',
+      { beforeDispatch: expect.any(Function) },
+    );
+  });
+
+  function leadModelWithSiblings(siblings: any[]) {
+    const chain: any = {
+      select: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      maxTimeMS: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue(siblings),
+    };
+    mongooseModelSpy.mockImplementation((name: any) => {
+      if (name === 'Lead') {
+        return { findOneAndUpdate: mockLeadFindOneAndUpdate, updateOne: mockLeadUpdateOne, find: jest.fn().mockReturnValue(chain) } as any;
+      }
+      throw new Error(`Schema hasn't been registered for model "${name}".`);
+    });
+  }
+
+  it('pins the email reply to this inquiry and tells the model not to mention the customer\'s other vehicle inquiry', async () => {
+    const civicInquiry = { _id: 'lead-2', email: lead.email, vehicle: { year: '2022', make: 'Honda', model: 'Civic' }, updatedAt: new Date() };
+    leadModelWithSiblings([lead, civicInquiry]);
+
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
+
+    const call = mockGenerateAlexEmailReply.mock.calls[0][0];
+    expect(call.leadVehicleInterest).toBe('2023 Volvo XC40');
+    expect(call.vehicleContextNote).toContain('This message is about the 2023 Volvo XC40 only');
+    expect(call.vehicleContextNote).toContain('2022 Honda Civic');
+  });
+
+  it('leaves single-inquiry email replies unchanged (no extra vehicle instruction)', async () => {
+    leadModelWithSiblings([lead]);
+
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo');
+
+    expect(mockGenerateAlexEmailReply.mock.calls[0][0].vehicleContextNote).toBeUndefined();
   });
 
   it('on a handoff marker, creates an AI agent task and a mentioning note, and still sends the reply', async () => {

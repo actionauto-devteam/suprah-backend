@@ -11,6 +11,7 @@ export interface IEmailCampaignRecipient extends Document {
   email: string;
   phone?: string;
   customerName: string;
+  greetingName?: string;
   status: EmailCampaignRecipientStatus;
   failureReason?: string;
   sentAt?: Date;
@@ -32,6 +33,7 @@ const EmailCampaignRecipientSchema: Schema<IEmailCampaignRecipient> = new Schema
     email: { type: String, required: true, trim: true, lowercase: true },
     phone: { type: String, trim: true },
     customerName: { type: String, trim: true },
+    greetingName: { type: String, trim: true },
     status: {
       type: String,
       enum: ['pending', 'processing', 'sent', 'failed', 'skipped', 'uncertain'],

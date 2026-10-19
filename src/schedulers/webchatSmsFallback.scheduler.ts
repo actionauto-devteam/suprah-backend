@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import WebChatSession from '../models/WebChatSession.model';
 import WebChatMessage from '../models/WebChatMessage.model';
+import { WEBCHAT_ACK_ACTOR_ID } from '../utils/webchatAck';
 import { sendWebchatFallbackSms } from '../services/communication.service';
 import logger from '../utils/logger';
 
@@ -39,6 +40,7 @@ export async function runWebchatSmsFallbackSweep(): Promise<FallbackStats> {
       const staffReplied = await WebChatMessage.exists({
         sessionId: session._id,
         direction: 'outbound',
+        'sentBy.userId': { $ne: WEBCHAT_ACK_ACTOR_ID },
       });
       if (staffReplied) {
         await WebChatSession.updateOne(

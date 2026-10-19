@@ -56,6 +56,7 @@ export interface ICrmUser extends Document {
   autoSwitchOverride?: 'default' | 'on' | 'off';
   desktopLocationOverride?: 'default' | 'on' | 'off';
   hourlyRate?: number;
+  payrollAccess?: boolean;
   payrollLocation?: 'Utah' | 'Philippines';
   googleCalendar?: {
     calendarConnected: boolean;
@@ -227,6 +228,9 @@ const CrmUserSchema = new Schema<ICrmUser>(
     otWarningExempt: {
       type: Boolean,
       default: false,
+    },
+    payrollAccess: {
+      type: Boolean,
     },
     screenshotBlurUntilPayout: {
       type: Boolean,
