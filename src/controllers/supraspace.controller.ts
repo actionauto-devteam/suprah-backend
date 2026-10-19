@@ -486,7 +486,12 @@ export async function pushToConversationMembers(conv: any, senderId: string, tit
           category: 'crm',
           title: notificationTitle,
           message: notificationMessage,
-          metadata: { conversationId: conv._id.toString(), messageId, kind: 'message' },
+          metadata: {
+            conversationId: conv._id.toString(),
+            messageId,
+            route: supraSpaceMessageUrl(conv._id.toString(), messageId),
+            kind: 'message',
+          },
         })
           .then((notification) => emitNotificationToUser(memberId, notification))
           .catch((err) => logger.warn({ err, memberId }, '[SupraSpace] Failed to persist notification log entry'));
