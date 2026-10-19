@@ -59,6 +59,20 @@ export function sanitizeConditionDetails(body: unknown): {
   };
 }
 
+/**
+ * The damaged part a condition photo shows. Optional: no value means a general
+ * photo of the vehicle. An unknown part is refused rather than dropped, so the
+ * driver isn't told the photo is linked when it isn't.
+ */
+export function parseConditionPhotoArea(value: unknown): string | undefined {
+  const area = String(value ?? "").trim();
+  if (!area) return undefined;
+  if (!(CONDITION_AREAS as readonly string[]).includes(area)) {
+    throw new ApiError(400, "Choose which part of the vehicle this photo shows from the list, or leave it blank.");
+  }
+  return area;
+}
+
 /** The customer's name and drawn signature (a PNG data URL), checked. */
 export function parseDeliverySignature(body: unknown): { signerName: string; signatureDataUrl: string } {
   const input = (body ?? {}) as { signerName?: unknown; signatureDataUrl?: unknown };
@@ -74,7 +88,7 @@ export function parseDeliverySignature(body: unknown): { signerName: string; sig
   return { signerName, signatureDataUrl };
 }
 
-type StoredPhoto = { _id?: unknown; key?: string; uploadedAt?: unknown };
+type StoredPhoto = { _id?: unknown; key?: string; uploadedAt?: unknown; area?: string };
 type StoredReport = {
   _id?: unknown;
   stop?: string;
@@ -94,6 +108,7 @@ async function signedPhotos(photos: StoredPhoto[] | undefined) {
       id: String(photo._id ?? ""),
       url: photo.key ? (await getSignedProofUrl(photo.key)) || null : null,
       uploadedAt: photo.uploadedAt ?? null,
+      area: photo.area ?? null,
     })),
   );
 }

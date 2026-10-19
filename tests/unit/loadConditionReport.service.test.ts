@@ -81,7 +81,8 @@ describe('condition report rules', () => {
     };
     await presentConditionReportsForStaff(load);
     expect(load.conditionReports[0].photos).toEqual([
-      { id: 'p1', url: 'https://signed.example/condition-report/a.jpg', uploadedAt: '2026-10-13T10:00:00Z' },
+      // area: the damaged part the photo shows; null for a general photo.
+      { id: 'p1', url: 'https://signed.example/condition-report/a.jpg', uploadedAt: '2026-10-13T10:00:00Z', area: null },
     ]);
     expect(JSON.stringify(load)).not.toContain('"key"');
   });

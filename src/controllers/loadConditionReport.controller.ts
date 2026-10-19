@@ -17,6 +17,7 @@ import {
 import {
   assertConditionStopEditable,
   editableConditionStops,
+  parseConditionPhotoArea,
   parseConditionStop,
   parseDeliverySignature,
   parseVehicleIndex,
@@ -117,6 +118,8 @@ const uploadConditionPhoto = asyncHandler(async (req: Request, res: Response) =>
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) throw new ApiError(400, "Take or choose a photo first.");
   const stop = parseConditionStop(req.params.stop);
+  // Optional: the damaged part this photo shows (multipart field "area").
+  const area = parseConditionPhotoArea((req.body as any)?.area);
   const { user, load } = await driverLoad(req, stop);
   const vehicleIndex = parseVehicleIndex(req.params.vehicleIndex, load.vehicles?.length ?? 0);
   const driverId = user._id.toString();
@@ -131,7 +134,7 @@ const uploadConditionPhoto = asyncHandler(async (req: Request, res: Response) =>
 
   const key = await storageService.upload(file, "condition-report", BucketType.PRIVATE);
   const now = new Date();
-  const photo = { _id: new mongoose.Types.ObjectId(), key, uploadedAt: now };
+  const photo = { _id: new mongoose.Types.ObjectId(), key, uploadedAt: now, ...(area ? { area } : {}) };
   const open = openForDriver(load._id, user._id, stop);
 
   // Add to this driver's report for the vehicle (while under the limit), or start it.
