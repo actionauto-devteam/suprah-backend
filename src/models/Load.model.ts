@@ -125,7 +125,8 @@ export interface ILoad extends Document {
     vehicleIndex: number;
     driverId: mongoose.Types.ObjectId;
     driverName?: string;
-    photos: Array<{ _id: mongoose.Types.ObjectId; key: string; uploadedAt?: Date }>;
+    /** area: the damaged part the photo shows, when the driver picked one (optional). */
+    photos: Array<{ _id: mongoose.Types.ObjectId; key: string; uploadedAt?: Date; area?: string }>;
     damageAreas: string[];
     damageTypes: string[];
     note?: string;
@@ -140,6 +141,8 @@ export interface ILoad extends Document {
     driverName?: string;
   };
   deliveryOverride?: Record<string, any>;
+  /** When drivers were told this load is on the board (once per load). */
+  boardAlertSentAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -352,6 +355,8 @@ const conditionReportSchema = new Schema(
           {
             key: { type: String, required: true },
             uploadedAt: { type: Date, default: Date.now },
+            // The damaged part this photo shows, when the driver chose one.
+            area: { type: String, enum: CONDITION_AREAS },
           },
           { _id: true },
         ),
@@ -561,6 +566,9 @@ const loadSchema = new Schema<ILoad>(
       },
     },
     conditionReports: { type: [conditionReportSchema], default: undefined },
+    // Set when drivers who can request this load were told it's on the board
+    // (newLoadAlert.service), so each load is announced only once.
+    boardAlertSentAt: { type: Date, select: false },
     deliverySignature: {
       type: new Schema(
         {

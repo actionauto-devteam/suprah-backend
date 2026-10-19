@@ -41,6 +41,11 @@ export const NOTIFICATION_TYPES = [
   'driver_document_verified', 'driver_document_rejected', 'driver_profile_approved',
   // Reminder to a driver that a CDL, medical card or insurance expires soon.
   'driver_document_expiring',
+  // A new load on the board that the driver can request, with or without
+  // something to check first (newLoadAlert.service).
+  'new_load_available', 'new_load_check_first',
+  // What those alerts become once the load has left the board.
+  'new_load_unavailable',
   'payment_received', 'payment_pending', 'payment_failed', 'payment_request', 'payout_processed',
   'wallet_low_balance', 'wallet_payout_failed',
   'admin_broadcast', 'admin_system_alert', 'admin_staff_activity', 'admin_security_audit',

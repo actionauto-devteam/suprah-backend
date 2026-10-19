@@ -24,6 +24,7 @@ import {
   assertNoDriverCommitmentConflict,
   withDriverCommitmentLock,
 } from "../services/driverWorkCommitment.service";
+import { markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
 import User, { IUser } from "../models/User.model";
 import DriverProfile, {
   REQUIRED_COMPLIANCE_DOCS,
@@ -2505,6 +2506,8 @@ const assignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   });
 
   await flushLifecycleOutbox(load._id.toString());
+  // Off the board now: other drivers' new-load alerts stop offering it.
+  void markNewLoadAlertsUnavailable(load._id.toString(), driverId);
 
   logger.info(
     {
@@ -4303,6 +4306,15 @@ const requestLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
       status: "Posted",
       assignedDriverId: null,
       "driverRequests.driverId": { $ne: user._id },
+      // Still the load the checks above looked at: on the board, with the
+      // same vehicle count, trailer and dates. A change in between refuses
+      // the request, so the driver checks the load again.
+      "additionalInfo.visibility": { $ne: "private" },
+      trailerType: load.trailerType ?? null,
+      vehicles: { $size: Array.isArray(load.vehicles) ? load.vehicles.length : 0 },
+      "dates.firstAvailable": load.dates?.firstAvailable ?? null,
+      "dates.pickupDeadline": load.dates?.pickupDeadline ?? null,
+      "dates.deliveryDeadline": load.dates?.deliveryDeadline ?? null,
     },
     appendLoadLifecycleOutbox(
       {
@@ -4572,6 +4584,8 @@ const approveLoadRequest = asyncHandler(async (req: ExpressRequest, res: Express
   });
 
   await flushLifecycleOutbox(load._id.toString());
+  // Off the board now: other drivers' new-load alerts stop offering it.
+  void markNewLoadAlertsUnavailable(load._id.toString(), driverId);
 
   return res.status(200).json(new ApiResponse(200, load, "Request approved"));
 });
