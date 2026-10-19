@@ -75,21 +75,164 @@ const FIELD_LABELS: Record<string, string> = {
   deliveryZip: 'Delivery ZIP',
 };
 
+/** The words people see on the forms, for the fields the APIs check. */
+const FIELD_NAMES: Record<string, string> = {
+  // Loads
+  postType: 'load type',
+  trailerType: 'trailer type',
+  vehicles: 'vehicles',
+  address: 'street address',
+  city: 'city',
+  state: 'state',
+  zip: 'ZIP code',
+  country: 'country',
+  phone: 'phone number',
+  phoneExt: 'phone extension',
+  email: 'email address',
+  contactName: 'contact name',
+  locationType: 'location type',
+  notes: 'notes',
+  coordinates: 'map pin',
+  lat: 'map pin',
+  lng: 'map pin',
+  placeId: 'map location',
+  vin: 'VIN',
+  year: 'year',
+  make: 'make',
+  model: 'model',
+  color: 'color',
+  condition: 'condition',
+  inspectionPhotoUrl: 'inspection photo',
+  firstAvailable: 'first available date',
+  pickupDeadline: 'pickup deadline',
+  deliveryDeadline: 'delivery deadline',
+  visibility: 'visibility',
+  instructions: 'instructions',
+  referenceNumber: 'reference number',
+  agreedToTerms: 'agreement to the transport terms',
+  signatureDataUrl: 'signature',
+  signerName: 'signer name',
+  pricePerMile: 'price per mile',
+  carrierPayAmount: 'carrier pay',
+  copCodAmount: 'COP/COD amount',
+  pickupZip: 'pickup ZIP code',
+  deliveryZip: 'delivery ZIP code',
+  // Accounts
+  name: 'name',
+  password: 'password',
+  newPassword: 'new password',
+  otp: 'code',
+  dealershipName: 'dealership name',
+  dealershipSlug: 'dealership web address',
+  organizationId: 'organization',
+  inviteToken: 'invite link',
+  role: 'account type',
+  // Driver profile
+  maxVehicleCapacity: 'number of vehicles your trailer carries',
+  serviceRadius: 'service radius',
+  availableDays: 'work days',
+  preferredRoutes: 'preferred routes',
+  homeBase: 'home base',
+  licenseExpirationDate: 'CDL expiration date',
+  medicalCardExpirationDate: 'medical card expiration date',
+  insuranceExpirationDate: 'insurance expiration date',
+  driversLicenseNumber: 'CDL number',
+  licenseState: 'license state',
+  ssnLast4: 'last 4 digits of the SSN',
+};
+
+const humanizeKey = (key: string) => key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase();
+const capitalize = (text: string) => (text ? text[0].toUpperCase() + text.slice(1) : text);
+
+/**
+ * The field a validation path points to, in the form's words, e.g.
+ * ["pickupLocation", "zip"] -> "Pickup ZIP code", ["vehicles", 1, "year"] -> "Vehicle 2 year".
+ */
+export function fieldLabelForPath(path: ReadonlyArray<PropertyKey>): string {
+  const keys = path.filter((part): part is string => typeof part === 'string' && !/^\d+$/.test(part));
+  const index = path.find((part): part is number => typeof part === 'number' || (typeof part === 'string' && /^\d+$/.test(part)));
+  const leaf = keys[keys.length - 1];
+  const leafName = leaf ? FIELD_NAMES[leaf] ?? humanizeKey(leaf) : '';
+
+  if (keys[0] === 'pickupLocation' || keys[0] === 'deliveryLocation') {
+    const where = keys[0] === 'pickupLocation' ? 'Pickup' : 'Delivery';
+    if (keys.length === 1) return `${where} location`;
+    return `${where} ${leaf === 'name' ? 'location name' : leafName}`;
+  }
+  if (keys[0] === 'vehicles') {
+    const vehicle = index !== undefined ? `Vehicle ${Number(index) + 1}` : 'Vehicles';
+    return keys.length > 1 ? `${vehicle} ${leafName}` : vehicle;
+  }
+  return capitalize(leafName);
+}
+
+// The validation library's own wording ("Invalid input: expected string,
+// received undefined", "Too big: expected number to be <=1000") is replaced;
+// messages a schema writes for people are kept.
+const LIBRARY_DEFAULT_MESSAGE = /^(Invalid( input| option| string| email| value| format| date| number| key| element| union)?\b|Too (small|big)\b|Unrecognized key)/i;
+
+type ValidationIssue = {
+  path: PropertyKey[];
+  message: string;
+  code?: string;
+  expected?: string;
+  origin?: string;
+  format?: string;
+  minimum?: number | bigint;
+  maximum?: number | bigint;
+};
+
+function plainIssue(issue: ValidationIssue, label: string): string {
+  const field = label || 'This field';
+  const lower = label ? label[0].toLowerCase() + label.slice(1) : 'value';
+  const min = Number(issue.minimum);
+  const max = Number(issue.maximum);
+  switch (issue.code) {
+    case 'invalid_type':
+      if (/received (undefined|null)\s*$/i.test(issue.message)) {
+        return issue.expected === 'array' ? `${field}: add at least one.` : `${field} is missing.`;
+      }
+      if (issue.expected === 'int') return `${field} must be a whole number.`;
+      if (issue.expected === 'number') return `${field} must be a number.`;
+      if (issue.expected === 'object') return `${field} is missing or incomplete.`;
+      if (issue.expected === 'array') return `${field} must be a list.`;
+      if (issue.expected === 'boolean') return `${field} must be yes or no.`;
+      return `${field} isn't valid.`;
+    case 'too_small':
+      if (issue.origin === 'string') return min <= 1 ? `${field} is missing.` : `${field} must be at least ${min} characters.`;
+      if (issue.origin === 'array') return `${field}: add at least ${min}.`;
+      return min === 0 ? `${field} can't be negative.` : `${field} must be at least ${min}.`;
+    case 'too_big':
+      if (issue.origin === 'string') return `${field} can be at most ${max} characters.`;
+      if (issue.origin === 'array') return `${field}: at most ${max} allowed.`;
+      return `${field} can be at most ${max}.`;
+    case 'invalid_value':
+      return `Choose a valid ${lower}.`;
+    case 'invalid_format':
+      return issue.format === 'email' ? `Enter a valid ${label ? lower : 'email address'}.` : `${field} isn't in the right format.`;
+    case 'unrecognized_keys':
+      return "This form includes something that can't be saved here. Refresh the page and try again.";
+    default:
+      return `${field} isn't valid.`;
+  }
+}
+
 /**
  * Turns validation issues into one readable sentence, naming the part of the
  * form each problem belongs to, e.g.
- * "Please fix the following: Pickup: City is required. Vehicle 2: Invalid year."
+ * "Please fix the following: Pickup: City is required. Vehicle 2 year must be a number."
  */
-export function describeValidationIssues(
-  issues: Array<{ path: PropertyKey[]; message: string }>,
-): string {
+export function describeValidationIssues(issues: ValidationIssue[]): string {
   const parts = issues.slice(0, 6).map((issue) => {
-    const [first, second] = issue.path;
+    if (LIBRARY_DEFAULT_MESSAGE.test(issue.message ?? '')) {
+      return plainIssue(issue, fieldLabelForPath(issue.path ?? []));
+    }
+    const [first, second] = issue.path ?? [];
     const base = FIELD_LABELS[String(first ?? '')] ?? '';
     const label =
       base === 'Vehicle' && typeof second === 'number' ? `Vehicle ${second + 1}` : base;
     return label ? `${label}: ${issue.message}` : issue.message;
   });
-  const unique = [...new Set(parts)];
-  return `Please fix the following: ${unique.join('. ')}.`.replace(/\.\./g, '.');
+  const unique = [...new Set(parts.map((part) => part.replace(/\.?\s*$/, '.')))];
+  return `Please fix the following: ${unique.join(' ')}`;
 }
