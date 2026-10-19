@@ -21,6 +21,19 @@ import {
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
 import { syncVerificationContactToAccount } from "../services/driverContactSync.service";
 import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
+import { TRAILER_TYPES } from "../validations/load.validation";
+
+// Work days are stored as lowercase full names; older or hand-typed values
+// such as "Monday" or "mon" are converted.
+const WORK_DAYS: Record<string, string> = {
+  sunday: "sunday", sun: "sunday",
+  monday: "monday", mon: "monday",
+  tuesday: "tuesday", tue: "tuesday", tues: "tuesday",
+  wednesday: "wednesday", wed: "wednesday",
+  thursday: "thursday", thu: "thursday", thur: "thursday", thurs: "thursday",
+  friday: "friday", fri: "friday",
+  saturday: "saturday", sat: "saturday",
+};
 
 const getDriverUser = (req: Request): IUser => {
   const user = req.user as IUser;
@@ -563,6 +576,19 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
     hitchType,
     specialFeatures,
   } = req.body;
+
+  // Load matching compares trailer types exactly, so only the Equipment
+  // page's choices are saved. An unchanged older value still saves, so a
+  // driver can update other equipment details.
+  if (
+    trailerType !== undefined &&
+    trailerType !== null &&
+    trailerType !== "" &&
+    trailerType !== profile.trailerType &&
+    !(TRAILER_TYPES as readonly string[]).includes(String(trailerType))
+  ) {
+    throw new ApiError(400, "Choose your trailer type from the list on the Equipment page, then save again.");
+  }
 
   if (trailerType !== undefined) profile.trailerType = trailerType;
   if (maxVehicleCapacity !== undefined) {
@@ -1183,10 +1209,30 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
     }
   }
 
+  // Load matching reads these, so only real work days and a list of routes are saved.
+  let workDays: string[] | undefined;
+  if (availableDays !== undefined) {
+    const days = Array.isArray(availableDays)
+      ? availableDays.map((day: unknown) => WORK_DAYS[String(day ?? "").trim().toLowerCase()])
+      : [undefined];
+    if (days.some((day) => !day)) {
+      throw new ApiError(400, "Choose your work days from Monday to Sunday, then save again.");
+    }
+    workDays = [...new Set(days as string[])];
+  }
+  if (
+    preferredRoutes !== undefined &&
+    (!Array.isArray(preferredRoutes) || preferredRoutes.some((route: unknown) => typeof route !== "string"))
+  ) {
+    throw new ApiError(400, 'Your preferred routes couldn\'t be saved. Add each one with "Add Preferred Route", then save again.');
+  }
+
   const applyLogisticsFields = (target: any) => {
     if (serviceRadius !== undefined) target.serviceRadius = serviceRadius;
-    if (preferredRoutes !== undefined) target.preferredRoutes = preferredRoutes;
-    if (availableDays !== undefined) target.availableDays = availableDays;
+    if (preferredRoutes !== undefined) {
+      target.preferredRoutes = (preferredRoutes as string[]).map((route) => route.trim()).filter(Boolean);
+    }
+    if (workDays !== undefined) target.availableDays = workDays;
     if (homeBase !== undefined) {
       if (homeBase.address !== undefined) target.homeBase.address = homeBase.address;
       if (homeBase.city !== undefined) target.homeBase.city = homeBase.city;

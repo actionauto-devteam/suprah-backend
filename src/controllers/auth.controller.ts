@@ -212,7 +212,7 @@ class AuthController {
 
     resendOTP = asyncHandler(async (req: Request, res: Response) => {
         const { email } = req.body;
-        if (!email) throw new ApiError(400, 'Email is required');
+        if (!email) throw new ApiError(400, 'Enter your email address.');
 
         await authService.resendOTP(email);
         res.json(new ApiResponse(200, null, 'Verification code resent successfully'));

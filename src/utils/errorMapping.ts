@@ -3,25 +3,44 @@
  * (malformed ids, invalid values, duplicates) never surface as HTTP 500 with a
  * raw Mongoose message.
  */
-import { INVALID_LINK, describeValidationIssues } from "./userMessages";
+import { INVALID_LINK, describeValidationIssues, fieldLabelForPath } from "./userMessages";
 
-const FIELD_WORDS: Record<string, string> = {
-  zip: "ZIP code",
-  vin: "VIN",
-  pickupLocation: "pickup",
-  deliveryLocation: "delivery",
-  carrierPayAmount: "carrier pay",
-  copCodAmount: "COP/COD amount",
-  pricePerMile: "price per mile",
-};
-
-/** "pickupLocation.zip" -> "pickup ZIP code"; "vehicles.0.year" -> "year". */
+/** "pickupLocation.zip" -> "pickup ZIP code"; "vehicles.0.year" -> "vehicle 1 year". */
 function humanizeField(path: string) {
-  const words = path
-    .split(".")
-    .filter((segment) => segment && !/^d+$/.test(segment))
-    .map((segment) => FIELD_WORDS[segment] ?? segment.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase());
-  return words.slice(-2).join(" ") || "a field";
+  const label = fieldLabelForPath(path.split(".").filter(Boolean));
+  return label ? label[0].toLowerCase() + label.slice(1) : "a field";
+}
+
+/** What is wrong with one field, without repeating the value that was entered. */
+function describeFieldProblem(entry: any): string {
+  const path = String(entry?.path ?? "");
+  const label = fieldLabelForPath(path.split(".").filter(Boolean)) || "A field";
+  const lower = label[0].toLowerCase() + label.slice(1);
+  const props = entry?.properties ?? {};
+  switch (String(entry?.kind ?? "")) {
+    case "required":
+      return `${label} is missing.`;
+    case "min":
+      return `${label} must be at least ${props.min}.`;
+    case "max":
+      return `${label} can be at most ${props.max}.`;
+    case "minlength":
+      return `${label} must be at least ${props.minlength} characters.`;
+    case "maxlength":
+      return `${label} can be at most ${props.maxlength} characters.`;
+    case "enum":
+      return `Choose a valid ${lower}.`;
+    case "regexp":
+      return `${label} isn't in the right format.`;
+    case "Number":
+      return `${label} must be a number.`;
+    case "Date":
+      return `${label} must be a valid date.`;
+    case "Boolean":
+      return `${label} must be yes or no.`;
+    default:
+      return `${label} isn't valid.`;
+  }
 }
 
 export interface MappedError {
@@ -85,13 +104,15 @@ export function mapKnownError(err: any): MappedError | null {
   }
 
   if (isMongooseValidationError(err)) {
-    const fields = Object.values(err.errors as Record<string, any>).map((entry) => ({
+    const entries = Object.values(err.errors as Record<string, any>);
+    const fields = entries.map((entry) => ({
       field: String(entry?.path ?? ""),
       kind: String(entry?.kind ?? "invalid"),
     }));
+    const problems = [...new Set(entries.slice(0, 6).map(describeFieldProblem))];
     return {
       statusCode: 400,
-      message: `Some information is missing or not valid: ${[...new Set(fields.map((field) => humanizeField(field.field)))].join(", ")}. Check these fields and try again.`,
+      message: `Please fix the following: ${problems.join(" ")}`,
       errorType: "VALIDATION_ERROR",
       errors: fields,
     };

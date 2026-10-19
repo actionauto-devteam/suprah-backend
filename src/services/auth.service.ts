@@ -42,7 +42,7 @@ class AuthService {
 
         const existingUser = await User.findOne({ email: email?.toLowerCase() });
         if (existingUser) {
-            throw new ApiError(400, 'User with this email already exists');
+            throw new ApiError(400, "An account with this email already exists. Sign in instead, or use Forgot password if you don't remember it.");
         }
 
         let roleToAssign = role === 'dealership' ? 'admin' : (role || 'customer');
@@ -158,7 +158,7 @@ class AuthService {
     async verifyEmail(email: string, otp: string) {
         const user = await User.findOne({ email: email.toLowerCase() }).select('+otpCode +otpExpiresAt');
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
-            throw new ApiError(400, 'Invalid or expired verification code');
+            throw new ApiError(400, "That verification code is wrong or has expired. Check the latest email from Suprah, or send a new code.");
         }
 
         user.emailVerified = true;
@@ -176,11 +176,11 @@ class AuthService {
     async resendOTP(email: string) {
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
-            throw new ApiError(404, 'User not found');
+            throw new ApiError(404, "We couldn't find an account with that email. Check the email address, or sign up first.");
         }
 
         if (user.emailVerified) {
-            throw new ApiError(400, 'Email is already verified');
+            throw new ApiError(400, 'This email is already verified. You can sign in now.');
         }
 
         const otp = crypto.randomInt(100000, 1000000).toString();
@@ -237,12 +237,12 @@ class AuthService {
         try {
             const existingUser = await User.findOne({ email: email.toLowerCase() }).session(session);
             if (existingUser) {
-                throw new ApiError(400, 'User with this email already exists');
+                throw new ApiError(400, "An account with this email already exists. Sign in instead, or use Forgot password if you don't remember it.");
             }
 
             const existingOrg = await Organization.findOne({ slug: dealershipSlug }).session(session);
             if (existingOrg) {
-                throw new ApiError(400, 'Dealership slug is already taken');
+                throw new ApiError(400, 'That dealership web address is already taken. Choose a different one.');
             }
 
             const user = new User({
@@ -300,7 +300,7 @@ class AuthService {
         const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
 
         if (!user) {
-            throw new ApiError(401, 'Invalid email or password');
+            throw new ApiError(401, 'The email or password is incorrect. Check them and try again, or use Forgot password.');
         }
 
         if (!user.password && !user.googleId) {
@@ -308,20 +308,20 @@ class AuthService {
         }
 
         if (!password) {
-            throw new ApiError(401, 'Password required');
+            throw new ApiError(401, 'Enter your password to sign in.');
         }
 
         if (!user.password && user.googleId) {
-            throw new ApiError(401, 'Please sign in with Google');
+            throw new ApiError(401, 'This account signs in with Google. Use the "Sign in with Google" button instead.');
         }
 
         if (!user.password) {
-            throw new ApiError(401, 'Invalid email or password');
+            throw new ApiError(401, 'The email or password is incorrect. Check them and try again, or use Forgot password.');
         }
 
         const isMatch = await user.isPasswordMatch(password);
         if (!isMatch) {
-            throw new ApiError(401, 'Invalid email or password');
+            throw new ApiError(401, 'The email or password is incorrect. Check them and try again, or use Forgot password.');
         }
 
         // An unapproved driver may still log in WHILE their application is
@@ -374,7 +374,7 @@ class AuthService {
     async upgradeLegacyUser(email: string, otp: string, newPassword: string) {
         const user = await User.findOne({ email: email.toLowerCase() }).select('+password +otpCode +otpExpiresAt');
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
-            throw new ApiError(400, 'Invalid or expired OTP');
+            throw new ApiError(400, "That code is wrong or has expired. Send a new code and try again.");
         }
 
         user.password = newPassword;
@@ -486,7 +486,7 @@ class AuthService {
         const user = await User.findOne({ email: email.toLowerCase() }).select('+password +otpCode +otpExpiresAt');
 
         if (!user || user.otpCode !== otp || !user.otpExpiresAt || user.otpExpiresAt < new Date()) {
-            throw new ApiError(400, 'Invalid or expired reset code');
+            throw new ApiError(400, "That reset code is wrong or has expired. Check the latest email from Suprah, or request a new code.");
         }
 
         user.password = newPassword;
@@ -523,7 +523,7 @@ class AuthService {
         // (i.e. customer who set role but hasn't picked an org).
         // Block true re-entry where onboarding is already fully complete.
         if (user.onboardingCompleted) {
-            throw new ApiError(400, 'Onboarding already completed');
+            throw new ApiError(400, 'Your account setup is already complete. Refresh the page to continue.');
         }
 
         // Dealership accounts are invite-only now (see registerViaInvite's

@@ -16,7 +16,7 @@ import { SUPPORT_EMAIL } from "../utils/userMessages";
 const getUserId = (req: Request): string => {
   const user = req.user as IUser;
   if (!user?._id) {
-    throw new ApiError(401, "User not authenticated");
+    throw new ApiError(401, "Your session has ended. Please sign in again.");
   }
   return user._id.toString();
 };
@@ -142,7 +142,7 @@ async function alreadyDecidedError(requestId: string) {
     .select("status reviewedBy")
     .populate("reviewedBy", "name")
     .lean();
-  if (!existing) return new ApiError(404, "Driver request not found");
+  if (!existing) return new ApiError(404, "We couldn't find this driver application. It may have been decided already. Refresh the review queue and try again.");
   if (existing.status === "pending") {
     return new ApiError(409, "This application is being decided right now. Refresh and try again.");
   }
@@ -171,7 +171,7 @@ const approveDriverRequest = asyncHandler(
 
     const driverUser = await User.findById(pending.driverUserId);
     if (!driverUser) {
-      throw new ApiError(404, "Driver user not found");
+      throw new ApiError(404, "The account for this driver application no longer exists, so it can't be approved. Refresh the review queue.");
     }
 
     // Take the decision in one step, and only while the application is still
