@@ -48,6 +48,7 @@ export interface IUser extends Document {
   avatar?: string;
   role: "customer" | "employee" | "admin" | "super_admin" | "driver";
   isActive: boolean;
+  suspendedByOffboard?: boolean;
   isApproved: boolean;
   organizationId?: mongoose.Types.ObjectId;
   organizationRole?: string;
@@ -160,6 +161,9 @@ const UserSchema = new Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    suspendedByOffboard: {
+      type: Boolean,
     },
     isApproved: {
       type: Boolean,

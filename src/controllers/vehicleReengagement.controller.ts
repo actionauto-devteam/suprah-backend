@@ -4,9 +4,11 @@ import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
 import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
 import { sendStaffAttributedSms } from '../services/communication.service';
+import { decideAiDelivery } from '../services/aiOperatingMode.service';
+import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import Lead from '../models/lead.model';
 
-const STATUSES = ['blocked', 'sent', 'failed', 'skipped'];
+const STATUSES = ['blocked', 'sent', 'failed', 'skipped', 'skipped_ai_not_live'];
 
 const serialize = (log: any) => ({
   ...log,
@@ -58,13 +60,33 @@ export const sendAnyway = asyncHandler(async (req: Request, res: Response) => {
   if (log.status !== 'blocked') throw new ApiError(409, 'This message is no longer blocked');
   if (!log.finalMessage) throw new ApiError(400, 'No message text to send');
 
-  const sent = await sendStaffAttributedSms({
-    orgId,
+  const delivery = await decideAiDelivery({
+    organizationId: orgId,
+    channel: 'sms',
+    workflow: 'reengagement_send_anyway',
     toPhone: log.leadPhone,
-    body: log.finalMessage,
     leadId: log.leadId,
-    actor: { userId: String(user._id), name: user.fullName || 'Staff' },
   });
+  if (delivery.action !== 'send') {
+    throw new ApiError(409, 'Suprah SMS AI is not live, so blocked re-engagement messages cannot be sent right now');
+  }
+
+  let sent: Awaited<ReturnType<typeof sendStaffAttributedSms>>;
+  try {
+    sent = await sendStaffAttributedSms({
+      orgId,
+      toPhone: log.leadPhone,
+      body: log.finalMessage,
+      leadId: log.leadId,
+      actor: { userId: String(user._id), name: user.fullName || 'Staff' },
+      aiWorkflow: 'reengagement_send_anyway',
+    });
+  } catch (err) {
+    if (err instanceof AiReplySuppressedError) {
+      throw new ApiError(409, 'Suprah SMS AI is not live, so blocked re-engagement messages cannot be sent right now');
+    }
+    throw err;
+  }
 
   if (!sent) {
     throw new ApiError(409, 'This customer has opted out of SMS and cannot be messaged');

@@ -623,6 +623,7 @@ class AuthService {
     }
 
     private async generateAuthTokens(user: IUser, familyId?: mongoose.Types.ObjectId) {
+        if (user.isActive === false) throw new ApiError(403, 'Your account has been suspended. Contact your administrator for help.');
         if (familyId && await Session.exists({ $or: [{ familyId }, { _id: familyId }], revokedAt: { $exists: true } })) throw new ApiError(401, 'Login session revoked');
         const accessToken = tokenService.generateAccessToken(user);
         const refreshToken = tokenService.generateRefreshToken(user);

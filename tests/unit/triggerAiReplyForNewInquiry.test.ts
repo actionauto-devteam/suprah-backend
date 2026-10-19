@@ -36,6 +36,7 @@ jest.mock('../../src/utils/smsFailure', () => ({ describeSmsFailure: jest.fn() }
 jest.mock('../../src/utils/notificationTemplates', () => ({ notificationTemplates: {} }));
 jest.mock('../../src/models/SmsOptOut.model', () => ({ __esModule: true, default: { findOne: jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }) }) } }));
 jest.mock('../../src/models/Vehicle.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/aiOperatingMode.service', () => require('./helpers/legacyAiModeMock').legacyAiModeMock((orgId: any) => mockResolveAiAgentSettings(orgId)));
 jest.mock('../../src/services/aiAgent.service', () => ({
   resolveAiAgentSettings: mockResolveAiAgentSettings,
   processAlexTurn: jest.fn(),
@@ -171,6 +172,23 @@ describe('triggerAiReplyForNewInquiry', () => {
     await triggerAiReplyForNewInquiry('org-1', lead, '+18015550142', 'Interested in the Traverse');
 
     expect(mockScreenAiHumanAttention).not.toHaveBeenCalled();
+  });
+
+  it('in Training mode, keeps the inquiry in the conversation and runs the customer-attention check, but never starts Alex', async () => {
+    const modeMock = jest.requireMock('../../src/services/aiOperatingMode.service');
+    const attentionMock = jest.requireMock('../../src/services/aiHumanAttention.service');
+    modeMock.resolveAiChannelMode.mockResolvedValueOnce({ mode: 'training', source: 'configured' });
+    modeMock.decideAiDelivery.mockResolvedValueOnce({ action: 'skip', mode: 'training', source: 'configured' });
+
+    await triggerAiReplyForNewInquiry('org-1', lead, '+18015550142', 'Interested in the Traverse');
+
+    expect(mockMessageCreate).toHaveBeenCalledWith(expect.objectContaining({ direction: 'inbound', body: 'Interested in the Traverse' }));
+    expect(mockScreenAiHumanAttention).toHaveBeenCalledTimes(1);
+    expect(modeMock.decideAiDelivery).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'sms', workflow: 'sms_reply', toPhone: '+18015550142', leadId: 'lead-1',
+    }));
+    expect(attentionMock.claimAiGeneration).not.toHaveBeenCalled();
+    expect(attentionMock.finishAiAttentionCheck).toHaveBeenCalled();
   });
 
   it('never throws out of the function even if a downstream step rejects (fire-and-forget safe)', async () => {

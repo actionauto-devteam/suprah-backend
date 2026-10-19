@@ -76,3 +76,47 @@ describe('generateLeadSummary', () => {
     expect(result.error).toMatch(/unavailable/i);
   });
 });
+
+describe('generateLeadSummary — customers with multiple vehicle inquiries', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Jordan asked about the Camry.' } }] });
+  });
+
+  function promptsOfLastCall() {
+    const messages = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0].messages;
+    return {
+      system: messages.find((m: any) => m.role === 'system').content as string,
+      user: messages.find((m: any) => m.role === 'user').content as string,
+    };
+  }
+
+  it('leaves out activity from the customer\'s other inquiries and tells the model to stay on this vehicle', async () => {
+    await generateLeadSummary(baseLead(), [
+      timelineItem({ id: 'sms:1', body: 'Is the Camry still there?', metadata: { inquiryScope: 'this_inquiry' } }),
+      timelineItem({ id: 'sms:2', body: 'Can I see the 2025 Audi A5?', metadata: { inquiryScope: 'shared', relatedVehicleLabel: '2025 Audi A5' } }),
+    ]);
+
+    const { system, user } = promptsOfLastCall();
+    expect(user).toContain('Is the Camry still there?');
+    expect(user).not.toContain('Audi');
+    expect(system).toContain('Summarize only this inquiry (the 2022 Toyota Camry) and do not mention any other vehicle');
+  });
+
+  it('returns the templated fallback when every activity item belongs to other inquiries', async () => {
+    const result = await generateLeadSummary(baseLead(), [
+      timelineItem({ body: 'Can I see the 2025 Audi A5?', metadata: { inquiryScope: 'shared' } }),
+    ]);
+    expect(result.summary).toContain('2022 Toyota Camry');
+    expect(result.summary).not.toContain('Audi');
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('keeps single-inquiry summaries unchanged (no extra instruction, all activity included)', async () => {
+    await generateLeadSummary(baseLead(), [timelineItem({ body: 'Is the Camry still there?' })]);
+
+    const { system, user } = promptsOfLastCall();
+    expect(user).toContain('Is the Camry still there?');
+    expect(system).not.toMatch(/other vehicle/i);
+  });
+});

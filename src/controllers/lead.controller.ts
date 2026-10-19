@@ -228,6 +228,7 @@ export async function sendLeadReplyEmail(
   orgId: string,
   attachments: Express.Multer.File[] = [],
   forcedSenderEmail?: string,
+  options: { beforeDispatch?: () => Promise<void> } = {},
 ) {
   if (isLocalUiAcceptanceMode()) {
     throw new Error('[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Gmail send.');
@@ -337,6 +338,7 @@ export async function sendLeadReplyEmail(
       .replace(/\//g, '_')
       .replace(/=/g, '');
 
+  await options.beforeDispatch?.();
   const sendResult = await gmail.users.messages.send({
     userId: 'me',
     requestBody: {

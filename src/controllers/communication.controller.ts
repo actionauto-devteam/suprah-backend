@@ -24,6 +24,7 @@ import { canReceiveIvrCall } from '../services/ivr.service';
 import * as recording from '../services/callRecording.service';
 import { recordingPrincipal } from '../services/callRecordingAccess.service';
 import { attentionOrgIds } from '../services/aiHumanAttention.service';
+import { loadPhoneLeads, classifyInquiryScope } from '../services/vehicleInquiryContext.service';
 
 /** crmAuth() attaches req.user or req.crmUser plus req.orgId (same pattern
  *  as lead.controller). */
@@ -281,7 +282,7 @@ export async function buildLeadTimeline(
   const beforeDate = cursor?.occurredAt || null;
 
   const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId })
-    .select("firstName lastName email phone channel source subject body parsedContent comments notes statusHistory createdAt")
+    .select("firstName lastName email phone vehicle channel source subject body parsedContent comments notes statusHistory createdAt updatedAt")
     .lean();
   if (!lead) throw new ApiError(404, "Lead not found");
 
@@ -368,10 +369,29 @@ export async function buildLeadTimeline(
       }).sort({ sentAt: -1, _id: -1 }).limit(sourceLimit).lean(), [])
     : [];
 
+  let siblingLeads: any[] = [];
+  if (phone && ((messages as any[]).length || (calls as any[]).length)) {
+    try {
+      siblingLeads = (await loadPhoneLeads(orgId, lead.phone)).filter((sibling: any) => String(sibling._id) !== String(leadId));
+    } catch {
+      siblingLeads = [];
+    }
+  }
+  const scopeOf = (entry: { leadId?: any; body?: string }) =>
+    siblingLeads.length ? classifyInquiryScope(entry, { ...lead, _id: leadId }, siblingLeads) : null;
+
   const items: TimelineItem[] = [];
 
   for (const message of messages as any[]) {
     const failure = message.status === "failed" && message.errorDetail ? describeSmsFailure(message.errorDetail) : null;
+    const scope = scopeOf({ leadId: message.leadId, body: message.body });
+    const failureMetadata = message.errorDetail
+      ? {
+          error: message.errorDetail,
+          smsFailureMessage: failure?.friendlyMessage,
+          smsFailureCategory: failure?.category,
+        }
+      : undefined;
     items.push({
       id: `sms:${message._id}`,
       channel: "sms",
@@ -381,18 +401,13 @@ export async function buildLeadTimeline(
       status: message.status,
       actor: message.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : message.sentBy?.name || "Team member",
       occurredAt: message.createdAt,
-      metadata: message.errorDetail
-        ? {
-            error: message.errorDetail,
-            smsFailureMessage: failure?.friendlyMessage,
-            smsFailureCategory: failure?.category,
-          }
-        : undefined,
+      metadata: failureMetadata || scope ? { ...(failureMetadata || {}), ...(scope || {}) } : undefined,
     });
   }
 
   for (const call of calls as any[]) {
     const actor = call.direction === "inbound" ? `${lead.firstName} ${lead.lastName || ""}`.trim() : call.placedBy?.name || "Team member";
+    const scope = scopeOf({ leadId: call.leadId });
     items.push({
       id: `call:${call._id}`,
       channel: "call",
@@ -402,7 +417,7 @@ export async function buildLeadTimeline(
       status: call.status,
       actor,
       occurredAt: call.createdAt,
-      metadata: call.hangupCause ? { hangupCause: call.hangupCause } : undefined,
+      metadata: call.hangupCause || scope ? { ...(call.hangupCause ? { hangupCause: call.hangupCause } : {}), ...(scope || {}) } : undefined,
     });
   }
 

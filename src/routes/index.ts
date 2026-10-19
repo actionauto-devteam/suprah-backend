@@ -89,6 +89,7 @@ import crmReportsRoute from "./crmReports.routes";
 import marketingContactRoute from "./marketingContact.routes";
 import aiAgentTaskRoute from "./aiAgentTask.routes";
 import aiAgentCoachingRoute from "./aiAgentCoaching.routes";
+import aiOperatingModeRoute from "./aiOperatingMode.routes";
 import crmLeadGroupRoute from "./crmLeadGroup.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
@@ -259,6 +260,10 @@ const defaultRoutes = [
   {
     path: "/crm/ai-coaching",
     route: aiAgentCoachingRoute,
+  },
+  {
+    path: "/crm/ai-modes",
+    route: aiOperatingModeRoute,
   },
   {
     path: "/crm/lead-groups",

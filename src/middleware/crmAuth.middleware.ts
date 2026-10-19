@@ -156,6 +156,7 @@ const crmAuth = () => async (req: Request, res: Response, next: NextFunction) =>
           ? 'admin' as const
           : mainUser.organizationRole === 'manager' ? 'manager' as const : 'employee' as const,
         isActive: true,
+        payrollAccess: false,
         lastLoginAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),

@@ -13,6 +13,9 @@ import Organization from '../models/Organization.model';
 import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
 import { hasSendPermission } from '../services/marketingContact.service';
 import { sanitizeEmailHtml, htmlToPlainText } from '../utils/emailHtmlSanitizer';
+import emailService, { campaignGreetingNameFor } from '../services/email.service';
+import storageService, { BucketType } from '../services/storage.service';
+import logger from '../utils/logger';
 
 const MAX_RECIPIENTS = 500;
 const VALID_STATUSES = LEAD_STATUS_VALUES;
@@ -65,9 +68,70 @@ async function filterEligibleContacts(contacts: any[], orgId: string) {
 export const getAudienceCount = asyncHandler(async (req: Request, res: Response) => {
   const orgId = String((req as any).orgId);
   const statuses = parseStatuses(req.query.statuses);
-  const count = await Lead.countDocuments(audienceQuery(orgId, statuses));
+  const query = audienceQuery(orgId, statuses);
+  const [count, sampleLead] = await Promise.all([
+    Lead.countDocuments(query),
+    Lead.findOne(query).select('firstName lastName email').lean(),
+  ]);
+  const previewRecipient = sampleLead
+    ? {
+        firstName: String((sampleLead as any).firstName || '').trim(),
+        displayName: [(sampleLead as any).firstName, (sampleLead as any).lastName].filter(Boolean).join(' ').trim(),
+        email: String((sampleLead as any).email || ''),
+      }
+    : null;
 
-  res.json(new ApiResponse(200, { count, capped: Math.min(count, MAX_RECIPIENTS) }, 'Audience count'));
+  res.json(new ApiResponse(200, { count, capped: Math.min(count, MAX_RECIPIENTS), previewRecipient }, 'Audience count'));
+});
+
+export const previewCampaign = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const user = (req as any).crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can send email campaigns');
+
+  const subject = String(req.body?.subject || '');
+  const greetingText = String(req.body?.greetingText || '');
+  const rawBodyHtml = String(req.body?.bodyHtml || '').trim();
+  const rawBannerImageUrl = String(req.body?.bannerImageUrl || '').trim();
+  const signOffText = String(req.body?.signOffText || '');
+  const previewFirstName = campaignGreetingNameFor(req.body?.previewFirstName);
+
+  const bodyHtml = rawBodyHtml ? sanitizeEmailHtml(rawBodyHtml) : '';
+  const bodyText = bodyHtml ? htmlToPlainText(bodyHtml) : String(req.body?.bodyText || '');
+  const bannerImageUrl = /^https?:\/\//i.test(rawBannerImageUrl) ? rawBannerImageUrl : '';
+  const countImages = (html: string) => (html.match(/<img\b/gi) || []).length;
+  const insecureImageUrls = (rawBodyHtml.match(/<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi) || [])
+    .map((tag) => (tag.match(/src\s*=\s*["']([^"']+)["']/i) || [])[1] || '')
+    .filter((src) => src && !/^https:\/\//i.test(src)).length + (rawBannerImageUrl && !/^https:\/\//i.test(rawBannerImageUrl) ? 1 : 0);
+
+  const rendered = await emailService.renderCampaignEmail(
+    {
+      to: '',
+      greetingName: previewFirstName,
+      subject,
+      greetingText,
+      bannerImageUrl: bannerImageUrl || undefined,
+      bodyText,
+      bodyHtml: bodyHtml || undefined,
+      signOffText,
+      organizationId: orgId,
+    },
+    'preview',
+  );
+
+  res.json(new ApiResponse(200, {
+    subject: rendered.subject,
+    html: rendered.html,
+    greetingName: rendered.greetingName,
+    missingMailingAddress: rendered.missingMailingAddress,
+    images: {
+      inEditor: countImages(rawBodyHtml) + (rawBannerImageUrl ? 1 : 0),
+      inEmail: rendered.imageCount,
+      removedBySanitizer: countImages(rawBodyHtml) - countImages(bodyHtml) + (rawBannerImageUrl && !bannerImageUrl ? 1 : 0),
+      notHttps: insecureImageUrls,
+    },
+  }, 'Campaign preview'));
 });
 
 export const listCampaigns = asyncHandler(async (req: Request, res: Response) => {
@@ -106,6 +170,30 @@ export const getCampaign = asyncHandler(async (req: Request, res: Response) => {
   ]);
 
   res.json(new ApiResponse(200, { campaign, failedSample, uncertainSample }, 'Campaign fetched'));
+});
+
+export const uploadCampaignImage = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const user = (req as any).crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can send email campaigns');
+
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!file?.buffer?.length) throw new ApiError(400, 'Choose a JPG, PNG, WEBP, or GIF image to upload');
+
+  let url: string;
+  try {
+    url = await storageService.upload(file, `email-campaigns/${orgId}`, BucketType.PUBLIC, { allowLocalFallback: false });
+  } catch (err) {
+    logger.error({ err, orgId }, '[EmailCampaign] Campaign image upload failed');
+    throw new ApiError(502, 'The image could not be uploaded right now. Please try again.');
+  }
+  if (!/^https:\/\//i.test(url)) {
+    logger.error({ orgId, url }, '[EmailCampaign] Image storage returned a non-public URL');
+    throw new ApiError(500, 'Image storage is not set up for email images yet. Please contact your developer.');
+  }
+
+  res.status(201).json(new ApiResponse(201, { url }, 'Image uploaded'));
 });
 
 export const createCampaign = asyncHandler(async (req: Request, res: Response) => {
@@ -192,6 +280,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
         email: c.email,
         phone: c.phone || undefined,
         customerName: [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || 'there',
+        greetingName: campaignGreetingNameFor(c.firstName),
         status: 'pending',
       }));
       selectionSummary = {
@@ -242,6 +331,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
         email: c.email,
         phone: c.phone || undefined,
         customerName: [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || 'there',
+        greetingName: campaignGreetingNameFor(c.firstName),
         status: 'pending',
       }));
       selectionSummary = {
@@ -276,6 +366,7 @@ export const createCampaign = asyncHandler(async (req: Request, res: Response) =
       email: lead.email,
       phone: lead.phone || undefined,
       customerName: [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || 'there',
+      greetingName: campaignGreetingNameFor(lead.firstName),
       status: 'pending',
     }));
   }

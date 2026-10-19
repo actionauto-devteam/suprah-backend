@@ -2,14 +2,24 @@ import { Writable } from 'stream';
 // v1.4.0
 import mongoose from 'mongoose';
 import { SystemLog } from '../models/SystemLog.model';
+import { guardMongoUri } from '../config/productionDbGuard';
 
 const build = async (options: any) => {
+  let blockedReason: string | null = null;
 
   const connect = async () => {
+    if (blockedReason) return;
     if (mongoose.connection.readyState === 1) return;
     
     const mongoUri = options.uri || process.env.MONGODB_URI;
     if (mongoUri) {
+      try {
+        guardMongoUri(mongoUri);
+      } catch (err: any) {
+        blockedReason = String(err?.message || err);
+        console.warn(`[Pino-MongoDB-Transport] MongoDB log writing disabled: ${blockedReason}`);
+        return;
+      }
       try {
         await mongoose.connect(mongoUri);
         console.log('[Pino-MongoDB-Transport] Worker established DB connection');
@@ -34,6 +44,8 @@ const build = async (options: any) => {
           } catch (e) {
             return callback();
           }
+
+          if (blockedReason) return callback();
 
           if (mongoose.connection.readyState !== 1) {
             await connect();

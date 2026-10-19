@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { existsSync, mkdirSync, createReadStream } from 'fs';
 import { sharedAwsHttpHandler } from '../config/awsHttpHandler';
+import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 
 export enum BucketType {
     PUBLIC = 'public',
@@ -25,7 +26,7 @@ interface UploadOptions {
     preserveFilename?: boolean;
 }
 
-class StorageService {
+export class StorageService {
     private s3Client: S3Client | null = null;
     private isConfigured: boolean = false;
 
@@ -34,6 +35,11 @@ class StorageService {
     }
 
     private initialize() {
+        if (isLocalUiAcceptanceMode()) {
+            console.warn('[StorageService] LOCAL_UI_ACCEPTANCE_MODE is on. Cloud storage is disabled and files are kept on local disk.');
+            return;
+        }
+
         const { accessKeyId, secretAccessKey, endpoint, buckets } = config.r2;
 
         if (!accessKeyId || !secretAccessKey || !endpoint || !buckets.public) {
@@ -53,6 +59,11 @@ class StorageService {
             requestHandler: sharedAwsHttpHandler,
         });
         this.isConfigured = true;
+    }
+
+    private cloudClient(): S3Client | null {
+        if (!this.isConfigured || !this.s3Client || isLocalUiAcceptanceMode()) return null;
+        return this.s3Client;
     }
 
     private getBucketName(type: BucketType): string {
@@ -81,7 +92,8 @@ class StorageService {
         const key = `${folder}/${fileName}`;
         const bucketName = this.getBucketName(type);
 
-        if (this.isConfigured && this.s3Client) {
+        const uploadClient = this.cloudClient();
+        if (uploadClient) {
             try {
                 const command = new PutObjectCommand({
                     Bucket: bucketName,
@@ -89,7 +101,7 @@ class StorageService {
                     Body: file.buffer,
                     ContentType: file.mimetype,
                 });
-                await this.s3Client.send(command);
+                await uploadClient.send(command);
 
                 if (type === BucketType.PUBLIC) {
                     const finalUrl = `${config.r2.publicUrl}/${key}`;
@@ -128,10 +140,10 @@ class StorageService {
      * @param expiresIn Expiration time in seconds (default 15 mins)
      */
     async getSignedUrl(key: string, expiresIn: number = 900, responseContentDisposition?: string): Promise<string | null> {
-        if (!this.isConfigured || !this.s3Client || !key) return null;
+        if (key?.startsWith('/uploads/')) return key;
 
-        // If it's a local path, return it as is (internal dev)
-        if (key.startsWith('/uploads/')) return key;
+        const signingClient = this.cloudClient();
+        if (!signingClient || !key) return null;
 
         try {
             const command = new GetObjectCommand({
@@ -139,7 +151,7 @@ class StorageService {
                 Key: key,
                 ...(responseContentDisposition && { ResponseContentDisposition: responseContentDisposition }),
             });
-            return await getSignedUrl(this.s3Client, command, { expiresIn });
+            return await getSignedUrl(signingClient, command, { expiresIn });
         } catch (error) {
             console.error('[StorageService] Signed URL Error:', error);
             return null;
@@ -168,7 +180,8 @@ class StorageService {
         }
 
         // 2. Handle R2 Deletion
-        if (!this.isConfigured || !this.s3Client) return;
+        const deleteClient = this.cloudClient();
+        if (!deleteClient) return;
 
         let key = pathOrUrl;
         if (pathOrUrl.startsWith('http')) {
@@ -190,7 +203,7 @@ class StorageService {
                 Bucket: this.getBucketName(type),
                 Key: key,
             });
-            await this.s3Client.send(command);
+            await deleteClient.send(command);
         } catch (error: any) {
             console.error('[StorageService] R2 Delete Error:', error);
         }
@@ -202,7 +215,8 @@ class StorageService {
      * Returns the keys as strings (no signed URLs — call getSignedProofUrl per key).
      */
     async list(prefix: string, type: BucketType = BucketType.PRIVATE): Promise<Array<{ key: string; lastModified?: Date }>> {
-        if (!this.isConfigured || !this.s3Client) return [];
+        const listClient = this.cloudClient();
+        if (!listClient) return [];
 
         const results: Array<{ key: string; lastModified?: Date }> = [];
         let continuationToken: string | undefined;
@@ -213,7 +227,7 @@ class StorageService {
                 Prefix: prefix,
                 ContinuationToken: continuationToken,
             });
-            const response = await this.s3Client.send(command);
+            const response = await listClient.send(command);
             for (const obj of response.Contents ?? []) {
                 if (obj.Key) {
                     results.push({ key: obj.Key, lastModified: obj.LastModified });
@@ -241,14 +255,15 @@ class StorageService {
             return { stream: createReadStream(fullPath) as unknown as Readable, contentType };
         }
 
-        if (!this.isConfigured || !this.s3Client) return null;
+        const privateClient = this.cloudClient();
+        if (!privateClient) return null;
 
         try {
             const command = new GetObjectCommand({
                 Bucket: config.r2.buckets.private,
                 Key: key,
             });
-            const response = await this.s3Client.send(command);
+            const response = await privateClient.send(command);
             if (!response.Body) return null;
             return {
                 stream: response.Body as Readable,
@@ -261,14 +276,15 @@ class StorageService {
     }
 
     async streamPublicFile(key: string): Promise<{ stream: Readable; contentType: string } | null> {
-        if (!key || !this.isConfigured || !this.s3Client) return null;
+        const publicClient = this.cloudClient();
+        if (!key || !publicClient) return null;
 
         try {
             const command = new GetObjectCommand({
                 Bucket: config.r2.buckets.public,
                 Key: key,
             });
-            const response = await this.s3Client.send(command);
+            const response = await publicClient.send(command);
             if (!response.Body) return null;
             return {
                 stream: response.Body as Readable,

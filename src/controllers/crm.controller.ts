@@ -7,7 +7,10 @@ import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
 import User, { IUser } from "../models/User.model";
 import TimeproofArchive from "../models/TimeproofArchive.model";
+import { hasPayrollAccess } from "../utils/payrollAccess.util";
+import { suspendLinkedMainAccount, restoreLinkedMainAccount } from "../services/offboardMainAccount.service";
 import Organization from "../models/Organization.model";
+import { hasConfiguredAiModes, storedModesFromMetadata } from "../services/aiOperatingMode.service";
 import TimeLog from "../models/TimeLog.model";
 import {
   issueCrmSessionToken,
@@ -253,6 +256,7 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     desktopLocationEnabled,
     trayDeviceAuthEnabled,
     deviceSwitch,
+    payrollAccess: hasPayrollAccess(user),
     ...(monitoringMode && { monitoringMode }),
   };
 
@@ -305,6 +309,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const parsedFollowUpInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
   const aiFollowUpIntervalHours = FOLLOWUP_INTERVAL_OPTIONS_HOURS.includes(parsedFollowUpInterval) ? parsedFollowUpInterval : 24;
   const physicalMailingAddress = metadata.physicalMailingAddress || '';
+  const storedModes = storedModesFromMetadata(metadata);
 
   res.json(new ApiResponse(200, {
     reviewLink,
@@ -316,6 +321,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiHandoffFallbackGroupId,
     aiFollowUpIntervalHours,
     physicalMailingAddress,
+    aiAgentModes: { sms: storedModes.sms, email: storedModes.email, webchat: storedModes.webchat },
+    aiAgentModeSource: storedModes.source,
   }, 'Organization settings fetched'));
 });
 
@@ -362,8 +369,11 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   if (webchatGreeting !== undefined) {
     metadata.webchatGreeting = String(webchatGreeting || '').trim().slice(0, 300);
   }
-  if (aiAgentEnabled !== undefined) {
-    metadata.aiAgentEnabled = aiAgentEnabled === true;
+  if (aiAgentEnabled === true) {
+    throw new ApiError(409, 'Turning on live AI replies now requires the AI operating mode controls. Refresh the page and use the AI Agent card.');
+  }
+  if (aiAgentEnabled !== undefined && !hasConfiguredAiModes(metadata)) {
+    metadata.aiAgentEnabled = false;
   }
   if (aiAgentName !== undefined) {
     metadata.aiAgentName = String(aiAgentName || '').trim().slice(0, 40) || 'Alex';
@@ -737,6 +747,7 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     hireDate: hireDate ? new Date(hireDate) : undefined,
     gender: gender && ['male', 'female'].includes(gender) ? gender : undefined,
     department: normalizedDepartment,
+    payrollAccess: false,
   });
 
   if (normalizedDepartment) {
@@ -882,7 +893,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt')
+      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt payrollAccess isSystem')
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
@@ -892,6 +903,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const personalInfoByEmail = await getMainPersonalInfoMapByEmails(users.map((user) => user.email));
   const enrichedUsers = users.map((user) => ({
     ...user,
+    payrollAccess: hasPayrollAccess(user),
     personalInfo: personalInfoByEmail.get(normalizeEmail(user.email)),
   }));
 
@@ -923,7 +935,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, autoSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt } = req.body;
+  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, autoSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt, payrollAccess } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -949,6 +961,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     if (emailTaken)
       throw new ApiError(409, "An account with that email already exists");
     user.email = email.trim().toLowerCase();
+  }
+
+  if (user.payrollAccess == null) {
+    user.payrollAccess = hasPayrollAccess(user);
   }
 
   if (requestedRole) {
@@ -1040,6 +1056,13 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(400, 'payrollLocation must be "Utah" or "Philippines"');
     }
     user.payrollLocation = payrollLocation ?? undefined;
+  }
+
+  if (payrollAccess !== undefined && hasPayrollAccess(actor) && user.payrollAccess !== !!payrollAccess) {
+    if (user._id.toString() === actor._id.toString()) {
+      throw new ApiError(400, "You cannot change your own payroll access");
+    }
+    user.payrollAccess = !!payrollAccess;
   }
 
   // Validate the CRM document before touching the main User record. This keeps
@@ -1413,7 +1436,17 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
     { upsert: true },
   ).catch(() => {});
 
-  res.json(new ApiResponse(200, null, "User offboarded successfully"));
+  const mainAccount = await suspendLinkedMainAccount(user).catch(() => "none" as const);
+
+  res.json(new ApiResponse(
+    200,
+    { mainAccount },
+    mainAccount === "protected"
+      ? "User offboarded. Their Suprah AI account was NOT locked because it is a super admin or organization owner."
+      : mainAccount === "other_organization"
+        ? "User offboarded. Their Suprah AI account was NOT locked because it belongs to another organization."
+        : "User offboarded successfully",
+  ));
 });
 
 const undoOffboardUser = asyncHandler(async (req: Request, res: Response) => {
@@ -1441,8 +1474,9 @@ const undoOffboardUser = asyncHandler(async (req: Request, res: Response) => {
   await user.save({ validateModifiedOnly: true });
 
   await TimeproofArchive.deleteOne({ _id: user._id }).catch(() => {});
+  const mainAccountRestored = await restoreLinkedMainAccount(user).catch(() => false);
 
-  res.json(new ApiResponse(200, null, "Offboard undone successfully"));
+  res.json(new ApiResponse(200, { mainAccountRestored }, "Offboard undone successfully"));
 });
 
 const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {

@@ -88,7 +88,7 @@ router.get('/google/callback',
             res.redirect(finalRedirect);
         } catch (error) {
             console.error('[Google Callback] Error:', error);
-            const code = isDbOutageError(error) ? 'service_unavailable' : 'oauth_failed';
+            const code = isDbOutageError(error) ? 'service_unavailable' : (error as { statusCode?: number })?.statusCode === 403 ? 'account_suspended' : 'oauth_failed';
             res.redirect(`${config.frontendUrl}/sign-in?error=${code}`);
         }
     }

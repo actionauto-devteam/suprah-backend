@@ -15,7 +15,14 @@ import { resolveAiAgentSettings, generateProactiveFollowUp, classifyAlexReplySaf
 import { validateOutboundMessage } from '../utils/aiOutboundSafety';
 import { CommunicationMessage, Conversation } from '../models/communication.model';
 import { retryDbWrite } from '../utils/retryDbWrite';
+import { decideAiDelivery, AI_NOT_LIVE_REASON } from '../services/aiOperatingMode.service';
+import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import logger from '../utils/logger';
+import {
+  resolvePinnedVehicleContext,
+  latestSharedConversationActivity,
+  buildVehicleContextNote,
+} from '../services/vehicleInquiryContext.service';
 
 /** Eligibility evaluation genuinely starts at 8:00 AM America/Denver, with actual sending
  *  still never earlier than 9:00 AM — preserved as two distinct things, not collapsed into
@@ -107,8 +114,15 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
 
   for (const lead of candidates as any[]) {
     try {
-      const { enabled: aiEnabled, agentName, followUpIntervalHours } = await resolveAiAgentSettings(String(lead.organizationId));
-      if (!aiEnabled) { stats.skipped++; continue; }
+      const { agentName, followUpIntervalHours } = await resolveAiAgentSettings(String(lead.organizationId));
+      const delivery = await decideAiDelivery({
+        organizationId: lead.organizationId,
+        channel: 'sms',
+        workflow: 'sms_followup',
+        toPhone: lead.phone,
+        leadId: lead._id,
+      });
+      if (delivery.action !== 'send') { stats.skipped++; continue; }
 
       const step: number = lead.followUp?.aiFollowUpCount || 0;
       const intervalMs = followUpIntervalHours * HOUR_MS;
@@ -127,6 +141,12 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
       if (now.getTime() - lastActivity < intervalMs) continue;
 
       if (await hasActiveAppointment(lead._id, now)) { stats.skipped++; continue; }
+
+      const vehicleContext = await resolvePinnedVehicleContext({ organizationId: lead.organizationId, lead, phone: lead.phone });
+      if (vehicleContext.multipleInquiries) {
+        const sharedActivityAt = await latestSharedConversationActivity(lead.organizationId, lead.phone).catch(() => null);
+        if (sharedActivityAt && now.getTime() - sharedActivityAt.getTime() < intervalMs) { stats.skipped++; continue; }
+      }
 
       if (await isSmsOptedOut(lead.organizationId, lead.phone)) {
         await Lead.updateOne(
@@ -198,6 +218,7 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
           transcript,
           channel: 'sms',
           followUpNumber: step + 1,
+          vehicleContextNote: buildVehicleContextNote(vehicleContext),
         });
 
         if (!generation.text) {
@@ -241,6 +262,7 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
           body: generation.text,
           leadId: lead._id,
           actor: { userId: 'ai-agent', name: agentName },
+          aiWorkflow: 'sms_followup',
         });
 
         if (result) {
@@ -283,6 +305,19 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
           stats.skipped++;
         }
       } catch (err) {
+        if (err instanceof AiReplySuppressedError) {
+          await Lead.updateOne(
+            { _id: lead._id, 'followUp.aiFollowUpStatus': 'processing' },
+            {
+              $set: { 'followUp.aiFollowUpStatus': 'skipped', 'followUp.aiFollowUpFailureReason': AI_NOT_LIVE_REASON },
+              $unset: { 'followUp.aiFollowUpNextRetryAt': 1 },
+              $inc: { 'followUp.aiFollowUpAttemptCount': -1 },
+            },
+            { timestamps: false },
+          ).catch(() => undefined);
+          stats.skipped++;
+          continue;
+        }
         if (err instanceof SmsDeliveryUncertainError) {
           await retryDbWrite(() =>
             Lead.updateOne(

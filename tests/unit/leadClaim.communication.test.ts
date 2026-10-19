@@ -64,6 +64,7 @@ jest.mock('../../src/models/SmsOptOut.model', () => ({
   default: { updateOne: mockSmsOptOutUpdateOne },
 }));
 jest.mock('../../src/models/Vehicle.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/services/aiOperatingMode.service', () => require('./helpers/legacyAiModeMock').legacyAiModeMock((orgId: any) => mockResolveAiAgentSettings(orgId)));
 jest.mock('../../src/services/aiAgent.service', () => ({
   resolveAiAgentSettings: mockResolveAiAgentSettings,
   processAlexTurn: jest.fn(),

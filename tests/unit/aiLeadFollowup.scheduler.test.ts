@@ -52,6 +52,7 @@ jest.mock('../../src/services/communication.service', () => ({
   SmsDeliveryUncertainError: MockSmsDeliveryUncertainError,
 }));
 
+jest.mock('../../src/services/aiOperatingMode.service', () => require('./helpers/legacyAiModeMock').legacyAiModeMock((orgId: any) => mockResolveAiAgentSettings(orgId)));
 jest.mock('../../src/services/aiAgent.service', () => ({
   resolveAiAgentSettings: mockResolveAiAgentSettings,
   generateProactiveFollowUp: mockGenerateProactiveFollowUp,
@@ -75,7 +76,9 @@ jest.mock('../../src/utils/logger', () => ({
   default: { info: jest.fn(), error: jest.fn() },
 }));
 
+import mongoose from 'mongoose';
 import { runAiLeadFollowupSweep } from '../../src/schedulers/aiLeadFollowup.scheduler';
+import { AiReplySuppressedError } from '../../src/utils/aiReplySuppressed';
 
 function baseLead(overrides: Record<string, any> = {}) {
   return {
@@ -131,6 +134,33 @@ describe('AI lead follow-up scheduler', () => {
     expect(stats.skipped).toBe(1);
     expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
     expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('an in-flight follow-up whose mode leaves Live at dispatch is marked skipped, never failed, with no retry scheduled', async () => {
+    seedCandidates([baseLead()]);
+    mockSendStaffAttributedSms.mockRejectedValue(new AiReplySuppressedError());
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.skipped).toBe(1);
+    expect(stats.sent).toBe(0);
+    const updates = mockLeadUpdateOne.mock.calls.map(([, update]) => update);
+    expect(updates).toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'skipped' }),
+      $unset: { 'followUp.aiFollowUpNextRetryAt': 1 },
+    }));
+    expect(updates).not.toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'failed' }),
+    }));
+    expect(updates).not.toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'sent' }),
+    }));
+  });
+
+  it('tags the follow-up send as an AI workflow so the dispatch guard runs', async () => {
+    seedCandidates([baseLead()]);
+    await runAiLeadFollowupSweep();
+    expect(mockSendStaffAttributedSms).toHaveBeenCalledWith(expect.objectContaining({ aiWorkflow: 'sms_followup' }));
   });
 
   it('never sends when the deterministic safety check fails, even though the classifier was never reached', async () => {
@@ -450,5 +480,100 @@ describe('AI lead follow-up scheduler', () => {
 
     const claimFilter = mockLeadFindOneAndUpdate.mock.calls[0][0];
     expect(claimFilter['followUp.aiFollowUpStatus']).toEqual({ $ne: 'pending_reconciliation' });
+  });
+});
+
+describe('AI lead follow-up scheduler — customers with multiple vehicle inquiries', () => {
+  const PHONE = '+13853365062';
+  const HOUR = 60 * 60 * 1000;
+  let modelSpy: jest.SpiedFunction<typeof mongoose.model>;
+
+  const crv = baseLead({ _id: 'lead-crv', phone: PHONE, vehicle: { year: '2024', make: 'Honda', model: 'CR-V' }, updatedAt: new Date(Date.now() - 5 * 24 * HOUR) });
+  const jeep = { _id: 'lead-jeep', phone: '385-336-5062', vehicle: { year: '2022', make: 'Jeep', model: 'Grand Cherokee 4xe' }, updatedAt: new Date(Date.now() - 2 * 24 * HOUR) };
+
+  function seedSiblings(siblings: any[]) {
+    const chain: any = {
+      select: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      maxTimeMS: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue(siblings),
+    };
+    modelSpy = jest.spyOn(mongoose, 'model').mockReturnValue({ find: jest.fn().mockReturnValue(chain) } as any);
+  }
+
+  function seedSharedConversationActivity(lastMessageAt: Date | null) {
+    mockConversationFindOne.mockReturnValue({
+      select: jest.fn(() => ({ lean: jest.fn().mockResolvedValue(lastMessageAt ? { _id: 'conv-1', lastMessageAt } : null) })),
+    });
+    mockCommFind.mockReturnValue({ sort: jest.fn(() => ({ limit: jest.fn(() => ({ lean: jest.fn().mockResolvedValue([]) })) })) });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCheckConversationPauseForLead.mockResolvedValue({ status: 'unpaused' });
+    mockIsSmsOptedOut.mockResolvedValue(false);
+    mockAppointmentExists.mockResolvedValue(false);
+    mockResolveAiAgentSettings.mockResolvedValue({ enabled: true, agentName: 'Anna', followUpIntervalHours: 24 });
+    mockResolveDealerName.mockResolvedValue('Action Auto Utah');
+    mockGenerateProactiveFollowUp.mockResolvedValue({ text: 'Hi Jamie, just checking in on the CR-V!' });
+    mockValidateOutboundMessage.mockReturnValue({ ok: true, reasons: [] });
+    mockClassifyAlexReplySafety.mockResolvedValue('SAFE');
+    mockSendStaffAttributedSms.mockResolvedValue({ message: { _id: 'msg-1' } });
+    mockLeadFindOneAndUpdate.mockResolvedValue({ _id: 'lead-crv' });
+    mockLeadUpdateOne.mockResolvedValue({});
+    emptyMessageLookup();
+  });
+
+  afterEach(() => modelSpy?.mockRestore());
+
+  it('pins the check-in to this inquiry and tells the model not to mention the customer\'s other vehicle', async () => {
+    seedSiblings([crv, jeep]);
+    seedSharedConversationActivity(new Date(Date.now() - 3 * 24 * HOUR));
+    seedCandidates([crv]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+    const call = mockGenerateProactiveFollowUp.mock.calls[0][0];
+    expect(call.leadVehicleInterest).toBe('2024 Honda CR-V');
+    expect(call.vehicleContextNote).toContain('This message is about the 2024 Honda CR-V only');
+    expect(call.vehicleContextNote).toContain('2022 Jeep Grand Cherokee 4xe');
+  });
+
+  it('defers (no claim, no send) while the shared text thread is active about any inquiry', async () => {
+    seedSiblings([crv, jeep]);
+    seedSharedConversationActivity(new Date(Date.now() - 2 * HOUR));
+    seedCandidates([crv]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.skipped).toBe(1);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockGenerateProactiveFollowUp).not.toHaveBeenCalled();
+    expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
+  });
+
+  it('treats duplicate leads for the same vehicle as one inquiry (no deferral, no extra instruction)', async () => {
+    const crvDuplicate = { ...jeep, _id: 'lead-crv-dup', vehicle: { year: '2024', make: 'Honda', model: 'CR-V' } };
+    seedSiblings([crv, crvDuplicate]);
+    seedSharedConversationActivity(new Date(Date.now() - 2 * HOUR));
+    seedCandidates([crv]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+    expect(mockGenerateProactiveFollowUp.mock.calls[0][0].vehicleContextNote).toBeUndefined();
+  });
+
+  it('leaves single-inquiry customers unchanged, even when their thread was active recently', async () => {
+    seedSiblings([crv]);
+    seedSharedConversationActivity(new Date(Date.now() - 2 * HOUR));
+    seedCandidates([crv]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.sent).toBe(1);
+    expect(mockGenerateProactiveFollowUp.mock.calls[0][0].vehicleContextNote).toBeUndefined();
   });
 });

@@ -22,6 +22,7 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   },
   allowProtocolRelative: false,
   disallowedTagsMode: 'discard',
+  exclusiveFilter: (frame) => frame.tag === 'img' && !String(frame.attribs?.src || '').trim(),
   transformTags: {
     p: sanitizeHtml.simpleTransform('p', { style: 'margin:0 0 12px 0;' }, true),
     h1: sanitizeHtml.simpleTransform('h1', { style: 'margin:16px 0 8px 0;font-size:22px;font-weight:bold;' }, true),

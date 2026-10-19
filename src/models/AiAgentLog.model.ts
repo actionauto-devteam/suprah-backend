@@ -36,6 +36,9 @@ export interface IAiAgentLog extends Document {
   coachingViolatedRuleIds?: mongoose.Types.ObjectId[];
   coachingRegenerated?: boolean;
   coachingRegenerationReason?: string;
+  vehicleContextResolution?: string;
+  fallbackKind?: string;
+  classifierRetried?: boolean;
   sentAt?: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -85,6 +88,12 @@ const AiAgentLogSchema: Schema<IAiAgentLog> = new Schema(
     coachingViolatedRuleIds: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
     coachingRegenerated: { type: Boolean, default: false },
     coachingRegenerationReason: { type: String, trim: true, maxlength: 500 },
+    vehicleContextResolution: {
+      type: String,
+      enum: ['single', 'new_inquiry', 'pinned', 'explicit_mention', 'recent_context', 'ambiguous'],
+    },
+    fallbackKind: { type: String, trim: true, maxlength: 50 },
+    classifierRetried: { type: Boolean },
     sentAt: { type: Date },
   },
   { timestamps: true },
