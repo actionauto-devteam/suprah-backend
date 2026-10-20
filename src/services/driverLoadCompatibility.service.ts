@@ -1,5 +1,6 @@
 import DriverProfile from "../models/DriverProfile.model";
 import { ApiError } from "../utils/ApiError";
+import { MAX_TRAILER_VEHICLES } from "../validations/load.validation";
 import {
   DriverRouteCompatibilitySignals,
   evaluateDriverRouteCompatibility,
@@ -152,7 +153,12 @@ export function evaluateDriverLoadCompatibility(
       ? Math.max(0, Number(load.vehicleCount))
       : 0;
 
-  const configuredCapacity = Number(profile?.maxVehicleCapacity);
+  // A profile saved before the trailer limit can still hold a higher number
+  // until it's saved again; it counts as the limit.
+  const configuredCapacity = Math.min(
+    Number(profile?.maxVehicleCapacity),
+    MAX_TRAILER_VEHICLES,
+  );
   const maxVehicles =
     Number.isFinite(configuredCapacity) && configuredCapacity > 0
       ? configuredCapacity

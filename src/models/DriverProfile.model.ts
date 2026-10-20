@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 import { businessDateParts } from "../utils/businessDate";
+import { MAX_TRAILER_VEHICLES } from "../validations/load.validation";
 
 // The compliance meter currently requires only the driver's license.
 // Keep this synchronized with REQUIRED_DOCUMENTS on the frontend.
@@ -221,7 +222,7 @@ const driverProfileSchema = new Schema<IDriverProfile>(
     // ── Equipment ──
     trailerType: { type: String, trim: true },
     customTrailerName: { type: String, trim: true },
-    maxVehicleCapacity: { type: Number, min: 1, max: 20, default: 1 },
+    maxVehicleCapacity: { type: Number, min: 1, max: MAX_TRAILER_VEHICLES, default: 1 },
     truckMake: { type: String, trim: true },
     truckModel: { type: String, trim: true },
     truckYear: { type: Number, min: 1950, max: 2100 },
@@ -521,6 +522,15 @@ export function approvedCredentialExpiryUpdates(
   }
   return updates;
 }
+
+// A profile saved before the 10-vehicle trailer limit is brought down to it on
+// its next save, so that driver can still save everything else.
+driverProfileSchema.pre("validate", function (next) {
+  if (typeof this.maxVehicleCapacity === "number" && this.maxVehicleCapacity > MAX_TRAILER_VEHICLES) {
+    this.maxVehicleCapacity = MAX_TRAILER_VEHICLES;
+  }
+  next();
+});
 
 // Keep the compliance flag current whenever a profile is saved.
 driverProfileSchema.pre("save", function (next) {

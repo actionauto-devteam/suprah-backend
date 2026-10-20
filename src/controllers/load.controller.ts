@@ -12,7 +12,7 @@
     import Vehicle from "../models/Vehicle.model";
     import User, { IUser } from "../models/User.model";
     import logger from "../utils/logger";
-    import { createLoadSchema, calculateRateSchema, updateLoadSchema } from "../validations/load.validation";
+    import { createLoadSchema, calculateRateSchema, updateLoadSchema, MAX_TRAILER_VEHICLES } from "../validations/load.validation";
     import { GPS_TRACKING_LOAD_STATUSES } from "../constants/loadStatus";
     import {
       getCoordinatesForPair,
@@ -442,7 +442,7 @@
         rgn: 2,
         double_drop: 2,
         power_only: 0,
-        other: 20,
+        other: MAX_TRAILER_VEHICLES,
       };
 
       const vehicleCount = vehicles?.length || 0;

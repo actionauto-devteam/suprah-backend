@@ -89,6 +89,12 @@ export const TRAILER_TYPES = [
   "other",
 ] as const;
 
+// The most vehicles one trailer can carry. A driver's capacity can't be set
+// higher. A load can still have more (up to MAX_VEHICLES_PER_LOAD) when it
+// takes more than one trip. Must match MAX_TRAILER_VEHICLES in the frontend's
+// components/driver-profile/driver-profile-constants.tsx.
+export const MAX_TRAILER_VEHICLES = 10;
+
 // Load schedule dates are calendar days (YYYY-MM-DD). A value with a time and
 // time zone could otherwise land on a different day once stored. The UTC
 // midnight form the API itself returns (…T00:00:00.000Z) is also accepted, so

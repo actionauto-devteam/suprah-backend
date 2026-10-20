@@ -21,7 +21,7 @@ import {
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
 import { syncVerificationContactToAccount } from "../services/driverContactSync.service";
 import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
-import { TRAILER_TYPES } from "../validations/load.validation";
+import { MAX_TRAILER_VEHICLES, TRAILER_TYPES } from "../validations/load.validation";
 
 // Work days are stored as lowercase full names; older or hand-typed values
 // such as "Monday" or "mon" are converted.
@@ -588,6 +588,17 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
     !(TRAILER_TYPES as readonly string[]).includes(String(trailerType))
   ) {
     throw new ApiError(400, "Choose your trailer type from the list on the Equipment page, then save again.");
+  }
+
+  if (
+    maxVehicleCapacity !== undefined &&
+    maxVehicleCapacity !== null &&
+    Number(maxVehicleCapacity) > MAX_TRAILER_VEHICLES
+  ) {
+    throw new ApiError(
+      400,
+      `A trailer can carry at most ${MAX_TRAILER_VEHICLES} vehicles. Set Max Vehicles to ${MAX_TRAILER_VEHICLES} or less, then save again.`,
+    );
   }
 
   if (trailerType !== undefined) profile.trailerType = trailerType;
