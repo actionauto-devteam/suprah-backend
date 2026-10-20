@@ -80,6 +80,7 @@ import {
   assertDriverLoadCompatibility,
   evaluateDriverLoadCompatibilityWithRecommendations,
 } from "../services/driverLoadCompatibility.service";
+import { getDispatchProximityOrigins } from "../services/driverDispatchProximity.service";
 import { getCoordinatesFromZip } from "../utils/calculations";
 import {
   GPS_TRACKING_LOAD_STATUSES,
@@ -3592,13 +3593,16 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
   );
 
   const compatibilityByLoadKey: Record<string, Record<string, any>> = {};
+  const validDriverIds = requestedDriverIds.filter((driverId) =>
+    allowedDriverIds.has(driverId),
+  );
+  // Where each driver's distance is measured from when it isn't home base:
+  // a location they chose to share, or their delivery in the last 12 hours.
+  const dispatchOriginByDriverId = await getDispatchProximityOrigins(validDriverIds);
 
   const PREVIEW_CONCURRENCY = 8;
   for (const entry of previewEntries) {
     const compatibilityByDriverId: Record<string, any> = {};
-    const validDriverIds = requestedDriverIds.filter((driverId) =>
-      allowedDriverIds.has(driverId),
-    );
 
     // Home-base city/state geocoding is cached, but the first lookup for many
     // drivers can still touch an external geocoder. Keep that work bounded so
@@ -3615,8 +3619,9 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
               // GPS. Dispatch can evaluate equipment, availability, home base,
               // service radius, preferred routes, and the load route without
               // gaining location visibility before an accepted relationship
-              // exists.
+              // exists. The dispatch origin gives only a rounded distance.
               null,
+              dispatchOriginByDriverId.get(driverId) ?? null,
             );
         }),
       );
@@ -4718,8 +4723,9 @@ const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: Exp
 
   // Drivers are a shared platform-wide pool — not restricted to this org.
   // P1 #14: pending requests are still pre-assignment, so this endpoint must
-  // not fetch or use exact DriverLocation coordinates for compatibility.
-  const [drivers, profiles, eligibilityPairs] = await Promise.all([
+  // not fetch or use exact DriverLocation coordinates for compatibility. The
+  // dispatch origins give only a rounded distance (driverDispatchProximity).
+  const [drivers, profiles, eligibilityPairs, dispatchOriginByDriverId] = await Promise.all([
     User.find({
       _id: { $in: driverIds },
       role: "driver",
@@ -4733,6 +4739,7 @@ const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: Exp
         await getDriverWorkEligibility(driverId, organizationId),
       ] as const),
     ),
+    getDispatchProximityOrigins(driverIds),
   ]);
 
   const driverById = new Map(drivers.map((driver: any) => [String(driver._id), driver]));
@@ -4775,6 +4782,7 @@ const getPendingLoadRequests = asyncHandler(async (req: ExpressRequest, res: Exp
           // Compatibility may use profile/schedule/equipment data, but never
           // the driver's exact live GPS before assignment/acceptance.
           null,
+          dispatchOriginByDriverId.get(driverId) ?? null,
         ),
         equipment: profile
           ? {

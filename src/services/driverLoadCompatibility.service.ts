@@ -2,6 +2,7 @@ import DriverProfile from "../models/DriverProfile.model";
 import { ApiError } from "../utils/ApiError";
 import { MAX_TRAILER_VEHICLES } from "../validations/load.validation";
 import {
+  DispatchProximityOrigin,
   DriverRouteCompatibilitySignals,
   evaluateDriverRouteCompatibility,
   getDriverLocationForMatching,
@@ -247,11 +248,13 @@ export async function evaluateDriverLoadCompatibilityWithRecommendations(
   profile: any | null | undefined,
   load: any,
   location?: any | null,
+  dispatchOrigin?: DispatchProximityOrigin | null,
 ): Promise<DriverLoadCompatibility> {
   const routeSignals = await evaluateDriverRouteCompatibility(
     profile,
     load,
     location,
+    dispatchOrigin,
   );
   return evaluateDriverLoadCompatibility(profile, load, routeSignals);
 }
