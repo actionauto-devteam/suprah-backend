@@ -12,6 +12,27 @@ import { findOrCreatePendingDriverRequest } from './driverApplication.service';
 import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
 
+const OTP_LIFETIME_MS = 15 * 60 * 1000;
+// A code with at least this long left is emailed again instead of replaced.
+const OTP_REUSE_MIN_LEFT_MS = 5 * 60 * 1000;
+
+/**
+ * The code to email: the account's current code while it still has a while to
+ * run, otherwise a new 15-minute one. Sending the same code again means a
+ * second request (Resend, a repeated password reset, a slow email) never makes
+ * the code in an earlier email stop working. The expiry is never extended.
+ */
+function currentOrNewOtp(user: IUser, now = Date.now()) {
+    const expiresAt = user.otpExpiresAt ? new Date(user.otpExpiresAt).getTime() : 0;
+    if (user.otpCode && expiresAt - now >= OTP_REUSE_MIN_LEFT_MS) {
+        return { otp: user.otpCode, minutesLeft: Math.floor((expiresAt - now) / 60_000) };
+    }
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    user.otpCode = otp;
+    user.otpExpiresAt = new Date(now + OTP_LIFETIME_MS);
+    return { otp, minutesLeft: OTP_LIFETIME_MS / 60_000 };
+}
+
 class AuthService {
     /**
      * Resolve a tenant's display name for account-related email copy.
@@ -174,7 +195,7 @@ class AuthService {
      * Resend verification OTP
      */
     async resendOTP(email: string) {
-        const user = await User.findOne({ email: email.toLowerCase() });
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+otpCode +otpExpiresAt');
         if (!user) {
             throw new ApiError(404, "We couldn't find an account with that email. Check the email address, or sign up first.");
         }
@@ -183,9 +204,7 @@ class AuthService {
             throw new ApiError(400, 'This email is already verified. You can sign in now.');
         }
 
-        const otp = crypto.randomInt(100000, 1000000).toString();
-        user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        const { otp, minutesLeft } = currentOrNewOtp(user);
         await user.save();
 
         try {
@@ -193,8 +212,8 @@ class AuthService {
             await emailService.sendEmail({
                 to: user.email,
                 subject: `Your ${dealerName} Verification Code`,
-                text: `Your verification code is: ${otp}`,
-                html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code will expire in 15 minutes.</p>`
+                text: `Your verification code is: ${otp}. This code expires in ${minutesLeft} minutes.`,
+                html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code expires in ${minutesLeft} minutes.</p>`
             });
         } catch (emailErr) {
             console.error('[AuthService] Failed to resend OTP email:', emailErr);
@@ -458,22 +477,20 @@ class AuthService {
      * Send OTP for forgot password
      */
     async sendForgotPasswordOTP(email: string) {
-        const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+password +otpCode +otpExpiresAt');
         if (!user) {
             return { message: 'If an account exists, a reset code has been sent' };
         }
 
-        const otp = crypto.randomInt(100000, 1000000).toString();
-        user.otpCode = otp;
-        user.otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        const { otp, minutesLeft } = currentOrNewOtp(user);
         await user.save();
 
         const resetDealerName = await this.resolveDealerName(user.organizationId);
         await emailService.sendEmail({
             to: user.email,
             subject: `Reset Your ${resetDealerName} Password`,
-            text: `Your password reset code is: ${otp}. This code expires in 15 minutes.`,
-            html: `<h1>Reset Password</h1><p>Your password reset code is: <strong>${otp}</strong></p><p>Use this to set a new password for your account.</p>`
+            text: `Your password reset code is: ${otp}. This code expires in ${minutesLeft} minutes.`,
+            html: `<h1>Reset Password</h1><p>Your password reset code is: <strong>${otp}</strong></p><p>Use this to set a new password for your account. This code expires in ${minutesLeft} minutes.</p>`
         });
 
         return { message: 'If an account exists, a reset code has been sent' };
