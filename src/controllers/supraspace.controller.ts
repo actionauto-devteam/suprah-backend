@@ -226,13 +226,19 @@ function emitToConversation(conv: any, event: string, payload: any) {
   }
 }
 
-async function createConversationActivityMessage(conversation: any, sender: any, content: string) {
+async function createConversationActivityMessage(
+  conversation: any,
+  sender: any,
+  content: string,
+  metadata: Record<string, unknown> = {},
+) {
   const message = await SupraSpaceMessage.create({
     conversationId: conversation._id,
     sender: sender._id,
     content,
     type: 'system',
     readBy: [sender._id],
+    metadata,
   });
   await message.populate('sender', 'fullName username avatar');
   conversation.lastMessage = message._id as any;
@@ -2747,11 +2753,12 @@ const pinMessage = asyncHandler(async (req: Request, res: Response) => {
   const message = await SupraSpaceMessage.findById(messageId);
   if (!message || message.isDeleted || message.scheduledStatus === 'pending') throw new ApiError(404, 'Message not found');
 
-  const conversation = await SupraSpaceConversation.findById(message.conversationId).lean();
+  const conversation = await SupraSpaceConversation.findById(message.conversationId);
   if (!conversation || !idIn(conversation.members as any, userId)) throw new ApiError(403, 'Not a member of this conversation');
   assertConversationWritable(conversation, userId);
 
   const alreadyPinned = (message.pinnedBy || []).length > 0;
+  const changed = pinned !== alreadyPinned;
   if (pinned) {
     // A message pin is shared by the whole conversation. `pinnedBy` is the
     // actor audit field, not a collection of per-member pin votes.
@@ -2767,6 +2774,22 @@ const pinMessage = asyncHandler(async (req: Request, res: Response) => {
   }
   await message.save();
 
+  // Pin activity is a real conversation event, like membership activity—not a
+  // client-only marker attached to the older message being pinned. Persisting
+  // it makes the alert appear at the latest position after reloads and for
+  // every connected member.
+  const activityMessage = changed
+    ? await createConversationActivityMessage(
+      conversation,
+      req.crmUser!,
+      `${req.crmUser!.fullName || 'Someone'} ${pinned ? 'pinned' : 'unpinned'} a message.`,
+      {
+        activityType: pinned ? 'message_pinned' : 'message_unpinned',
+        activityTargetMessageId: message._id,
+      },
+    )
+    : null;
+
   const payload = {
     conversationId: message.conversationId.toString(),
     messageId,
@@ -2775,6 +2798,12 @@ const pinMessage = asyncHandler(async (req: Request, res: Response) => {
     pinnedAt: message.pinnedAt,
   };
   emitToConversation(conversation, 'message:pinned', payload);
+  if (activityMessage) {
+    emitToConversation(conversation, 'message:new', {
+      conversationId: message.conversationId.toString(),
+      message: activityMessage,
+    });
+  }
   res.json(new ApiResponse(200, payload, payload.pinned ? 'Message pinned' : 'Message unpinned'));
 });
 

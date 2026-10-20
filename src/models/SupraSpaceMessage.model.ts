@@ -64,6 +64,8 @@ export interface ISupraSpaceMessageMetadata {
   // guarantee that retries map one report to one Suprah Space message.
   source?: string | null;
   dayPulseReportId?: mongoose.Types.ObjectId | null;
+  activityType?: 'message_pinned' | 'message_unpinned' | null;
+  activityTargetMessageId?: mongoose.Types.ObjectId | null;
 }
 
 
@@ -172,6 +174,12 @@ const MessageMetadataSchema = new Schema<ISupraSpaceMessageMetadata>(
     crmUserRole:       { type: String, default: null },
     source:            { type: String, default: null },
     dayPulseReportId:  { type: Schema.Types.ObjectId, ref: 'DayPulse', default: null },
+    activityType: {
+      type: String,
+      enum: ['message_pinned', 'message_unpinned'],
+      default: null,
+    },
+    activityTargetMessageId: { type: Schema.Types.ObjectId, ref: 'SupraSpaceMessage', default: null },
   },
   { _id: false }
 );
