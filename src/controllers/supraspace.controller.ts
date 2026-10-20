@@ -1079,6 +1079,7 @@ async function withFreshAvatar<T extends { avatarKey?: string | null; avatar?: s
 /** GET /api/supraspace/conversations */
 const getConversations = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
+  const archivedOnly = String(req.query.archived || '').toLowerCase() === 'true';
   const mentionContentQuery = mentionContentQueryForUser(req.crmUser as any);
   const requestedLimit = parseInt(String(req.query.limit || ''), 10);
   const requestedOffset = parseInt(String(req.query.offset || ''), 10);
@@ -1097,6 +1098,7 @@ const getConversations = asyncHandler(async (req: Request, res: Response) => {
     $or: [{ members: userId }, { leftBy: userId }],
     isActive: true,
     deletedFor: { $ne: userId },
+    ...(archivedOnly ? { archivedBy: userId } : {}),
     'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
     ...(deprecated.length ? { name: { $nin: deprecated } } : {}),
   };
