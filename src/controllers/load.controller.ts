@@ -53,6 +53,7 @@
       checkProofOfDeliverySubmission,
       staffDeletableLoadFilter,
     } from "../services/loadLifecyclePolicy";
+    import { announceNewBoardLoad, markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
 
 
     const getUser = (req: Request) => req.user as IUser;
@@ -543,6 +544,11 @@
           loadNumber: load.loadNumber,
           route: '/transportation?tab=shipments',
         }, user._id.toString()).catch((err) => logger.error(err, 'Failed to notify admins of new load'));
+      }
+
+      // Tell drivers who can request it, without delaying the response.
+      if (load.additionalInfo?.visibility !== "private") {
+        void announceNewBoardLoad(load._id.toString());
       }
 
       logger.info({ loadId: load._id, loadNumber: load.loadNumber, orgId: organizationId }, 'Load created successfully');
@@ -1056,12 +1062,17 @@
       // Status transitions carry side effects (driver notifications, GPS,
       // assignment cleanup, outbox) that only the Driver Tracker actions
       // perform. Echoing the current status is harmless and still accepted.
-      if (status !== undefined && status !== load.status) {
+      // The one exception is posting a draft (a load converted from a quote):
+      // it has no driver yet, so Posted only makes it assignable and, when
+      // public, visible on the load board.
+      const postsDraft = status === "Posted" && load.status === "Draft" && !load.assignedDriverId;
+      if (status !== undefined && status !== load.status && !postsDraft) {
         throw new ApiError(
           409,
           `The status of load ${load.loadNumber} can't be changed from this form. Use the Driver Tracker actions to assign, reassign, or remove a driver; the driver completes pickup and delivery from their app.`,
         );
       }
+      if (postsDraft) updateData.status = "Posted";
 
       // If pickup or delivery locations changed, recalculate miles/rate if not manually overridden
       if (pickupLocation?.zip || deliveryLocation?.zip) {
@@ -1368,6 +1379,23 @@
         });
       }
 
+      // A load that just appeared on the board (a private load made public, or
+      // a public draft posted) is announced to drivers who can request it
+      // (once per load, only while it's still Posted).
+      if (
+        (updatedLoad as any).additionalInfo?.visibility !== "private" &&
+        (postsDraft || (load as any).additionalInfo?.visibility === "private")
+      ) {
+        void announceNewBoardLoad(loadId);
+      }
+      // Made private: it left the board, so drivers' new-load alerts stop offering it.
+      if (
+        (load as any).additionalInfo?.visibility !== "private" &&
+        (updatedLoad as any).additionalInfo?.visibility === "private"
+      ) {
+        void markNewLoadAlertsUnavailable(loadId);
+      }
+
       if (changeOutbox.length > 0) {
         // Immediate delivery for UX; failures stay queued for the worker.
         try {
@@ -1406,7 +1434,9 @@
         loadId,
         amendment
           ? `Updated active load ${load.loadNumber}; driver acknowledgement required`
-          : `Updated load ${load.loadNumber}`,
+          : postsDraft
+            ? `Posted draft load ${load.loadNumber}`
+            : `Updated load ${load.loadNumber}`,
       );
 
       return res.json(
@@ -1460,6 +1490,8 @@
       // Its photos (inspection, pickup, delivery, condition) go with it; nothing
       // could open them once the load is gone. Never fails the delete.
       await deletePhotosOfDeletedLoad(collectLoadPhotoKeys(load.toObject()), load._id);
+      // Drivers' new-load alerts stop offering it.
+      void markNewLoadAlertsUnavailable(load._id.toString());
 
       // Drivers with a pending request must see the load disappear.
       const requesterIds = new Set<string>(
