@@ -1,6 +1,8 @@
 import {
   ChimeSDKMeetingsClient, CreateMeetingCommand, CreateAttendeeCommand,
   GetMeetingCommand, DeleteMeetingCommand, NotFoundException,
+  StartMeetingTranscriptionCommand, StopMeetingTranscriptionCommand,
+  type TranscribeLanguageCode,
 } from '@aws-sdk/client-chime-sdk-meetings';
 import {
   ChimeSDKMediaPipelinesClient, CreateMediaCapturePipelineCommand,
@@ -62,6 +64,24 @@ export async function deleteChimeMeeting(meetingId: string) {
   } catch (err) {
     if (!(err instanceof NotFoundException)) throw err;
   }
+}
+
+export async function startMeetingCaptions(meetingId: string, languageCode: TranscribeLanguageCode) {
+  await meetingsClient.send(new StartMeetingTranscriptionCommand({
+    MeetingId: meetingId,
+    TranscriptionConfiguration: {
+      EngineTranscribeSettings: {
+        LanguageCode: languageCode,
+        Region: 'auto',
+        EnablePartialResultsStabilization: true,
+        PartialResultsStability: 'medium',
+      },
+    },
+  }));
+}
+
+export async function stopMeetingCaptions(meetingId: string) {
+  await meetingsClient.send(new StopMeetingTranscriptionCommand({ MeetingId: meetingId }));
 }
 
 export async function startRecordingPipelines(chimeMeetingId: string, s3Prefix: string) {

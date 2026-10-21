@@ -30,7 +30,7 @@ jest.mock('../../src/models/Organization.model', () => ({
   __esModule: true,
   default: { findById: mockOrganizationFindById },
 }));
-jest.mock('../../src/services/vehicleReengagement.service', () => ({
+jest.mock('../../src/utils/vehicleMatch', () => ({
   matchesVehicle: mockMatchesVehicle,
 }));
 jest.mock('../../src/services/aiOperatingMode.service', () => require('./helpers/legacyAiModeMock').legacyAiModeMock((orgId: any) => mockResolveAiAgentSettings(orgId)));

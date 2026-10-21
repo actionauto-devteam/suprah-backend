@@ -263,6 +263,11 @@ export const notificationTemplates = {
       : `${data.customerName}'s conversation needs a human to step in`,
   }),
 
+  ai_technical_failures_alert: (data: { agentName: string; count: number; causes: string }) => ({
+    title: `${data.agentName}'s safety check failed ${data.count} times in the last hour`,
+    message: `${data.agentName} paused those conversations and did not reply to them. Causes: ${data.causes}. Review them under AI Tasks, Technical.`,
+  }),
+
   lead_note_mention: (data: { customerName: string; authorName: string }) => ({
     title: 'You were mentioned in a note',
     message: `${data.authorName} mentioned you on ${data.customerName}'s lead`,

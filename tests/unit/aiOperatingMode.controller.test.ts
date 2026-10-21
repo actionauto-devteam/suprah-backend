@@ -15,7 +15,7 @@ jest.mock('../../src/models/AiModeChangeLog.model', () => ({
 }));
 jest.mock('../../src/models/AiUsageCounter.model', () => ({
   __esModule: true,
-  default: { find: mockUsageFind, updateOne: jest.fn() },
+  default: { find: mockUsageFind, updateOne: jest.fn(), findOne: () => ({ select: () => ({ lean: () => Promise.resolve(null) }) }) },
 }));
 jest.mock('../../src/utils/socketEmitter', () => ({ emitToOrg: mockEmitToOrg }));
 jest.mock('../../src/utils/logger', () => ({
@@ -77,12 +77,29 @@ describe('AI operating mode admin endpoint', () => {
 
   it('shows a legacy org as legacy with its existing behavior preserved', async () => {
     storedMetadata = { aiAgentEnabled: true };
-    const { json } = await invoke(getAiModes, { orgId: 'org-1', crmUser: { _id: 'u2', role: 'employee' } });
+    const { json } = await invoke(getAiModes, { orgId: 'org-1', crmUser: { _id: 'u2', role: 'manager' } });
     const data = json.mock.calls[0][0].data;
     expect(data.source).toBe('legacy');
     expect(data.modes).toEqual({ sms: 'live', email: 'live', webchat: 'live' });
     expect(data.canEdit).toBe(false);
     expect(data.usageToday.attention_screen).toBe(4);
+  });
+
+  it('gives employees only the mode fields their screens need', async () => {
+    storedMetadata = { aiAgentEnabled: true, aiShadowDraftsEnabled: true };
+    const { json } = await invoke(getAiModes, { orgId: 'org-1', crmUser: { _id: 'u3', role: 'employee' } });
+    const data = json.mock.calls[0][0].data;
+    expect(data).toEqual({
+      modes: { sms: 'live', email: 'live', webchat: 'live' },
+      effective: { sms: 'live', email: 'live', webchat: 'live' },
+      source: 'legacy',
+      masterSwitchOn: true,
+      configuredAt: null,
+      usageToday: {},
+      canEdit: false,
+      recentChanges: [],
+    });
+    expect(mockLogFind).not.toHaveBeenCalled();
   });
 
   it('only admins can change modes', async () => {

@@ -10,6 +10,7 @@ import { resolveAiAgentSettings } from './aiAgent.service';
 import { resolvePinnedVehicleContext, latestSharedConversationActivity } from './vehicleInquiryContext.service';
 import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import logger from '../utils/logger';
+import { normalizeToken, matchesVehicle } from '../utils/vehicleMatch';
 import {
   createGeminiClient,
   hasGeminiApiKey,
@@ -42,31 +43,9 @@ const MAX_FINAL_LENGTH = 320;
 const ACTIVE_CONVERSATION_WINDOW_MS =
   parseInt(process.env.VEHICLE_REENGAGEMENT_ACTIVE_CONVERSATION_HOURS || '48', 10) * 60 * 60 * 1000;
 
-export function normalizeToken(value: unknown): string {
-  return String(value || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+export { normalizeToken, matchesVehicle };
 
 export const validateOutboundMessage = validateOutboundMessageShared;
-
-export function matchesVehicle(leadVehicle: any, vehicle: IVehicle): boolean {
-  const leadYear = parseInt(leadVehicle?.year, 10);
-  if (!Number.isFinite(leadYear) || leadYear !== vehicle.year) return false;
-
-  const leadMake = normalizeToken(leadVehicle?.make);
-  const targetMake = normalizeToken(vehicle.make);
-  if (!leadMake || !targetMake || leadMake !== targetMake) return false;
-
-  const leadModel = normalizeToken(leadVehicle?.model);
-  const targetModel = normalizeToken(vehicle.modelName);
-  if (!leadModel || !targetModel) return false;
-  if (leadModel.length < 3 || targetModel.length < 3) return leadModel === targetModel;
-  return leadModel.includes(targetModel) || targetModel.includes(leadModel);
-}
 
 export async function findMatchingLeads(vehicle: IVehicle) {
   const cooldownCutoff = new Date(Date.now() - COOLDOWN_DAYS * 24 * 60 * 60 * 1000);

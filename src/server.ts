@@ -47,7 +47,6 @@ import { initDriverCredentialReminderScheduler } from "./schedulers/driverCreden
 // Driver GPS silence is monitored by startDriverLocationMonitor in driverTracking.routes.
 import { startProjectDeadlineReminders } from "./services/projectDeadlineReminder.service";
 import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
-// ➕ SUPRAH MEET — 10-minute meeting reminders for tagged users.
 import { initSuprahMeetReminders } from "./services/suprahMeetReminder.service";
 import healthRoute from "./routes/health.route";
 import supraSpaceRoute from "./routes/supraspace.route";

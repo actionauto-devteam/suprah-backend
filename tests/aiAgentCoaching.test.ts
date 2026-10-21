@@ -1,4 +1,5 @@
 import request from 'supertest';
+import mongoose from 'mongoose';
 import app from '../src/server';
 import Organization from '../src/models/Organization.model';
 import CrmUser from '../src/models/CrmUser.model';
@@ -90,13 +91,32 @@ describe('AI agent coaching routes', () => {
       Lead.deleteMany({ _id: lead?._id }),
       CrmUser.deleteMany({ _id: { $in: [employee?._id, manager?._id].filter(Boolean) } }),
       Organization.deleteMany({ _id: org?._id }),
+      ...['aitrainingpolicies', 'aitrainingpolicyversions', 'aitrainingauditlogs'].map((name) =>
+        mongoose.connection.db!.collection(name).deleteMany({ organizationId: String(org?._id) })),
     ]);
   });
 
-  it('lets regular CRM staff submit coaching tied to a verified Alex SMS message', async () => {
+  it('routes coaching from regular CRM staff into a pending proposal instead of an active rule', async () => {
+    const before = await AiAgentCoachingRule.countDocuments({ organizationId: String(org._id) });
     const res = await request(app)
       .post('/api/crm/ai-coaching')
       .set('Authorization', `Bearer ${employeeToken}`)
+      .send({
+        leadId: String(lead._id),
+        messageId: String(aiMessage._id),
+        channel: 'sms',
+        instruction: "Ask for the customer's preferred appointment time first.",
+      });
+
+    expect(res.status).toBe(202);
+    expect(res.body.data).toMatchObject({ pending: true, status: 'in_review' });
+    expect(await AiAgentCoachingRule.countDocuments({ organizationId: String(org._id) })).toBe(before);
+  });
+
+  it('lets managers save coaching tied to a verified Alex SMS message', async () => {
+    const res = await request(app)
+      .post('/api/crm/ai-coaching')
+      .set('Authorization', `Bearer ${managerToken}`)
       .send({
         leadId: String(lead._id),
         messageId: String(aiMessage._id),
@@ -111,7 +131,8 @@ describe('AI agent coaching routes', () => {
 
     const saved = await AiAgentCoachingRule.findById(res.body.data.id).lean();
     expect(saved?.organizationId).toBe(String(org._id));
-    expect(saved?.createdByName).toBe('Rep User');
+    expect(saved?.status).toBe('active');
+    expect(saved?.createdByName).toBe('Manager User');
   });
 
   it('rejects coaching for non-Alex messages', async () => {

@@ -9,6 +9,9 @@ describe('Real-DB proof: IntakeClaim and Lead messageId unique indexes actually 
   beforeAll(async () => {
     jest.setTimeout(30000);
     await Lead.init();
+    const messageIdIndex = Lead.schema.indexes().find(([, options]) => options?.name === 'lead_org_messageid_unique');
+    if (!messageIdIndex) throw new Error('lead_org_messageid_unique is no longer defined on the Lead schema');
+    await Lead.collection.createIndex(messageIdIndex[0] as any, messageIdIndex[1] as any);
     await IntakeClaim.init();
 
     testOrg = await Organization.create({

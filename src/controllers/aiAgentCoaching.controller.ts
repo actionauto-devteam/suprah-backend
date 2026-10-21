@@ -8,6 +8,7 @@ import AiAgentLog from '../models/AiAgentLog.model';
 import AiAgentCoachingRule from '../models/AiAgentCoachingRule.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import { CommunicationMessage } from '../models/communication.model';
+import { submitCoachingAsProposal, trainingActor, writeTrainingAudit } from '../services/aiTraining.service';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 const MANAGER_ROLES = new Set(['manager', 'admin', 'super_admin']);
@@ -123,6 +124,27 @@ export const createAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     .select('_id')
     .lean();
 
+  if (!isManager(user)) {
+    const { policy, created } = await submitCoachingAsProposal({
+      organizationId: orgId,
+      user,
+      instruction,
+      channel,
+      leadId,
+      messageId,
+      messageModel: verified.sourceMessageModel,
+      aiLogId: log?._id,
+      originalAiMessageSnapshot: verified.originalAiMessageSnapshot,
+    });
+    res.status(202).json(new ApiResponse(202, {
+      pending: true,
+      created,
+      proposalId: String(policy._id),
+      status: policy.status,
+    }, 'Coaching sent to a manager for review'));
+    return;
+  }
+
   const rule = await AiAgentCoachingRule.create({
     organizationId: orgId,
     scope: 'organization',
@@ -136,6 +158,13 @@ export const createAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     originalAiMessageSnapshot: verified.originalAiMessageSnapshot,
     createdBy: user._id,
     createdByName: actorName(user),
+  });
+  await writeTrainingAudit({
+    organizationId: orgId,
+    action: 'legacy_coaching_created',
+    actor: trainingActor(user),
+    legacyCoachingRuleId: rule._id,
+    toStatus: 'active',
   });
 
   res.status(201).json(new ApiResponse(201, serialize(rule.toObject()), 'AI coaching saved'));
@@ -174,6 +203,13 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     { new: true },
   ).lean();
   if (!rule) throw new ApiError(404, 'Coaching rule not found');
+  await writeTrainingAudit({
+    organizationId: orgId,
+    action: 'legacy_coaching_updated',
+    actor: trainingActor(user),
+    legacyCoachingRuleId: (rule as any)._id,
+    toStatus: (rule as any).status,
+  });
 
   res.json(new ApiResponse(200, serialize(rule), 'AI coaching updated'));
 });
@@ -198,6 +234,13 @@ export const deleteAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     { new: true },
   ).lean();
   if (!rule) throw new ApiError(404, 'Coaching rule not found');
+  await writeTrainingAudit({
+    organizationId: orgId,
+    action: 'legacy_coaching_deleted',
+    actor: trainingActor(user),
+    legacyCoachingRuleId: (rule as any)._id,
+    toStatus: 'deleted',
+  });
 
   res.json(new ApiResponse(200, serialize(rule), 'AI coaching deleted'));
 });

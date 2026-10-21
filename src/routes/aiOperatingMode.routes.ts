@@ -7,6 +7,8 @@ const router = express.Router();
 router.use(crmAuth());
 
 router.get('/', ctrl.getAiModes);
+router.get('/history', ctrl.getAiModeHistory);
 router.patch('/', ctrl.updateAiModes);
+router.patch('/shadow-drafts', ctrl.updateShadowDrafts);
 
 export default router;

@@ -1,8 +1,6 @@
 import mongoose from 'mongoose';
-import Vehicle from '../models/Vehicle.model';
 import OrgLeadConfig from '../models/OrgLeadConfig.model';
 import Organization from '../models/Organization.model';
-import { matchesVehicle } from './vehicleReengagement.service';
 import {
   resolveAiAgentSettings,
   generateAlexEmailReply,
@@ -20,65 +18,16 @@ import {
 import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
 import { sendLeadReplyEmail, fetchGmailThreadMessages } from '../controllers/lead.controller';
+import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
+import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from './aiShadowDraft.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from './aiOperatingMode.service';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
-import { hasGuaranteedAvailabilityLanguage } from '../utils/aiOutboundSafety';
+import { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
+export { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 
-function normalizeVinOrStock(value: unknown): string {
-  return String(value || '').trim().toUpperCase();
-}
-
-async function resolveCurrentVehicleAndPrice(lead: any): Promise<{ vehicle: any; price?: number; previousPrice?: number } | null> {
-  if (!lead?.vehicle) return null;
-  const vin = normalizeVinOrStock(lead.vehicle.vin);
-  const stock = normalizeVinOrStock(lead.vehicle.stock);
-
-  let vehicle: any = null;
-  if (vin) {
-    vehicle = await Vehicle.findOne({ organizationId: lead.organizationId, vin: new RegExp(`^${vin}$`, 'i') }).lean();
-  }
-  if (!vehicle && stock) {
-    vehicle = await Vehicle.findOne({ organizationId: lead.organizationId, stockNumber: new RegExp(`^${stock}$`, 'i') }).lean();
-  }
-  if (!vehicle && !vin && !stock) {
-    const candidates = await Vehicle.find({ organizationId: lead.organizationId, isArchived: { $ne: true } }).limit(500).lean();
-    vehicle = candidates.find((v: any) => matchesVehicle(lead.vehicle, v)) || null;
-  }
-  if (!vehicle || typeof vehicle.price !== 'number') return vehicle ? { vehicle } : null;
-
-  const history = Array.isArray(vehicle.priceHistory) ? vehicle.priceHistory : [];
-  const last = history[history.length - 1];
-  return {
-    vehicle,
-    price: vehicle.price,
-    previousPrice: typeof last?.previousPrice === 'number' ? last.previousPrice : undefined,
-  };
-}
-
-export function validateOutboundEmailMessage(text: string, allowedPrices: number[] = []): { ok: boolean; reasons: string[] } {
-  const reasons: string[] = [];
-  if (/\d+\s?%\s?(off)?/i.test(text)) reasons.push('percent-off');
-  if (/\bdiscount(s|ed)?\b|\bpromo(tion)?(al)?\b|\bincentive[s]?\b|\brebate[s]?\b|\bon sale\b|\bsale price\b|\bclearance\b|\bspecial offer\b/i.test(text)) reasons.push('discount/incentive language');
-  if (/\bfinanc(e|ing)\b|\bloan[s]?\b|\blease[ds]?\b|\bAPR\b|\bdown payment\b|\bmonthly payment[s]?\b|\bcredit approv(al|ed)\b|\/\s?mo\b/i.test(text)) reasons.push('financing/payment language');
-  if (/\btrade[\s-]?in\b/i.test(text)) reasons.push('trade-in mention');
-  if (hasGuaranteedAvailabilityLanguage(text)) reasons.push('guaranteed-availability language');
-  if (/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(text)) reasons.push('unexpected phone number');
-  if (/https?:\/\/|www\.|[a-z0-9-]+\.(com|net|org|io)\b/i.test(text)) reasons.push('unexpected link');
-  if (/[\w.+-]+@[\w-]+\.[a-z]{2,}/i.test(text)) reasons.push('unexpected email address');
-
-  const dollarAmounts = Array.from(text.matchAll(/\$\s?([\d,]+(?:\.\d{2})?)/g)).map((m) => parseFloat(m[1].replace(/,/g, '')));
-  for (const amount of dollarAmounts) {
-    if (!allowedPrices.some((p) => Math.abs(p - amount) < 0.5)) {
-      reasons.push('unverified price figure');
-    }
-  }
-
-  if (text.trim().length < 10) reasons.push('message too short or malformed');
-  return { ok: reasons.length === 0, reasons: Array.from(new Set(reasons)) };
-}
 
 async function buildEmailTranscript(lead: any): Promise<AiAgentTranscriptEntry[]> {
   const messages = await fetchGmailThreadMessages(String(lead.organizationId), lead.threadId, lead.messageId);
@@ -116,11 +65,24 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       messageId: String(messageId),
     });
 
-    if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body: text, agentName }))) return;
+    const shadowSource: ShadowDraftSource = {
+      organizationId: orgId,
+      channel: 'email',
+      sourceMessageId: String(lead._id),
+      sourceMessageModel: 'Lead',
+      leadId: lead._id,
+      inquiryReceivedAt: lead.createdAt ? new Date(lead.createdAt) : new Date(),
+    };
+
+    if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body: text, agentName }))) {
+      if (emailMode === 'training') queueShadowAttentionSkip(shadowSource);
+      return;
+    }
 
     const delivery = await decideAiDelivery({ organizationId: orgId, channel: 'email', workflow: 'email_reply', leadId: lead._id });
     if (delivery.action !== 'send') {
       await finishAiAttentionCheck(check);
+      if (delivery.mode === 'training') queueShadowDraft({ ...shadowSource, lead, inquiryText: text });
       return;
     }
 
