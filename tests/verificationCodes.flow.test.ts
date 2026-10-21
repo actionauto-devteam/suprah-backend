@@ -72,6 +72,31 @@ describe('Email codes keep working when another one is requested', () => {
       .expect(400);
   });
 
+  it('new accounts need an uppercase letter, a number and a symbol, on every sign-up path', async () => {
+    const weak = await request(app)
+      .post('/api/auth/register')
+      .send({ name: 'Weak Password', email: `weak${TEST_EMAIL_DOMAIN}`, password: 'password12345', role: 'driver' })
+      .expect(400);
+    expect(weak.body.message).toBe(
+      'Please fix the following: Password must include at least one uppercase letter. Password must include at least one special character.',
+    );
+    expect(await User.exists({ email: `weak${TEST_EMAIL_DOMAIN}` })).toBeNull();
+
+    // Invite links (customers, drivers, dealerships) check the password before the link.
+    const viaInvite = await request(app)
+      .post('/api/auth/invite/no-such-link/register')
+      .send({ name: 'Weak Password', email: `weak-invite${TEST_EMAIL_DOMAIN}`, password: 'password12345' })
+      .expect(400);
+    expect(viaInvite.body.message).toBe(
+      'Please fix the following: Password must include at least one uppercase letter. Password must include at least one special character.',
+    );
+    const badLink = await request(app)
+      .post('/api/auth/invite/no-such-link/register')
+      .send({ name: 'Strong Password', email: `strong-invite${TEST_EMAIL_DOMAIN}`, password: 'Codes-Passw0rd!' })
+      .expect(404);
+    expect(badLink.body.message).toBe("This invite link isn't valid. Ask the person who sent it for a new one.");
+  });
+
   it('a code close to expiring is replaced by a new one', async () => {
     const other = `nearly-expired${TEST_EMAIL_DOMAIN}`;
     await request(app)

@@ -10,6 +10,7 @@ import emailService from '../services/email.service';
 import authService from '../services/auth.service';
 import DealershipInquiry from '../models/DealershipInquiry.model';
 import config from '../config';
+import { strongPasswordProblems } from '../validations/auth.validation';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const BULK_TEMP_PASSWORD = 'customersaccount';
@@ -254,19 +255,22 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
   const { name, email, password, dealershipName, dealershipSlug } = req.body;
 
   if (!name?.trim() || !email?.trim() || !password) {
-    throw new ApiError(400, 'name, email, and password are required');
+    throw new ApiError(400, 'Enter your name, email address and a password, then try again.');
   }
-  if (password.length < 8) {
-    throw new ApiError(400, 'Password must be at least 8 characters');
+  // Every new account uses the same password rules (sign-up, invite links, reset).
+  const passwordProblems = strongPasswordProblems(String(password));
+  if (passwordProblems.length > 0) {
+    throw new ApiError(400, `Please fix the following: ${passwordProblems.map((problem) => `${problem}.`).join(' ')}`);
   }
 
   const token = await CustomerInviteToken.findOne({ shortCode });
-  if (!token) throw new ApiError(404, 'Invite link not found');
+  if (!token) throw new ApiError(404, "This invite link isn't valid. Ask the person who sent it for a new one.");
   if (!token.multiUse && token.isUsed) throw new ApiError(410, 'This invite link has already been used');
   if (new Date() > token.expiresAt) throw new ApiError(410, 'This invite link has expired');
 
   const accountType = resolveAccountType(token.accountType);
   const label = accountTypeLabel(accountType);
+
 
   const normalizedEmail = email.trim().toLowerCase();
 
