@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import OpenAI from 'openai';
 import logger from './logger';
 import { isDemoPhone } from './demoPhone';
@@ -26,11 +27,69 @@ export function hasGeminiApiKey(phone?: string): boolean {
   return !!process.env.GEMINI_API_KEY;
 }
 
-export function createGeminiClient(): OpenAI {
+export function createGeminiClient(options: { timeout?: number; maxRetries?: number } = {}): OpenAI {
   return new OpenAI({
     apiKey: process.env.GEMINI_API_KEY || NO_KEY_PLACEHOLDER,
     baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    ...options,
   });
+}
+
+export interface AiCallRecord {
+  phase: string;
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  latencyMs: number;
+  ok: boolean;
+}
+
+export interface AiCallObserver {
+  signal?: AbortSignal;
+  perCallTimeoutMs?: number;
+  maxCalls: number;
+  phase: string;
+  calls: AiCallRecord[];
+  budgetExhausted?: boolean;
+}
+
+export class AiCallBudgetExceededError extends Error {
+  constructor() { super('AI call budget for this request was exhausted'); }
+}
+
+const aiCallObserverStorage = new AsyncLocalStorage<AiCallObserver>();
+
+export function runWithAiCallObserver<T>(observer: AiCallObserver, fn: () => Promise<T>): Promise<T> {
+  return aiCallObserverStorage.run(observer, fn);
+}
+
+async function observedCompletion(client: OpenAI, options: any, observer: AiCallObserver): Promise<any> {
+  if (observer.signal?.aborted) throw observer.signal.reason || new Error('AI request was cancelled');
+  if (observer.calls.length >= observer.maxCalls) {
+    observer.budgetExhausted = true;
+    throw new AiCallBudgetExceededError();
+  }
+  const signals = [observer.signal, observer.perCallTimeoutMs ? AbortSignal.timeout(observer.perCallTimeoutMs) : undefined]
+    .filter(Boolean) as AbortSignal[];
+  const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+  const record: AiCallRecord = { phase: observer.phase, model: String(options?.model || ''), latencyMs: 0, ok: false };
+  observer.calls.push(record);
+  const startedAt = Date.now();
+  try {
+    const completion: any = await client.chat.completions.create(options, { signal, maxRetries: 0 });
+    record.ok = true;
+    record.model = String(completion?.model || record.model);
+    const usage = completion?.usage;
+    if (usage) {
+      record.promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
+      record.completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined;
+      record.totalTokens = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
+    }
+    return completion;
+  } finally {
+    record.latencyMs = Date.now() - startedAt;
+  }
 }
 
 export async function createCompletionWithFallback(
@@ -39,15 +98,17 @@ export async function createCompletionWithFallback(
   fallbackModel: string,
   logLabel: string,
 ): Promise<any> {
+  const observer = aiCallObserverStorage.getStore();
+  const create = (body: any) => (observer ? observedCompletion(client, body, observer) : client.chat.completions.create(body));
   try {
-    return await client.chat.completions.create(options);
+    return await create(options);
   } catch (err: any) {
     if (err?.status === 404 && options.model !== fallbackModel) {
       logger.warn(
         { model: options.model, fallback: fallbackModel },
         `[${logLabel}] Gemini model not found, retrying with fallback model`,
       );
-      return client.chat.completions.create({ ...options, model: fallbackModel });
+      return create({ ...options, model: fallbackModel });
     }
     throw err;
   }
@@ -76,6 +137,28 @@ const PROHIBITED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 const ALWAYS_UNSAFE_AVAILABILITY = /\bguarantee(d)?\b|\bact fast\b|\bwon'?t last\b|\blimited (time|availability|stock)\b|\bhurry\b|\bfirst come\b/i;
 const CONDITIONAL_AVAILABILITY_PHRASES = /\bstill available\b|\bin stock\b|\bavailable now\b/gi;
 const AVAILABILITY_HEDGE_WORDS = /\b(if|whether|check|confirm(ing)?|verify|verifying|see|seeing|find out|let me|i'll|we'll|will|going to)\b/i;
+
+export function validateOutboundEmailMessage(text: string, allowedPrices: number[] = []): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (/\d+\s?%\s?(off)?/i.test(text)) reasons.push('percent-off');
+  if (/\bdiscount(s|ed)?\b|\bpromo(tion)?(al)?\b|\bincentive[s]?\b|\brebate[s]?\b|\bon sale\b|\bsale price\b|\bclearance\b|\bspecial offer\b/i.test(text)) reasons.push('discount/incentive language');
+  if (/\bfinanc(e|ing)\b|\bloan[s]?\b|\blease[ds]?\b|\bAPR\b|\bdown payment\b|\bmonthly payment[s]?\b|\bcredit approv(al|ed)\b|\/\s?mo\b/i.test(text)) reasons.push('financing/payment language');
+  if (/\btrade[\s-]?in\b/i.test(text)) reasons.push('trade-in mention');
+  if (hasGuaranteedAvailabilityLanguage(text)) reasons.push('guaranteed-availability language');
+  if (/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(text)) reasons.push('unexpected phone number');
+  if (/https?:\/\/|www\.|[a-z0-9-]+\.(com|net|org|io)\b/i.test(text)) reasons.push('unexpected link');
+  if (/[\w.+-]+@[\w-]+\.[a-z]{2,}/i.test(text)) reasons.push('unexpected email address');
+
+  const dollarAmounts = Array.from(text.matchAll(/\$\s?([\d,]+(?:\.\d{2})?)/g)).map((m) => parseFloat(m[1].replace(/,/g, '')));
+  for (const amount of dollarAmounts) {
+    if (!allowedPrices.some((p) => Math.abs(p - amount) < 0.5)) {
+      reasons.push('unverified price figure');
+    }
+  }
+
+  if (text.trim().length < 10) reasons.push('message too short or malformed');
+  return { ok: reasons.length === 0, reasons: Array.from(new Set(reasons)) };
+}
 
 export function hasGuaranteedAvailabilityLanguage(text: string): boolean {
   if (ALWAYS_UNSAFE_AVAILABILITY.test(text)) return true;

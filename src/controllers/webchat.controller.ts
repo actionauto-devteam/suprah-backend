@@ -23,10 +23,10 @@ import logger from '../utils/logger';
 import {
   resolveAiAgentSettings,
   processAlexTurn,
-  AiAgentTranscriptEntry,
-  HISTORY_LIMIT,
 } from '../services/aiAgent.service';
 import { getRelevantAiCoaching } from '../services/aiAgentCoaching.service';
+import { buildWebchatTranscript } from '../services/aiReplyContext.service';
+import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from '../services/aiShadowDraft.service';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, claimAiGeneration, claimAiReplyDispatch } from '../services/aiHumanAttention.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from '../services/aiOperatingMode.service';
@@ -124,19 +124,6 @@ async function resolveDealerName(organizationId: any): Promise<string> {
   }
 }
 
-async function buildWebchatTranscript(sessionId: any): Promise<AiAgentTranscriptEntry[]> {
-  const messages = await WebChatMessage.find({ sessionId, aiDispatchPending: { $ne: true } })
-    .sort({ createdAt: -1 })
-    .limit(HISTORY_LIMIT)
-    .lean();
-
-  return messages.reverse().map((m: any): AiAgentTranscriptEntry => {
-    if (m.direction === 'inbound') return { from: 'customer', body: m.body };
-    if (m.sentBy?.userId === AI_AGENT_ACTOR_ID) return { from: 'ai', body: m.body };
-    return { from: 'staff', staffName: m.sentBy?.name, body: m.body };
-  });
-}
-
 /** Fire-and-forget: generates and sends Alex's next reply for this session,
  *  if the org has Alex enabled and this conversation isn't paused. Called
  *  after every inbound visitor message (first message and every follow-up),
@@ -184,6 +171,18 @@ export async function sendWebchatUnavailableAck(session: any): Promise<boolean> 
   }
 }
 
+function webchatShadowSource(session: any, check: AttentionCheck): ShadowDraftSource {
+  return {
+    organizationId: session.organizationId,
+    channel: 'webchat',
+    sourceMessageId: check.messageId,
+    sourceMessageModel: 'WebChatMessage',
+    leadId: session.leadId,
+    sessionId: session._id,
+    inquiryReceivedAt: new Date(),
+  };
+}
+
 async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: string): Promise<void> {
   try {
     const { agentName } = await resolveAiAgentSettings(session.organizationId);
@@ -194,6 +193,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
       return;
     }
     if (!(await screenAiHumanAttention({ ...check, leadId: String(session.leadId), body, agentName, phone: session.visitorPhone }))) {
+      if (webchatMode === 'training') queueShadowAttentionSkip(webchatShadowSource(session, check));
       if (webchatMode !== 'live') await sendWebchatUnavailableAck(session);
       return;
     }
@@ -206,6 +206,9 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
     });
     if (delivery.action !== 'send') {
       await finishAiAttentionCheck(check);
+      if (delivery.mode === 'training') {
+        queueShadowDraft({ ...webchatShadowSource(session, check), phone: session.visitorPhone || undefined });
+      }
       await sendWebchatUnavailableAck(session);
       return;
     }

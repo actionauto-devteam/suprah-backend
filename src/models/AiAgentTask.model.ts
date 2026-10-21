@@ -14,9 +14,15 @@ export interface IAiAgentTask extends Document {
   resolvedAt?: Date;
   resolvedBy?: mongoose.Types.ObjectId;
   resolutionNote?: string;
+  resolutionType?: 'technical_recovery';
+  recoveredByName?: string;
   conversationId?: mongoose.Types.ObjectId;
   sessionId?: mongoose.Types.ObjectId;
   sourceMessageId?: string;
+  attentionKind?: 'customer' | 'technical';
+  attentionCode?: string;
+  classifierSource?: 'gemini' | 'mock' | 'skipped';
+  notificationsSuppressedAt?: Date;
   notificationLease?: string;
   notificationLeaseUntil?: Date;
   notificationsCompletedAt?: Date;
@@ -43,9 +49,15 @@ const AiAgentTaskSchema: Schema<IAiAgentTask> = new Schema(
     resolvedAt: { type: Date },
     resolvedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     resolutionNote: { type: String, trim: true, maxlength: 500 },
+    resolutionType: { type: String, enum: ['technical_recovery'] },
+    recoveredByName: { type: String, trim: true, maxlength: 120 },
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation' },
     sessionId: { type: Schema.Types.ObjectId, ref: 'WebChatSession' },
     sourceMessageId: { type: String },
+    attentionKind: { type: String, enum: ['customer', 'technical'] },
+    attentionCode: { type: String },
+    classifierSource: { type: String, enum: ['gemini', 'mock', 'skipped'] },
+    notificationsSuppressedAt: { type: Date },
     notificationLease: { type: String },
     notificationLeaseUntil: { type: Date },
     notificationsCompletedAt: { type: Date },

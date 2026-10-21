@@ -23,10 +23,10 @@ import Vehicle from "../models/Vehicle.model";
 import {
   resolveAiAgentSettings,
   processAlexTurn,
-  AiAgentTranscriptEntry,
-  HISTORY_LIMIT,
 } from "./aiAgent.service";
 import { getRelevantAiCoaching } from "./aiAgentCoaching.service";
+import { buildSmsTranscript } from "./aiReplyContext.service";
+import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from "./aiShadowDraft.service";
 import {
   resolveVehicleContextForReply,
   buildVehicleContextNote,
@@ -961,24 +961,23 @@ async function bumpConversation(conversationId: any, message: any) {
   );
 }
 
-async function buildSmsTranscript(conversationId: any): Promise<AiAgentTranscriptEntry[]> {
-  const messages = await CommunicationMessage.find({ conversationId })
-    .sort({ createdAt: -1 })
-    .limit(HISTORY_LIMIT)
-    .lean();
-
-  return messages.reverse().map((m: any): AiAgentTranscriptEntry => {
-    if (m.direction === "inbound") return { from: "customer", body: m.body };
-    if (m.sentBy?.userId === AI_AGENT_ACTOR_ID) return { from: "ai", body: m.body };
-    return { from: "staff", staffName: m.sentBy?.name, body: m.body };
-  });
-}
-
 /** Fire-and-forget: generates and sends Alex's next SMS reply for this
  *  conversation, if the org has Alex enabled, the number isn't paused, and
  *  the inbound message wasn't already handled by the STOP or appointment
  *  keyword handlers. Skipped entirely when the number doesn't match a Lead —
  *  Alex only operates within a lead conversation. */
+function smsShadowSource(orgId: any, conversation: any, lead: any, check: AttentionCheck): ShadowDraftSource {
+  return {
+    organizationId: orgId,
+    channel: "sms",
+    sourceMessageId: check.messageId,
+    sourceMessageModel: "CommunicationMessage",
+    leadId: lead._id,
+    conversationId: conversation._id,
+    inquiryReceivedAt: new Date(),
+  };
+}
+
 export async function triggerSmsAiReply(
   orgId: any,
   conversation: any,
@@ -994,7 +993,10 @@ export async function triggerSmsAiReply(
     const { agentName } = await resolveAiAgentSettings(String(orgId));
     const { mode: smsMode } = await resolveAiChannelMode(orgId, "sms");
     if (!isAttentionScreeningMode(smsMode)) { await finishAiAttentionCheck(check); return; }
-    if (!screened && !(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) return;
+    if (!screened && !(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) {
+      if (smsMode === "training") queueShadowAttentionSkip(smsShadowSource(orgId, conversation, lead, check));
+      return;
+    }
 
     const delivery = await decideAiDelivery({
       organizationId: orgId,
@@ -1003,7 +1005,18 @@ export async function triggerSmsAiReply(
       toPhone: conversation.customerPhone,
       leadId: lead._id,
     });
-    if (delivery.action !== "send") { await finishAiAttentionCheck(check); return; }
+    if (delivery.action !== "send") {
+      await finishAiAttentionCheck(check);
+      if (delivery.mode === "training") {
+        queueShadowDraft({
+          ...smsShadowSource(orgId, conversation, lead, check),
+          lead,
+          phone: conversation.customerPhone,
+          isNewInquiry: options.isNewInquiry,
+        });
+      }
+      return;
+    }
 
     const claimed = await claimAiGeneration(check);
     if (!claimed) return;
@@ -1293,7 +1306,10 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     const { agentName } = await resolveAiAgentSettings(String(orgId));
     const { mode: screeningMode } = await resolveAiChannelMode(orgId, "sms");
     if (isAttentionScreeningMode(screeningMode)) {
-      if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) return message;
+      if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) {
+        if (screeningMode === "training") queueShadowAttentionSkip(smsShadowSource(orgId, conversation, lead, check));
+        return message;
+      }
       screened = true;
     }
   }

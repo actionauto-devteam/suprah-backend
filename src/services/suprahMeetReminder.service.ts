@@ -1,60 +1,84 @@
 import Meeting from '../models/Meeting.model';
-import CrmUser from '../models/CrmUser.model';
 import { deleteChimeMeeting, stopRecordingPipelines } from './suprahMeetAws.service';
 
-/**
- * Suprah Meet background scheduler — runs every 60s:
- *  1. 10-minute meeting reminders (fires once per session).
- *  2. Auto-end sweep: a meeting that is "live" but abandoned (everyone left
- *     and nobody pressed End) is closed out so "Happening now" stays truthful.
- */
+import { randomUUID } from 'crypto';
+import {
+  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingReminder,
+} from './suprahMeetNotification.service';
+import logger from '../utils/logger';
+
+
+let timer: NodeJS.Timeout | null = null;
+let running = false;
+
 export function initSuprahMeetReminders() {
-  setInterval(() => { void tick(); }, 60_000);
-  console.log('[SuprahMeet] scheduler started (reminders + auto-end sweep)');
+  if (timer) return;
+  timer = setInterval(() => { void tick(); }, 30_000);
+  timer.unref();
+  void tick();
+  console.log('[SuprahMeet] scheduler started (ten-minute reminders + auto-end sweep)');
 }
 
 async function tick() {
-  await remindTick().catch((err) => console.error('[SuprahMeet] reminder tick failed:', err?.message));
-  await autoEndTick().catch((err) => console.error('[SuprahMeet] auto-end tick failed:', err?.message));
+  if (running) return;
+  running = true;
+  try {
+    await sendSuprahMeetNotifications().catch((err) => logger.error({ err }, '[SuprahMeet] reminder tick failed'));
+    await autoEndTick().catch((err) => logger.error({ err }, '[SuprahMeet] auto-end tick failed'));
+  } finally {
+    running = false;
+  }
 }
 
-/* ── 1. Reminders ─────────────────────────────────────────────────────── */
-async function remindTick() {
-  const now = Date.now();
+/** Exported for focused tests; importing this module never starts the scheduler. */
+export async function sendSuprahMeetNotifications(now = new Date()) {
+  // Recover creation notifications after a partial failure or API restart.
+  // Only newly created meetings explicitly opt into this queue.
+  const pending = await Meeting.find({
+    invitationNotificationPending: true,
+    status: { $in: ['scheduled', 'live'] },
+  }).sort({ createdAt: 1 }).limit(20);
+  for (const meeting of pending) {
+    await notifyMeetingCreated(meeting).catch((err) =>
+      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] Invitation retry failed'));
+  }
+
   const due = await Meeting.find({
-    status: 'scheduled',
+    status: { $in: ['scheduled', 'live'] },
     reminderSentAt: null,
-    scheduledAt: { $gte: new Date(now), $lte: new Date(now + 10 * 60_000) },
-  }).limit(20);
+    scheduledAt: { $gte: now, $lte: new Date(now.getTime() + MEET_REMINDER_WINDOW_MS) },
+    $or: [{ reminderClaimUntil: null }, { reminderClaimUntil: { $lte: now } }],
+  }).sort({ scheduledAt: 1 }).limit(50);
 
   for (const meeting of due) {
-    meeting.reminderSentAt = new Date();
-    await meeting.save();
+    const claimToken = randomUUID();
+    // Lease across server instances; an interrupted worker can be retried.
+    const claimed = await Meeting.findOneAndUpdate({
+      _id: meeting._id, organizationId: meeting.organizationId,
+      status: { $in: ['scheduled', 'live'] },
+      scheduledAt: meeting.scheduledAt, reminderSentAt: null,
+      $or: [{ reminderClaimUntil: null }, { reminderClaimUntil: { $lte: now } }],
+    }, { $set: {
+      reminderClaimToken: claimToken,
+      reminderClaimUntil: new Date(now.getTime() + 2 * 60_000),
+    } }, { new: true });
+    if (!claimed) continue;
 
-    const targets = meeting.inviteAll
-      ? (await CrmUser.find({
-          organizationId: meeting.organizationId, isActive: true, isSystem: { $ne: true },
-        }).select('_id').lean()).map((u) => u._id.toString())
-      : meeting.invitees.map((id) => id.toString());
-    if (!targets.includes(meeting.hostCrmUserId.toString())) {
-      targets.push(meeting.hostCrmUserId.toString());
-    }
-
-    const mins = Math.max(1, Math.round(((meeting.scheduledAt?.getTime() ?? now) - now) / 60_000));
-    const title = '📅 Suprah Meet reminder';
-    const body = `"${meeting.title}" starts in ${mins} minute${mins === 1 ? '' : 's'} — code ${meeting.code}`;
-
-    // In-app alert toasts come from GET /api/crm/meet/alerts regardless.
-    // If your crmPush.service exposes a push method, wire it here:
+    const ownedClaim = {
+      _id: claimed._id, organizationId: claimed.organizationId,
+      scheduledAt: claimed.scheduledAt, reminderClaimToken: claimToken,
+    };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const push = require('./crmPush.service');
-      if (typeof push?.sendToUsers === 'function') {
-        await push.sendToUsers(targets, { title, body, url: `/crm/suprah-meet/room/${meeting.code}` });
-      }
-    } catch { /* push service optional */ }
-
-    console.log(`[SuprahMeet] reminder sent for ${meeting.code} (${targets.length} users)`);
+      await notifyMeetingReminder(claimed, now);
+      await Meeting.updateOne(ownedClaim, { $set: {
+        reminderSentAt: new Date(), reminderClaimToken: null, reminderClaimUntil: null,
+      } });
+    } catch (err) {
+      await Meeting.updateOne(ownedClaim, { $set: {
+        reminderClaimToken: null, reminderClaimUntil: null,
+      } });
+      logger.error({ err, meetingId: claimed._id }, '[SuprahMeet] Reminder pending retry');
+    }
   }
 }
 

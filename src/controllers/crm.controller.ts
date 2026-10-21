@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { Request, Response } from "express";
-import { revokeRecordingMediaForLogin } from '../services/recordingMediaAuth.service';
+import { revokeRecordingMediaForLogin } from "../services/recordingMediaAuth.service";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -8,9 +8,15 @@ import CrmUser from "../models/CrmUser.model";
 import User, { IUser } from "../models/User.model";
 import TimeproofArchive from "../models/TimeproofArchive.model";
 import { hasPayrollAccess } from "../utils/payrollAccess.util";
-import { suspendLinkedMainAccount, restoreLinkedMainAccount } from "../services/offboardMainAccount.service";
+import {
+  suspendLinkedMainAccount,
+  restoreLinkedMainAccount,
+} from "../services/offboardMainAccount.service";
 import Organization from "../models/Organization.model";
-import { hasConfiguredAiModes, storedModesFromMetadata } from "../services/aiOperatingMode.service";
+import {
+  hasConfiguredAiModes,
+  storedModesFromMetadata,
+} from "../services/aiOperatingMode.service";
 import TimeLog from "../models/TimeLog.model";
 import {
   issueCrmSessionToken,
@@ -19,24 +25,71 @@ import {
   CRM_TOKEN_COOKIE,
 } from "../middleware/crmAuth.middleware";
 import emailService from "../services/email.service";
-import { getSocketIO, emitToShiftBoard, emitToUser } from "../utils/socketEmitter";
+import {
+  getSocketIO,
+  emitToShiftBoard,
+  emitToUser,
+} from "../utils/socketEmitter";
 import { storageService } from "../services/storage.service";
-import { deleteCrmAvatar, isCrmAvatarId, streamCrmAvatar, uploadCrmAvatar } from "../services/crmAvatar.service";
+import {
+  deleteCrmAvatar,
+  isCrmAvatarId,
+  streamCrmAvatar,
+  uploadCrmAvatar,
+} from "../services/crmAvatar.service";
 import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import CrmPushService from "../services/crmPush.service";
 import Absence from "../models/Absence.model";
 import { buildSessions, buildBreakSessions } from "../utils/timeLogEngine";
-import { cascadeDepartmentToLinkedUser, cascadeEmailToLinkedUser } from "../utils/departmentSync.util";
-import { normalizeDepartmentValue, getDefaultDepartmentKey } from "../services/department.service";
-import { isMainMonitorOnlyDept, isLocationRequiredForUser, isIdleDetectionExemptDept, isMobileMonitoringDept, isIdleVideoProofEnabled, resolveMonitoringMode } from "../config/departmentMonitoring";
+import {
+  cascadeDepartmentToLinkedUser,
+  cascadeEmailToLinkedUser,
+} from "../utils/departmentSync.util";
+import {
+  normalizeDepartmentValue,
+  getDefaultDepartmentKey,
+} from "../services/department.service";
+import {
+  isMainMonitorOnlyDept,
+  isLocationRequiredForUser,
+  isIdleDetectionExemptDept,
+  isMobileMonitoringDept,
+  isIdleVideoProofEnabled,
+  resolveMonitoringMode,
+} from "../config/departmentMonitoring";
 import { resolveScreenshotsRequired } from "../utils/monitoringMode.util";
-import { clearShiftDevice, getDeviceSwitchView, initShiftDevice, recordAutoSwitchOverrideChange, recordDesktopLocationOverrideChange, recordDeviceSwitchOverrideChange } from "../services/monitoringDevice.service";
-import { DEVICE_SWITCH_OVERRIDES, normalizeDeviceSwitchOverride } from "../utils/deviceSwitch.util";
-import { AUTO_SWITCH_OVERRIDES, normalizeAutoSwitchOverride } from "../utils/autoSwitch.util";
-import { DESKTOP_LOCATION_OVERRIDES, isDesktopPlatformAllowed, isLocationFeatureOnForUser, normalizeDesktopLocationOverride } from "../utils/locationFlags.util";
+import {
+  clearShiftDevice,
+  getDeviceSwitchView,
+  initShiftDevice,
+  recordAutoSwitchOverrideChange,
+  recordDesktopLocationOverrideChange,
+  recordDeviceSwitchOverrideChange,
+} from "../services/monitoringDevice.service";
+import {
+  DEVICE_SWITCH_OVERRIDES,
+  normalizeDeviceSwitchOverride,
+} from "../utils/deviceSwitch.util";
+import {
+  AUTO_SWITCH_OVERRIDES,
+  normalizeAutoSwitchOverride,
+} from "../utils/autoSwitch.util";
+import {
+  DESKTOP_LOCATION_OVERRIDES,
+  isDesktopPlatformAllowed,
+  isLocationFeatureOnForUser,
+  normalizeDesktopLocationOverride,
+} from "../utils/locationFlags.util";
 import { evaluateDesktopLocationEligibility } from "../utils/desktopPing.util";
-import { isTrayDeviceAuthEnabledForUser, normalizeTrayDeviceAuthOverride, TRAY_DEVICE_AUTH_OVERRIDES } from "../utils/trayDevice.util";
-import { recordTrayDeviceAuthOverrideChange, revokeUserTrayDevices } from "../services/trayDevice.service";
+import {
+  isTrayDeviceAuthEnabledForUser,
+  normalizeTrayDeviceAuthOverride,
+  TRAY_DEVICE_AUTH_OVERRIDES,
+} from "../utils/trayDevice.util";
+import {
+  recordTrayDeviceAuthOverrideChange,
+  revokeUserTrayDevices,
+} from "../services/trayDevice.service";
 import { fireShiftAlert } from "../services/shiftAlerts.service";
 import { findOpenShiftOnOtherIdentity } from "../utils/crossIdentityShift.util";
 import EmployeeLocation from "../models/EmployeeLocation.model";
@@ -59,7 +112,8 @@ const CRM_AVATAR_DATABASE_ID = /^db-([a-f\d]{24})$/i;
 // same 1-hour allotment, enforced here as a hard cap on starting a new break.
 const BREAK_LIMIT_SECONDS = 3600;
 
-const normalizeEmail = (email?: string | null) => email?.trim().toLowerCase() || "";
+const normalizeEmail = (email?: string | null) =>
+  email?.trim().toLowerCase() || "";
 
 async function getMainPersonalInfoByEmail(email?: string | null) {
   const normalizedEmail = normalizeEmail(email);
@@ -72,21 +126,32 @@ async function getMainPersonalInfoByEmail(email?: string | null) {
   return user?.personalInfo;
 }
 
-async function getMainPersonalInfoMapByEmails(emails: Array<string | undefined | null>) {
-  const normalizedEmails = Array.from(new Set(emails.map(normalizeEmail).filter(Boolean)));
+async function getMainPersonalInfoMapByEmails(
+  emails: Array<string | undefined | null>,
+) {
+  const normalizedEmails = Array.from(
+    new Set(emails.map(normalizeEmail).filter(Boolean)),
+  );
   if (normalizedEmails.length === 0) return new Map<string, unknown>();
 
   const users = await User.find({ email: { $in: normalizedEmails } })
     .select("email personalInfo")
     .lean();
 
-  return new Map(users.map((user) => [normalizeEmail(user.email), user.personalInfo]));
+  return new Map(
+    users.map((user) => [normalizeEmail(user.email), user.personalInfo]),
+  );
 }
 
 const login = asyncHandler(async (req: Request, res: Response) => {
   const { username, password } = req.body;
 
-  if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
+  if (
+    typeof username !== "string" ||
+    typeof password !== "string" ||
+    !username ||
+    !password
+  ) {
     throw new ApiError(400, "Employee ID and password are required");
   }
 
@@ -151,9 +216,10 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const todayMDTStr = nowMDT.toISOString().split("T")[0];
+  const todayMDTStartUTC =
+    new Date(todayMDTStr + "T00:00:00.000Z").getTime() -
+    COMPANY_TZ_OFFSET_MINUTES * 60_000;
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
@@ -171,23 +237,40 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   let isOnShiftWalk = false;
   let walkShiftStartedAt: Date | null = null;
   for (const log of lookbackLogs) {
-    if (log.type === 'time-in') {
+    if (log.type === "time-in") {
       isOnShiftWalk = true;
       walkShiftStartedAt = log.timestamp;
-    } else if (log.type === 'time-out') {
+    } else if (log.type === "time-out") {
       isOnShiftWalk = false;
       walkShiftStartedAt = null;
     }
   }
 
-  const todayLogs = (isOnShiftWalk && walkShiftStartedAt && walkShiftStartedAt.getTime() < today.getTime()
-    ? lookbackLogs.filter((l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime())
-    : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
+  const todayLogs = (
+    isOnShiftWalk &&
+    walkShiftStartedAt &&
+    walkShiftStartedAt.getTime() < today.getTime()
+      ? lookbackLogs.filter(
+          (l) => l.timestamp.getTime() >= walkShiftStartedAt!.getTime(),
+        )
+      : lookbackLogs.filter((l) => l.timestamp.getTime() >= today.getTime())
   ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  const [personalInfo, mainMonitorOnly, locationRequiredForTimeproof, idleDetectionExempt, mobileMonitoringDept, screenshotsRequired, idleVideoProofEnabled] = await Promise.all([
+  const [
+    personalInfo,
+    mainMonitorOnly,
+    locationRequiredForTimeproof,
+    idleDetectionExempt,
+    mobileMonitoringDept,
+    screenshotsRequired,
+    idleVideoProofEnabled,
+  ] = await Promise.all([
     getMainPersonalInfoByEmail(user.email),
     isMainMonitorOnlyDept(user.organizationId?.toString(), user.department),
-    isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride),
+    isLocationRequiredForUser(
+      user.organizationId?.toString(),
+      user.department,
+      user.locationRequiredOverride,
+    ),
     isIdleDetectionExemptDept(user.organizationId?.toString(), user.department),
     isMobileMonitoringDept(user.organizationId?.toString(), user.department),
     resolveScreenshotsRequired({
@@ -201,21 +284,36 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     isIdleVideoProofEnabled(user.organizationId?.toString(), user.department),
   ]);
 
-  const requestedPlatform = typeof req.query.platform === "string" ? req.query.platform : null;
-  const desktopLocationEnabled = isLocationFeatureOnForUser("LOC_DESKTOP_CHANNEL", user)
+  const requestedPlatform =
+    typeof req.query.platform === "string" ? req.query.platform : null;
+  const desktopLocationEnabled = isLocationFeatureOnForUser(
+    "LOC_DESKTOP_CHANNEL",
+    user,
+  )
     ? evaluateDesktopLocationEligibility({
         flagOn: true,
-        platformAllowed: requestedPlatform === null ? null : isDesktopPlatformAllowed(requestedPlatform),
+        platformAllowed:
+          requestedPlatform === null
+            ? null
+            : isDesktopPlatformAllowed(requestedPlatform),
         hasOrganization: !!user.organizationId,
         hasConsent: !!user.locationConsent?.granted,
         optedOut: !!user.locationSharingOptOut,
         locationRequired: locationRequiredForTimeproof,
-        mode: await resolveMonitoringMode(user.organizationId?.toString(), user.department, user.monitoringModeOverride),
+        mode: await resolveMonitoringMode(
+          user.organizationId?.toString(),
+          user.department,
+          user.monitoringModeOverride,
+        ),
       }).eligible
     : false;
 
   const trayDeviceAuthEnabled = isTrayDeviceAuthEnabledForUser(user);
-  const deviceSwitch = await getDeviceSwitchView(user).catch(() => ({ enabled: false, activeDevice: null, autoSwitch: false }));
+  const deviceSwitch = await getDeviceSwitchView(user).catch(() => ({
+    enabled: false,
+    activeDevice: null,
+    autoSwitch: false,
+  }));
   const monitoringMode = await resolveMonitoringMode(
     user.organizationId?.toString(),
     user.department,
@@ -263,74 +361,117 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, userData, "User fetched successfully"));
 });
 
-const MESSAGE_TEXT_SIZES = new Set(['small', 'default', 'medium', 'large', 'extra-large']);
+const MESSAGE_TEXT_SIZES = new Set([
+  "small",
+  "default",
+  "medium",
+  "large",
+  "extra-large",
+]);
 
-const getMySupraSpacePreferences = asyncHandler(async (req: Request, res: Response) => {
-  const user = await CrmUser.findById(req.crmUser!._id).select('supraSpacePreferences').lean();
-  if (!user) throw new ApiError(404, 'CRM account not found');
+const getMySupraSpacePreferences = asyncHandler(
+  async (req: Request, res: Response) => {
+    const user = await CrmUser.findById(req.crmUser!._id)
+      .select("supraSpacePreferences")
+      .lean();
+    if (!user) throw new ApiError(404, "CRM account not found");
 
-  res.json(new ApiResponse(200, {
-    messageTextSize: user.supraSpacePreferences?.messageTextSize || 'default',
-  }, 'SupraSpace preferences fetched'));
-});
+    res.json(
+      new ApiResponse(
+        200,
+        {
+          messageTextSize:
+            user.supraSpacePreferences?.messageTextSize || "default",
+        },
+        "SupraSpace preferences fetched",
+      ),
+    );
+  },
+);
 
-const updateMySupraSpacePreferences = asyncHandler(async (req: Request, res: Response) => {
-  const { messageTextSize } = req.body;
-  if (!MESSAGE_TEXT_SIZES.has(messageTextSize)) {
-    throw new ApiError(400, 'Invalid message text size');
-  }
+const updateMySupraSpacePreferences = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { messageTextSize } = req.body;
+    if (!MESSAGE_TEXT_SIZES.has(messageTextSize)) {
+      throw new ApiError(400, "Invalid message text size");
+    }
 
-  const user = await CrmUser.findByIdAndUpdate(
-    req.crmUser!._id,
-    { $set: { 'supraSpacePreferences.messageTextSize': messageTextSize } },
-    { new: true, runValidators: true },
-  ).select('supraSpacePreferences');
-  if (!user) throw new ApiError(404, 'CRM account not found');
+    const user = await CrmUser.findByIdAndUpdate(
+      req.crmUser!._id,
+      { $set: { "supraSpacePreferences.messageTextSize": messageTextSize } },
+      { new: true, runValidators: true },
+    ).select("supraSpacePreferences");
+    if (!user) throw new ApiError(404, "CRM account not found");
 
-  res.json(new ApiResponse(200, {
-    messageTextSize: user.supraSpacePreferences?.messageTextSize || 'default',
-  }, 'SupraSpace preferences updated'));
-});
+    res.json(
+      new ApiResponse(
+        200,
+        {
+          messageTextSize:
+            user.supraSpacePreferences?.messageTextSize || "default",
+        },
+        "SupraSpace preferences updated",
+      ),
+    );
+  },
+);
 
 const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
-  if (!orgId) throw new ApiError(400, 'Organization context missing');
+  if (!orgId) throw new ApiError(400, "Organization context missing");
 
-  const org = await Organization.findById(orgId).select('metadata').lean();
+  const org = await Organization.findById(orgId).select("metadata").lean();
   const metadata = (org?.metadata as any) || {};
-  const reviewLink = metadata.reviewLink || '';
-  const reviewLinks = Array.isArray(metadata.reviewLinks) ? metadata.reviewLinks : [];
+  const reviewLink = metadata.reviewLink || "";
+  const reviewLinks = Array.isArray(metadata.reviewLinks)
+    ? metadata.reviewLinks
+    : [];
   const webchatEnabled = metadata.webchatEnabled !== false;
-  const webchatGreeting = metadata.webchatGreeting || '';
+  const webchatGreeting = metadata.webchatGreeting || "";
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
-  const aiAgentName = metadata.aiAgentName || 'Alex';
-  const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || '';
+  const aiAgentName = metadata.aiAgentName || "Alex";
+  const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || "";
   const FOLLOWUP_INTERVAL_OPTIONS_HOURS = [24, 48, 72];
   const parsedFollowUpInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
-  const aiFollowUpIntervalHours = FOLLOWUP_INTERVAL_OPTIONS_HOURS.includes(parsedFollowUpInterval) ? parsedFollowUpInterval : 24;
-  const physicalMailingAddress = metadata.physicalMailingAddress || '';
+  const aiFollowUpIntervalHours = FOLLOWUP_INTERVAL_OPTIONS_HOURS.includes(
+    parsedFollowUpInterval,
+  )
+    ? parsedFollowUpInterval
+    : 24;
+  const physicalMailingAddress = metadata.physicalMailingAddress || "";
   const storedModes = storedModesFromMetadata(metadata);
 
-  res.json(new ApiResponse(200, {
-    reviewLink,
-    reviewLinks,
-    webchatEnabled,
-    webchatGreeting,
-    aiAgentEnabled,
-    aiAgentName,
-    aiHandoffFallbackGroupId,
-    aiFollowUpIntervalHours,
-    physicalMailingAddress,
-    aiAgentModes: { sms: storedModes.sms, email: storedModes.email, webchat: storedModes.webchat },
-    aiAgentModeSource: storedModes.source,
-  }, 'Organization settings fetched'));
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        reviewLink,
+        reviewLinks,
+        webchatEnabled,
+        webchatGreeting,
+        aiAgentEnabled,
+        aiAgentName,
+        aiHandoffFallbackGroupId,
+        aiFollowUpIntervalHours,
+        physicalMailingAddress,
+        aiAgentModes: {
+          sms: storedModes.sms,
+          email: storedModes.email,
+          webchat: storedModes.webchat,
+        },
+        aiAgentModeSource: storedModes.source,
+      },
+      "Organization settings fetched",
+    ),
+  );
 });
 
 const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const orgId = req.orgId;
   const user = req.crmUser;
-  if (!orgId || !user) throw new ApiError(401, 'Please authenticate');
-  if (user.role !== 'admin') throw new ApiError(403, 'Only admins can update organization settings');
+  if (!orgId || !user) throw new ApiError(401, "Please authenticate");
+  if (user.role !== "admin")
+    throw new ApiError(403, "Only admins can update organization settings");
 
   const {
     reviewLink,
@@ -344,65 +485,87 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     physicalMailingAddress,
   } = req.body;
   const org = await Organization.findById(orgId);
-  if (!org) throw new ApiError(404, 'Organization not found');
+  if (!org) throw new ApiError(404, "Organization not found");
 
   // Partial update — only touch the fields this caller actually sent, so
   // e.g. the Webchat settings card saving can never wipe out the Review
   // Requests card's fields (and vice versa); each card only sends its own.
   const metadata: any = { ...(org.metadata || {}) };
   if (reviewLink !== undefined) {
-    metadata.reviewLink = String(reviewLink || '').trim();
+    metadata.reviewLink = String(reviewLink || "").trim();
   }
   if (reviewLinks !== undefined) {
     metadata.reviewLinks = Array.isArray(reviewLinks)
       ? reviewLinks
           .map((row: any) => ({
-            location: String(row?.location || '').trim(),
-            url: String(row?.url || '').trim(),
+            location: String(row?.location || "").trim(),
+            url: String(row?.url || "").trim(),
           }))
-          .filter((row: { location: string; url: string }) => row.location && row.url)
+          .filter(
+            (row: { location: string; url: string }) => row.location && row.url,
+          )
       : [];
   }
   if (webchatEnabled !== undefined) {
     metadata.webchatEnabled = webchatEnabled !== false;
   }
   if (webchatGreeting !== undefined) {
-    metadata.webchatGreeting = String(webchatGreeting || '').trim().slice(0, 300);
+    metadata.webchatGreeting = String(webchatGreeting || "")
+      .trim()
+      .slice(0, 300);
   }
   if (aiAgentEnabled === true) {
-    throw new ApiError(409, 'Turning on live AI replies now requires the AI operating mode controls. Refresh the page and use the AI Agent card.');
+    throw new ApiError(
+      409,
+      "Turning on live AI replies now requires the AI operating mode controls. Refresh the page and use the AI Agent card.",
+    );
   }
   if (aiAgentEnabled !== undefined && !hasConfiguredAiModes(metadata)) {
     metadata.aiAgentEnabled = false;
   }
   if (aiAgentName !== undefined) {
-    metadata.aiAgentName = String(aiAgentName || '').trim().slice(0, 40) || 'Alex';
+    metadata.aiAgentName =
+      String(aiAgentName || "")
+        .trim()
+        .slice(0, 40) || "Alex";
   }
   if (aiHandoffFallbackGroupId !== undefined) {
-    metadata.aiHandoffFallbackGroupId = String(aiHandoffFallbackGroupId || '').trim();
+    metadata.aiHandoffFallbackGroupId = String(
+      aiHandoffFallbackGroupId || "",
+    ).trim();
   }
   if (aiFollowUpIntervalHours !== undefined) {
     const parsed = parseInt(aiFollowUpIntervalHours, 10);
-    metadata.aiFollowUpIntervalHours = [24, 48, 72].includes(parsed) ? parsed : 24;
+    metadata.aiFollowUpIntervalHours = [24, 48, 72].includes(parsed)
+      ? parsed
+      : 24;
   }
   if (physicalMailingAddress !== undefined) {
-    metadata.physicalMailingAddress = String(physicalMailingAddress || '').trim().slice(0, 300);
+    metadata.physicalMailingAddress = String(physicalMailingAddress || "")
+      .trim()
+      .slice(0, 300);
   }
 
   org.metadata = metadata;
   await org.save();
 
-  res.json(new ApiResponse(200, {
-    reviewLink: org.metadata.reviewLink,
-    reviewLinks: org.metadata.reviewLinks,
-    webchatEnabled: org.metadata.webchatEnabled,
-    webchatGreeting: org.metadata.webchatGreeting,
-    aiAgentEnabled: org.metadata.aiAgentEnabled,
-    aiAgentName: org.metadata.aiAgentName,
-    aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
-    aiFollowUpIntervalHours: org.metadata.aiFollowUpIntervalHours,
-    physicalMailingAddress: org.metadata.physicalMailingAddress,
-  }, 'Organization settings updated'));
+  res.json(
+    new ApiResponse(
+      200,
+      {
+        reviewLink: org.metadata.reviewLink,
+        reviewLinks: org.metadata.reviewLinks,
+        webchatEnabled: org.metadata.webchatEnabled,
+        webchatGreeting: org.metadata.webchatGreeting,
+        aiAgentEnabled: org.metadata.aiAgentEnabled,
+        aiAgentName: org.metadata.aiAgentName,
+        aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
+        aiFollowUpIntervalHours: org.metadata.aiFollowUpIntervalHours,
+        physicalMailingAddress: org.metadata.physicalMailingAddress,
+      },
+      "Organization settings updated",
+    ),
+  );
 });
 
 const timeClock = asyncHandler(async (req: Request, res: Response) => {
@@ -416,13 +579,17 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
 
   const VALID_TYPES = ["time-in", "time-out", "break-in", "break-out"] as const;
   if (!type || !VALID_TYPES.includes(type)) {
-    throw new ApiError(400, 'Type must be "time-in", "time-out", "break-in", or "break-out"');
+    throw new ApiError(
+      400,
+      'Type must be "time-in", "time-out", "break-in", or "break-out"',
+    );
   }
 
   const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const todayMDTStr = nowMDT.toISOString().split("T")[0];
+  const todayMDTStartUTC =
+    new Date(todayMDTStr + "T00:00:00.000Z").getTime() -
+    COMPANY_TZ_OFFSET_MINUTES * 60_000;
   const today = new Date(todayMDTStartUTC);
   const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
 
@@ -433,23 +600,37 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   const recentLogsForState = await TimeLog.find({
     userId: user._id,
     timestamp: { $gte: lookbackStart },
-  }).sort({ timestamp: 1 }).lean();
+  })
+    .sort({ timestamp: 1 })
+    .lean();
 
   let hasActiveSession = false;
   let hasActiveBreak = false;
   for (const log of recentLogsForState) {
-    if (log.type === 'time-in') { hasActiveSession = true; }
-    else if (log.type === 'time-out') { hasActiveSession = false; hasActiveBreak = false; }
-    else if (log.type === 'break-in') { hasActiveBreak = true; }
-    else if (log.type === 'break-out') { hasActiveBreak = false; }
+    if (log.type === "time-in") {
+      hasActiveSession = true;
+    } else if (log.type === "time-out") {
+      hasActiveSession = false;
+      hasActiveBreak = false;
+    } else if (log.type === "break-in") {
+      hasActiveBreak = true;
+    } else if (log.type === "break-out") {
+      hasActiveBreak = false;
+    }
   }
 
-  if (type === "time-in"   && hasActiveSession)  throw new ApiError(400, "You are already clocked in");
-  if (type === "time-out"  && !hasActiveSession)  throw new ApiError(400, "You must clock in before clocking out");
-  if (type === "time-out"  && hasActiveBreak)     throw new ApiError(400, "Please end your break before clocking out");
-  if (type === "break-in"  && !hasActiveSession)  throw new ApiError(400, "You must be clocked in to start a break");
-  if (type === "break-in"  && hasActiveBreak)     throw new ApiError(400, "You are already on break");
-  if (type === "break-out" && !hasActiveBreak)    throw new ApiError(400, "No active break to end");
+  if (type === "time-in" && hasActiveSession)
+    throw new ApiError(400, "You are already clocked in");
+  if (type === "time-out" && !hasActiveSession)
+    throw new ApiError(400, "You must clock in before clocking out");
+  if (type === "time-out" && hasActiveBreak)
+    throw new ApiError(400, "Please end your break before clocking out");
+  if (type === "break-in" && !hasActiveSession)
+    throw new ApiError(400, "You must be clocked in to start a break");
+  if (type === "break-in" && hasActiveBreak)
+    throw new ApiError(400, "You are already on break");
+  if (type === "break-out" && !hasActiveBreak)
+    throw new ApiError(400, "No active break to end");
 
   // Prevent the same real person from having two concurrent open shifts across both identity
   // models (CrmUser here vs. the main User account, linked only by email) — previously nothing
@@ -457,12 +638,21 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // manually clocked out, later force-closed at midnight with a confusing admin alert about a
   // shift nobody consciously started.
   if (type === "time-in" && user.email) {
-    const otherShift = await findOpenShiftOnOtherIdentity(user.email, "CrmUser");
+    const otherShift = await findOpenShiftOnOtherIdentity(
+      user.email,
+      "CrmUser",
+    );
     if (otherShift) {
       const startedAtStr = otherShift.shiftStartedAt.toLocaleString("en-US", {
-        timeZone: "America/Denver", hour: "numeric", minute: "2-digit", hour12: true,
+        timeZone: "America/Denver",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
       });
-      throw new ApiError(400, `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`);
+      throw new ApiError(
+        400,
+        `You're already clocked in on your other TimeProof account (since ${startedAtStr} MDT) — please clock out there first before starting a new shift here.`,
+      );
     }
   }
 
@@ -476,9 +666,16 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   if (
     type === "time-in" &&
     !user.locationConsent?.granted &&
-    (await isLocationRequiredForUser(user.organizationId?.toString(), user.department, user.locationRequiredOverride))
+    (await isLocationRequiredForUser(
+      user.organizationId?.toString(),
+      user.department,
+      user.locationRequiredOverride,
+    ))
   ) {
-    throw new ApiError(400, "Location sharing must be turned on before you can clock in.");
+    throw new ApiError(
+      400,
+      "Location sharing must be turned on before you can clock in.",
+    );
   }
 
   // Cumulative 1-hour break cap per shift — once the total across all break
@@ -487,23 +684,35 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // is allowed for the rest of this shift, however many short breaks it took
   // to get there.
   if (type === "break-in") {
-    const lastTimeInLog = [...recentLogsForState].reverse().find((l) => l.type === "time-in");
+    const lastTimeInLog = [...recentLogsForState]
+      .reverse()
+      .find((l) => l.type === "time-in");
     const sessionStart = lastTimeInLog?.timestamp ?? today;
     const sessionBreakLogs = recentLogsForState.filter(
-      (l) => (l.type === "break-in" || l.type === "break-out") && l.timestamp >= sessionStart
+      (l) =>
+        (l.type === "break-in" || l.type === "break-out") &&
+        l.timestamp >= sessionStart,
     );
     const usedBreakSeconds = buildBreakSessions(sessionBreakLogs).reduce(
       (sum, b) => sum + (b.out ? b.duration : 0),
-      0
+      0,
     );
     if (usedBreakSeconds >= BREAK_LIMIT_SECONDS) {
-      throw new ApiError(400, "You have already used your 1-hour break for this shift.");
+      throw new ApiError(
+        400,
+        "You have already used your 1-hour break for this shift.",
+      );
     }
   }
 
-  const startedVia: 'desktop' | 'mobile' | undefined =
+  const startedVia: "desktop" | "mobile" | undefined =
     type === "time-in"
-      ? (typeof deviceHint === "string" && deviceHint !== "" && deviceHint !== "desktop-web" && deviceHint !== "desktop" ? "mobile" : "desktop")
+      ? typeof deviceHint === "string" &&
+        deviceHint !== "" &&
+        deviceHint !== "desktop-web" &&
+        deviceHint !== "desktop"
+        ? "mobile"
+        : "desktop"
       : undefined;
 
   const timeLog = await TimeLog.create({
@@ -528,14 +737,20 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // here too, at the one guaranteed, unambiguous break-in event, closes
   // that gap regardless of what the heartbeat did or didn't catch.
   if (type === "break-in") {
-    AgentHeartbeat.updateOne({ userId: user._id }, { lastBreakNotifiedAt: null }).catch(() => {});
+    AgentHeartbeat.updateOne(
+      { userId: user._id },
+      { lastBreakNotifiedAt: null },
+    ).catch(() => {});
   }
 
   // A fresh shift resets the connection-loss "already notified" flag — it's
   // meant to fire once per outage per shift, not stay suppressed forever
   // because of an alert from a previous, unrelated shift.
   if (type === "time-in") {
-    EmployeeLocation.updateOne({ userId: user._id }, { connectionLostNotifiedAt: null }).catch(() => {});
+    EmployeeLocation.updateOne(
+      { userId: user._id },
+      { connectionLostNotifiedAt: null },
+    ).catch(() => {});
   }
 
   // Per-department kill switch for the whole Shift Alerts location-monitoring
@@ -544,12 +759,21 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // for this one account specifically. Computed once and shared by both
   // triggers below.
   const locationMonitoringActive = user.organizationId
-    ? await isLocationRequiredForUser(user.organizationId.toString(), user.department, user.locationRequiredOverride)
+    ? await isLocationRequiredForUser(
+        user.organizationId.toString(),
+        user.department,
+        user.locationRequiredOverride,
+      )
     : true;
 
   // Shift Alerts: started a shift without location sharing on — fire-and-forget,
   // must not delay the clock-in response.
-  if (type === "time-in" && !user.locationConsent?.granted && user.organizationId && locationMonitoringActive) {
+  if (
+    type === "time-in" &&
+    !user.locationConsent?.granted &&
+    user.organizationId &&
+    locationMonitoringActive
+  ) {
     fireShiftAlert({
       organizationId: user.organizationId.toString(),
       targetUserId: user._id.toString(),
@@ -567,7 +791,12 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // Turning it off WHILE on break is expected/private (handled separately in
   // locator.controller.ts's handleLocationTurnedOff) — this only fires once
   // they're back to active work and it's still off.
-  if (type === "break-out" && !user.locationConsent?.granted && user.organizationId && locationMonitoringActive) {
+  if (
+    type === "break-out" &&
+    !user.locationConsent?.granted &&
+    user.organizationId &&
+    locationMonitoringActive
+  ) {
     fireShiftAlert({
       organizationId: user.organizationId.toString(),
       targetUserId: user._id.toString(),
@@ -587,31 +816,43 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   // clocked in" check above already blocks that case, so every session
   // buildSessions() returns is closed and safe to sum).
   let todayTotalWorkedSeconds = 0;
-  if (type === 'time-in') {
+  if (type === "time-in") {
     const prevLogs = await TimeLog.find({
       userId: user._id,
-      type: { $in: ['time-in', 'time-out'] },
+      type: { $in: ["time-in", "time-out"] },
       timestamp: { $gte: today, $lt: timeLog.timestamp },
-    }).sort({ timestamp: 1 }).lean();
-    todayTotalWorkedSeconds = buildSessions(prevLogs).reduce((sum, s) => sum + (s.out ? s.duration : 0), 0);
+    })
+      .sort({ timestamp: 1 })
+      .lean();
+    todayTotalWorkedSeconds = buildSessions(prevLogs).reduce(
+      (sum, s) => sum + (s.out ? s.duration : 0),
+      0,
+    );
   }
 
   let totalBreakSeconds = 0;
-  if (type === 'break-out') {
+  if (type === "break-out") {
     const latestTimeIn = await TimeLog.findOne({
       userId: user._id,
-      type: 'time-in',
+      type: "time-in",
       timestamp: { $gte: today, $lt: tomorrow },
-    }).sort({ timestamp: -1 }).lean();
+    })
+      .sort({ timestamp: -1 })
+      .lean();
 
     const sessionStart = latestTimeIn?.timestamp ?? today;
     const breakLogs = await TimeLog.find({
       userId: user._id,
-      type: { $in: ['break-in', 'break-out'] },
+      type: { $in: ["break-in", "break-out"] },
       timestamp: { $gte: sessionStart, $lt: tomorrow },
-    }).sort({ timestamp: 1 }).lean();
+    })
+      .sort({ timestamp: 1 })
+      .lean();
 
-    totalBreakSeconds = buildBreakSessions(breakLogs).reduce((sum, b) => sum + (b.out ? b.duration : 0), 0);
+    totalBreakSeconds = buildBreakSessions(breakLogs).reduce(
+      (sum, b) => sum + (b.out ? b.duration : 0),
+      0,
+    );
   }
 
   try {
@@ -621,8 +862,11 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
       type: timeLog.type,
       timestamp: timeLog.timestamp,
       userId: user._id.toString(),
-      ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
-      ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
+      ...(type === "time-in" && {
+        shiftStartedAt: timeLog.timestamp,
+        todayTotalWorkedSeconds,
+      }),
+      ...(type === "break-in" && { breakStartedAt: timeLog.timestamp }),
       ...(type === "break-out" && { totalBreakSeconds }),
     };
     if (io) {
@@ -630,8 +874,11 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
         _id: timeLog._id,
         type: timeLog.type,
         timestamp: timeLog.timestamp,
-        ...(type === "time-in"   && { shiftStartedAt: timeLog.timestamp, todayTotalWorkedSeconds }),
-        ...(type === "break-in"  && { breakStartedAt: timeLog.timestamp }),
+        ...(type === "time-in" && {
+          shiftStartedAt: timeLog.timestamp,
+          todayTotalWorkedSeconds,
+        }),
+        ...(type === "break-in" && { breakStartedAt: timeLog.timestamp }),
         ...(type === "break-out" && { totalBreakSeconds }),
       });
     }
@@ -645,13 +892,21 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
   }).sort({ timestamp: -1 });
 
   const typeLabel: Record<string, string> = {
-    "time-in": "Clocked in", "time-out": "Clocked out",
-    "break-in": "Break started", "break-out": "Break ended",
+    "time-in": "Clocked in",
+    "time-out": "Clocked out",
+    "break-in": "Break started",
+    "break-out": "Break ended",
   };
 
-  res.status(201).json(
-    new ApiResponse(201, { entry: timeLog, todayLogs }, `${typeLabel[type]} successfully`),
-  );
+  res
+    .status(201)
+    .json(
+      new ApiResponse(
+        201,
+        { entry: timeLog, todayLogs },
+        `${typeLabel[type]} successfully`,
+      ),
+    );
 });
 
 const getTimeLogs = asyncHandler(async (req: Request, res: Response) => {
@@ -714,7 +969,16 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const { fullName, email, password, role, birthday, hireDate, gender, department } = req.body;
+  const {
+    fullName,
+    email,
+    password,
+    role,
+    birthday,
+    hireDate,
+    gender,
+    department,
+  } = req.body;
 
   if (!fullName?.trim() || !email?.trim() || !password || !role) {
     throw new ApiError(400, "fullName, email, password, and role are required");
@@ -732,7 +996,10 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
   );
 
   const normalizedDepartment = department
-    ? await normalizeDepartmentValue(actor.organizationId?.toString(), department)
+    ? await normalizeDepartmentValue(
+        actor.organizationId?.toString(),
+        department,
+      )
     : await getDefaultDepartmentKey(actor.organizationId?.toString());
 
   const user = await CrmUser.create({
@@ -745,7 +1012,7 @@ const createUser = asyncHandler(async (req: Request, res: Response) => {
     isActive: true,
     birthday: birthday ? new Date(birthday) : undefined,
     hireDate: hireDate ? new Date(hireDate) : undefined,
-    gender: gender && ['male', 'female'].includes(gender) ? gender : undefined,
+    gender: gender && ["male", "female"].includes(gender) ? gender : undefined,
     department: normalizedDepartment,
     payrollAccess: false,
   });
@@ -791,70 +1058,75 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const {
-    page = '1',
-    limit = '10',
+    page = "1",
+    limit = "10",
     search,
     role,
     status,
     department,
     dateJoined,
     hourlyTrackingExempt,
-    sortBy = 'createdAt',
-    sortOrder = 'desc',
+    sortBy = "createdAt",
+    sortOrder = "desc",
   } = req.query;
 
   const pageNum = Math.max(Number(page) || 1, 1);
   const limitNum = Math.min(Math.max(Number(limit) || 10, 1), 50);
   const skip = (pageNum - 1) * limitNum;
 
-  const filter: any = { organizationId: actor.organizationId, isSystem: { $ne: true } };
+  const filter: any = {
+    organizationId: actor.organizationId,
+    isSystem: { $ne: true },
+  };
 
-  const searchValue = typeof search === 'string' ? search.trim() : '';
+  const searchValue = typeof search === "string" ? search.trim() : "";
   if (searchValue) {
-    const escapedSearch = searchValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedSearch = searchValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     filter.$or = [
-      { fullName: { $regex: escapedSearch, $options: 'i' } },
-      { email: { $regex: escapedSearch, $options: 'i' } },
-      { username: { $regex: escapedSearch, $options: 'i' } },
+      { fullName: { $regex: escapedSearch, $options: "i" } },
+      { email: { $regex: escapedSearch, $options: "i" } },
+      { username: { $regex: escapedSearch, $options: "i" } },
     ];
   }
 
-  const roleValue = typeof role === 'string' ? role.toLowerCase() : '';
-  if (['employee', 'manager', 'admin'].includes(roleValue)) {
+  const roleValue = typeof role === "string" ? role.toLowerCase() : "";
+  if (["employee", "manager", "admin"].includes(roleValue)) {
     filter.role = roleValue;
   }
 
-  const statusValue = typeof status === 'string' ? status.toLowerCase() : '';
-  if (statusValue === 'active') {
+  const statusValue = typeof status === "string" ? status.toLowerCase() : "";
+  if (statusValue === "active") {
     filter.isActive = true;
-  } else if (statusValue === 'inactive') {
+  } else if (statusValue === "inactive") {
     filter.isActive = false;
   }
 
-  const departmentValue = typeof department === 'string' ? department.trim() : '';
-  if (departmentValue && departmentValue !== 'all') {
+  const departmentValue =
+    typeof department === "string" ? department.trim() : "";
+  if (departmentValue && departmentValue !== "all") {
     filter.department = departmentValue;
   }
 
-  if (hourlyTrackingExempt === 'true') {
+  if (hourlyTrackingExempt === "true") {
     filter.hourlyTrackingExempt = true;
   }
 
-  const dateJoinedValue = typeof dateJoined === 'string' ? dateJoined.toLowerCase() : '';
-  if (dateJoinedValue && dateJoinedValue !== 'all') {
+  const dateJoinedValue =
+    typeof dateJoined === "string" ? dateJoined.toLowerCase() : "";
+  if (dateJoinedValue && dateJoinedValue !== "all") {
     const now = new Date();
     let startDate: Date | null = null;
 
-    if (dateJoinedValue === '7d') {
+    if (dateJoinedValue === "7d") {
       startDate = new Date(now);
       startDate.setDate(startDate.getDate() - 7);
-    } else if (dateJoinedValue === '30d') {
+    } else if (dateJoinedValue === "30d") {
       startDate = new Date(now);
       startDate.setDate(startDate.getDate() - 30);
-    } else if (dateJoinedValue === '90d') {
+    } else if (dateJoinedValue === "90d") {
       startDate = new Date(now);
       startDate.setDate(startDate.getDate() - 90);
-    } else if (dateJoinedValue === 'year') {
+    } else if (dateJoinedValue === "year") {
       startDate = new Date(now.getFullYear(), 0, 1);
     }
 
@@ -864,43 +1136,47 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const sortFieldMap: Record<string, string> = {
-    fullName: 'fullName',
-    username: 'username',
-    email: 'email',
-    role: 'role',
-    status: 'isActive',
-    isActive: 'isActive',
-    createdAt: 'createdAt',
-    joined: 'createdAt',
-    lastLoginAt: 'lastLoginAt',
-    hireDate: 'hireDate',
-    birthday: 'birthday',
+    fullName: "fullName",
+    username: "username",
+    email: "email",
+    role: "role",
+    status: "isActive",
+    isActive: "isActive",
+    createdAt: "createdAt",
+    joined: "createdAt",
+    lastLoginAt: "lastLoginAt",
+    hireDate: "hireDate",
+    birthday: "birthday",
   };
 
   const resolvedSortBy =
-    typeof sortBy === 'string' && sortFieldMap[sortBy]
+    typeof sortBy === "string" && sortFieldMap[sortBy]
       ? sortFieldMap[sortBy]
-      : 'createdAt';
-  const resolvedSortOrder = sortOrder === 'asc' ? 1 : -1;
+      : "createdAt";
+  const resolvedSortOrder = sortOrder === "asc" ? 1 : -1;
 
   const sortQuery: Record<string, 1 | -1> = {
     [resolvedSortBy]: resolvedSortOrder,
   };
 
-  if (resolvedSortBy !== 'createdAt') {
+  if (resolvedSortBy !== "createdAt") {
     sortQuery.createdAt = -1;
   }
 
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
-      .select('fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt payrollAccess isSystem')
+      .select(
+        "fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt payrollAccess isSystem",
+      )
       .sort(sortQuery)
       .skip(skip)
       .limit(limitNum)
       .lean(),
     CrmUser.countDocuments(filter),
   ]);
-  const personalInfoByEmail = await getMainPersonalInfoMapByEmails(users.map((user) => user.email));
+  const personalInfoByEmail = await getMainPersonalInfoMapByEmails(
+    users.map((user) => user.email),
+  );
   const enrichedUsers = users.map((user) => ({
     ...user,
     payrollAccess: hasPayrollAccess(user),
@@ -922,7 +1198,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
           totalPages,
         },
       },
-      'Users fetched successfully',
+      "Users fetched successfully",
     ),
   );
 });
@@ -935,7 +1211,26 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { id } = req.params;
-  const { fullName, email, role, birthday, hireDate, gender, department, screenshotExempt, locationRequiredOverride, monitoringModeOverride, trayDeviceAuthOverride, deviceSwitchOverride, autoSwitchOverride, desktopLocationOverride, payrollLocation, hourlyTrackingExempt, otWarningExempt, payrollAccess } = req.body;
+  const {
+    fullName,
+    email,
+    role,
+    birthday,
+    hireDate,
+    gender,
+    department,
+    screenshotExempt,
+    locationRequiredOverride,
+    monitoringModeOverride,
+    trayDeviceAuthOverride,
+    deviceSwitchOverride,
+    autoSwitchOverride,
+    desktopLocationOverride,
+    payrollLocation,
+    hourlyTrackingExempt,
+    otWarningExempt,
+    payrollAccess,
+  } = req.body;
 
   const user = await CrmUser.findOne({
     _id: id,
@@ -982,12 +1277,16 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (gender !== undefined) {
-    user.gender = gender && ['male', 'female'].includes(gender) ? gender : undefined;
+    user.gender =
+      gender && ["male", "female"].includes(gender) ? gender : undefined;
   }
 
   let normalizedDepartment: string | undefined;
   if (department !== undefined) {
-    normalizedDepartment = await normalizeDepartmentValue(user.organizationId?.toString(), department);
+    normalizedDepartment = await normalizeDepartmentValue(
+      user.organizationId?.toString(),
+      department,
+    );
     user.department = normalizedDepartment;
   }
 
@@ -1003,17 +1302,30 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     user.otWarningExempt = !!otWarningExempt;
   }
 
-  if (locationRequiredOverride !== undefined && ['default', 'required', 'exempt'].includes(locationRequiredOverride)) {
+  if (
+    locationRequiredOverride !== undefined &&
+    ["default", "required", "exempt"].includes(locationRequiredOverride)
+  ) {
     user.locationRequiredOverride = locationRequiredOverride;
   }
 
-  if (monitoringModeOverride !== undefined && ['default', 'off', 'always', 'switching'].includes(monitoringModeOverride)) {
+  if (
+    monitoringModeOverride !== undefined &&
+    ["default", "off", "always", "switching"].includes(monitoringModeOverride)
+  ) {
     user.monitoringModeOverride = monitoringModeOverride;
   }
 
   let trayDeviceAuthOverrideChange: { from: string; to: string } | null = null;
-  if (trayDeviceAuthOverride !== undefined && (TRAY_DEVICE_AUTH_OVERRIDES as readonly unknown[]).includes(trayDeviceAuthOverride)) {
-    const previous = normalizeTrayDeviceAuthOverride(user.trayDeviceAuthOverride);
+  if (
+    trayDeviceAuthOverride !== undefined &&
+    (TRAY_DEVICE_AUTH_OVERRIDES as readonly unknown[]).includes(
+      trayDeviceAuthOverride,
+    )
+  ) {
+    const previous = normalizeTrayDeviceAuthOverride(
+      user.trayDeviceAuthOverride,
+    );
     const next = normalizeTrayDeviceAuthOverride(trayDeviceAuthOverride);
     if (previous !== next) {
       user.trayDeviceAuthOverride = next;
@@ -1022,7 +1334,12 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   let deviceSwitchOverrideChange: { from: string; to: string } | null = null;
-  if (deviceSwitchOverride !== undefined && (DEVICE_SWITCH_OVERRIDES as readonly unknown[]).includes(deviceSwitchOverride)) {
+  if (
+    deviceSwitchOverride !== undefined &&
+    (DEVICE_SWITCH_OVERRIDES as readonly unknown[]).includes(
+      deviceSwitchOverride,
+    )
+  ) {
     const previous = normalizeDeviceSwitchOverride(user.deviceSwitchOverride);
     const next = normalizeDeviceSwitchOverride(deviceSwitchOverride);
     if (previous !== next) {
@@ -1032,7 +1349,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   let autoSwitchOverrideChange: { from: string; to: string } | null = null;
-  if (autoSwitchOverride !== undefined && (AUTO_SWITCH_OVERRIDES as readonly unknown[]).includes(autoSwitchOverride)) {
+  if (
+    autoSwitchOverride !== undefined &&
+    (AUTO_SWITCH_OVERRIDES as readonly unknown[]).includes(autoSwitchOverride)
+  ) {
     const previous = normalizeAutoSwitchOverride(user.autoSwitchOverride);
     const next = normalizeAutoSwitchOverride(autoSwitchOverride);
     if (previous !== next) {
@@ -1042,8 +1362,15 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   let desktopLocationOverrideChange: { from: string; to: string } | null = null;
-  if (desktopLocationOverride !== undefined && (DESKTOP_LOCATION_OVERRIDES as readonly unknown[]).includes(desktopLocationOverride)) {
-    const previous = normalizeDesktopLocationOverride(user.desktopLocationOverride);
+  if (
+    desktopLocationOverride !== undefined &&
+    (DESKTOP_LOCATION_OVERRIDES as readonly unknown[]).includes(
+      desktopLocationOverride,
+    )
+  ) {
+    const previous = normalizeDesktopLocationOverride(
+      user.desktopLocationOverride,
+    );
     const next = normalizeDesktopLocationOverride(desktopLocationOverride);
     if (previous !== next) {
       user.desktopLocationOverride = next;
@@ -1052,13 +1379,23 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   }
 
   if (payrollLocation !== undefined) {
-    if (payrollLocation !== null && !['Utah', 'Philippines'].includes(payrollLocation)) {
-      throw new ApiError(400, 'payrollLocation must be "Utah" or "Philippines"');
+    if (
+      payrollLocation !== null &&
+      !["Utah", "Philippines"].includes(payrollLocation)
+    ) {
+      throw new ApiError(
+        400,
+        'payrollLocation must be "Utah" or "Philippines"',
+      );
     }
     user.payrollLocation = payrollLocation ?? undefined;
   }
 
-  if (payrollAccess !== undefined && hasPayrollAccess(actor) && user.payrollAccess !== !!payrollAccess) {
+  if (
+    payrollAccess !== undefined &&
+    hasPayrollAccess(actor) &&
+    user.payrollAccess !== !!payrollAccess
+  ) {
     if (user._id.toString() === actor._id.toString()) {
       throw new ApiError(400, "You cannot change your own payroll access");
     }
@@ -1080,7 +1417,12 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
   // User as admin. Reconcile only that downgrade here. We intentionally DO NOT
   // allow this CRM endpoint to promote an employee into a main-app/global admin;
   // that broader privilege grant must continue through the main admin workflow.
-  if (requestedRole && requestedRole !== "admin" && linkedCoreEmail && user.organizationId) {
+  if (
+    requestedRole &&
+    requestedRole !== "admin" &&
+    linkedCoreEmail &&
+    user.organizationId
+  ) {
     linkedCoreUser = await User.findOne({
       email: linkedCoreEmail,
       organizationId: user.organizationId,
@@ -1145,27 +1487,50 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
         await linkedCoreUser.save({ validateModifiedOnly: true });
         invalidateUserCache(linkedCoreUser._id.toString());
       } catch (rollbackError) {
-        console.error("Failed to roll back linked main User role after CRM update failure", rollbackError);
+        console.error(
+          "Failed to roll back linked main User role after CRM update failure",
+          rollbackError,
+        );
       }
     }
     throw error;
   }
 
   if (trayDeviceAuthOverrideChange) {
-    recordTrayDeviceAuthOverrideChange(user, trayDeviceAuthOverrideChange.from, trayDeviceAuthOverrideChange.to, actor._id);
+    recordTrayDeviceAuthOverrideChange(
+      user,
+      trayDeviceAuthOverrideChange.from,
+      trayDeviceAuthOverrideChange.to,
+      actor._id,
+    );
   }
 
   if (desktopLocationOverrideChange) {
-    recordDesktopLocationOverrideChange(user, desktopLocationOverrideChange.from, desktopLocationOverrideChange.to, actor._id);
+    recordDesktopLocationOverrideChange(
+      user,
+      desktopLocationOverrideChange.from,
+      desktopLocationOverrideChange.to,
+      actor._id,
+    );
   }
 
   if (autoSwitchOverrideChange) {
-    recordAutoSwitchOverrideChange(user, autoSwitchOverrideChange.from, autoSwitchOverrideChange.to, actor._id);
+    recordAutoSwitchOverrideChange(
+      user,
+      autoSwitchOverrideChange.from,
+      autoSwitchOverrideChange.to,
+      actor._id,
+    );
   }
 
   if (deviceSwitchOverrideChange) {
-    recordDeviceSwitchOverrideChange(user, deviceSwitchOverrideChange.from, deviceSwitchOverrideChange.to, actor._id);
-    if (deviceSwitchOverrideChange.to === 'off') clearShiftDevice(user._id);
+    recordDeviceSwitchOverrideChange(
+      user,
+      deviceSwitchOverrideChange.from,
+      deviceSwitchOverrideChange.to,
+      actor._id,
+    );
+    if (deviceSwitchOverrideChange.to === "off") clearShiftDevice(user._id);
   }
 
   if (normalizeEmail(user.email) !== linkedCoreEmail) {
@@ -1220,7 +1585,8 @@ const toggleUserStatus = asyncHandler(async (req: Request, res: Response) => {
 
   user.isActive = !user.isActive;
   await user.save({ validateModifiedOnly: true });
-  if (!user.isActive) revokeUserTrayDevices(user._id, "user_deactivated").catch(() => {});
+  if (!user.isActive)
+    revokeUserTrayDevices(user._id, "user_deactivated").catch(() => {});
 
   res.json(
     new ApiResponse(
@@ -1304,7 +1670,12 @@ const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
   user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
   await user.save({ validateModifiedOnly: true });
 
-  await emailService.sendCrmPasswordResetEmail(user.email, user.fullName, otp, user.organizationId?.toString());
+  await emailService.sendCrmPasswordResetEmail(
+    user.email,
+    user.fullName,
+    otp,
+    user.organizationId?.toString(),
+  );
 
   res.json(
     new ApiResponse(
@@ -1436,17 +1807,21 @@ const offboardUser = asyncHandler(async (req: Request, res: Response) => {
     { upsert: true },
   ).catch(() => {});
 
-  const mainAccount = await suspendLinkedMainAccount(user).catch(() => "none" as const);
+  const mainAccount = await suspendLinkedMainAccount(user).catch(
+    () => "none" as const,
+  );
 
-  res.json(new ApiResponse(
-    200,
-    { mainAccount },
-    mainAccount === "protected"
-      ? "User offboarded. Their Suprah AI account was NOT locked because it is a super admin or organization owner."
-      : mainAccount === "other_organization"
-        ? "User offboarded. Their Suprah AI account was NOT locked because it belongs to another organization."
-        : "User offboarded successfully",
-  ));
+  res.json(
+    new ApiResponse(
+      200,
+      { mainAccount },
+      mainAccount === "protected"
+        ? "User offboarded. Their Suprah AI account was NOT locked because it is a super admin or organization owner."
+        : mainAccount === "other_organization"
+          ? "User offboarded. Their Suprah AI account was NOT locked because it belongs to another organization."
+          : "User offboarded successfully",
+    ),
+  );
 });
 
 const undoOffboardUser = asyncHandler(async (req: Request, res: Response) => {
@@ -1474,9 +1849,17 @@ const undoOffboardUser = asyncHandler(async (req: Request, res: Response) => {
   await user.save({ validateModifiedOnly: true });
 
   await TimeproofArchive.deleteOne({ _id: user._id }).catch(() => {});
-  const mainAccountRestored = await restoreLinkedMainAccount(user).catch(() => false);
+  const mainAccountRestored = await restoreLinkedMainAccount(user).catch(
+    () => false,
+  );
 
-  res.json(new ApiResponse(200, { mainAccountRestored }, "Offboard undone successfully"));
+  res.json(
+    new ApiResponse(
+      200,
+      { mainAccountRestored },
+      "Offboard undone successfully",
+    ),
+  );
 });
 
 const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
@@ -1498,8 +1881,10 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
     updated = await CrmUser.findByIdAndUpdate(
       user._id,
       { $set: { avatar: avatarReference } },
-      { new: true }
-    ).select("_id fullName avatar").lean();
+      { new: true },
+    )
+      .select("_id fullName avatar")
+      .lean();
   } catch (error) {
     await deleteCrmAvatar(avatarId).catch(() => undefined);
     throw error;
@@ -1512,10 +1897,13 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
 
   if (user.avatar) {
     try {
-      const previousDatabaseId = user.avatar.startsWith("db:") ? user.avatar.slice(3) : "";
-      if (isCrmAvatarId(previousDatabaseId)) await deleteCrmAvatar(previousDatabaseId);
+      const previousDatabaseId = user.avatar.startsWith("db:")
+        ? user.avatar.slice(3)
+        : "";
+      if (isCrmAvatarId(previousDatabaseId))
+        await deleteCrmAvatar(previousDatabaseId);
       else await storageService.delete(user.avatar);
-    } catch { }
+    } catch {}
   }
 
   try {
@@ -1525,7 +1913,9 @@ const updateMeAvatar = asyncHandler(async (req: Request, res: Response) => {
       avatar: avatarUrl,
       fullName: (updated as any).fullName,
     });
-  } catch { /* socket may not be initialised — best effort */ }
+  } catch {
+    /* socket may not be initialised — best effort */
+  }
 
   res.json(new ApiResponse(200, { avatar: avatarUrl }, "Avatar updated"));
 });
@@ -1534,7 +1924,7 @@ const getAvatar = asyncHandler(async (req: Request, res: Response) => {
   const identifier = String(req.params.filename || "");
   const databaseMatch = identifier.match(CRM_AVATAR_DATABASE_ID);
   const avatar = databaseMatch
-    ? await CrmUser.exists({ avatar: `db:${databaseMatch[1]}` })
+    ? (await CrmUser.exists({ avatar: `db:${databaseMatch[1]}` }))
       ? await streamCrmAvatar(databaseMatch[1])
       : null
     : CRM_AVATAR_FILENAME.test(identifier)
@@ -1542,7 +1932,10 @@ const getAvatar = asyncHandler(async (req: Request, res: Response) => {
       : null;
   if (!avatar) throw new ApiError(404, "Avatar not found");
 
-  res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+  res.setHeader(
+    "Cache-Control",
+    "public, max-age=86400, stale-while-revalidate=604800",
+  );
   res.type(avatar.contentType);
   avatar.stream.on("error", () => res.destroy());
   avatar.stream.pipe(res);
@@ -1560,23 +1953,38 @@ const SCREENSHOT_PRIVACY_ALLOWED_EMAILS = ["charl@suprahai.com"];
  * no one else can see or change this setting for themselves, and there is no
  * admin-controlled equivalent.
  */
-const updateMyScreenshotPrivacy = asyncHandler(async (req: Request, res: Response) => {
-  const user = req.crmUser!;
+const updateMyScreenshotPrivacy = asyncHandler(
+  async (req: Request, res: Response) => {
+    const user = req.crmUser!;
 
-  if (!SCREENSHOT_PRIVACY_ALLOWED_EMAILS.includes(user.email?.toLowerCase() ?? "")) {
-    throw new ApiError(403, "This setting is not available for your account");
-  }
+    if (
+      !SCREENSHOT_PRIVACY_ALLOWED_EMAILS.includes(
+        user.email?.toLowerCase() ?? "",
+      )
+    ) {
+      throw new ApiError(403, "This setting is not available for your account");
+    }
 
-  const { screenshotBlurUntilPayout } = req.body;
+    const { screenshotBlurUntilPayout } = req.body;
 
-  if (typeof screenshotBlurUntilPayout !== "boolean") {
-    throw new ApiError(400, "screenshotBlurUntilPayout must be a boolean");
-  }
+    if (typeof screenshotBlurUntilPayout !== "boolean") {
+      throw new ApiError(400, "screenshotBlurUntilPayout must be a boolean");
+    }
 
-  await CrmUser.updateOne({ _id: user._id }, { $set: { screenshotBlurUntilPayout } });
+    await CrmUser.updateOne(
+      { _id: user._id },
+      { $set: { screenshotBlurUntilPayout } },
+    );
 
-  res.json(new ApiResponse(200, { screenshotBlurUntilPayout }, "Privacy setting updated"));
-});
+    res.json(
+      new ApiResponse(
+        200,
+        { screenshotBlurUntilPayout },
+        "Privacy setting updated",
+      ),
+    );
+  },
+);
 
 /**
  * POST /api/crm/token-refresh
@@ -1585,7 +1993,9 @@ const updateMyScreenshotPrivacy = asyncHandler(async (req: Request, res: Respons
  */
 const tokenRefresh = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
-  const newToken = req.crmAuthToken ? await renewCrmSessionToken(req.crmAuthToken, user._id.toString()) : await issueCrmSessionToken(user._id.toString());
+  const newToken = req.crmAuthToken
+    ? await renewCrmSessionToken(req.crmAuthToken, user._id.toString())
+    : await issueCrmSessionToken(user._id.toString());
   res.cookie(CRM_TOKEN_COOKIE, newToken, COOKIE_OPTIONS);
   res.json(new ApiResponse(200, { token: newToken }, "Token refreshed"));
 });

@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IAiModeChangeLog extends Document {
   organizationId: string;
-  channel: 'sms' | 'email' | 'webchat';
+  channel: 'sms' | 'email' | 'webchat' | 'shadow_drafts';
   fromMode: string;
   toMode: string;
   fromSource: 'configured' | 'legacy' | 'disabled';
@@ -16,7 +16,7 @@ export interface IAiModeChangeLog extends Document {
 const AiModeChangeLogSchema: Schema<IAiModeChangeLog> = new Schema(
   {
     organizationId: { type: String, required: true },
-    channel: { type: String, enum: ['sms', 'email', 'webchat'], required: true },
+    channel: { type: String, enum: ['sms', 'email', 'webchat', 'shadow_drafts'], required: true },
     fromMode: { type: String, required: true },
     toMode: { type: String, required: true },
     fromSource: { type: String, enum: ['configured', 'legacy', 'disabled'], required: true },

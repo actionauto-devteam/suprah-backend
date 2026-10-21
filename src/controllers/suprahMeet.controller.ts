@@ -10,11 +10,14 @@ import CrmUser from '../models/CrmUser.model';
 import {
   createChimeMeeting, getChimeMeeting, createChimeAttendee, deleteChimeMeeting,
   startRecordingPipelines, stopRecordingPipelines, findConcatenatedVideoKey, presignGet,
+  startMeetingCaptions, stopMeetingCaptions,
 } from '../services/suprahMeetAws.service';
 import {
   startTranscription, getTranscriptionStatus, readTranscriptText, generateSummary,
 } from '../services/suprahMeetAI.service';
 import { mailConfigured, sendRecordingEmail } from '../services/suprahMeetMail.service';
+import { MEET_REMINDER_WINDOW_MS, notifyMeetingCreated } from '../services/suprahMeetNotification.service';
+import logger from '../utils/logger';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
 const MAX_SERIES_SESSIONS = 30;
@@ -207,6 +210,7 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
     invitees: inviteeList,
     inviteAll: Boolean(inviteAll),
     inviteDepartments: deptKeys,
+    invitationNotificationPending: true,
     // Public (default): anyone in the org with the code joins right away.
     // Private: join-by-code users go through the waiting room.
     visibility: visibility === 'private' ? 'private' : 'public',
@@ -216,6 +220,9 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   // Instant meeting
   if (scheduledDates.length === 0) {
     const meeting = await createOne({ ...base, status: 'live', startedAt: new Date() });
+    await notifyMeetingCreated(meeting).catch((error) => {
+      logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Invitation delivery pending retry');
+    });
     return res.status(201).json(new ApiResponse(201, serializeMeeting(meeting), 'Meeting created'));
   }
 
@@ -224,9 +231,13 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   const seriesId = scheduledDates.length > 1 ? crypto.randomUUID() : null;
   const created: IMeeting[] = [];
   for (const when of scheduledDates) {
-    created.push(await createOne({
+    const meeting = await createOne({
       ...base, status: 'scheduled', scheduledAt: when, seriesId: seriesId ?? undefined,
-    }));
+    });
+    created.push(meeting);
+    await notifyMeetingCreated(meeting).catch((error) => {
+      logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Invitation delivery pending retry');
+    });
   }
 
   res.status(201).json(new ApiResponse(201, {
@@ -369,6 +380,7 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
     chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
+    meeting.captionsEnabled = false;
   }
   const externalUserId = `guest:${g.guestId}#${crypto.randomBytes(4).toString('hex')}`;
   const attendee = await wrapAws(
@@ -396,8 +408,10 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
       status: meeting.status, startedAt: meeting.startedAt ?? null,
       participants: pubParticipants(meeting),
       recording: { status: meeting.recording.status },
+      captionsEnabled: Boolean(meeting.captionsEnabled),
+      captionLanguage: meeting.captionLanguage || 'en-US',
     },
-    self: { crmUserId: `guest:${g.guestId}`, fullName: g.name, canControl: false, isGuest: true },
+    self: { crmUserId: `guest:${g.guestId}`, fullName: g.name, canControl: false, canEndForAll: false, isGuest: true },
   }, 'Joined as guest'));
 });
 
@@ -694,7 +708,9 @@ const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(400, 'That time is already in the past (MDT). Pick a future time.');
     }
     own.scheduledAt = when;
-    own.reminderSentAt = null; // re-arm the 10-minute reminder for the new time
+    own.reminderSentAt = null;
+    own.reminderClaimToken = null;
+    own.reminderClaimUntil = null;
   }
 
   if (Object.keys(shared).length === 0 && Object.keys(own).length === 0) {
@@ -747,7 +763,7 @@ const listMeetings = asyncHandler(async (req: Request, res: Response) => {
 const getAlerts = asyncHandler(async (req: Request, res: Response) => {
   const user = requireCrmUser(req);
   const now = Date.now();
-  const soon = new Date(now + 10 * 60_000);
+  const soon = new Date(now + MEET_REMINDER_WINDOW_MS);
 
   const invitedFilter = {
     organizationId: user.organizationId,
@@ -784,6 +800,7 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
+    meeting.captionsEnabled = false;
   }
 
   // Session-unique ExternalUserId (crmUserId#session) so the same CRM user
@@ -823,6 +840,7 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
       crmUserId: user._id.toString(),
       fullName: user.fullName,
       canControl: canControl(user, meeting),
+      canEndForAll: meeting.hostCrmUserId.toString() === user._id.toString(),
     },
   }, 'Joined meeting'));
 });
@@ -831,6 +849,39 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
 const getMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { meeting } = await findOrgMeeting(req);
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting fetched'));
+});
+
+const setCaptions = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (String(meeting.hostCrmUserId) !== String(user._id)) {
+    throw new ApiError(403, 'Only the meeting host can start or stop live captions.');
+  }
+  if (typeof req.body?.enabled !== 'boolean') {
+    throw new ApiError(400, 'Choose whether to enable or disable live captions.');
+  }
+  if (meeting.status !== 'live' || !meeting.chimeMeetingId) {
+    throw new ApiError(409, 'Join a live meeting before starting captions.');
+  }
+  const language = req.body.languageCode ?? meeting.captionLanguage ?? 'en-US';
+  if (language !== 'en-US') {
+    throw new ApiError(400, 'Live captions currently support English (US).');
+  }
+  try {
+    if (req.body.enabled) await startMeetingCaptions(meeting.chimeMeetingId, language);
+    else await stopMeetingCaptions(meeting.chimeMeetingId);
+  } catch (error: any) {
+    logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Live captions request failed');
+    const accessDenied = error?.name === 'AccessDeniedException' || error?.name === 'UnauthorizedClientException';
+    throw new ApiError(502, accessDenied
+      ? 'Live captions are not configured on the server yet. Contact your administrator.'
+      : 'Live captions could not be updated. Please try again.');
+  }
+  meeting.captionsEnabled = req.body.enabled;
+  meeting.captionLanguage = language;
+  await meeting.save();
+  res.json(new ApiResponse(200, {
+    enabled: meeting.captionsEnabled, languageCode: language,
+  }, meeting.captionsEnabled ? 'Live captions requested' : 'Live captions stopped'));
 });
 
 // ── POST /api/crm/meet/meetings/:code/leave ─────────────────────────────────
@@ -847,17 +898,9 @@ const leaveMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── POST /api/crm/meet/meetings/:code/end ───────────────────────────────────
 const endMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  // Host-only end: the host can always end for everyone. An admin/manager may
-  // end ONLY when the host is not currently in the room (host-absent fallback).
   const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
-  const hostPresent = meeting.participants.some(
-    (p) => p.crmUserId && p.crmUserId.toString() === meeting.hostCrmUserId.toString() && !p.leftAt
-  );
-  const isElevated = user.role === 'admin' || user.role === 'manager';
-  if (!isHost && !(isElevated && !hostPresent)) {
-    throw new ApiError(403, hostPresent
-      ? 'Only the host can end this meeting while they are in the room.'
-      : 'Only the host or an admin/manager can end the meeting.');
+  if (!isHost) {
+    throw new ApiError(403, 'Only the meeting host can end the meeting for everyone.');
   }
   if (meeting.status === 'ended') {
     return res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting already ended'));
@@ -1027,6 +1070,8 @@ function serializeMeeting(m: any) {
       startedAt: m.recording?.startedAt,
       stoppedAt: m.recording?.stoppedAt,
     },
+    captionsEnabled: Boolean(m.captionsEnabled),
+    captionLanguage: m.captionLanguage || 'en-US',
     ai: { status: m.ai?.status ?? 'idle', summary: m.ai?.summary, generatedAt: m.ai?.generatedAt },
     startedAt: m.startedAt,
     endedAt: m.endedAt,
@@ -1035,7 +1080,7 @@ function serializeMeeting(m: any) {
 }
 
 export default {
-  createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting,
+  createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting, setCaptions,
   deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting,
   guestRequest, guestJoin, guestLeave, guestRoster,
   getDistribution, distributeRecording, recordingAccess, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,

@@ -62,7 +62,9 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
   customer_call_requested: 'crm', sms_opt_out: 'crm', vehicle_reengagement_blocked: 'crm',
   ai_agent_handoff_needed: 'crm',
+  ai_technical_failures_alert: 'crm',
   lead_note_mention: 'crm',
+  suprah_meet_invited: 'crm', suprah_meet_reminder: 'crm',
 
   feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
 
@@ -297,6 +299,7 @@ const createNotification = async (params: CreateNotificationParams) => {
       sms_opt_out: '/crm/leads',
       vehicle_reengagement_blocked: metadata?.route || '/crm/vehicle-reengagement',
       ai_agent_handoff_needed: metadata?.route || '/crm/leads',
+      ai_technical_failures_alert: metadata?.route || '/crm/ai-tasks',
       lead_note_mention: metadata?.route || '/crm/leads',
       new_lead: '/crm/dashboard',
       lead_assigned: '/crm/dashboard',

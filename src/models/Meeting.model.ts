@@ -45,6 +45,11 @@ export interface IMeeting extends Document {
   inviteDepartments: string[];     // department keys tagged at creation (members
                                    // are resolved into `invitees` at create time)
   reminderSentAt?: Date;
+  invitationNotificationPending: boolean;
+  reminderClaimToken?: string | null;
+  reminderClaimUntil?: Date | null;
+  captionsEnabled: boolean;
+  captionLanguage: string;
   chimeMeetingId?: string;
   mediaRegion?: string;
   participants: IMeetingParticipant[];
@@ -97,6 +102,12 @@ const MeetingSchema = new Schema<IMeeting>(
     inviteAll: { type: Boolean, default: false },
     inviteDepartments: [{ type: String, trim: true }],
     reminderSentAt: { type: Date, default: null },
+    // Explicit opt-in on creation avoids notifying historical meetings on deploy.
+    invitationNotificationPending: { type: Boolean, default: false },
+    reminderClaimToken: { type: String, default: null },
+    reminderClaimUntil: { type: Date, default: null },
+    captionsEnabled: { type: Boolean, default: false },
+    captionLanguage: { type: String, default: 'en-US' },
     chimeMeetingId: { type: String },
     mediaRegion: { type: String },
     participants: [
