@@ -11,6 +11,7 @@ import Organization from '../models/Organization.model';
 import { findOrCreatePendingDriverRequest } from './driverApplication.service';
 import DriverProfile from '../models/DriverProfile.model';
 import notificationService from './notification.service';
+import { codeEmail } from '../utils/codeEmail';
 
 const OTP_LIFETIME_MS = 15 * 60 * 1000;
 // A code with at least this long left is emailed again instead of replaced.
@@ -158,8 +159,13 @@ class AuthService {
                 await emailService.sendEmail({
                     to: user.email,
                     subject: `Verify Your ${dealerName} Account`,
-                    text: `Your verification code is: ${otp}`,
-                    html: `<h1>Account Verification</h1><p>Welcome to ${dealerName}! Your verification code is: <strong>${otp}</strong></p>`
+                    ...codeEmail({
+                        brandName: dealerName,
+                        heading: 'Verify your email',
+                        intro: `Welcome to ${dealerName}! Enter this code to verify your email and finish creating your account.`,
+                        code: otp,
+                        minutesLeft: OTP_LIFETIME_MS / 60_000,
+                    }),
                 });
             } catch (emailErr) {
                 console.error('[AuthService] Failed to send verification email:', emailErr);
@@ -212,12 +218,17 @@ class AuthService {
             await emailService.sendEmail({
                 to: user.email,
                 subject: `Your ${dealerName} Verification Code`,
-                text: `Your verification code is: ${otp}. This code expires in ${minutesLeft} minutes.`,
-                html: `<h1>Verify Your Account</h1><p>Your verification code is: <strong>${otp}</strong>. This code expires in ${minutesLeft} minutes.</p>`
+                ...codeEmail({
+                    brandName: dealerName,
+                    heading: 'Your verification code',
+                    intro: 'Here is your code again. Enter it to verify your email and finish creating your account. A code from an earlier email still works until it expires.',
+                    code: otp,
+                    minutesLeft,
+                }),
             });
         } catch (emailErr) {
             console.error('[AuthService] Failed to resend OTP email:', emailErr);
-            throw new ApiError(500, 'Could not send verification email. Please try again later.');
+            throw new ApiError(500, "We couldn't send the email right now. Wait a minute, then tap Resend Code again.");
         }
 
         return { message: 'New verification code sent' };
@@ -489,8 +500,13 @@ class AuthService {
         await emailService.sendEmail({
             to: user.email,
             subject: `Reset Your ${resetDealerName} Password`,
-            text: `Your password reset code is: ${otp}. This code expires in ${minutesLeft} minutes.`,
-            html: `<h1>Reset Password</h1><p>Your password reset code is: <strong>${otp}</strong></p><p>Use this to set a new password for your account. This code expires in ${minutesLeft} minutes.</p>`
+            ...codeEmail({
+                brandName: resetDealerName,
+                heading: 'Reset your password',
+                intro: 'Enter this code on the password reset page, then choose a new password with at least 8 characters, an uppercase letter, a number and a symbol.',
+                code: otp,
+                minutesLeft,
+            }),
         });
 
         return { message: 'If an account exists, a reset code has been sent' };

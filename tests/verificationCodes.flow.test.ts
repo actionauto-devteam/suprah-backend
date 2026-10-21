@@ -12,6 +12,7 @@ import app from '../src/server';
 import User from '../src/models/User.model';
 import DriverProfile from '../src/models/DriverProfile.model';
 import DriverRequest from '../src/models/DriverRequest.model';
+import emailService from '../src/services/email.service';
 
 const TEST_EMAIL_DOMAIN = '@verification-codes-test.com';
 const codeOf = async (email: string) =>
@@ -46,9 +47,16 @@ describe('Email codes keep working when another one is requested', () => {
     const first = await codeOf(email);
     expect(first.otpCode).toMatch(/^\d{6}$/);
 
+    (emailService.sendEmail as jest.Mock).mockClear();
     await request(app).post('/api/auth/resend-otp').send({ email }).expect(200);
     const after = await codeOf(email);
     expect(after.otpCode).toBe(first.otpCode);
+    // The Resend Code email is the branded Suprah.AI code email.
+    const sent = (emailService.sendEmail as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(sent.subject).toBe('Your Suprah.AI Verification Code');
+    expect(sent.html).toContain('Suprah.AI');
+    expect(sent.html).toContain(first.otpCode);
+    expect(sent.html).toContain('support@suprahai.com');
     // The expiry is not extended by asking again.
     expect(new Date(after.otpExpiresAt).getTime()).toBe(new Date(first.otpExpiresAt).getTime());
 
@@ -70,6 +78,31 @@ describe('Email codes keep working when another one is requested', () => {
       .post('/api/auth/reset-password')
       .send({ email, otp: first.otpCode, newPassword: 'Codes-Passw0rd-3!' })
       .expect(400);
+  });
+
+  it('new accounts need an uppercase letter, a number and a symbol, on every sign-up path', async () => {
+    const weak = await request(app)
+      .post('/api/auth/register')
+      .send({ name: 'Weak Password', email: `weak${TEST_EMAIL_DOMAIN}`, password: 'password12345', role: 'driver' })
+      .expect(400);
+    expect(weak.body.message).toBe(
+      'Please fix the following: Password must include at least one uppercase letter. Password must include at least one special character.',
+    );
+    expect(await User.exists({ email: `weak${TEST_EMAIL_DOMAIN}` })).toBeNull();
+
+    // Invite links (customers, drivers, dealerships) check the password before the link.
+    const viaInvite = await request(app)
+      .post('/api/auth/invite/no-such-link/register')
+      .send({ name: 'Weak Password', email: `weak-invite${TEST_EMAIL_DOMAIN}`, password: 'password12345' })
+      .expect(400);
+    expect(viaInvite.body.message).toBe(
+      'Please fix the following: Password must include at least one uppercase letter. Password must include at least one special character.',
+    );
+    const badLink = await request(app)
+      .post('/api/auth/invite/no-such-link/register')
+      .send({ name: 'Strong Password', email: `strong-invite${TEST_EMAIL_DOMAIN}`, password: 'Codes-Passw0rd!' })
+      .expect(404);
+    expect(badLink.body.message).toBe("This invite link isn't valid. Ask the person who sent it for a new one.");
   });
 
   it('a code close to expiring is replaced by a new one', async () => {

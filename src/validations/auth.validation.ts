@@ -1,9 +1,30 @@
 import { z } from "zod";
 
+// Password rules for every new account (sign-up and invite links) and every
+// password reset. The website shows the same list (lib/password-rules.ts).
+// Existing passwords still sign in; sign-in only checks a password is given.
+const STRONG_PASSWORD_RULES: Array<{ pattern: RegExp; message: string }> = [
+  { pattern: /^.{8,}$/s, message: "Password must be at least 8 characters" },
+  { pattern: /[A-Z]/, message: "Password must include at least one uppercase letter" },
+  { pattern: /[0-9]/, message: "Password must include at least one number" },
+  { pattern: /[^A-Za-z0-9]/, message: "Password must include at least one special character" },
+];
+
+/** The strong-password rules this password doesn't meet (empty when it meets them all). */
+export function strongPasswordProblems(password: string): string[] {
+  return STRONG_PASSWORD_RULES.filter((rule) => !rule.pattern.test(password)).map((rule) => rule.message);
+}
+
+const strongPasswordSchema = z.string().superRefine((password, ctx) => {
+  for (const message of strongPasswordProblems(password)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
 export const registerSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: strongPasswordSchema,
   role: z.enum(["customer", "driver", "dealership"]).optional(),
   inviteToken: z.string().optional(),
   organizationId: z
@@ -21,7 +42,7 @@ export const loginSchema = z.object({
 export const registerDealershipSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: strongPasswordSchema,
   dealershipName: z
     .string()
     .min(2, "Dealership name must be at least 2 characters"),
@@ -46,15 +67,7 @@ export const forgotPasswordSchema = z.object({
 export const resetPasswordSchema = z.object({
   email: z.string().email("Invalid email address"),
   otp: z.string().length(6, "Reset code must be 6 digits"),
-  newPassword: z
-    .string()
-    .min(8, "Password must be at least 8 characters")
-    .regex(/[A-Z]/, "Password must include at least one uppercase letter")
-    .regex(/[0-9]/, "Password must include at least one number")
-    .regex(
-      /[^A-Za-z0-9]/,
-      "Password must include at least one special character",
-    ),
+  newPassword: strongPasswordSchema,
 });
 
 export const completeOnboardingSchema = z.object({
