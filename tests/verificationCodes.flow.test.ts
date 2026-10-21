@@ -12,6 +12,7 @@ import app from '../src/server';
 import User from '../src/models/User.model';
 import DriverProfile from '../src/models/DriverProfile.model';
 import DriverRequest from '../src/models/DriverRequest.model';
+import emailService from '../src/services/email.service';
 
 const TEST_EMAIL_DOMAIN = '@verification-codes-test.com';
 const codeOf = async (email: string) =>
@@ -46,9 +47,16 @@ describe('Email codes keep working when another one is requested', () => {
     const first = await codeOf(email);
     expect(first.otpCode).toMatch(/^\d{6}$/);
 
+    (emailService.sendEmail as jest.Mock).mockClear();
     await request(app).post('/api/auth/resend-otp').send({ email }).expect(200);
     const after = await codeOf(email);
     expect(after.otpCode).toBe(first.otpCode);
+    // The Resend Code email is the branded Suprah.AI code email.
+    const sent = (emailService.sendEmail as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(sent.subject).toBe('Your Suprah.AI Verification Code');
+    expect(sent.html).toContain('Suprah.AI');
+    expect(sent.html).toContain(first.otpCode);
+    expect(sent.html).toContain('support@suprahai.com');
     // The expiry is not extended by asking again.
     expect(new Date(after.otpExpiresAt).getTime()).toBe(new Date(first.otpExpiresAt).getTime());
 
