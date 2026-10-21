@@ -2004,7 +2004,7 @@ const getConversationAttachments = asyncHandler(async (req: Request, res: Respon
   const items: any[] = [];
   for (const m of messages) {
     for (const a of (m as any).attachments || []) {
-      const matchesType = type === 'media' ? isMedia(a.mimeType, a.originalName) : !isMedia(a.mimeType, a.originalName) && !a.mimeType?.startsWith('audio/');
+      const matchesType = type === 'media' ? isMedia(a.mimeType, a.originalName) : !isMedia(a.mimeType, a.originalName);
       if (matchesType) items.push({ messageId: m._id, createdAt: (m as any).createdAt, attachment: a });
     }
   }
