@@ -60,6 +60,21 @@ describe('manual SMS send guards', () => {
     expect(mockSendSmsFromUser).not.toHaveBeenCalled();
   });
 
+  it('blocks a phone number with an extension before anything is looked up or sent', async () => {
+    const { error } = await invoke(sendMessage, smsRequest({ toPhone: '385-503-5869 x12', body: 'hi', leadId: LEAD_ID }));
+    expect(error?.statusCode).toBe(400);
+    expect(error?.message).toMatch(/extension/);
+    expect(mockLeadExists).not.toHaveBeenCalled();
+    expect(mockIsSmsOptedOut).not.toHaveBeenCalled();
+    expect(mockSendSmsFromUser).not.toHaveBeenCalled();
+  });
+
+  it('blocks an 11-digit number that is not a US number written with +', async () => {
+    const { error } = await invoke(sendMessage, smsRequest({ toPhone: '23855035869', body: 'hi' }));
+    expect(error?.statusCode).toBe(400);
+    expect(mockSendSmsFromUser).not.toHaveBeenCalled();
+  });
+
   it('rejects a leadId that is not a valid id', async () => {
     const { error } = await invoke(sendMessage, smsRequest({ toPhone: '+13855035869', body: 'hi', leadId: 'not-an-id' }));
     expect(error?.statusCode).toBe(404);

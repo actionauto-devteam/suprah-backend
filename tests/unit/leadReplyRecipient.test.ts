@@ -16,8 +16,13 @@ describe('resolveLeadReplyRecipient', () => {
     expect(resolveLeadReplyRecipient(lead)).toBeNull();
   });
 
-  it('falls back to senderEmail only for a legacy direct-email lead that is not centrally ingested', () => {
-    const lead = { email: '', senderEmail: 'buyer@example.com', channel: 'email' };
+  it('never falls back to senderEmail, even for a legacy direct-email lead that is not centrally ingested', () => {
+    const lead = { email: '', senderEmail: 'buyer@example.com', channel: 'email', centralIngestion: false };
+    expect(resolveLeadReplyRecipient(lead)).toBeNull();
+  });
+
+  it('uses the saved customer email on a legacy lead and ignores a different senderEmail', () => {
+    const lead = { email: 'buyer@example.com', senderEmail: 'noreply@aggregator.example', channel: 'email', centralIngestion: false };
     expect(resolveLeadReplyRecipient(lead)).toBe('buyer@example.com');
   });
 

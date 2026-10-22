@@ -16,6 +16,7 @@ import WebChatMessage from "../models/WebChatMessage.model";
 import MailConversation from "../models/MailConversation.model";
 import { describeSmsFailure } from "../utils/smsFailure";
 import { recordHumanTakeover } from "../utils/aiAutoPause";
+import { manualSmsPhoneProblem } from "../utils/manualSmsPhone";
 import MailMessage from "../models/MailMessage.model";
 import EmailCampaignRecipient from "../models/EmailCampaignRecipient.model";
 import EmailCampaign from "../models/EmailCampaign.model";
@@ -48,11 +49,6 @@ const orgOf = (req: Request) => (req as any).orgId;
 
 export const SMS_OPTED_OUT_MESSAGE =
   "This customer replied STOP, so texting is turned off. Texting turns back on only after they reply START.";
-
-const hasTextablePhone = (phone: unknown) => {
-  const digits = String(phone ?? "").replace(/\D/g, "");
-  return digits.length >= 10 && digits.length <= 15;
-};
 
 async function assertManualSmsAllowed(orgId: any, phone: string, leadId?: unknown) {
   if (leadId) {
@@ -193,9 +189,8 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { toPhone, body, customerId, customerName, leadId } = req.body || {};
   if (!toPhone) throw new ApiError(400, "toPhone is required");
-  if (!hasTextablePhone(toPhone)) {
-    throw new ApiError(400, "Add a valid phone number before sending a text.");
-  }
+  const phoneProblem = manualSmsPhoneProblem(toPhone);
+  if (phoneProblem) throw new ApiError(400, phoneProblem);
   await assertManualSmsAllowed(orgId, toPhone, leadId);
 
   const result = await comm.sendSmsFromUser({

@@ -14,12 +14,7 @@ export class LeadReplyRecipientError extends Error {
   }
 }
 
-type RecipientLead = {
-  email?: unknown;
-  senderEmail?: unknown;
-  channel?: unknown;
-  centralIngestion?: unknown;
-} | null | undefined;
+type RecipientLead = { email?: unknown } | null | undefined;
 
 export function resolveLeadReplyRecipient(lead: RecipientLead, dealershipAddresses: unknown[] = []): string | null {
   const blocked = new Set(
@@ -28,8 +23,5 @@ export function resolveLeadReplyRecipient(lead: RecipientLead, dealershipAddress
       .filter((address): address is string => Boolean(address)),
   );
   const savedEmail = normalizeIdentityEmail(lead?.email);
-  if (savedEmail) return blocked.has(savedEmail) ? null : savedEmail;
-  if (lead?.channel === 'adf' || lead?.centralIngestion === true) return null;
-  const senderEmail = normalizeIdentityEmail(lead?.senderEmail);
-  return senderEmail && !blocked.has(senderEmail) ? senderEmail : null;
+  return savedEmail && !blocked.has(savedEmail) ? savedEmail : null;
 }

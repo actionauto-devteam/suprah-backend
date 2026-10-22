@@ -127,6 +127,19 @@ describe('manual email replies use a verified customer recipient', () => {
     expect(lead.status).toBe('New');
   });
 
+  it('replyToInquiry blocks a legacy lead that only has a senderEmail and leaves its data untouched', async () => {
+    const lead = makeLead({ email: '', senderEmail: 'buyer@example.com', channel: 'email', centralIngestion: false });
+    mockLeadFindOne.mockResolvedValue(lead);
+    const res = mockResponse();
+    await replyToInquiry({ params: { id: 'lead-1' }, body: { message: 'Hi' }, files: [], user: { _id: 'user-1' }, orgId: 'org-1' } as any, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'NO_CUSTOMER_EMAIL' }));
+    expect(gmailSendMock).not.toHaveBeenCalled();
+    expect(lead.save).not.toHaveBeenCalled();
+    expect(lead.senderEmail).toBe('buyer@example.com');
+    expect(lead.email).toBe('');
+  });
+
   it('replyToInquiry sends to the customer email for an ADF lead', async () => {
     const lead = makeLead(adfLeadWithCustomer);
     mockLeadFindOne.mockResolvedValue(lead);
