@@ -51,14 +51,14 @@ export interface LabIssue {
 }
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
-const PHONE_PATTERN = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
-const EMAIL_PATTERN = /[\w.+-]+@([\w-]+(?:\.[\w-]+)+)/gi;
-const FICTIONAL_EMAIL_DOMAIN = /(^|\.)(example\.(com|org|net)|test|example|invalid|localhost)$/i;
-const VIN_PATTERN = /\b(?=[A-HJ-NPR-Z0-9]*\d)(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])[A-HJ-NPR-Z0-9]{17}\b/i;
-const RECORD_ID_PATTERN = /\b[a-f0-9]{24}\b/i;
-const URL_PATTERN = /\bhttps?:\/\/([^\s/]+)|\bwww\.([^\s/]+)/gi;
-const STREET_PATTERN = /\b\d{2,6}\s+(?:[a-z0-9]+\s){0,3}(street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|circle|parkway|pkwy)\b/i;
-const MOCK_DIRECTIVE_PATTERN = /\[mock:/i;
+export const PHONE_PATTERN = /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+export const EMAIL_PATTERN = /[\w.+-]+@([\w-]+(?:\.[\w-]+)+)/gi;
+export const FICTIONAL_EMAIL_DOMAIN = /(^|\.)(example\.(com|org|net)|test|example|invalid|localhost)$/i;
+export const VIN_PATTERN = /\b(?=[A-HJ-NPR-Z0-9]*\d)(?=[A-HJ-NPR-Z0-9]*[A-HJ-NPR-Z])[A-HJ-NPR-Z0-9]{17}\b/i;
+export const RECORD_ID_PATTERN = /\b[a-f0-9]{24}\b/i;
+export const URL_PATTERN = /\bhttps?:\/\/([^\s/]+)|\bwww\.([^\s/]+)/gi;
+export const STREET_PATTERN = /\b\d{2,6}\s+(?:[a-z0-9]+\s){0,3}(street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|circle|parkway|pkwy)\b/i;
+export const MOCK_DIRECTIVE_PATTERN = /\[mock:/i;
 
 export function fictionalDataIssues(field: string, text: string): { errors: LabIssue[]; warnings: LabIssue[] } {
   const errors: LabIssue[] = [];

@@ -10,7 +10,7 @@ import CrmUser from '../models/CrmUser.model';
 import {
   createChimeMeeting, getChimeMeeting, createChimeAttendee, deleteChimeMeeting,
   startRecordingPipelines, stopRecordingPipelines, findConcatenatedVideoKey, presignGet,
-  startMeetingCaptions, stopMeetingCaptions,
+  startMeetingCaptions,
 } from '../services/suprahMeetAws.service';
 import {
   startTranscription, getTranscriptionStatus, readTranscriptText, generateSummary,
@@ -381,6 +381,7 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
     meeting.captionsEnabled = false;
+    meeting.captionStartClaimUntil = null;
   }
   const externalUserId = `guest:${g.guestId}#${crypto.randomBytes(4).toString('hex')}`;
   const attendee = await wrapAws(
@@ -801,6 +802,7 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
     meeting.captionsEnabled = false;
+    meeting.captionStartClaimUntil = null;
   }
 
   // Session-unique ExternalUserId (crmUserId#session) so the same CRM user
@@ -851,13 +853,9 @@ const getMeeting = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting fetched'));
 });
 
-const setCaptions = asyncHandler(async (req: Request, res: Response) => {
-  const { user, meeting } = await findOrgMeeting(req);
-  if (String(meeting.hostCrmUserId) !== String(user._id)) {
-    throw new ApiError(403, 'Only the meeting host can start or stop live captions.');
-  }
-  if (typeof req.body?.enabled !== 'boolean') {
-    throw new ApiError(400, 'Choose whether to enable or disable live captions.');
+async function ensureLiveCaptions(req: Request, res: Response, meeting: IMeeting) {
+  if (req.body?.enabled !== true) {
+    throw new ApiError(400, 'Hide captions on your own screen to turn them off.');
   }
   if (meeting.status !== 'live' || !meeting.chimeMeetingId) {
     throw new ApiError(409, 'Join a live meeting before starting captions.');
@@ -866,22 +864,59 @@ const setCaptions = asyncHandler(async (req: Request, res: Response) => {
   if (language !== 'en-US') {
     throw new ApiError(400, 'Live captions currently support English (US).');
   }
+  const respond = (pending = false, reused = false) => res.json(new ApiResponse(200, {
+    enabled: true, languageCode: language, pending, reused,
+  }, 'Live captions requested'));
+  if (meeting.captionsEnabled && req.body.retry !== true) return respond(false, true);
+  const claimUntil = new Date(Date.now() + 60_000);
+  const claimed = await Meeting.findOneAndUpdate({
+    _id: meeting._id, organizationId: meeting.organizationId,
+    chimeMeetingId: meeting.chimeMeetingId, status: 'live',
+    ...(req.body.retry === true ? {} : { captionsEnabled: { $ne: true } }),
+    $or: [{ captionStartClaimUntil: null }, { captionStartClaimUntil: { $lte: new Date() } }],
+  }, { $set: { captionStartClaimUntil: claimUntil } }, { new: true });
+  if (!claimed) return respond(true);
+  const ownedClaim = {
+    _id: meeting._id, organizationId: meeting.organizationId,
+    chimeMeetingId: meeting.chimeMeetingId, captionStartClaimUntil: claimUntil,
+  };
   try {
-    if (req.body.enabled) await startMeetingCaptions(meeting.chimeMeetingId, language);
-    else await stopMeetingCaptions(meeting.chimeMeetingId);
+    await startMeetingCaptions(meeting.chimeMeetingId, language);
+    await Meeting.updateOne({ ...ownedClaim, status: 'live' }, { $set: {
+      captionsEnabled: true, captionLanguage: language, captionStartClaimUntil: null,
+    } });
   } catch (error: any) {
+    await Meeting.updateOne(ownedClaim, { $set: { captionStartClaimUntil: null } }).catch((releaseError) => {
+      logger.error({ releaseError, meetingId: meeting._id }, '[SuprahMeet] Caption claim release failed');
+    });
     logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Live captions request failed');
     const accessDenied = error?.name === 'AccessDeniedException' || error?.name === 'UnauthorizedClientException';
     throw new ApiError(502, accessDenied
       ? 'Live captions are not configured on the server yet. Contact your administrator.'
       : 'Live captions could not be updated. Please try again.');
   }
-  meeting.captionsEnabled = req.body.enabled;
-  meeting.captionLanguage = language;
-  await meeting.save();
-  res.json(new ApiResponse(200, {
-    enabled: meeting.captionsEnabled, languageCode: language,
-  }, meeting.captionsEnabled ? 'Live captions requested' : 'Live captions stopped'));
+  return respond();
+}
+
+const setCaptions = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (!meeting.participants.some((person) => person.crmUserId
+    && String(person.crmUserId) === String(user._id) && !person.leftAt)) {
+    throw new ApiError(403, 'Join the meeting before enabling live captions.');
+  }
+  await ensureLiveCaptions(req, res, meeting);
+});
+
+const guestCaptions = asyncHandler(async (req: Request, res: Response) => {
+  const guest = verifyGuest(req);
+  const code = String(req.params.code || '').trim().toUpperCase();
+  if (guest.code !== code) throw new ApiError(401, 'This guest pass is for a different meeting.');
+  const meeting = await Meeting.findOne({ organizationId: guest.organizationId, code });
+  if (!meeting) throw new ApiError(404, 'Meeting not found.');
+  if (!meeting.participants.some((person) => person.isGuest && person.guestId === guest.guestId && !person.leftAt)) {
+    throw new ApiError(403, 'Join the meeting before enabling live captions.');
+  }
+  await ensureLiveCaptions(req, res, meeting);
 });
 
 // ── POST /api/crm/meet/meetings/:code/leave ─────────────────────────────────
@@ -1082,6 +1117,6 @@ function serializeMeeting(m: any) {
 export default {
   createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting, setCaptions,
   deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting,
-  guestRequest, guestJoin, guestLeave, guestRoster,
+  guestRequest, guestJoin, guestLeave, guestRoster, guestCaptions,
   getDistribution, distributeRecording, recordingAccess, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
 };

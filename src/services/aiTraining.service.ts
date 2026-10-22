@@ -16,6 +16,7 @@ import AiDraftEvaluation, {
 } from '../models/AiDraftEvaluation.model';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
+import { reviewBlockers } from './aiTrainingRules.service';
 
 export type TrainingRole = 'rep' | 'manager' | 'admin';
 
@@ -249,8 +250,9 @@ export async function createPolicyWithFirstVersion(input: {
   policy: Record<string, unknown>;
   version: VersionContent;
   session: ClientSession | null;
+  policyId?: mongoose.Types.ObjectId;
 }): Promise<IAiTrainingPolicy> {
-  const policyId = new mongoose.Types.ObjectId();
+  const policyId = input.policyId || new mongoose.Types.ObjectId();
   await AiTrainingPolicyVersion.create([{ organizationId: input.organizationId, policyId, version: 1, ...input.version }], withSession(input.session));
   const [policy] = await AiTrainingPolicy.create(
     [{ ...input.policy, _id: policyId, organizationId: input.organizationId, currentVersion: 1, adoptedVersions: [1] }],
@@ -435,9 +437,10 @@ export async function transitionProposal(input: {
   if (rule.reviewerOnly && !reviewer) throw new ApiError(403, 'Only managers or admins can review training proposals');
   if (!rule.reviewerOnly && !isAuthor && !reviewer) throw new ApiError(403, 'Only the author or a manager can withdraw this proposal');
   if (input.action === 'approve' && isAuthor) throw new ApiError(403, 'You cannot approve your own proposal. Ask another manager or admin to review it.');
+  let current: any = null;
   if (input.action === 'approve') {
-    const current: any = await AiTrainingPolicyVersion.findOne({ organizationId: input.organizationId, policyId: policy._id, version: policy.currentVersion })
-      .select('createdBy').lean();
+    current = await AiTrainingPolicyVersion.findOne({ organizationId: input.organizationId, policyId: policy._id, version: policy.currentVersion })
+      .select('createdBy spec').lean();
     if (current?.createdBy?.userId === actor.userId) {
       throw new ApiError(403, 'You edited the current version, so another manager or admin needs to approve it.');
     }
@@ -447,7 +450,13 @@ export async function transitionProposal(input: {
   if (input.expectedVersion !== undefined && input.expectedVersion !== null && Number(input.expectedVersion) !== policy.currentVersion) {
     throw new ApiError(409, 'This proposal has a newer version. Refresh and review the latest version.');
   }
-  if (input.action === 'approve') await requirePolicyIntegrity(input.organizationId, policy);
+  if (input.action === 'approve') {
+    await requirePolicyIntegrity(input.organizationId, policy);
+    const blockers = reviewBlockers(current?.spec, policy);
+    if (blockers.length) {
+      throw new ApiError(400, 'This version cannot be approved until the highlighted items are fixed. Request changes so the author can update it.', blockers);
+    }
+  }
 
   const now = new Date();
   const set: Record<string, unknown> = {
@@ -469,6 +478,8 @@ export async function transitionProposal(input: {
   return updated;
 }
 
+const STRUCTURED_REVISE_MESSAGE = 'This rule is edited in the rule editor. Open it there, save your changes and submit it for review.';
+
 export async function reviseProposal(input: {
   organizationId: string;
   policyId: string;
@@ -480,9 +491,11 @@ export async function reviseProposal(input: {
   const policy = await loadVisibleProposal(input.organizationId, input.policyId, input.user);
   if (policy.createdBy?.userId !== actor.userId) throw new ApiError(403, 'Only the author can revise this proposal');
   if (!['draft', 'changes_requested'].includes(policy.status)) throw new ApiError(409, 'Only proposals that need changes can be revised');
+  if (policy.ruleFormat === 'structured_v1') throw new ApiError(409, STRUCTURED_REVISE_MESSAGE);
   const instruction = cleanInstruction(input.instruction);
   const changeNote = cleanNote(input.changeNote, false);
   const previous: any = await AiTrainingPolicyVersion.findOne({ organizationId: input.organizationId, policyId: policy._id, version: policy.currentVersion }).lean();
+  if (previous?.spec?.format === 'structured_v1') throw new ApiError(409, STRUCTURED_REVISE_MESSAGE);
   const now = new Date();
   const snapshot = policy.toObject();
 

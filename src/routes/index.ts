@@ -93,6 +93,8 @@ import aiOperatingModeRoute from "./aiOperatingMode.routes";
 import aiShadowDraftRoute from "./aiShadowDraft.routes";
 import aiTrainingRoute from "./aiTraining.routes";
 import crmLeadGroupRoute from "./crmLeadGroup.routes";
+import crmLocationRoute from "./crmLocation.routes";
+import aiKnowledgeBaseRoute from "./aiKnowledgeBase.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
@@ -278,6 +280,14 @@ const defaultRoutes = [
   {
     path: "/crm/lead-groups",
     route: crmLeadGroupRoute,
+  },
+  {
+    path: "/crm/locations",
+    route: crmLocationRoute,
+  },
+  {
+    path: "/crm/knowledge-base",
+    route: aiKnowledgeBaseRoute,
   },
   {
     path: "/webchat",

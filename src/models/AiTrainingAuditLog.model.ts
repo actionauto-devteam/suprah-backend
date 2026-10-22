@@ -19,6 +19,8 @@ export const TRAINING_AUDIT_ACTIONS = [
   'legacy_coaching_created',
   'legacy_coaching_updated',
   'legacy_coaching_deleted',
+  'import_committed',
+  'import_content_purged',
 ] as const;
 export type TrainingAuditAction = (typeof TRAINING_AUDIT_ACTIONS)[number];
 
@@ -30,6 +32,8 @@ export interface IAiTrainingAuditLog extends Document {
   draftId?: mongoose.Types.ObjectId;
   evaluationId?: mongoose.Types.ObjectId;
   legacyCoachingRuleId?: mongoose.Types.ObjectId;
+  importBatchId?: mongoose.Types.ObjectId;
+  importItemId?: mongoose.Types.ObjectId;
   actor: TrainingActorRef;
   fromStatus?: string;
   toStatus?: string;
@@ -46,6 +50,8 @@ const AiTrainingAuditLogSchema: Schema<IAiTrainingAuditLog> = new Schema(
     draftId: { type: Schema.Types.ObjectId, ref: 'AiAgentDraft' },
     evaluationId: { type: Schema.Types.ObjectId, ref: 'AiDraftEvaluation' },
     legacyCoachingRuleId: { type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' },
+    importBatchId: { type: Schema.Types.ObjectId, ref: 'AiTrainingImportBatch' },
+    importItemId: { type: Schema.Types.ObjectId, ref: 'AiTrainingImportItem' },
     actor: { type: TrainingActorSchema, required: true },
     fromStatus: { type: String, trim: true, maxlength: 40 },
     toStatus: { type: String, trim: true, maxlength: 40 },
@@ -56,6 +62,7 @@ const AiTrainingAuditLogSchema: Schema<IAiTrainingAuditLog> = new Schema(
 
 AiTrainingAuditLogSchema.index({ organizationId: 1, createdAt: -1 }, { name: 'ai_training_audit_org_recent' });
 AiTrainingAuditLogSchema.index({ organizationId: 1, policyId: 1, createdAt: 1 }, { name: 'ai_training_audit_org_policy' });
+AiTrainingAuditLogSchema.index({ organizationId: 1, importBatchId: 1, createdAt: 1 }, { name: 'ai_training_audit_org_import', partialFilterExpression: { importBatchId: { $exists: true } } });
 makeAppendOnly(AiTrainingAuditLogSchema, 'AiTrainingAuditLog');
 
 const AiTrainingAuditLog = mongoose.model<IAiTrainingAuditLog>('AiTrainingAuditLog', AiTrainingAuditLogSchema);
