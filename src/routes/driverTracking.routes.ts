@@ -23,7 +23,8 @@ import { ApiError } from "../utils/ApiError";
 import { uploadProofImage, validateUploadedImageContent } from "../middleware/upload.middleware";
 import loadConditionReportController from "../controllers/loadConditionReport.controller";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import { mapPlaceLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
+import { mapPlaceLookupLimiter, routeLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
+import loadRouteController from "../controllers/loadRoute.controller";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
@@ -266,6 +267,9 @@ router.get("/dashboard-stats", driverOnly, noStoreSensitive, driverTrackingContr
 
 // Driver load lists
 router.get("/my-loads", driverOnly, noStoreSensitive, driverTrackingController.getMyLoads);
+// The best route and arrival time to the driver's next stop (Amazon Location,
+// live traffic). Off unless AMAZON_LOCATION_ROUTES_ENABLED=true.
+router.get("/my-loads/:id/route", driverOnly, noStoreSensitive, routeLookupLimiter, loadRouteController.getMyLoadRoute);
 router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingController.getMyRequests);
 router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 
@@ -281,6 +285,16 @@ router.get(
   staffOnly,
   noStoreSensitive,
   driverTrackingController.getLoadTripHistory,
+);
+// The best route and arrival time to the load's next stop, for the people who
+// can see the driver's exact location (Amazon Location, live traffic).
+router.get(
+  "/loads/:id/route",
+  staffOnly,
+  trackingOrganizationOnly,
+  noStoreSensitive,
+  routeLookupLimiter,
+  loadRouteController.getLoadRouteForStaff,
 );
 router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
 router.post(

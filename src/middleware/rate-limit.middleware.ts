@@ -410,3 +410,25 @@ export const mapPlaceLookupLimiter = rateLimit({
     legacyHeaders: false,
     validate: { default: false }
 });
+
+// Routes and arrival times use paid Amazon Location lookups. Pages refresh
+// them every minute and the server reuses each route, so this only stops
+// runaway requests.
+export const routeLookupLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 120,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => {
+        return req.user?._id?.toString() || req.ip;
+    },
+    message: {
+        success: false,
+        message: 'Routes are being checked too quickly. Wait a few minutes and they will show again.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
