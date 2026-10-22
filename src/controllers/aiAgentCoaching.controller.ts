@@ -9,6 +9,7 @@ import AiAgentCoachingRule from '../models/AiAgentCoachingRule.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import { CommunicationMessage } from '../models/communication.model';
 import { submitCoachingAsProposal, trainingActor, writeTrainingAudit } from '../services/aiTraining.service';
+import { strictInstructionIssues } from '../services/aiTrainingSafetyGate';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 const MANAGER_ROLES = new Set(['manager', 'admin', 'super_admin']);
@@ -23,6 +24,18 @@ const actorName = (user: any) =>
   'Team member';
 
 const isManager = (user: any) => MANAGER_ROLES.has(String(user?.role || ''));
+
+function requireSafeCoaching(instruction: string): void {
+  const blockers = strictInstructionIssues(instruction);
+  if (blockers.length) throw new ApiError(400, `This coaching can't be saved. ${blockers[0].message}`, blockers);
+}
+
+function requireSafeReactivation(instruction: string): void {
+  const blockers = strictInstructionIssues(instruction);
+  if (blockers.length) {
+    throw new ApiError(400, `This coaching can't be turned back on. ${blockers[0].message} It stays disabled until its text is updated.`, blockers);
+  }
+}
 
 const serialize = (rule: any) => ({
   ...rule,
@@ -145,6 +158,7 @@ export const createAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     return;
   }
 
+  requireSafeCoaching(instruction);
   const rule = await AiAgentCoachingRule.create({
     organizationId: orgId,
     scope: 'organization',
@@ -182,6 +196,7 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     const instruction = String(req.body?.instruction || '').trim();
     if (!instruction) throw new ApiError(400, 'Coaching feedback is required');
     if (instruction.length > 800) throw new ApiError(400, 'Coaching feedback is too long');
+    requireSafeCoaching(instruction);
     setValues.instruction = instruction;
   }
   if (Object.prototype.hasOwnProperty.call(req.body || {}, 'status')) {
@@ -191,18 +206,35 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     if (status === 'disabled') {
       setValues.disabledAt = new Date();
       setValues.disabledBy = user._id;
-    } else {
-      setValues.disabledAt = undefined;
-      setValues.disabledBy = undefined;
     }
   }
 
+  const filter: Record<string, any> = { _id: req.params.id, organizationId: orgId, status: { $ne: 'deleted' } };
+  let guarded = false;
+  if (setValues.status === 'active' && !Object.prototype.hasOwnProperty.call(setValues, 'instruction')) {
+    const current = await AiAgentCoachingRule.findOne(filter).select('status instruction').lean() as any;
+    if (!current) throw new ApiError(404, 'Coaching rule not found');
+    filter.status = current.status;
+    if (current.status !== 'active') {
+      requireSafeReactivation(String(current.instruction || ''));
+      if (current.instruction === undefined || current.instruction === null) filter.instruction = null;
+      else filter.$expr = { $eq: ['$instruction', current.instruction] };
+    }
+    guarded = true;
+  }
+
+  const update: Record<string, any> = { $set: setValues };
+  if (setValues.status === 'active') update.$unset = { disabledAt: '', disabledBy: '' };
   const rule = await AiAgentCoachingRule.findOneAndUpdate(
-    { _id: req.params.id, organizationId: orgId, status: { $ne: 'deleted' } },
-    { $set: setValues },
+    filter,
+    update,
     { new: true },
   ).lean();
-  if (!rule) throw new ApiError(404, 'Coaching rule not found');
+  if (!rule) {
+    const stillExists = guarded && await AiAgentCoachingRule.exists({ _id: req.params.id, organizationId: orgId, status: { $ne: 'deleted' } });
+    if (stillExists) throw new ApiError(409, 'This coaching changed while you were saving. Reload it and try again.');
+    throw new ApiError(404, 'Coaching rule not found');
+  }
   await writeTrainingAudit({
     organizationId: orgId,
     action: 'legacy_coaching_updated',

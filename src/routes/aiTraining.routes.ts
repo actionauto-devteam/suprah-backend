@@ -3,6 +3,8 @@ import crmAuth from '../middleware/crmAuth.middleware';
 import * as ctrl from '../controllers/aiTraining.controller';
 import * as lab from '../controllers/aiTrainingLab.controller';
 import { trainingLabCheckLimiter, trainingLabWriteLimiter } from '../middleware/trainingLabRateLimit';
+import * as imports from '../controllers/aiTrainingImport.controller';
+import { trainingImportPreviewLimiter, trainingImportWriteLimiter } from '../middleware/trainingImportRateLimit';
 
 const router = express.Router();
 
@@ -36,5 +38,13 @@ router.post('/lab/runs', trainingLabWriteLimiter, lab.createRunHandler);
 router.post('/lab/runs/batch', trainingLabWriteLimiter, lab.createBatchRunHandler);
 router.get('/lab/runs', lab.listRuns);
 router.get('/lab/runs/:id', lab.getRun);
+router.get('/imports/template', imports.getImportTemplate);
+router.post('/imports/preview', trainingImportPreviewLimiter, imports.previewImportHandler);
+router.post('/imports', trainingImportWriteLimiter, imports.commitImportHandler);
+router.get('/imports', imports.listImportsHandler);
+router.get('/imports/:id', imports.getImportHandler);
+router.get('/imports/:id/items/:itemId', imports.getImportItemHandler);
+router.post('/imports/:id/purge-content', trainingImportWriteLimiter, imports.purgeImportHandler);
+router.post('/imports/:id/knowledge', trainingImportWriteLimiter, imports.saveImportToKnowledgeHandler);
 
 export default router;

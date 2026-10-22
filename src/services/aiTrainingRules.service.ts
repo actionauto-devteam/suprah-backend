@@ -11,6 +11,7 @@ import AiTrainingPolicyVersion, {
 } from '../models/AiTrainingPolicyVersion.model';
 import { ApiError } from '../utils/ApiError';
 import { validateOutboundEmailMessage, validateOutboundMessage } from '../utils/aiOutboundSafety';
+import { strictInstructionIssues, strictRuleIssues } from './aiTrainingSafetyGate';
 import {
   appendPolicyVersion,
   auditEntry,
@@ -457,6 +458,18 @@ export function ruleFromSpec(spec: any, policy?: any): StructuredRule {
   }).rule;
 }
 
+export function evaluateRuleForReview(rule: StructuredRule): RuleEvaluation {
+  const evaluation = evaluateStructuredRule(rule);
+  const seen = new Set(evaluation.errors.map((issue) => `${issue.field}:${issue.code}`));
+  const errors = [...evaluation.errors, ...strictRuleIssues(rule).filter((issue) => !seen.has(`${issue.field}:${issue.code}`))];
+  return { ...evaluation, errors, readyToSubmit: errors.length === 0 };
+}
+
+export function reviewBlockers(spec: any, policy?: any): RuleIssue[] {
+  if (spec?.format === 'structured_v1' || policy?.ruleFormat === 'structured_v1') return evaluateRuleForReview(ruleFromSpec(spec, policy)).errors;
+  return strictInstructionIssues(String(spec?.instruction || ''));
+}
+
 function requireParsed(raw: unknown): StructuredRule {
   const { rule, problems } = parseStructuredRule(raw);
   if (problems.length) throw new ApiError(400, problems[0].message, problems);
@@ -478,7 +491,7 @@ function requireExpectedVersion(value: unknown, policy: IAiTrainingPolicy): void
 
 export function previewStructuredRule(raw: unknown) {
   const { rule, problems } = parseStructuredRule(raw);
-  const evaluation = evaluateStructuredRule(rule);
+  const evaluation = evaluateRuleForReview(rule);
   const errors = [...problems, ...evaluation.errors];
   return { rule, problems, ...evaluation, errors, readyToSubmit: errors.length === 0 };
 }
@@ -491,7 +504,7 @@ export async function createStructuredProposal(input: {
 }): Promise<{ policy: IAiTrainingPolicy; evaluation: RuleEvaluation }> {
   const actor = trainingActor(input.user);
   const rule = requireParsed(input.rule);
-  const evaluation = evaluateStructuredRule(rule);
+  const evaluation = evaluateRuleForReview(rule);
   const submit = input.submit === true;
   if (submit && evaluation.errors.length) throw new ApiError(400, 'Fix the highlighted items before submitting', evaluation.errors);
   if (!rule.channels.length) rule.channels = ['sms', 'webchat'];
@@ -543,7 +556,7 @@ export async function saveStructuredVersion(input: {
   const rule = requireParsed(input.rule);
   if (!rule.channels.length) rule.channels = (policy.channels as Channel[])?.length ? [...policy.channels] as Channel[] : ['sms', 'webchat'];
   const changeNote = cleanChangeNote(input.changeNote, mode === 'review');
-  const evaluation = evaluateStructuredRule(rule);
+  const evaluation = evaluateRuleForReview(rule);
   const snapshot = policy.toObject();
   const { updated } = await runTrainingWrite((session) => appendPolicyVersion({
     organizationId: input.organizationId,
@@ -572,7 +585,7 @@ export async function submitStructuredProposal(input: {
   const version: any = await AiTrainingPolicyVersion.findOne({ organizationId: input.organizationId, policyId: policy._id, version: policy.currentVersion }).lean();
   if (!version) throw new ApiError(409, 'The current version could not be found. Save the rule again.');
   if (version.spec?.format !== 'structured_v1') throw new ApiError(409, 'Open this proposal in the rule editor and save it before submitting.');
-  const evaluation = evaluateStructuredRule(ruleFromSpec(version.spec, policy));
+  const evaluation = evaluateRuleForReview(ruleFromSpec(version.spec, policy));
   if (evaluation.errors.length) throw new ApiError(400, 'Fix the highlighted items before submitting', evaluation.errors);
 
   const fromStatus = policy.status as TrainingPolicyStatus;

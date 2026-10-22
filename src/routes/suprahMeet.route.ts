@@ -13,6 +13,7 @@ const router = Router();
 router.post('/guest/:code/request', suprahMeetController.guestRequest);
 router.post('/guest/:code/join',    suprahMeetController.guestJoin);
 router.post('/guest/:code/leave',   suprahMeetController.guestLeave);
+router.post('/guest/:code/captions', suprahMeetController.guestCaptions);
 router.get('/guest/:code/roster',   suprahMeetController.guestRoster);
 router.get('/guest/recording/:code', suprahMeetController.recordingAccess); // token-gated
 

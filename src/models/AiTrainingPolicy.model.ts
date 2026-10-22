@@ -20,7 +20,7 @@ export const TRAINING_POLICY_STATUSES = [
 ] as const;
 export type TrainingPolicyStatus = (typeof TRAINING_POLICY_STATUSES)[number];
 
-export const TRAINING_POLICY_SOURCES = ['coaching_submission', 'manual', 'draft_evaluation', 'train_alex'] as const;
+export const TRAINING_POLICY_SOURCES = ['coaching_submission', 'manual', 'draft_evaluation', 'train_alex', 'podium_import'] as const;
 export type TrainingPolicySource = (typeof TRAINING_POLICY_SOURCES)[number];
 
 export interface TrainingActorRef {
@@ -57,6 +57,11 @@ export interface IAiTrainingPolicy extends Document {
     channel?: 'sms' | 'webchat';
     aiLogId?: mongoose.Types.ObjectId;
     draftId?: mongoose.Types.ObjectId;
+    importBatchId?: mongoose.Types.ObjectId;
+    importItemId?: mongoose.Types.ObjectId;
+    sourceSystem?: 'podium';
+    sourceKey?: string;
+    previousPolicyId?: mongoose.Types.ObjectId;
   };
   currentVersion: number;
   ruleFormat?: TrainingRuleFormat;
@@ -97,6 +102,11 @@ const AiTrainingPolicySchema: Schema<IAiTrainingPolicy> = new Schema(
       channel: { type: String, enum: ['sms', 'webchat'] },
       aiLogId: { type: Schema.Types.ObjectId, ref: 'AiAgentLog' },
       draftId: { type: Schema.Types.ObjectId, ref: 'AiAgentDraft' },
+      importBatchId: { type: Schema.Types.ObjectId, ref: 'AiTrainingImportBatch' },
+      importItemId: { type: Schema.Types.ObjectId, ref: 'AiTrainingImportItem' },
+      sourceSystem: { type: String, enum: ['podium'] },
+      sourceKey: { type: String, trim: true, maxlength: 64 },
+      previousPolicyId: { type: Schema.Types.ObjectId, ref: 'AiTrainingPolicy' },
     },
     currentVersion: { type: Number, default: 1, min: 1 },
     ruleFormat: { type: String, enum: TRAINING_RULE_FORMATS, default: 'instruction' },
@@ -132,6 +142,7 @@ const AiTrainingPolicySchema: Schema<IAiTrainingPolicy> = new Schema(
 AiTrainingPolicySchema.index({ organizationId: 1, status: 1, updatedAt: -1 }, { name: 'ai_training_org_status_recent' });
 AiTrainingPolicySchema.index({ organizationId: 1, 'createdBy.userId': 1, updatedAt: -1 }, { name: 'ai_training_org_author_recent' });
 AiTrainingPolicySchema.index({ organizationId: 1, source: 1, 'sourceRef.messageId': 1 }, { name: 'ai_training_org_source_message' });
+AiTrainingPolicySchema.index({ organizationId: 1, 'sourceRef.importItemId': 1 }, { name: 'ai_training_org_import_item' });
 
 const AiTrainingPolicy = mongoose.model<IAiTrainingPolicy>('AiTrainingPolicy', AiTrainingPolicySchema);
 

@@ -1,6 +1,8 @@
 # Suprah Meet live captions
 
-The meeting host opens the CC panel and starts English (US) live captions. Every attendee, including an admitted external guest, can independently show or hide captions. Hiding the panel or leaving the room does not stop captions for other attendees. Only the host can stop shared transcription.
+Any joined attendee, including an admitted external guest, clicks CC to request English (US) live captions immediately. No host approval or separate Start action is required. Each viewer independently shows or hides their caption panel; hiding the panel or leaving does not stop captions for other attendees. The shared transcription stream continues until the meeting ends.
+
+Authenticated requests must match an active participant in the user's organization. Guest requests need a valid pass for the exact meeting and organization, plus an active guest participant entry. Waiting-room users and people who already left cannot start captions. A short database claim coordinates simultaneous CC requests; existing streams are reused, and failed starts can be retried.
 
 Captions use Chime's meeting audio and transcript events. They do not depend on browser speech recognition, recording, or access to the viewer's microphone. Partial phrases update in place, speaker identities resolve against the roster, and recent captions expire from the local display. The application does not persist these live captions as a transcript or send caption text over its general chat channel.
 
@@ -19,4 +21,4 @@ References: [AWS account configuration](https://docs.aws.amazon.com/chime-sdk/la
 
 Backend unit tests mock AWS and database operations. Frontend tests cover transcript revisions, speaker separation, bounded local buffers and rendered caption controls. These do not establish that the deployed AWS identity has the required permissions or that audio-to-text is operational.
 
-Before release acceptance, use two signed-in devices and an admitted guest: host starts captions, each device speaks, viewers independently toggle CC, host stops captions, then repeat after reconnecting. Check a phone in portrait/landscape and verify that captions, video and call controls remain usable. Test provider failures without losing the meeting's audio/video session.
+Before release acceptance, use two signed-in devices and an admitted guest: a non-host clicks CC, each device speaks, viewers independently toggle CC, then repeat after reconnecting. Verify that concurrent CC clicks reuse one stream and hiding one viewer's captions does not interrupt anyone else. Check a phone in portrait/landscape and verify that captions, video and call controls remain usable. Test provider failures without losing the meeting's audio/video session.

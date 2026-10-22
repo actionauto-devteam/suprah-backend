@@ -50,6 +50,7 @@ export interface IMeeting extends Document {
   reminderClaimUntil?: Date | null;
   captionsEnabled: boolean;
   captionLanguage: string;
+  captionStartClaimUntil?: Date | null;
   chimeMeetingId?: string;
   mediaRegion?: string;
   participants: IMeetingParticipant[];
@@ -108,6 +109,7 @@ const MeetingSchema = new Schema<IMeeting>(
     reminderClaimUntil: { type: Date, default: null },
     captionsEnabled: { type: Boolean, default: false },
     captionLanguage: { type: String, default: 'en-US' },
+    captionStartClaimUntil: { type: Date, default: null },
     chimeMeetingId: { type: String },
     mediaRegion: { type: String },
     participants: [
