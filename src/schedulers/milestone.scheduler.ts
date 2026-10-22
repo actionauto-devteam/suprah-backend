@@ -10,7 +10,8 @@ import { getIO as getSupraSpaceIO } from "../socket/supraspace.socket";
 import logger from "../utils/logger";
 
 const CRON_SCHEDULE = process.env.MILESTONE_CRON_SCHEDULE || "0 8 * * *";
-const GENERAL_CHAT_GREETINGS_ENABLED = process.env.MILESTONE_GENERAL_GREETINGS_ENABLED === "true";
+const GENERAL_CHAT_GREETINGS_ENABLED =
+  process.env.MILESTONE_GENERAL_GREETINGS_ENABLED === "true";
 // Kept as-is (not renamed) — this is a stored CrmUser.username value used to
 // look up the existing per-org "system sender" record; changing it would
 // orphan already-created system accounts instead of finding them.
@@ -122,7 +123,10 @@ async function postFeedAnnouncement(
   authorAvatar?: string,
 ): Promise<boolean> {
   if (await alreadyPostedToday(userId, organizationId, authorName, content)) {
-    logger.info({ userId, authorName }, "[MilestoneScheduler] Skipping duplicate; already posted today");
+    logger.info(
+      { userId, authorName },
+      "[MilestoneScheduler] Skipping duplicate; already posted today",
+    );
     return false;
   }
 
@@ -229,19 +233,32 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
 
   let announcementsSent = 0;
 
-  const birthdayUsers = users.filter((user) => user.organizationId && user.birthday && isTodayAnniversary(user.birthday));
-  const birthdayOrgIds = [...new Set(birthdayUsers.map((user) => user.organizationId!.toString()))];
+  const birthdayUsers = users.filter(
+    (user) =>
+      user.organizationId && user.birthday && isTodayAnniversary(user.birthday),
+  );
+  const birthdayOrgIds = [
+    ...new Set(birthdayUsers.map((user) => user.organizationId!.toString())),
+  ];
 
   for (const orgId of birthdayOrgIds) {
-    const celebrants = birthdayUsers.filter((user) => user.organizationId!.toString() === orgId);
+    const celebrants = birthdayUsers.filter(
+      (user) => user.organizationId!.toString() === orgId,
+    );
     const names = celebrants.map((user) => user.fullName).filter(Boolean);
     if (!names.length) continue;
 
     const systemSender = await getActionAutoTeamSender(orgId);
-    const content = names.length === 1
-      ? `🎂 Happy Birthday to ${formatCelebrantNames(names)}! Wishing you a wonderful day filled with joy and good vibes. 🥳\n\nGreetings from ${systemSender.fullName} ✨`
-      : `🎂 Happy Birthday to these wonderful people: ${formatCelebrantNames(names)}! Wishing you all a day full of joy, laughter, and good vibes. 🥳🎉\n\nGreetings from ${systemSender.fullName} ✨`;
-    const posted = await postFeedAnnouncement(systemSender._id.toString(), orgId, content, systemSender.fullName);
+    const content =
+      names.length === 1
+        ? `🎂 Happy Birthday to ${formatCelebrantNames(names)}! Wishing you a wonderful day filled with joy and good vibes. 🥳\n\nGreetings from ${systemSender.fullName} ✨`
+        : `🎂 Happy Birthday to these wonderful people: ${formatCelebrantNames(names)}! Wishing you all a day full of joy, laughter, and good vibes. 🥳🎉\n\nGreetings from ${systemSender.fullName} ✨`;
+    const posted = await postFeedAnnouncement(
+      systemSender._id.toString(),
+      orgId,
+      content,
+      systemSender.fullName,
+    );
 
     if (posted) {
       await postSupraSpaceAnnouncement(orgId, content);
@@ -265,18 +282,29 @@ async function runMilestoneCheck(): Promise<MilestoneStats> {
       if (years > 0) {
         const dealerTeamName = await resolveDealerTeamName(orgId);
         const content = `🎉 Happy ${years}-year work anniversary to **${user.fullName}**! Thank you for your continued dedication. 🥳\n\nGreetings from ${dealerTeamName} ✨`;
-        const posted = await postFeedAnnouncement(userId, orgId, content, dealerTeamName);
+        const posted = await postFeedAnnouncement(
+          userId,
+          orgId,
+          content,
+          dealerTeamName,
+        );
 
         if (posted) {
           await postSupraSpaceAnnouncement(orgId, content);
           announcementsSent++;
-          logger.info({ userId, fullName: user.fullName, years }, "[MilestoneScheduler] Work anniversary announcement posted");
+          logger.info(
+            { userId, fullName: user.fullName, years },
+            "[MilestoneScheduler] Work anniversary announcement posted",
+          );
         }
       }
     }
   }
 
-  logger.info({ usersScanned: users.length, announcementsSent }, "[MilestoneScheduler] Check complete");
+  logger.info(
+    { usersScanned: users.length, announcementsSent },
+    "[MilestoneScheduler] Check complete",
+  );
   return { usersScanned: users.length, announcementsSent };
 }
 

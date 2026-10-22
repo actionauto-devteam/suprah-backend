@@ -39,6 +39,7 @@ import { resolveVehicleContextForLead, UNMAPPED_LEAD_LOCATION_LABEL } from '../s
 import { triggerAiReplyForNewInquiry } from '../services/communication.service';
 import { triggerAiEmailReplyForNewInquiry } from '../services/aiEmailReply.service';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
+import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
@@ -228,7 +229,7 @@ export async function sendLeadReplyEmail(
   orgId: string,
   attachments: Express.Multer.File[] = [],
   forcedSenderEmail?: string,
-  options: { beforeDispatch?: () => Promise<void> } = {},
+  options: { beforeDispatch?: () => Promise<void>; requireVerifiedRecipient?: boolean } = {},
 ) {
   if (isLocalUiAcceptanceMode()) {
     throw new Error('[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Gmail send.');
@@ -238,6 +239,14 @@ export async function sendLeadReplyEmail(
     organizationId: orgId,
     isActive: true,
   });
+
+  const verifiedRecipient = options.requireVerifiedRecipient
+    ? resolveLeadReplyRecipient(lead, [config?.gmailAddress, config?.leadSourceEmail])
+    : null;
+
+  if (options.requireVerifiedRecipient && !verifiedRecipient) {
+    throw new LeadReplyRecipientError();
+  }
 
   const oauth2Client = await getCentralOAuth2Client(orgId);
   const gmail = google.gmail({
@@ -254,6 +263,7 @@ export async function sendLeadReplyEmail(
     'actionautoutah.dev@gmail.com';
 
   const recipientEmail =
+    verifiedRecipient ||
     lead.senderEmail ||
     lead.email;
 
@@ -1363,9 +1373,13 @@ export const updateLead = async (req: Request, res: Response) => {
     if (isClosing) {
       try {
         const closingMessage = `Hi ${lead.firstName || 'there'},\n\nWe've marked your inquiry as resolved. If you have any more questions, feel free to reply to this email anytime.\n\nThanks!`;
-        await sendLeadReplyEmail(lead, closingMessage, userId, orgId as string);
+        await sendLeadReplyEmail(lead, closingMessage, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
       } catch (emailError) {
-        console.error('[STATUS] Failed to send closed-ticket email to customer:', emailError);
+        if (emailError instanceof LeadReplyRecipientError) {
+          logger.info({ leadId: lead._id }, 'Closed-ticket email skipped: no customer email on file');
+        } else {
+          console.error('[STATUS] Failed to send closed-ticket email to customer:', emailError);
+        }
       }
     }
 
@@ -1741,8 +1755,17 @@ export const replyToInquiry = async (
         userId,
         orgId,
         attachments,
+        undefined,
+        { requireVerifiedRecipient: true },
       );
     } catch (gmailError) {
+      if (gmailError instanceof LeadReplyRecipientError) {
+        return res.status(400).json({
+          message: gmailError.message,
+          code: gmailError.code,
+        });
+      }
+
       console.error(
         '[REPLY] Failed to send reply via centralized account:',
         gmailError,
@@ -1855,9 +1878,14 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
     }
 
     const leads = await Lead.find({ _id: { $in: leadIds }, organizationId: orgId });
+    const replyConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).lean();
+    const dealershipAddresses = [replyConfig?.gmailAddress, replyConfig?.leadSourceEmail];
 
     const results = await Promise.allSettled(
       leads.map(async (lead) => {
+        if (!resolveLeadReplyRecipient(lead, dealershipAddresses)) {
+          throw new LeadReplyRecipientError();
+        }
         pushStatusHistory(lead, lead.status, 'Contacted', userId);
         lead.status = 'Contacted';
         lead.isRead = true;
@@ -1865,7 +1893,7 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
         lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
         await lead.save();
 
-        await sendLeadReplyEmail(lead, message, userId, orgId as string);
+        await sendLeadReplyEmail(lead, message, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
 
         await activityService.createActivity({
           userId: userId.toString(),

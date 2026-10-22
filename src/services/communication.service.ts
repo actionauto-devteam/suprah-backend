@@ -1371,6 +1371,12 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
 }
 
 /** Delivery receipts (message.sent / message.finalized). */
+const SMS_STATUS_ALLOWED_FROM: Record<string, string[]> = {
+  sent: ["queued", "pending_reconciliation"],
+  delivered: ["queued", "sent", "pending_reconciliation"],
+  failed: ["queued", "sent", "pending_reconciliation"],
+};
+
 export async function handleSmsStatus(payload: any) {
   const providerMessageId = payload?.id;
   if (!providerMessageId) return;
@@ -1390,7 +1396,7 @@ export async function handleSmsStatus(payload: any) {
     update.errorDetail = JSON.stringify(toEntry.errors).slice(0, 500);
 
   const message = await CommunicationMessage.findOneAndUpdate(
-    { providerMessageId },
+    { providerMessageId, status: { $in: SMS_STATUS_ALLOWED_FROM[status] } },
     { $set: update },
     { new: true }
   );

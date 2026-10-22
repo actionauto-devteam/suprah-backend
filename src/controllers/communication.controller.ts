@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { isValidObjectId } from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -44,6 +45,26 @@ export function actor(req: Request) {
   };
 }
 const orgOf = (req: Request) => (req as any).orgId;
+
+export const SMS_OPTED_OUT_MESSAGE =
+  "This customer replied STOP, so texting is turned off. Texting turns back on only after they reply START.";
+
+const hasTextablePhone = (phone: unknown) => {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+};
+
+async function assertManualSmsAllowed(orgId: any, phone: string, leadId?: unknown) {
+  if (leadId) {
+    const leadInOrg = isValidObjectId(leadId)
+      ? await Lead.exists({ _id: leadId, organizationId: orgId })
+      : null;
+    if (!leadInOrg) throw new ApiError(404, "Lead not found");
+  }
+  if (await comm.isSmsOptedOut(orgId, phone)) {
+    throw new ApiError(403, SMS_OPTED_OUT_MESSAGE, [{ code: "SMS_OPTED_OUT" }]);
+  }
+}
 
 /* ------------------------------ conversations --------------------------- */
 
@@ -98,6 +119,7 @@ export const replyToConversation = asyncHandler(async (req: Request, res: Respon
 
   const conversation = await Conversation.findOne({ _id: id, orgId });
   if (!conversation) throw new ApiError(404, "Conversation not found");
+  await assertManualSmsAllowed(orgId, conversation.customerPhone);
 
   const result = await comm.sendSmsFromUser({
     orgId,
@@ -171,6 +193,10 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { toPhone, body, customerId, customerName, leadId } = req.body || {};
   if (!toPhone) throw new ApiError(400, "toPhone is required");
+  if (!hasTextablePhone(toPhone)) {
+    throw new ApiError(400, "Add a valid phone number before sending a text.");
+  }
+  await assertManualSmsAllowed(orgId, toPhone, leadId);
 
   const result = await comm.sendSmsFromUser({
     orgId,
@@ -619,8 +645,11 @@ export const getThreadByPhone = asyncHandler(async (req: Request, res: Response)
   const leadId = req.query.leadId ? String(req.query.leadId) : undefined;
   if (!phone) throw new ApiError(400, "phone is required");
 
-  const data = await comm.getThreadByPhone(orgId, phone, leadId);
-  res.json(new ApiResponse(200, data, "Thread"));
+  const [data, smsOptedOut] = await Promise.all([
+    comm.getThreadByPhone(orgId, phone, leadId),
+    comm.isSmsOptedOut(orgId, phone),
+  ]);
+  res.json(new ApiResponse(200, { ...data, smsOptedOut }, "Thread"));
 });
 
 /** Caller record for the calls workspace (customer or lead by phone). */

@@ -191,7 +191,7 @@ describe('sendSmsFromUser — delivery outcome vs. local recording failure', () 
     const result = await handleSmsStatus({ id: 'telnyx-msg-never-persisted', to: [{ status: 'delivered' }] });
 
     expect(mockMessageFindOneAndUpdate).toHaveBeenCalledWith(
-      { providerMessageId: 'telnyx-msg-never-persisted' },
+      { providerMessageId: 'telnyx-msg-never-persisted', status: { $in: ['queued', 'sent', 'pending_reconciliation'] } },
       { $set: expect.objectContaining({ status: 'delivered' }) },
       { new: true },
     );
@@ -209,7 +209,7 @@ describe('sendSmsFromUser — delivery outcome vs. local recording failure', () 
     await handleSmsStatus({ id: 'telnyx-msg-persisted', to: [{ status: 'delivered' }] });
 
     expect(mockMessageFindOneAndUpdate).toHaveBeenCalledWith(
-      { providerMessageId: 'telnyx-msg-persisted' },
+      { providerMessageId: 'telnyx-msg-persisted', status: { $in: ['queued', 'sent', 'pending_reconciliation'] } },
       { $set: expect.objectContaining({ status: 'delivered' }) },
       { new: true },
     );

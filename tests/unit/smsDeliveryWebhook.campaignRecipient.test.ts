@@ -151,9 +151,28 @@ describe('handleSmsStatus — SMS campaign recipient delivery-status reconciliat
     await handleSmsStatus({ id: 'telnyx-msg-8', to: [{ status: 'delivered' }] });
 
     expect(mockMessageFindOneAndUpdate).toHaveBeenCalledWith(
-      { providerMessageId: 'telnyx-msg-8' },
+      { providerMessageId: 'telnyx-msg-8', status: { $in: ['queued', 'sent', 'pending_reconciliation'] } },
       { $set: { status: 'delivered', deliveredAt: expect.any(Date) } },
       { new: true },
     );
+  });
+
+  it('never lets a late "sent" event overwrite a final status', async () => {
+    await handleSmsStatus({ id: 'telnyx-msg-9', to: [{ status: 'sent' }] });
+    const [filter] = mockMessageFindOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ providerMessageId: 'telnyx-msg-9', status: { $in: ['queued', 'pending_reconciliation'] } });
+  });
+
+  it('only marks a message failed while it is still in flight', async () => {
+    await handleSmsStatus({ id: 'telnyx-msg-10', to: [{ status: 'delivery_failed', errors: [{ code: '40300' }] }] });
+    const [filter, update] = mockMessageFindOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ providerMessageId: 'telnyx-msg-10', status: { $in: ['queued', 'sent', 'pending_reconciliation'] } });
+    expect(update.$set.status).toBe('failed');
+  });
+
+  it('does not emit a status event when no in-flight message matched', async () => {
+    mockMessageFindOneAndUpdate.mockResolvedValue(null);
+    await handleSmsStatus({ id: 'telnyx-msg-11', to: [{ status: 'sent' }] });
+    expect(mockEmitToOrg).not.toHaveBeenCalled();
   });
 });

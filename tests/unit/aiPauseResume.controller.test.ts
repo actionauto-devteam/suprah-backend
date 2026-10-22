@@ -13,9 +13,9 @@ jest.mock('../../src/models/WebChatSession.model', () => ({
   default: { findOneAndUpdate: mockSessionFindOneAndUpdate },
 }));
 const mockSendSmsFromUser = jest.fn();
-jest.mock('../../src/services/communication.service', () => ({ sendSmsFromUser: mockSendSmsFromUser }));
+jest.mock('../../src/services/communication.service', () => ({ sendSmsFromUser: mockSendSmsFromUser, isSmsOptedOut: jest.fn().mockResolvedValue(false) }));
 jest.mock('../../src/services/telnyx.service', () => ({}));
-jest.mock('../../src/models/lead.model', () => ({ __esModule: true, default: {} }));
+jest.mock('../../src/models/lead.model', () => ({ __esModule: true, default: { exists: jest.fn().mockResolvedValue({ _id: '64b7f0c2a1b2c3d4e5f60718' }) } }));
 jest.mock('../../src/models/Appointment.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/WebChatMessage.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/models/MailConversation.model', () => ({ __esModule: true, default: {} }));
@@ -137,12 +137,12 @@ describe('actor() — staff display-name resolution', () => {
   it('staff-authored SMS attribution (sendMessage) uses the resolved CrmUser fullName, not the email, matching the pause-attribution fix', async () => {
     mockSendSmsFromUser.mockResolvedValue({
       message: { _id: 'msg-1' },
-      conversation: { _id: 'conv-1', leadId: 'lead-1' },
+      conversation: { _id: 'conv-1', leadId: '64b7f0c2a1b2c3d4e5f60718' },
     });
     const req: any = {
       orgId: 'org-1',
       crmUser: { _id: 'crm-1', fullName: 'Dev Admin', email: 'dev-0001@local.test' },
-      body: { toPhone: '+18015550142', body: 'hello', leadId: 'lead-1' },
+      body: { toPhone: '+18015550142', body: 'hello', leadId: '64b7f0c2a1b2c3d4e5f60718' },
     };
     await invoke(sendMessage, req);
 
