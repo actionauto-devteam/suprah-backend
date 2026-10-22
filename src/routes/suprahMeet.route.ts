@@ -23,6 +23,7 @@ router.post('/meetings',                        suprahMeetController.createMeeti
 router.get('/meetings',                         suprahMeetController.listMeetings);
 router.get('/alerts',                           suprahMeetController.getAlerts);
 router.get('/meetings/:code',                   suprahMeetController.getMeeting);
+router.get('/meetings/:code/people',            suprahMeetController.getPeople);
 router.patch('/meetings/:code',                 suprahMeetController.updateMeeting);
 router.delete('/meetings/:code',                suprahMeetController.deleteMeeting);
 

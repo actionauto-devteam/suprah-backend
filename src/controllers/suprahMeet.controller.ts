@@ -853,6 +853,63 @@ const getMeeting = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting fetched'));
 });
 
+const MEET_PEOPLE_LIMIT = 500;
+
+const getPeople = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  const hostId = meeting.hostCrmUserId.toString();
+  const knownIds = new Set<string>([hostId]);
+  (meeting.invitees ?? []).forEach((id: any) => knownIds.add(id.toString()));
+  const joinedById = new Map<string, any>();
+  for (const p of meeting.participants as any[]) {
+    if (!p.crmUserId) continue;
+    const id = p.crmUserId.toString();
+    knownIds.add(id);
+    joinedById.set(id, p);
+  }
+
+  const users = await CrmUser.find(meeting.inviteAll
+    ? {
+        organizationId: user.organizationId,
+        isSystem: { $ne: true },
+        $or: [{ isActive: true }, { _id: { $in: [...knownIds] } }],
+      }
+    : { organizationId: user.organizationId, _id: { $in: [...knownIds] } })
+    .select('fullName avatar department')
+    .limit(MEET_PEOPLE_LIMIT)
+    .lean();
+
+  const people = (users as any[]).map((u) => {
+    const id = u._id.toString();
+    const joined = joinedById.get(id);
+    return {
+      crmUserId: id,
+      fullName: u.fullName,
+      avatar: u.avatar ?? joined?.avatar ?? null,
+      department: u.department ?? null,
+      isHost: id === hostId,
+      isGuest: false,
+      joinedBefore: Boolean(joined),
+      leftAt: joined?.leftAt ?? null,
+    };
+  });
+
+  const guests = (meeting.participants as any[])
+    .filter((p) => p.isGuest && p.guestId)
+    .map((p) => ({
+      crmUserId: `guest:${p.guestId}`,
+      fullName: p.fullName,
+      avatar: null,
+      department: null,
+      isHost: false,
+      isGuest: true,
+      joinedBefore: true,
+      leftAt: p.leftAt ?? null,
+    }));
+
+  res.json(new ApiResponse(200, { hostCrmUserId: hostId, people: [...people, ...guests] }, 'People fetched'));
+});
+
 async function ensureLiveCaptions(req: Request, res: Response, meeting: IMeeting) {
   if (req.body?.enabled !== true) {
     throw new ApiError(400, 'Hide captions on your own screen to turn them off.');
@@ -1115,7 +1172,7 @@ function serializeMeeting(m: any) {
 }
 
 export default {
-  createMeeting, listMeetings, getMeeting, joinMeeting, leaveMeeting, endMeeting, setCaptions,
+  createMeeting, listMeetings, getMeeting, getPeople, joinMeeting, leaveMeeting, endMeeting, setCaptions,
   deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting,
   guestRequest, guestJoin, guestLeave, guestRoster, guestCaptions,
   getDistribution, distributeRecording, recordingAccess, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
