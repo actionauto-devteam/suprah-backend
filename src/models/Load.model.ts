@@ -605,6 +605,9 @@ const loadSchema = new Schema<ILoad>(
 // ── Indexes ──
 loadSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
 loadSchema.index({ organizationId: 1, assignedDriverId: 1, status: 1 });
+// A driver's loads across every organization (shared driver pool), for
+// example the trip they're on or their latest delivery.
+loadSchema.index({ assignedDriverId: 1, status: 1, deliveredAt: -1 });
 loadSchema.index(
   { organizationId: 1, loadNumber: 1 },
   {

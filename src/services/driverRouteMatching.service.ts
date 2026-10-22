@@ -10,7 +10,12 @@ export type PreferredRouteCompatibilityStatus =
   | "preferred"
   | "not_preferred"
   | "unknown";
-export type ProximityCompatibilitySource = "live_gps" | "home_base" | null;
+export type ProximityCompatibilitySource =
+  | "live_gps"
+  | "shared_location"
+  | "last_delivery"
+  | "home_base"
+  | null;
 
 export interface DriverRouteCompatibilitySignals {
   serviceArea: {
@@ -32,13 +37,37 @@ export interface DriverRouteCompatibilitySignals {
   proximity: {
     distanceToPickupMiles: number | null;
     source: ProximityCompatibilitySource;
+    // When the position was measured, or when the last delivery was made.
     lastSeenAt: string | null;
+    // True when the distance is rounded (see approximateMiles).
+    approximate?: boolean;
   };
 }
 
-interface CoordinatePair {
+export interface CoordinatePair {
   lat: number;
   lon: number;
+}
+
+/**
+ * Where Dispatch's distance is measured from before a load is assigned, when
+ * it isn't home base (see driverDispatchProximity.service). It never leaves
+ * the server; only a rounded distance does.
+ */
+export interface DispatchProximityOrigin {
+  coords: CoordinatePair;
+  source: "shared_location" | "last_delivery";
+  at: Date;
+}
+
+// Distances from a dispatch origin are rounded to 5 miles, so distances to
+// several pickups can't be used to work out where the driver is.
+const APPROXIMATE_MILES_STEP = 5;
+function approximateMiles(miles: number): number {
+  return Math.max(
+    APPROXIMATE_MILES_STEP,
+    Math.round(miles / APPROXIMATE_MILES_STEP) * APPROXIMATE_MILES_STEP,
+  );
 }
 
 const PRESENCE_STALE_MS = GPS_RECENT_FOR_DISTANCE_MS;
@@ -108,7 +137,7 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
-function coordinatesFromUnknown(value: unknown): CoordinatePair | null {
+export function coordinatesFromUnknown(value: unknown): CoordinatePair | null {
   if (Array.isArray(value) && value.length >= 2) {
     const lon = finiteNumber(value[0]);
     const lat = finiteNumber(value[1]);
@@ -332,7 +361,7 @@ async function resolvePickupCoordinates(load: any): Promise<CoordinatePair | nul
   return getCoordinatesFromZip(zip.slice(0, 5));
 }
 
-function resolveLiveCoordinates(location: any): {
+export function resolveLiveCoordinates(location: any): {
   coords: CoordinatePair | null;
   lastSeenAt: string | null;
 } {
@@ -351,6 +380,9 @@ export async function evaluateDriverRouteCompatibility(
   profile: any | null | undefined,
   load: any,
   location?: any | null,
+  // Dispatch's views before assignment pass no live location; this is the
+  // only other place their distance can be measured from besides home base.
+  dispatchOrigin?: DispatchProximityOrigin | null,
 ): Promise<DriverRouteCompatibilitySignals> {
   const [pickupCoords, homeBaseCoords] = await Promise.all([
     resolvePickupCoordinates(load),
@@ -417,14 +449,19 @@ export async function evaluateDriverRouteCompatibility(
     }
   }
 
+  // Measured from, in order: the live location given (the driver's own views),
+  // the dispatch origin, then home base.
   const live = resolveLiveCoordinates(location);
-  const proximityOrigin = live.coords ?? homeBaseCoords;
+  const origin = live.coords ? null : dispatchOrigin ?? null;
+  const proximityOrigin = live.coords ?? origin?.coords ?? homeBaseCoords;
   const proximitySource: ProximityCompatibilitySource = live.coords
     ? "live_gps"
-    : homeBaseCoords
-      ? "home_base"
-      : null;
-  const distanceToPickupMiles =
+    : origin
+      ? origin.source
+      : homeBaseCoords
+        ? "home_base"
+        : null;
+  const exactMiles =
     pickupCoords && proximityOrigin
       ? calculateDistance(
           proximityOrigin.lat,
@@ -433,6 +470,9 @@ export async function evaluateDriverRouteCompatibility(
           pickupCoords.lon,
         )
       : null;
+  const approximate = Boolean(origin) && exactMiles != null;
+  const distanceToPickupMiles =
+    approximate && exactMiles != null ? approximateMiles(exactMiles) : exactMiles;
 
   return {
     serviceArea: {
@@ -454,7 +494,8 @@ export async function evaluateDriverRouteCompatibility(
     proximity: {
       distanceToPickupMiles,
       source: proximitySource,
-      lastSeenAt: live.lastSeenAt,
+      lastSeenAt: origin ? origin.at.toISOString() : live.lastSeenAt,
+      ...(approximate ? { approximate: true } : {}),
     },
   };
 }
