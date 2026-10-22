@@ -13,6 +13,7 @@
  *   AMAZON_LOCATION_ROUTES_ENABLED     "true" to show routes and arrival times
  *   AMAZON_LOCATION_REGION             AWS region (default AWS_REGION, then us-west-2)
  *   AMAZON_LOCATION_TRAVEL_MODE        "Truck" (default) or "Car"
+ *   AMAZON_LOCATION_ROUTE_PREFERENCE   "fastest" (default) or "shortest" distance
  *   AMAZON_LOCATION_ROUTES_PER_MINUTE  safety cap on route and address requests (10–600, default 60)
  *   AMAZON_LOCATION_TRUCK_HEIGHT_CM    truck profile (default 411 cm = 13 ft 6 in)
  *   AMAZON_LOCATION_TRUCK_LENGTH_CM    truck profile (default 2286 cm = 75 ft)
@@ -31,6 +32,8 @@ export type AmazonLocationConfig = {
   routesEnabled: boolean;
   region: string;
   travelMode: "Truck" | "Car";
+  /** Fastest drive time (with traffic) or shortest distance; both stay truck-legal. */
+  routePreference: "fastest" | "shortest";
   routesPerMinute: number;
   truck: TruckProfile;
 };
@@ -46,6 +49,7 @@ export function getAmazonLocationConfig(env: Env = process.env): AmazonLocationC
     routesEnabled: String(env.AMAZON_LOCATION_ROUTES_ENABLED ?? "").trim().toLowerCase() === "true",
     region: /^[a-z]{2}(-[a-z]+)+-\d$/.test(region) ? region : "us-west-2",
     travelMode: String(env.AMAZON_LOCATION_TRAVEL_MODE ?? "").trim().toLowerCase() === "car" ? "Car" : "Truck",
+    routePreference: String(env.AMAZON_LOCATION_ROUTE_PREFERENCE ?? "").trim().toLowerCase() === "shortest" ? "shortest" : "fastest",
     routesPerMinute: bounded(env.AMAZON_LOCATION_ROUTES_PER_MINUTE, 60, 10, 600),
     // A typical US car-hauler (tractor and trailer at the legal limits).
     truck: {

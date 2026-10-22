@@ -7,11 +7,19 @@ describe('Amazon Location settings', () => {
       routesEnabled: false,
       region: 'us-west-2',
       travelMode: 'Truck',
+      routePreference: 'fastest',
       routesPerMinute: 60,
       truck: { heightCm: 411, lengthCm: 2286, grossWeightKg: 36_287 },
     });
     expect(getAmazonLocationConfig({ AMAZON_LOCATION_ROUTES_ENABLED: 'TRUE ' }).routesEnabled).toBe(true);
     expect(getAmazonLocationConfig({ AMAZON_LOCATION_ROUTES_ENABLED: 'yes' }).routesEnabled).toBe(false);
+  });
+
+  it('plans the fastest route unless the shortest distance is chosen', () => {
+    expect(getAmazonLocationConfig({ AMAZON_LOCATION_ROUTE_PREFERENCE: ' Shortest ' }).routePreference).toBe('shortest');
+    expect(getAmazonLocationConfig({ AMAZON_LOCATION_ROUTE_PREFERENCE: 'fastest' }).routePreference).toBe('fastest');
+    // Anything else keeps the fastest route.
+    expect(getAmazonLocationConfig({ AMAZON_LOCATION_ROUTE_PREFERENCE: 'cheapest' }).routePreference).toBe('fastest');
   });
 
   it('ignores settings outside safe limits', () => {

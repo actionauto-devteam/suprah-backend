@@ -178,10 +178,12 @@ beforeEach(async () => {
   mockPlacesSend.mockReset();
   resetLoadRouteForTests();
   delete process.env.AMAZON_LOCATION_ROUTES_ENABLED;
+  delete process.env.AMAZON_LOCATION_ROUTE_PREFERENCE;
 });
 
 afterAll(async () => {
   delete process.env.AMAZON_LOCATION_ROUTES_ENABLED;
+  delete process.env.AMAZON_LOCATION_ROUTE_PREFERENCE;
   if (mongoose.connection.readyState !== 1) {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/action-auto-test');
   }
@@ -208,6 +210,7 @@ describe('Best route and arrival time', () => {
     expect(data).toMatchObject({
       available: true,
       stop: 'delivery',
+      optimizedFor: 'fastest',
       durationSeconds: 7200,
       distanceMeters: 160_000,
       traffic: { level: 'heavy', delaySeconds: 1800, comparedWithUsual: 'worse' },
@@ -264,6 +267,22 @@ describe('Best route and arrival time', () => {
     expect(input.Waypoints).toEqual([{ Position: [PICKUP.lng, PICKUP.lat] }]);
     expect(input.Destination).toEqual([DELIVERY.lng, DELIVERY.lat]);
     await Load.updateOne({ _id: load._id }, { $unset: { 'pickupLocation.coordinates': 1 } });
+  });
+
+  it('plans the shortest distance instead when that is chosen, still for a truck', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    process.env.AMAZON_LOCATION_ROUTE_PREFERENCE = 'shortest';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+
+    const res = await staffRoute().expect(200);
+    expect(res.body.data).toMatchObject({ available: true, optimizedFor: 'shortest' });
+    const input = mockRoutesSend.mock.calls[0][0].input;
+    expect(input).toMatchObject({
+      OptimizeRoutingFor: 'ShortestRoute',
+      TravelMode: 'Truck',
+      Traffic: { Usage: 'UseTrafficData' },
+    });
+    expect(loadRouteHealthSnapshot()).toMatchObject({ routePreference: 'shortest' });
   });
 
   it('reuses the route for 2 minutes for everyone looking at the load', async () => {

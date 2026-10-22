@@ -20,7 +20,8 @@ import { distanceToLineMeters, simplifyLine, type TracePoint } from "./routeTrac
  * Location Service:
  *
  * 1. The fastest truck-legal route from the driver's latest position, with
- *    live traffic (Amazon Location Routes, DepartNow). Before pickup the same
+ *    live traffic (Amazon Location Routes, DepartNow), or the shortest one
+ *    when AMAZON_LOCATION_ROUTE_PREFERENCE=shortest. Before pickup the same
  *    request also plans the rest of the trip, from the pickup to the delivery.
  * 2. The arrival time at the next stop, adjusted a little by how this driver
  *    has actually been moving over the last 30 minutes (bounded; see
@@ -75,6 +76,8 @@ export type LoadRoute =
   | {
       available: true;
       stop: Stop;
+      /** Which route was planned: the fastest drive time or the shortest distance. */
+      optimizedFor: "fastest" | "shortest";
       /** Seconds from now, including the driver-pace adjustment. */
       durationSeconds: number;
       arrivalAt: string;
@@ -374,7 +377,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
               },
             }
           : {}),
-        OptimizeRoutingFor: "FastestRoute",
+        OptimizeRoutingFor: config.routePreference === "shortest" ? "ShortestRoute" : "FastestRoute",
         LegGeometryFormat: "Simple",
         LegAdditionalFeatures: ["Summary", "TypicalDuration", "Incidents"],
       }),
@@ -447,6 +450,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
     result: {
       available: true,
       stop,
+      optimizedFor: config.routePreference,
       durationSeconds,
       arrivalAt: new Date(arrivalMs).toISOString(),
       distanceMeters: Math.round(distance),
@@ -490,11 +494,12 @@ async function leftTheRoute(load: RouteLoad, cached: CachedRoute): Promise<boole
  * minutes per load, or planned again sooner when the driver leaves the route.
  */
 export async function getLoadRoute(load: RouteLoad): Promise<LoadRoute> {
-  if (!getAmazonLocationConfig().routesEnabled) return unavailable("routes_off");
+  const config = getAmazonLocationConfig();
+  if (!config.routesEnabled) return unavailable("routes_off");
   const stop = nextStopFor(load.status);
   if (!stop || !load.assignedDriverId) return unavailable("not_tracked");
 
-  const key = `${String(load._id)}:${stop}:${stopsKey(load)}`;
+  const key = `${String(load._id)}:${stop}:${config.routePreference}:${stopsKey(load)}`;
   const cached = results.get(key);
   if (cached && Date.now() - cached.at < ROUTE_REUSE_MS) {
     if (!(await leftTheRoute(load, cached))) {
@@ -524,6 +529,7 @@ export function loadRouteHealthSnapshot() {
     routesEnabled: config.routesEnabled,
     region: config.region,
     travelMode: config.travelMode,
+    routePreference: config.routePreference,
     routesPerMinute: config.routesPerMinute,
     truck: config.truck,
     ...health,
