@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockLeadFind = jest.fn();
 const mockLeadFindOneAndUpdate = jest.fn();
 const mockLeadUpdateOne = jest.fn();
@@ -56,7 +70,7 @@ jest.mock('../../src/utils/sendingWindow', () => ({
 
 jest.mock('../../src/utils/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), error: jest.fn() },
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 import { runLeadNurtureSweep } from '../../src/schedulers/leadNurture.scheduler';
@@ -155,6 +169,53 @@ describe('lead nurture scheduler', () => {
         }),
       }),
       { timestamps: false },
+    );
+  });
+
+  it('does not claim or send a customer marked Do Not Contact, and records why', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    restriction.checkContactForSend.mockImplementationOnce(async () => ({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false }));
+
+    const stats = await runLeadNurtureSweep();
+
+    expect(stats.skipped).toBe(1);
+    expect(restriction.checkContactForSend).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org-1', leadId: 'lead-1', phone: '+13035550123' }),
+      expect.objectContaining({ channel: 'sms', purpose: 'lead_nurture' }),
+    );
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockSendLeadNurtureText).not.toHaveBeenCalled();
+    expect(mockLeadUpdateOne).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: 'lead-1' }),
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          'followUp.nurtureStatus': 'skipped',
+          'followUp.nurtureFailureReason': expect.stringContaining('Do Not Contact'),
+        }),
+      }),
+      { timestamps: false },
+    );
+  });
+
+  it('treats a Do Not Contact block at send time as a skip, not a retryable failure', async () => {
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    mockSendLeadNurtureText.mockRejectedValue(new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false }));
+
+    const stats = await runLeadNurtureSweep();
+
+    expect(stats).toEqual(expect.objectContaining({ skipped: 1, errors: 0, sent: 0 }));
+    expect(mockLeadUpdateOne).toHaveBeenCalledWith(
+      { _id: 'lead-1', 'followUp.nurtureStatus': 'processing' },
+      expect.objectContaining({
+        $set: expect.objectContaining({ 'followUp.nurtureStatus': 'skipped' }),
+        $inc: { 'followUp.nurtureAttemptCount': -1 },
+      }),
+      { timestamps: false },
+    );
+    expect(mockLeadUpdateOne).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ $set: expect.objectContaining({ 'followUp.nurtureStatus': 'failed' }) }),
+      expect.anything(),
     );
   });
 
@@ -334,4 +395,28 @@ describe('lead nurture scheduler', () => {
     const claimFilter = mockLeadFindOneAndUpdate.mock.calls[0][0];
     expect(claimFilter['followUp.nurtureStatus']).toEqual({ $ne: 'pending_reconciliation' });
   });
+
+  it.each(['+639171234567', '385-503-5869 x12', '+385503586912'])(
+    'does not claim, send or retry soon for the untextable number %p',
+    async (phone) => {
+      seedCandidates([{ ...oldLead(), phone }]);
+
+      const stats = await runLeadNurtureSweep();
+
+      expect(stats.skipped).toBe(1);
+      expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+      expect(mockSendLeadNurtureText).not.toHaveBeenCalled();
+      expect(mockLeadUpdateOne).toHaveBeenCalledWith(
+        { _id: 'lead-1', status: { $in: NURTURE_ELIGIBLE_STATUSES }, 'followUp.nurtureStatus': { $ne: 'processing' } },
+        {
+          $set: expect.objectContaining({
+            'followUp.nurtureStatus': 'skipped',
+            'followUp.nurtureFailureReason': expect.any(String),
+            'followUp.nurtureNextRetryAt': expect.any(Date),
+          }),
+        },
+        { timestamps: false },
+      );
+    },
+  );
 });

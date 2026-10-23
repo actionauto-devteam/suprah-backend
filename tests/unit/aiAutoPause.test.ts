@@ -64,19 +64,36 @@ describe('recordHumanTakeover', () => {
     expect(filter.aiPausedAt).toBe(null);
   });
 
-  it('sets aiAutoPausedUntil for a webchat session when Alex is enabled', async () => {
-    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1', leadId: 'lead-1' });
+  it('pauses Alex for the web chat session until someone resumes it, with no timer', async () => {
+    await recordHumanTakeover({
+      kind: 'webchat',
+      organizationId: 'org-1',
+      sessionId: 'sess-1',
+      leadId: 'lead-1',
+      pausedBy: { userId: 'staff-1', name: 'Sam' },
+    });
 
     expect(mockSessionUpdate).toHaveBeenCalledTimes(1);
     const [filter, update] = mockSessionUpdate.mock.calls[0];
-    expect(filter).toEqual({ _id: 'sess-1', aiPausedAt: { $exists: false } });
-    expect(update.$set.aiAutoPausedUntil).toBeInstanceOf(Date);
+    expect(filter).toEqual({ _id: 'sess-1', organizationId: 'org-1', aiPausedAt: null });
+    expect(update.$set.aiPausedAt).toBeInstanceOf(Date);
+    expect(update.$set.aiPausedBy).toEqual({ userId: 'staff-1', name: 'Sam' });
+    expect(update.$set.aiAutoPausedUntil).toBeUndefined();
+    expect(update.$unset).toEqual({ aiAutoPausedUntil: '' });
+    expect(update.$inc).toEqual({ aiResponseVersion: 1 });
   });
 
-  it('scopes the webchat write so it can never clobber an active manual pause', async () => {
+  it('records the web chat takeover even when Alex is currently turned off, so it never auto-resumes later', async () => {
+    mockResolveSettings.mockResolvedValue({ enabled: false, agentName: 'Alex' });
+    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1' });
+    expect(mockSessionUpdate).toHaveBeenCalledTimes(1);
+    expect(mockResolveSettings).not.toHaveBeenCalled();
+  });
+
+  it('leaves an existing web chat pause and its owner untouched', async () => {
     await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1' });
     const [filter] = mockSessionUpdate.mock.calls[0];
-    expect(filter.aiPausedAt).toEqual({ $exists: false });
+    expect(filter.aiPausedAt).toBe(null);
   });
 
   it('never throws even if the DB write rejects', async () => {
@@ -104,12 +121,12 @@ describe('recordHumanTakeover', () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
-  it('emits webchat:ai_paused for the webchat kind', async () => {
-    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1', leadId: 'lead-1' });
+  it('emits webchat:ai_paused as a real pause naming who took over', async () => {
+    await recordHumanTakeover({ kind: 'webchat', organizationId: 'org-1', sessionId: 'sess-1', leadId: 'lead-1', pausedBy: { userId: 'staff-1', name: 'Sam' } });
     expect(mockEmit).toHaveBeenCalledWith(
       'org-1',
       'webchat:ai_paused',
-      expect.objectContaining({ leadId: 'lead-1', paused: false }),
+      expect.objectContaining({ leadId: 'lead-1', paused: true, pausedBy: 'Sam' }),
     );
   });
 

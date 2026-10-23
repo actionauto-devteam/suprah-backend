@@ -4,6 +4,8 @@ import SmsCampaignRecipient from '../models/SmsCampaignRecipient.model';
 import { sendStaffAttributedSms } from '../services/communication.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import logger from '../utils/logger';
+import { isSmsDestinationError } from '../utils/smsDestination';
+import { isDoNotContactError } from '../services/contactRestriction.service';
 
 const CRON_SCHEDULE = process.env.SMS_CAMPAIGN_CRON || '* * * * *';
 const BATCH_PER_TICK = parseInt(process.env.SMS_CAMPAIGN_BATCH_PER_TICK || '20', 10);
@@ -89,6 +91,24 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
         await SmsCampaign.updateOne({ _id: campaign._id }, { $inc: { skippedCount: 1 } });
       }
     } catch (err) {
+      if (isSmsDestinationError(err)) {
+        await SmsCampaignRecipient.updateOne(
+          { _id: recipient._id },
+          { $set: { status: 'skipped', failureReason: err.message }, $unset: { sentAt: 1 } },
+        );
+        await SmsCampaign.updateOne({ _id: campaign._id }, { $inc: { skippedCount: 1 } });
+        logger.warn({ campaignId: campaign._id, recipientId: recipient._id, reason: err.reason }, '[SmsCampaign] Recipient skipped: phone number cannot be texted');
+        continue;
+      }
+      if (isDoNotContactError(err)) {
+        await SmsCampaignRecipient.updateOne(
+          { _id: recipient._id },
+          { $set: { status: 'skipped', failureReason: err.message }, $unset: { sentAt: 1 } },
+        );
+        await SmsCampaign.updateOne({ _id: campaign._id }, { $inc: { skippedCount: 1 } });
+        logger.warn({ campaignId: campaign._id, recipientId: recipient._id }, '[SmsCampaign] Recipient skipped: customer is marked Do Not Contact');
+        continue;
+      }
       await SmsCampaignRecipient.updateOne(
         { _id: recipient._id },
         { $set: { status: 'failed', failureReason: String((err as any)?.message || err).slice(0, 500) } },

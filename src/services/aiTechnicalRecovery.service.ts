@@ -9,6 +9,7 @@ import { AiHumanAttention, attentionKindOf } from '../models/aiHumanAttention';
 import { attentionOrgIds } from './aiHumanAttention.service';
 import { isSmsOptedOut } from './communication.service';
 import { isEmailOptedOut } from './email.service';
+import { resolveContactRestriction } from './contactRestriction.service';
 import { canReviewTraining, trainingRole } from './aiTraining.service';
 import { addLeadNoteAndNotify } from '../utils/leadNote';
 import { emitToOrg } from '../utils/socketEmitter';
@@ -38,7 +39,7 @@ export const RECOVERY_BLOCKER_MESSAGES: Record<RecoveryBlocker, string> = {
   screening_in_progress: 'A new customer message is being checked right now. Try again in a moment.',
   sms_opted_out: 'This customer opted out of texts.',
   email_opted_out: 'This customer opted out of automated emails.',
-  do_not_contact: 'This lead is marked Do Not Contact.',
+  do_not_contact: "This customer is marked Do Not Contact, or we couldn't confirm they can be contacted.",
   conversation_missing: 'The conversation for this task could not be found.',
 };
 
@@ -94,7 +95,7 @@ async function loadContext(organizationId: string, taskId: string): Promise<Reco
   const { model, scope } = targetFor(task, organizationId);
   const [state, lead] = await Promise.all([
     scope ? model.findOne(scope).lean() : null,
-    Lead.findOne({ _id: task.leadId, organizationId }).select('status email phone firstName lastName').lean(),
+    Lead.findOne({ _id: task.leadId, organizationId }).select('status email phone firstName lastName customerId').lean(),
   ]);
   return { task, model, scope, state, lead };
 }
@@ -129,7 +130,14 @@ async function blockersFor(organizationId: string, ctx: RecoveryContext): Promis
     blockers.push('paused_for_other_reason');
   }
   if (state.aiAttentionPendingIds?.length) blockers.push('screening_in_progress');
-  if (lead.status === 'Do Not Contact') blockers.push('do_not_contact');
+  const restriction = await resolveContactRestriction({
+    organizationId,
+    leadId: lead._id,
+    phone: task.channel === 'sms' ? state.customerPhone || lead.phone : lead.phone,
+    email: lead.email,
+    customerId: lead.customerId,
+  });
+  if (restriction.status !== 'allowed') blockers.push('do_not_contact');
   if (task.channel === 'sms' && state.customerPhone && await isSmsOptedOut(organizationId, state.customerPhone)) blockers.push('sms_opted_out');
   if (task.channel === 'email' && lead.email && await isEmailOptedOut(organizationId, lead.email)) blockers.push('email_opted_out');
   return [...new Set(blockers)];

@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockGmailSend = jest.fn().mockResolvedValue({ data: { id: 'gmail-1' } });
 const mockSendMail = jest.fn().mockResolvedValue({ messageId: 'smtp-1' });
 const mockOrgLeadConfigFindOne = jest.fn();

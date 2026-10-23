@@ -1,9 +1,17 @@
 import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
 import emailService from '../services/email.service';
-import { sendAutomatedSms } from '../services/communication.service';
+import { sendSystemSms } from '../services/communication.service';
 import { isDemoPhone } from '../utils/demoPhone';
 import logger from '../utils/logger';
+import { resolveSmsDestination } from '../utils/smsDestination';
+import { isContactRestrictedError } from '../services/contactRestriction.service';
+import {
+  finishAppointmentSmsNotice,
+  noticeOutcomeFromSendError,
+  noticeOutcomeFromSendResult,
+  startAppointmentSmsNotice,
+} from '../utils/appointmentSmsNotice';
 import { CALENDAR_TZ } from '../constants/calendarTimezone';
 
 const CRON_SCHEDULE = process.env.APPOINTMENT_REMINDER_CRON || '*/10 * * * *';
@@ -40,26 +48,52 @@ export async function sendReminderFor(appointment: any): Promise<void> {
 
   const isDemoCustomer = Boolean(phone) && isDemoPhone(phone);
 
-  if (phone) {
-    const timeLabel = formatApptTime(new Date(appointment.startTime));
+  const forStartTime = new Date(appointment.startTime);
+  const destination = phone ? resolveSmsDestination(phone, 'automated') : null;
+  if (destination && !destination.ok) {
+    logger.warn({ appointmentId: appointment._id, reason: destination.reason }, '[AppointmentReminder] SMS skipped: phone number cannot be texted');
+    sends.push(
+      startAppointmentSmsNotice(appointment._id, 'reminderSms', forStartTime, 'not_sent', destination.message).catch((err) => {
+        logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] Could not record skipped SMS');
+      }),
+    );
+  } else if (phone) {
+    const timeLabel = formatApptTime(forStartTime);
     const text = `Reminder: your appointment "${appointment.title}" is scheduled for ${timeLabel}. Reply YES to confirm or CANCEL if you need to reschedule. Reply STOP to opt out.`;
     sends.push(
-      sendAutomatedSms({
-        orgId: appointment.organizationId,
-        toPhone: phone,
-        body: text,
-        leadId: appointment.leadId,
-      }).catch((err) => {
+      (async () => {
+        const started = await startAppointmentSmsNotice(appointment._id, 'reminderSms', forStartTime, 'sending');
+        if (!started) {
+          logger.warn({ appointmentId: appointment._id }, '[AppointmentReminder] SMS skipped: appointment time changed before sending');
+          return;
+        }
+        const outcome = await sendSystemSms({
+          orgId: appointment.organizationId,
+          toPhone: phone,
+          body: text,
+          leadId: appointment.leadId,
+        }).then(noticeOutcomeFromSendResult, noticeOutcomeFromSendError);
+        if (outcome.status !== 'accepted') {
+          logger.warn({ appointmentId: appointment._id, status: outcome.status }, '[AppointmentReminder] SMS not sent');
+        }
+        await finishAppointmentSmsNotice(appointment._id, 'reminderSms', forStartTime, outcome);
+      })().catch((err) => {
         logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] SMS send failed');
       }),
     );
   }
 
+  let emailBlockedReason: string | null = null;
+  let customerEmailSent = false;
   if (email && !isDemoCustomer) {
     sends.push(
       emailService
         .sendAppointmentReminder(appointment, email, customerName, appointment.organizationId)
+        .then(() => {
+          customerEmailSent = true;
+        })
         .catch((err: unknown) => {
+          if (isContactRestrictedError(err)) emailBlockedReason = err.message;
           logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] Customer email send failed');
         }),
     );
@@ -80,6 +114,20 @@ export async function sendReminderFor(appointment: any): Promise<void> {
   }
 
   await Promise.allSettled(sends);
+
+  if (emailBlockedReason) {
+    await Appointment.updateOne(
+      { _id: appointment._id, startTime: appointment.startTime },
+      { $set: { customerEmailNotice: { status: 'not_sent', emailType: 'reminder', reason: emailBlockedReason, updatedAt: new Date() } } },
+      { timestamps: false },
+    ).catch((err: unknown) => logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] Could not save the email warning'));
+  } else if (customerEmailSent && appointment.customerEmailNotice) {
+    await Appointment.updateOne(
+      { _id: appointment._id, startTime: appointment.startTime },
+      { $unset: { customerEmailNotice: '' } },
+      { timestamps: false },
+    ).catch((err: unknown) => logger.warn({ err, appointmentId: appointment._id }, '[AppointmentReminder] Could not clear the email warning'));
+  }
 }
 
 export async function runAppointmentReminderSweep(): Promise<ReminderStats> {
@@ -105,7 +153,7 @@ export async function runAppointmentReminderSweep(): Promise<ReminderStats> {
   for (const appointment of candidates as any[]) {
     try {
       const claimed = await Appointment.updateOne(
-        { _id: appointment._id, reminderSent: false },
+        { _id: appointment._id, reminderSent: false, startTime: appointment.startTime },
         { $set: { reminderSent: true, reminderSentAt: now } },
       );
       if (claimed.modifiedCount === 0) continue;

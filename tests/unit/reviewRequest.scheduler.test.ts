@@ -31,10 +31,11 @@ jest.mock('../../src/utils/sendingWindow', () => ({
 
 jest.mock('../../src/utils/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), error: jest.fn() },
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 import { runReviewRequestSweep } from '../../src/schedulers/reviewRequest.scheduler';
+import { SmsDestinationError } from '../../src/utils/smsDestination';
 
 function smsAppointment() {
   return {
@@ -232,5 +233,73 @@ describe('review request scheduler', () => {
 
     expect(stats).toEqual({ scanned: 0, sent: 0, skipped: 0, errors: 0, emailScanned: 0, emailSent: 0, emailSkipped: 0, emailErrors: 0 });
     expect(mockAppointmentFind).not.toHaveBeenCalled();
+  });
+
+  describe('untextable destinations', () => {
+    it('marks the SMS review request skipped with the reason, with no retry', async () => {
+      seedFind([smsAppointment()]);
+      seedFind([]);
+      mockAppointmentFindOneAndUpdate.mockResolvedValue({ ...smsAppointment(), reviewRequestAttemptCount: 1 });
+      mockSendReviewRequestText.mockRejectedValue(new SmsDestinationError('extension', 'automated'));
+
+      const stats = await runReviewRequestSweep();
+
+      expect(stats.skipped).toBe(1);
+      expect(stats.errors).toBe(0);
+      expect(mockAppointmentUpdateOne).toHaveBeenCalledWith(
+        { _id: 'appt-1', reviewRequestStatus: 'processing' },
+        {
+          $set: { reviewRequestStatus: 'skipped', reviewRequestFailureReason: 'The phone number includes an extension, so it cannot be texted.' },
+          $unset: { reviewRequestNextRetryAt: 1 },
+        },
+        { timestamps: false },
+      );
+      const retryWrites = mockAppointmentUpdateOne.mock.calls.filter((call: any) => call[1]?.$set?.reviewRequestNextRetryAt);
+      expect(retryWrites).toHaveLength(0);
+    });
+  });
+
+  describe('Do Not Contact customers', () => {
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    const blocked = () => new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false });
+
+    it('marks the SMS review request skipped with the reason, with no retry', async () => {
+      seedFind([smsAppointment()]);
+      seedFind([]);
+      mockAppointmentFindOneAndUpdate.mockResolvedValue({ ...smsAppointment(), reviewRequestAttemptCount: 1 });
+      mockSendReviewRequestText.mockRejectedValue(blocked());
+
+      const stats = await runReviewRequestSweep();
+
+      expect(stats.skipped).toBe(1);
+      expect(stats.errors).toBe(0);
+      expect(mockAppointmentUpdateOne).toHaveBeenCalledWith(
+        { _id: 'appt-1', reviewRequestStatus: 'processing' },
+        {
+          $set: { reviewRequestStatus: 'skipped', reviewRequestFailureReason: expect.stringContaining('Do Not Contact') },
+          $unset: { reviewRequestNextRetryAt: 1 },
+        },
+        { timestamps: false },
+      );
+    });
+
+    it('marks the email review request skipped with the reason, with no retry', async () => {
+      seedFind([]);
+      seedFind([emailAppointment()]);
+      mockAppointmentFindOneAndUpdate.mockResolvedValueOnce(emailAppointment());
+      mockSendReviewRequestEmail.mockRejectedValue(blocked());
+
+      const stats = await runReviewRequestSweep();
+
+      expect(stats.emailSkipped).toBe(1);
+      expect(stats.emailErrors).toBe(0);
+      const retryWrites = mockAppointmentUpdateOne.mock.calls.filter((call: any) => call[1]?.$set?.reviewRequestEmailNextRetryAt);
+      expect(retryWrites).toHaveLength(0);
+      expect(mockAppointmentUpdateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ reviewRequestEmailStatus: 'processing' }),
+        expect.objectContaining({ $set: { reviewRequestEmailStatus: 'skipped', reviewRequestEmailFailureReason: expect.stringContaining('Do Not Contact') } }),
+        { timestamps: false },
+      );
+    });
   });
 });

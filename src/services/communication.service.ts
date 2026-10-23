@@ -15,11 +15,15 @@ import { notifyOrgAdmins } from "../utils/safeNotification";
 import { createAiAgentTaskAndNotify } from "../utils/aiAgentTask";
 import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from "../utils/leadNote";
 import { describeSmsFailure } from "../utils/smsFailure";
+import { assertSmsDestination, isSmsDestinationError, resolveSmsDestination, SmsDestinationPolicy } from "../utils/smsDestination";
+import { recordAppointmentSmsDelivery } from "../utils/appointmentSmsNotice";
+import { assertContactAllowed, auditActorFromRef, checkContactForSend, isContactRestrictedError, contactRestrictionSkipReason } from "./contactRestriction.service";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
 import SmsCampaignRecipient from "../models/SmsCampaignRecipient.model";
 import Vehicle from "../models/Vehicle.model";
+import AiAgentLog from "../models/AiAgentLog.model";
 import {
   resolveAiAgentSettings,
   processAlexTurn,
@@ -161,6 +165,26 @@ export async function sendAutomatedSms(opts: {
   return true;
 }
 
+async function sendAutomatedReplySms(opts: Parameters<typeof sendAutomatedSms>[0]): Promise<boolean> {
+  try {
+    return await sendAutomatedSms(opts);
+  } catch (err) {
+    if (isContactRestrictedError(err)) {
+      console.warn("[comm] automatic SMS reply skipped: customer is not contactable", {
+        restricted: err.restricted,
+        leadId: opts.leadId ? String(opts.leadId) : undefined,
+      });
+      return false;
+    }
+    if (!isSmsDestinationError(err)) throw err;
+    console.warn("[comm] automatic SMS reply skipped:", {
+      reason: err.reason,
+      leadId: opts.leadId ? String(opts.leadId) : undefined,
+    });
+    return false;
+  }
+}
+
 function aiSmsDispatchGuard(orgId: any, workflow: AiWorkflow, toPhone: string, leadId?: any) {
   return async () => {
     await assertAiDispatchAllowed({ organizationId: orgId, channel: "sms", workflow, toPhone, leadId });
@@ -209,6 +233,10 @@ async function sendMissedCallTextBack(call: any): Promise<void> {
       leadId: call.leadId,
     });
   } catch (err) {
+    if (isContactRestrictedError(err)) {
+      console.warn("[comm] missed-call text-back skipped: customer is not contactable", { restricted: err.restricted, callId: String(call?._id || "") });
+      return;
+    }
     console.error("[comm] missed-call text-back failed:", err);
   }
 }
@@ -356,7 +384,7 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
       });
 
       const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
-      await sendAutomatedSms({
+      await sendAutomatedReplySms({
         orgId,
         toPhone: from,
         body: `You're confirmed for ${timeLabel}! See you then.`,
@@ -376,7 +404,7 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string)
         { $set: { rescheduleAwaitingReplyAt: new Date() } },
       );
 
-      await sendAutomatedSms({
+      await sendAutomatedReplySms({
         orgId,
         toPhone: from,
         body: "Got it! What day and time works best for you? We'll get you rebooked.",
@@ -438,7 +466,7 @@ async function captureRescheduleReply(orgId: any, from: string, body: string): P
       },
     );
 
-    await sendAutomatedSms({
+    await sendAutomatedReplySms({
       orgId,
       toPhone: from,
       body: "Thanks! We'll confirm your new time soon.",
@@ -491,7 +519,25 @@ async function handleSmsOptCommand(orgId: any, from: string, body: string): Prom
   return true;
 }
 
-export async function notifyCustomerOfReschedule(appointment: any): Promise<boolean> {
+export type AppointmentTextResult = false | { messageId: string; providerMessageId?: string };
+
+const toAppointmentTextResult = (result: false | { message?: any }): AppointmentTextResult =>
+  result && result.message
+    ? { messageId: String(result.message._id), providerMessageId: result.message.providerMessageId || undefined }
+    : false;
+
+export async function sendSystemSms(opts: {
+  orgId: any;
+  toPhone: string;
+  body: string;
+  customerId?: any;
+  customerName?: string;
+  leadId?: any;
+}): Promise<AppointmentTextResult> {
+  return toAppointmentTextResult(await sendStaffAttributedSms({ ...opts, actor: SYSTEM_ACTOR }));
+}
+
+export async function notifyCustomerOfReschedule(appointment: any): Promise<AppointmentTextResult> {
   const phone = appointment.customerBooking?.phone;
   if (!phone) return false;
 
@@ -519,13 +565,13 @@ export async function notifyCustomerOfReschedule(appointment: any): Promise<bool
         actor: { userId: AI_AGENT_ACTOR_ID, name: agentName },
         aiWorkflow: "reschedule_notice",
       });
-      return Boolean(result);
+      return toAppointmentTextResult(result);
     } catch (err) {
       if (!(err instanceof AiReplySuppressedError)) throw err;
     }
   }
 
-  return sendAutomatedSms({
+  return sendSystemSms({
     orgId: appointment.organizationId,
     toPhone: phone,
     body: `Hi ${firstName}, ${dealerName} here. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`,
@@ -859,8 +905,9 @@ export async function sendSmsFromUser(opts: {
   leadId?: any;
   beforeSend?: () => Promise<void>;
   beforeDispatch?: () => Promise<void>;
+  destinationPolicy?: SmsDestinationPolicy;
 }) {
-  const to = normalizePhone(opts.toPhone);
+  const to = assertSmsDestination(opts.toPhone, opts.destinationPolicy ?? "automated");
   const body = (opts.body || "").trim();
   if (!body) throw Object.assign(new Error("Message body is required"), { statusCode: 400 });
   if (!telnyx.COMPANY_NUMBER)
@@ -881,6 +928,14 @@ export async function sendSmsFromUser(opts: {
     const lead = await findLeadByPhone(opts.orgId, to);
     if (lead) leadId = lead._id;
   }
+
+  const restrictionTarget = { organizationId: opts.orgId, phone: to, leadId, customerId };
+  const restrictionContext = {
+    channel: "sms" as const,
+    purpose: opts.destinationPolicy === "manual" ? "manual_sms" : "automated_sms",
+    actor: auditActorFromRef(opts.user),
+  };
+  await assertContactAllowed(restrictionTarget, restrictionContext);
 
   const conversation = await getOrCreateConversation({
     orgId: opts.orgId,
@@ -906,6 +961,7 @@ export async function sendSmsFromUser(opts: {
 
   try {
     await opts.beforeSend?.();
+    await assertContactAllowed(restrictionTarget, restrictionContext);
     await opts.beforeDispatch?.();
     const sent = await telnyx.sendSms(to, body);
     try {
@@ -927,7 +983,7 @@ export async function sendSmsFromUser(opts: {
     }
   } catch (err: any) {
     if (err instanceof SmsDeliveryUncertainError) throw err;
-    if (err instanceof AiReplySuppressedError) {
+    if (err instanceof AiReplySuppressedError || isContactRestrictedError(err)) {
       await CommunicationMessage.deleteOne({ _id: message._id, orgId: opts.orgId, status: 'queued' });
       throw err;
     }
@@ -1015,6 +1071,41 @@ export async function triggerSmsAiReply(
           isNewInquiry: options.isNewInquiry,
         });
       }
+      return;
+    }
+
+    const destination = resolveSmsDestination(conversation.customerPhone, "automated");
+    if (!destination.ok) {
+      await finishAiAttentionCheck(check);
+      console.warn("[comm] Alex SMS reply skipped:", { reason: destination.reason, leadId: String(lead._id) });
+      await AiAgentLog.create({
+        organizationId: String(orgId),
+        channel: "sms",
+        leadId: lead._id,
+        conversationId: conversation._id,
+        status: "skipped",
+        failureReason: `${destination.message} (${destination.reason})`,
+      }).catch(() => undefined);
+      return;
+    }
+
+    const restriction = await checkContactForSend({
+      organizationId: orgId,
+      phone: conversation.customerPhone,
+      leadId: lead._id,
+      customerId: conversation.customerId,
+    }, { channel: "sms", purpose: "alex_sms_reply", actor: { kind: "ai", userId: AI_AGENT_ACTOR_ID, name: agentName } });
+    if (restriction.status !== "allowed") {
+      await finishAiAttentionCheck(check);
+      console.warn("[comm] Alex SMS reply skipped: customer is not contactable", { status: restriction.status, leadId: String(lead._id) });
+      await AiAgentLog.create({
+        organizationId: String(orgId),
+        channel: "sms",
+        leadId: lead._id,
+        conversationId: conversation._id,
+        status: "skipped",
+        failureReason: contactRestrictionSkipReason(restriction),
+      }).catch(() => undefined);
       return;
     }
 
@@ -1414,6 +1505,9 @@ export async function handleSmsStatus(payload: any) {
       { providerMessageId },
       { $set: { deliveryStatus, deliveryStatusUpdatedAt: new Date() } },
     ).catch(() => undefined);
+    if (message) {
+      await recordAppointmentSmsDelivery(providerMessageId, status).catch(() => undefined);
+    }
   }
 }
 

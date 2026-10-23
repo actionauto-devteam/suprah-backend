@@ -3,6 +3,8 @@ import Appointment from '../models/Appointment.model';
 import { sendReviewRequestText, checkConversationPauseForLead, shouldDeferAutomatedFollowUp } from '../services/communication.service';
 import emailService from '../services/email.service';
 import logger from '../utils/logger';
+import { isSmsDestinationError } from '../utils/smsDestination';
+import { isDoNotContactError } from '../services/contactRestriction.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 
 const CRON_SCHEDULE = process.env.REVIEW_REQUEST_CRON || '*/15 * * * *';
@@ -173,6 +175,32 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
           stats.skipped++;
         }
       } catch (err) {
+        if (isSmsDestinationError(err)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestStatus: 'processing' },
+            {
+              $set: { reviewRequestStatus: 'skipped', reviewRequestFailureReason: err.message },
+              $unset: { reviewRequestNextRetryAt: 1 },
+            },
+            { timestamps: false },
+          ).catch(() => undefined);
+          stats.skipped++;
+          logger.warn({ appointmentId: appointment._id, reason: err.reason }, '[ReviewRequest] SMS skipped: phone number cannot be texted');
+          continue;
+        }
+        if (isDoNotContactError(err)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestStatus: 'processing' },
+            {
+              $set: { reviewRequestStatus: 'skipped', reviewRequestFailureReason: err.message },
+              $unset: { reviewRequestNextRetryAt: 1 },
+            },
+            { timestamps: false },
+          ).catch(() => undefined);
+          stats.skipped++;
+          logger.warn({ appointmentId: appointment._id }, '[ReviewRequest] SMS skipped: customer is marked Do Not Contact');
+          continue;
+        }
         const attempts = (appointment.reviewRequestAttemptCount || 0) + 1;
         const exhausted = attempts >= MAX_ATTEMPTS;
         await Appointment.updateOne(
@@ -326,6 +354,19 @@ export async function runReviewRequestSweep(): Promise<ReviewRequestStats> {
           stats.emailSkipped++;
         }
       } catch (err) {
+        if (isDoNotContactError(err)) {
+          await Appointment.updateOne(
+            { _id: appointment._id, reviewRequestEmailStatus: 'processing' },
+            {
+              $set: { reviewRequestEmailStatus: 'skipped', reviewRequestEmailFailureReason: err.message },
+              $unset: { reviewRequestEmailNextRetryAt: 1 },
+            },
+            { timestamps: false },
+          ).catch(() => undefined);
+          stats.emailSkipped++;
+          logger.warn({ appointmentId: appointment._id }, '[ReviewRequest] Email skipped: customer is marked Do Not Contact');
+          continue;
+        }
         const attempts = (appointment.reviewRequestEmailAttemptCount || 0) + 1;
         const exhausted = attempts >= MAX_ATTEMPTS;
         await Appointment.updateOne(

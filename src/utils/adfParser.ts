@@ -24,9 +24,28 @@ export interface ParsedADFLead {
   provider: string;
   vendor: string;
   requestDate: string;
+  requestDateProvided?: boolean;
+  providerInquiryId?: string;
+  providerInquiryIdSource?: string;
   parsedContent: string;
   channel: 'email' | 'sms' | 'adf' | 'phone' | 'web';
   rawFields: Record<string, string>;
+}
+
+function extractProspectInquiryId(node: any): { value: string; source: string } | null {
+  const entries = (Array.isArray(node) ? node : node === undefined || node === null ? [] : [node])
+    .map((entry: any) => {
+      if (typeof entry === 'string') return { value: entry.trim(), source: '', sequence: Number.POSITIVE_INFINITY };
+      if (!entry || typeof entry !== 'object') return null;
+      const value = entry._ === undefined || entry._ === null ? '' : String(entry._).trim();
+      const source = typeof entry.source === 'string' ? entry.source.trim() : '';
+      const sequence = Number(entry.sequence);
+      return { value, source, sequence: Number.isFinite(sequence) ? sequence : Number.POSITIVE_INFINITY };
+    })
+    .filter((entry): entry is { value: string; source: string; sequence: number } => Boolean(entry?.value));
+  if (!entries.length) return null;
+  const [first] = [...entries].sort((a, b) => a.sequence - b.sequence);
+  return { value: first.value, source: first.source };
 }
 
 export function detectChannel(
@@ -360,7 +379,9 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
                        'ADF Lead';
     const providerName = extractText(provider?.name || provider?._ || provider) || '';
     const vendorName = extractText(vendor?.vendorname || vendor?.name || vendor?._ || vendor) || '';
-    const requestDate = extractText(prospect.requestdate) || new Date().toISOString();
+    const requestDateText = extractText(prospect.requestdate);
+    const requestDate = requestDateText || new Date().toISOString();
+    const providerInquiry = extractProspectInquiryId(prospect.id);
 
     // --- Build raw fields for metadata ---
     const rawFields: Record<string, string> = {};
@@ -393,6 +414,9 @@ export async function parseADF(xmlData: string): Promise<ParsedADFLead | null> {
       provider: cleanString(providerName),
       vendor: cleanString(vendorName),
       requestDate,
+      requestDateProvided: Boolean(requestDateText),
+      providerInquiryId: providerInquiry?.value,
+      providerInquiryIdSource: providerInquiry?.source || undefined,
       parsedContent,
       channel: 'adf',
       rawFields,

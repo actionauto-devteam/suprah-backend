@@ -18,6 +18,8 @@ import { isDemoPhone } from '../utils/demoPhone';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { withRetry } from '../utils/withRetry';
 import logger from '../utils/logger';
+import { assertContactAllowed } from './contactRestriction.service';
+import { normalizeIdentityEmail } from '../utils/contactIdentity';
 
 interface EmailOptions {
     to: string;
@@ -41,6 +43,7 @@ export interface CampaignEmailInput {
     bodyHtml?: string;
     signOffText?: string;
     organizationId: string;
+    leadId?: string;
 }
 
 export interface RenderedCampaignEmail {
@@ -150,6 +153,17 @@ class EmailService {
         } catch {
             return '';
         }
+    }
+
+    private async assertAppointmentRecipientAllowed(appointment: any, recipientEmail: string, organizationId: string | undefined, purpose: string): Promise<void> {
+        const booking = appointment?.customerBooking || {};
+        const recipient = normalizeIdentityEmail(recipientEmail);
+        const isCustomer = Boolean(recipient) && recipient === normalizeIdentityEmail(booking.email);
+        await assertContactAllowed({
+            organizationId: organizationId || appointment?.organizationId,
+            email: recipientEmail,
+            ...(isCustomer ? { phone: booking.phone, leadId: appointment?.leadId } : {}),
+        }, { channel: 'email', purpose, actor: { kind: 'system', userId: 'system', name: null } });
     }
 
     private async resolveDealerName(organizationId?: string, fallback: string = 'Your Dealership'): Promise<string> {
@@ -340,6 +354,7 @@ class EmailService {
         token: string,
         organizationId?: string
     ): Promise<void> {
+        await this.assertAppointmentRecipientAllowed(appointment, guestEmail, organizationId, 'appointment_invitation');
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
             year: 'numeric',
@@ -610,6 +625,7 @@ Questions? Contact ${organizer.email}
         guestEmail: string,
         organizationId?: string
     ): Promise<void> {
+        await this.assertAppointmentRecipientAllowed(appointment, guestEmail, organizationId, 'appointment_update');
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
             year: 'numeric',
@@ -752,6 +768,7 @@ Questions? Contact ${organizer.email}
         guestEmail: string,
         organizationId?: string
     ): Promise<void> {
+        await this.assertAppointmentRecipientAllowed(appointment, guestEmail, organizationId, 'appointment_cancellation');
         const dealerName = await this.resolveDealerName(organizationId);
 
         // Generate cancellation ICS file
@@ -869,6 +886,7 @@ Questions? Contact ${organizer.email}
         recipientName: string,
         organizationId?: string
     ): Promise<void> {
+        await this.assertAppointmentRecipientAllowed(appointment, recipientEmail, organizationId, 'appointment_reminder');
         const startDate = new Date(appointment.startTime).toLocaleString('en-US', {
             weekday: 'long',
             year: 'numeric',
@@ -989,6 +1007,10 @@ See you there!
         if (!email) return false;
 
         const phone = appointment.customerBooking?.phone;
+        await assertContactAllowed(
+            { organizationId: appointment.organizationId, email, phone, leadId: appointment.leadId },
+            { channel: 'email', purpose: 'review_request', actor: { kind: 'system', userId: 'system', name: null } },
+        );
         if (phone && isDemoPhone(phone)) return true;
 
         const orgId = appointment.organizationId;
@@ -1213,6 +1235,10 @@ Unsubscribe from automated emails: ${unsubscribeUrl}
     async sendCampaignEmail(opts: CampaignEmailInput): Promise<boolean> {
         const { to, organizationId } = opts;
         if (!to) return false;
+        await assertContactAllowed(
+            { organizationId, email: to, phone: opts.phone, leadId: opts.leadId },
+            { channel: 'email', purpose: 'email_campaign', actor: { kind: 'system', userId: 'system', name: null } },
+        );
         if (opts.phone && isDemoPhone(opts.phone)) return true;
         if (await isEmailOptedOut(organizationId, to)) return false;
 
@@ -1243,9 +1269,13 @@ Unsubscribe from automated emails: ${unsubscribeUrl}
         const email = lead.email;
         if (!email) return false;
 
+        const orgId = vehicle.organizationId;
+        await assertContactAllowed(
+            { organizationId: orgId, email, phone: lead.phone, leadId: lead._id, customerId: lead.customerId },
+            { channel: 'email', purpose: 'price_drop', actor: { kind: 'system', userId: 'system', name: null } },
+        );
         if (lead.phone && isDemoPhone(lead.phone)) return true;
 
-        const orgId = vehicle.organizationId;
         if (await isEmailOptedOut(orgId, email)) return false;
 
         const firstName = String(lead.firstName || '').trim() || 'there';

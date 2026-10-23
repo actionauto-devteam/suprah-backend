@@ -425,18 +425,38 @@ it('never exposes a pending webchat draft through visitor polling or Lead activi
   expect(JSON.stringify(timeline.body)).not.toContain(hidden);
 });
 
-it.each(['sms', 'webchat'] as const)('preserves persistent %s staff auto-pause independently of human-request pause', async channel => {
+it('preserves persistent sms staff auto-pause independently of human-request pause', async () => {
   intent = 'none';
-  const f = await fixture(channel);
+  const f = await fixture('sms');
   const check = await begin(f, 'Hello');
   await screenAiHumanAttention(check);
-  await recordHumanTakeover({ kind: channel, organizationId: f.organizationId, leadId: f.leadId,
-    ...(channel === 'sms' ? { conversationId: f.targetId } : { sessionId: f.targetId }) });
+  await recordHumanTakeover({ kind: 'sms', organizationId: f.organizationId, leadId: f.leadId, conversationId: f.targetId });
   const state = await f.model.findById(f.targetId).lean();
   expect(state.aiAutoPausedUntil).toBeInstanceOf(Date);
   expect(await canSendAiReply(check)).toBe(false);
   await f.model.updateOne({ _id: f.targetId }, { $set: { aiAutoPausedUntil: new Date(0) } });
   expect(await canSendAiReply(check)).toBe(true);
+});
+
+it('keeps a webchat staff takeover paused until someone resumes Alex, independently of human-request pause', async () => {
+  intent = 'none';
+  const f = await fixture('webchat');
+  const check = await begin(f, 'Hello');
+  await screenAiHumanAttention(check);
+  await recordHumanTakeover({ kind: 'webchat', organizationId: f.organizationId, leadId: f.leadId, sessionId: f.targetId,
+    pausedBy: { userId: 'staff-1', name: 'Erin Employee' } });
+  const state = await f.model.findById(f.targetId).lean();
+  expect(state.aiPausedAt).toBeInstanceOf(Date);
+  expect(state.aiPausedBy).toMatchObject({ userId: 'staff-1', name: 'Erin Employee' });
+  expect(state.aiAutoPausedUntil).toBeUndefined();
+  expect(await canSendAiReply(check)).toBe(false);
+  await f.model.updateOne({ _id: f.targetId }, { $set: { aiAutoPausedUntil: new Date(0) } });
+  expect(await canSendAiReply(check)).toBe(false);
+  await f.model.updateOne({ _id: f.targetId }, { $unset: { aiPausedAt: '', aiPausedBy: '', aiAutoPausedUntil: '' } });
+  expect(await canSendAiReply(check)).toBe(false);
+  const next = await begin(f, 'One more question');
+  await screenAiHumanAttention(next);
+  expect(await canSendAiReply(next)).toBe(true);
 });
 
 it('recovers an abandoned SMS identity check from a duplicate webhook without creating another inbound message', async () => {

@@ -95,6 +95,10 @@ export interface ILead extends Document {
   aiSummary?: string;
   aiSummaryGeneratedAt?: Date;
   sourceSubmittedAt?: Date;
+  sourceInquiryId?: mongoose.Types.ObjectId;
+  intakeSlots?: string[];
+  lastInquiryAt?: Date;
+  inquiryCount?: number;
 
   followUp?: {
     lastCustomerActivityAt?: Date;
@@ -374,6 +378,10 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
     aiSummary: { type: String, trim: true },
     aiSummaryGeneratedAt: { type: Date },
     sourceSubmittedAt: { type: Date },
+    sourceInquiryId: { type: Schema.Types.ObjectId, ref: 'LeadInquiry' },
+    intakeSlots: { type: [String], default: undefined },
+    lastInquiryAt: { type: Date },
+    inquiryCount: { type: Number, min: 0 },
 
     followUp: {
       lastCustomerActivityAt: {
@@ -624,6 +632,24 @@ LeadSchema.index(
     unique: true,
     partialFilterExpression: { messageId: { $type: 'string' } },
     name: 'lead_org_messageid_unique',
+  },
+);
+
+LeadSchema.index(
+  { organizationId: 1, sourceInquiryId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { sourceInquiryId: { $type: 'objectId' } },
+    name: 'lead_org_source_inquiry_unique',
+  },
+);
+
+LeadSchema.index(
+  { organizationId: 1, intakeSlots: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { intakeSlots: { $type: 'string' } },
+    name: 'lead_org_intake_slot_unique',
   },
 );
 

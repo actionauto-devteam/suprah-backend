@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type AiAgentLogStatus = 'sent' | 'blocked' | 'failed' | 'skipped' | 'fallback_sent';
-export type AiAgentLogChannel = 'webchat' | 'sms';
+export type AiAgentLogChannel = 'webchat' | 'sms' | 'email';
 export type AiAgentLogClassifierVerdict = 'SAFE' | 'UNSAFE' | 'ERROR';
 export type AiAgentCoachingComplianceVerdict =
   | 'not_checked'
@@ -47,7 +47,7 @@ export interface IAiAgentLog extends Document {
 const AiAgentLogSchema: Schema<IAiAgentLog> = new Schema(
   {
     organizationId: { type: String, required: true, index: true },
-    channel: { type: String, enum: ['webchat', 'sms'], required: true },
+    channel: { type: String, enum: ['webchat', 'sms', 'email'], required: true },
     leadId: { type: Schema.Types.ObjectId, required: true, ref: 'Lead', index: true },
     sessionId: { type: Schema.Types.ObjectId, ref: 'WebChatSession' },
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation' },

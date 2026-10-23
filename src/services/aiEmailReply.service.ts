@@ -25,6 +25,8 @@ import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 export { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
+import AiAgentLog from '../models/AiAgentLog.model';
+import { checkContactForSend, contactRestrictionSkipReason, isContactRestrictedError } from './contactRestriction.service';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 
@@ -83,6 +85,26 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
     if (delivery.action !== 'send') {
       await finishAiAttentionCheck(check);
       if (delivery.mode === 'training') queueShadowDraft({ ...shadowSource, lead, inquiryText: text });
+      return;
+    }
+
+    const restriction = await checkContactForSend({
+      organizationId: orgId,
+      leadId: lead._id,
+      email: lead.email,
+      phone: lead.phone,
+      customerId: lead.customerId,
+    }, { channel: 'email', purpose: 'alex_email_reply', actor: { kind: 'ai', userId: AI_AGENT_ACTOR_ID, name: agentName } });
+    if (restriction.status !== 'allowed') {
+      await finishAiAttentionCheck(check);
+      logger.warn({ leadId: lead._id, status: restriction.status }, '[AiEmailReply] Alex email skipped: customer is not contactable');
+      await AiAgentLog.create({
+        organizationId: String(orgId),
+        channel: 'email',
+        leadId: lead._id,
+        status: 'skipped',
+        failureReason: contactRestrictionSkipReason(restriction),
+      }).catch(() => undefined);
       return;
     }
 
@@ -235,6 +257,20 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
     if (err instanceof AiReplySuppressedError) {
       if (check) await finishAiAttentionCheck(check).catch(() => undefined);
       logger.info({ leadId: lead?._id }, '[AiEmailReply] AI email suppressed before dispatch');
+      return;
+    }
+    if (isContactRestrictedError(err)) {
+      if (check) await finishAiAttentionCheck(check).catch(() => undefined);
+      logger.warn({ leadId: lead?._id, restricted: err.restricted }, '[AiEmailReply] Alex email blocked at dispatch: customer is not contactable');
+      if (lead?._id) {
+        await AiAgentLog.create({
+          organizationId: String(orgId),
+          channel: 'email',
+          leadId: lead._id,
+          status: 'skipped',
+          failureReason: err.skipReason,
+        }).catch(() => undefined);
+      }
       return;
     }
     logger.error({ err, leadId: lead?._id }, '[AiEmailReply] triggerAiEmailReplyForNewInquiry failed');

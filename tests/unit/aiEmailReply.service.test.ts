@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockLeadFindOneAndUpdate = jest.fn();
 const mockLeadUpdateOne = jest.fn().mockResolvedValue({});
 const mockVehicleFindOne = jest.fn();
@@ -17,6 +31,12 @@ const mockShouldSuppressHandoffNoteNotification = jest.fn().mockReturnValue(fals
 const mockSendLeadReplyEmail = jest.fn();
 const mockFetchGmailThreadMessages = jest.fn().mockResolvedValue([]);
 const mockMatchesVehicle = jest.fn().mockReturnValue(false);
+const mockAiAgentLogCreate = jest.fn().mockResolvedValue({});
+
+jest.mock('../../src/models/AiAgentLog.model', () => ({
+  __esModule: true,
+  default: { create: mockAiAgentLogCreate },
+}));
 
 jest.mock('../../src/models/Vehicle.model', () => ({
   __esModule: true,
@@ -218,6 +238,32 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
     expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
     expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
+  });
+
+  it('skips a Do Not Contact customer before generating anything and records why', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    restriction.checkContactForSend.mockImplementationOnce(async () => ({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false }));
+    await triggerAiEmailReplyForNewInquiry('org-1', { ...lead, customerId: 'cust-1' }, 'Interested in the Volvo');
+    expect(restriction.checkContactForSend).toHaveBeenCalledWith({
+      organizationId: 'org-1', leadId: 'lead-1', email: 'kaitlyn@example.com', phone: undefined, customerId: 'cust-1',
+    }, expect.objectContaining({ channel: 'email', purpose: 'alex_email_reply' }));
+    expect(mockClaimAiGeneration).not.toHaveBeenCalled();
+    expect(mockGenerateAlexEmailReply).not.toHaveBeenCalled();
+    expect(mockSendLeadReplyEmail).not.toHaveBeenCalled();
+    expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
+    expect(mockAiAgentLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'email', leadId: 'lead-1', status: 'skipped', failureReason: expect.stringContaining('(do_not_contact)'),
+    }));
+  });
+
+  it('records a skip, with no fallback or handoff, when the email send boundary finds the customer is Do Not Contact', async () => {
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    mockSendLeadReplyEmail.mockRejectedValueOnce(new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-1'], onThisLead: true }));
+    await expect(triggerAiEmailReplyForNewInquiry('org-1', lead, 'Interested in the Volvo')).resolves.toBeUndefined();
+    expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
+    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+    expect(mockFinishAiAttentionCheck).toHaveBeenCalled();
+    expect(mockAiAgentLogCreate).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', status: 'skipped' }));
   });
 
   it('on a clean happy path, sends the generated reply via sendLeadReplyEmail using the org central Gmail address', async () => {

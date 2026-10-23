@@ -19,10 +19,11 @@ jest.mock('../../src/utils/sendingWindow', () => ({
 
 jest.mock('../../src/utils/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), error: jest.fn() },
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 import { runNoShowFollowUpSweep } from '../../src/schedulers/appointmentNoShowFollowUp.scheduler';
+import { SmsDestinationError } from '../../src/utils/smsDestination';
 
 const appointment = {
   _id: 'appointment-1',
@@ -113,5 +114,23 @@ describe('appointment no-show follow-up scheduler', () => {
 
     expect(stats).toEqual({ scanned: 1, sent: 0, skipped: 0, errors: 0 });
     expect(sendNoShowFollowUpText).not.toHaveBeenCalled();
+  });
+
+  it('skips an untextable number once with the reason and never schedules a retry', async () => {
+    sendNoShowFollowUpText.mockRejectedValue(new SmsDestinationError('country_not_allowed', 'automated'));
+
+    const stats = await runNoShowFollowUpSweep();
+
+    expect(stats).toEqual({ scanned: 1, sent: 0, skipped: 1, errors: 0 });
+    expect(updateOne).toHaveBeenCalledWith(
+      { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+      {
+        $set: { noShowFollowUpStatus: 'skipped', noShowFollowUpFailureReason: 'Automatic texts only go to numbers in the US, US territories, and Canada.' },
+        $unset: { noShowFollowUpNextRetryAt: 1 },
+      },
+      { timestamps: false },
+    );
+    const failedWrites = updateOne.mock.calls.filter((call: any) => call[1]?.$set?.noShowFollowUpStatus === 'failed');
+    expect(failedWrites).toHaveLength(0);
   });
 });

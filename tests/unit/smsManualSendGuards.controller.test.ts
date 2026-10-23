@@ -29,6 +29,7 @@ jest.mock('../../src/utils/socketEmitter', () => ({ emitToOrg: jest.fn() }));
 process.env.GEMINI_API_KEY = 'test-key';
 
 import { sendMessage, replyToConversation, getThreadByPhone } from '../../src/controllers/communication.controller';
+import { SmsDestinationError } from '../../src/utils/smsDestination';
 
 const LEAD_ID = '64b7f0c2a1b2c3d4e5f60718';
 
@@ -135,5 +136,40 @@ describe('manual SMS send guards', () => {
     mockIsSmsOptedOut.mockResolvedValue(true);
     const { json } = await invoke(getThreadByPhone, { orgId: 'org-1', query: { phone: '+13855035869', leadId: LEAD_ID } });
     expect(json.mock.calls[0][0].data).toEqual({ conversation: { _id: 'conv-1' }, messages: [], smsOptedOut: true });
+  });
+
+  it('marks staff texts as manual on the server and ignores any policy sent by the browser', async () => {
+    const { error } = await invoke(
+      sendMessage,
+      smsRequest({ toPhone: '+63 917 123 4567', body: 'hi', destinationPolicy: 'automated', automated: true }),
+    );
+    expect(error).toBeUndefined();
+    expect(mockSendSmsFromUser).toHaveBeenCalledWith(
+      expect.objectContaining({ toPhone: '+63 917 123 4567', destinationPolicy: 'manual' }),
+    );
+  });
+
+  it('marks a conversation reply as a manual text', async () => {
+    mockConvFindOne.mockResolvedValue({ _id: 'conv-1', customerPhone: '+639171234567', leadId: LEAD_ID });
+    const { error } = await invoke(replyToConversation, { orgId: 'org-1', crmUser: { _id: 'crm-1' }, params: { id: 'conv-1' }, body: { body: 'hi', destinationPolicy: 'automated' } });
+    expect(error).toBeUndefined();
+    expect(mockSendSmsFromUser).toHaveBeenCalledWith(expect.objectContaining({ toPhone: '+639171234567', destinationPolicy: 'manual' }));
+  });
+
+  it('returns the structured destination error and records no human takeover', async () => {
+    mockSendSmsFromUser.mockRejectedValue(new SmsDestinationError('invalid', 'manual'));
+    const { error } = await invoke(sendMessage, smsRequest({ toPhone: '+999 123 456 789', body: 'hi' }));
+    expect(error?.statusCode).toBe(400);
+    expect(error?.errors).toEqual([{ code: 'SMS_INVALID_DESTINATION', reason: 'invalid', policy: 'manual' }]);
+    expect(mockRecordHumanTakeover).not.toHaveBeenCalled();
+  });
+
+  it('rejects a legacy malformed conversation number with the structured error', async () => {
+    mockConvFindOne.mockResolvedValue({ _id: 'conv-1', customerPhone: '+385503586912' });
+    mockSendSmsFromUser.mockRejectedValue(new SmsDestinationError('invalid', 'manual'));
+    const { error } = await invoke(replyToConversation, { orgId: 'org-1', crmUser: { _id: 'crm-1' }, params: { id: 'conv-1' }, body: { body: 'hi' } });
+    expect(error?.statusCode).toBe(400);
+    expect(error?.errors?.[0]?.code).toBe('SMS_INVALID_DESTINATION');
+    expect(mockRecordHumanTakeover).not.toHaveBeenCalled();
   });
 });

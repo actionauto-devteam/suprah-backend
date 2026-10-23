@@ -124,6 +124,7 @@ export const replyToConversation = asyncHandler(async (req: Request, res: Respon
     body,
     customerId: conversation.customerId,
     customerName: conversation.customerName,
+    destinationPolicy: "manual",
   });
 
   await recordHumanTakeover({
@@ -201,6 +202,7 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     customerId,
     customerName,
     leadId,
+    destinationPolicy: "manual",
   });
 
   await recordHumanTakeover({
