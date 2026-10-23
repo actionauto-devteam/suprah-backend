@@ -27,6 +27,7 @@ import notificationService from '../services/notification.service';
 import { stripMessageFormatting, truncateWithEllipsis } from '../utils/messagePreview';
 import { createPushAvatarFallback } from '../utils/pushPayload';
 import { resolveNextEmployeeId } from '../utils/employeeId.util';
+import sharp from 'sharp';
 
 
 const idIn = (arr: any[], id: any) => (arr || []).map(String).includes(id.toString());
@@ -201,6 +202,20 @@ function mapSupraSpaceThumbnails(files: any, body: any): Map<number, Express.Mul
 async function uploadSupraSpaceAttachmentThumbnail(file?: Express.Multer.File): Promise<string | undefined> {
   if (!file) return undefined;
   return storageService.upload(file, 'chat-attachments/thumbnails', BucketType.PRIVATE, { allowLocalFallback: false });
+}
+
+async function getSupraSpaceImageDimensions(file: Express.Multer.File, isImage: boolean): Promise<{ width: number; height: number } | undefined> {
+  if (!isImage || !file.buffer?.length) return undefined;
+  try {
+    const { width, height } = await sharp(file.buffer).metadata();
+    if (!width || !height || width < 1 || height < 1) return undefined;
+    return { width, height };
+  } catch (err) {
+    // Media still uploads normally when a format cannot expose metadata. The
+    // client has a one-time natural-size fallback for those legacy cases.
+    logger.debug({ err, fileName: file.originalname }, '[SupraSpace] Image dimensions unavailable');
+    return undefined;
+  }
 }
 
 async function deleteSupraSpaceAttachmentFiles(attachment: any, logContext?: Record<string, unknown>) {
@@ -2534,6 +2549,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
     const isAudio = mimeType.startsWith('audio/');
     if (isImage) hasImage = true;
     if (isAudio) hasAudio = true;
+    const dimensions = await getSupraSpaceImageDimensions(file, isImage);
 
     let fileUrl: string;
     let thumbnailUrl: string | undefined;
@@ -2562,6 +2578,7 @@ const uploadAttachment = asyncHandler(async (req: Request, res: Response) => {
       size: file.size,
       thumbnailUrl,
       duration: isAudio && duration ? Number(duration) : undefined,
+      ...dimensions,
     });
   }
 
@@ -2929,6 +2946,7 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
       file.mimetype = mimeType;
       const isImage = isSupraSpaceImageUpload(file, mimeType);
       const isVideo = isSupraSpaceVideoUpload(file, mimeType);
+      const dimensions = await getSupraSpaceImageDimensions(file, isImage);
       const uploadedKeys: string[] = [];
       try {
         const fileUrl = await storageService.upload(file, 'chat-attachments', BucketType.PRIVATE, { allowLocalFallback: false });
@@ -2946,6 +2964,7 @@ const replaceMessageAttachments = asyncHandler(async (req: Request, res: Respons
           mimeType,
           size: file.size,
           thumbnailUrl,
+          ...dimensions,
         });
       } catch (err) {
         await Promise.all(uploadedKeys.map(key => storageService.delete(key).catch(() => undefined)));

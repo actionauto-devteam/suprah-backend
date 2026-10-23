@@ -9,6 +9,8 @@ export interface ISupraSpaceAttachment {
   size: number;
   thumbnailUrl?: string;
   duration?: number;
+  width?: number;
+  height?: number;
 }
 
 
@@ -108,6 +110,8 @@ const AttachmentSchema = new Schema<ISupraSpaceAttachment>(
     size:         { type: Number, required: true },
     thumbnailUrl: { type: String, default: null },
     duration:     { type: Number, default: null },
+    width:        { type: Number, default: null },
+    height:       { type: Number, default: null },
   },
   { _id: false }
 );
