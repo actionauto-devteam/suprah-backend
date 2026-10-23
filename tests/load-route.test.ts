@@ -65,12 +65,13 @@ const road = (from: { lat: number; lng: number }, to: { lat: number; lng: number
     return [from.lng + (to.lng - from.lng) * t + bend, from.lat + (to.lat - from.lat) * t];
   });
 
-type FakeLeg = { distance: number; duration: number; typical?: number; bestCase?: number; line: number[][]; incidents?: unknown[] };
-const leg = ({ distance, duration, typical, bestCase, line, incidents = [] }: FakeLeg) => ({
+type FakeLeg = { distance: number; duration: number; typical?: number; bestCase?: number; line: number[][]; incidents?: unknown[]; notices?: unknown[] };
+const leg = ({ distance, duration, typical, bestCase, line, incidents = [], notices = [] }: FakeLeg) => ({
   Geometry: { LineString: line },
   VehicleLegDetails: {
     Summary: { Overview: { Distance: distance, Duration: duration, TypicalDuration: typical, BestCaseDuration: bestCase } },
     Incidents: incidents,
+    Notices: notices,
   },
 });
 
@@ -105,10 +106,10 @@ const throughPickup = () => ({
   ],
 });
 
-async function moveDriver(position: { lat: number; lng: number }, secondsAgo = 5) {
+async function moveDriver(position: { lat: number; lng: number }, secondsAgo = 5, accuracy: number | null = null) {
   await DriverLocation.updateOne(
     { userId: driver._id },
-    { $set: { coords: position, locationRecordedAt: new Date(Date.now() - secondsAgo * 1000) } },
+    { $set: { coords: position, locationRecordedAt: new Date(Date.now() - secondsAgo * 1000), accuracy } },
   );
 }
 
@@ -315,6 +316,112 @@ describe('Best route and arrival time', () => {
     expect(mockRoutesSend.mock.calls[1][0].input.Origin).toEqual([onRoute[0], onRoute[1] + 0.09]);
     expect(rerouted.body.data.route.origin).toEqual({ lat: onRoute[1] + 0.09, lng: onRoute[0] });
     expect(loadRouteHealthSnapshot()).toMatchObject({ computed: 2, rerouted: 1 });
+  });
+
+  it('a rough location (worse than 100 m) never triggers a new route', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await staffRoute().expect(200);
+    ageLoadRouteForTests(String(load._id), 60_000);
+    // Kilometres away, but from a 1.5 km Wi-Fi fix.
+    const onRoute = road(DRIVER, DELIVERY)[5];
+    await moveDriver({ lat: onRoute[1] + 0.09, lng: onRoute[0] }, 5, 1_500);
+    await staffRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("being off the route by less than the location's own error isn't leaving it", async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await staffRoute().expect(200);
+    ageLoadRouteForTests(String(load._id), 60_000);
+    // About 300 m east of the road: with a ±90 m reading it may still be on it.
+    const onRoute = road(DRIVER, DELIVERY)[5];
+    const beside = { lat: onRoute[1], lng: onRoute[0] + 0.0035 };
+    await moveDriver(beside, 5, 90);
+    await staffRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(1);
+    // The same spot measured to ±10 m is clearly off the road.
+    await moveDriver(beside, 3, 10);
+    await staffRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(2);
+  });
+
+  it('says when the route starts from a rough location, and plans again from a precise one', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await moveDriver(DRIVER, 60, 1_500);
+    const rough = await staffRoute().expect(200);
+    expect(rough.body.data.driver).toMatchObject({ positionApproximate: true, positionAccuracyMeters: 1_500 });
+
+    ageLoadRouteForTests(String(load._id), 60_000);
+    await moveDriver(DRIVER, 5, 8);
+    const precise = await staffRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(2);
+    expect(precise.body.data.driver).toMatchObject({ positionApproximate: false, positionAccuracyMeters: 8 });
+  });
+
+  it('withholds a route that breaks a truck limit, and says which limit', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    const blocked = toDelivery();
+    (blocked.Routes[0].Legs[0].VehicleLegDetails as any).Notices = [
+      { Code: 'ViolatedVehicleRestriction', Impact: 'High', Details: [{ ViolatedConstraints: { MaxHeight: 381 } }] },
+    ];
+    mockRoutesSend.mockResolvedValue(blocked);
+
+    const res = await staffRoute().expect(200);
+    expect(res.body.data).toEqual({
+      available: false,
+      reason: 'no_safe_route',
+      message: 'No truck route to the delivery was found that avoids a 12 ft 6 in height limit. Plan this drive in a truck navigation app.',
+    });
+    // The same answer is reused for a couple of minutes instead of asking Amazon again.
+    await driverRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(1);
+    expect(loadRouteHealthSnapshot()).toMatchObject({ withheldForLimits: 1 });
+  });
+
+  it('shows the route with a warning when a truck limit may apply', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    const maybe = toDelivery();
+    (maybe.Routes[0].Legs[0].VehicleLegDetails as any).Notices = [
+      { Code: 'PotentialViolatedVehicleRestrictionUsage', Impact: 'Low', Details: [{ ViolatedConstraints: { MaxWeight: { Type: 'Gross', Value: 18_144 } } }] },
+    ];
+    mockRoutesSend.mockResolvedValue(maybe);
+
+    const res = await staffRoute().expect(200);
+    expect(res.body.data).toMatchObject({
+      available: true,
+      safety: { status: 'check', limits: ['a 40,000 lb weight limit'], restOfTripUnsafe: false, restOfTripLimits: [] },
+    });
+    expect(res.body.data.route.ahead.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('leaves the rest of the trip off the map when only that part breaks a limit', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    await Load.updateOne({ _id: load._id }, { $set: { status: 'Accepted', 'pickupLocation.coordinates': PICKUP } });
+    const trip = throughPickup();
+    (trip.Routes[0].Legs[1].VehicleLegDetails as any).Notices = [{ Code: 'ViolatedBlockedRoad', Impact: 'High', Details: [] }];
+    mockRoutesSend.mockResolvedValue(trip);
+
+    const res = await driverRoute().expect(200);
+    expect(res.body.data).toMatchObject({
+      available: true,
+      stop: 'pickup',
+      safety: { status: 'check', limits: [], restOfTripUnsafe: true, restOfTripLimits: ['a blocked road'] },
+    });
+    expect(res.body.data.route.ahead.length).toBeGreaterThanOrEqual(2);
+    expect(res.body.data.route.later).toBeNull();
+    await Load.updateOne({ _id: load._id }, { $unset: { 'pickupLocation.coordinates': 1 } });
+  });
+
+  it("ignores Amazon's notices that aren't about the truck, like toll data", async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    const tolls = toDelivery();
+    (tolls.Routes[0].Legs[0].VehicleLegDetails as any).Notices = [{ Code: 'TollsDataUnavailable', Impact: 'Low', Details: [] }];
+    mockRoutesSend.mockResolvedValue(tolls);
+    const res = await staffRoute().expect(200);
+    expect(res.body.data.safety).toEqual({ status: 'ok', limits: [], restOfTripUnsafe: false, restOfTripLimits: [] });
   });
 
   it("doesn't plan again right away for a driver who just left the route", async () => {

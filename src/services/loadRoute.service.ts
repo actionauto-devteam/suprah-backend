@@ -13,7 +13,8 @@ import {
   trafficLevel,
   type DeadlineStatus,
 } from "./etaMath.service";
-import { distanceToLineMeters, simplifyLine, type TracePoint } from "./routeTrace.service";
+import { MAX_ROUTE_ACCURACY_METERS, distanceToLineMeters, simplifyLine, type TracePoint } from "./routeTrace.service";
+import { legSafety, listOf } from "./routeSafety.service";
 
 /*
  * The best route and arrival time (ETA) for a load's next stop, with Amazon
@@ -28,6 +29,11 @@ import { distanceToLineMeters, simplifyLine, type TracePoint } from "./routeTrac
  *    etaMath.service).
  * 3. "Stopped for N minutes" instead of a guess when the truck isn't moving.
  * 4. On time / At risk / Late against the stop's deadline day.
+ * 5. A second check on Amazon's answer (routeSafety.service): a route that
+ *    breaks one of the truck's limits is never shown as the way to go, and
+ *    one where a limit may apply carries a warning.
+ * 6. Rough locations (worse than 100 m) never trigger a new route, and
+ *    "off the route" allows for the location's own error.
  *
  * A route is reused for 2 minutes per load (only worked out while someone has
  * the driver or load open). When the driver leaves the planned route, a new
@@ -45,6 +51,12 @@ export const MIN_REROUTE_MS = 45_000;
 export const MAX_ROUTE_LINE_POINTS = 1_500;
 /** Points kept for checking whether the driver left the route (finer than the drawn line). */
 const MAX_CHECK_LINE_POINTS = 8_000;
+/**
+ * A location less precise than this (a computer's Wi-Fi location can be
+ * kilometres off) never triggers a new route, and the arrival card says the
+ * route starts from an approximate location.
+ */
+export const ROUGH_POSITION_METERS = MAX_ROUTE_ACCURACY_METERS;
 /** A position older than this is shown as the basis of the estimate. */
 const STALE_POSITION_MS = 15 * 60_000;
 const PACE_WINDOW_MS = 30 * 60_000;
@@ -60,7 +72,8 @@ export type RouteUnavailableReason =
   | "not_tracked"
   | "no_driver_position"
   | "no_destination"
-  | "unavailable";
+  | "unavailable"
+  | "no_safe_route";
 
 export type LoadRouteLines = {
   /** Where the route starts: the driver's position when it was planned. */
@@ -97,7 +110,19 @@ export type LoadRoute =
         positionAgeMinutes: number;
         /** The latest position is over 15 minutes old: the estimate starts from there. */
         positionStale: boolean;
+        /** How precise the starting location is, in metres (null when unknown). */
+        positionAccuracyMeters: number | null;
+        /** The route starts from a rough location (worse than 100 m). */
+        positionApproximate: boolean;
       };
+      /**
+       * Amazon Location's own warnings checked against the truck's limits.
+       * "check": a limit may apply somewhere on the route. A route that
+       * breaks a limit on the way to the next stop is never returned (see
+       * "no_safe_route"); one that breaks a limit after the pickup loses its
+       * rest-of-trip line.
+       */
+      safety: { status: "ok" | "check"; limits: string[]; restOfTripUnsafe: boolean; restOfTripLimits: string[] };
       deadline: { day: string; status: DeadlineStatus } | null;
       /** Null when Amazon Location sent no shape for the route; the arrival time still stands. */
       route: LoadRouteLines | null;
@@ -120,6 +145,7 @@ const UNAVAILABLE_MESSAGES: Record<RouteUnavailableReason, string> = {
   no_driver_position: "No recent location from the driver yet.",
   no_destination: "This stop's address couldn't be found on the map. Add a map pin to the load.",
   unavailable: "The route couldn't be worked out right now. It will try again shortly.",
+  no_safe_route: "No truck route was found that avoids every road limit. Plan this drive in a truck navigation app.",
 };
 
 const unavailable = (reason: RouteUnavailableReason): LoadRoute => ({
@@ -135,6 +161,8 @@ type CachedRoute = {
   checkLine: LatLng[] | null;
   /** When the driver's position the route started from was measured. */
   originMeasuredMs: number;
+  /** The route started from a rough location; a precise one plans it again. */
+  originRough: boolean;
 };
 
 let routesClient: GeoRoutesClient | null = null;
@@ -150,6 +178,8 @@ const health = {
   computed: 0,
   reused: 0,
   rerouted: 0,
+  /** Routes withheld because they break one of the truck's limits. */
+  withheldForLimits: 0,
   geocoded: 0,
   failed: 0,
   skippedByCap: 0,
@@ -281,15 +311,21 @@ async function recentTrace(loadId: unknown, driverId: string, sinceMs: number): 
 
 async function latestDriverPosition(driverId: string) {
   const location: any = await DriverLocation.findOne({ userId: driverId })
-    .select("coords locationRecordedAt speed")
+    .select("coords locationRecordedAt speed accuracy")
     .lean();
   const coords = location?.coords;
   const measuredMs = location?.locationRecordedAt ? new Date(location.locationRecordedAt).getTime() : Number.NaN;
   if (!coords || !Number.isFinite(coords.lat) || !Number.isFinite(coords.lng) || !Number.isFinite(measuredMs)) return null;
+  const accuracy = typeof location.accuracy === "number" && Number.isFinite(location.accuracy) && location.accuracy >= 0
+    ? location.accuracy
+    : null;
   return {
     position: { lat: Number(coords.lat), lng: Number(coords.lng) },
     measuredMs,
     speed: typeof location.speed === "number" && Number.isFinite(location.speed) ? location.speed : null,
+    /** Metres; null when the device didn't say. */
+    accuracy,
+    rough: accuracy !== null && accuracy > ROUGH_POSITION_METERS,
   };
 }
 
@@ -309,6 +345,7 @@ type LegSummary = {
   typical: number | null;
   freeFlow: number | null;
   incidents: any[];
+  notices: unknown;
   line: LatLng[];
 };
 
@@ -321,6 +358,7 @@ function legSummary(leg: any): LegSummary {
     typical: number(overview.TypicalDuration),
     freeFlow: number(overview.BestCaseDuration),
     incidents: leg?.VehicleLegDetails?.Incidents ?? [],
+    notices: leg?.VehicleLegDetails?.Notices ?? [],
     line: linePoints(leg?.Geometry?.LineString),
   };
 }
@@ -333,6 +371,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
     result: unavailable(reason),
     checkLine: null,
     originMeasuredMs: 0,
+    originRough: false,
   });
 
   const latest = await latestDriverPosition(driverId);
@@ -399,6 +438,34 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
     return notReady("unavailable");
   }
 
+  // A second check on Amazon's answer: its own notices against the truck's
+  // limits. A route that breaks one on the way to the next stop is never
+  // shown as the way to go.
+  const aheadSafety = legSafety(ahead.notices);
+  if (aheadSafety.status === "unsafe") {
+    health.withheldForLimits += 1;
+    return {
+      at: Date.now(),
+      result: {
+        available: false,
+        reason: "no_safe_route",
+        message: aheadSafety.limits.length
+          ? `No truck route to the ${stop} was found that avoids ${listOf(aheadSafety.limits)}. Plan this drive in a truck navigation app.`
+          : UNAVAILABLE_MESSAGES.no_safe_route,
+      },
+      checkLine: null,
+      originMeasuredMs: latest.measuredMs,
+      originRough: latest.rough,
+    };
+  }
+  const laterSafety = later ? legSafety(later.notices) : null;
+  const restOfTripUnsafe = laterSafety?.status === "unsafe";
+  if (restOfTripUnsafe) health.withheldForLimits += 1;
+  const cautions = [
+    ...(aheadSafety.status === "check" ? aheadSafety.limits : []),
+    ...(laterSafety?.status === "check" ? laterSafety.limits : []),
+  ].filter((limit, index, all) => all.indexOf(limit) === index);
+
   const distance = ahead.distance as number;
   const duration = ahead.duration as number;
   const now = Date.now();
@@ -431,8 +498,9 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
       ? {
           origin,
           ahead: toCoordinates(aheadLine),
+          // The rest of the trip is left off the map when it breaks a truck limit.
           later:
-            later && laterLine.length >= 2 && later.distance !== null && later.duration !== null
+            !restOfTripUnsafe && later && laterLine.length >= 2 && later.distance !== null && later.duration !== null
               ? { line: toCoordinates(laterLine), distanceMeters: Math.round(later.distance), durationSeconds: Math.round(later.duration) }
               : null,
           stops: {
@@ -447,6 +515,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
     at: now,
     checkLine: ahead.line.length >= 2 ? simplifyLine(ahead.line, MAX_CHECK_LINE_POINTS) : null,
     originMeasuredMs: latest.measuredMs,
+    originRough: latest.rough,
     result: {
       available: true,
       stop,
@@ -470,6 +539,14 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
         stoppedMinutes: stopped ? Math.floor(stoppedMs / 60_000) : null,
         positionAgeMinutes: Math.max(0, Math.floor((now - latest.measuredMs) / 60_000)),
         positionStale: now - latest.measuredMs > STALE_POSITION_MS,
+        positionAccuracyMeters: latest.accuracy !== null ? Math.round(latest.accuracy) : null,
+        positionApproximate: latest.rough,
+      },
+      safety: {
+        status: cautions.length || restOfTripUnsafe ? "check" : "ok",
+        limits: cautions.slice(0, 3),
+        restOfTripUnsafe,
+        restOfTripLimits: restOfTripUnsafe ? (laterSafety?.limits ?? []) : [],
       },
       deadline: deadlineDay ? { day: deadlineDay, status: deadlineStatus(arrivalMs, deadlineDay) } : null,
       route: lines,
@@ -486,7 +563,12 @@ async function leftTheRoute(load: RouteLoad, cached: CachedRoute): Promise<boole
   if (!cached.checkLine || Date.now() - cached.at < MIN_REROUTE_MS) return false;
   const latest = await latestDriverPosition(String(load.assignedDriverId ?? ""));
   if (!latest || latest.measuredMs <= cached.originMeasuredMs) return false;
-  return distanceToLineMeters(latest.position, cached.checkLine) > OFF_ROUTE_METERS;
+  // A rough location (Wi-Fi, a weak indoor fix) is never a reason to plan again.
+  if (latest.rough) return false;
+  // The route started from a rough location: plan it again from a precise one.
+  if (cached.originRough) return true;
+  // Off the route even after allowing for the location's own error.
+  return distanceToLineMeters(latest.position, cached.checkLine) - (latest.accuracy ?? 0) > OFF_ROUTE_METERS;
 }
 
 /**
@@ -512,9 +594,10 @@ export async function getLoadRoute(load: RouteLoad): Promise<LoadRoute> {
   if (pending) return pending;
   const request = computeRoute(load, stop)
     .then((computed) => {
-      // A failure is retried on the next view instead of being reused.
       const { result } = computed;
-      if (result.available || result.reason === "no_destination") results.set(key, computed);
+      // A withheld route is reused too, so Amazon isn't asked again for a
+      // couple of minutes; a failure is retried on the next view instead.
+      if (result.available || result.reason === "no_destination" || result.reason === "no_safe_route") results.set(key, computed);
       else results.delete(key);
       return result;
     })
@@ -545,7 +628,7 @@ export function resetLoadRouteForTests() {
   geocodes.clear();
   quotaWindowStart = 0;
   quotaUsed = 0;
-  Object.assign(health, { computed: 0, reused: 0, rerouted: 0, geocoded: 0, failed: 0, skippedByCap: 0, lastError: null, lastErrorAt: null });
+  Object.assign(health, { computed: 0, reused: 0, rerouted: 0, withheldForLimits: 0, geocoded: 0, failed: 0, skippedByCap: 0, lastError: null, lastErrorAt: null });
 }
 
 /** Test hook: makes the cached route for a load look older than it is. */
