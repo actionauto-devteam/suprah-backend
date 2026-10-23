@@ -7,6 +7,7 @@ import { hasSendPermission } from '../services/marketingContact.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
+import { isDoNotContactError } from '../services/contactRestriction.service';
 
 const CRON_SCHEDULE = process.env.EMAIL_CAMPAIGN_CRON || '* * * * *';
 const BATCH_PER_TICK = parseInt(process.env.EMAIL_CAMPAIGN_BATCH_PER_TICK || '20', 10);
@@ -133,8 +134,20 @@ async function processCampaign(campaign: any, budget: number): Promise<number> {
         bodyHtml: campaign.bodyHtml,
         signOffText: campaign.signOffText,
         organizationId: campaign.organizationId,
+        leadId: recipient.leadId ? String(recipient.leadId) : undefined,
       });
     } catch (err) {
+      if (isDoNotContactError(err)) {
+        const skippedResult = await EmailCampaignRecipient.updateOne(
+          { _id: recipient._id, status: 'processing' },
+          { $set: { status: 'skipped', failureReason: err.message } },
+        ).catch(() => null);
+        if (skippedResult && skippedResult.matchedCount > 0) {
+          await EmailCampaign.updateOne({ _id: campaign._id }, { $inc: { skippedCount: 1 } }).catch(() => undefined);
+        }
+        logger.warn({ campaignId: campaign._id, recipientId: recipient._id }, '[EmailCampaign] Recipient skipped: customer is marked Do Not Contact');
+        continue;
+      }
       const updateResult = await EmailCampaignRecipient.updateOne(
         { _id: recipient._id, status: 'processing' },
         { $set: { status: 'failed', failureReason: String((err as any)?.message || err).slice(0, 500) } },

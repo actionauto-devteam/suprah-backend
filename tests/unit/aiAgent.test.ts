@@ -34,6 +34,7 @@ import {
 } from '../../src/services/aiAgent.service';
 import { validateOutboundMessage } from '../../src/utils/aiOutboundSafety';
 import { AiReplySuppressedError } from '../../src/utils/aiReplySuppressed';
+import { ContactRestrictedError } from '../../src/services/contactRestriction.service';
 import { buildVehicleCandidate, CLARIFYING_QUESTION_MARKER } from '../../src/services/vehicleInquiryContext.service';
 
 describe('ALEX_FALLBACK_MESSAGE', () => {
@@ -716,6 +717,20 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
     expect(ctx.send).toHaveBeenCalledTimes(1);
     expect(ctx.notifyHandoff).not.toHaveBeenCalled();
     expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'Alex fallback suppressed at dispatch' }));
+  });
+
+  it('records a Do Not Contact skip, with no fallback or handoff, when the send boundary blocks the reply', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'What day works best for you?' } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+    const blocked = new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false });
+    const ctx = buildCtx({ send: jest.fn().mockRejectedValue(blocked) });
+    await processAlexTurn(ctx);
+    expect(ctx.send).toHaveBeenCalledTimes(1);
+    expect(ctx.notifyHandoff).not.toHaveBeenCalled();
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'skipped',
+      failureReason: expect.stringMatching(/Do Not Contact.*\(do_not_contact\)$/),
+    }));
   });
 });
 

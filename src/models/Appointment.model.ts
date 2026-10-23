@@ -2,6 +2,28 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export type EntryType = 'event' | 'task' | 'reminder' | 'appointment';
 
+export const APPOINTMENT_SMS_NOTICE_STATUSES = ['not_sent', 'sending', 'accepted', 'delivered', 'failed', 'unknown'] as const;
+export type AppointmentSmsNoticeStatus = (typeof APPOINTMENT_SMS_NOTICE_STATUSES)[number];
+
+export interface IAppointmentSmsNotice {
+  status: AppointmentSmsNoticeStatus;
+  reason?: string | null;
+  forStartTime: Date;
+  messageId?: mongoose.Types.ObjectId | null;
+  providerMessageId?: string | null;
+  updatedAt: Date;
+}
+
+export const APPOINTMENT_EMAIL_NOTICE_TYPES = ['invitation', 'update', 'cancellation', 'reminder'] as const;
+export type AppointmentEmailNoticeType = (typeof APPOINTMENT_EMAIL_NOTICE_TYPES)[number];
+
+export interface IAppointmentEmailNotice {
+  status: 'not_sent';
+  emailType: AppointmentEmailNoticeType;
+  reason: string;
+  updatedAt: Date;
+}
+
 export interface IGuestResponse {
   email: string;
   status: 'pending' | 'accepted' | 'declined';
@@ -55,6 +77,9 @@ export interface IAppointment extends Document {
   reminderSent: boolean;
   reminderTime?: Date;
   reminderSentAt?: Date;
+  reminderSms?: IAppointmentSmsNotice;
+  rescheduleNotice?: IAppointmentSmsNotice;
+  customerEmailNotice?: IAppointmentEmailNotice;
   noShowFollowUpSentAt?: Date;
   noShowFollowUpStatus?: 'processing' | 'sent' | 'failed' | 'skipped';
   noShowFollowUpAttemptCount?: number;
@@ -108,6 +133,28 @@ const GuestResponseSchema = new Schema({
   guestName: String,
   guestPhone: String
 }, { _id: false });
+
+const AppointmentSmsNoticeSchema = new Schema(
+  {
+    status: { type: String, enum: APPOINTMENT_SMS_NOTICE_STATUSES, required: true },
+    reason: { type: String, trim: true, maxlength: 300, default: null },
+    forStartTime: { type: Date, required: true },
+    messageId: { type: Schema.Types.ObjectId, ref: 'CommunicationMessage', default: null },
+    providerMessageId: { type: String, trim: true, default: null },
+    updatedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
+const AppointmentEmailNoticeSchema = new Schema(
+  {
+    status: { type: String, enum: ['not_sent'], required: true },
+    emailType: { type: String, enum: APPOINTMENT_EMAIL_NOTICE_TYPES, required: true },
+    reason: { type: String, trim: true, maxlength: 300, required: true },
+    updatedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
 
 const CustomerBookingSchema = new Schema({
   firstName: { type: String, required: true, trim: true },
@@ -204,6 +251,9 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
     reminderSentAt: { type: Date },
+    reminderSms: { type: AppointmentSmsNoticeSchema, default: undefined },
+    rescheduleNotice: { type: AppointmentSmsNoticeSchema, default: undefined },
+    customerEmailNotice: { type: AppointmentEmailNoticeSchema, default: undefined },
     noShowFollowUpSentAt: { type: Date },
     noShowFollowUpStatus: {
       type: String,
@@ -260,6 +310,14 @@ AppointmentSchema.index({ entryType: 1, startTime: 1 });
 AppointmentSchema.index({ 'guestEmails.email': 1 });
 AppointmentSchema.index({ 'customerBooking.email': 1 });
 AppointmentSchema.index({ 'customerBooking.phone': 1 });
+AppointmentSchema.index(
+  { 'reminderSms.providerMessageId': 1 },
+  { partialFilterExpression: { 'reminderSms.providerMessageId': { $type: 'string' } }, name: 'appointment_reminder_sms_provider_message' },
+);
+AppointmentSchema.index(
+  { 'rescheduleNotice.providerMessageId': 1 },
+  { partialFilterExpression: { 'rescheduleNotice.providerMessageId': { $type: 'string' } }, name: 'appointment_reschedule_sms_provider_message' },
+);
 AppointmentSchema.index({ 'customerBooking.firstName': 1, 'customerBooking.lastName': 1 });
 AppointmentSchema.index({ 'customerBooking.isCustomerBooking': 1, startTime: -1 });
 

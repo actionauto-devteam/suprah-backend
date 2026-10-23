@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockLeadFind = jest.fn();
 const mockLeadFindOneAndUpdate = jest.fn();
 const mockLeadUpdateOne = jest.fn();
@@ -73,7 +87,7 @@ jest.mock('../../src/utils/sendingWindow', () => ({
 
 jest.mock('../../src/utils/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), error: jest.fn() },
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
 import mongoose from 'mongoose';
@@ -154,6 +168,44 @@ describe('AI lead follow-up scheduler', () => {
     }));
     expect(updates).not.toContainEqual(expect.objectContaining({
       $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'sent' }),
+    }));
+  });
+
+  it('never generates or sends for a customer marked Do Not Contact, and records why', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    restriction.checkContactForSend.mockImplementationOnce(async () => ({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false }));
+    seedCandidates([baseLead()]);
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats.skipped).toBe(1);
+    expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockGenerateProactiveFollowUp).not.toHaveBeenCalled();
+    expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
+    const updates = mockLeadUpdateOne.mock.calls.map(([, update]) => update);
+    expect(updates).toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({
+        'followUp.aiFollowUpStatus': 'skipped',
+        'followUp.aiFollowUpFailureReason': expect.stringContaining('Do Not Contact'),
+      }),
+    }));
+  });
+
+  it('marks a Do Not Contact block at the send boundary as skipped, never failed', async () => {
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    seedCandidates([baseLead()]);
+    mockSendStaffAttributedSms.mockRejectedValue(new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false }));
+
+    const stats = await runAiLeadFollowupSweep();
+
+    expect(stats).toEqual(expect.objectContaining({ skipped: 1, sent: 0, errors: 0 }));
+    const updates = mockLeadUpdateOne.mock.calls.map(([, update]) => update);
+    expect(updates).toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'skipped' }),
+      $inc: { 'followUp.aiFollowUpAttemptCount': -1 },
+    }));
+    expect(updates).not.toContainEqual(expect.objectContaining({
+      $set: expect.objectContaining({ 'followUp.aiFollowUpStatus': 'failed' }),
     }));
   });
 
@@ -576,4 +628,29 @@ describe('AI lead follow-up scheduler — customers with multiple vehicle inquir
     expect(stats.sent).toBe(1);
     expect(mockGenerateProactiveFollowUp.mock.calls[0][0].vehicleContextNote).toBeUndefined();
   });
+
+  it.each(['+639171234567', '385-503-5869 ext 4', '+180170268'])(
+    'does not generate, claim or send for the untextable number %p',
+    async (phone) => {
+      seedCandidates([baseLead({ phone })]);
+
+      const stats = await runAiLeadFollowupSweep();
+
+      expect(stats.skipped).toBe(1);
+      expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
+      expect(mockGenerateProactiveFollowUp).not.toHaveBeenCalled();
+      expect(mockSendStaffAttributedSms).not.toHaveBeenCalled();
+      expect(mockLeadUpdateOne).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: 'lead-1', 'followUp.aiFollowUpStatus': { $ne: 'processing' } }),
+        {
+          $set: expect.objectContaining({
+            'followUp.aiFollowUpStatus': 'skipped',
+            'followUp.aiFollowUpFailureReason': expect.any(String),
+            'followUp.aiFollowUpNextRetryAt': expect.any(Date),
+          }),
+        },
+        { timestamps: false },
+      );
+    },
+  );
 });

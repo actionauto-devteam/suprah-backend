@@ -70,3 +70,33 @@ export const REASON_REQUIRED_STATUSES: string[] = [
   ...LEAD_STATUS_CATEGORIES.DeadLead,
   ...LEAD_STATUS_CATEGORIES.ClosedLegacy,
 ];
+
+export type LeadLifecycleState = 'active' | 'terminal' | 'unknown';
+
+export const CONTACT_RESTRICTED_STATUSES: string[] = ['Do Not Contact'];
+
+export const LIFECYCLE_TERMINAL_STATUSES: string[] = [
+  'Closed',
+  'Sold',
+  'Bought Elsewhere',
+  'Bad Lead',
+  'Missed Opportunity',
+  'Declined',
+  'No Longer Interested',
+  ...CONTACT_RESTRICTED_STATUSES,
+];
+
+export const LIFECYCLE_ACTIVE_STATUSES: string[] = LEAD_STATUS_VALUES.filter(
+  (status) => !LIFECYCLE_TERMINAL_STATUSES.includes(status),
+);
+
+export function classifyLeadLifecycle(status: unknown): LeadLifecycleState {
+  const value = typeof status === 'string' ? status.trim() : '';
+  if (LIFECYCLE_TERMINAL_STATUSES.includes(value)) return 'terminal';
+  if (LIFECYCLE_ACTIVE_STATUSES.includes(value)) return 'active';
+  return 'unknown';
+}
+
+export function isContactRestrictedStatus(status: unknown): boolean {
+  return typeof status === 'string' && CONTACT_RESTRICTED_STATUSES.includes(status.trim());
+}

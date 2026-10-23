@@ -1,4 +1,4 @@
-import Appointment from '../models/Appointment.model';
+import Appointment, { AppointmentEmailNoticeType } from '../models/Appointment.model';
 import User from '../models/User.model';
 import Lead from '../models/lead.model';
 import { getSocketIO, emitToOrg } from '../utils/socketEmitter';
@@ -6,8 +6,18 @@ import notificationService from './notification.service';
 import emailService from './email.service';
 import googleCalendarService from './googleCalendar.service';
 import customerBookingService from './customerbooking.service';
-import { notifyCustomerOfReschedule } from './communication.service';
+import { isSmsOptedOut, notifyCustomerOfReschedule } from './communication.service';
 import { ApiError } from '../utils/ApiError';
+import { resolveSmsDestination } from '../utils/smsDestination';
+import { CONTACT_RESTRICTED_STATUSES } from '../constants/leadStatus';
+import { checkContactForSend, contactRestrictionMessage, isContactRestrictedError } from './contactRestriction.service';
+import {
+  SMS_OPTED_OUT_NOTICE_REASON,
+  finishAppointmentSmsNotice,
+  noticeOutcomeFromSendError,
+  noticeOutcomeFromSendResult,
+  plannedSmsNotice,
+} from '../utils/appointmentSmsNotice';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import CrmUser from '../models/CrmUser.model';
@@ -95,7 +105,64 @@ const checkUserAvailability = async (
   }
 };
 
+export const SERVER_OWNED_APPOINTMENT_NOTICE_FIELDS = ['reminderSent', 'reminderSentAt', 'reminderSms', 'rescheduleNotice', 'customerEmailNotice'] as const;
+
+export function contactBlockedEmailReason(error: unknown): string | null {
+  return isContactRestrictedError(error) ? error.message : null;
+}
+
+export async function saveCustomerEmailNotice(
+  appointment: any,
+  emailType: AppointmentEmailNoticeType,
+  blockedReason: string | null,
+  customerEmailSent: boolean,
+  persist = true,
+) {
+  if (blockedReason) {
+    const notice = { status: 'not_sent' as const, emailType, reason: blockedReason, updatedAt: new Date() };
+    appointment.customerEmailNotice = notice;
+    if (persist) {
+      await Appointment.updateOne({ _id: appointment._id }, { $set: { customerEmailNotice: notice } }, { timestamps: false })
+        .catch((error: any) => console.error('[AppointmentService] Could not save the email warning:', error?.message));
+    }
+    return notice;
+  }
+  if (customerEmailSent && appointment.customerEmailNotice) {
+    appointment.customerEmailNotice = undefined;
+    if (persist) {
+      await Appointment.updateOne({ _id: appointment._id }, { $unset: { customerEmailNotice: '' } }, { timestamps: false })
+        .catch((error: any) => console.error('[AppointmentService] Could not clear the email warning:', error?.message));
+    }
+  }
+  return null;
+}
+
+export function withoutServerOwnedNoticeFields<T>(data: T): T {
+  if (!data || typeof data !== 'object') return data;
+  const copy: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  for (const field of SERVER_OWNED_APPOINTMENT_NOTICE_FIELDS) delete copy[field];
+  return copy as T;
+}
+
+async function planRescheduleNotice(appointment: any) {
+  const phone = appointment.customerBooking?.phone;
+  if (!phone) return undefined;
+  const destination = resolveSmsDestination(phone, 'automated');
+  if (!destination.ok) return plannedSmsNotice('not_sent', appointment.startTime, destination.message);
+  const restrictionReason = contactRestrictionMessage(await checkContactForSend({
+    organizationId: appointment.organizationId,
+    phone,
+    email: appointment.customerBooking?.email,
+    leadId: appointment.leadId,
+  }, { channel: 'sms', purpose: 'reschedule_text', actor: { kind: 'system', userId: 'system', name: null } }));
+  if (restrictionReason) return plannedSmsNotice('not_sent', appointment.startTime, restrictionReason);
+  const optedOut = await isSmsOptedOut(appointment.organizationId, phone).catch(() => false);
+  if (optedOut) return plannedSmsNotice('not_sent', appointment.startTime, SMS_OPTED_OUT_NOTICE_REASON);
+  return plannedSmsNotice('sending', appointment.startTime);
+}
+
 const createAppointment = async (userId: string, orgId: string, data: CreateAppointmentData) => {
+  data = withoutServerOwnedNoticeFields(data);
   const start = new Date(data.startTime);
   const end = new Date(data.endTime);
 
@@ -167,11 +234,14 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   }
 
   if (data.leadId) {
-    await Lead.findByIdAndUpdate(data.leadId, {
-      status: 'Appointment Set'
-    });
+    await Lead.updateOne(
+      { _id: data.leadId, organizationId: orgId, status: { $nin: CONTACT_RESTRICTED_STATUSES } },
+      { status: 'Appointment Set' },
+    );
   }
 
+  let invitationBlockedReason: string | null = null;
+  let customerInvitationSent = false;
   if (customerBooking) {
     try {
       const token = jwt.sign(
@@ -187,8 +257,10 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
         token,
         appointment.organizationId.toString()
       );
+      customerInvitationSent = true;
       console.log(`✅ Sent customer booking invitation to ${customerBooking.email}`);
     } catch (error) {
+      invitationBlockedReason = contactBlockedEmailReason(error);
       console.error(`❌ Failed to send customer booking invitation:`, error);
     }
   }
@@ -211,12 +283,14 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
           appointment.organizationId.toString()
         );
       } catch (error) {
+        invitationBlockedReason = invitationBlockedReason || contactBlockedEmailReason(error);
         console.error(`Failed to send invitation to ${guest.email}:`, error);
       }
     });
 
     await Promise.allSettled(invitationPromises);
   }
+  await saveCustomerEmailNotice(appointment, 'invitation', invitationBlockedReason, customerInvitationSent);
 
   const participantIds = participants.filter(p => p !== userId);
   await Promise.all(
@@ -253,7 +327,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
       const leadEmail = data.customerBooking?.email || (data as any).email;
       if (leadEmail) {
         const updatedLead = await Lead.findOneAndUpdate(
-          { email: leadEmail, organizationId: orgId },
+          { email: leadEmail, organizationId: orgId, status: { $nin: CONTACT_RESTRICTED_STATUSES } },
           { status: 'Appointment Set' },
           { new: true }
         );
@@ -395,6 +469,7 @@ const updateAppointment = async (
     throw new ApiError(403, 'Only the creator can modify participants or guests');
   }
 
+  updateData = withoutServerOwnedNoticeFields(updateData);
   const previousStatus = appointment.status;
   const previousStartTime = appointment.startTime;
   Object.assign(appointment, updateData);
@@ -416,6 +491,11 @@ const updateAppointment = async (
     appointment.reminderTime = undefined;
     appointment.rescheduleAwaitingReplyAt = undefined;
     appointment.rescheduleStatedPreference = undefined;
+    appointment.reminderSms = undefined;
+    appointment.rescheduleNotice = await planRescheduleNotice(appointment);
+    if (appointment.rescheduleNotice?.status === 'not_sent') {
+      console.warn(`[AppointmentService] Reschedule text not sent for ${appointmentId}: ${appointment.rescheduleNotice.reason}`);
+    }
   }
 
   console.log(`[AppointmentService] Saving appointment ${appointmentId}...`);
@@ -430,10 +510,15 @@ const updateAppointment = async (
     startTime: appointment.startTime,
   });
 
-  if (startTimeChanged) {
-    notifyCustomerOfReschedule(appointment).catch((error: any) => {
-      console.error('[AppointmentService] Failed to notify customer of reschedule:', error.message);
-    });
+  const plannedNotice = appointment.rescheduleNotice;
+  if (startTimeChanged && plannedNotice?.status === 'sending') {
+    const forStartTime = plannedNotice.forStartTime;
+    notifyCustomerOfReschedule(appointment)
+      .then(noticeOutcomeFromSendResult, noticeOutcomeFromSendError)
+      .then((outcome) => finishAppointmentSmsNotice(appointment._id, 'rescheduleNotice', forStartTime, outcome))
+      .catch((error: any) => {
+        console.error('[AppointmentService] Failed to notify customer of reschedule:', error?.message);
+      });
   }
 
   try {
@@ -469,15 +554,20 @@ const updateAppointment = async (
   );
 
   console.log(`[AppointmentService] Sending emails...`);
+  let updateBlockedReason: string | null = null;
+  let customerUpdateSent = false;
   if (appointment.guestEmails.length > 0) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       console.log(`[AppointmentService] Sending update to ${appointment.guestEmails.length} guests...`);
-      await Promise.allSettled(
+      const guestResults = await Promise.allSettled(
         appointment.guestEmails.map(guest =>
           emailService.sendAppointmentUpdate(appointment, organizer, guest.email)
         )
       );
+      for (const result of guestResults) {
+        if (result.status === 'rejected') updateBlockedReason = updateBlockedReason || contactBlockedEmailReason(result.reason);
+      }
     }
   }
 
@@ -488,12 +578,15 @@ const updateAppointment = async (
       try {
         console.log(`[AppointmentService] Sending update to customer ${appointment.customerBooking.email}...`);
         await emailService.sendAppointmentUpdate(appointment, organizer, appointment.customerBooking.email);
+        customerUpdateSent = true;
         console.log(`✅ Sent customer booking update to ${appointment.customerBooking.email}`);
       } catch (error) {
+        updateBlockedReason = updateBlockedReason || contactBlockedEmailReason(error);
         console.error(`❌ Failed to send customer booking update:`, error);
       }
     }
   }
+  await saveCustomerEmailNotice(appointment, 'update', updateBlockedReason, customerUpdateSent);
 
   console.log(`[AppointmentService] Update complete.`);
   return appointment.populate('participants createdBy', 'name email avatar');
@@ -556,14 +649,19 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     )
   );
 
+  let cancellationBlockedReason: string | null = null;
+  let customerCancellationSent = false;
   if (appointment.guestEmails.length > 0) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
-      await Promise.allSettled(
+      const guestResults = await Promise.allSettled(
         appointment.guestEmails.map(guest =>
           emailService.sendAppointmentCancellation(appointment, organizer, guest.email)
         )
       );
+      for (const result of guestResults) {
+        if (result.status === 'rejected') cancellationBlockedReason = cancellationBlockedReason || contactBlockedEmailReason(result.reason);
+      }
     }
   }
 
@@ -573,12 +671,15 @@ const cancelAppointment = async (appointmentId: string, orgId: string, userId: s
     if (organizer) {
       try {
         await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
+        customerCancellationSent = true;
         console.log(`✅ Sent customer booking cancellation to ${appointment.customerBooking.email}`);
       } catch (error) {
+        cancellationBlockedReason = cancellationBlockedReason || contactBlockedEmailReason(error);
         console.error(`❌ Failed to send customer booking cancellation:`, error);
       }
     }
   }
+  await saveCustomerEmailNotice(appointment, 'cancellation', cancellationBlockedReason, customerCancellationSent);
 
   return appointment;
 };
@@ -610,15 +711,19 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
   }
 
   console.log(`[AppointmentService] Sending cancellation emails...`);
+  let deletionBlockedReason: string | null = null;
   if (appointment.guestEmails.length > 0) {
     const organizer = await resolveOrganizer(appointment.createdBy._id.toString());
     if (organizer) {
       console.log(`[AppointmentService] Notifying ${appointment.guestEmails.length} guests...`);
-      await Promise.allSettled(
+      const guestResults = await Promise.allSettled(
         appointment.guestEmails.map(guest =>
           emailService.sendAppointmentCancellation(appointment, organizer, guest.email)
         )
       );
+      for (const result of guestResults) {
+        if (result.status === 'rejected') deletionBlockedReason = deletionBlockedReason || contactBlockedEmailReason(result.reason);
+      }
     }
   }
 
@@ -631,14 +736,17 @@ const deleteAppointment = async (appointmentId: string, orgId: string, userId: s
         await emailService.sendAppointmentCancellation(appointment, organizer, appointment.customerBooking.email);
         console.log(`✅ Sent customer booking cancellation to ${appointment.customerBooking.email}`);
       } catch (error) {
+        deletionBlockedReason = deletionBlockedReason || contactBlockedEmailReason(error);
         console.error(`❌ Failed to send customer booking cancellation:`, error);
       }
     }
   }
+  const customerEmailNotice = await saveCustomerEmailNotice(appointment, 'cancellation', deletionBlockedReason, false, false);
 
   console.log(`[AppointmentService] Removing from database...`);
   await Appointment.findByIdAndDelete(appointmentId);
   console.log(`[AppointmentService] Delete complete.`);
+  return { customerEmailNotice };
 };
 
 const getAppointmentById = async (appointmentId: string, orgId: string, userId: string) => {

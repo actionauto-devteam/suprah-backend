@@ -295,7 +295,7 @@ export const crmCalendarController = {
     const orgId = (req.crmUser as any).organizationId.toString();
     const { id } = req.params;
 
-    await appointmentService.deleteAppointment(
+    const result = await appointmentService.deleteAppointment(
       id,
       orgId,
       crmUserId
@@ -304,6 +304,7 @@ export const crmCalendarController = {
     res.json({
       success: true,
       message: 'Appointment deleted successfully',
+      data: { customerEmailNotice: result?.customerEmailNotice || null },
     });
   }),
 };

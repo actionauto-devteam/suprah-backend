@@ -4,6 +4,8 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import { WEBCHAT_ACK_ACTOR_ID } from '../utils/webchatAck';
 import { sendWebchatFallbackSms } from '../services/communication.service';
 import logger from '../utils/logger';
+import { isSmsDestinationError } from '../utils/smsDestination';
+import { isDoNotContactError } from '../services/contactRestriction.service';
 
 const CRON_SCHEDULE = process.env.WEBCHAT_SMS_FALLBACK_CRON || '*/2 * * * *';
 const DELAY_MINUTES = parseInt(process.env.WEBCHAT_SMS_FALLBACK_DELAY_MINUTES || '5', 10);
@@ -68,6 +70,16 @@ export async function runWebchatSmsFallbackSweep(): Promise<FallbackStats> {
       if (delivered) stats.sent++;
       else stats.skipped++;
     } catch (err) {
+      if (isSmsDestinationError(err)) {
+        stats.skipped++;
+        logger.warn({ sessionId: session._id, reason: err.reason }, '[WebchatSmsFallback] SMS skipped: phone number cannot be texted');
+        continue;
+      }
+      if (isDoNotContactError(err)) {
+        stats.skipped++;
+        logger.warn({ sessionId: session._id }, '[WebchatSmsFallback] SMS skipped: customer is marked Do Not Contact');
+        continue;
+      }
       stats.errors++;
       logger.error({ err, sessionId: session._id }, '[WebchatSmsFallback] Failed to process session');
     }

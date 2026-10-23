@@ -18,6 +18,8 @@ import { retryDbWrite } from '../utils/retryDbWrite';
 import { decideAiDelivery, AI_NOT_LIVE_REASON } from '../services/aiOperatingMode.service';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
 import logger from '../utils/logger';
+import { resolveSmsDestination } from '../utils/smsDestination';
+import { checkContactForSend, contactRestrictionMessage, isDoNotContactError } from '../services/contactRestriction.service';
 import {
   resolvePinnedVehicleContext,
   latestSharedConversationActivity,
@@ -155,6 +157,36 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
           { timestamps: false },
         );
         stats.skipped++;
+        continue;
+      }
+
+      const destination = resolveSmsDestination(lead.phone, 'automated');
+      if (!destination.ok) {
+        await Lead.updateOne(
+          { _id: lead._id, status: { $in: ELIGIBLE_STATUSES }, 'followUp.aiFollowUpStatus': { $ne: 'processing' } },
+          { $set: { 'followUp.aiFollowUpStatus': 'skipped', 'followUp.aiFollowUpFailureReason': destination.message, 'followUp.aiFollowUpNextRetryAt': new Date(Date.now() + 24 * HOUR_MS) } },
+          { timestamps: false },
+        );
+        stats.skipped++;
+        logger.warn({ leadId: lead._id, reason: destination.reason }, '[AiLeadFollowup] SMS skipped: phone number cannot be texted');
+        continue;
+      }
+
+      const restriction = await checkContactForSend({
+        organizationId: lead.organizationId,
+        phone: lead.phone,
+        email: lead.email,
+        leadId: lead._id,
+        customerId: lead.customerId,
+      }, { channel: 'sms', purpose: 'ai_follow_up', actor: { kind: 'ai', userId: 'ai-agent', name: agentName } });
+      if (restriction.status !== 'allowed') {
+        await Lead.updateOne(
+          { _id: lead._id, status: { $in: ELIGIBLE_STATUSES }, 'followUp.aiFollowUpStatus': { $ne: 'processing' } },
+          { $set: { 'followUp.aiFollowUpStatus': 'skipped', 'followUp.aiFollowUpFailureReason': contactRestrictionMessage(restriction), 'followUp.aiFollowUpNextRetryAt': new Date(Date.now() + 24 * HOUR_MS) } },
+          { timestamps: false },
+        );
+        stats.skipped++;
+        logger.warn({ leadId: lead._id, status: restriction.status }, '[AiLeadFollowup] SMS skipped: customer is not contactable');
         continue;
       }
 
@@ -305,6 +337,23 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
           stats.skipped++;
         }
       } catch (err) {
+        if (isDoNotContactError(err)) {
+          await Lead.updateOne(
+            { _id: lead._id, 'followUp.aiFollowUpStatus': 'processing' },
+            {
+              $set: {
+                'followUp.aiFollowUpStatus': 'skipped',
+                'followUp.aiFollowUpFailureReason': err.message,
+                'followUp.aiFollowUpNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+              },
+              $inc: { 'followUp.aiFollowUpAttemptCount': -1 },
+            },
+            { timestamps: false },
+          ).catch(() => undefined);
+          stats.skipped++;
+          logger.warn({ leadId: lead._id }, '[AiLeadFollowup] SMS skipped at send: customer is marked Do Not Contact');
+          continue;
+        }
         if (err instanceof AiReplySuppressedError) {
           await Lead.updateOne(
             { _id: lead._id, 'followUp.aiFollowUpStatus': 'processing' },

@@ -2,6 +2,8 @@ import cron from 'node-cron';
 import Appointment from '../models/Appointment.model';
 import { sendNoShowFollowUpText } from '../services/communication.service';
 import logger from '../utils/logger';
+import { isSmsDestinationError } from '../utils/smsDestination';
+import { isDoNotContactError } from '../services/contactRestriction.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
 
 const CRON_SCHEDULE = process.env.NOSHOW_FOLLOWUP_CRON || '*/10 * * * *';
@@ -162,6 +164,32 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
         stats.skipped++;
       }
     } catch (err) {
+      if (isSmsDestinationError(err)) {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+          {
+            $set: { noShowFollowUpStatus: 'skipped', noShowFollowUpFailureReason: err.message },
+            $unset: { noShowFollowUpNextRetryAt: 1 },
+          },
+          { timestamps: false },
+        ).catch(() => undefined);
+        stats.skipped++;
+        logger.warn({ appointmentId: appointment._id, reason: err.reason }, '[NoShowFollowUp] SMS skipped: phone number cannot be texted');
+        continue;
+      }
+      if (isDoNotContactError(err)) {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpStatus: 'processing' },
+          {
+            $set: { noShowFollowUpStatus: 'skipped', noShowFollowUpFailureReason: err.message },
+            $unset: { noShowFollowUpNextRetryAt: 1 },
+          },
+          { timestamps: false },
+        ).catch(() => undefined);
+        stats.skipped++;
+        logger.warn({ appointmentId: appointment._id }, '[NoShowFollowUp] SMS skipped: customer is marked Do Not Contact');
+        continue;
+      }
       const attempts = (appointment.noShowFollowUpAttemptCount || 0) + 1;
       const exhausted = attempts >= MAX_ATTEMPTS;
       await Appointment.updateOne(

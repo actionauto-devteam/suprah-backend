@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockLeadCreate = jest.fn();
 const mockLeadFindOne = jest.fn();
 const mockLeadUpdateOne = jest.fn().mockResolvedValue({});
@@ -23,6 +37,10 @@ const mockClaimGeneration = jest.fn();
 const mockClaimDispatch = jest.fn().mockResolvedValue(undefined);
 const mockProcessAlexTurn = jest.fn();
 const mockResolveDealerName = jest.fn().mockResolvedValue('Action Auto');
+const mockSessionFindOne = jest.fn();
+const mockAiAgentLogCreate = jest.fn().mockResolvedValue({});
+
+jest.mock('../../src/models/AiAgentLog.model', () => ({ __esModule: true, default: { create: mockAiAgentLogCreate } }));
 
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
@@ -36,7 +54,7 @@ jest.mock('../../src/models/Organization.model', () => ({
 }));
 jest.mock('../../src/models/WebChatSession.model', () => ({
   __esModule: true,
-  default: { create: mockSessionCreate, findOneAndUpdate: mockSessionFindOneAndUpdate, updateOne: mockSessionUpdateOne },
+  default: { create: mockSessionCreate, findOne: mockSessionFindOne, findOneAndUpdate: mockSessionFindOneAndUpdate, updateOne: mockSessionUpdateOne },
 }));
 jest.mock('../../src/models/WebChatMessage.model', () => ({
   __esModule: true,
@@ -90,7 +108,7 @@ jest.mock('../../src/services/aiOperatingMode.service', () => ({
 }));
 
 import mongoose from 'mongoose';
-import { startSession, sendWebchatUnavailableAck } from '../../src/controllers/webchat.controller';
+import { startSession, sendWebchatUnavailableAck, sendStaffMessage } from '../../src/controllers/webchat.controller';
 import { AiReplySuppressedError } from '../../src/utils/aiReplySuppressed';
 import { WEBCHAT_ACK_ACTOR_ID } from '../../src/utils/webchatAck';
 
@@ -203,6 +221,91 @@ describe('Website chat while Suprah AI is not live', () => {
     expect(mockMessageUpdateOne).not.toHaveBeenCalledWith(expect.anything(), { $set: { aiDispatchPending: false } });
     expect(mockClaimDispatch).not.toHaveBeenCalled();
   });
+
+  it('when Live, a Do Not Contact customer gets no Alex reply and no acknowledgement, and the skip is recorded', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    restriction.authorizeWebchatReply.mockImplementation(async () => ({
+      allowed: false,
+      check: { status: 'restricted', leadIds: ['lead-old'], onThisLead: false },
+      reasonCode: 'do_not_contact',
+    }));
+    mockResolveAiChannelMode.mockResolvedValue({ mode: 'live', source: 'configured' });
+    mockDecideAiDelivery.mockResolvedValue({ action: 'send', mode: 'live', source: 'configured' });
+    try {
+      await start();
+    } finally {
+      restriction.authorizeWebchatReply.mockImplementation(async () => ({ allowed: true, basis: 'not_restricted' }));
+    }
+    expect(mockProcessAlexTurn).not.toHaveBeenCalled();
+    expect(mockClaimGeneration).not.toHaveBeenCalled();
+    expect(ackCreates()).toHaveLength(0);
+    expect(mockFinish).toHaveBeenCalled();
+    expect(restriction.recordContactRestrictionAudit).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'outbound_blocked',
+      channel: 'webchat',
+      purpose: 'alex_webchat_reply',
+      outcome: 'restricted',
+    }));
+    expect(mockAiAgentLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'webchat',
+      status: 'skipped',
+      failureReason: expect.stringContaining('(do_not_contact)'),
+    }));
+  });
+
+  it('rechecks Do Not Contact when Alex sends and deletes the hidden reply if the customer became restricted', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    mockResolveAiChannelMode.mockResolvedValue({ mode: 'live', source: 'configured' });
+    mockDecideAiDelivery.mockResolvedValue({ action: 'send', mode: 'live', source: 'configured' });
+    mockAssertAiDispatchAllowed.mockResolvedValue(undefined);
+    restriction.assertWebchatReplyAllowed.mockImplementation(async () => {
+      throw new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-old'], onThisLead: false });
+    });
+    let sendError: unknown;
+    mockProcessAlexTurn.mockImplementation(async (ctx: any) => {
+      try {
+        await ctx.send('The Civic is a great pick!');
+      } catch (err) {
+        sendError = err;
+      }
+    });
+    try {
+      await start();
+    } finally {
+      restriction.assertWebchatReplyAllowed.mockImplementation(async () => ({ allowed: true, basis: 'not_restricted' }));
+    }
+    expect(sendError).toBeInstanceOf(ContactRestrictedError);
+    expect(mockMessageDeleteOne).toHaveBeenCalledTimes(1);
+    expect(mockClaimDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('staff website-chat replies', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSessionFindOne.mockResolvedValue({ _id: 'session-1', organizationId: String(orgId), leadId, visitorPhone: '3855550123', visitorEmail: 'jordan@example.com' });
+  });
+
+  it('blocks a staff reply to a Do Not Contact customer before anything is shown to the visitor', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    restriction.assertWebchatReplyAllowed.mockImplementationOnce(async () => {
+      throw new ContactRestrictedError({ status: 'restricted', leadIds: [String(leadId)], onThisLead: true });
+    });
+    const next = jest.fn();
+    const req: any = { orgId: String(orgId), params: { leadId: String(leadId) }, body: { body: 'Hi Jordan' }, crmUser: { _id: 'staff-1', fullName: 'Sam Staff' } };
+    const res: any = { status: jest.fn(() => ({ json: jest.fn() })), json: jest.fn() };
+    sendStaffMessage(req, res, next);
+    await flush();
+    expect(restriction.assertWebchatReplyAllowed).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: String(orgId), leadId, visitorPhone: '3855550123', visitorEmail: 'jordan@example.com' }),
+      expect.objectContaining({ purpose: 'staff_webchat_reply', actor: expect.objectContaining({ kind: 'staff', userId: 'staff-1' }) }),
+    );
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403, message: expect.stringContaining('Do Not Contact') }));
+    expect(mockMessageCreate).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
 });
 
 describe('sendWebchatUnavailableAck', () => {
@@ -230,5 +333,17 @@ describe('sendWebchatUnavailableAck', () => {
   it('never throws into the visitor request', async () => {
     mockMessageExists.mockRejectedValue(new Error('db down'));
     await expect(sendWebchatUnavailableAck(session)).resolves.toBe(false);
+  });
+
+  it('sends no acknowledgement to a Do Not Contact customer', async () => {
+    const restriction = jest.requireMock('../../src/services/contactRestriction.service');
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    restriction.assertWebchatReplyAllowed.mockImplementationOnce(async () => {
+      throw new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-1'], onThisLead: true });
+    });
+    mockMessageExists.mockResolvedValue(null);
+    await expect(sendWebchatUnavailableAck(session)).resolves.toBe(false);
+    expect(mockSessionFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mockMessageCreate).not.toHaveBeenCalled();
   });
 });

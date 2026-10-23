@@ -32,6 +32,22 @@ import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAi
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from '../services/aiOperatingMode.service';
 import { resolveDealerName as resolveTrustedDealerName } from '../services/communication.service';
 import { WEBCHAT_ACK_ACTOR_ID, buildWebchatUnavailableAck } from '../utils/webchatAck';
+import AiAgentLog from '../models/AiAgentLog.model';
+import {
+  assertWebchatReplyAllowed,
+  authorizeWebchatReply,
+  describeWebchatContactPolicy,
+  isContactRestrictedError,
+  recordContactRestrictionAudit,
+  recordWebchatExceptionReply,
+  webchatReplyError,
+  WebchatReplyDecision,
+} from '../services/contactRestriction.service';
+
+const DNC_WEBCHAT_ALEX_NOTE =
+  'This customer is marked Do Not Contact. You may only answer what they asked in this live chat. Do not offer, promise, or ask to call, text, or email them, and do not suggest any later follow-up outside this chat.';
+const DNC_WEBCHAT_HANDOFF_SUFFIX =
+  'Customer is marked Do Not Contact: reply only in this live chat, within 30 minutes of their latest message. Do not call, text, or email them.';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 
@@ -137,6 +153,17 @@ export async function sendWebchatUnavailableAck(session: any): Promise<boolean> 
       direction: 'outbound',
     });
     if (hasOutbound) return false;
+    let replyDecision: WebchatReplyDecision;
+    try {
+      replyDecision = await assertWebchatReplyAllowed(session, {
+        purpose: 'webchat_ack',
+        actor: { kind: 'system', userId: WEBCHAT_ACK_ACTOR_ID, name: null },
+      });
+    } catch (err) {
+      if (!isContactRestrictedError(err)) throw err;
+      logger.warn({ sessionId: session._id, reason: err.reasonCode }, '[Webchat] AI-unavailable acknowledgement skipped: customer is not contactable');
+      return false;
+    }
     const claimed = await WebChatSession.findOneAndUpdate(
       {
         _id: session._id,
@@ -155,6 +182,11 @@ export async function sendWebchatUnavailableAck(session: any): Promise<boolean> 
       direction: 'outbound',
       body: buildWebchatUnavailableAck(dealerName),
       sentBy: { userId: WEBCHAT_ACK_ACTOR_ID, name: dealerName },
+    });
+    await recordWebchatExceptionReply(session, replyDecision, {
+      actor: { kind: 'system', userId: WEBCHAT_ACK_ACTOR_ID, name: dealerName },
+      purpose: 'webchat_ack',
+      messageId: message._id,
     });
     await WebChatSession.updateOne(
       { _id: session._id, organizationId: session.organizationId },
@@ -213,6 +245,34 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
       return;
     }
 
+    const replyDecision = await authorizeWebchatReply(session);
+    if (!replyDecision.allowed) {
+      await finishAiAttentionCheck(check);
+      const blocked = webchatReplyError(replyDecision);
+      logger.warn({ sessionId: session._id, reason: blocked.reasonCode }, '[Webchat] Alex reply skipped: customer is not contactable');
+      await recordContactRestrictionAudit({
+        organizationId: session.organizationId,
+        leadId: session.leadId,
+        event: 'outbound_blocked',
+        actor: { kind: 'ai', userId: AI_AGENT_ACTOR_ID, name: agentName },
+        channel: 'webchat',
+        purpose: 'alex_webchat_reply',
+        outcome: replyDecision.check.status,
+        restrictingLeadIds: replyDecision.check.status === 'restricted' ? replyDecision.check.leadIds : [],
+        sessionId: session._id,
+      });
+      await AiAgentLog.create({
+        organizationId: String(session.organizationId),
+        channel: 'webchat',
+        leadId: session.leadId,
+        sessionId: session._id,
+        status: 'skipped',
+        failureReason: blocked.skipReason,
+      }).catch(() => undefined);
+      return;
+    }
+    const restrictedSession = replyDecision.basis === 'dnc_live_session';
+
     const claimed = await claimAiGeneration(check);
     if (!claimed) return;
 
@@ -258,6 +318,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
         coachingNotes: coaching.notes,
         coachingRuleIds: coaching.ids,
         coachingRules: coaching.rules,
+        contactRestrictionNote: restrictedSession ? DNC_WEBCHAT_ALEX_NOTE : undefined,
         send: async (text: string) => {
           await assertAiReplyAllowed(check);
           const message = await WebChatMessage.create({
@@ -269,7 +330,12 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
             sentBy: { userId: AI_AGENT_ACTOR_ID, name: agentName },
             aiDispatchPending: true,
           });
+          let dispatchDecision: WebchatReplyDecision;
           try {
+            dispatchDecision = await assertWebchatReplyAllowed(session, {
+              purpose: 'alex_webchat_reply',
+              actor: { kind: 'ai', userId: AI_AGENT_ACTOR_ID, name: agentName },
+            });
             await assertAiDispatchAllowed({
               organizationId: session.organizationId,
               channel: 'webchat',
@@ -284,6 +350,11 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
           }
           await WebChatMessage.updateOne({ _id: message._id, organizationId: session.organizationId },
             { $set: { aiDispatchPending: false } });
+          await recordWebchatExceptionReply(session, dispatchDecision, {
+            actor: { kind: 'ai', userId: AI_AGENT_ACTOR_ID, name: agentName },
+            purpose: 'alex_webchat_reply',
+            messageId: message._id,
+          });
           const now = new Date();
           await Promise.all([
             WebChatSession.updateOne({ _id: session._id, organizationId: session.organizationId }, { $set: { lastMessageAt: now } }),
@@ -318,7 +389,9 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
             await addLeadNoteAndNotify({
               organizationId: String(session.organizationId),
               leadId: String(session.leadId),
-              text: reason || 'Needs human follow-up',
+              text: restrictedSession
+                ? `${reason || 'Needs human follow-up'} ${DNC_WEBCHAT_HANDOFF_SUFFIX}`
+                : reason || 'Needs human follow-up',
               authorType: 'ai',
               authorName: agentName,
               mentionedUserIds,
@@ -691,10 +764,11 @@ export const getLeadWebChat = asyncHandler(async (req: Request, res: Response) =
   const [messages, session] = await Promise.all([
     WebChatMessage.find({ leadId, organizationId: orgId, aiDispatchPending: { $ne: true } }).sort({ createdAt: 1 }).limit(500).lean(),
     WebChatSession.findOne({ leadId, organizationId: orgId })
-      .select('aiPausedAt aiPausedBy aiAutoPausedUntil')
+      .select('_id organizationId leadId visitorPhone visitorEmail aiPausedAt aiPausedBy aiAutoPausedUntil')
       .sort({ createdAt: -1 })
       .lean(),
   ]);
+  const contactPolicy = session ? await describeWebchatContactPolicy(session as any) : null;
 
   res.json(
     new ApiResponse(
@@ -704,6 +778,7 @@ export const getLeadWebChat = asyncHandler(async (req: Request, res: Response) =
         aiPausedAt: session?.aiPausedAt || null,
         aiPausedBy: session?.aiPausedBy || null,
         aiAutoPausedUntil: session?.aiAutoPausedUntil || null,
+        contactPolicy,
       },
       'Web chat fetched',
     ),
@@ -722,6 +797,10 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
 
   const staff = actor(req);
   if (!staff.userId) throw new ApiError(401, 'Please authenticate');
+  const replyDecision = await assertWebchatReplyAllowed(session, {
+    purpose: 'staff_webchat_reply',
+    actor: { kind: 'staff', userId: staff.userId, name: staff.name },
+  });
   const message = await WebChatMessage.create({
     organizationId: orgId,
     sessionId: session._id,
@@ -737,11 +816,18 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
     Lead.updateOne({ _id: session.leadId }, { $set: { 'followUp.lastRepResponseAt': now } }),
   ]);
 
+  await recordWebchatExceptionReply(session, replyDecision, {
+    actor: { kind: 'staff', userId: staff.userId, name: staff.name },
+    purpose: 'staff_webchat_reply',
+    messageId: message._id,
+  });
+
   await recordHumanTakeover({
     kind: 'webchat',
     organizationId: orgId,
     sessionId: session._id,
     leadId: session.leadId,
+    pausedBy: { userId: staff.userId, name: staff.name },
   });
 
   const payload = serializeForStaff(message);

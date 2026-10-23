@@ -8,6 +8,8 @@ import { isWithinSendingHours } from '../utils/sendingWindow';
 import { NURTURE_ELIGIBLE_STATUSES as ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import { retryDbWrite } from '../utils/retryDbWrite';
 import logger from '../utils/logger';
+import { resolveSmsDestination } from '../utils/smsDestination';
+import { checkContactForSend, contactRestrictionMessage, isDoNotContactError } from '../services/contactRestriction.service';
 
 const STEP_INTERVALS_HOURS = (process.env.LEAD_NURTURE_INTERVALS_HOURS || '24,48,96')
   .split(',')
@@ -244,6 +246,48 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
         continue;
       }
 
+      const destination = resolveSmsDestination(lead.phone, 'automated');
+      if (!destination.ok) {
+        await Lead.updateOne(
+          { _id: lead._id, status: { $in: ELIGIBLE_STATUSES }, 'followUp.nurtureStatus': { $ne: 'processing' } },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'skipped',
+              'followUp.nurtureFailureReason': destination.message,
+              'followUp.nurtureNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+            },
+          },
+          { timestamps: false },
+        );
+        stats.skipped++;
+        logger.warn({ leadId: lead._id, reason: destination.reason }, '[LeadNurture] SMS skipped: phone number cannot be texted');
+        continue;
+      }
+
+      const restriction = await checkContactForSend({
+        organizationId: lead.organizationId,
+        phone: lead.phone,
+        email: lead.email,
+        leadId: lead._id,
+        customerId: lead.customerId,
+      }, { channel: 'sms', purpose: 'lead_nurture', actor: { kind: 'system', userId: 'system', name: null } });
+      if (restriction.status !== 'allowed') {
+        await Lead.updateOne(
+          { _id: lead._id, status: { $in: ELIGIBLE_STATUSES }, 'followUp.nurtureStatus': { $ne: 'processing' } },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'skipped',
+              'followUp.nurtureFailureReason': contactRestrictionMessage(restriction),
+              'followUp.nurtureNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+            },
+          },
+          { timestamps: false },
+        );
+        stats.skipped++;
+        logger.warn({ leadId: lead._id, status: restriction.status }, '[LeadNurture] SMS skipped: customer is not contactable');
+        continue;
+      }
+
       const staleBefore = new Date(now.getTime() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
       const claimed = await Lead.findOneAndUpdate(
         {
@@ -359,6 +403,23 @@ export async function runLeadNurtureSweep(): Promise<NurtureStats> {
         stats.skipped++;
       }
     } catch (err) {
+      if (isDoNotContactError(err)) {
+        await Lead.updateOne(
+          { _id: lead._id, 'followUp.nurtureStatus': 'processing' },
+          {
+            $set: {
+              'followUp.nurtureStatus': 'skipped',
+              'followUp.nurtureFailureReason': err.message,
+              'followUp.nurtureNextRetryAt': new Date(Date.now() + 24 * HOUR_MS),
+            },
+            $inc: { 'followUp.nurtureAttemptCount': -1 },
+          },
+          { timestamps: false },
+        ).catch(() => undefined);
+        stats.skipped++;
+        logger.warn({ leadId: lead._id }, '[LeadNurture] SMS skipped at send: customer is marked Do Not Contact');
+        continue;
+      }
       if (err instanceof SmsDeliveryUncertainError) {
         await retryDbWrite(() =>
           Lead.updateOne(

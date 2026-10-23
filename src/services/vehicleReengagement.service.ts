@@ -10,6 +10,8 @@ import { resolveAiAgentSettings } from './aiAgent.service';
 import { resolvePinnedVehicleContext, latestSharedConversationActivity } from './vehicleInquiryContext.service';
 import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import logger from '../utils/logger';
+import { resolveSmsDestination } from '../utils/smsDestination';
+import { checkContactForSend, contactRestrictionMessage, isContactRestrictedError } from './contactRestriction.service';
 import { normalizeToken, matchesVehicle } from '../utils/vehicleMatch';
 import {
   createGeminiClient,
@@ -223,6 +225,28 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
     return;
   }
 
+  const destination = resolveSmsDestination(lead.phone, 'automated');
+  if (!destination.ok) {
+    await writeLog({ ...base, status: 'skipped', failureReason: destination.message });
+    return;
+  }
+
+  const restriction = await checkContactForSend({
+    organizationId: vehicle.organizationId,
+    phone: lead.phone,
+    email: lead.email,
+    leadId: lead._id,
+    customerId: lead.customerId,
+  }, { channel: 'sms', purpose: 'vehicle_reengagement', actor: { kind: 'ai', userId: 'ai-agent', name: null } });
+  if (restriction.status !== 'allowed') {
+    await writeLog({
+      ...base,
+      status: restriction.status === 'restricted' ? 'skipped' : 'failed',
+      failureReason: contactRestrictionMessage(restriction) || undefined,
+    });
+    return;
+  }
+
   const vehicleContext = await resolvePinnedVehicleContext({ organizationId: vehicle.organizationId, lead, phone: lead.phone });
   if (vehicleContext.multipleInquiries) {
     const sharedActivityAt = await latestSharedConversationActivity(vehicle.organizationId, lead.phone).catch(() => null);
@@ -291,6 +315,17 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
       aiWorkflow: 'vehicle_reengagement',
     });
   } catch (err) {
+    if (isContactRestrictedError(err)) {
+      await writeLog({
+        ...base,
+        generatedMessage: draft,
+        finalMessage,
+        status: err.restricted ? 'skipped' : 'failed',
+        classifierVerdict: verdict,
+        failureReason: err.message,
+      });
+      return;
+    }
     if (!(err instanceof AiReplySuppressedError)) throw err;
     await writeLog({
       ...base,

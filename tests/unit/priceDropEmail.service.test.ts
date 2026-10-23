@@ -147,6 +147,19 @@ describe('processVehicleForPriceDrop', () => {
     );
   });
 
+  it('logs "skipped" with the reason, not "failed", when the customer is marked Do Not Contact', async () => {
+    const { ContactRestrictedError } = jest.requireActual('../../src/services/contactRestriction.service');
+    seedLeads([{ _id: 'lead-1', email: 'a@test.com', vehicle: { vin: 'VIN123' } }]);
+    mockSendPriceDropEmail.mockRejectedValue(new ContactRestrictedError({ status: 'restricted', leadIds: ['lead-1'], onThisLead: true }));
+
+    await processVehicleForPriceDrop(baseVehicle() as any);
+
+    expect(mockLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'skipped', skippedReason: expect.stringContaining('Do Not Contact') }),
+    );
+    expect(mockLogCreate).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+  });
+
   it('does not throw when the log write hits the dedup unique-index collision', async () => {
     seedLeads([{ _id: 'lead-1', email: 'a@test.com', vehicle: { vin: 'VIN123' } }]);
     mockSendPriceDropEmail.mockResolvedValue(true);

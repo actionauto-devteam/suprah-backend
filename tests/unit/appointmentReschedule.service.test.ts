@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const findOne = jest.fn();
 const syncAppointmentToGoogleCalendar = jest.fn().mockResolvedValue(undefined);
 const createNotification = jest.fn().mockResolvedValue(undefined);
@@ -6,10 +20,12 @@ const crmUserExists = jest.fn().mockResolvedValue(null);
 const userFindById = jest.fn();
 const emitToOrg = jest.fn();
 const notifyCustomerOfReschedule = jest.fn().mockResolvedValue(true);
+const isSmsOptedOut = jest.fn().mockResolvedValue(false);
+const appointmentUpdateOne = jest.fn().mockResolvedValue({ matchedCount: 1 });
 
 jest.mock('../../src/models/Appointment.model', () => ({
   __esModule: true,
-  default: { findOne },
+  default: { findOne, updateOne: appointmentUpdateOne },
 }));
 
 jest.mock('../../src/models/CrmUser.model', () => ({
@@ -54,9 +70,10 @@ jest.mock('../../src/utils/socketEmitter', () => ({
 
 jest.mock('../../src/services/communication.service', () => ({
   notifyCustomerOfReschedule,
+  isSmsOptedOut,
 }));
 
-import appointmentService from '../../src/services/appointment.service';
+import appointmentService, { withoutServerOwnedNoticeFields } from '../../src/services/appointment.service';
 
 function buildAppointment(overrides: Record<string, any> = {}) {
   const appointment: any = {
@@ -106,7 +123,7 @@ describe('appointmentService.updateAppointment reschedule side effects', () => {
   });
 
   it('notifies the customer when startTime actually changes', async () => {
-    const appointment = buildAppointment({ customerBooking: { phone: '+15551234567', firstName: 'Alex' } });
+    const appointment = buildAppointment({ customerBooking: { phone: '+18015550142', firstName: 'Alex' } });
     findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
 
     await appointmentService.updateAppointment('appt-1', 'org-1', 'user-1', {
@@ -117,7 +134,7 @@ describe('appointmentService.updateAppointment reschedule side effects', () => {
   });
 
   it('does not notify the customer when startTime is unchanged', async () => {
-    const appointment = buildAppointment({ customerBooking: { phone: '+15551234567', firstName: 'Alex' } });
+    const appointment = buildAppointment({ customerBooking: { phone: '+18015550142', firstName: 'Alex' } });
     findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
 
     await appointmentService.updateAppointment('appt-1', 'org-1', 'user-1', {
@@ -129,7 +146,7 @@ describe('appointmentService.updateAppointment reschedule side effects', () => {
 
   it('does not let a failed customer notification break the reschedule itself', async () => {
     notifyCustomerOfReschedule.mockRejectedValueOnce(new Error('telnyx down'));
-    const appointment = buildAppointment({ customerBooking: { phone: '+15551234567', firstName: 'Alex' } });
+    const appointment = buildAppointment({ customerBooking: { phone: '+18015550142', firstName: 'Alex' } });
     findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
 
     await expect(
@@ -205,5 +222,137 @@ describe('appointmentService.updateAppointment reschedule side effects', () => {
         startTime: new Date('2026-10-06T18:00:00.000Z') as any,
       }),
     ).rejects.toThrow('Not authorized to update this appointment');
+  });
+
+  const newStart = new Date('2026-10-06T18:00:00.000Z');
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const reschedule = async (appointment: any, extra: Record<string, unknown> = {}) => {
+    findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
+    await appointmentService.updateAppointment('appt-1', 'org-1', 'user-1', { startTime: newStart as any, ...extra } as any);
+    await flush();
+    await flush();
+  };
+
+  it.each([
+    ['385-503-5869 x12', 'The phone number includes an extension, so it cannot be texted.'],
+    ['+639171234567', 'Automatic texts only go to numbers in the US, US territories, and Canada.'],
+    ['+385503586912', 'The phone number is not a valid number.'],
+  ])('does not text %p about the new time and records why for staff', async (phone, reason) => {
+    const appointment = buildAppointment({ customerBooking: { phone, firstName: 'Alex' } });
+    await reschedule(appointment);
+
+    expect(notifyCustomerOfReschedule).not.toHaveBeenCalled();
+    expect(appointment.rescheduleNotice).toMatchObject({ status: 'not_sent', reason, forStartTime: newStart });
+    expect(appointment.save).toHaveBeenCalled();
+  });
+
+  it('warns staff instead of texting a customer who replied STOP', async () => {
+    isSmsOptedOut.mockResolvedValueOnce(true);
+    const appointment = buildAppointment({ customerBooking: { phone: '+18015550142', firstName: 'Alex' } });
+    await reschedule(appointment);
+
+    expect(isSmsOptedOut).toHaveBeenCalledWith('org-1', '+18015550142');
+    expect(notifyCustomerOfReschedule).not.toHaveBeenCalled();
+    expect(appointment.rescheduleNotice).toMatchObject({
+      status: 'not_sent',
+      reason: 'This customer replied STOP, so texting is turned off.',
+    });
+  });
+
+  it('records the text as accepted by the carrier only after the send succeeds, for this exact appointment time', async () => {
+    notifyCustomerOfReschedule.mockResolvedValueOnce({ messageId: '64b7f0c2a1b2c3d4e5f60718', providerMessageId: 'tx-1' });
+    const appointment = buildAppointment({
+      customerBooking: { phone: '(385) 503-5869', firstName: 'Alex' },
+      reminderSms: { status: 'not_sent', reason: 'old', forStartTime: new Date('2026-10-05T16:00:00.000Z'), updatedAt: new Date() },
+    });
+    await reschedule(appointment);
+
+    expect(appointment.reminderSms).toBeUndefined();
+    expect(appointment.rescheduleNotice).toMatchObject({ status: 'sending', forStartTime: newStart });
+    expect(notifyCustomerOfReschedule).toHaveBeenCalledWith(appointment);
+    expect(appointmentUpdateOne).toHaveBeenCalledWith(
+      { _id: 'appt-1', startTime: newStart, 'rescheduleNotice.forStartTime': newStart, 'rescheduleNotice.status': 'sending' },
+      {
+        $set: expect.objectContaining({
+          'rescheduleNotice.status': 'accepted',
+          'rescheduleNotice.providerMessageId': 'tx-1',
+          'rescheduleNotice.reason': null,
+        }),
+      },
+      { timestamps: false },
+    );
+  });
+
+  it.each([
+    [Object.assign(new Error('SMS provider rejected the message'), { statusCode: 502 }), 'failed', 'The text service rejected this message.'],
+    [Object.assign(new Error('accepted but not recorded'), { name: 'SmsDeliveryUncertainError', providerMessageId: 'tx-9' }), 'unknown', "We couldn't confirm whether this text went out."],
+  ])('records a real send problem instead of a false success (%#)', async (error, status, reason) => {
+    notifyCustomerOfReschedule.mockRejectedValueOnce(error);
+    const appointment = buildAppointment({ customerBooking: { phone: '(385) 503-5869', firstName: 'Alex' } });
+    await reschedule(appointment);
+
+    expect(appointmentUpdateOne).toHaveBeenCalledWith(
+      expect.objectContaining({ 'rescheduleNotice.status': 'sending' }),
+      { $set: expect.objectContaining({ 'rescheduleNotice.status': status, 'rescheduleNotice.reason': reason }) },
+      { timestamps: false },
+    );
+  });
+
+  it('records a not-sent warning when the customer opted out between saving and sending', async () => {
+    notifyCustomerOfReschedule.mockResolvedValueOnce(false);
+    const appointment = buildAppointment({ customerBooking: { phone: '(385) 503-5869', firstName: 'Alex' } });
+    await reschedule(appointment);
+
+    expect(appointmentUpdateOne).toHaveBeenCalledWith(
+      expect.anything(),
+      { $set: expect.objectContaining({ 'rescheduleNotice.status': 'not_sent', 'rescheduleNotice.reason': 'This customer replied STOP, so texting is turned off.' }) },
+      { timestamps: false },
+    );
+  });
+
+  it('replaces an older reschedule warning once the next reschedule can be texted', async () => {
+    const appointment = buildAppointment({
+      customerBooking: { phone: '(385) 503-5869', firstName: 'Alex' },
+      rescheduleNotice: { status: 'not_sent', reason: 'old warning', forStartTime: new Date('2026-10-05T16:00:00.000Z'), updatedAt: new Date() },
+    });
+    await reschedule(appointment);
+
+    expect(appointment.rescheduleNotice).toMatchObject({ status: 'sending', reason: null, forStartTime: newStart });
+  });
+
+  it('ignores notification status fields sent by a client', async () => {
+    const existingNotice = { status: 'not_sent', reason: 'kept', forStartTime: new Date('2026-10-05T16:00:00.000Z'), updatedAt: new Date() };
+    const appointment = buildAppointment({ rescheduleNotice: existingNotice });
+    findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
+
+    await appointmentService.updateAppointment('appt-1', 'org-1', 'user-1', {
+      notes: 'updated notes',
+      rescheduleNotice: { status: 'delivered' },
+      reminderSms: { status: 'delivered' },
+      reminderSent: false,
+      reminderSentAt: null,
+    } as any);
+
+    expect(appointment.rescheduleNotice).toBe(existingNotice);
+    expect(appointment.reminderSms).toBeUndefined();
+    expect(appointment.reminderSent).toBe(true);
+    expect(appointment.notes).toBe('updated notes');
+  });
+
+  it('strips server-owned notification fields from client data', () => {
+    expect(
+      withoutServerOwnedNoticeFields({ title: 'Test', reminderSent: true, reminderSentAt: 'x', reminderSms: {}, rescheduleNotice: {} }),
+    ).toEqual({ title: 'Test' });
+  });
+
+  it('does not touch the reschedule warning when the time is unchanged', async () => {
+    const existingNotice = { status: 'not_sent', reason: 'kept', forStartTime: new Date('2026-10-05T16:00:00.000Z'), updatedAt: new Date() };
+    const appointment = buildAppointment({ customerBooking: { phone: '+639171234567', firstName: 'Alex' }, rescheduleNotice: existingNotice });
+    findOne.mockReturnValue({ populate: jest.fn().mockResolvedValue(appointment) });
+
+    await appointmentService.updateAppointment('appt-1', 'org-1', 'user-1', { notes: 'updated notes' } as any);
+
+    expect(appointment.rescheduleNotice).toBe(existingNotice);
+    expect(notifyCustomerOfReschedule).not.toHaveBeenCalled();
   });
 });

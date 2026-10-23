@@ -26,7 +26,20 @@ import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
-import { UNANSWERED_LEAD_STATUSES } from '../constants/leadStatus';
+import { UNANSWERED_LEAD_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
+import {
+  assertContactAllowed,
+  isContactRestrictedError,
+  isOrganizationAdmin,
+  protectPreviousContact,
+  recordContactRestrictionAudit,
+  releaseProtectedContacts,
+  CONTACT_RESTRICTION_ADMIN_ONLY_CODE,
+  CONTACT_RESTRICTION_MESSAGES,
+  CONTACT_RESTRICTION_REASON_REQUIRED_CODE,
+  LEAD_STATUS_CHANGED_CODE,
+} from '../services/contactRestriction.service';
+import { normalizeIdentityPhone } from '../utils/contactIdentity';
 import { addLeadNoteAndNotify } from '../utils/leadNote';
 import { withRetry } from '../utils/withRetry';
 import {
@@ -348,6 +361,19 @@ export async function sendLeadReplyEmail(
       .replace(/\//g, '_')
       .replace(/=/g, '');
 
+  await assertContactAllowed({
+    organizationId: orgId,
+    leadId: lead._id,
+    email: recipientEmail,
+    phone: lead.phone,
+    customerId: lead.customerId,
+  }, {
+    channel: 'email',
+    purpose: 'lead_reply',
+    actor: String(userId) === 'ai-agent'
+      ? { kind: 'ai', userId: 'ai-agent', name: null }
+      : { kind: 'staff', userId: userId ? String(userId) : null, name: null },
+  });
   await options.beforeDispatch?.();
   const sendResult = await gmail.users.messages.send({
     userId: 'me',
@@ -390,21 +416,66 @@ export async function sendLeadReplyEmail(
   );
 }
 
-/**
- * Records a status transition on a lead's audit trail. Caller is responsible
- * for saving the document afterwards (or this can be combined with other
- * field updates in the same .save()).
- */
-function pushStatusHistory(lead: any, from: string, to: string, userId: any, reason?: string) {
-  if (from === to) return;
-  lead.statusHistory = lead.statusHistory || [];
-  lead.statusHistory.push({
-    from,
-    to,
-    changedAt: new Date(),
-    changedBy: userId,
-    reason: reason || undefined,
-  });
+function statusHistoryEntry(from: string, to: string, userId: any, reason?: string) {
+  if (from === to) return null;
+  return { from, to, changedAt: new Date(), changedBy: userId, reason: reason || undefined };
+}
+
+function staffAuditActor(user: any) {
+  return {
+    kind: 'staff' as const,
+    userId: user?._id ? String(user._id) : null,
+    name: user?.fullName || user?.name || user?.email || null,
+  };
+}
+
+async function guardRestrictedContactChange(
+  req: Request,
+  input: {
+    orgId: string;
+    user: any;
+    current: { _id: any; status?: string; email?: string; phone?: string; identityEmailExcluded?: boolean };
+    nextEmail?: string;
+    nextPhone?: string;
+  },
+): Promise<{ changed: boolean; reason?: string; error?: { status: number; body: Record<string, unknown> } }> {
+  const emailChanged = input.nextEmail !== undefined
+    && input.nextEmail !== String(input.current.email || '').trim().toLowerCase();
+  const phoneChanged = input.nextPhone !== undefined
+    && normalizeIdentityPhone(input.nextPhone) !== normalizeIdentityPhone(input.current.phone);
+  if (!isContactRestrictedStatus(input.current.status) || (!emailChanged && !phoneChanged)) return { changed: false };
+  if (!(await isOrganizationAdmin(input.user, input.orgId))) {
+    return {
+      changed: true,
+      error: { status: 403, body: { message: CONTACT_RESTRICTION_MESSAGES.contactEditAdminOnly, code: CONTACT_RESTRICTION_ADMIN_ONLY_CODE } },
+    };
+  }
+  const reason = String(req.body?.restrictionReason || '').trim().slice(0, 1000);
+  if (!reason) {
+    return {
+      changed: true,
+      error: { status: 400, body: { message: CONTACT_RESTRICTION_MESSAGES.contactEditReasonRequired, code: CONTACT_RESTRICTION_REASON_REQUIRED_CODE } },
+    };
+  }
+  try {
+    await protectPreviousContact({
+      organizationId: input.orgId,
+      leadId: input.current._id,
+      previous: input.current,
+      next: {
+        phone: input.nextPhone !== undefined ? input.nextPhone : input.current.phone,
+        email: input.nextEmail !== undefined ? input.nextEmail : input.current.email,
+      },
+      actorUserId: input.user?._id,
+    });
+  } catch (err) {
+    logger.error({ err, leadId: input.current._id }, 'Could not protect the previous contact details of a Do Not Contact lead');
+    return {
+      changed: true,
+      error: { status: 503, body: { message: "We couldn't protect the previous contact details, so nothing was changed. Please try again." } },
+    };
+  }
+  return { changed: true, reason };
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -1020,7 +1091,7 @@ export const updateLeadContact = async (req: Request, res: Response) => {
     const lastName = String(req.body?.lastName || '').trim();
     const email = String(req.body?.email || '').trim().toLowerCase();
     const phone = String(req.body?.phone || '').trim();
-    const previousContact = await Lead.findOne({ _id: id, organizationId: orgId }).select('email identityEmailExcluded').lean();
+    const previousContact = await Lead.findOne({ _id: id, organizationId: orgId }).select('email phone status identityEmailExcluded').lean();
 
     if (!firstName) {
       return res.status(400).json({
@@ -1034,10 +1105,19 @@ export const updateLeadContact = async (req: Request, res: Response) => {
       });
     }
 
+    const contactGuard = previousContact
+      ? await guardRestrictedContactChange(req, { orgId, user, current: previousContact as any, nextEmail: email, nextPhone: phone })
+      : { changed: false as const };
+    if ('error' in contactGuard && contactGuard.error) {
+      return res.status(contactGuard.error.status).json(contactGuard.error.body);
+    }
+    const restrictedContactChanged = contactGuard.changed;
+
     const lead = await Lead.findOneAndUpdate(
       {
         _id: id,
         organizationId: orgId,
+        ...(previousContact ? { status: previousContact.status } : {}),
       },
       {
         $set: {
@@ -1055,8 +1135,23 @@ export const updateLeadContact = async (req: Request, res: Response) => {
     );
 
     if (!lead) {
+      if (previousContact) {
+        return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
+      }
       return res.status(404).json({
         message: 'Lead not found',
+      });
+    }
+
+    if (restrictedContactChanged) {
+      await recordContactRestrictionAudit({
+        organizationId: orgId,
+        leadId: lead._id,
+        event: 'dnc_contact_changed',
+        actor: staffAuditActor(user),
+        reason: 'reason' in contactGuard ? contactGuard.reason : null,
+        previousContact: { phone: previousContact?.phone || null, email: previousContact?.email || null },
+        newContact: { phone: phone || null, email: email || null },
       });
     }
 
@@ -1069,6 +1164,9 @@ export const updateLeadContact = async (req: Request, res: Response) => {
       metadata: {
         leadId: lead._id.toString(),
         activityKind: 'lead_contact_update',
+        ...(restrictedContactChanged
+          ? { doNotContactContactChange: { previousEmail: previousContact?.email || '', previousPhone: previousContact?.phone || '' } }
+          : {}),
       },
       ipAddress: req.ip,
     });
@@ -1183,14 +1281,42 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'No editable lead details were provided' });
     }
 
+    const contactGuard = await guardRestrictedContactChange(req, {
+      orgId,
+      user,
+      current: currentLead as any,
+      nextEmail: setValues.email !== undefined ? String(setValues.email) : undefined,
+      nextPhone: setValues.phone !== undefined ? String(setValues.phone) : undefined,
+    });
+    if (contactGuard.error) {
+      return res.status(contactGuard.error.status).json(contactGuard.error.body);
+    }
+    const restrictedContactChanged = contactGuard.changed;
+    const contactFieldsChanged = setValues.email !== undefined || setValues.phone !== undefined;
+
     const lead = await Lead.findOneAndUpdate(
-      { _id: id, organizationId: orgId },
+      { _id: id, organizationId: orgId, ...(contactFieldsChanged ? { status: currentLead.status } : {}) },
       { $set: setValues },
       { new: true, runValidators: true },
     );
 
     if (!lead) {
+      if (contactFieldsChanged) {
+        return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
+      }
       return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    if (restrictedContactChanged) {
+      await recordContactRestrictionAudit({
+        organizationId: orgId,
+        leadId: lead._id,
+        event: 'dnc_contact_changed',
+        actor: staffAuditActor(user),
+        reason: contactGuard.reason || null,
+        previousContact: { phone: currentLead.phone || null, email: currentLead.email || null },
+        newContact: { phone: lead.phone || null, email: lead.email || null },
+      });
     }
 
     await activityService.createActivity({
@@ -1203,6 +1329,9 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
         leadId: lead._id.toString(),
         activityKind: 'lead_details_update',
         updatedFields: Object.keys(setValues),
+        ...(restrictedContactChanged
+          ? { doNotContactContactChange: { previousEmail: currentLead.email || '', previousPhone: currentLead.phone || '' } }
+          : {}),
       },
       ipAddress: req.ip,
     });
@@ -1321,25 +1450,57 @@ export const updateLead = async (req: Request, res: Response) => {
     const userId = user._id;
     const orgId = req.orgId;
 
-    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
-    if (!lead) {
+    const currentLead = await Lead.findOne({ _id: id, organizationId: orgId });
+    if (!currentLead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    const fromStatus = lead.status;
+    const fromStatus = currentLead.status;
     const isClosing = status === 'Closed' && fromStatus !== 'Closed';
     const isReopening = fromStatus === 'Closed' && status !== 'Closed';
+    const isRemovingDoNotContact = isContactRestrictedStatus(fromStatus) && !isContactRestrictedStatus(status);
+    const isApplyingDoNotContact = !isContactRestrictedStatus(fromStatus) && isContactRestrictedStatus(status);
+    if (isRemovingDoNotContact && !(await isOrganizationAdmin(user, orgId))) {
+      return res.status(403).json({ message: CONTACT_RESTRICTION_MESSAGES.adminOnly, code: CONTACT_RESTRICTION_ADMIN_ONLY_CODE });
+    }
+    if (isRemovingDoNotContact && !(reason && String(reason).trim())) {
+      return res.status(400).json({ message: CONTACT_RESTRICTION_MESSAGES.reasonRequired });
+    }
     if ((isClosing || isReopening) && !(reason && String(reason).trim())) {
       return res.status(400).json({ message: 'A reason is required to close or reopen this ticket.' });
     }
 
-    lead.status = status;
+    const statusSet: Record<string, unknown> = { status };
     if (['Contacted', 'Appointment Set', 'Closed'].includes(status)) {
-      lead.isPending = false;
-      lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
+      statusSet.isPending = false;
+      statusSet['followUp.lastRepResponseAt'] = new Date();
     }
-    pushStatusHistory(lead, fromStatus, status, userId, reason);
-    await lead.save();
+    const historyEntry = statusHistoryEntry(fromStatus, status, userId, reason);
+    const lead = await Lead.findOneAndUpdate(
+      { _id: currentLead._id, organizationId: orgId, status: fromStatus },
+      { $set: statusSet, ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}) },
+      { new: true, runValidators: true },
+    );
+    if (!lead) {
+      return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
+    }
+
+    if (isRemovingDoNotContact) {
+      await releaseProtectedContacts({ organizationId: orgId, leadId: lead._id, actorUserId: userId }).catch((err) => {
+        logger.error({ err, leadId: lead._id }, 'Could not release protected contact details after Do Not Contact was removed');
+      });
+    }
+    if (isRemovingDoNotContact || isApplyingDoNotContact) {
+      await recordContactRestrictionAudit({
+        organizationId: orgId,
+        leadId: lead._id,
+        event: isRemovingDoNotContact ? 'dnc_removed' : 'dnc_applied',
+        actor: staffAuditActor(user),
+        fromStatus,
+        toStatus: status,
+        reason: reason ? String(reason).trim().slice(0, 1000) : null,
+      });
+    }
 
     const { title, message } = notificationTemplates.lead_status_changed({
       customerName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
@@ -1363,14 +1524,21 @@ export const updateLead = async (req: Request, res: Response) => {
       userId: userId.toString(),
       organizationId: orgId || 'global',
       type: 'other',
-      title: 'Lead Status Updated',
+      title: isRemovingDoNotContact ? 'Do Not Contact Removed' : 'Lead Status Updated',
       description: `Lead ${lead.firstName} status changed to ${status}`,
-      metadata: { leadId: lead._id.toString(), status, reason }
+      metadata: {
+        leadId: lead._id.toString(),
+        status,
+        reason,
+        ...(isRemovingDoNotContact ? { activityKind: 'do_not_contact_removed', fromStatus } : {}),
+      }
     });
 
-    logger.info({ leadId: lead._id, status, userId }, 'Lead status updated');
+    logger.info({ leadId: lead._id, status, userId, ...(isRemovingDoNotContact ? { fromStatus, doNotContactRemoved: true } : {}) }, 'Lead status updated');
 
-    if (isClosing) {
+    if (isClosing && isRemovingDoNotContact) {
+      logger.info({ leadId: lead._id }, 'Closed-ticket email skipped: the lead was marked Do Not Contact');
+    } else if (isClosing) {
       try {
         const closingMessage = `Hi ${lead.firstName || 'there'},\n\nWe've marked your inquiry as resolved. If you have any more questions, feel free to reply to this email anytime.\n\nThanks!`;
         await sendLeadReplyEmail(lead, closingMessage, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
@@ -1532,13 +1700,21 @@ export const markAsPending = async (req: Request, res: Response) => {
     const orgId = req.orgId;
     const user = req.user || req.crmUser;
 
-    const lead = await Lead.findOne({ _id: id, organizationId: orgId });
-    if (!lead) return res.status(404).json({ message: 'Inquiry not found' });
+    const currentLead = await Lead.findOne({ _id: id, organizationId: orgId });
+    if (!currentLead) return res.status(404).json({ message: 'Inquiry not found' });
+    if (isContactRestrictedStatus(currentLead.status)) {
+      return res.status(403).json({ message: CONTACT_RESTRICTION_MESSAGES.statusLocked, code: CONTACT_RESTRICTION_ADMIN_ONLY_CODE });
+    }
 
-    pushStatusHistory(lead, lead.status, 'Pending', user?._id);
-    lead.isPending = true;
-    lead.status = 'Pending';
-    await lead.save();
+    const historyEntry = statusHistoryEntry(currentLead.status, 'Pending', user?._id);
+    const lead = await Lead.findOneAndUpdate(
+      { _id: currentLead._id, organizationId: orgId, status: currentLead.status },
+      { $set: { isPending: true, status: 'Pending' }, ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}) },
+      { new: true },
+    );
+    if (!lead) {
+      return res.status(409).json({ message: CONTACT_RESTRICTION_MESSAGES.statusChanged, code: LEAD_STATUS_CHANGED_CODE });
+    }
 
     const io = getSocketIO();
     if (io) {
@@ -1765,6 +1941,13 @@ export const replyToInquiry = async (
           code: gmailError.code,
         });
       }
+      if (isContactRestrictedError(gmailError)) {
+        return res.status(gmailError.statusCode).json({
+          message: gmailError.message,
+          code: gmailError.errors[0]?.code,
+          errors: gmailError.errors,
+        });
+      }
 
       console.error(
         '[REPLY] Failed to send reply via centralized account:',
@@ -1778,23 +1961,24 @@ export const replyToInquiry = async (
     }
 
     const previousStatus = lead.status;
+    const repliedAt = new Date();
+    const historyEntry = statusHistoryEntry(previousStatus, 'Contacted', userId);
 
-    pushStatusHistory(
-      lead,
-      previousStatus,
-      'Contacted',
-      userId,
-    );
-
-    lead.status = 'Contacted';
-    lead.isRead = true;
-    lead.isPending = false;
-    lead.followUp = {
-      ...(lead.followUp as any),
-      lastRepResponseAt: new Date(),
-    };
-
-    await lead.save();
+    const repliedLead =
+      (await Lead.findOneAndUpdate(
+        { _id: lead._id, organizationId: orgId, status: previousStatus },
+        {
+          $set: { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': repliedAt },
+          ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),
+        },
+        { new: true },
+      ))
+      || (await Lead.findOneAndUpdate(
+        { _id: lead._id, organizationId: orgId },
+        { $set: { isRead: true, 'followUp.lastRepResponseAt': repliedAt } },
+        { new: true },
+      ))
+      || lead;
 
     await activityService.createActivity({
       userId: userId.toString(),
@@ -1832,7 +2016,7 @@ export const replyToInquiry = async (
     if (io) {
       io.to(`org:${orgId}`).emit(
         'lead:update',
-        lead,
+        repliedLead,
       );
     }
 
@@ -1840,7 +2024,7 @@ export const replyToInquiry = async (
       success: true,
       message:
         'Reply sent successfully',
-      data: lead,
+      data: repliedLead,
     });
   } catch (error) {
     console.error(
@@ -1883,17 +2067,29 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
 
     const results = await Promise.allSettled(
       leads.map(async (lead) => {
-        if (!resolveLeadReplyRecipient(lead, dealershipAddresses)) {
+        const bulkRecipient = resolveLeadReplyRecipient(lead, dealershipAddresses);
+        if (!bulkRecipient) {
           throw new LeadReplyRecipientError();
         }
-        pushStatusHistory(lead, lead.status, 'Contacted', userId);
-        lead.status = 'Contacted';
-        lead.isRead = true;
-        lead.isPending = false;
-        lead.followUp = { ...(lead.followUp as any), lastRepResponseAt: new Date() };
-        await lead.save();
+        await assertContactAllowed({
+          organizationId: String(orgId),
+          leadId: lead._id,
+          email: bulkRecipient,
+          phone: lead.phone,
+          customerId: lead.customerId,
+        }, { channel: 'email', purpose: 'bulk_reply', actor: staffAuditActor(user) });
+        const historyEntry = statusHistoryEntry(lead.status, 'Contacted', userId);
+        const contactedLead = await Lead.findOneAndUpdate(
+          { _id: lead._id, organizationId: orgId, status: lead.status },
+          {
+            $set: { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': new Date() },
+            ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),
+          },
+          { new: true },
+        );
+        if (!contactedLead) throw new Error(CONTACT_RESTRICTION_MESSAGES.statusChanged);
 
-        await sendLeadReplyEmail(lead, message, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
+        await sendLeadReplyEmail(contactedLead, message, userId, orgId as string, [], undefined, { requireVerifiedRecipient: true });
 
         await activityService.createActivity({
           userId: userId.toString(),
@@ -1908,7 +2104,7 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
 
         const io = getSocketIO();
         if (io) {
-          io.to(`org:${orgId}`).emit('lead:update', lead);
+          io.to(`org:${orgId}`).emit('lead:update', contactedLead);
         }
 
         return lead._id.toString();
@@ -2271,15 +2467,30 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
     appointmentData
   );
 
-  pushStatusHistory(lead, lead.status, 'Appointment Set', userId);
-  lead.status = 'Appointment Set';
-  lead.appointment = {
+  const appointmentInfo = {
     date: new Date(date),
     time,
     notes: notes || '',
     location: locationOrVehicle || '',
   };
-  await lead.save();
+  const historyEntry = statusHistoryEntry(lead.status, 'Appointment Set', userId);
+  const scheduledLead =
+    (!isContactRestrictedStatus(lead.status)
+      ? await Lead.findOneAndUpdate(
+          { _id: lead._id, organizationId: orgId, status: { $in: [lead.status, 'Appointment Set'] } },
+          {
+            $set: { status: 'Appointment Set', appointment: appointmentInfo },
+            ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),
+          },
+          { new: true },
+        )
+      : null)
+    || (await Lead.findOneAndUpdate(
+      { _id: lead._id, organizationId: orgId },
+      { $set: { appointment: appointmentInfo } },
+      { new: true },
+    ))
+    || lead;
 
   await activityService.createActivity({
     userId: userId.toString(),
@@ -2292,10 +2503,10 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${orgId}`).emit('lead:update', lead);
+    io.to(`org:${orgId}`).emit('lead:update', scheduledLead);
   }
 
-  res.json(new ApiResponse(200, { lead, appointment }, 'Appointment scheduled and synced successfully'));
+  res.json(new ApiResponse(200, { lead: scheduledLead, appointment }, 'Appointment scheduled and synced successfully'));
 });
 
 export async function fetchGmailThreadMessages(orgId: string, threadId: string | undefined | null, excludeMessageId?: string | null): Promise<any[]> {

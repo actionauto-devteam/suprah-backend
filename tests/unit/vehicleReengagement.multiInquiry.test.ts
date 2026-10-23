@@ -1,3 +1,17 @@
+jest.mock('../../src/services/contactRestriction.service', () => ({
+  ...jest.requireActual('../../src/services/contactRestriction.service'),
+  resolveContactRestriction: jest.fn(async () => ({ status: 'allowed' })),
+  checkContactForSend: jest.fn(async () => ({ status: 'allowed' })),
+  assertContactAllowed: jest.fn(async () => undefined),
+  authorizeWebchatReply: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  assertWebchatReplyAllowed: jest.fn(async () => ({ allowed: true, basis: 'not_restricted' })),
+  recordWebchatExceptionReply: jest.fn(async () => undefined),
+  recordContactRestrictionAudit: jest.fn(async () => true),
+  describeWebchatContactPolicy: jest.fn(async () => ({ restricted: false, lookupUnavailable: false, restrictedSince: null, windowMinutes: 30 })),
+  isOrganizationAdmin: jest.fn(async () => false),
+  protectPreviousContact: jest.fn(async () => ({})),
+  releaseProtectedContacts: jest.fn(async () => undefined),
+}));
 const mockCreate = jest.fn();
 
 jest.mock('openai', () => {
@@ -157,4 +171,20 @@ describe('vehicle re-engagement — customers with multiple vehicle inquiries', 
     expect(mockSendAutomatedSms).not.toHaveBeenCalled();
     expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'Customer opted out of SMS' }));
   });
+
+  it.each(['+639171234567', '385-336-5062 x7', '+385503586912'])(
+    'logs a skipped re-engagement for the untextable number %p without generating or sending',
+    async (phone) => {
+      seedSiblings([{ ...civicLead, phone }]);
+      seedSharedConversationActivity(null);
+
+      await processLeadForVehicle({ ...civicLead, phone }, civicArrival);
+
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockSendAutomatedSms).not.toHaveBeenCalled();
+      expect(mockLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ leadId: 'lead-civic', status: 'skipped', failureReason: expect.any(String) }),
+      );
+    },
+  );
 });

@@ -5,6 +5,7 @@ import { matchesVehicle } from './vehicleReengagement.service';
 import emailService from './email.service';
 import { NURTURE_ELIGIBLE_STATUSES } from '../constants/leadStatus';
 import logger from '../utils/logger';
+import { isDoNotContactError } from './contactRestriction.service';
 
 const MIN_DROP_AMOUNT = parseFloat(process.env.PRICE_DROP_EMAIL_MIN_AMOUNT || '250');
 const CANDIDATE_SCAN_LIMIT = 2000;
@@ -113,6 +114,10 @@ export async function processVehicleForPriceDrop(vehicle: IVehicle): Promise<{ m
         await writeLog({ ...base, status: 'skipped', skippedReason: 'No email on file or opted out' });
       }
     } catch (err: any) {
+      if (isDoNotContactError(err)) {
+        await writeLog({ ...base, status: 'skipped', skippedReason: err.message });
+        continue;
+      }
       logger.error({ err, leadId: lead._id, vehicleId: vehicle._id }, '[PriceDropEmail] Send failed');
       await writeLog({
         ...base,
