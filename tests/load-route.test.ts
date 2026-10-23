@@ -419,6 +419,20 @@ describe('Best route and arrival time', () => {
     expect(precise.body.data.driver).toMatchObject({ positionApproximate: false, positionAccuracyMeters: 8 });
   });
 
+  it('calls a location approximate only past 1 km, like the Driver Tracker, but never re-routes from one past 100 m', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await moveDriver(DRIVER, 60, 300);
+    const first = await staffRoute().expect(200);
+    expect(first.body.data.driver).toMatchObject({ positionApproximate: false, positionAccuracyMeters: 300 });
+
+    ageLoadRouteForTests(String(load._id), 60_000);
+    const onRoute = road(DRIVER, DELIVERY)[5];
+    await moveDriver({ lat: onRoute[1] + 0.09, lng: onRoute[0] }, 5, 300);
+    await staffRoute().expect(200);
+    expect(mockRoutesSend).toHaveBeenCalledTimes(1);
+  });
+
   it('withholds a route that breaks a truck limit, and says which limit', async () => {
     process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
     const blocked = toDelivery();

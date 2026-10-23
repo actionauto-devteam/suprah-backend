@@ -35,7 +35,9 @@ import { legSafety, listOf } from "./routeSafety.service";
  *    breaks one of the truck's limits is never shown as the way to go, and
  *    one where a limit may apply carries a warning.
  * 6. Rough locations (worse than 100 m) never trigger a new route, and
- *    "off the route" allows for the location's own error.
+ *    "off the route" allows for the location's own error. Past 1 km the
+ *    arrival card calls the starting location approximate, like the Driver
+ *    Tracker does.
  * 7. The route fits the driver's own rig: its height and length from the
  *    Equipment page, or the company default for what the driver hasn't added.
  *
@@ -57,10 +59,15 @@ export const MAX_ROUTE_LINE_POINTS = 1_500;
 const MAX_CHECK_LINE_POINTS = 8_000;
 /**
  * A location less precise than this (a computer's Wi-Fi location can be
- * kilometres off) never triggers a new route, and the arrival card says the
- * route starts from an approximate location.
+ * kilometres off) never triggers a new route.
  */
 export const ROUGH_POSITION_METERS = MAX_ROUTE_ACCURACY_METERS;
+/**
+ * Past this, the arrival card says the route starts from an approximate
+ * location: the same cut-off as the Driver Tracker's "Approximate GPS" label
+ * (LOW_ACCURACY_M in the frontend's lib/driver-tracking-view.ts).
+ */
+export const APPROXIMATE_POSITION_METERS = 1_000;
 /** A position older than this is shown as the basis of the estimate. */
 const STALE_POSITION_MS = 15 * 60_000;
 const PACE_WINDOW_MS = 30 * 60_000;
@@ -116,7 +123,7 @@ export type LoadRoute =
         positionStale: boolean;
         /** How precise the starting location is, in metres (null when unknown). */
         positionAccuracyMeters: number | null;
-        /** The route starts from a rough location (worse than 100 m). */
+        /** The route starts from an approximate location (off by more than 1 km). */
         positionApproximate: boolean;
       };
       /**
@@ -579,7 +586,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
         positionAgeMinutes: Math.max(0, Math.floor((now - latest.measuredMs) / 60_000)),
         positionStale: now - latest.measuredMs > STALE_POSITION_MS,
         positionAccuracyMeters: latest.accuracy !== null ? Math.round(latest.accuracy) : null,
-        positionApproximate: latest.rough,
+        positionApproximate: latest.accuracy !== null && latest.accuracy > APPROXIMATE_POSITION_METERS,
       },
       safety: {
         status: cautions.length || restOfTripUnsafe ? "check" : "ok",
