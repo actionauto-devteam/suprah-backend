@@ -21,7 +21,7 @@ import {
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
 import { syncVerificationContactToAccount } from "../services/driverContactSync.service";
 import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
-import { MAX_TRAILER_VEHICLES, TRAILER_TYPES } from "../validations/load.validation";
+import { MAX_TRAILER_VEHICLES, RIG_HEIGHT_INCHES, RIG_LENGTH_FEET, TRAILER_TYPES } from "../validations/load.validation";
 
 // Work days are stored as lowercase full names; older or hand-typed values
 // such as "Monday" or "mon" are converted.
@@ -548,6 +548,18 @@ const getProfile = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+/**
+ * A rig size from the Equipment page: undefined leaves it as it is, empty or
+ * null clears it, anything else must be a whole number within the limits.
+ */
+function rigSize(value: unknown, limits: { min: number; max: number }, message: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  const size = typeof value === "number" || typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(size) || size < limits.min || size > limits.max) throw new ApiError(400, message);
+  return Math.round(size);
+}
+
 const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   const user = getDriverUser(req);
   const profile = await getOrCreateProfile(user._id.toString());
@@ -576,6 +588,18 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
     hitchType,
     specialFeatures,
   } = req.body;
+
+  // Truck routes are planned around this size, so an impossible one is refused.
+  const rigHeightInches = rigSize(
+    req.body.rigHeightInches,
+    RIG_HEIGHT_INCHES,
+    "Enter your rig's overall height between 6 ft and 16 ft, then save again.",
+  );
+  const rigLengthFeet = rigSize(
+    req.body.rigLengthFeet,
+    RIG_LENGTH_FEET,
+    "Enter your rig's overall length between 20 ft and 100 ft, then save again.",
+  );
 
   // Load matching compares trailer types exactly, so only the Equipment
   // page's choices are saved. An unchanged older value still saves, so a
@@ -620,6 +644,8 @@ const updateEquipment = asyncHandler(async (req: Request, res: Response) => {
   if (gvwr !== undefined) profile.gvwr = gvwr === null ? undefined : gvwr;
   if (trailerAxles !== undefined) profile.trailerAxles = trailerAxles;
   if (trailerGvwr !== undefined) profile.trailerGvwr = trailerGvwr === null ? undefined : trailerGvwr;
+  if (rigHeightInches !== undefined) profile.rigHeightInches = rigHeightInches ?? undefined;
+  if (rigLengthFeet !== undefined) profile.rigLengthFeet = rigLengthFeet ?? undefined;
   if (engineType !== undefined) profile.engineType = engineType;
   if (trailerMake !== undefined) profile.trailerMake = trailerMake;
   if (trailerModel !== undefined) profile.trailerModel = trailerModel;

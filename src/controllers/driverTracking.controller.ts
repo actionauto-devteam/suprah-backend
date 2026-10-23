@@ -8080,6 +8080,8 @@ const getDriverComplianceProfile = asyncHandler(async (req: ExpressRequest, res:
       trailerLength: profile.trailerLength,
       trailerAxles: profile.trailerAxles,
       trailerGvwr: profile.trailerGvwr,
+      rigHeightInches: profile.rigHeightInches,
+      rigLengthFeet: profile.rigLengthFeet,
       hitchType: profile.hitchType,
     },
     logistics: {
