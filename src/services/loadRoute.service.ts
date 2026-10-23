@@ -1,9 +1,11 @@
 import { CalculateRoutesCommand, GeoRoutesClient } from "@aws-sdk/client-geo-routes";
 import { GeocodeCommand, GeoPlacesClient } from "@aws-sdk/client-geo-places";
-import { getAmazonLocationConfig } from "../config/amazonLocation";
+import { getAmazonLocationConfig, type TruckProfile } from "../config/amazonLocation";
 import DriverLocation from "../models/DriverLocation.model";
+import DriverProfile from "../models/DriverProfile.model";
 import LoadTripPoint from "../models/LoadTripPoint.model";
 import logger from "../utils/logger";
+import { RIG_HEIGHT_INCHES, RIG_LENGTH_FEET } from "../validations/load.validation";
 import {
   STOPPED_MIN_MS,
   deadlineStatus,
@@ -34,6 +36,8 @@ import { legSafety, listOf } from "./routeSafety.service";
  *    one where a limit may apply carries a warning.
  * 6. Rough locations (worse than 100 m) never trigger a new route, and
  *    "off the route" allows for the location's own error.
+ * 7. The route fits the driver's own rig: its height and length from the
+ *    Equipment page, or the company default for what the driver hasn't added.
  *
  * A route is reused for 2 minutes per load (only worked out while someone has
  * the driver or load open). When the driver leaves the planned route, a new
@@ -123,6 +127,12 @@ export type LoadRoute =
        * rest-of-trip line.
        */
       safety: { status: "ok" | "check"; limits: string[]; restOfTripUnsafe: boolean; restOfTripLimits: string[] };
+      /**
+       * The rig size the route was planned for (null for car routes). Each
+       * part comes from the driver's Equipment page when they added it, or
+       * the company default.
+       */
+      truck: { heightInches: number; lengthFeet: number; fromEquipment: { height: boolean; length: boolean } } | null;
       deadline: { day: string; status: DeadlineStatus } | null;
       /** Null when Amazon Location sent no shape for the route; the arrival time still stands. */
       route: LoadRouteLines | null;
@@ -339,6 +349,33 @@ function linePoints(lineString: unknown): LatLng[] {
 
 const toCoordinates = (points: LatLng[]): RouteCoordinate[] => points.map((point) => [point.lng, point.lat]);
 
+const withinLimits = (value: unknown, limits: { min: number; max: number }) =>
+  typeof value === "number" && Number.isFinite(value) && value >= limits.min && value <= limits.max ? value : null;
+
+/**
+ * The truck to plan for: the driver's rig height and length from the
+ * Equipment page, each falling back to the company default. Weight stays the
+ * company setting (by default the 80,000 lb legal limit, so a route never
+ * crosses a bridge too weak for a fully loaded rig).
+ */
+async function truckFor(driverId: string, fallback: TruckProfile) {
+  const profile: any = await DriverProfile.findOne({ userId: driverId }).select("rigHeightInches rigLengthFeet").lean();
+  const heightInches = withinLimits(profile?.rigHeightInches, RIG_HEIGHT_INCHES);
+  const lengthFeet = withinLimits(profile?.rigLengthFeet, RIG_LENGTH_FEET);
+  return {
+    profile: {
+      heightCm: heightInches !== null ? Math.round(heightInches * 2.54) : fallback.heightCm,
+      lengthCm: lengthFeet !== null ? Math.round(lengthFeet * 30.48) : fallback.lengthCm,
+      grossWeightKg: fallback.grossWeightKg,
+    },
+    shown: {
+      heightInches: heightInches ?? Math.round(fallback.heightCm / 2.54),
+      lengthFeet: lengthFeet ?? Math.round(fallback.lengthCm / 30.48),
+      fromEquipment: { height: heightInches !== null, length: lengthFeet !== null },
+    },
+  };
+}
+
 type LegSummary = {
   distance: number | null;
   duration: number | null;
@@ -392,6 +429,8 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
     return notReady("unavailable");
   }
 
+  const truck = config.travelMode === "Truck" ? await truckFor(driverId, config.truck) : null;
+
   let ahead: LegSummary;
   let later: LegSummary | null = null;
   try {
@@ -403,14 +442,14 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
         DepartNow: true,
         Traffic: { Usage: "UseTrafficData" },
         TravelMode: config.travelMode,
-        ...(config.travelMode === "Truck"
+        ...(truck
           ? {
               TravelModeOptions: {
                 Truck: {
                   TruckType: "Tractor",
-                  Height: config.truck.heightCm,
-                  Length: config.truck.lengthCm,
-                  GrossWeight: config.truck.grossWeightKg,
+                  Height: truck.profile.heightCm,
+                  Length: truck.profile.lengthCm,
+                  GrossWeight: truck.profile.grossWeightKg,
                   Trailer: { TrailerCount: 1 },
                 },
               },
@@ -548,6 +587,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
         restOfTripUnsafe,
         restOfTripLimits: restOfTripUnsafe ? (laterSafety?.limits ?? []) : [],
       },
+      truck: truck?.shown ?? null,
       deadline: deadlineDay ? { day: deadlineDay, status: deadlineStatus(arrivalMs, deadlineDay) } : null,
       route: lines,
       computedAt: new Date(now).toISOString(),

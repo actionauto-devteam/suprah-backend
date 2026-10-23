@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document, Model } from "mongoose";
 import { businessDateParts } from "../utils/businessDate";
-import { MAX_TRAILER_VEHICLES } from "../validations/load.validation";
+import { MAX_TRAILER_VEHICLES, RIG_HEIGHT_INCHES, RIG_LENGTH_FEET } from "../validations/load.validation";
 
 // The compliance meter currently requires only the driver's license.
 // Keep this synchronized with REQUIRED_DOCUMENTS on the frontend.
@@ -90,6 +90,10 @@ export interface IDriverProfile extends Document {
   trailerLength?: number;
   trailerAxles?: number;
   trailerGvwr?: number;
+  /** Overall rig height (truck and trailer, loaded), in inches. Used for truck routes. */
+  rigHeightInches?: number;
+  /** Overall rig length (front bumper to the end of the trailer), in feet. Used for truck routes. */
+  rigLengthFeet?: number;
   hitchType?: string;
   specialFeatures: string[];
   dotNumber?: string;
@@ -237,6 +241,8 @@ const driverProfileSchema = new Schema<IDriverProfile>(
     trailerLength: { type: Number, min: 0 },
     trailerAxles: { type: Number, min: 0 },
     trailerGvwr: { type: Number, min: 0 },
+    rigHeightInches: { type: Number, min: RIG_HEIGHT_INCHES.min, max: RIG_HEIGHT_INCHES.max },
+    rigLengthFeet: { type: Number, min: RIG_LENGTH_FEET.min, max: RIG_LENGTH_FEET.max },
     hitchType: { type: String, trim: true },
     specialFeatures: { type: [String], default: [] },
     dotNumber: { type: String, trim: true },

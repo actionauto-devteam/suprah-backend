@@ -170,6 +170,7 @@ beforeEach(async () => {
     { $set: { status: 'In-Transit', 'dates.pickupDeadline': day(-1), 'dates.deliveryDeadline': day(10) } },
   );
   await LoadTripPoint.deleteMany({ loadId: load._id });
+  await DriverProfile.updateOne({ userId: driver._id }, { $unset: { rigHeightInches: 1, rigLengthFeet: 1 } });
   await DriverLocation.deleteMany({ userId: driver._id });
   await DriverLocation.create({
     userId: driver._id, organizationId: org._id, status: 'on-route', coords: DRIVER,
@@ -245,7 +246,64 @@ describe('Best route and arrival time', () => {
       LegGeometryFormat: 'Simple',
     });
     expect(input.Waypoints).toBeUndefined();
+    // No rig size on the Equipment page yet: the company default is used.
+    expect(data.truck).toEqual({ heightInches: 162, lengthFeet: 75, fromEquipment: { height: false, length: false } });
     expect(loadRouteHealthSnapshot()).toMatchObject({ routesEnabled: true, computed: 1, failed: 0 });
+  });
+
+  it("plans for the driver's own rig size from the Equipment page", async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await request(app)
+      .patch('/api/driver-profile/equipment')
+      .set(auth(driverToken))
+      .send({ rigHeightInches: 150, rigLengthFeet: 65 })
+      .expect(200);
+
+    const res = await staffRoute().expect(200);
+    expect(mockRoutesSend.mock.calls[0][0].input.TravelModeOptions.Truck).toMatchObject({
+      Height: 381, // 12 ft 6 in
+      Length: 1981, // 65 ft
+      GrossWeight: 36287, // weight stays the company setting
+    });
+    expect(res.body.data.truck).toEqual({ heightInches: 150, lengthFeet: 65, fromEquipment: { height: true, length: true } });
+  });
+
+  it('uses the company default for the part of the rig size the driver left out', async () => {
+    process.env.AMAZON_LOCATION_ROUTES_ENABLED = 'true';
+    mockRoutesSend.mockResolvedValue(toDelivery());
+    await request(app).patch('/api/driver-profile/equipment').set(auth(driverToken)).send({ rigHeightInches: 168 }).expect(200);
+
+    const res = await driverRoute().expect(200);
+    expect(mockRoutesSend.mock.calls[0][0].input.TravelModeOptions.Truck).toMatchObject({ Height: 427, Length: 2286 });
+    expect(res.body.data.truck).toEqual({ heightInches: 168, lengthFeet: 75, fromEquipment: { height: true, length: false } });
+  });
+
+  it('the Equipment page refuses a rig size that cannot be right, and can clear it', async () => {
+    const save = (body: Record<string, unknown>) =>
+      request(app).patch('/api/driver-profile/equipment').set(auth(driverToken)).send(body);
+    const rigOf = async () =>
+      DriverProfile.findOne({ userId: driver._id }).select('rigHeightInches rigLengthFeet').lean() as any;
+
+    const low = await save({ rigHeightInches: 40 }).expect(400);
+    expect(low.body.message).toBe("Enter your rig's overall height between 6 ft and 16 ft, then save again.");
+    const long = await save({ rigLengthFeet: 300 }).expect(400);
+    expect(long.body.message).toBe("Enter your rig's overall length between 20 ft and 100 ft, then save again.");
+    await save({ rigHeightInches: 'tall' }).expect(400);
+    await save({ rigLengthFeet: { $gt: 0 } }).expect(400);
+    const untouched = await rigOf();
+    expect(untouched.rigHeightInches).toBeUndefined();
+    expect(untouched.rigLengthFeet).toBeUndefined();
+
+    await save({ rigHeightInches: '162', rigLengthFeet: 74.6 }).expect(200);
+    expect(await rigOf()).toMatchObject({ rigHeightInches: 162, rigLengthFeet: 75 });
+    // Saving another section leaves it as it is; an empty field clears it.
+    await save({ truckMake: 'Peterbilt' }).expect(200);
+    expect(await rigOf()).toMatchObject({ rigHeightInches: 162, rigLengthFeet: 75 });
+    await save({ rigHeightInches: null, rigLengthFeet: '' }).expect(200);
+    const cleared = await rigOf();
+    expect(cleared.rigHeightInches).toBeUndefined();
+    expect(cleared.rigLengthFeet).toBeUndefined();
   });
 
   it('before pickup: one request plans the drive to the pickup and the rest of the trip to the delivery', async () => {

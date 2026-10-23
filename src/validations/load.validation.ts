@@ -95,6 +95,13 @@ export const TRAILER_TYPES = [
 // components/driver-profile/driver-profile-constants.tsx.
 export const MAX_TRAILER_VEHICLES = 10;
 
+// The rig's overall size (truck and trailer together, loaded) from the
+// Equipment page, used to plan truck routes around low bridges and length
+// limits. Must match RIG_HEIGHT_INCHES and RIG_LENGTH_FEET in the frontend's
+// lib/rig-size.ts.
+export const RIG_HEIGHT_INCHES = { min: 72, max: 192 } as const; // 6 ft to 16 ft
+export const RIG_LENGTH_FEET = { min: 20, max: 100 } as const;
+
 // Load schedule dates are calendar days (YYYY-MM-DD). A value with a time and
 // time zone could otherwise land on a different day once stored. The UTC
 // midnight form the API itself returns (…T00:00:00.000Z) is also accepted, so

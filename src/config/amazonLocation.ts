@@ -18,6 +18,9 @@
  *   AMAZON_LOCATION_TRUCK_HEIGHT_CM    truck profile (default 411 cm = 13 ft 6 in)
  *   AMAZON_LOCATION_TRUCK_LENGTH_CM    truck profile (default 2286 cm = 75 ft)
  *   AMAZON_LOCATION_TRUCK_WEIGHT_KG    truck profile (default 36287 kg = 80,000 lb)
+ *
+ * The height and length are the fallback for drivers who haven't added their
+ * rig's size on the Equipment page; the weight is used for every driver.
  */
 
 type Env = Record<string, string | undefined>;
