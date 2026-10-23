@@ -1931,11 +1931,11 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
     // could count the just-opened messages as unread again. Each operation is
     // intentionally failure-tolerant: a notification-cleanup issue must not
     // prevent an authorized member from reading their conversation.
-    await Promise.all([
+    const [readResult] = await Promise.all([
       SupraSpaceMessage.updateMany(
         { conversationId: id, readBy: { $ne: userId } },
         { $addToSet: { readBy: userId } }
-      ).catch(() => undefined),
+      ).catch(() => null),
       SupraSpaceConversation.updateOne(
         { _id: id, manualUnreadBy: userId },
         { $pull: { manualUnreadBy: userId } }
@@ -1945,6 +1945,15 @@ const getMessages = asyncHandler(async (req: Request, res: Response) => {
         { $set: { isRead: true } }
       ).catch(() => undefined),
     ]);
+
+    // HTTP history loads also advance the receipt. Broadcast that movement so
+    // full-page, phone, and Mini Suprah timelines update without a refresh.
+    if (readResult?.modifiedCount) {
+      emitToConversation(conversation, 'messages:read', {
+        conversationId: id,
+        userId: userId.toString(),
+      });
+    }
   }
 
   const fallbackSender = (m: any) => ({
