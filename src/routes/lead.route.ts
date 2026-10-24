@@ -30,6 +30,7 @@ import { getLeadAiSummary, regenerateLeadAiSummary } from "../controllers/leadAi
 import { getLeadConversation, getLeadEarlierConversation } from "../controllers/leadConversation.controller";
 import { generateLeadAiDraftHandler, getLeadReplyOptionsHandler } from "../controllers/leadComposer.controller";
 import { staffAiDraftLimiter } from "../middleware/trainingLabRateLimit";
+import { getLeadVehiclePreviewHandler } from "../controllers/leadVehiclePreview.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
 import {
   adfLimiter,
@@ -74,6 +75,7 @@ router.get("/:id/thread", getThreadMessages);
 router.get("/:id/conversation", getLeadConversation);
 router.get("/:id/conversation/earlier/:earlierId", getLeadEarlierConversation);
 router.get("/:id/reply-options", getLeadReplyOptionsHandler);
+router.get("/:id/vehicle-preview", getLeadVehiclePreviewHandler);
 router.post("/:id/ai-draft", staffAiDraftLimiter, generateLeadAiDraftHandler);
 router.get("/:id/ai-summary", getLeadAiSummary);
 router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
