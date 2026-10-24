@@ -13,6 +13,10 @@ import { emitToOrg } from '../utils/socketEmitter';
 import { triggerAiReplyForNewInquiry } from './communication.service';
 import logger from '../utils/logger';
 import { ApiError } from '../utils/ApiError';
+import { getLeadIntakeMode } from './leadIntakeControl.service';
+import { submitLeadInquiry } from './leadIntake.service';
+import { startNewLeadAutomations } from './leadIntakeIntegration';
+import { buildInquiryContentKey } from '../utils/inquiryKeys';
 
 const VEHICLE_INQUIRY_DEDUP_WINDOW_MS = 15 * 60 * 1000;
 
@@ -152,6 +156,66 @@ class LeadService {
       const systemUserId = await resolveOrgSystemUserId(organizationId);
       if (!systemUserId) {
         throw new ApiError(400, 'This dealership is not yet set up to receive online inquiries');
+      }
+
+      const vehicleDetails = {
+        year: vehicle.year?.toString(),
+        make: vehicle.make,
+        model: vehicle.modelName,
+        vin: vehicle.vin,
+        stock: vehicle.stockNumber,
+        trim: vehicle.trim,
+        price: vehicle.price?.toString(),
+      };
+
+      if ((await getLeadIntakeMode(String(organizationId))) !== 'off') {
+        const inquiryVehicle = {
+          year: vehicleDetails.year,
+          make: vehicleDetails.make,
+          model: vehicleDetails.model,
+          trim: vehicleDetails.trim,
+          vin: vehicleDetails.vin,
+          stock: vehicleDetails.stock,
+        };
+        const intake = await submitLeadInquiry({
+          organizationId: String(organizationId),
+          kind: 'website_inquiry',
+          receivedAt: new Date(),
+          channel: 'web',
+          source: LEAD_SOURCE.WEBSITE_INQUIRY,
+          contact: {
+            firstName: dto.customerName.first,
+            lastName: dto.customerName.last,
+            email: dto.customerEmail,
+            phone: dto.customerPhone,
+            assurance: 'self_reported',
+          },
+          vehicle: inquiryVehicle,
+          comments: dto.comments,
+          contentKey: buildInquiryContentKey({
+            email: dto.customerEmail,
+            phone: dto.customerPhone,
+            vehicle: inquiryVehicle,
+            comments: dto.comments,
+          }),
+          leadDraft: {
+            createdBy: systemUserId,
+            vehicle: vehicleDetails,
+            vehicleId: vehicle._id,
+            location: vehicle.dealerCity || undefined,
+            parsedContent: adfXml,
+          },
+        });
+        if (intake.status === 'associated' || (intake.status === 'duplicate' && intake.leadId)) {
+          await IntakeClaim.updateOne(
+            { organizationId, kind: 'vehicle_inquiry', claimKey },
+            { $set: { leadId: intake.leadId } },
+          );
+        }
+        await startNewLeadAutomations(String(organizationId), intake, { email: false }).catch((err) =>
+          logger.warn({ err, organizationId }, '[LeadService] New-lead automation failed'));
+        logger.info({ organizationId, vehicleId, intake: intake.status }, 'Vehicle inquiry sent through lead intake');
+        return;
       }
 
       const lead = await Lead.create({

@@ -51,6 +51,13 @@ import {
 import { resolveVehicleContextForLead, UNMAPPED_LEAD_LOCATION_LABEL } from '../services/leadLocation.service';
 import { triggerAiReplyForNewInquiry } from '../services/communication.service';
 import { triggerAiEmailReplyForNewInquiry } from '../services/aiEmailReply.service';
+import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
+import { submitLeadInquiry } from '../services/leadIntake.service';
+import { adfInquiryRequest, intakeHandled, startNewLeadAutomations } from '../services/leadIntakeIntegration';
+import { processGmailMessageThroughIntake } from '../services/gmailLeadIntake';
+import { CLOSED_LEAD_SEND_MESSAGE, isClosedForManualSend } from '../utils/closedLeadGuard';
+import { clearLeadConversationEmailCache, withoutOtherLeadsEmails } from '../services/leadConversation.service';
+import { extractGmailText } from '../utils/gmailMessageParser';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
 
@@ -511,6 +518,36 @@ export const receiveADF = async (req: Request, res: Response) => {
       return res.status(500).json({ message: 'Internal server error: No administrative context' });
     }
 
+    if ((await getLeadIntakeMode(orgId)) !== 'off') {
+      const intakeVehicle = await resolveVehicleContextForLead(orgId, adfData.vehicle).catch(() => null);
+      const intake = await submitLeadInquiry(adfInquiryRequest({
+        organizationId: String(orgId),
+        adf: adfData,
+        receivedAt: new Date(),
+        channel: 'adf',
+        source: LEAD_SOURCE.THIRD_PARTY_LEAD,
+        sourceIds: { adfPayloadHash: ingestionFingerprint },
+        leadDraft: {
+          createdBy: systemUserId,
+          vehicle: adfData.vehicle,
+          vehicleId: intakeVehicle?.vehicleId,
+          location: intakeVehicle?.location,
+          parsedContent: adfData.parsedContent,
+          senderEmail: config?.leadSourceEmail || LEADS_SOURCE_EMAIL,
+          centralIngestion: true,
+          ingestionFingerprint,
+          sourceSubmittedAt: adfData.requestDate ? new Date(adfData.requestDate) : undefined,
+          followUp: { lastCustomerActivityAt: new Date(), reminderCount: 0, reminderHistory: [] },
+        },
+      }));
+      if (intakeHandled(intake)) {
+        await startNewLeadAutomations(String(orgId), intake).catch((err) =>
+          logger.warn({ err, orgId }, '[ADF] New-lead automations will not run for this inquiry'));
+        logger.info({ orgId, intake }, '[ADF] Inquiry received through lead intake');
+        return res.status(200).send(intake.status === 'duplicate' ? 'Lead already processed' : 'Lead received');
+      }
+    }
+
     // ADF senders (Cars.com, dealer.com, etc.) commonly redeliver the same
     // webhook call on a timeout/no-ack, with no stable message id to key off
     // of. Treat the same email + vehicle landing again within a short window
@@ -774,7 +811,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'parsedContent threadId messageId isRead isPending channel ' +
         'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
-        'aiPausedAt aiPausedBy aiAutoPausedUntil'
+        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
       )
       .sort(sort)
       .skip(skip)
@@ -921,7 +958,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'parsedContent threadId messageId isRead isPending channel ' +
         'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
-        'aiPausedAt aiPausedBy aiAutoPausedUntil'
+        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
       )
       .lean();
 
@@ -1924,6 +1961,10 @@ export const replyToInquiry = async (
       });
     }
 
+    if (await isClosedForManualSend(orgId, lead)) {
+      return res.status(409).json({ message: CLOSED_LEAD_SEND_MESSAGE, code: 'lead_closed' });
+    }
+
     try {
       await sendLeadReplyEmail(
         lead,
@@ -2010,6 +2051,7 @@ export const replyToInquiry = async (
     await cacheService.del(
       `lead:thread:${id}`,
     );
+    await clearLeadConversationEmailCache(id, lead.threadId);
 
     const io = getSocketIO();
 
@@ -2067,6 +2109,7 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
 
     const results = await Promise.allSettled(
       leads.map(async (lead) => {
+        if (await isClosedForManualSend(orgId, lead)) throw new Error(CLOSED_LEAD_SEND_MESSAGE);
         const bulkRecipient = resolveLeadReplyRecipient(lead, dealershipAddresses);
         if (!bulkRecipient) {
           throw new LeadReplyRecipientError();
@@ -2101,6 +2144,7 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
         });
 
         await cacheService.del(`lead:thread:${lead._id}`);
+        await clearLeadConversationEmailCache(lead._id, contactedLead.threadId || lead.threadId);
 
         const io = getSocketIO();
         if (io) {
@@ -2193,6 +2237,40 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
     let syncedCount = 0;
     const errors: string[] = [];
     const MAX_SYNC_PER_RUN = 20;
+
+    if ((await getLeadIntakeMode(req.orgId)) !== 'off') {
+      let processed = 0;
+      for (const message of [...messages].reverse()) {
+        if (processed >= 50) break;
+        try {
+          const details: any = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: message.id!, format: 'full' }));
+          processed++;
+          const rawBody = extractGmailText(details.data);
+          if (!rawBody) continue;
+          const result = await processGmailMessageThroughIntake({
+            organizationId: String(req.orgId),
+            message: details.data,
+            rawBody,
+            leadSourceEmail: LEADS_SOURCE_EMAIL,
+            systemUserId: userId,
+            allowNewInquiry: true,
+          });
+          if (result.status === 'associated' && result.created) syncedCount++;
+        } catch (error: any) {
+          const isQuota = error?.code === 403 || error?.code === 429;
+          if (isQuota) break;
+          console.error(`[CENTRAL-SYNC] Lead intake failed for message ${message.id}:`, error?.message);
+          errors.push(`Message ${message.id}: Processing failed`);
+        }
+      }
+      return res.json(
+        new ApiResponse(
+          200,
+          { syncedCount, totalFound: messages.length, errors: errors.length > 0 ? errors : undefined },
+          `Sync completed. ${syncedCount} new leads added from ${LEADS_SOURCE_EMAIL}.`,
+        ),
+      );
+    }
 
     for (const message of messages) {
       if (syncedCount >= MAX_SYNC_PER_RUN) {
@@ -2589,7 +2667,8 @@ export const getThreadMessages = asyncHandler(async (req: Request, res: Response
       return res.json(new ApiResponse(200, cachedThread, 'Thread messages fetched (Cached)'));
     }
 
-    const messages = await fetchGmailThreadMessages(req.orgId as string, lead.threadId, lead.messageId);
+    const threadMessages = await fetchGmailThreadMessages(req.orgId as string, lead.threadId, lead.messageId);
+    const messages = await withoutOtherLeadsEmails(String(req.orgId), String(lead._id), lead.threadId, threadMessages);
 
     // FIX: was 1800s (30 min) — customer replies took up to half an hour to
     // appear while the UI polls every 15s. 45s keeps Gmail quota safe and

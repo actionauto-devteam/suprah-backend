@@ -15,6 +15,8 @@ import { resolveVehicleContextForLead } from './leadLocation.service';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { triggerAiReplyForNewInquiry } from './communication.service';
 import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
+import { getLeadIntakeMode } from './leadIntakeControl.service';
+import { processGmailMessageThroughIntake } from './gmailLeadIntake';
 
 class OrgGmailService {
     private createOAuth2Client(): OAuth2Client {
@@ -127,6 +129,59 @@ class OrgGmailService {
             let syncedCount = 0;
             const systemUserId = await resolveOrgSystemUserId(orgId);
             if (!systemUserId) throw new ApiError(400, 'This dealership has no intake user configured');
+
+            if ((await getLeadIntakeMode(orgId)) !== 'off') {
+                const newInquiryIds = new Set(messages.map((m) => m.id));
+                if (config.leadSourceEmail) {
+                    let replyToken: string | undefined = undefined;
+                    do {
+                        const replies: any = await withRetry(() => gmail.users.messages.list({
+                            userId: 'me',
+                            q: `is:unread after:${oneDayAgo} -from:${config.leadSourceEmail}`,
+                            maxResults: 100,
+                            pageToken: replyToken,
+                        }));
+                        if (replies.data.messages) messages.push(...replies.data.messages);
+                        replyToken = replies.data.nextPageToken as string | undefined;
+                    } while (replyToken && messages.length < 4000);
+                }
+                const unique = [...new Map(messages.map((m) => [m.id, m])).values()];
+                const details: any[] = [];
+                for (const msg of unique) {
+                    try {
+                        const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: msg.id! }));
+                        details.push(detail.data);
+                    } catch (err) {
+                        console.error(`[OrgSync] Could not read message ${msg.id} for org ${orgId}:`, err);
+                    }
+                }
+                details.sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0));
+                let intakeCreated = 0;
+                for (const message of details) {
+                    try {
+                        const rawBody = this.extractBody(message);
+                        if (!rawBody || !rawBody.trim()) continue;
+                        const result = await processGmailMessageThroughIntake({
+                            organizationId: orgId,
+                            message,
+                            rawBody,
+                            leadSourceEmail: config.leadSourceEmail,
+                            systemUserId,
+                            allowNewInquiry: !config.leadSourceEmail || newInquiryIds.has(message.id),
+                        });
+                        if (result.status === 'inactive' || result.status === 'skipped') continue;
+                        if (result.status === 'associated' && result.created) intakeCreated++;
+                        await gmail.users.messages.batchModify({
+                            userId: 'me',
+                            requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] },
+                        });
+                    } catch (err) {
+                        console.error(`[OrgSync] Lead intake failed for message ${message.id} for org ${orgId}:`, err);
+                    }
+                }
+                await OrgLeadConfig.updateOne({ organizationId: orgId }, { $set: { lastSyncAt: new Date() } });
+                return { total: details.length, synced: intakeCreated };
+            }
 
             for (const msg of messages) {
                 try {

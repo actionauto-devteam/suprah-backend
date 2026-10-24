@@ -88,6 +88,7 @@ export interface ICommunicationMessage extends Document {
   to: string;
   status: MessageStatus;
   providerMessageId?: string;
+  origin?: "inquiry";
   sentBy?: IActorRef | null; // null for inbound
   errorDetail?: string;
   sentAt?: Date;
@@ -106,6 +107,7 @@ const CommunicationMessageSchema = new Schema<ICommunicationMessage>(
     body: { type: String, required: true },
     from: { type: String, required: true },
     to: { type: String, required: true },
+    origin: { type: String, enum: ["inquiry"] },
     status: {
       type: String,
       enum: ["queued", "sent", "delivered", "failed", "received", "pending_reconciliation"],

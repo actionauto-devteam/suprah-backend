@@ -9,6 +9,8 @@ import {
   CallLog,
 } from "../models/communication.model";
 import * as comm from "../services/communication.service";
+import { getLeadIntakeMode } from "../services/leadIntakeControl.service";
+import { assertLeadOpenForManualSend } from "../utils/closedLeadGuard";
 import * as telnyx from "../services/telnyx.service";
 import Lead from "../models/lead.model";
 import Appointment from "../models/Appointment.model";
@@ -192,6 +194,7 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   if (!toPhone) throw new ApiError(400, "toPhone is required");
   const phoneProblem = manualSmsPhoneProblem(toPhone);
   if (phoneProblem) throw new ApiError(400, phoneProblem);
+  await assertLeadOpenForManualSend(orgId, leadId);
   await assertManualSmsAllowed(orgId, toPhone, leadId);
 
   const result = await comm.sendSmsFromUser({
@@ -332,7 +335,7 @@ export async function buildLeadTimeline(
   const callOr: any[] = [{ leadId }];
   if (phone) callOr.push({ from: phone }, { to: phone });
 
-  const [messages, calls, webchat, appointments, mailConversations, campaignRecipients, priceDropLogs] = await Promise.all([
+  const [loadedMessages, loadedCalls, webchat, appointments, mailConversations, campaignRecipients, priceDropLogs] = await Promise.all([
     safe("sms", () => CommunicationMessage.find({
       orgId,
       $or: messageOr,
@@ -372,6 +375,11 @@ export async function buildLeadTimeline(
       ...(timeFilter ? { updatedAt: timeFilter } : {}),
     }).sort({ updatedAt: -1, _id: -1 }).limit(sourceLimit).lean(), []),
   ]);
+
+  const ownedOnly = (await getLeadIntakeMode(orgId).catch(() => "off")) !== "off";
+  const ownedBy = (entry: any) => !ownedOnly || String(entry?.leadId || "") === String(leadId);
+  const messages = (loadedMessages as any[]).filter(ownedBy);
+  const calls = (loadedCalls as any[]).filter(ownedBy);
 
   const campaignIds = Array.from(new Set((campaignRecipients as any[]).map((r) => String(r.campaignId))));
   const campaignsById = new Map<string, any>();
@@ -642,11 +650,15 @@ export const getThreadByPhone = asyncHandler(async (req: Request, res: Response)
   const leadId = req.query.leadId ? String(req.query.leadId) : undefined;
   if (!phone) throw new ApiError(400, "phone is required");
 
-  const [data, smsOptedOut] = await Promise.all([
+  const [data, smsOptedOut, intakeMode] = await Promise.all([
     comm.getThreadByPhone(orgId, phone, leadId),
     comm.isSmsOptedOut(orgId, phone),
+    leadId ? getLeadIntakeMode(orgId).catch(() => "paused") : Promise.resolve("off"),
   ]);
-  res.json(new ApiResponse(200, { ...data, smsOptedOut }, "Thread"));
+  const messages = leadId && intakeMode !== "off"
+    ? (data.messages as any[]).filter((message) => String(message?.leadId || "") === leadId)
+    : data.messages;
+  res.json(new ApiResponse(200, { ...data, messages, smsOptedOut }, "Thread"));
 });
 
 /** Caller record for the calls workspace (customer or lead by phone). */
@@ -770,13 +782,23 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
     catch (err) { console.error('[recording] Unable to persist call evidence', err); }
   }
 
+  let retainedSms: comm.InboundSmsRetention | null = null;
+  if (type === "message.received") {
+    try {
+      retainedSms = await comm.retainInboundSms(payload);
+    } catch (err) {
+      console.error("[comm] inbound SMS could not be stored; Telnyx will retry", err);
+      throw new ApiError(503, "Inbound message could not be stored");
+    }
+  }
+
   // Respond fast; process async. Telnyx retries on non-2xx/timeouts.
   res.status(200).json({ received: true });
 
   try {
     switch (type) {
       case "message.received":
-        await comm.handleInboundSms(payload);
+        await comm.handleInboundSms(payload, undefined, retainedSms);
         break;
       case "message.sent":
       case "message.finalized":

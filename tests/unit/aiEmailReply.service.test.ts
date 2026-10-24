@@ -186,6 +186,13 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
     expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
+  it('skips Alex without generating or sending when the only email is the lead-source address', async () => {
+    await triggerAiEmailReplyForNewInquiry('org-1', { ...lead, email: 'leads@dealerscloud.com' }, 'Interested in the Volvo');
+    expect(mockSendLeadReplyEmail).not.toHaveBeenCalled();
+    expect(mockClaimAiGeneration).not.toHaveBeenCalled();
+    expect(mockGenerateAlexEmailReply).not.toHaveBeenCalled();
+  });
+
   it('does nothing when the inquiry text is empty', async () => {
     await triggerAiEmailReplyForNewInquiry('org-1', lead, '   ');
     expect(mockLeadFindOneAndUpdate).not.toHaveBeenCalled();
@@ -276,7 +283,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
-      { beforeDispatch: expect.any(Function) },
+      { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
   });
 
@@ -307,7 +314,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
-      { beforeDispatch: expect.any(Function) },
+      { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
     expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
     expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
@@ -323,7 +330,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
-      { beforeDispatch: expect.any(Function) },
+      { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
     expect(mockCreateAiAgentTaskAndNotify).toHaveBeenCalled();
     expect(mockAddLeadNoteAndNotify).toHaveBeenCalled();
@@ -339,7 +346,7 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'org-1',
       [],
       'actionautoutah.dev@gmail.com',
-      { beforeDispatch: expect.any(Function) },
+      { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
   });
 

@@ -5,6 +5,7 @@ import LeadInquiry, {
   LeadInquiryContactAssurance,
   LeadInquiryKind,
   LeadInquiryOutcome,
+  LeadInquiryReviewKind,
   LeadInquirySideEffect,
   LeadInquirySideEffectState,
 } from '../models/LeadInquiry.model';
@@ -21,6 +22,7 @@ export interface InquirySourceIds {
   gmailMessageId?: string;
   gmailThreadId?: string;
   providerInquiryKey?: string;
+  adfPayloadHash?: string;
   smsProviderMessageId?: string;
   callControlId?: string;
   webchatSessionId?: unknown;
@@ -31,6 +33,9 @@ export interface InquirySourceIds {
 export interface RecordInquiryInput {
   organizationId: string;
   kind: LeadInquiryKind;
+  intakePolicy?: 'associate' | 'isolate';
+  intentAssurance?: 'confirmed' | 'unconfirmed';
+  evidence?: { automated?: boolean; isReply?: boolean; vehicleMatch?: string | null } | null;
   receivedAt: Date;
   channel?: string;
   source?: string;
@@ -50,6 +55,8 @@ export interface RecordInquiryInput {
   fingerprint?: string | null;
   contentKey?: string | null;
   sideEffects?: Partial<Record<LeadInquirySideEffect, LeadInquirySideEffectState>>;
+  leadDraft?: Record<string, unknown> | null;
+  contextLeadId?: unknown;
 }
 
 const optionalString = (value: unknown) => {
@@ -65,6 +72,7 @@ function sourceIdsFor(input: InquirySourceIds = {}) {
     gmailMessageId: optionalString(input.gmailMessageId),
     gmailThreadId: optionalString(input.gmailThreadId),
     providerInquiryKey: optionalString(input.providerInquiryKey),
+    adfPayloadHash: optionalString(input.adfPayloadHash),
     smsProviderMessageId: optionalString(input.smsProviderMessageId),
     callControlId: optionalString(input.callControlId),
     webchatSessionId: optionalObjectId(input.webchatSessionId),
@@ -77,6 +85,7 @@ function sourceIdsFor(input: InquirySourceIds = {}) {
 const UNIQUE_SOURCE_FIELDS = [
   'gmailMessageId',
   'providerInquiryKey',
+  'adfPayloadHash',
   'smsProviderMessageId',
   'callControlId',
   'webchatSessionId',
@@ -125,6 +134,9 @@ export async function recordInquiryEvent(input: RecordInquiryInput): Promise<{ e
     const event = await LeadInquiry.create({
       organizationId: input.organizationId,
       kind: input.kind,
+      intakePolicy: input.intakePolicy || 'associate',
+      intentAssurance: input.intentAssurance === 'unconfirmed' ? 'unconfirmed' : 'confirmed',
+      evidence: input.evidence || null,
       receivedAt: input.receivedAt,
       channel: optionalString(input.channel),
       source: optionalString(input.source),
@@ -146,6 +158,8 @@ export async function recordInquiryEvent(input: RecordInquiryInput): Promise<{ e
       fingerprint: optionalString(input.fingerprint),
       contentKey: optionalString(input.contentKey),
       sideEffects,
+      leadDraft: input.leadDraft || null,
+      association: { contextLeadId: optionalObjectId(input.contextLeadId) || null },
     });
     return { event, created: true };
   } catch (err: any) {
@@ -163,7 +177,7 @@ const EVENT_IDENTITY_FIELDS = ['providerInquiryKey', 'smsProviderMessageId', 'ca
 export function resolveInquiryIdentity(sourceIds: InquirySourceIds = {}, fingerprint?: string | null): InquiryIdentityStrength {
   const ids = sourceIdsFor(sourceIds);
   if (optionalString(fingerprint) || EVENT_IDENTITY_FIELDS.some((field) => ids[field] !== undefined)) return 'event';
-  if (ids.gmailMessageId !== undefined) return 'transport';
+  if (ids.gmailMessageId !== undefined || ids.adfPayloadHash !== undefined) return 'transport';
   return 'none';
 }
 
@@ -266,6 +280,7 @@ export interface InquiryAssociationResult {
   candidateLeadIds?: unknown[];
   contextLeadId?: unknown;
   duplicateOf?: unknown;
+  review?: { kind: LeadInquiryReviewKind; reason: string; candidateLeadIds?: unknown[] } | null;
 }
 
 export async function completeInquiryAssociation(
@@ -281,6 +296,17 @@ export async function completeInquiryAssociation(
     throw new Error('Automatic resolution only dismisses duplicates');
   }
   const now = options.now || new Date();
+  const review = result.state === 'pending_review'
+    ? { kind: 'unassigned' as LeadInquiryReviewKind, reason: result.reason, candidateLeadIds: result.candidateLeadIds }
+    : result.review || null;
+  const reviewSet = review
+    ? {
+        'review.state': 'pending',
+        'review.kind': review.kind,
+        'review.reason': review.reason,
+        'review.candidateLeadIds': (review.candidateLeadIds || []).map(optionalObjectId).filter(Boolean),
+      }
+    : {};
   return LeadInquiry.findOneAndUpdate(
     {
       _id: eventId,
@@ -291,6 +317,7 @@ export async function completeInquiryAssociation(
     },
     {
       $set: {
+        ...reviewSet,
         'association.state': result.state,
         'association.leadId': result.state === 'associated' ? optionalObjectId(result.leadId) : null,
         'association.outcome': result.state === 'pending_review' ? null : result.outcome,
@@ -349,7 +376,7 @@ export async function claimInquirySideEffect(
   eventId: unknown,
   name: LeadInquirySideEffect,
   owner: string,
-  options: { leaseMs?: number; maxAttempts?: number; now?: Date } = {},
+  options: { leaseMs?: number; maxAttempts?: number; now?: Date; allowPendingReview?: boolean } = {},
 ): Promise<ILeadInquiry | null> {
   const now = options.now || new Date();
   const path = `sideEffects.${name}`;
@@ -360,7 +387,7 @@ export async function claimInquirySideEffect(
   return LeadInquiry.findOneAndUpdate(
     {
       _id: eventId,
-      'association.state': { $in: ['associated', 'resolved'] },
+      'association.state': { $in: options.allowPendingReview ? ['associated', 'resolved', 'pending_review'] : ['associated', 'resolved'] },
       [`${path}.attempts`]: { $lt: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS },
       $or: claimable,
     },

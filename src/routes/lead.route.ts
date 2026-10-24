@@ -27,6 +27,7 @@ import {
   resumeEmailAi,
 } from "../controllers/lead.controller";
 import { getLeadAiSummary, regenerateLeadAiSummary } from "../controllers/leadAiSummary.controller";
+import { getLeadConversation, getLeadEarlierConversation } from "../controllers/leadConversation.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
 import {
   adfLimiter,
@@ -68,6 +69,8 @@ router.post(
 
 router.get("/:id", getLeadById);
 router.get("/:id/thread", getThreadMessages);
+router.get("/:id/conversation", getLeadConversation);
+router.get("/:id/conversation/earlier/:earlierId", getLeadEarlierConversation);
 router.get("/:id/ai-summary", getLeadAiSummary);
 router.post("/:id/ai-summary/regenerate", regenerateLeadAiSummary);
 router.patch("/:id/read", markAsRead);

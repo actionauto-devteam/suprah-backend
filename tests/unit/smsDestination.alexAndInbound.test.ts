@@ -28,6 +28,13 @@ const mockFinishAiAttentionCheck = jest.fn().mockResolvedValue(undefined);
 const mockProcessAlexTurn = jest.fn();
 const mockAiAgentLogCreate = jest.fn().mockResolvedValue({});
 
+jest.mock('../../src/models/IntakeClaim.model', () => ({
+  __esModule: true,
+  default: {
+    findOneAndUpdate: jest.fn().mockResolvedValue({ lastErrorObject: { updatedExisting: false }, value: null }),
+    findOne: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }),
+  },
+}));
 jest.mock('../../src/models/communication.model', () => {
   const { Schema } = require('mongoose');
   return {

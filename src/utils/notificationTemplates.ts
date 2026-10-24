@@ -279,6 +279,21 @@ export const notificationTemplates = {
     message: `New lead from ${data.customerName}${data.source ? ` via ${data.source}` : ''}${data.vehicleInterest ? ` - Interested in ${data.vehicleInterest}` : ''}`,
   }),
 
+  lead_new_inquiry: (data: { customerName: string; source?: string; vehicleInterest?: string }) => ({
+    title: 'New inquiry on an open lead',
+    message: `${data.customerName} sent a new inquiry${data.source ? ` via ${data.source}` : ''}${data.vehicleInterest ? ` about ${data.vehicleInterest}` : ''}. It was added to their open lead.`,
+  }),
+
+  lead_customer_replied: (data: { customerName: string; channel: string }) => ({
+    title: 'Customer replied on an open lead',
+    message: `${data.customerName} replied by ${data.channel === 'email_reply' ? 'email' : data.channel === 'call' ? 'phone' : 'text'}.`,
+  }),
+
+  lead_inquiry_review: (data: { customerName: string }) => ({
+    title: 'Inquiry needs review',
+    message: `${data.customerName}'s inquiry needs someone to decide which lead it belongs to.`,
+  }),
+
   lead_assigned: (data: LeadData & { assignedTo: string }) => ({
     title: 'Lead Assigned to You',
     message: `${data.customerName} has been assigned to you`,

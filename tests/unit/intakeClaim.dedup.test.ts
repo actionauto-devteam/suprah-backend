@@ -12,6 +12,7 @@ const mockIntakeClaimUpdateOne = jest.fn();
 const mockEmitToOrg = jest.fn();
 const mockNotifyOrgAdmins = jest.fn().mockResolvedValue(undefined);
 
+jest.mock('../../src/services/leadIntakeControl.service', () => ({ __esModule: true, getLeadIntakeMode: jest.fn().mockResolvedValue('off'), onLeadIntakeResumed: jest.fn() }));
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
   default: { create: mockLeadCreate },

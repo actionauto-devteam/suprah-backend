@@ -13,6 +13,13 @@ const mockResolveOrgSystemUserId = jest.fn();
 const mockResolveAiAgentSettings = jest.fn();
 const mockGetSocketIO = jest.fn().mockReturnValue(null);
 
+jest.mock('../../src/models/IntakeClaim.model', () => ({
+  __esModule: true,
+  default: {
+    findOneAndUpdate: jest.fn().mockResolvedValue({ lastErrorObject: { updatedExisting: false }, value: null }),
+    findOne: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }),
+  },
+}));
 jest.mock('../../src/models/communication.model', () => {
   const { Schema } = require('mongoose');
   return {

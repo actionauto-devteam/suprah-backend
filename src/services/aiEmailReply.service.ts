@@ -27,6 +27,7 @@ export { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
 import AiAgentLog from '../models/AiAgentLog.model';
 import { checkContactForSend, contactRestrictionSkipReason, isContactRestrictedError } from './contactRestriction.service';
+import { resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 
@@ -108,6 +109,20 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       return;
     }
 
+    const recipientConfig = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).select('gmailAddress leadSourceEmail').lean();
+    if (!resolveLeadReplyRecipient(lead, [(recipientConfig as any)?.gmailAddress, (recipientConfig as any)?.leadSourceEmail])) {
+      await finishAiAttentionCheck(check);
+      logger.warn({ leadId: lead._id }, '[AiEmailReply] Alex email skipped: no verified customer email');
+      await AiAgentLog.create({
+        organizationId: String(orgId),
+        channel: 'email',
+        leadId: lead._id,
+        status: 'skipped',
+        failureReason: 'no_verified_customer_email',
+      }).catch(() => undefined);
+      return;
+    }
+
     claimedForGen = await claimAiGeneration(check);
     if (!claimedForGen) return;
 
@@ -145,6 +160,7 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
         });
         await sendLeadReplyEmail(lead, fallback.text, AI_AGENT_ACTOR_ID, String(orgId), [], (fallbackConfig as any)?.gmailAddress, {
           beforeDispatch: emailDispatchGuard(orgId, lead._id),
+          requireVerifiedRecipient: true,
         });
         const taskResult = await createAiAgentTaskAndNotify({
           organizationId: String(orgId),
@@ -199,6 +215,7 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       const config = await OrgLeadConfig.findOne({ organizationId: orgId, isActive: true }).select('gmailAddress').lean();
       await sendLeadReplyEmail(lead, generation.text, AI_AGENT_ACTOR_ID, String(orgId), [], (config as any)?.gmailAddress, {
         beforeDispatch: emailDispatchGuard(orgId, lead._id),
+        requireVerifiedRecipient: true,
       });
 
       if (generation.handoffReason) {

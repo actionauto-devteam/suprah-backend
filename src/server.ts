@@ -35,6 +35,7 @@ import { initReviewRequestScheduler } from "./schedulers/reviewRequest.scheduler
 import { initVehicleReengagementScheduler } from "./schedulers/vehicleReengagement.scheduler";
 import { initSmsCampaignScheduler } from "./schedulers/smsCampaign.scheduler";
 import { initPriceDropEmailScheduler } from "./schedulers/priceDropEmail.scheduler";
+import { initLeadIntakeRecoveryScheduler } from "./schedulers/leadIntakeRecovery.scheduler";
 import { initEmailCampaignScheduler } from "./schedulers/emailCampaign.scheduler";
 import { initWebchatSmsFallbackScheduler } from "./schedulers/webchatSmsFallback.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
@@ -236,6 +237,7 @@ if (require.main === module) {
       initVehicleReengagementScheduler();
       initSmsCampaignScheduler();
       initPriceDropEmailScheduler();
+      initLeadIntakeRecoveryScheduler();
       initEmailCampaignScheduler();
       initWebchatSmsFallbackScheduler();
       initSupraSpaceScheduledMessageScheduler();

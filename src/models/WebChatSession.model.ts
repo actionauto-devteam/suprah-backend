@@ -35,6 +35,7 @@ export interface IWebChatSession extends Document {
   aiLastDispatchVersion?: number;
   aiAttentionPendingIds?: string[];
   aiHumanAttention?: AiHumanAttention;
+  replacedBySessionId?: mongoose.Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -57,6 +58,7 @@ const WebChatSessionSchema: Schema<IWebChatSession> = new Schema(
     aiPausedBy: { type: AiPausedBySchema },
     aiGeneratingAt: { type: Date },
     aiAutoPausedUntil: { type: Date },
+    replacedBySessionId: { type: Schema.Types.ObjectId, ref: 'WebChatSession', default: null },
     ...aiHumanAttentionFields,
   },
   { timestamps: true },

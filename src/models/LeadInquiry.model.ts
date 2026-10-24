@@ -30,6 +30,26 @@ export type LeadInquirySideEffectState = (typeof LEAD_INQUIRY_SIDE_EFFECT_STATES
 export const LEAD_INQUIRY_CONTACT_ASSURANCE = ['carrier_verified', 'self_reported', 'staff_entered'] as const;
 export type LeadInquiryContactAssurance = (typeof LEAD_INQUIRY_CONTACT_ASSURANCE)[number];
 
+export const LEAD_INQUIRY_REVIEW_STATES = ['none', 'pending', 'resolved'] as const;
+export type LeadInquiryReviewState = (typeof LEAD_INQUIRY_REVIEW_STATES)[number];
+
+export const LEAD_INQUIRY_REVIEW_KINDS = ['unassigned', 'possible_match'] as const;
+export type LeadInquiryReviewKind = (typeof LEAD_INQUIRY_REVIEW_KINDS)[number];
+
+export const LEAD_INQUIRY_REVIEW_RESOLUTIONS = ['associated', 'created_lead', 'not_customer_inquiry', 'kept_separate'] as const;
+export type LeadInquiryReviewResolution = (typeof LEAD_INQUIRY_REVIEW_RESOLUTIONS)[number];
+
+export interface ILeadInquiryReview {
+  state: LeadInquiryReviewState;
+  kind?: LeadInquiryReviewKind | null;
+  reason?: string | null;
+  candidateLeadIds: Types.ObjectId[];
+  resolution?: LeadInquiryReviewResolution | null;
+  resolvedBy?: { userId?: string; name?: string } | null;
+  resolvedAt?: Date | null;
+  note?: string | null;
+}
+
 export interface ILeadInquirySideEffect {
   state: LeadInquirySideEffectState;
   attempts: number;
@@ -41,9 +61,15 @@ export interface ILeadInquirySideEffect {
   externalRef?: string | null;
 }
 
+export const LEAD_INQUIRY_POLICIES = ['associate', 'isolate'] as const;
+export type LeadInquiryPolicy = (typeof LEAD_INQUIRY_POLICIES)[number];
+
 export interface ILeadInquiry extends Document {
   organizationId: Types.ObjectId;
   kind: LeadInquiryKind;
+  intakePolicy?: LeadInquiryPolicy;
+  intentAssurance?: 'confirmed' | 'unconfirmed';
+  evidence?: { automated?: boolean; isReply?: boolean; vehicleMatch?: string | null } | null;
   channel?: string;
   source?: string;
   sourceProvider?: string;
@@ -72,6 +98,7 @@ export interface ILeadInquiry extends Document {
     gmailMessageId?: string;
     gmailThreadId?: string;
     providerInquiryKey?: string;
+    adfPayloadHash?: string;
     smsProviderMessageId?: string;
     callControlId?: string;
     webchatSessionId?: Types.ObjectId;
@@ -102,6 +129,8 @@ export interface ILeadInquiry extends Document {
     lastError?: string | null;
   };
   sideEffects: Record<LeadInquirySideEffect, ILeadInquirySideEffect>;
+  leadDraft?: Record<string, unknown> | null;
+  review: ILeadInquiryReview;
   version: number;
   createdAt: Date;
   updatedAt: Date;
@@ -125,6 +154,12 @@ const LeadInquirySchema = new Schema<ILeadInquiry>(
   {
     organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', required: true },
     kind: { type: String, enum: LEAD_INQUIRY_KINDS, required: true },
+    intakePolicy: { type: String, enum: LEAD_INQUIRY_POLICIES, default: 'associate' },
+    intentAssurance: { type: String, enum: ['confirmed', 'unconfirmed'], default: 'confirmed' },
+    evidence: {
+      type: new Schema({ automated: Boolean, isReply: Boolean, vehicleMatch: { type: String, default: null } }, { _id: false }),
+      default: null,
+    },
     channel: { type: String, trim: true },
     source: { type: String, trim: true },
     sourceProvider: { type: String, trim: true },
@@ -153,6 +188,7 @@ const LeadInquirySchema = new Schema<ILeadInquiry>(
       gmailMessageId: { type: String, trim: true },
       gmailThreadId: { type: String, trim: true },
       providerInquiryKey: { type: String, trim: true },
+      adfPayloadHash: { type: String, trim: true },
       smsProviderMessageId: { type: String, trim: true },
       callControlId: { type: String, trim: true },
       webchatSessionId: { type: Schema.Types.ObjectId, ref: 'WebChatSession' },
@@ -190,6 +226,20 @@ const LeadInquirySchema = new Schema<ILeadInquiry>(
       notification: { type: SideEffectSchema, default: () => ({}) },
       alexReply: { type: SideEffectSchema, default: () => ({}) },
     },
+    leadDraft: { type: Schema.Types.Mixed, default: null },
+    review: {
+      state: { type: String, enum: LEAD_INQUIRY_REVIEW_STATES, default: 'none' },
+      kind: { type: String, enum: [...LEAD_INQUIRY_REVIEW_KINDS, null], default: null },
+      reason: { type: String, default: null, maxlength: 200 },
+      candidateLeadIds: [{ type: Schema.Types.ObjectId, ref: 'Lead' }],
+      resolution: { type: String, enum: [...LEAD_INQUIRY_REVIEW_RESOLUTIONS, null], default: null },
+      resolvedBy: {
+        type: new Schema({ userId: String, name: String }, { _id: false }),
+        default: null,
+      },
+      resolvedAt: { type: Date, default: null },
+      note: { type: String, default: null, maxlength: 1000 },
+    },
     version: { type: Number, default: 0 },
   },
   { timestamps: true },
@@ -204,6 +254,7 @@ const uniqueOptionalKey = (field: string, type: 'string' | 'objectId', name: str
 
 uniqueOptionalKey('sourceIds.gmailMessageId', 'string', 'lead_inquiry_org_gmail_message_unique');
 uniqueOptionalKey('sourceIds.providerInquiryKey', 'string', 'lead_inquiry_org_provider_inquiry_unique');
+uniqueOptionalKey('sourceIds.adfPayloadHash', 'string', 'lead_inquiry_org_adf_payload_unique');
 uniqueOptionalKey('sourceIds.smsProviderMessageId', 'string', 'lead_inquiry_org_sms_message_unique');
 uniqueOptionalKey('sourceIds.callControlId', 'string', 'lead_inquiry_org_call_control_unique');
 uniqueOptionalKey('sourceIds.webchatSessionId', 'objectId', 'lead_inquiry_org_webchat_session_unique');
@@ -216,6 +267,7 @@ LeadInquirySchema.index(
 LeadInquirySchema.index({ organizationId: 1, 'association.state': 1, createdAt: -1 }, { name: 'lead_inquiry_org_association_state' });
 LeadInquirySchema.index({ organizationId: 1, 'association.leadId': 1, receivedAt: -1 }, { name: 'lead_inquiry_org_lead_received' });
 LeadInquirySchema.index({ 'processing.state': 1, 'processing.nextAttemptAt': 1 }, { name: 'lead_inquiry_processing_queue' });
+LeadInquirySchema.index({ organizationId: 1, 'review.state': 1, createdAt: -1 }, { name: 'lead_inquiry_org_review_state' });
 
 const LeadInquiry = mongoose.model<ILeadInquiry>('LeadInquiry', LeadInquirySchema);
 

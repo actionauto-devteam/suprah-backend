@@ -41,6 +41,7 @@ const mockSessionFindOne = jest.fn();
 const mockAiAgentLogCreate = jest.fn().mockResolvedValue({});
 
 jest.mock('../../src/models/AiAgentLog.model', () => ({ __esModule: true, default: { create: mockAiAgentLogCreate } }));
+jest.mock('../../src/services/leadIntakeControl.service', () => ({ __esModule: true, getLeadIntakeMode: jest.fn().mockResolvedValue('off'), onLeadIntakeResumed: jest.fn() }));
 
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
@@ -284,7 +285,9 @@ describe('Website chat while Suprah AI is not live', () => {
 describe('staff website-chat replies', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockSessionFindOne.mockResolvedValue({ _id: 'session-1', organizationId: String(orgId), leadId, visitorPhone: '3855550123', visitorEmail: 'jordan@example.com' });
+    mockSessionFindOne.mockReturnValue({
+      sort: jest.fn().mockResolvedValue({ _id: 'session-1', organizationId: String(orgId), leadId, visitorPhone: '3855550123', visitorEmail: 'jordan@example.com' }),
+    });
   });
 
   it('blocks a staff reply to a Do Not Contact customer before anything is shown to the visitor', async () => {

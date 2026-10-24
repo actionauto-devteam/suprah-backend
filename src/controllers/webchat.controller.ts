@@ -12,6 +12,13 @@ import WebChatSession from '../models/WebChatSession.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import IntakeClaim from '../models/IntakeClaim.model';
 import { LEAD_SOURCE } from '../constants/leadSource';
+import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
+import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
+import { createLeadForInquiry, dismissLeadInquiry, submitLeadInquiry } from '../services/leadIntake.service';
+import LeadInquiry from '../models/LeadInquiry.model';
+import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
+import { assertLeadOpenForManualSend } from '../utils/closedLeadGuard';
+import { sessionControlToCarry } from '../utils/conversationOwnership';
 import { emitToOrg } from '../utils/socketEmitter';
 import { notifyOrgAdmins } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
@@ -476,6 +483,255 @@ export const getPublicConfig = asyncHandler(async (req: Request, res: Response) 
   );
 });
 
+interface WebchatConversationInput {
+  orgId: any;
+  systemUserId: any;
+  visitorName: string;
+  visitorEmail?: string;
+  visitorPhone?: string;
+  vehicle: any;
+  firstMessage: string;
+  pageUrl?: string;
+  sessionId?: mongoose.Types.ObjectId;
+  carryPause?: { aiPausedAt?: Date | null; aiPausedBy?: any; aiAutoPausedUntil?: Date | null };
+}
+
+async function createWebchatLead(input: WebchatConversationInput, sessionId: mongoose.Types.ObjectId) {
+  const [firstName, ...restOfName] = input.visitorName.split(/\s+/);
+  const vehicle = input.vehicle;
+  const vehicleDetails = vehicle
+    ? {
+        year: vehicle.year ? String(vehicle.year) : undefined,
+        make: vehicle.make,
+        model: vehicle.model,
+        stock: vehicle.stockNumber,
+        trim: vehicle.trim,
+      }
+    : undefined;
+  const mode = await getLeadIntakeMode(String(input.orgId));
+  if (mode !== 'off') {
+    const intake = await submitLeadInquiry({
+      organizationId: String(input.orgId),
+      kind: 'webchat_session',
+      intakePolicy: 'isolate',
+      receivedAt: new Date(),
+      channel: 'webchat',
+      source: LEAD_SOURCE.WEBSITE_CHAT,
+      contact: {
+        firstName: firstName || undefined,
+        lastName: restOfName.join(' ') || undefined,
+        email: input.visitorEmail || undefined,
+        phone: input.visitorPhone || undefined,
+        assurance: 'self_reported',
+      },
+      vehicle: vehicleDetails
+        ? { year: vehicleDetails.year, make: vehicleDetails.make, model: vehicle.modelName || vehicle.model, trim: vehicle.trim, stock: vehicle.stockNumber, vin: vehicle.vin }
+        : undefined,
+      comments: input.firstMessage,
+      sourceIds: { webchatSessionId: sessionId },
+      leadDraft: {
+        createdBy: input.systemUserId,
+        vehicle: vehicleDetails,
+        vehicleId: vehicle?._id,
+        location: vehicle?.dealerCity || undefined,
+      },
+    });
+    const leadId = intake.status === 'associated' || intake.status === 'duplicate' ? intake.leadId : null;
+    const lead = leadId ? await Lead.findOne({ _id: leadId, organizationId: input.orgId }) : null;
+    if (lead) return { lead, viaIntake: true };
+    if (intake.status === 'held') {
+      try {
+        const held = await LeadInquiry.findOneAndUpdate(
+          { _id: intake.inquiryId, organizationId: input.orgId, kind: 'webchat_session', intakePolicy: 'isolate' },
+          { $set: { 'leadDraft.announced': true } },
+          { new: true },
+        );
+        if (held) return { lead: await createLeadForInquiry(String(input.orgId), held, { intakeSlots: undefined }), viaIntake: false };
+      } catch (err) {
+        logger.warn({ err, inquiryId: intake.inquiryId }, '[webchat] Could not open an isolated chat while intake is held');
+      }
+    }
+    if (intake.status !== 'inactive' && 'inquiryId' in intake) {
+      await dismissLeadInquiry(intake.inquiryId, 'webchat_start_failed').catch(() => undefined);
+    }
+    throw new ApiError(503, 'Chat is temporarily unavailable. Please try again in a moment or call us.');
+  }
+  const lead = await Lead.create({
+    organizationId: input.orgId,
+    createdBy: input.systemUserId,
+    firstName: firstName || 'Unknown',
+    lastName: restOfName.join(' '),
+    email: input.visitorEmail || undefined,
+    phone: input.visitorPhone || undefined,
+    vehicle: vehicleDetails,
+    vehicleId: vehicle?._id,
+    location: vehicle?.dealerCity || undefined,
+    comments: input.firstMessage,
+    source: LEAD_SOURCE.WEBSITE_CHAT,
+    channel: 'webchat',
+    status: 'New',
+  });
+  return { lead, viaIntake: false };
+}
+
+async function createWebchatConversation(input: WebchatConversationInput) {
+  const sessionId = input.sessionId || new mongoose.Types.ObjectId();
+  const { lead, viaIntake } = await createWebchatLead(input, sessionId);
+  const vehicle = input.vehicle;
+  const token = crypto.randomBytes(24).toString('hex');
+  const session = await WebChatSession.create({
+    _id: sessionId,
+    organizationId: String(input.orgId),
+    leadId: lead._id,
+    tokenHash: hashToken(token),
+    visitorName: input.visitorName,
+    visitorEmail: input.visitorEmail || undefined,
+    visitorPhone: input.visitorPhone || undefined,
+    vehicleId: vehicle?._id,
+    pageUrl: input.pageUrl ? String(input.pageUrl).slice(0, 500) : undefined,
+    ...(input.carryPause?.aiPausedAt ? { aiPausedAt: input.carryPause.aiPausedAt, aiPausedBy: input.carryPause.aiPausedBy } : {}),
+    ...(input.carryPause?.aiAutoPausedUntil ? { aiAutoPausedUntil: input.carryPause.aiAutoPausedUntil } : {}),
+  });
+
+  const messageId = new mongoose.Types.ObjectId();
+  const check = await beginAiAttentionCheck({ organizationId: String(input.orgId), channel: 'webchat',
+    targetId: String(session._id), messageId: String(messageId) });
+  const chatMessage = await WebChatMessage.create({
+    _id: messageId,
+    organizationId: String(input.orgId),
+    sessionId: session._id,
+    leadId: lead._id,
+    direction: 'inbound',
+    body: input.firstMessage,
+  });
+
+  if (!viaIntake) emitToOrg(String(input.orgId), 'lead:new', lead.toObject());
+  emitToOrg(String(input.orgId), 'webchat:message', {
+    leadId: String(lead._id),
+    message: serializeForStaff(chatMessage),
+  });
+
+  if (!viaIntake) {
+    const vehicleInterest = vehicle
+      ? [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ')
+      : undefined;
+    const { title, message: notificationMessage } = notificationTemplates.new_lead({
+      customerName: input.visitorName,
+      source: LEAD_SOURCE.WEBSITE_CHAT,
+      vehicleInterest,
+    });
+    notifyOrgAdmins(String(input.orgId), 'new_lead', title, notificationMessage, {
+      leadId: String(lead._id),
+      customerName: input.visitorName,
+      source: LEAD_SOURCE.WEBSITE_CHAT,
+      channel: 'webchat',
+    }).catch(() => undefined);
+  }
+
+  return { lead, session, token, chatMessage, check };
+}
+
+async function appendVisitorMessage(session: any, body: string) {
+  const messageId = new mongoose.Types.ObjectId();
+  const check = await beginAiAttentionCheck({ organizationId: String(session.organizationId), channel: 'webchat',
+    targetId: String(session._id), messageId: String(messageId) });
+  const message = await WebChatMessage.create({
+    _id: messageId,
+    organizationId: session.organizationId,
+    sessionId: session._id,
+    leadId: session.leadId,
+    direction: 'inbound',
+    body,
+  });
+
+  const now = new Date();
+  await Promise.all([
+    WebChatSession.updateOne({ _id: session._id }, { $set: { lastMessageAt: now } }),
+    Lead.updateOne(
+      { _id: session.leadId },
+      { $set: { 'followUp.lastCustomerActivityAt': now, isRead: false } },
+    ),
+  ]);
+
+  emitToOrg(session.organizationId, 'webchat:message', {
+    leadId: String(session.leadId),
+    message: serializeForStaff(message),
+  });
+  emitToOrg(session.organizationId, 'lead:update', { leadId: String(session.leadId) });
+  return { message, check };
+}
+
+async function openLeadSession(sessionId: unknown, organizationId: string) {
+  const session = await WebChatSession.findOne({ _id: sessionId, organizationId });
+  if (!session) return null;
+  const lead: any = await Lead.findOne({ _id: session.leadId, organizationId }).select('status').lean();
+  if (!lead || LIFECYCLE_TERMINAL_STATUSES.includes(lead.status)) return null;
+  return session;
+}
+
+async function continueInFreshConversation(oldSession: any, body: string) {
+  const organizationId = String(oldSession.organizationId);
+  const rotate = async (session: any) => {
+    const token = crypto.randomBytes(24).toString('hex');
+    await WebChatSession.updateOne({ _id: session._id }, { $set: { tokenHash: hashToken(token) } });
+    const { message, check } = await appendVisitorMessage(session, body);
+    return { session, token, chatMessage: message, check };
+  };
+
+  if (oldSession.replacedBySessionId) {
+    const replacement = await openLeadSession(oldSession.replacedBySessionId, organizationId);
+    if (replacement) return rotate(replacement);
+  }
+
+  const nextSessionId = new mongoose.Types.ObjectId();
+  const claimed = await WebChatSession.findOneAndUpdate(
+    {
+      _id: oldSession._id,
+      $or: [
+        { replacedBySessionId: null },
+        { replacedBySessionId: { $exists: false } },
+        ...(oldSession.replacedBySessionId ? [{ replacedBySessionId: oldSession.replacedBySessionId }] : []),
+      ],
+    },
+    { $set: { replacedBySessionId: nextSessionId } },
+    { new: true },
+  );
+  if (!claimed) {
+    const fresh: any = await WebChatSession.findById(oldSession._id).select('replacedBySessionId').lean();
+    for (let attempt = 0; attempt < 20 && fresh?.replacedBySessionId; attempt++) {
+      const replacement = await openLeadSession(fresh.replacedBySessionId, organizationId);
+      if (replacement) return rotate(replacement);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new ApiError(409, 'Your chat is reconnecting. Please send your message again.');
+  }
+
+  try {
+    const systemUserId = await resolveOrgSystemUserId(organizationId);
+    if (!systemUserId) throw new ApiError(400, 'This dealership is not yet set up to receive chats');
+    const vehicle = oldSession.vehicleId ? await Vehicle.findById(oldSession.vehicleId).lean() : null;
+    const created = await createWebchatConversation({
+      orgId: organizationId,
+      systemUserId,
+      visitorName: oldSession.visitorName,
+      visitorEmail: oldSession.visitorEmail,
+      visitorPhone: oldSession.visitorPhone,
+      vehicle,
+      firstMessage: body,
+      pageUrl: oldSession.pageUrl,
+      sessionId: nextSessionId,
+      carryPause: sessionControlToCarry(oldSession),
+    });
+    return created;
+  } catch (err) {
+    await WebChatSession.updateOne(
+      { _id: oldSession._id, replacedBySessionId: nextSessionId },
+      { $set: { replacedBySessionId: oldSession.replacedBySessionId || null } },
+    ).catch(() => undefined);
+    throw err;
+  }
+}
+
 export const startSession = asyncHandler(async (req: Request, res: Response) => {
   if (process.env.WEBCHAT_ENABLED === 'false') {
     throw new ApiError(503, 'Chat is currently unavailable. Please call us instead.');
@@ -580,58 +836,25 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
     }
   }
 
-  const [firstName, ...restOfName] = visitorName.split(/\s+/);
-  const vehicleInterest = vehicle
-    ? [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ')
-    : undefined;
-
-  const lead = await Lead.create({
-    organizationId: orgId,
-    createdBy: (systemUser as any)._id,
-    firstName: firstName || 'Unknown',
-    lastName: restOfName.join(' '),
-    email: visitorEmail || undefined,
-    phone: visitorPhone || undefined,
-    vehicle: vehicle
-      ? {
-          year: vehicle.year ? String(vehicle.year) : undefined,
-          make: vehicle.make,
-          model: vehicle.model,
-          stock: vehicle.stockNumber,
-          trim: vehicle.trim,
-        }
-      : undefined,
-    vehicleId: vehicle?._id,
-    location: vehicle?.dealerCity || undefined,
-    comments: firstMessage,
-    source: LEAD_SOURCE.WEBSITE_CHAT,
-    channel: 'webchat',
-    status: 'New',
-  });
-
-  const token = crypto.randomBytes(24).toString('hex');
-  const session = await WebChatSession.create({
-    organizationId: String(orgId),
-    leadId: lead._id,
-    tokenHash: hashToken(token),
-    visitorName,
-    visitorEmail: visitorEmail || undefined,
-    visitorPhone: visitorPhone || undefined,
-    vehicleId: vehicle?._id,
-    pageUrl: pageUrl ? String(pageUrl).slice(0, 500) : undefined,
-  });
-
-  const messageId = new mongoose.Types.ObjectId();
-  const check = await beginAiAttentionCheck({ organizationId: String(orgId), channel: 'webchat',
-    targetId: String(session._id), messageId: String(messageId) });
-  const chatMessage = await WebChatMessage.create({
-    _id: messageId,
-    organizationId: String(orgId),
-    sessionId: session._id,
-    leadId: lead._id,
-    direction: 'inbound',
-    body: firstMessage,
-  });
+  let created: Awaited<ReturnType<typeof createWebchatConversation>>;
+  try {
+    created = await createWebchatConversation({
+      orgId,
+      systemUserId: (systemUser as any)._id,
+      visitorName,
+      visitorEmail: visitorEmail || undefined,
+      visitorPhone: visitorPhone || undefined,
+      vehicle,
+      firstMessage,
+      pageUrl: pageUrl ? String(pageUrl) : undefined,
+    });
+  } catch (err) {
+    if (clientRequestId) {
+      await IntakeClaim.deleteOne({ organizationId: orgId, kind: 'webchat_session', claimKey: clientRequestId }).catch(() => undefined);
+    }
+    throw err;
+  }
+  const { lead, session, token, chatMessage, check } = created;
 
   if (clientRequestId) {
     await IntakeClaim.updateOne(
@@ -639,24 +862,6 @@ export const startSession = asyncHandler(async (req: Request, res: Response) => 
       { $set: { leadId: lead._id } },
     );
   }
-
-  emitToOrg(String(orgId), 'lead:new', lead.toObject());
-  emitToOrg(String(orgId), 'webchat:message', {
-    leadId: String(lead._id),
-    message: serializeForStaff(chatMessage),
-  });
-
-  const { title, message: notificationMessage } = notificationTemplates.new_lead({
-    customerName: visitorName,
-    source: LEAD_SOURCE.WEBSITE_CHAT,
-    vehicleInterest,
-  });
-  notifyOrgAdmins(String(orgId), 'new_lead', title, notificationMessage, {
-    leadId: String(lead._id),
-    customerName: visitorName,
-    source: LEAD_SOURCE.WEBSITE_CHAT,
-    channel: 'webchat',
-  }).catch(() => undefined);
 
   logger.info({ leadId: lead._id, sessionId: session._id }, 'Website chat started');
 
@@ -688,32 +893,17 @@ export const sendVisitorMessage = asyncHandler(async (req: Request, res: Respons
     throw new ApiError(429, 'You have reached the message limit for now. Please call us or try again later.');
   }
 
-  const messageId = new mongoose.Types.ObjectId();
-  const check = await beginAiAttentionCheck({ organizationId: String(session.organizationId), channel: 'webchat',
-    targetId: String(session._id), messageId: String(messageId) });
-  const message = await WebChatMessage.create({
-    _id: messageId,
-    organizationId: session.organizationId,
-    sessionId: session._id,
-    leadId: session.leadId,
-    direction: 'inbound',
-    body,
-  });
+  if ((await getLeadIntakeMode(String(session.organizationId))) !== 'off'
+    && !(await openLeadSession(session._id, String(session.organizationId)))) {
+    const continued = await continueInFreshConversation(session, body);
+    triggerWebchatAiReply(continued.session, continued.check, body).catch(() => undefined);
+    return res.status(201).json(new ApiResponse(201, {
+      message: serializeForVisitor(continued.chatMessage),
+      session: { sessionId: String(continued.session._id), token: continued.token },
+    }, 'Message sent'));
+  }
 
-  const now = new Date();
-  await Promise.all([
-    WebChatSession.updateOne({ _id: session._id }, { $set: { lastMessageAt: now } }),
-    Lead.updateOne(
-      { _id: session.leadId },
-      { $set: { 'followUp.lastCustomerActivityAt': now, isRead: false } },
-    ),
-  ]);
-
-  emitToOrg(session.organizationId, 'webchat:message', {
-    leadId: String(session.leadId),
-    message: serializeForStaff(message),
-  });
-  emitToOrg(session.organizationId, 'lead:update', { leadId: String(session.leadId) });
+  const { message, check } = await appendVisitorMessage(session, body);
 
   triggerWebchatAiReply(session, check, body).catch(() => undefined);
 
@@ -792,8 +982,9 @@ export const sendStaffMessage = asyncHandler(async (req: Request, res: Response)
 
   if (!mongoose.isValidObjectId(leadId)) throw new ApiError(404, 'Lead not found');
 
-  const session = await WebChatSession.findOne({ leadId, organizationId: orgId });
+  const session = await WebChatSession.findOne({ leadId, organizationId: orgId }).sort({ createdAt: -1 });
   if (!session) throw new ApiError(404, 'No web chat found for this lead');
+  await assertLeadOpenForManualSend(orgId, leadId);
 
   const staff = actor(req);
   if (!staff.userId) throw new ApiError(401, 'Please authenticate');
