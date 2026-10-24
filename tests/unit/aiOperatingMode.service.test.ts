@@ -125,7 +125,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('sends only when the channel is live', async () => {
-    orgWith({ aiAgentModes: { sms: 'live', email: 'training', webchat: 'off' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'live', email: 'training', webchat: 'off' } });
     await expect(decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: '+13855550199' }))
       .resolves.toMatchObject({ action: 'send', mode: 'live' });
     await expect(decideAiDelivery({ organizationId: 'org-1', channel: 'email', workflow: 'email_reply' }))
@@ -135,7 +135,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('skips a real customer in training mode', async () => {
-    orgWith({ aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
     leadWith({ source: 'Website Chat', phone: '+13855550199' });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: '+13855550199', leadId: 'lead-1' }),
@@ -143,7 +143,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('allows a simulated send only for a genuine Demo Lab lead with a fictional number while Demo Lab is enabled', async () => {
-    orgWith({ aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
     leadWith({ source: 'Demo', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: DEMO_PHONE, leadId: 'lead-demo' }),
@@ -151,7 +151,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('does not trust a 555 number alone: a real lead with a fictional-looking number is still skipped', async () => {
-    orgWith({ aiAgentModes: { sms: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training' } });
     leadWith({ source: 'Website Inquiry', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: DEMO_PHONE, leadId: 'lead-1' }),
@@ -159,7 +159,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('skips a demo send when the recipient number does not match the demo lead', async () => {
-    orgWith({ aiAgentModes: { sms: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training' } });
     leadWith({ source: 'Demo', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: '+18015550177', leadId: 'lead-demo' }),
@@ -168,7 +168,7 @@ describe('decideAiDelivery', () => {
 
   it('skips demo sends when Demo Lab is disabled', async () => {
     process.env.DEMO_LAB_ENABLED = 'false';
-    orgWith({ aiAgentModes: { sms: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training' } });
     leadWith({ source: 'Demo', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: DEMO_PHONE, leadId: 'lead-demo' }),
@@ -177,7 +177,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('never simulates email, and never simulates the re-engagement Send anyway action', async () => {
-    orgWith({ aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } });
     leadWith({ source: 'Demo', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'email', workflow: 'email_reply', toPhone: DEMO_PHONE, leadId: 'lead-demo' }),
@@ -188,7 +188,7 @@ describe('decideAiDelivery', () => {
   });
 
   it('skips everything in off mode, including demo leads', async () => {
-    orgWith({ aiAgentModes: { sms: 'off' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'off' } });
     leadWith({ source: 'Demo', phone: DEMO_PHONE });
     await expect(
       decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: DEMO_PHONE, leadId: 'lead-demo' }),
@@ -196,17 +196,44 @@ describe('decideAiDelivery', () => {
   });
 
   it('assertAiDispatchAllowed throws the standard suppression error when not allowed', async () => {
-    orgWith({ aiAgentModes: { sms: 'training' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'training' } });
     await expect(
       assertAiDispatchAllowed({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_followup', toPhone: '+13855550199' }),
     ).rejects.toBeInstanceOf(AiReplySuppressedError);
   });
 
   it('assertAiDispatchAllowed passes when live', async () => {
-    orgWith({ aiAgentModes: { sms: 'live' } });
+    orgWith({ aiAgentName: 'Anna', aiAgentModes: { sms: 'live' } });
     await expect(
       assertAiDispatchAllowed({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_followup', toPhone: '+13855550199' }),
     ).resolves.toMatchObject({ action: 'send' });
+  });
+  it('never sends without a configured AI Agent name, even when the channel is live', async () => {
+    for (const aiAgentName of [undefined, '', '   ', '123']) {
+      orgWith({ aiAgentName, aiAgentModes: { sms: 'live' } });
+      await expect(decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: '+13855550199' }))
+        .resolves.toMatchObject({ action: 'skip', mode: 'live', nameMissing: true });
+    }
+    orgWith({ aiAgentModes: { sms: 'live' } });
+    await expect(
+      assertAiDispatchAllowed({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_followup', toPhone: '+13855550199' }),
+    ).rejects.toBeInstanceOf(AiReplySuppressedError);
+  });
+
+  it('never simulates a Demo Lab send without a configured AI Agent name', async () => {
+    orgWith({ aiAgentModes: { sms: 'training' } });
+    leadWith({ source: 'Demo', phone: DEMO_PHONE });
+    await expect(
+      decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: DEMO_PHONE, leadId: 'lead-demo' }),
+    ).resolves.toMatchObject({ action: 'skip', nameMissing: true });
+  });
+
+  it('fails closed when the AI Agent name cannot be read', async () => {
+    mockOrgFindById
+      .mockReturnValueOnce({ select: () => ({ lean: () => Promise.resolve({ metadata: { aiAgentName: 'Anna', aiAgentModes: { sms: 'live' } } }) }) })
+      .mockReturnValueOnce({ select: () => ({ lean: () => Promise.reject(new Error('db down')) }) });
+    await expect(decideAiDelivery({ organizationId: 'org-1', channel: 'sms', workflow: 'sms_reply', toPhone: '+13855550199' }))
+      .resolves.toMatchObject({ action: 'skip', nameMissing: true });
   });
 });
 

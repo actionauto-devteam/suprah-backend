@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { identityFromMetadata } from '../utils/aiAgentIdentity';
 import AiAgentTask from '../models/AiAgentTask.model';
 import Lead from '../models/lead.model';
 import Organization from '../models/Organization.model';
@@ -244,7 +245,7 @@ export async function recoverTechnicalPause(input: {
 
   try {
     const org: any = await Organization.findById(input.organizationId).select('metadata.aiAgentName').lean();
-    const agentName = String(org?.metadata?.aiAgentName || 'Alex');
+    const agentName = identityFromMetadata(org?.metadata).displayName;
     const waitingText = waiting === null
       ? `${agentName} did not reply to the message that failed the check. Staff confirmed a manual review of the email thread; Suprah did not check it for new replies.`
       : `${agentName} did not reply to the ${waiting} customer message${waiting === 1 ? '' : 's'} received while paused.`;

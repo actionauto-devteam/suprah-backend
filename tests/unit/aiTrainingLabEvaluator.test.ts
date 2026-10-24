@@ -116,7 +116,7 @@ describe('rule handling', () => {
   it('rule matching is approximate and says so', () => {
     const check = byId(evaluateScenario({ rule: rule(), scenario: scenario() }), 'rule.likely_applies');
     expect(check.method).toBe('approximate');
-    expect(check.message).toContain('not proof of what Alex would say');
+    expect(check.message).toContain('not proof of what the AI Agent would say');
   });
 
   it('little overlap produces a warning, never a fail', () => {

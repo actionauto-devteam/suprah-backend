@@ -394,15 +394,15 @@ export function avoidItemIssues(field: string, text: string): ImportIssue[] {
   for (const clause of clauses) {
     const avoided = clause.replace(/^\s*(?:also|and|then|plus)\s+/i, '').replace(AVOID_REDUNDANT_PREFIX, '');
     if (AVOID_INVERTED.test(avoided)) {
-      add([{ field, code: 'must_avoid_contradiction', severity: 'error', message: '"Never include" items must name the thing to avoid. Wording like "refusing to quote prices" would tell Alex to do the opposite.' }]);
+      add([{ field, code: 'must_avoid_contradiction', severity: 'error', message: '"Never include" items must name the thing to avoid. Wording like "refusing to quote prices" would tell the AI Agent to do the opposite.' }]);
     }
     const safetyMatch = avoided.match(AVOID_SAFETY);
     if (safetyMatch && !AVOID_VIOLATION_VERB.test(avoided.slice(0, safetyMatch.index))) {
-      add([{ field, code: 'must_avoid_safety', severity: 'error', message: "A rule can't tell Alex to avoid handing off, honoring opt-outs, safety checks, or saying it's an AI assistant." }]);
+      add([{ field, code: 'must_avoid_safety', severity: 'error', message: "A rule can't tell the AI Agent to avoid handing off, honoring opt-outs, safety checks, or saying it's an AI assistant." }]);
     }
   }
   if (rest.some((clause) => AVOID_POSITIVE_IMPERATIVE.test(clause))) {
-    add([{ field, code: 'must_avoid_extra_instruction', severity: 'error', message: 'Keep each "Never include" item to the one thing Alex should avoid. Put instructions in the response guidance.' }]);
+    add([{ field, code: 'must_avoid_extra_instruction', severity: 'error', message: 'Keep each "Never include" item to the one thing the AI Agent should avoid. Put instructions in the response guidance.' }]);
   }
   for (const clause of rest) {
     if (AVOID_POSITIVE_IMPERATIVE.test(clause)) add(guardrailIssues(field, clause, 'instruction'));

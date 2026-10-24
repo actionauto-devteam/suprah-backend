@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type AiUsageKind = 'attention_screen' | 'shadow_draft';
+export type AiUsageKind = 'attention_screen' | 'shadow_draft' | 'staff_draft';
 
 export interface IAiUsageCounter extends Document {
   organizationId: string;
@@ -15,7 +15,7 @@ const AiUsageCounterSchema: Schema<IAiUsageCounter> = new Schema(
   {
     organizationId: { type: String, required: true },
     day: { type: String, required: true },
-    kind: { type: String, enum: ['attention_screen', 'shadow_draft'], required: true },
+    kind: { type: String, enum: ['attention_screen', 'shadow_draft', 'staff_draft'], required: true },
     count: { type: Number, default: 0 },
   },
   { timestamps: true },

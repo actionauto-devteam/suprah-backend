@@ -107,7 +107,7 @@ describe('generateReengagementMessage (sender identity)', () => {
     mockCreate.mockReset();
     mockOrganizationFindById.mockReset();
     mockOrganizationFindById.mockReturnValue({
-      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto Utah' }) }),
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ name: 'Action Auto Utah', metadata: { aiAgentName: 'Anna' } }) }),
     });
   });
 
@@ -119,7 +119,8 @@ describe('generateReengagementMessage (sender identity)', () => {
     await generateReengagementMessage(lead, vehicle);
 
     const systemPrompt = mockCreate.mock.calls[0][0].messages[0].content as string;
-    expect(systemPrompt).toContain('You are Alex, writing on behalf of Action Auto Utah');
+    expect(systemPrompt).toContain('You are Anna, writing on behalf of Action Auto Utah');
+    expect(systemPrompt).not.toContain('Alex');
     expect(systemPrompt).not.toContain('Autrix');
   });
 

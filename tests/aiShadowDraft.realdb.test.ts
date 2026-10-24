@@ -14,7 +14,7 @@ import {
   shadowDraftUsageDay,
 } from '../src/services/aiShadowDraft.service';
 
-const TRAINING = { aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } };
+const TRAINING = { aiAgentName: 'Anna', aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } };
 
 describe('Real-DB proof: shadow draft foundation (local dev MongoDB only)', () => {
   const env = { ...process.env };

@@ -216,7 +216,7 @@ export async function processLeadForVehicle(lead: any, vehicle: IVehicle): Promi
     leadId: lead._id,
   });
   if (delivery.action !== 'send') {
-    await writeLog({ ...base, status: 'skipped_ai_not_live', failureReason: `${AI_NOT_LIVE_REASON} (sms: ${delivery.mode})` });
+    await writeLog({ ...base, status: 'skipped_ai_not_live', failureReason: delivery.reason || `${AI_NOT_LIVE_REASON} (sms: ${delivery.mode})` });
     return;
   }
 

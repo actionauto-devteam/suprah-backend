@@ -214,19 +214,19 @@ describe('non-AI preview', () => {
     const first = previewStructuredRule(valid());
     const second = previewStructuredRule(valid());
     expect(first.preview).toEqual(second.preview);
-    expect(first.preview.headline).toBe('When a customer is deciding between a sedan and an SUV, Alex asks the follow-up questions below before answering.');
+    expect(first.preview.headline).toBe('When a customer is deciding between a sedan and an SUV, the AI Agent asks the follow-up questions below before answering.');
     expect(first.preview.safetyNotice).toBe(SAFETY_NOTICE);
     expect(first.preview.activationNotice).toBe(ACTIVATION_NOTICE);
     expect(first.preview.channels).toEqual(['SMS', 'Website chat']);
     expect(first.preview.sections.map((s) => s.label)).toEqual([
-      'Recognize it when the customer', 'How Alex should respond', 'Ask these follow-up questions', 'Always include', 'Never include',
+      'Recognize it when the customer', 'How the AI Agent should respond', 'Ask these follow-up questions', 'Always include', 'Never include',
     ]);
   });
 
   it('"Alex answers" is always described as conditional on safety checks', () => {
     const { preview } = previewStructuredRule(valid({ handling: 'ai_handles' }));
     expect(preview.headline).toContain('only after the mandatory safety checks pass');
-    expect(preview.handlingLabel).toBe('Alex answers (only after safety checks pass)');
+    expect(preview.handlingLabel).toBe('The AI Agent answers (only after safety checks pass)');
   });
 
   it('combines malformed-input problems with submit errors without throwing', () => {

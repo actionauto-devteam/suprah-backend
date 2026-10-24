@@ -89,9 +89,9 @@ export interface RuleEvaluation {
 }
 
 export const HANDLING_LABELS: Record<TrainingRuleHandling, string> = {
-  ai_handles: 'Alex answers (only after safety checks pass)',
-  ask_clarifying: 'Alex asks clarifying questions first',
-  escalate: 'Alex hands off to a person',
+  ai_handles: 'The AI Agent answers (only after safety checks pass)',
+  ask_clarifying: 'The AI Agent asks clarifying questions first',
+  escalate: 'The AI Agent hands off to a person',
 };
 
 const HANDLING_PREVIEW: Record<TrainingRuleHandling, string> = {
@@ -102,8 +102,8 @@ const HANDLING_PREVIEW: Record<TrainingRuleHandling, string> = {
 
 const CHANNEL_LABELS: Record<Channel, string> = { sms: 'SMS', webchat: 'Website chat', email: 'Email' };
 
-export const SAFETY_NOTICE = 'Mandatory checks always run first. Requests for a person, questions about talking to AI, opt-outs, compliance limits and technical screening failures pause Alex no matter what this rule says.';
-export const ACTIVATION_NOTICE = 'Proposal only. Alex does not use training rules yet; approved rules are published in a later release.';
+export const SAFETY_NOTICE = 'Mandatory checks always run first. Requests for a person, questions about talking to AI, opt-outs, compliance limits and technical screening failures pause the AI Agent no matter what this rule says.';
+export const ACTIVATION_NOTICE = 'Proposal only. The AI Agent does not use training rules yet; approved rules are published in a later release.';
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
@@ -123,7 +123,7 @@ const BYPASS_PATTERNS: Array<{ message: string; pattern: RegExp; negatable?: boo
     pattern: /\b(ignore|bypass|skip|override|disable|turn off|get around|work around)\b[^.\n]{0,40}\b(safety|screen(ing)?|checks?|opt[\s-]?outs?|unsubscrib\w*|escalat\w*|hand[\s-]?offs?|compliance|validators?|filters?|rules?)\b/i,
   },
   {
-    message: 'Alex may not claim to be a human or deny being AI.',
+    message: 'The AI Agent may not claim to be a human or deny being AI.',
     pattern: /\b(say|tell|claim|pretend|insist|reply|answer|respond)\b[^.\n]{0,30}\b(you are|you're|youre|to be|that you are|i am|i'm|alex is)\b[^.\n]{0,15}\b(a\s+)?(human|real person|not (a |an )?(bot|ai|robot))\b/i,
     negatable: true,
   },
@@ -132,7 +132,7 @@ const BYPASS_PATTERNS: Array<{ message: string; pattern: RegExp; negatable?: boo
     pattern: /\b(keep|continue)\s+(texting|messaging|emailing|replying|contacting|following up)\b[^.\n]{0,60}\b(stop|unsubscrib\w*|opt)/i,
   },
   {
-    message: 'A rule cannot tell Alex to keep answering when a customer asks for a person, asks about AI, or opts out.',
+    message: 'A rule cannot tell the AI Agent to keep answering when a customer asks for a person, asks about AI, or opts out.',
     pattern: /\b(even if|even when|regardless of whether|no matter (if|whether|what))\b[^.\n]{0,60}\b(stop|unsubscrib\w*|opt|person|human|manager|salesperson|bot|robot|ai)\b/i,
     unlessEscalating: true,
   },
@@ -220,7 +220,7 @@ export function parseStructuredRule(raw: unknown): { rule: StructuredRule; probl
   let handling: TrainingRuleHandling | '' = '';
   if (input.handling !== undefined && input.handling !== null && input.handling !== '') {
     if (!(TRAINING_RULE_HANDLING as readonly string[]).includes(String(input.handling))) {
-      problems.push({ field: 'handling', code: 'invalid_value', message: 'Choose how Alex should handle this.' });
+      problems.push({ field: 'handling', code: 'invalid_value', message: 'Choose how the AI Agent should handle this.' });
     } else {
       handling = input.handling;
     }
@@ -326,7 +326,7 @@ export function buildRulePreview(rule: StructuredRule): RulePreview {
   const intent = rule.intent || 'sends this kind of message';
   const sections = [
     { label: 'Recognize it when the customer', items: rule.triggers },
-    { label: 'How Alex should respond', items: rule.instruction ? [rule.instruction] : [] },
+    { label: 'How the AI Agent should respond', items: rule.instruction ? [rule.instruction] : [] },
     { label: 'Ask these follow-up questions', items: rule.requiredQuestions },
     { label: 'Always include', items: rule.mustInclude },
     { label: 'Never include', items: rule.mustAvoid },
@@ -334,7 +334,7 @@ export function buildRulePreview(rule: StructuredRule): RulePreview {
     { label: 'Reason shown to staff on handoff', items: rule.escalation.handoffReason ? [rule.escalation.handoffReason] : [] },
   ].filter((section) => section.items.length);
   return {
-    headline: `When a customer ${intent.replace(/^(customer|the customer)\s+/i, '')}, Alex ${rule.handling ? HANDLING_PREVIEW[handling] : '(choose how Alex should handle it)'}.`,
+    headline: `When a customer ${intent.replace(/^(customer|the customer)\s+/i, '')}, the AI Agent ${rule.handling ? HANDLING_PREVIEW[handling] : '(choose how the AI Agent should handle it)'}.`,
     handlingLabel: rule.handling ? HANDLING_LABELS[rule.handling] : 'Not chosen yet',
     channels: rule.channels.map((channel) => CHANNEL_LABELS[channel]),
     safetyNotice: SAFETY_NOTICE,
@@ -357,14 +357,14 @@ export function evaluateStructuredRule(rule: StructuredRule): RuleEvaluation {
 
   if (!rule.intent) errors.push({ field: 'intent', code: 'required', message: 'Describe the customer intent this rule covers.' });
   if (!rule.triggers.length) errors.push({ field: 'triggers', code: 'required', message: 'Add at least one scenario trigger.' });
-  if (!rule.handling) errors.push({ field: 'handling', code: 'required', message: 'Choose how Alex should handle this.' });
+  if (!rule.handling) errors.push({ field: 'handling', code: 'required', message: 'Choose how the AI Agent should handle this.' });
   if (rule.instruction.length < L.instructionMin) errors.push({ field: 'instruction', code: 'too_short', message: `Response guidance needs at least ${L.instructionMin} characters.` });
   if (!rule.channels.length) errors.push({ field: 'channels', code: 'required', message: 'Choose at least one channel.' });
   if (rule.handling === 'ask_clarifying' && !rule.requiredQuestions.length) {
-    errors.push({ field: 'requiredQuestions', code: 'required', message: 'Add at least one follow-up question for Alex to ask.' });
+    errors.push({ field: 'requiredQuestions', code: 'required', message: 'Add at least one follow-up question for the AI Agent to ask.' });
   }
   if (rule.handling === 'escalate') {
-    if (!rule.escalation.when) errors.push({ field: 'escalation.when', code: 'required', message: 'Describe when Alex should hand off.' });
+    if (!rule.escalation.when) errors.push({ field: 'escalation.when', code: 'required', message: 'Describe when the AI Agent should hand off.' });
     if (!rule.escalation.handoffReason) errors.push({ field: 'escalation.handoffReason', code: 'required', message: 'Add the handoff reason staff will see.' });
   }
 
@@ -373,7 +373,7 @@ export function evaluateStructuredRule(rule: StructuredRule): RuleEvaluation {
     errors.push({
       field: 'handling',
       code: 'protected_topic',
-      message: `Customers ${topic} always go through Suprah's mandatory checks and are handed to a person. Choose "Alex hands off to a person" for this rule.`,
+      message: `Customers ${topic} always go through Suprah's mandatory checks and are handed to a person. Choose "The AI Agent hands off to a person" for this rule.`,
     });
   }
 

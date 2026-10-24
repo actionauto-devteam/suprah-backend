@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { AI_AGENT_NAME_REQUIRED_REASON, resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
 import Organization from '../models/Organization.model';
 import AiUsageCounter, { AiUsageKind } from '../models/AiUsageCounter.model';
 import { isDemoPhone } from '../utils/demoPhone';
@@ -37,6 +38,7 @@ export interface AiDeliveryDecision {
   source: AiModeSource;
   simulated?: boolean;
   reason?: string;
+  nameMissing?: boolean;
 }
 
 export const AI_NOT_LIVE_REASON = 'Suprah AI is not live for this channel';
@@ -127,16 +129,22 @@ export async function decideAiDelivery(input: {
   leadId?: any;
 }): Promise<AiDeliveryDecision> {
   const { mode, source } = await resolveAiChannelMode(input.organizationId, input.channel);
-  if (mode === 'live') return { action: 'send', mode, source };
-  if (
+  const wouldSend = mode === 'live' || (
     (mode === 'training' || mode === 'testing') &&
     input.channel === 'sms' &&
     input.workflow !== 'reengagement_send_anyway' &&
     (await isSimulatedDemoRecipient(input.organizationId, input.toPhone, input.leadId))
-  ) {
-    return { action: 'send', mode, source, simulated: true };
+  );
+  if (!wouldSend) return { action: 'skip', mode, source, reason: `${AI_NOT_LIVE_REASON} (${input.channel}: ${mode})` };
+  const identity = await resolveAiAgentIdentity(input.organizationId);
+  if (!identity.configured) {
+    logger.info(
+      { organizationId: String(input.organizationId), channel: input.channel, workflow: input.workflow, lookupFailed: Boolean(identity.lookupFailed) },
+      '[AiOperatingMode] AI message skipped: no AI Agent name is set',
+    );
+    return { action: 'skip', mode, source, reason: AI_AGENT_NAME_REQUIRED_REASON, nameMissing: true };
   }
-  return { action: 'skip', mode, source, reason: `${AI_NOT_LIVE_REASON} (${input.channel}: ${mode})` };
+  return mode === 'live' ? { action: 'send', mode, source } : { action: 'send', mode, source, simulated: true };
 }
 
 export async function assertAiDispatchAllowed(input: {

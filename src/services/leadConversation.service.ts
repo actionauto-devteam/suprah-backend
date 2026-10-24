@@ -89,7 +89,7 @@ const SYSTEM_ACTORS = ['system', 'system-webchat-ack'];
 function authorFor(sentBy: any, customerName: string, inbound: boolean) {
   if (inbound) return { name: customerName, kind: 'customer' as const };
   const userId = sentBy?.userId ? String(sentBy.userId) : null;
-  if (userId === AI_ACTOR) return { name: sentBy?.name || 'Alex', kind: 'ai' as const, userId };
+  if (userId === AI_ACTOR) return { name: sentBy?.name || 'AI Agent', kind: 'ai' as const, userId };
   if (userId && SYSTEM_ACTORS.includes(userId)) return { name: sentBy?.name || 'Automatic message', kind: 'system' as const, userId };
   return { name: sentBy?.name || 'Team member', kind: 'staff' as const, userId };
 }
