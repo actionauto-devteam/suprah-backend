@@ -321,7 +321,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
   }
 
   // Senior Fix: Transition Lead to "Appointment Set"
-  if (data.customerBooking?.isCustomerBooking || data.participants.length > 0) {
+  if (data.customerBooking?.isCustomerBooking || (data.participants?.length ?? 0) > 0) {
     try {
       // Look for a lead matching the email or context
       const leadEmail = data.customerBooking?.email || (data as any).email;

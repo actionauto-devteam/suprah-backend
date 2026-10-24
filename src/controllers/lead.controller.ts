@@ -60,6 +60,16 @@ import { clearLeadConversationEmailCache, withoutOtherLeadsEmails } from '../ser
 import { extractGmailText } from '../utils/gmailMessageParser';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
+import { cleanEmailSubject, encodeEmailHeader, resolveLeadEmailSubject } from '../utils/leadEmailSubject';
+import {
+  COMPOSER_MESSAGES,
+  SEND_UNCERTAIN_CODE,
+  beginComposerSend,
+  composerRequestHash,
+  finishComposerSend,
+  normalizeClientRequestId,
+  type ComposerSendStart,
+} from '../services/leadComposer.service';
 
 const LEADS_SOURCE_EMAIL = 'leads@dealerscloud.com';
 const DEFAULT_UNANSWERED_THRESHOLD_MINUTES = Number(process.env.CRM_UNANSWERED_INQUIRY_THRESHOLD_MINUTES || 60);
@@ -249,8 +259,8 @@ export async function sendLeadReplyEmail(
   orgId: string,
   attachments: Express.Multer.File[] = [],
   forcedSenderEmail?: string,
-  options: { beforeDispatch?: () => Promise<void>; requireVerifiedRecipient?: boolean } = {},
-) {
+  options: { beforeDispatch?: () => Promise<void>; requireVerifiedRecipient?: boolean; subject?: string } = {},
+): Promise<{ gmailMessageId: string | null; threadId: string | null; subject: string; recipientEmail: string }> {
   if (isLocalUiAcceptanceMode()) {
     throw new Error('[LOCAL_UI_ACCEPTANCE_MODE] Blocked outbound Gmail send.');
   }
@@ -293,13 +303,12 @@ export async function sendLeadReplyEmail(
     );
   }
 
-  const subject =
-    `Re: ${lead.subject || 'Inquiry Response'}`;
+  const { subject } = resolveLeadEmailSubject(lead, options.subject);
 
   const commonHeaders = [
     `From: ${senderDisplay}`,
     `To: ${recipientEmail}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodeEmailHeader(subject)}`,
     ...(lead.messageId
       ? [`In-Reply-To: ${lead.messageId}`]
       : []),
@@ -404,9 +413,10 @@ export async function sendLeadReplyEmail(
   const sentThreadId = sendResult?.data?.threadId;
   if (sentThreadId && !lead.threadId) {
     lead.threadId = sentThreadId;
+    lead.emailThreadSubject = subject;
     await Lead.updateOne(
       { _id: lead._id },
-      { $set: { threadId: sentThreadId } },
+      { $set: { threadId: sentThreadId, emailThreadSubject: subject } },
     );
   }
 
@@ -421,6 +431,18 @@ export async function sendLeadReplyEmail(
   console.log(
     `[REPLY] Email sent to ${recipientEmail} with ${attachments.length} attachment(s)`,
   );
+
+  return {
+    gmailMessageId: sendResult?.data?.id || null,
+    threadId: sentThreadId || lead.threadId || null,
+    subject,
+    recipientEmail,
+  };
+}
+
+function isDefiniteGmailRejection(err: any): boolean {
+  const status = Number(err?.response?.status ?? err?.status ?? err?.code);
+  return Number.isInteger(status) && status >= 400 && status < 500;
 }
 
 function statusHistoryEntry(from: string, to: string, userId: any, reason?: string) {
@@ -891,7 +913,7 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
         $group: {
           _id: {
             $cond: [
-              { $in: ['$location', [null, '']] },
+              { $in: [{ $ifNull: ['$location', null] }, [null, '']] },
               UNMAPPED_LEAD_LOCATION_LABEL,
               '$location',
             ],
@@ -1965,17 +1987,84 @@ export const replyToInquiry = async (
       return res.status(409).json({ message: CLOSED_LEAD_SEND_MESSAGE, code: 'lead_closed' });
     }
 
+    const rawRequestId = req.body?.clientRequestId;
+    const clientRequestId = normalizeClientRequestId(rawRequestId);
+    if (rawRequestId !== undefined && rawRequestId !== '' && !clientRequestId) {
+      return res.status(400).json({ message: 'This send request is not valid. Refresh and try again.' });
+    }
+    const requestedSubject = typeof req.body?.subject === 'string' ? req.body.subject : undefined;
+
+    let claim: ComposerSendStart | null = null;
+    if (clientRequestId) {
+      try {
+        claim = await beginComposerSend({
+          organizationId: orgId,
+          leadId: lead._id,
+          channel: 'email',
+          clientRequestId,
+          requestHash: composerRequestHash([
+            'email',
+            String(lead._id),
+            message,
+            cleanEmailSubject(requestedSubject),
+            attachments.map((file) => [file.originalname, file.size]),
+          ]),
+          userId,
+        });
+      } catch (claimError) {
+        if (claimError instanceof ApiError) {
+          return res.status(claimError.statusCode).json({
+            message: claimError.message,
+            code: claimError.errors[0]?.code,
+            errors: claimError.errors,
+          });
+        }
+        throw claimError;
+      }
+      if (claim.kind === 'duplicate') {
+        const current = await Lead.findOne({ _id: lead._id, organizationId: orgId }).lean();
+        return res.json({
+          success: true,
+          message: 'Reply already sent',
+          duplicate: true,
+          data: current,
+          sendResult: claim.result,
+        });
+      }
+    }
+
+    let dispatched = false;
     try {
-      await sendLeadReplyEmail(
+      const sent = await sendLeadReplyEmail(
         lead,
         message,
         userId,
         orgId,
         attachments,
         undefined,
-        { requireVerifiedRecipient: true },
+        {
+          requireVerifiedRecipient: true,
+          subject: requestedSubject,
+          beforeDispatch: async () => {
+            dispatched = true;
+          },
+        },
       );
+      if (claim?.kind === 'proceed') {
+        await finishComposerSend(claim.claimId, {
+          state: 'sent',
+          result: { gmailMessageId: sent.gmailMessageId, threadId: sent.threadId, subject: sent.subject },
+        });
+      }
     } catch (gmailError) {
+      if (claim?.kind === 'proceed') {
+        const uncertain = dispatched && !isDefiniteGmailRejection(gmailError);
+        await finishComposerSend(claim.claimId, { state: uncertain ? 'uncertain' : 'failed', error: gmailError });
+        if (uncertain) {
+          console.error('[REPLY] Gmail send outcome unknown:', gmailError);
+          return res.status(409).json({ message: COMPOSER_MESSAGES.uncertain, code: SEND_UNCERTAIN_CODE });
+        }
+      }
       if (gmailError instanceof LeadReplyRecipientError) {
         return res.status(400).json({
           message: gmailError.message,

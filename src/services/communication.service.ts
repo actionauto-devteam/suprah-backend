@@ -152,6 +152,13 @@ export class SmsDeliveryUncertainError extends Error {
   }
 }
 
+function isDefiniteSmsRejection(err: any): boolean {
+  const LocalBlock = telnyx.LocalUiAcceptanceModeBlockedError;
+  if (typeof LocalBlock === "function" && err instanceof LocalBlock) return true;
+  const status = Number(err?.status);
+  return Number.isInteger(status) && status >= 400 && status < 500;
+}
+
 export async function isSmsOptedOut(orgId: any, phone: string): Promise<boolean> {
   const record: any = await SmsOptOut.findOne({
     organizationId: String(orgId),
@@ -915,6 +922,7 @@ export async function sendSmsFromUser(opts: {
   beforeSend?: () => Promise<void>;
   beforeDispatch?: () => Promise<void>;
   destinationPolicy?: SmsDestinationPolicy;
+  uncertainOnTransportError?: boolean;
 }) {
   const to = assertSmsDestination(opts.toPhone, opts.destinationPolicy ?? "automated");
   const body = (opts.body || "").trim();
@@ -971,9 +979,11 @@ export async function sendSmsFromUser(opts: {
     sentBy: opts.user,
   });
 
+  let dispatched = false;
   try {
     await opts.beforeSend?.();
     await assertContactAllowed(restrictionTarget, restrictionContext);
+    dispatched = true;
     await opts.beforeDispatch?.();
     const sent = await telnyx.sendSms(to, body);
     try {
@@ -998,6 +1008,17 @@ export async function sendSmsFromUser(opts: {
     if (err instanceof AiReplySuppressedError || isContactRestrictedError(err)) {
       await CommunicationMessage.deleteOne({ _id: message._id, orgId: opts.orgId, status: 'queued' });
       throw err;
+    }
+    if (opts.uncertainOnTransportError && dispatched && !isDefiniteSmsRejection(err)) {
+      message.status = "pending_reconciliation";
+      message.errorDetail = String(err?.message || err).slice(0, 500);
+      await retryDbWrite(() => message.save()).catch(() => undefined);
+      await bumpConversation(conversation._id, message);
+      emitToOrg(opts.orgId, "comm:message:new", { message: message.toObject() });
+      throw new SmsDeliveryUncertainError(
+        "We couldn't confirm whether the SMS provider accepted the message",
+        { messageId: String(message._id), providerMessageId: "" },
+      );
     }
     message.status = "failed";
     message.errorDetail = String(err?.message || err).slice(0, 500);

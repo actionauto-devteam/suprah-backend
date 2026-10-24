@@ -27,12 +27,13 @@ describe('aiAutoPause scope guard', () => {
     expect(webchatController).toMatch(/recordHumanTakeover/);
 
     // Specifically inside sendMessage and replyToConversation, not just imported.
-    const sendMessageBody = commController.slice(commController.indexOf('export const sendMessage'));
+    const sendMessageStart = commController.indexOf('export const sendMessage');
+    const sendMessageBody = commController.slice(sendMessageStart, commController.indexOf('export const', sendMessageStart + 1));
     const replyBody = commController.slice(
       commController.indexOf('export const replyToConversation'),
       commController.indexOf('export const pauseSmsAi'),
     );
-    expect(sendMessageBody.slice(0, 800)).toMatch(/recordHumanTakeover/);
+    expect(sendMessageBody).toMatch(/recordHumanTakeover/);
     expect(replyBody).toMatch(/recordHumanTakeover/);
 
     const sendStaffMessageBody = webchatController.slice(

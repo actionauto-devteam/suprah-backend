@@ -19,6 +19,16 @@ import MailConversation from "../models/MailConversation.model";
 import { describeSmsFailure } from "../utils/smsFailure";
 import { recordHumanTakeover } from "../utils/aiAutoPause";
 import { manualSmsPhoneProblem } from "../utils/manualSmsPhone";
+import { resolveSmsDestination } from "../utils/smsDestination";
+import {
+  COMPOSER_MESSAGES,
+  SEND_UNCERTAIN_CODE,
+  beginComposerSend,
+  composerRequestHash,
+  finishComposerSend,
+  normalizeClientRequestId,
+  type ComposerSendStart,
+} from "../services/leadComposer.service";
 import MailMessage from "../models/MailMessage.model";
 import EmailCampaignRecipient from "../models/EmailCampaignRecipient.model";
 import EmailCampaign from "../models/EmailCampaign.model";
@@ -188,6 +198,58 @@ export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
 
 /** Start (or continue) a thread by phone/customer/lead — used by the leads
  *  page SMS Reply and the customer profile. */
+async function startComposerSms(req: Request, orgId: any, leadId: unknown, toPhone: unknown, body: unknown) {
+  const rawRequestId = req.body?.clientRequestId;
+  if (rawRequestId === undefined || rawRequestId === "") return null;
+  const clientRequestId = normalizeClientRequestId(rawRequestId);
+  if (!clientRequestId) throw new ApiError(400, "This send request is not valid. Refresh and try again.");
+  if (!leadId) throw new ApiError(400, "Choose a lead before sending.");
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId: orgId }).select("phone").lean();
+  const leadPhone = resolveSmsDestination(lead?.phone, "manual");
+  const target = resolveSmsDestination(toPhone, "manual");
+  if (!leadPhone.ok || !target.ok || leadPhone.e164 !== target.e164) {
+    throw new ApiError(409, COMPOSER_MESSAGES.phoneChanged, [{ code: "RECIPIENT_CHANGED" }]);
+  }
+  return beginComposerSend({
+    organizationId: orgId,
+    leadId,
+    channel: "sms",
+    clientRequestId,
+    requestHash: composerRequestHash(["sms", String(leadId), target.e164, String(body || "").trim()]),
+    userId: actor(req).userId,
+  });
+}
+
+async function sendComposerSms(
+  claim: ComposerSendStart | null,
+  send: () => ReturnType<typeof comm.sendSmsFromUser>,
+) {
+  if (claim?.kind !== "proceed") return send();
+  try {
+    const result = await send();
+    await finishComposerSend(claim.claimId, {
+      state: "sent",
+      result: { messageId: String(result.message._id), conversationId: String(result.conversation._id) },
+    });
+    return result;
+  } catch (err) {
+    const uncertain = err instanceof comm.SmsDeliveryUncertainError;
+    await finishComposerSend(claim.claimId, { state: uncertain ? "uncertain" : "failed", error: err });
+    if (uncertain) {
+      throw new ApiError(409, COMPOSER_MESSAGES.uncertain, [
+        { code: SEND_UNCERTAIN_CODE, messageId: (err as comm.SmsDeliveryUncertainError).messageId },
+      ]);
+    }
+    throw err;
+  }
+}
+
+async function duplicateComposerSms(orgId: any, result: Record<string, unknown>) {
+  const original: any = result.messageId ? await CommunicationMessage.findById(result.messageId).lean() : null;
+  const message = original && String(original.orgId) === String(orgId) ? original : null;
+  return new ApiResponse(200, { message, conversationId: result.conversationId || null, duplicate: true }, "Message already sent");
+}
+
 export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
   const { toPhone, body, customerId, customerName, leadId } = req.body || {};
@@ -196,8 +258,13 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
   if (phoneProblem) throw new ApiError(400, phoneProblem);
   await assertLeadOpenForManualSend(orgId, leadId);
   await assertManualSmsAllowed(orgId, toPhone, leadId);
+  const claim = await startComposerSms(req, orgId, leadId, toPhone, body);
+  if (claim?.kind === "duplicate") {
+    res.status(200).json(await duplicateComposerSms(orgId, claim.result));
+    return;
+  }
 
-  const result = await comm.sendSmsFromUser({
+  const result = await sendComposerSms(claim, () => comm.sendSmsFromUser({
     orgId,
     user: actor(req),
     toPhone,
@@ -206,7 +273,8 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     customerName,
     leadId,
     destinationPolicy: "manual",
-  });
+    uncertainOnTransportError: Boolean(claim),
+  }));
 
   await recordHumanTakeover({
     kind: "sms",

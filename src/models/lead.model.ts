@@ -29,6 +29,7 @@ export interface ILead extends Document {
   sourceProvider?: string;
 
   subject?: string;
+  emailThreadSubject?: string;
   body?: string;
 
   /** Clean, human-readable content (ADF parsed or cleaned email body) */
@@ -219,6 +220,11 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
 
     subject: {
       type: String,
+    },
+
+    emailThreadSubject: {
+      type: String,
+      maxlength: 200,
     },
 
     body: {
