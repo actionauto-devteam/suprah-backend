@@ -207,9 +207,14 @@ async function uploadSupraSpaceAttachmentThumbnail(file?: Express.Multer.File): 
 async function getSupraSpaceImageDimensions(file: Express.Multer.File, isImage: boolean): Promise<{ width: number; height: number } | undefined> {
   if (!isImage || !file.buffer?.length) return undefined;
   try {
-    const { width, height } = await sharp(file.buffer).metadata();
+    const { width, height, orientation } = await sharp(file.buffer).metadata();
     if (!width || !height || width < 1 || height < 1) return undefined;
-    return { width, height };
+    // Browsers honor EXIF rotation for phone photos, while Sharp metadata is
+    // reported in the stored pixel orientation. Persist display dimensions so
+    // the optimistic and delivered bubbles reserve the same geometry.
+    return [5, 6, 7, 8].includes(orientation || 1)
+      ? { width: height, height: width }
+      : { width, height };
   } catch (err) {
     // Media still uploads normally when a format cannot expose metadata. The
     // client has a one-time natural-size fallback for those legacy cases.
