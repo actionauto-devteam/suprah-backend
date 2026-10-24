@@ -87,7 +87,7 @@ async function waitFor(condition: () => Promise<any>) {
 
 beforeAll(async () => {
   await Organization.collection.insertMany([
-    { _id: ids.org, name: 'Attention Local Test', slug: `attention-${ids.org}`, metadata: { aiAgentEnabled: true } },
+    { _id: ids.org, name: 'Attention Local Test', slug: `attention-${ids.org}`, metadata: { aiAgentName: 'Anna', aiAgentEnabled: true } },
     { _id: ids.other, name: 'Attention Other Test', slug: `attention-${ids.other}` },
   ]);
   await User.collection.insertMany([

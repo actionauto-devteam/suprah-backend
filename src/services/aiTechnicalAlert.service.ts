@@ -1,4 +1,5 @@
 import AiAgentTask from '../models/AiAgentTask.model';
+import { AI_AGENT_FALLBACK_LABEL } from '../utils/aiAgentIdentity';
 import AiTechnicalAlertState from '../models/AiTechnicalAlertState.model';
 import { AttentionTechnicalCode, TECHNICAL_ATTENTION_CODES } from '../models/aiHumanAttention';
 import { notifyOrgAdmins } from '../utils/safeNotification';
@@ -72,7 +73,7 @@ export async function maybeAlertTechnicalFailures(input: {
   }
 
   const codes = await AiAgentTask.aggregate([{ $match: filter }, { $group: { _id: '$attentionCode', n: { $sum: 1 } } }]);
-  const agentName = input.agentName || 'Alex';
+  const agentName = input.agentName || AI_AGENT_FALLBACK_LABEL;
   const codeCounts = Object.fromEntries(codes
     .filter(row => row._id && (TECHNICAL_ATTENTION_CODES as string[]).includes(row._id))
     .map(row => [row._id, row.n]));

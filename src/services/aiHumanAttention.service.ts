@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { AI_AGENT_FALLBACK_LABEL } from '../utils/aiAgentIdentity';
 import { randomUUID } from 'crypto';
 import { Conversation, CommunicationMessage } from '../models/communication.model';
 import WebChatSession from '../models/WebChatSession.model';
@@ -261,7 +262,7 @@ const TECHNICAL_DETAILS: Record<AttentionTechnicalCode, string> = {
 export function describeAttentionReason(
   attention: Pick<AiHumanAttention, 'reason' | 'kind' | 'code'>,
   customerName: string,
-  agentName = 'Alex',
+  agentName = AI_AGENT_FALLBACK_LABEL,
 ): string {
   if (attentionKindOf(attention) === 'technical') {
     const who = customerName || 'the customer';
@@ -337,7 +338,7 @@ async function ensureHandoffNote(
     const summary = describeAttentionReason(attention, customerName, agentName);
     const status = attentionKindOf(attention) === 'technical'
       ? ` ${agentName} is paused until someone resumes it.${quiet ? ' Training mode: logged under Technical in AI Tasks; no staff were notified.' : ''}`
-      : ' Alex is paused — a human needs to respond.';
+      : ` ${agentName} is paused — a human needs to respond.`;
     const text = `${summary}.${status}${mockLabel(attention)}${mentionLabel ? ` ${mentionLabel}` : ''}`;
 
     await addLeadNoteAndNotify({
@@ -400,7 +401,7 @@ async function ensureHandoff(input: AttentionCheck, attention: AiHumanAttention,
         await Promise.all(notificationIds.map(userId => notificationService.createNotification({
           userId, organizationId: input.organizationId, type: 'ai_agent_handoff_needed',
           title: `${attention.reason} - customer waiting`,
-          message: `${describeAttentionReason(attention, customerName, agentName)}. ${kind === 'technical' ? agentName : 'Alex'} is paused. Open the conversation to respond.${mockLabel(attention)}`,
+          message: `${describeAttentionReason(attention, customerName, agentName)}. ${agentName} is paused. Open the conversation to respond.${mockLabel(attention)}`,
           metadata: { leadId, taskId: String(attention.taskId), channel: input.channel,
             route: `/crm/leads?leadId=${leadId}`, reason: attention.reason, attentionKind: kind,
             ...(attention.code ? { attentionCode: attention.code } : {}),
@@ -494,8 +495,8 @@ export async function screenAiHumanAttention(input: AttentionCheck & { leadId: s
       $setOnInsert: { organizationId: input.organizationId, leadId: input.leadId, channel: input.channel,
         status: 'skipped', handoffTriggered: true, handoffReason: `${attention.reason}${mockLabel(attention)}`,
         failureReason: technical
-          ? `Safety check unavailable (${attention.code || 'unknown'}); Alex did not send a reply`
-          : 'Customer message escalated without an Alex response',
+          ? `Safety check unavailable (${attention.code || 'unknown'}); the AI Agent did not send a reply`
+          : 'Customer message escalated without an AI Agent response',
         ...(input.channel === 'sms' ? { conversationId: input.targetId } : { sessionId: input.targetId }) },
     }, { upsert: true });
     await ensureHandoff(input, attention, input.leadId, input.agentName);

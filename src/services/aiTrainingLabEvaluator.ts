@@ -36,7 +36,7 @@ const HANDLING_LABELS: Record<string, string> = {
   safety_stop: 'be stopped by the mandatory safety checks',
 };
 
-const APPROXIMATE_NOTE = 'Approximate word matching, not proof of what Alex would say.';
+const APPROXIMATE_NOTE = 'Approximate word matching, not proof of what the AI Agent would say.';
 const LOCAL_SCREEN_NOTE = 'Local approximation only. The real check uses Gemini and can decide differently.';
 const SMS_LENGTH_LIMIT = 320;
 const CLAIMS_HUMAN = /\b(i am|i'm|im|this is)\s+(a\s+|an\s+)?(real|actual|live)\s+(person|human)\b|\b(i am|i'm|im)\s+(a\s+)?(human|person)\b|\b(i am|i'm|im)\s+not\s+(a\s+|an\s+)?(bot|robot|ai|machine|automated|virtual)\b|\bnot\s+a\s+(bot|robot|machine)\b/i;
@@ -99,7 +99,7 @@ function safetyChecks(scenario: ScenarioContent, expectsStop: boolean): { checks
       method: 'keyword_rule',
       status: relativeToExpectation(optOut, expectsStop, true),
       message: optOut
-        ? `"${command}" is an opt-out/opt-in keyword. Suprah handles it before Alex, so Alex never replies.`
+        ? `"${command}" is an opt-out/opt-in keyword. Suprah handles it before the AI Agent, so the AI Agent never replies.`
         : 'The message is not an opt-out or opt-in keyword.',
     });
 
@@ -114,8 +114,8 @@ function safetyChecks(scenario: ScenarioContent, expectsStop: boolean): { checks
       message: !appointment
         ? 'The message is not an appointment reply keyword.'
         : scenario.flags?.hasUpcomingAppointment
-          ? `"${command}" is handled as an appointment reply before Alex, so Alex never replies.`
-          : `"${command}" is handled as an appointment reply before Alex even without an upcoming appointment, so Alex never replies.`,
+          ? `"${command}" is handled as an appointment reply before the AI Agent, so the AI Agent never replies.`
+          : `"${command}" is handled as an appointment reply before the AI Agent even without an upcoming appointment, so the AI Agent never replies.`,
     });
 
     const optedOut = Boolean(scenario.flags?.previouslyOptedOut);
@@ -164,7 +164,7 @@ function safetyChecks(scenario: ScenarioContent, expectsStop: boolean): { checks
       label: 'Expected safety stop',
       method: 'approximate',
       status: 'warning',
-      message: 'None of the local checks flag this message. The real Gemini screen might still stop Alex, but that cannot be confirmed here.',
+      message: 'None of the local checks flag this message. The real Gemini screen might still stop the AI Agent, but that cannot be confirmed here.',
     });
   }
   return { checks, certain, likely };
@@ -182,8 +182,8 @@ function ruleChecks(rule: StructuredRule, scenario: ScenarioContent, path: Predi
       status: 'not_evaluated',
       optional: true,
       message: path === 'safety_stop_certain'
-        ? 'Alex never reaches the training rule in this scenario.'
-        : 'The scenario expects the safety checks to stop Alex, so the rule is not compared.',
+        ? 'The AI Agent never reaches the training rule in this scenario.'
+        : 'The scenario expects the safety checks to stop the AI Agent, so the rule is not compared.',
     });
   } else if (!rule.handling) {
     checks.push({
@@ -192,7 +192,7 @@ function ruleChecks(rule: StructuredRule, scenario: ScenarioContent, path: Predi
       label: 'Rule handling matches the expectation',
       method: 'deterministic',
       status: 'not_evaluated',
-      message: 'This proposal does not say how Alex should handle the situation (older coaching format).',
+      message: 'This proposal does not say how the AI Agent should handle the situation (older coaching format).',
     });
   } else {
     const matches = rule.handling === expected;
@@ -203,8 +203,8 @@ function ruleChecks(rule: StructuredRule, scenario: ScenarioContent, path: Predi
       method: 'deterministic',
       status: matches ? 'pass' : 'fail',
       message: matches
-        ? `The rule tells Alex to ${HANDLING_LABELS[rule.handling]}, as this scenario expects.`
-        : `The rule tells Alex to ${HANDLING_LABELS[rule.handling]}, but this scenario expects Alex to ${HANDLING_LABELS[expected]}.`,
+        ? `The rule tells the AI Agent to ${HANDLING_LABELS[rule.handling]}, as this scenario expects.`
+        : `The rule tells the AI Agent to ${HANDLING_LABELS[rule.handling]}, but this scenario expects the AI Agent to ${HANDLING_LABELS[expected]}.`,
     });
   }
 
@@ -251,7 +251,7 @@ function ruleChecks(rule: StructuredRule, scenario: ScenarioContent, path: Predi
       label: 'Rule versus safety checks',
       method: path === 'safety_stop_certain' ? 'deterministic' : 'approximate',
       status: 'warning',
-      message: 'This rule tells Alex to respond, but the safety checks would stop Alex for this message. Safety always wins.',
+      message: 'This rule tells the AI Agent to respond, but the safety checks would stop the AI Agent for this message. Safety always wins.',
     });
   }
   return checks;
@@ -271,7 +271,7 @@ function replyChecks(rule: StructuredRule, scenario: ScenarioContent, path: Pred
   ];
 
   if (path === 'safety_stop_certain' || expected === 'safety_stop') {
-    return placeholders('not_evaluated', 'Alex does not reply in this scenario, so a sample reply is not checked.', true);
+    return placeholders('not_evaluated', 'The AI Agent does not reply in this scenario, so a sample reply is not checked.', true);
   }
   if (!reply) return placeholders('not_evaluated', 'Add a sample reply to check this.');
 
@@ -297,7 +297,7 @@ function replyChecks(rule: StructuredRule, scenario: ScenarioContent, path: Pred
     method: 'deterministic',
     status: identity.length || claimsHuman ? 'fail' : 'pass',
     message: claimsHuman
-      ? 'The reply claims to be a person or denies being AI. Alex must never do that.'
+      ? 'The reply claims to be a person or denies being AI. The AI Agent must never do that.'
       : identity.length ? identity[0] : 'The reply does not claim to be a person or deny being AI.',
   });
 

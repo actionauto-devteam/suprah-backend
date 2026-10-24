@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { AI_AGENT_NAME_REQUIRED_REASON, configuredAiAgentName } from '../utils/aiAgentIdentity';
 import Organization from '../models/Organization.model';
 import AiAgentDraft, {
   AI_DRAFT_RETENTION_DAYS,
@@ -54,7 +55,8 @@ export type ShadowIneligibleReason =
   | 'ai_master_off'
   | 'org_not_found'
   | 'org_flag_off'
-  | 'mode_not_training';
+  | 'mode_not_training'
+  | 'agent_name_missing';
 
 export interface ShadowEligibility {
   eligible: boolean;
@@ -136,6 +138,7 @@ export function eligibilityFromMetadata(metadata: any, channel: AiDraftChannel, 
   if (!found) return { eligible: false, reason: 'org_not_found', ...base };
   if (metadata?.aiShadowDraftsEnabled !== true) return { eligible: false, reason: 'org_flag_off', ...base };
   if (modes.source !== 'configured' || modes[channel] !== 'training') return { eligible: false, reason: 'mode_not_training', ...base };
+  if (!configuredAiAgentName(metadata)) return { eligible: false, reason: 'agent_name_missing', ...base };
   return { eligible: true, ...base };
 }
 
@@ -371,7 +374,6 @@ export async function recoverStaleShadowDrafts(organizationId: any, now: Date = 
 export const SHADOW_MAX_AI_CALLS = 6;
 export const SHADOW_PER_CALL_TIMEOUT_MS = 12_000;
 export const SHADOW_DEADLINE_MS = 45_000;
-const DEFAULT_AGENT_NAME = 'Alex';
 
 function positiveIntFromEnv(name: string, fallback: number): number {
   const value = parseInt(process.env[name] || '', 10);
@@ -431,7 +433,8 @@ async function loadShadowLead(input: ShadowGenerationInput): Promise<any | null>
 
 async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallObserver): Promise<ShadowDraftResult> {
   const org: any = await Organization.findById(input.organizationId).select('name metadata').lean();
-  const agentName = String(org?.metadata?.aiAgentName || '').trim() || DEFAULT_AGENT_NAME;
+  const agentName = configuredAiAgentName(org?.metadata);
+  if (!agentName) throw new ShadowGenerationError(AI_AGENT_NAME_REQUIRED_REASON);
   const dealerName = org?.name || 'Your Dealership';
   const lead = input.lead || (await loadShadowLead(input)) || {};
 
@@ -504,7 +507,7 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
           ...base,
           status: 'needs_human',
           coachingVerdict: 'error',
-          handoffReason: 'Coaching rules could not be checked, so live Alex would have sent a safe fallback instead',
+          handoffReason: `Coaching rules could not be checked, so live ${agentName} would have sent a safe fallback instead`,
         };
       }
       appliedRules = selection.appliedRules;

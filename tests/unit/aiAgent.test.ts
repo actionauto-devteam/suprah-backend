@@ -707,7 +707,7 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
     await processAlexTurn(ctx);
     expect(ctx.send).toHaveBeenCalledTimes(1);
     expect(ctx.notifyHandoff).not.toHaveBeenCalled();
-    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'Alex reply suppressed at dispatch' }));
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'AI Agent reply suppressed at dispatch' }));
   });
 
   it('does not send another fallback or handoff if dispatch rejects a fallback', async () => {
@@ -716,7 +716,7 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
     await processAlexTurn(ctx);
     expect(ctx.send).toHaveBeenCalledTimes(1);
     expect(ctx.notifyHandoff).not.toHaveBeenCalled();
-    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'Alex fallback suppressed at dispatch' }));
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', failureReason: 'AI Agent fallback suppressed at dispatch' }));
   });
 
   it('records a Do Not Contact skip, with no fallback or handoff, when the send boundary blocks the reply', async () => {

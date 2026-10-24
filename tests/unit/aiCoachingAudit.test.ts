@@ -97,7 +97,7 @@ describe('summarizeCoachingAudit', () => {
     expect(text).toContain('Environment: local');
     expect(text).toContain('Credentials: read-only (roles: read@suprah_dev)');
     expect(text).toContain('Coaching records examined: 7 (active 5, disabled 2)');
-    expect(text).toContain('Passing current safety rules: 3 (includes 1 with no text, which Alex skips)');
+    expect(text).toContain('Passing current safety rules: 3 (includes 1 with no text, which the AI Agent skips)');
     expect(text).toContain('Failing current safety rules: 4 (active 2, disabled 2)');
     expect(text).toContain('Not examined: 1 deleted');
     expect(text).toContain('- guardrail_figure: 2 records (2 active).');

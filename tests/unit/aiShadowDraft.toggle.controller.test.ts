@@ -36,7 +36,7 @@ describe('shadow drafts organization toggle', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env = { ...env, AI_AGENT_ENABLED: 'true', AI_SHADOW_DRAFTS_ENABLED: 'true' };
-    storedMetadata = { aiAgentModes: { sms: 'training', email: 'live', webchat: 'off' } };
+    storedMetadata = { aiAgentName: 'Anna', aiAgentModes: { sms: 'training', email: 'live', webchat: 'off' } };
     mockOrgFindById.mockImplementation(() => ({ select: () => ({ lean: () => Promise.resolve({ metadata: storedMetadata }) }) }));
     mockOrgUpdateOne.mockImplementation(async (_f: any, update: any) => {
       for (const [k, v] of Object.entries(update.$set || {})) storedMetadata[k.replace('metadata.', '')] = v;

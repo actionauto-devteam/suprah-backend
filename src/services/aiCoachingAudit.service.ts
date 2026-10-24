@@ -25,7 +25,7 @@ const MAX_LISTED_IN_TEXT = 500;
 export const COACHING_AUDIT_ISSUE_LABELS: Record<string, string> = {
   guardrail_figure: 'Prices, payments, rates or other money figures',
   guardrail_topic: 'Pricing, financing, discount, trade-in or availability claims',
-  safety_bypass: 'Tells Alex to skip a safety rule such as opt-outs, handoffs, AI disclosure or mandatory checks',
+  safety_bypass: 'Tells the AI Agent to skip a safety rule such as opt-outs, handoffs, AI disclosure or mandatory checks',
 };
 
 export interface CoachingAuditInput {
@@ -292,7 +292,7 @@ export function formatCoachingAuditReport(
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push('');
   lines.push(`Coaching records examined: ${totals.examined} (active ${totals.active}, disabled ${totals.disabled})`);
-  lines.push(`Passing current safety rules: ${totals.passing}${totals.noText ? ` (includes ${totals.noText} with no text, which Alex skips)` : ''}`);
+  lines.push(`Passing current safety rules: ${totals.passing}${totals.noText ? ` (includes ${totals.noText} with no text, which the AI Agent skips)` : ''}`);
   lines.push(`Failing current safety rules: ${totals.failing} (active ${totals.failingActive}, disabled ${totals.failingDisabled})`);
   lines.push(`Not examined: ${report.notExamined.deleted} deleted${report.notExamined.otherStatus ? `, ${report.notExamined.otherStatus} with an unexpected status` : ''}`);
   lines.push('');

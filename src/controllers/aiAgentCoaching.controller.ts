@@ -73,7 +73,7 @@ async function loadVerifiedAiMessage(input: {
       direction: 'outbound',
       'sentBy.userId': AI_AGENT_ACTOR_ID,
     }).lean() as any;
-    if (!message) throw new ApiError(404, 'Alex SMS message not found');
+    if (!message) throw new ApiError(404, 'AI Agent SMS message not found');
     return {
       message,
       sourceMessageModel: 'CommunicationMessage' as const,
@@ -88,7 +88,7 @@ async function loadVerifiedAiMessage(input: {
     direction: 'outbound',
     'sentBy.userId': AI_AGENT_ACTOR_ID,
   }).lean() as any;
-  if (!message) throw new ApiError(404, 'Alex webchat message not found');
+  if (!message) throw new ApiError(404, 'AI Agent webchat message not found');
   return {
     message,
     sourceMessageModel: 'WebChatMessage' as const,

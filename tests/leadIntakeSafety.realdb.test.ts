@@ -145,7 +145,7 @@ describe('Real-DB: lifecycle intake safety (local MongoDB only)', () => {
     await Promise.all([Lead.createIndexes(), LeadInquiry.init(), LeadIntakeControl.init(), LeadIntakeAudit.init(), IntakeClaim.init()]);
     await Organization.collection.insertMany([
       { _id: orgId, name: 'Safety Dealer', slug: `safety-${orgId}`, status: 'active', metadata: {} },
-      { _id: aiOrgId, name: 'Alex Dealer', slug: `safety-${aiOrgId}`, status: 'active', metadata: { aiAgentEnabled: true, aiAgentModes: { sms: 'live', webchat: 'live', email: 'off' } } },
+      { _id: aiOrgId, name: 'Alex Dealer', slug: `safety-${aiOrgId}`, status: 'active', metadata: { aiAgentName: 'Anna', aiAgentEnabled: true, aiAgentModes: { sms: 'live', webchat: 'live', email: 'off' } } },
     ] as any[]);
     await User.collection.insertMany([
       { _id: ids.owner, name: 'Olivia Owner', email: `safety-owner-${orgId}@example.com`, password: 'x', role: 'admin', organizationRole: 'admin', organizationId: orgId, isActive: true },

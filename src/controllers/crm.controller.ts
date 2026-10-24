@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { cleanAiAgentName, identityFromMetadata, isValidAiAgentName } from "../utils/aiAgentIdentity";
 import { Request, Response } from "express";
 import { revokeRecordingMediaForLogin } from "../services/recordingMediaAuth.service";
 import { asyncHandler } from "../utils/asyncHandler";
@@ -429,7 +430,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
   const webchatEnabled = metadata.webchatEnabled !== false;
   const webchatGreeting = metadata.webchatGreeting || "";
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
-  const aiAgentName = metadata.aiAgentName || "Alex";
+  const aiAgentIdentity = identityFromMetadata(metadata);
+  const aiAgentName = aiAgentIdentity.name || "";
   const aiHandoffFallbackGroupId = metadata.aiHandoffFallbackGroupId || "";
   const FOLLOWUP_INTERVAL_OPTIONS_HOURS = [24, 48, 72];
   const parsedFollowUpInterval = parseInt(metadata.aiFollowUpIntervalHours, 10);
@@ -524,10 +526,11 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     metadata.aiAgentEnabled = false;
   }
   if (aiAgentName !== undefined) {
-    metadata.aiAgentName =
-      String(aiAgentName || "")
-        .trim()
-        .slice(0, 40) || "Alex";
+    const cleanedName = cleanAiAgentName(aiAgentName);
+    if (cleanedName && !isValidAiAgentName(cleanedName)) {
+      throw new ApiError(400, "The AI Agent name needs at least one letter.");
+    }
+    metadata.aiAgentName = cleanedName;
   }
   if (aiHandoffFallbackGroupId !== undefined) {
     metadata.aiHandoffFallbackGroupId = String(

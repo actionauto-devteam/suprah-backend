@@ -17,7 +17,7 @@ import {
 } from '../../src/services/aiShadowDraft.service';
 import AiAgentDraft from '../../src/models/AiAgentDraft.model';
 
-const training = { aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } };
+const training = { aiAgentName: 'Anna', aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'training', webchat: 'training' } };
 
 describe('shadow draft eligibility', () => {
   const env = { ...process.env };
@@ -45,10 +45,16 @@ describe('shadow draft eligibility', () => {
   });
 
   it('checks each channel independently', () => {
-    const metadata = { aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'live', webchat: 'off' } };
+    const metadata = { aiAgentName: 'Anna', aiShadowDraftsEnabled: true, aiAgentModes: { sms: 'training', email: 'live', webchat: 'off' } };
     expect(eligibilityFromMetadata(metadata, 'sms').eligible).toBe(true);
     expect(eligibilityFromMetadata(metadata, 'email').eligible).toBe(false);
     expect(eligibilityFromMetadata(metadata, 'webchat').eligible).toBe(false);
+  });
+
+  it('is never eligible without a configured AI Agent name', () => {
+    for (const aiAgentName of [undefined, '', '   ']) {
+      expect(eligibilityFromMetadata({ ...training, aiAgentName }, 'sms')).toMatchObject({ eligible: false, reason: 'agent_name_missing' });
+    }
   });
 
   it('is never eligible for a legacy organization that has not configured modes', () => {

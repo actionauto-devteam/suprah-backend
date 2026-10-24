@@ -101,6 +101,7 @@ describe('AI operating mode — every automated AI send path is guarded', () => 
       'schedulers/vehicleReengagement.scheduler.ts',
       'controllers/demoLab.controller.ts',
       'services/aiShadowDraft.service.ts',
+      'services/aiAgentDraft.service.ts',
     ]);
     const unexpected = allFiles.filter(({ file, source }) => generators.test(source) && !allowed.has(file)).map(({ file }) => file);
     expect(unexpected).toEqual([]);
@@ -114,6 +115,7 @@ describe('AI operating mode — every automated AI send path is guarded', () => 
     expect(readSrc('services/vehicleReengagement.service.ts')).toMatch(/workflow: 'vehicle_reengagement'[\s\S]*?skipped_ai_not_live[\s\S]*?generateReengagementMessage\(lead, vehicle\)/);
     expect(readSrc('controllers/vehicleReengagement.controller.ts')).toMatch(/workflow: 'reengagement_send_anyway'[\s\S]*?ApiError\(409/);
     expect(readSrc('services/aiShadowDraft.service.ts')).toMatch(/claimShadowDraft\(input\)[\s\S]*?beginShadowGeneration\([\s\S]*?runWithAiCallObserver\([\s\S]*?completeShadowDraft\(/);
+    expect(readSrc('services/aiAgentDraft.service.ts')).toMatch(/export async function generateStaffDraft[\s\S]*?AI_AGENT_NAME_REQUIRED_CODE[\s\S]*?assertLeadOpenForManualSend[\s\S]*?ContactRestrictedError[\s\S]*?withDeadline\(\s*buildDraft\(/);
   });
 
   it('the Customer Shop Assistant stays isolated from outbound lead messaging', () => {

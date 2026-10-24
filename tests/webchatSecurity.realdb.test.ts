@@ -102,7 +102,7 @@ describe('Real-DB: Web Chat security and permissions (local MongoDB only)', () =
     process.env.AI_AGENT_ENABLED = 'true';
     process.env.GEMINI_API_KEY = 'local-test-key';
     await Organization.collection.insertMany([
-      { _id: orgId, name: 'Web Chat Security Dealer', slug: SLUG, status: 'active', metadata: { aiAgentEnabled: true } },
+      { _id: orgId, name: 'Web Chat Security Dealer', slug: SLUG, status: 'active', metadata: { aiAgentName: 'Anna', aiAgentEnabled: true } },
       { _id: otherOrgId, name: 'Other Dealer', slug: `wcsec-${otherOrgId}`, status: 'active', metadata: {} },
     ] as any[]);
     await User.collection.insertMany([

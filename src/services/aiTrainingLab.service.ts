@@ -180,7 +180,7 @@ export function parseScenarioInput(raw: unknown): { content: Omit<ScenarioConten
     },
     expectation: {
       handling: SCENARIO_EXPECTED_HANDLING.includes(handling) ? handling : 'ai_handles',
-      mustAsk: cleanList(expectationInput.mustAsk, 'expectation.mustAsk', 'Questions Alex must ask', L.listItems, L.listItem, errors),
+      mustAsk: cleanList(expectationInput.mustAsk, 'expectation.mustAsk', 'Questions the AI Agent must ask', L.listItems, L.listItem, errors),
       mustInclude: cleanList(expectationInput.mustInclude, 'expectation.mustInclude', 'Things to include', L.includeItems, L.listItem, errors),
       mustAvoid: cleanList(expectationInput.mustAvoid, 'expectation.mustAvoid', 'Things to avoid', L.includeItems, L.listItem, errors),
       notes: cleanText(expectationInput.notes, 'expectation.notes', 'Notes', L.notes, errors) || undefined,
