@@ -1623,7 +1623,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
 export const createInquiry = async (req: Request, res: Response) => {
   try {
-    const { firstName, lastName, email, phone, vehicle, comments, source, channel, location } = req.body;
+    const { firstName, lastName, email, phone, address, vehicle, comments, source, channel, location } = req.body;
     const user = req.user || req.crmUser;
     if (!user) throw new ApiError(401, 'Please authenticate');
     const userId = user._id;
@@ -1648,6 +1648,7 @@ export const createInquiry = async (req: Request, res: Response) => {
       lastName: lastName || '',
       email,
       phone,
+      address: String(address || '').trim(),
       vehicle: {
         year: vehicle?.year || '',
         make: vehicle?.make || '',
