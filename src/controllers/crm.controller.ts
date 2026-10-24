@@ -1166,7 +1166,7 @@ const getUsers = asyncHandler(async (req: Request, res: Response) => {
   const [users, total] = await Promise.all([
     CrmUser.find(filter)
       .select(
-        "fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt payrollAccess isSystem",
+        "fullName username email avatar role isActive lastLoginAt createdAt birthday hireDate gender department screenshotExempt locationRequiredOverride monitoringModeOverride trayDeviceAuthOverride deviceSwitchOverride autoSwitchOverride desktopLocationOverride payrollLocation hourlyTrackingExempt isOffboarded offboardedAt payrollAccess leadReviewAccess isSystem",
       )
       .sort(sortQuery)
       .skip(skip)
@@ -1230,6 +1230,7 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
     hourlyTrackingExempt,
     otWarningExempt,
     payrollAccess,
+    leadReviewAccess,
   } = req.body;
 
   const user = await CrmUser.findOne({
@@ -1400,6 +1401,10 @@ const updateUser = asyncHandler(async (req: Request, res: Response) => {
       throw new ApiError(400, "You cannot change your own payroll access");
     }
     user.payrollAccess = !!payrollAccess;
+  }
+
+  if (leadReviewAccess !== undefined) {
+    user.leadReviewAccess = !!leadReviewAccess;
   }
 
   // Validate the CRM document before touching the main User record. This keeps

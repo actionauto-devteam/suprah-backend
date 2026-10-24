@@ -9,7 +9,7 @@ import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contact
 import { CustomerLinkStatus, evaluateCustomerIdentity, findIdentityCustomers } from './customerIdentity.service';
 
 const LEAD_MATCH_FIELDS =
-  '_id status statusHistory updatedAt createdAt customerId phone email normalizedPhone normalizedEmail identityEmailExcluded';
+  '_id status statusHistory updatedAt createdAt customerId phone email normalizedPhone normalizedEmail identityEmailExcluded intakeIdentity';
 export const MAX_MATCHED_LEADS = 200;
 export const MAX_RESTRICTION_MATCHES = 100;
 const QUERY_TIME_LIMIT_MS = 5000;
@@ -26,6 +26,7 @@ export interface LeadAssociationCandidate {
   matchedBy: ContactMatchField[];
   terminalAt: Date | null;
   terminalMarker?: string | null;
+  unverified?: boolean;
 }
 
 export interface LeadAssociationIdentity {
@@ -113,10 +114,11 @@ export function toAssociationCandidate(
     matchedBy,
     terminalAt: terminal.at,
     terminalMarker: terminal.at ? (terminal.fromHistory ? String(terminal.at.getTime()) : 'legacy') : null,
+    unverified: doc.intakeIdentity === 'unverified',
   };
 }
 
-function contactDisagrees(
+export function contactDisagrees(
   candidate: LeadAssociationCandidate,
   contact: { normalizedPhone: string | null; normalizedEmail: string | null },
 ): boolean {
@@ -248,15 +250,21 @@ async function loadContactLeads(
   return { candidates: [...byId.values()], complete: current.complete && older.complete };
 }
 
-export async function findLeadAssociation(input: {
+export interface LeadAssociationInputs {
+  contact: { normalizedPhone: string | null; normalizedEmail: string | null };
+  identity: LeadAssociationIdentity;
+  candidates: LeadAssociationCandidate[];
+  contextLead: LeadAssociationCandidate | null;
+  lookupComplete: boolean;
+}
+
+export async function loadLeadAssociationInputs(input: {
   organizationId: string;
   phone?: unknown;
   email?: unknown;
   emailExcluded?: boolean;
   contextLeadId?: unknown;
-}): Promise<
-  LeadAssociationDecision & { identity: LeadAssociationIdentity; candidates: LeadAssociationCandidate[]; lookupComplete: boolean }
-> {
+}): Promise<LeadAssociationInputs> {
   if (!input.organizationId || !mongoose.isValidObjectId(input.organizationId)) {
     throw new Error('A valid organization is required for lead matching');
   }
@@ -279,8 +287,21 @@ export async function findLeadAssociation(input: {
       .lean();
     contextLead = doc ? toAssociationCandidate(doc, contact) : null;
   }
-  const decision = decideLeadAssociation({ contact, identity, candidates, contextLead, lookupComplete: complete });
-  return { ...decision, identity, candidates, lookupComplete: complete };
+  return { contact, identity, candidates, contextLead, lookupComplete: complete };
+}
+
+export async function findLeadAssociation(input: {
+  organizationId: string;
+  phone?: unknown;
+  email?: unknown;
+  emailExcluded?: boolean;
+  contextLeadId?: unknown;
+}): Promise<
+  LeadAssociationDecision & { identity: LeadAssociationIdentity; candidates: LeadAssociationCandidate[]; lookupComplete: boolean }
+> {
+  const { contact, identity, candidates, contextLead, lookupComplete } = await loadLeadAssociationInputs(input);
+  const decision = decideLeadAssociation({ contact, identity, candidates, contextLead, lookupComplete });
+  return { ...decision, identity, candidates, lookupComplete };
 }
 
 export async function findContactRestriction(input: {

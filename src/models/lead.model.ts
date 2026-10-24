@@ -96,6 +96,7 @@ export interface ILead extends Document {
   aiSummaryGeneratedAt?: Date;
   sourceSubmittedAt?: Date;
   sourceInquiryId?: mongoose.Types.ObjectId;
+  intakeIdentity?: 'unverified';
   intakeSlots?: string[];
   lastInquiryAt?: Date;
   inquiryCount?: number;
@@ -379,6 +380,7 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
     aiSummaryGeneratedAt: { type: Date },
     sourceSubmittedAt: { type: Date },
     sourceInquiryId: { type: Schema.Types.ObjectId, ref: 'LeadInquiry' },
+    intakeIdentity: { type: String, enum: ['unverified'] },
     intakeSlots: { type: [String], default: undefined },
     lastInquiryAt: { type: Date },
     inquiryCount: { type: Number, min: 0 },

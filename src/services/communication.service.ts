@@ -21,6 +21,7 @@ import { assertContactAllowed, auditActorFromRef, checkContactForSend, isContact
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
+import IntakeClaim from "../models/IntakeClaim.model";
 import SmsCampaignRecipient from "../models/SmsCampaignRecipient.model";
 import Vehicle from "../models/Vehicle.model";
 import AiAgentLog from "../models/AiAgentLog.model";
@@ -41,6 +42,21 @@ import {
 import { resolveOrgSystemUserId } from "../utils/orgSystemUser";
 import { retryDbWrite } from "../utils/retryDbWrite";
 import { LEAD_SOURCE } from "../constants/leadSource";
+import { getLeadIntakeMode } from "./leadIntakeControl.service";
+import type { LeadIntakeMode } from "../models/LeadIntakeControl.model";
+import { LIFECYCLE_TERMINAL_STATUSES } from "../constants/leadStatus";
+import { moveConversationToLead } from "../utils/conversationOwnership";
+import {
+  CONFIRM_KEYWORDS,
+  HELP_KEYWORDS,
+  OPT_IN_KEYWORDS,
+  OPT_OUT_KEYWORDS,
+  RESCHEDULE_KEYWORDS,
+  normalizeSmsCommand,
+} from "../utils/smsKeywords";
+
+const lifecycleIntake = () => import("./leadIntake.service");
+const inquiryRecords = () => import("./leadInquiry.service");
 import { getInboundRoutingConfig, getConfiguredInboundOrganization } from './callRoutingConfig.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -293,16 +309,8 @@ export async function findLeadByPhone(orgId: any, phone: string): Promise<any | 
   return leads[0];
 }
 
-const CONFIRM_KEYWORDS = new Set(["YES", "Y", "CONFIRM", "CONFIRMED", "OK", "OKAY"]);
-const RESCHEDULE_KEYWORDS = new Set(["NO", "N", "CANCEL", "RESCHEDULE", "CHANGE"]);
-const OPT_OUT_KEYWORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT"]);
-const OPT_IN_KEYWORDS = new Set(["START", "UNSTOP"]);
 
-function normalizeSmsCommand(body: string): string {
-  return (body || "").trim().toUpperCase().replace(/[.!?]+$/, "");
-}
-
-async function findAppointmentForReply(orgId: any, phone: string): Promise<any | null> {
+async function findAppointmentForReply(orgId: any, phone: string, requireReminder = false): Promise<any | null> {
   const tail = last10(phone);
   if (tail.length < 7) return null;
 
@@ -323,6 +331,7 @@ async function findAppointmentForReply(orgId: any, phone: string): Promise<any |
     .sort({ reminderSentAt: -1 })
     .catch(() => null);
   if (reminded) return reminded;
+  if (requireReminder) return null;
 
   return Appointment.findOne({
     ...baseFilter,
@@ -343,13 +352,13 @@ function formatApptTimeForSms(date: Date): string {
   });
 }
 
-async function handleAppointmentSmsReply(orgId: any, from: string, body: string): Promise<boolean> {
+async function handleAppointmentSmsReply(orgId: any, from: string, body: string, requireReminder = false): Promise<boolean> {
   const command = normalizeSmsCommand(body);
   const isConfirm = CONFIRM_KEYWORDS.has(command);
   const isReschedule = RESCHEDULE_KEYWORDS.has(command);
   if (!isConfirm && !isReschedule) return false;
 
-  const appointment = await findAppointmentForReply(orgId, from);
+  const appointment = await findAppointmentForReply(orgId, from, requireReminder);
   if (!appointment) return true;
 
   const customerName =
@@ -925,7 +934,10 @@ export async function sendSmsFromUser(opts: {
     }
   }
   if (!leadId) {
-    const lead = await findLeadByPhone(opts.orgId, to);
+    const lifecycle = (await getLeadIntakeMode(String(opts.orgId)).catch(() => "paused")) !== "off";
+    const lead = lifecycle
+      ? await (await lifecycleIntake()).findOpenLeadForContact(String(opts.orgId), { phone: to }).catch(() => null)
+      : await findLeadByPhone(opts.orgId, to);
     if (lead) leadId = lead._id;
   }
 
@@ -1255,8 +1267,16 @@ export async function triggerAiReplyForNewInquiry(orgId: any, lead: any, phone: 
   const text = String(inquiryText || "").trim();
   const rawPhone = String(phone || "").trim();
   if (!rawPhone || !text || !lead?._id) return;
+  const destination = resolveSmsDestination(rawPhone, "automated");
+  if (!destination.ok) {
+    console.warn("[comm] New inquiry text skipped: phone number cannot be texted", { leadId: String(lead._id), reason: destination.reason });
+    return;
+  }
   const normalizedPhone = normalizePhone(rawPhone);
-  if (!normalizedPhone || normalizedPhone === "+") return;
+  if (!normalizedPhone || normalizedPhone === "+" || normalizedPhone !== destination.e164) {
+    console.warn("[comm] New inquiry text skipped: phone number did not normalize consistently", { leadId: String(lead._id) });
+    return;
+  }
 
   try {
     const LeadModel = mongoose.model("Lead");
@@ -1290,6 +1310,7 @@ export async function triggerAiReplyForNewInquiry(orgId: any, lead: any, phone: 
       from: normalizedPhone,
       to: telnyx.COMPANY_NUMBER,
       status: "received",
+      origin: "inquiry",
     });
 
     await bumpConversation(conversation._id, message);
@@ -1312,7 +1333,142 @@ export async function triggerAiReplyForNewInquiry(orgId: any, lead: any, phone: 
 }
 
 /** Inbound SMS from Telnyx webhook (message.received). */
-export async function handleInboundSms(payload: any, orgOverride?: any) {
+export interface InboundSmsRetention {
+  orgId: any;
+  mode: LeadIntakeMode;
+  messageId: mongoose.Types.ObjectId;
+  inquiryId: string | null;
+  replay: boolean;
+}
+
+export async function retainInboundSms(payload: any, orgOverride?: any): Promise<InboundSmsRetention | null> {
+  const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
+  const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
+  const to = normalizePhone(toEntry?.phone_number || toEntry || telnyx.COMPANY_NUMBER);
+  const body = payload?.text || "";
+  if (!from || !body) return null;
+  const orgId = orgOverride ?? (await resolveOrgForNumber(to));
+  if (!orgId) return null;
+  const mode = await getLeadIntakeMode(String(orgId));
+  const messageId = new mongoose.Types.ObjectId();
+  if (mode === "off") {
+    const providerId = String(payload?.id || "").trim();
+    if (!providerId) return { orgId, mode, messageId, inquiryId: null, replay: false };
+    const filter = { organizationId: String(orgId), kind: "sms_message" as const, claimKey: providerId };
+    const claim = await IntakeClaim.findOneAndUpdate(
+      filter,
+      { $setOnInsert: { ...filter, messageId, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) } },
+      { new: true, upsert: true, includeResultMetadata: true },
+    ).catch(async (err: any) => {
+      if (err?.code !== 11000) throw err;
+      return { lastErrorObject: { updatedExisting: true }, value: await IntakeClaim.findOne(filter).lean() } as any;
+    });
+    const existing = Boolean(claim?.lastErrorObject?.updatedExisting);
+    const claimedId = claim?.value?.messageId;
+    return {
+      orgId,
+      mode,
+      messageId: existing && claimedId ? new mongoose.Types.ObjectId(String(claimedId)) : messageId,
+      inquiryId: null,
+      replay: existing,
+    };
+  }
+  const customer = await findCustomerByPhone(orgId, from);
+  const [firstName, ...rest] = (customerDisplayName(customer) || "").trim().split(/\s+/).filter(Boolean);
+  const { event, created } = await (await inquiryRecords()).recordInquiryEvent({
+    organizationId: String(orgId),
+    kind: "sms",
+    receivedAt: new Date(),
+    channel: "sms",
+    source: LEAD_SOURCE.INBOUND_SMS,
+    contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
+    comments: String(body).slice(0, 10000),
+    sourceIds: { smsProviderMessageId: payload?.id || undefined, communicationMessageId: messageId },
+  });
+  const originalId = (event as any).sourceIds?.communicationMessageId;
+  return {
+    orgId,
+    mode,
+    messageId: created || !originalId ? messageId : new mongoose.Types.ObjectId(String(originalId)),
+    inquiryId: String(event._id),
+    replay: !created,
+  };
+}
+
+async function settleConversationInquiry(opts: {
+  orgId: any;
+  inquiryId: string;
+  earlyOwnerId: string | null;
+  conversation: any;
+  unlink: () => Promise<unknown>;
+}): Promise<any | null> {
+  if (opts.earlyOwnerId) await (await lifecycleIntake()).skipLeadInquiryNotification(opts.inquiryId).catch(() => undefined);
+  const result = await (await lifecycleIntake()).processLeadInquiry(opts.inquiryId);
+  const ownerId = result.status === "associated" || result.status === "duplicate" ? result.leadId : null;
+  const owner: any = ownerId
+    ? await mongoose.model("Lead").findOne({ _id: ownerId, organizationId: opts.orgId, status: { $nin: LIFECYCLE_TERMINAL_STATUSES } })
+    : null;
+  if (!owner) {
+    if (opts.earlyOwnerId) await opts.unlink().catch(() => undefined);
+    return null;
+  }
+  if (String(opts.conversation.leadId || "") !== String(owner._id)) {
+    const moved = await moveConversationToLead({ organizationId: opts.orgId, conversationId: opts.conversation._id, leadId: owner._id })
+      .catch(() => ({ switched: false, pauseCleared: false }));
+    opts.conversation.leadId = owner._id;
+    if (moved.pauseCleared) {
+      opts.conversation.aiPausedAt = undefined;
+      opts.conversation.aiPausedBy = undefined;
+    }
+  }
+  return owner;
+}
+
+export async function restoreInboundSmsFromInquiry(event: any): Promise<boolean> {
+  const messageId = event?.sourceIds?.communicationMessageId;
+  const from = event?.contact?.phone ? normalizePhone(String(event.contact.phone)) : "";
+  const body = String(event?.comments || "");
+  if (!messageId || !from || !body) return false;
+  const orgId = String(event.organizationId);
+  const command = normalizeSmsCommand(body);
+  if (OPT_OUT_KEYWORDS.has(command) || OPT_IN_KEYWORDS.has(command)) {
+    const receivedAt = new Date(event.receivedAt || Date.now());
+    await SmsOptOut.updateOne(
+      { organizationId: orgId, phone: from, $or: [{ changedAt: { $lt: receivedAt } }, { changedAt: null }] },
+      { $set: { optedOut: OPT_OUT_KEYWORDS.has(command), changedAt: receivedAt, keyword: command } },
+      { upsert: true },
+    ).catch((err: any) => {
+      if (err?.code !== 11000) throw err;
+    });
+  }
+  if (await CommunicationMessage.exists({ _id: messageId })) return false;
+  const existing = await Conversation.findOne({ orgId: { $in: attentionOrgIds(orgId) }, customerPhone: from });
+  const conversation = existing || (await getOrCreateConversation({ orgId, phone: from }));
+  const message = await CommunicationMessage.create({
+    _id: messageId,
+    orgId: conversation.orgId,
+    conversationId: conversation._id,
+    leadId: event.association?.leadId ?? null,
+    direction: "inbound",
+    body,
+    from,
+    to: telnyx.COMPANY_NUMBER,
+    status: "received",
+    providerMessageId: event.sourceIds?.smsProviderMessageId,
+  }).catch((err: any) => {
+    if (err?.code === 11000) return null;
+    throw err;
+  });
+  if (!message) return false;
+  await bumpConversation(conversation._id, message);
+  emitToOrg(conversation.orgId, "comm:message:new", {
+    message: message.toObject(),
+    conversation: { _id: conversation._id, customerPhone: conversation.customerPhone, leadId: conversation.leadId },
+  });
+  return true;
+}
+
+export async function handleInboundSms(payload: any, orgOverride?: any, retained?: InboundSmsRetention | null) {
   const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
   const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
   const to = normalizePhone(toEntry?.phone_number || toEntry || telnyx.COMPANY_NUMBER);
@@ -1323,10 +1479,19 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
 
   // Which org owns this number? Single-number setup: resolve org from env or
   // the first conversation. For a single-org deployment set COMM_ORG_ID.
-  const orgId = orgOverride ?? (await resolveOrgForNumber(to));
-  if (!orgId) {
+  const retention = retained === undefined ? await retainInboundSms(payload, orgOverride) : retained;
+  const orgId = retention?.orgId ?? null;
+  if (!retention || !orgId) {
     console.error("[comm] inbound SMS but COMM_ORG_ID is not configured");
     return null;
+  }
+  const lifecycleMode = retention.mode;
+  const lifecycle = lifecycleMode !== "off";
+  if (retention.replay) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (await CommunicationMessage.exists({ _id: retention.messageId })) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   if (providerMessageId) {
@@ -1342,7 +1507,10 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
   }
 
   const customer = await findCustomerByPhone(orgId, from);
-  let lead = await findLeadByPhone(orgId, from);
+  let lead = lifecycle
+    ? lifecycleMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }).catch(() => null) : null
+    : await findLeadByPhone(orgId, from);
+  const earlyOwnerId = lifecycle && lead?._id ? String(lead._id) : null;
   const conversation = await getOrCreateConversation({
     orgId,
     phone: from,
@@ -1350,10 +1518,19 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     customerName:
       customerDisplayName(customer) ||
       (lead ? `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || undefined : undefined),
-    leadId: lead?._id,
+    leadId: lifecycle ? undefined : lead?._id,
   });
+  if (earlyOwnerId && String(conversation.leadId || "") !== earlyOwnerId) {
+    const moved = await moveConversationToLead({ organizationId: orgId, conversationId: conversation._id, leadId: lead._id })
+      .catch(() => ({ switched: false, pauseCleared: false }));
+    if (moved.switched) conversation.leadId = lead._id;
+    if (moved.pauseCleared) {
+      conversation.aiPausedAt = undefined;
+      conversation.aiPausedBy = undefined;
+    }
+  }
 
-  const messageId = new mongoose.Types.ObjectId();
+  const messageId = retention.messageId;
   const check = await beginAiAttentionCheck({ organizationId: String(orgId), channel: 'sms',
     targetId: String(conversation._id), messageId: String(messageId) });
   const message = await CommunicationMessage.create({
@@ -1368,7 +1545,28 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     to,
     status: "received",
     providerMessageId,
+  }).catch((err: any) => {
+    if (err?.code === 11000 && (retention.replay || err?.keyPattern?._id)) return null;
+    throw err;
   });
+  if (!message) return CommunicationMessage.findById(messageId).lean();
+
+  const settleLifecycleSms = async (): Promise<any | null> => {
+    if (lifecycleMode !== "active" || !retention.inquiryId) return null;
+    const owner = await settleConversationInquiry({
+      orgId,
+      inquiryId: retention.inquiryId,
+      earlyOwnerId,
+      conversation,
+      unlink: () => CommunicationMessage.updateOne({ _id: message._id, leadId: earlyOwnerId }, { $set: { leadId: null } }),
+    });
+    if (!owner) return null;
+    await CommunicationMessage.updateOne(
+      { _id: message._id },
+      { $set: { leadId: owner._id, ...(owner.customerLink?.status === "linked" ? { customerId: owner.customerId } : {}) } },
+    ).catch(() => undefined);
+    return owner;
+  };
 
   await bumpConversation(conversation._id, message);
   if (lead?._id) await touchLeadOnInbound(lead._id, orgId);
@@ -1383,12 +1581,14 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     },
   });
 
-  const optHandled = await handleSmsOptCommand(orgId, from, body).catch((err) => {
-    console.error("[comm] handleSmsOptCommand failed:", err);
-    return false;
-  });
+  const optHandled = lifecycle && HELP_KEYWORDS.has(normalizeSmsCommand(body))
+    ? true
+    : await handleSmsOptCommand(orgId, from, body).catch((err) => {
+        console.error("[comm] handleSmsOptCommand failed:", err);
+        return false;
+      });
 
-  const appointmentHandled = await handleAppointmentSmsReply(orgId, from, body).catch((err) => {
+  const appointmentHandled = await handleAppointmentSmsReply(orgId, from, body, lifecycle).catch((err) => {
     console.error("[comm] handleAppointmentSmsReply failed:", err);
     return false;
   });
@@ -1399,6 +1599,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
     if (isAttentionScreeningMode(screeningMode)) {
       if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) {
         if (screeningMode === "training") queueShadowAttentionSkip(smsShadowSource(orgId, conversation, lead, check));
+        if (lifecycle) settleLifecycleSms().catch((err) => console.error("[comm] lead intake for inbound SMS failed:", err));
         return message;
       }
       screened = true;
@@ -1413,7 +1614,12 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
       : false;
 
   if (!optHandled && !appointmentHandled && !rescheduleReplyHandled) {
-    if (!lead) {
+    if (lifecycle) {
+      lead = await settleLifecycleSms().catch((err) => {
+        console.error("[comm] lead intake for inbound SMS failed:", err);
+        return null;
+      });
+    } else if (!lead) {
       const result = await findOrCreateLeadForContact({
         orgId,
         conversation,
@@ -1455,6 +1661,9 @@ export async function handleInboundSms(payload: any, orgOverride?: any) {
       console.error("[comm] triggerSmsAiReply failed:", err);
     });
   } else {
+    if (lifecycle && retention.inquiryId) {
+      await (await lifecycleIntake()).dismissLeadInquiry(retention.inquiryId, "sms_keyword").catch(() => undefined);
+    }
     await finishAiAttentionCheck(check);
   }
 
@@ -1596,8 +1805,31 @@ export async function handleCallInitiated(payload: any) {
     }
   }
 
+  const intakeMode: LeadIntakeMode = await getLeadIntakeMode(String(orgId)).catch(() => "paused" as LeadIntakeMode);
+  const lifecycle = intakeMode !== "off";
   const customer = await findCustomerByPhone(orgId, from);
-  let lead = await findLeadByPhone(orgId, from);
+  let callInquiryId: string | null = null;
+  if (lifecycle) {
+    const [firstName, ...rest] = (customerDisplayName(customer) || "").trim().split(/\s+/).filter(Boolean);
+    const recorded = await (await inquiryRecords()).recordInquiryEvent({
+      organizationId: String(orgId),
+      kind: "call",
+      receivedAt: new Date(),
+      channel: "phone",
+      source: LEAD_SOURCE.INBOUND_CALL,
+      contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
+      sourceIds: { callControlId },
+    }).catch((err) => {
+      console.error("[comm] inbound call could not be recorded for lead intake", err);
+      return null;
+    });
+    if (recorded && !recorded.created) return;
+    callInquiryId = recorded ? String(recorded.event._id) : null;
+  }
+  let lead = lifecycle
+    ? intakeMode === "active" ? await (await lifecycleIntake()).findOpenLeadForContact(String(orgId), { phone: from }).catch(() => null) : null
+    : await findLeadByPhone(orgId, from);
+  const earlyCallOwnerId = lifecycle && lead?._id ? String(lead._id) : null;
   const displayName =
     customerDisplayName(customer) ||
     (lead ? `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || undefined : undefined);
@@ -1606,10 +1838,10 @@ export async function handleCallInitiated(payload: any) {
     phone: from,
     customerId: customer?._id,
     customerName: displayName,
-    leadId: lead?._id,
+    leadId: lifecycle ? undefined : lead?._id,
   });
 
-  if (!lead) {
+  if (!lifecycle && !lead) {
     const result = await findOrCreateLeadForContact({
       orgId,
       conversation,
@@ -1641,6 +1873,21 @@ export async function handleCallInitiated(payload: any) {
     startedAt: new Date(),
     customerName: displayName,
   });
+
+  if (intakeMode === "active" && callInquiryId) {
+    const inquiryId = callInquiryId;
+    settleConversationInquiry({
+      orgId,
+      inquiryId,
+      earlyOwnerId: earlyCallOwnerId,
+      conversation,
+      unlink: () => CallLog.updateOne({ _id: call._id, leadId: earlyCallOwnerId }, { $set: { leadId: null } }),
+    }).then(async (owner) => {
+      if (!owner || String(owner._id) === earlyCallOwnerId) return;
+      const updated = await CallLog.findOneAndUpdate({ _id: call._id }, { $set: { leadId: owner._id } }, { new: true });
+      if (updated) emitCallUpdate(updated);
+    }).catch((err) => console.error("[comm] lead intake for inbound call failed:", err));
+  }
 
   if (inboundRouting && await initializeIvr(call, inboundRouting.config, ivrCallbacks)) return;
   const legacyCall = inboundRouting ? await CallLog.findById(call._id) : call;

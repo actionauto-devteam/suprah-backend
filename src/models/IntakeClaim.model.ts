@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type IntakeClaimKind = 'webchat_session' | 'test_drive_booking' | 'vehicle_inquiry';
+export type IntakeClaimKind = 'webchat_session' | 'test_drive_booking' | 'vehicle_inquiry' | 'sms_message';
 
 export interface IIntakeClaim extends Document {
   organizationId: mongoose.Types.ObjectId | string;
@@ -8,6 +8,7 @@ export interface IIntakeClaim extends Document {
   claimKey: string;
   leadId?: mongoose.Types.ObjectId | null;
   appointmentId?: mongoose.Types.ObjectId | null;
+  messageId?: mongoose.Types.ObjectId | null;
   expiresAt: Date;
   createdAt: Date;
 }
@@ -15,10 +16,11 @@ export interface IIntakeClaim extends Document {
 const IntakeClaimSchema: Schema<IIntakeClaim> = new Schema(
   {
     organizationId: { type: Schema.Types.Mixed, required: true },
-    kind: { type: String, enum: ['webchat_session', 'test_drive_booking', 'vehicle_inquiry'], required: true },
+    kind: { type: String, enum: ['webchat_session', 'test_drive_booking', 'vehicle_inquiry', 'sms_message'], required: true },
     claimKey: { type: String, required: true, trim: true },
     leadId: { type: Schema.Types.ObjectId, ref: 'Lead', default: null },
     appointmentId: { type: Schema.Types.ObjectId, ref: 'Appointment', default: null },
+    messageId: { type: Schema.Types.ObjectId, default: null },
     expiresAt: { type: Date, required: true, index: { expireAfterSeconds: 0 } },
   },
   { timestamps: { createdAt: true, updatedAt: false } },

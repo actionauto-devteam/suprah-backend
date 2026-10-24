@@ -94,7 +94,8 @@ describe('Testing Lab import guard', () => {
 });
 
 describe('STOP/START and appointment keyword drift detection', () => {
-  const live = read('services/communication.service.ts');
+  const live = read('utils/smsKeywords.ts');
+  const smsFlow = read('services/communication.service.ts');
   const liveSet = (name: string) => {
     const match = live.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\);`));
     expect(match).not.toBeNull();
@@ -110,6 +111,11 @@ describe('STOP/START and appointment keyword drift detection', () => {
     expect([...copy]).toEqual(liveSet(name));
   });
 
+  it('the live SMS flow uses the shared keyword lists', () => {
+    expect(smsFlow).toMatch(/from "\.\.\/utils\/smsKeywords"/);
+    expect(smsFlow).not.toMatch(/const (CONFIRM|RESCHEDULE|OPT_OUT|OPT_IN|HELP)_KEYWORDS = new Set/);
+  });
+
   it('the lab normalizer matches the live normalizer exactly', () => {
     const match = live.match(/function normalizeSmsCommand\(body: string\): string \{\n\s*(return [^\n]+)\n\}/);
     expect(match).not.toBeNull();
@@ -119,7 +125,7 @@ describe('STOP/START and appointment keyword drift detection', () => {
   });
 
   it('the live SMS flow still consumes appointment keywords before Alex even without an appointment', () => {
-    expect(live).toMatch(/const appointment = await findAppointmentForReply\(orgId, from\);\n\s*if \(!appointment\) return true;/);
+    expect(smsFlow).toMatch(/const appointment = await findAppointmentForReply\(orgId, from(, requireReminder)?\);\n\s*if \(!appointment\) return true;/);
   });
 });
 

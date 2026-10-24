@@ -56,7 +56,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   appointment_confirmed_via_sms: 'appointments', appointment_reschedule_requested: 'appointments',
   appointment_reschedule_preference_received: 'appointments',
 
-  new_lead: 'crm', lead_assigned: 'crm', lead_status_changed: 'crm', crm_message: 'crm',
+  new_lead: 'crm', lead_assigned: 'crm', lead_status_changed: 'crm', lead_new_inquiry: 'crm', lead_inquiry_review: 'crm', crm_message: 'crm',
   crm_task_assigned: 'crm', crm_task_due: 'crm', crm_biometric: 'crm', crm_timeproof: 'crm',
   reminder: 'crm', location_share_requested: 'crm',
   aftermarket_inquiry: 'crm', aftermarket_invoice: 'crm', aftermarket_order: 'crm',
@@ -304,6 +304,8 @@ const createNotification = async (params: CreateNotificationParams) => {
       new_lead: '/crm/dashboard',
       lead_assigned: '/crm/dashboard',
       lead_status_changed: '/crm/dashboard',
+      lead_new_inquiry: metadata?.route || '/crm/leads',
+      lead_inquiry_review: metadata?.route || '/crm/leads?review=1',
       crm_message: metadata?.route || '/crm/supra-space',
       crm_task_assigned: metadata?.route || '/crm/leads',
       crm_task_due: metadata?.route || '/crm/leads',
@@ -645,6 +647,8 @@ const broadcastNotification = async (params: {
       quote_created: '/transportation?tab=drafts',
       shipment_delivered: '/transportation?tab=shipments',
       new_lead: '/crm/dashboard',
+      lead_new_inquiry: '/crm/leads',
+      lead_inquiry_review: '/crm/leads?review=1',
       driver_request: '/driver-tracker',
       admin_broadcast: '/notifications',
     };

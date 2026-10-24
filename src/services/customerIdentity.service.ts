@@ -98,6 +98,7 @@ async function reconcileUnderLock(organizationId: string, leadId: string, renew:
     return result;
   };
   if (lead.source === 'Demo') return persist({ status: 'unresolved', reason: 'demo_excluded', candidateIds: [] });
+  if ((lead as any).intakeIdentity === 'unverified') return persist({ status: 'unresolved', reason: 'unverified_contact', candidateIds: [] });
   if ((!identity.normalizedEmail && !identity.normalizedPhone)
     || (String(input.email || '').trim() && !normalizeIdentityEmail(input.email))
     || (String(input.phone || '').trim() && !normalizeIdentityPhone(input.phone))) {

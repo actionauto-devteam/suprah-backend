@@ -20,6 +20,9 @@ import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotificati
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
 import { triggerAiReplyForNewInquiry } from '../services/communication.service';
+import { getLeadIntakeMode } from '../services/leadIntakeControl.service';
+import { submitLeadInquiry } from '../services/leadIntake.service';
+import { startNewLeadAutomations } from '../services/leadIntakeIntegration';
 import { startDrivingSessionForAppointment, endDrivingSessionForAppointment } from './locator.controller';
 
 const createAppointment = asyncHandler(async (req: Request, res: Response) => {
@@ -502,6 +505,7 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
     const systemUserId = (systemUser as any)._id;
     const end = new Date(start.getTime() + 60 * 60 * 1000);
     const vehicleLabel = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ');
+    const intakeMode = await getLeadIntakeMode(String(orgId));
 
     if (clientRequestId) {
         const claimResult = await IntakeClaim.findOneAndUpdate(
@@ -519,11 +523,11 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
 
         if (claimResult.lastErrorObject?.updatedExisting) {
             const claim = claimResult.value;
-            if (claim?.leadId && claim?.appointmentId) {
+            if (claim?.appointmentId && (claim?.leadId || intakeMode !== 'off')) {
                 return res.status(201).json(
                     new ApiResponse(
                         201,
-                        { leadId: claim.leadId, appointmentId: claim.appointmentId },
+                        { leadId: claim.leadId || null, appointmentId: claim.appointmentId },
                         'Test drive request submitted',
                     )
                 );
@@ -532,6 +536,82 @@ const createPublicTestDriveBooking = asyncHandler(async (req: Request, res: Resp
                 new ApiResponse(409, null, 'This request is already being processed.')
             );
         }
+    }
+
+    if (intakeMode !== 'off') {
+        const bookingTime = start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: CALENDAR_TZ });
+        const inquiryVehicle = {
+            year: vehicle.year ? String(vehicle.year) : undefined,
+            make: vehicle.make,
+            model: (vehicle as any).modelName || (vehicle as any).model,
+            vin: vehicle.vin,
+            stock: vehicle.stockNumber,
+        };
+        const bookingAppointment = await Appointment.create({
+            organizationId: orgId,
+            createdBy: systemUserId,
+            createdByModel: 'User',
+            participants: [systemUserId],
+            participantModel: 'User',
+            title: `Test Drive Request — ${vehicleLabel}`,
+            startTime: start,
+            endTime: end,
+            type: 'test-drive',
+            entryType: 'appointment',
+            status: 'scheduled',
+            vehicleId: vehicle._id,
+            customerBooking: { firstName, lastName, email, phone, isCustomerBooking: true },
+            notes,
+        });
+        let intake;
+        try {
+            intake = await submitLeadInquiry({
+                organizationId: String(orgId),
+                kind: 'test_drive',
+                receivedAt: new Date(),
+                channel: 'web',
+                source: LEAD_SOURCE.WEBSITE_BOOKING,
+                contact: { firstName, lastName, email, phone, assurance: 'self_reported' },
+                vehicle: inquiryVehicle,
+                comments: notes || `Requested a test drive for ${vehicleLabel} via the website.`,
+                sourceIds: { appointmentId: bookingAppointment._id },
+                leadDraft: {
+                    createdBy: systemUserId,
+                    vehicleId: vehicle._id,
+                    location: vehicle.dealerCity || undefined,
+                    status: 'Appointment Set',
+                    appointment: { date: start, time: bookingTime, notes },
+                },
+            });
+        } catch (err) {
+            await Appointment.deleteOne({ _id: bookingAppointment._id }).catch(() => undefined);
+            if (clientRequestId) {
+                await IntakeClaim.deleteOne({ organizationId: orgId, kind: 'test_drive_booking', claimKey: clientRequestId }).catch(() => undefined);
+            }
+            throw err;
+        }
+        if (intake.status !== 'inactive') {
+            const intakeLeadId = intake.status === 'associated' || intake.status === 'duplicate' ? intake.leadId : null;
+            if (clientRequestId) {
+                await IntakeClaim.updateOne(
+                    { organizationId: orgId, kind: 'test_drive_booking', claimKey: clientRequestId },
+                    { $set: { leadId: intakeLeadId, appointmentId: bookingAppointment._id } },
+                );
+            }
+            await startNewLeadAutomations(String(orgId), intake, { email: false }).catch((err) =>
+                logger.warn({ err, appointmentId: bookingAppointment._id }, '[public-booking] New-lead automation failed'));
+            emitToOrg(String(orgId), 'appointment:new', {
+                _id: bookingAppointment._id?.toString(),
+                title: bookingAppointment.title,
+                startTime: bookingAppointment.startTime,
+                status: bookingAppointment.status,
+            });
+            logger.info({ appointmentId: bookingAppointment._id, intake: intake.status }, 'Public test drive booking sent through lead intake');
+            return res.status(201).json(
+                new ApiResponse(201, { leadId: intakeLeadId, appointmentId: bookingAppointment._id }, 'Test drive request submitted')
+            );
+        }
+        await Appointment.deleteOne({ _id: bookingAppointment._id }).catch(() => undefined);
     }
 
     const lead = await Lead.create({
