@@ -144,7 +144,7 @@ describe('Organization Data Isolation', () => {
             .expect(404);
 
         // Plain-English not-found message that doesn't reveal the other org's data.
-        expect(res.body.message).toMatch(/couldn't find this transportation draft/i);
+        expect(res.body.message).toMatch(/couldn't find this quote/i);
     });
 
     it('should assign correct organizationId when creating a new quote', async () => {

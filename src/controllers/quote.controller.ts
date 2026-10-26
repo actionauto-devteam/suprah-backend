@@ -7,7 +7,7 @@ import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
-import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN } from '../utils/userMessages';
+import { QUOTE_NOT_FOUND, SIGN_IN_AGAIN, describeValidationIssues } from '../utils/userMessages';
 import logger from '../utils/logger';
 import activityService from '../services/activity.service';
 import { safeCreateNotification, notifyOrgAdmins } from '../utils/safeNotification';
@@ -159,7 +159,7 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         !resolvedFromAddress ||
         !resolvedToAddress
     ) {
-        throw new ApiError(400, 'Enter the origin and destination (city, state and ZIP code) for this draft.');
+        throw new ApiError(400, 'Enter the origin and destination (city, state and ZIP code) for this quote.');
     }
 
     if (!ZIP_RE.test(resolvedFromZip) || !ZIP_RE.test(resolvedToZip)) {
@@ -579,7 +579,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (status !== undefined) {
         const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
         if (!validStatuses.includes(status)) {
-            throw new ApiError(400, 'Choose a valid draft status: Pending, Accepted, Rejected or Booked.');
+            throw new ApiError(400, 'Choose a valid quote status: Pending, Accepted, Rejected or Booked.');
         }
         updateData.status = status;
     }
@@ -704,7 +704,7 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
     const validStatuses = ['pending', 'accepted', 'rejected', 'booked'];
     if (!validStatuses.includes(status)) {
-        throw new ApiError(400, 'Choose a valid draft status: Pending, Accepted, Rejected or Booked.');
+        throw new ApiError(400, 'Choose a valid quote status: Pending, Accepted, Rejected or Booked.');
     }
 
     const quote = await Quote.findOneAndUpdate(
@@ -876,7 +876,7 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
                 userId: userId || 'SYSTEM',
                 organizationId: orgId,
                 type: 'quote_deleted',
-                title: 'Draft Deleted',
+                title: 'Quote Deleted',
                 description: `Quote for ${customerName} was removed from the system`,
             }),
         );
@@ -930,28 +930,11 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     }
 
     if (quote.status === 'rejected') {
-        throw new ApiError(400, 'This draft was rejected, so it can\'t be converted into a load. Change its status first if the customer still wants the shipment.');
+        throw new ApiError(400, 'This quote was rejected, so it can\'t be converted into a load. If the customer still wants the shipment, create a new quote for them.');
     }
 
-    if (quote.status === 'booked') {
-        const existingLoad = await Load.findOne({
-            quoteId: quote._id,
-            organizationId: orgId,
-        });
-
-        if (existingLoad) {
-            quote.status = 'booked';
-            await quote.save();
-
-            throw new ApiError(
-                409,
-                `This draft was already converted into load ${existingLoad.loadNumber}. Open that load in Transportation instead.`
-            );
-        }
-
-        throw new ApiError(409, 'This draft was already converted into a load. Open it from Transportation instead.');
-    }
-
+    // One load per quote. A quote still marked "booked" whose load was deleted
+    // has no load anymore, so it may be converted again.
     const existingLoad = await Load.findOne({
         quoteId: quote._id,
         organizationId: orgId,
@@ -963,8 +946,12 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
         throw new ApiError(
             409,
-            `This draft was already converted into load ${existingLoad.loadNumber}. Open that load in Transportation instead.`
+            `This quote was already converted into load ${existingLoad.loadNumber}. Open that load in Transportation instead.`
         );
+    }
+
+    if (quote.status === 'booked') {
+        logger.info({ quoteId: quote._id, orgId }, 'Converting a booked quote whose load no longer exists');
     }
 
     /*
@@ -1214,13 +1201,10 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     const parsedConversion = createLoadSchema.safeParse(conversionPayload);
 
     if (!parsedConversion.success) {
-        const messages = parsedConversion.error.issues
-            .map((issue) => issue.message)
-            .join(', ');
-
+        // The shared helper names the stop (Pickup/Delivery) for each problem.
         throw new ApiError(
             400,
-            `Add the missing route details before converting this draft into a load: ${messages}`
+            `This quote is missing route details, so it can't be converted into a load yet. ${describeValidationIssues(parsedConversion.error.issues)}`
         );
     }
 

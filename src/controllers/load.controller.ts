@@ -38,6 +38,7 @@
     import activityService from "../services/activity.service";
     import emailService from "../services/email.service";
     import Quote from "../models/Quote.model";
+    import cacheService from "../services/cache.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -1523,6 +1524,28 @@
             route: "/driver/available-loads",
           },
         });
+      }
+
+      // A quote converted into this load was marked "booked". With the load
+      // gone, reopen it as Accepted so it can be converted again instead of
+      // staying stuck as "Converted to Load". NON-FATAL, like the logging below.
+      if (load.quoteId) {
+        const quoteId = load.quoteId.toString();
+        try {
+          const stillLinked = await Load.exists({ quoteId: load.quoteId, organizationId });
+          if (!stillLinked) {
+            const reopened = await Quote.updateOne(
+              { _id: load.quoteId, organizationId, status: "booked" },
+              { $set: { status: "accepted" } },
+            );
+            if (reopened.modifiedCount > 0) {
+              await cacheService.invalidateByPrefix(`quotes:${organizationId}`);
+              _io?.to(`org:${organizationId}`).emit("quote:change", { action: "updated", quoteId });
+            }
+          }
+        } catch (err) {
+          logger.error({ err, loadId: load._id, quoteId }, "Non-fatal: failed to reopen the quote of a deleted load");
+        }
       }
 
       // Log activity — NON-FATAL. The load is already deleted at this point;

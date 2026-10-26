@@ -19,6 +19,12 @@ describe('error middleware user-facing messages', () => {
     expect(body.message).not.toContain('loadNumber');
   });
 
+  it('tells people exactly who to contact when it keeps happening', () => {
+    const { body } = run(new Error('boom'));
+    expect(body.message).toMatch(/contact Suprah AI support at support@suprahai\.com\.$/);
+    expect(body.message).not.toMatch(/administrator/i);
+  });
+
   it('keeps deliberate ApiError messages, including 5xx ones', () => {
     expect(run(new ApiError(409, 'Load LD-1 changed. Refresh and try again.')).body.message).toBe('Load LD-1 changed. Refresh and try again.');
     expect(run(new ApiError(503, 'Document uploads are temporarily unavailable.')).body.message).toBe('Document uploads are temporarily unavailable.');

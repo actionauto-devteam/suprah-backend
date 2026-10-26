@@ -28,7 +28,7 @@ export const VEHICLE_NOT_FOUND =
   "We couldn't find this vehicle. It may have been sold, removed from inventory, or you may not have access to it. Refresh the page and try again.";
 
 export const QUOTE_NOT_FOUND =
-  "We couldn't find this transportation draft. It may have been deleted or converted into a load. Refresh the page and try again.";
+  "We couldn't find this quote. It may have been deleted. Refresh the page and try again.";
 
 export const DOCUMENT_NOT_FOUND =
   'This document is no longer available. It may have been replaced or removed.';
