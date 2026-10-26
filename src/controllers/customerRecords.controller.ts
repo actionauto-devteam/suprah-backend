@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import activityService from '../services/activity.service';
 import logger from '../utils/logger';
 import { getCustomerProfile, listCustomerRecords, updateCustomerRecord } from '../services/customerRecords.service';
+import { getCustomerTimeline } from '../services/customerLifecycle.service';
 
 const requireOrgId = (req: Request) => {
   const orgId = req.orgId ? String(req.orgId) : '';
@@ -23,6 +24,13 @@ export const getCustomerProfileHandler = asyncHandler(async (req: Request, res: 
   const orgId = requireOrgId(req);
   const profile = await getCustomerProfile(orgId, String(req.params.id));
   res.json(new ApiResponse(200, profile, 'Customer profile'));
+});
+
+export const getCustomerTimelineHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const { filter, before, limit } = req.query;
+  const timeline = await getCustomerTimeline(orgId, String(req.params.id), { filter, before, limit });
+  res.json(new ApiResponse(200, timeline, 'Customer timeline'));
 });
 
 export const updateCustomerRecordHandler = asyncHandler(async (req: Request, res: Response) => {

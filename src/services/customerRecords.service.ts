@@ -6,6 +6,7 @@ import { CallLog, CommunicationMessage } from '../models/communication.model';
 import { TERMINAL_LEAD_STATUSES } from '../constants/leadStatus';
 import { normalizeLeadSourceForDisplay } from '../constants/leadSource';
 import customerService from './customer.service';
+import { countAdditionalInquiries, findReturningVisits, inventoryStatusFor, inventoryStatusOf, isSoldStatus, soldStatusDate } from './customerLifecycle.service';
 import { ApiError } from '../utils/ApiError';
 
 export type CustomerRecordStatusFilter = 'active' | 'inactive' | 'all';
@@ -75,6 +76,10 @@ const formatAddress = (address: any) => {
 const vehicleKey = (vehicle: any) => {
   const vin = String(vehicle?.vin || '').trim().toUpperCase();
   if (vin) return `vin:${vin}`;
+  return modelKey(vehicle);
+};
+
+const modelKey = (vehicle: any) => {
   const parts = [vehicle?.year, vehicle?.make, vehicle?.model].map((part) => String(part || '').trim().toLowerCase());
   return parts.some(Boolean) ? `ymm:${parts.join('|')}` : '';
 };
@@ -164,7 +169,7 @@ export async function getCustomerProfile(orgId: string, id: string) {
   if (!customer) throw new ApiError(404, 'Customer not found');
 
   const leads: any[] = await Lead.find({ organizationId: orgObjectId(orgId), customerId: customer._id, 'customerLink.status': LINKED })
-    .select('firstName lastName status source sourceProvider channel createdAt updatedAt vehicle followUp.lastCustomerActivityAt assignedTo location notes._id')
+    .select('firstName lastName status source sourceProvider channel createdAt updatedAt vehicle vehicleId statusHistory followUp.lastCustomerActivityAt assignedTo location notes._id')
     .populate('assignedTo', 'name')
     .sort({ createdAt: -1 })
     .limit(200)
@@ -173,7 +178,7 @@ export async function getCustomerProfile(orgId: string, id: string) {
   const leadIds = leads.map((lead) => lead._id);
   const now = Date.now();
 
-  const [appointments, messageRows, calls, reviewCount] = await Promise.all([
+  const [appointments, messageRows, calls, reviewCount, additionalInquiries, inventory] = await Promise.all([
     leadIds.length
       ? Appointment.find({ organizationId: orgId, leadId: { $in: leadIds }, entryType: { $in: ['appointment', null] } })
         .select('title type status startTime endTime leadId')
@@ -190,6 +195,8 @@ export async function getCustomerProfile(orgId: string, id: string) {
       : Promise.resolve(0),
     Lead.countDocuments({ organizationId: orgObjectId(orgId), 'customerLink.candidateIds': customer._id, 'customerLink.status': { $in: ['ambiguous', 'conflict'] } })
       .maxTimeMS(3000).catch(() => null),
+    countAdditionalInquiries(orgId, leadIds),
+    inventoryStatusFor(orgId, leads),
   ]);
 
   const inbound = messageRows.find((row: any) => row._id === 'inbound');
@@ -213,31 +220,40 @@ export async function getCustomerProfile(orgId: string, id: string) {
   });
 
   const interest = new Map<string, any>();
+  const seenModels = new Set<string>();
   for (const lead of leads) {
     const key = vehicleKey(lead.vehicle);
+    const model = modelKey(lead.vehicle);
+    if (model) seenModels.add(model);
     if (!key || interest.has(key)) continue;
     interest.set(key, {
       year: String(lead.vehicle?.year || ''),
       make: String(lead.vehicle?.make || ''),
       model: String(lead.vehicle?.model || ''),
+      trim: String(lead.vehicle?.trim || ''),
       vin: String(lead.vehicle?.vin || '').toUpperCase(),
       stock: String(lead.vehicle?.stock || ''),
       leadId: String(lead._id),
       askedAt: lead.createdAt,
       leadStatus: lead.status || 'New',
+      inventoryStatus: inventoryStatusOf(inventory, lead),
     });
   }
   const recordKey = vehicleKey(customer.vehicleInterest);
-  if (recordKey && !interest.has(recordKey)) {
+  const recordModel = modelKey(customer.vehicleInterest);
+  const recordVin = String(customer.vehicleInterest?.vin || '').trim().toUpperCase();
+  if (recordKey && !interest.has(recordKey) && !(recordModel && seenModels.has(recordModel) && !recordVin)) {
     interest.set(recordKey, {
       year: String(customer.vehicleInterest?.year || ''),
       make: String(customer.vehicleInterest?.make || ''),
       model: String(customer.vehicleInterest?.model || ''),
+      trim: String(customer.vehicleInterest?.trim || ''),
       vin: String(customer.vehicleInterest?.vin || '').toUpperCase(),
       stock: '',
       leadId: null,
       askedAt: null,
       leadStatus: null,
+      inventoryStatus: null,
     });
   }
 
@@ -253,6 +269,16 @@ export async function getCustomerProfile(orgId: string, id: string) {
   }));
 
   const closedLeads = relatedLeads.filter((lead) => lead.closed).length;
+  const returningVisits = findReturningVisits(leads);
+  const latestReturn = returningVisits[returningVisits.length - 1];
+  const leadsMarkedSold = leads
+    .filter((lead) => isSoldStatus(lead.status))
+    .map((lead) => ({
+      leadId: String(lead._id),
+      status: lead.status,
+      vehicle: [lead.vehicle?.year, lead.vehicle?.make, lead.vehicle?.model].filter(Boolean).join(' '),
+      markedAt: soldStatusDate(lead),
+    }));
   const sourceLeadLinked = Boolean(customer.sourceLeadId && leadIds.some((leadId) => String(leadId) === String(customer.sourceLeadId)));
 
   return {
@@ -282,6 +308,7 @@ export async function getCustomerProfile(orgId: string, id: string) {
       owned: [],
       ownedAvailable: false,
     },
+    purchases: { available: false, verified: [], leadsMarkedSold },
     appointments: appointmentList,
     service: { available: false, records: [] },
     summary: {
@@ -299,6 +326,22 @@ export async function getCustomerProfile(orgId: string, id: string) {
       firstContact: earliest(...leads.map((lead) => lead.createdAt)),
       lastActivity: latest(...relatedLeads.map((lead) => lead.lastActivity), inbound?.last),
       leadsNeedingReview: reviewCount,
+      additionalInquiries,
+      returning: latestReturn
+        ? {
+          count: returningVisits.length,
+          latest: {
+            leadId: latestReturn.leadId,
+            at: latestReturn.at,
+            previousLeadId: latestReturn.previousLeadId,
+            previousStatus: latestReturn.previousStatus,
+            previousClosedAt: latestReturn.previousClosedAt,
+          },
+        }
+        : null,
+      verifiedPurchases: null,
+      ownedVehicles: null,
+      serviceVisits: null,
     },
   };
 }
