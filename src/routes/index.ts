@@ -93,6 +93,7 @@ import aiOperatingModeRoute from "./aiOperatingMode.routes";
 import aiShadowDraftRoute from "./aiShadowDraft.routes";
 import aiTrainingRoute from "./aiTraining.routes";
 import crmLeadGroupRoute from "./crmLeadGroup.routes";
+import crmCustomerRecordsRoute from "./crmCustomerRecords.routes";
 import leadIntakeRoute from "./leadIntake.routes";
 import crmLocationRoute from "./crmLocation.routes";
 import aiKnowledgeBaseRoute from "./aiKnowledgeBase.routes";
@@ -281,6 +282,10 @@ const defaultRoutes = [
   {
     path: "/crm/lead-groups",
     route: crmLeadGroupRoute,
+  },
+  {
+    path: "/crm/customer-records",
+    route: crmCustomerRecordsRoute,
   },
   {
     path: "/crm/lead-intake",
