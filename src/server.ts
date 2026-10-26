@@ -50,6 +50,7 @@ import { startProjectDeadlineReminders } from "./services/projectDeadlineReminde
 import { startCalendarReminderSweep } from "./services/calendarReminderSweep.service";
 import { initSuprahMeetReminders } from "./services/suprahMeetReminder.service";
 import healthRoute from "./routes/health.route";
+import crmExtensionRoute from "./routes/crmExtension.routes";
 import supraSpaceRoute from "./routes/supraspace.route";
 import { initSupraSpaceSocket } from "./socket/supraspace.socket";
 
@@ -165,6 +166,8 @@ const corsOptions = {
   exposedHeaders: ["Content-Range", "X-Content-Range"],
   maxAge: 86400,
 };
+
+app.use("/api/crm/extension", crmExtensionRoute);
 
 app.use(cors(corsOptions));
 

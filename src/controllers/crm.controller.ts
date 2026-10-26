@@ -3,6 +3,7 @@ import { cleanAiAgentName, identityFromMetadata, isValidAiAgentName } from "../u
 import { Request, Response } from "express";
 import { revokeRecordingMediaForLogin } from "../services/recordingMediaAuth.service";
 import { asyncHandler } from "../utils/asyncHandler";
+import { verifyCrmCredentials } from "../services/crmCredentials.service";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import CrmUser from "../models/CrmUser.model";
@@ -146,36 +147,7 @@ async function getMainPersonalInfoMapByEmails(
 
 const login = asyncHandler(async (req: Request, res: Response) => {
   const { username, password } = req.body;
-
-  if (
-    typeof username !== "string" ||
-    typeof password !== "string" ||
-    !username ||
-    !password
-  ) {
-    throw new ApiError(400, "Employee ID and password are required");
-  }
-
-  const user = await CrmUser.findOne({ username: username.trim() }).select(
-    "+password",
-  );
-
-  if (!user) {
-    throw new ApiError(401, "Invalid Employee ID or password");
-  }
-
-  if (!user.isActive) {
-    throw new ApiError(
-      403,
-      "Account has been deactivated. Contact your administrator.",
-    );
-  }
-
-  const isMatch = await user.isPasswordMatch(password);
-
-  if (!isMatch) {
-    throw new ApiError(401, "Invalid Employee ID or password");
-  }
+  const user = await verifyCrmCredentials(username, password);
 
   user.lastLoginAt = new Date();
   await user.save({ validateModifiedOnly: true });

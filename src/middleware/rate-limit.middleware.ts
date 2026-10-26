@@ -89,6 +89,66 @@ export const trayDeviceBootstrapLimiter = rateLimit({
     validate: { default: false }
 });
 
+const extensionSignInMessage = 'Too many sign-in attempts. Please wait 15 minutes and try again.';
+
+export const crmExtensionSignInIpLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skipSuccessfulRequests: true,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => `ext-signin-ip:${req.ip}`,
+    message: { success: false, message: extensionSignInMessage },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const crmExtensionSignInUserLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    skipSuccessfulRequests: true,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => `ext-signin-user:${String(req.body?.username ?? '').trim().toLowerCase().slice(0, 100) || req.ip}`,
+    message: { success: false, message: extensionSignInMessage },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const crmExtensionLookupLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => `ext-lookup:${String(req.crmUser?._id ?? req.ip)}`,
+    message: { success: false, message: 'Too many lookups in a short time. Please wait a minute and try again.' },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
+export const crmExtensionNotesLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => `ext-notes:${String(req.crmUser?._id ?? req.ip)}`,
+    message: { success: false, message: 'Too many requests in a short time. Please wait a minute and try again.' },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 export const adfLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,
