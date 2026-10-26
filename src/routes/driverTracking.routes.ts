@@ -29,6 +29,7 @@ import { startDriverLocationMonitor } from "../services/driverLocationMonitor.se
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
 import { areBackgroundJobsDisabled } from "../config/backgroundJobs";
+import { requireSuperAdmin } from "../middleware/rbac.middleware";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const staffOnly = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
@@ -270,6 +271,8 @@ router.get("/my-loads", driverOnly, noStoreSensitive, driverTrackingController.g
 // The best route and arrival time to the driver's next stop (Amazon Location,
 // live traffic). Off unless AMAZON_LOCATION_ROUTES_ENABLED=true.
 router.get("/my-loads/:id/route", driverOnly, noStoreSensitive, routeLookupLimiter, loadRouteController.getMyLoadRoute);
+// How routing has done since the server started; counts only, for the Suprah team.
+router.get("/route-health", requireSuperAdmin, noStoreSensitive, loadRouteController.getRouteHealth);
 router.get("/my-requests", driverOnly, noStoreSensitive, driverTrackingController.getMyRequests);
 router.get("/available-loads", driverOnly, noStoreSensitive, driverTrackingController.getAvailableLoads);
 

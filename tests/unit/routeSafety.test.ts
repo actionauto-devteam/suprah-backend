@@ -1,4 +1,4 @@
-import { legSafety, listOf } from '../../src/services/routeSafety.service';
+import { legSafety, listOf, unrecognizedNoticeCodes } from '../../src/services/routeSafety.service';
 
 const notice = (Code: string, ViolatedConstraints?: Record<string, unknown>, Impact = 'High') => ({
   Code,
@@ -74,6 +74,27 @@ describe('route safety check', () => {
     expect(legSafety([notice('ViolatedVehicleRestriction', { MaxHeight: -1, MaxWeight: { Value: 'heavy' } })]).limits).toEqual([
       'a road with truck limits',
     ]);
+  });
+
+  it('recognises the truck-limit notices and the ones about tolls and the like', () => {
+    expect(
+      unrecognizedNoticeCodes([
+        notice('ViolatedBlockedRoad'),
+        notice('PotentialViolatedVehicleRestrictionUsage'),
+        notice('SeasonalClosure'),
+        notice('TollsDataUnavailable'),
+        notice('TravelTimeExceedsDriverWorkHours'),
+      ]),
+    ).toEqual([]);
+    expect(unrecognizedNoticeCodes(undefined)).toEqual([]);
+  });
+
+  it('lists notice codes it does not recognise yet, once each, for review', () => {
+    expect(
+      unrecognizedNoticeCodes([notice('Other'), notice('NewTruckRule'), notice('Other'), null, { Code: 42 }, { Code: '  ' }]),
+    ).toEqual(['Other', 'NewTruckRule']);
+    // Recording them never changes the route's own safety result.
+    expect(legSafety([notice('NewTruckRule')])).toEqual({ status: 'ok', limits: [] });
   });
 
   it('joins limits into one sentence', () => {
