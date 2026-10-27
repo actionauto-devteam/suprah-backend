@@ -16,7 +16,7 @@ import {
   startTranscription, getTranscriptionStatus, readTranscriptText, generateSummary,
 } from '../services/suprahMeetAI.service';
 import { mailConfigured, sendRecordingEmail } from '../services/suprahMeetMail.service';
-import { MEET_REMINDER_WINDOW_MS, notifyMeetingCreated } from '../services/suprahMeetNotification.service';
+import { MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive } from '../services/suprahMeetNotification.service';
 import logger from '../utils/logger';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
@@ -333,10 +333,11 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
     organizationId: meeting.organizationId.toString(),
   });
   const live = meeting.status === 'live';
+  const scheduledAt = meeting.scheduledAt?.toISOString() ?? null;
 
   if ((meeting as any).visibility !== 'private') {
     return res.json(new ApiResponse(200,
-      { admitted: true, live, guestToken, title: meeting.title }, 'Admitted'));
+      { admitted: true, live, guestToken, title: meeting.title, scheduledAt }, 'Admitted'));
   }
   const waiting: any[] = (meeting as any).waiting ?? ((meeting as any).waiting = []);
   const entry = waiting.find((w) => w.guestId === guestId);
@@ -345,7 +346,7 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
   }
   if (entry?.status === 'admitted') {
     return res.json(new ApiResponse(200,
-      { admitted: true, live, guestToken, title: meeting.title }, 'Admitted'));
+      { admitted: true, live, guestToken, title: meeting.title, scheduledAt }, 'Admitted'));
   }
   if (!entry) {
     waiting.push({
@@ -354,7 +355,7 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
     });
     await meeting.save();
   }
-  res.json(new ApiResponse(200, { waiting: true, guestToken, title: meeting.title }, 'Waiting for the host'));
+  res.json(new ApiResponse(200, { waiting: true, guestToken, title: meeting.title, scheduledAt }, 'Waiting for the host'));
 });
 
 // POST /api/crm/meet/guest/:code/join   (guest pass required)
@@ -600,10 +601,30 @@ const recordingAccess = asyncHandler(async (req: Request, res: Response) => {
 const requestJoin = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
   if (meeting.status === 'ended') {
-    return res.json(new ApiResponse(200, { ended: true }, 'Meeting already ended'));
+    return res.json(new ApiResponse(200, { ended: true, title: meeting.title }, 'Meeting already ended'));
+  }
+  const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
+  const scheduledFuture = meeting.status === 'scheduled' &&
+    (!meeting.scheduledAt || meeting.scheduledAt.getTime() > Date.now());
+
+  // A scheduled room is not a live room just because an attendee opened its
+  // link. The owner has the key before its scheduled time; everyone else gets
+  // a refresh-safe waiting room until the host starts it or it auto-opens.
+  // Keep the existing private-room admission boundary intact: invited people
+  // wait for the scheduled opening, while unknown code-only users still enter
+  // the host's approval queue instead of learning private meeting details.
+  if (scheduledFuture && !isHost && isAllowedIn(user, meeting)) {
+    return res.json(new ApiResponse(200, {
+      notStarted: true, title: meeting.title,
+      scheduledAt: meeting.scheduledAt?.toISOString() ?? null,
+    }, 'Waiting for the host or scheduled start time'));
   }
   if (isAllowedIn(user, meeting)) {
-    return res.json(new ApiResponse(200, { admitted: true }, 'Admitted'));
+    return res.json(new ApiResponse(200, {
+      admitted: true, title: meeting.title,
+      scheduledAt: meeting.scheduledAt?.toISOString() ?? null,
+      canStart: scheduledFuture && isHost,
+    }, scheduledFuture ? 'Host may start this meeting now' : 'Admitted'));
   }
   const uid = user._id.toString();
   const waiting: any[] = (meeting as any).waiting ?? ((meeting as any).waiting = []);
@@ -621,7 +642,7 @@ const requestJoin = asyncHandler(async (req: Request, res: Response) => {
     });
     await meeting.save();
   }
-  res.json(new ApiResponse(200, { waiting: true }, 'Waiting for the host'));
+  res.json(new ApiResponse(200, { waiting: true, title: meeting.title }, 'Waiting for the host'));
 });
 
 // GET /api/crm/meet/meetings/:code/waiting  (host / admin / manager)
@@ -796,6 +817,12 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(403, 'The host has not admitted you to this meeting yet.');
   }
 
+  const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
+  const scheduledTimeReached = Boolean(meeting.scheduledAt && meeting.scheduledAt.getTime() <= Date.now());
+  if (meeting.status === 'scheduled' && !isHost && !scheduledTimeReached) {
+    throw new ApiError(409, 'This meeting has not started yet. The host can start it early, or you can join at the scheduled time.');
+  }
+
   let chimeMeeting = meeting.chimeMeetingId ? await getChimeMeeting(meeting.chimeMeetingId) : null;
   if (!chimeMeeting) {
     chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
@@ -813,12 +840,15 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     'Joining the meeting'
   );
 
-  if (meeting.status === 'scheduled') {
+  // Hosts can deliberately open their room early. At the scheduled instant,
+  // the scheduler opens it for everyone; this fallback also handles the small
+  // interval before a scheduler tick reaches a newly-due meeting.
+  const startedNow = meeting.status === 'scheduled';
+  if (startedNow) {
     meeting.status = 'live';
     meeting.startedAt = new Date();
   }
 
-  const isHost = meeting.hostCrmUserId.toString() === user._id.toString();
   const existing = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
   if (existing) {
     existing.leftAt = undefined;
@@ -834,6 +864,14 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     } as any);
   }
   await meeting.save();
+
+  // This is separate from the advance reminder: attendees who missed that
+  // notification still receive a durable, actionable "live now" alert.
+  if (startedNow) {
+    await notifyMeetingLive(meeting).catch((error) => {
+      logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] live notification delivery failed');
+    });
+  }
 
   res.json(new ApiResponse(200, {
     chime: { Meeting: chimeMeeting, Attendee: attendee },

@@ -25,7 +25,7 @@ export const NOTIFICATION_TYPES = [
   'pm_task_assigned', 'pm_task_comment', 'pm_task_status', 'pm_task_updated',
   'pm_group_added', 'pm_task_mention', 'pm_task_deadline',
   'calendar_event_reminder', 'calendar_event_today', 'calendar_event_assigned',
-  'suprah_meet_invited', 'suprah_meet_reminder',
+  'suprah_meet_invited', 'suprah_meet_reminder', 'suprah_meet_live',
   'driver_request', 'driver_request_approved', 'driver_request_rejected',
   'dealership_inquiry',
   'driver_assigned', 'load_accepted', 'load_amendment_acknowledged', 'driver_location_update', 'driver_payout',
