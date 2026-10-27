@@ -354,6 +354,37 @@ function splitAccountName(name: unknown): { firstName: string; lastName: string 
     return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
 }
 
+/** A phone number with its area code (10 to 15 digits), or "" when it isn't one. */
+function usablePhone(value: unknown): string {
+    const phone = String(value ?? '').trim();
+    const digits = phone.replace(/\D/g, '');
+    return phone.length <= 30 && digits.length >= 10 && digits.length <= 15 ? phone : '';
+}
+
+// What a customer types ends up on the dealership's quote cards and notices,
+// so each field keeps a sensible length: [field, what the customer calls it, max].
+const CUSTOMER_REQUEST_TEXT_LIMITS: ReadonlyArray<readonly [string, string, number]> = [
+    ['firstName', 'first name', 80],
+    ['lastName', 'last name', 80],
+    ['toLocationName', 'delivery place name', 200],
+    ['toStreetAddress', 'delivery street address', 200],
+    ['toAddress', 'delivery address', 300],
+    ['fullAddress', 'delivery address', 300],
+    ['fromLocationName', 'pickup place name', 200],
+    ['fromStreetAddress', 'pickup street address', 200],
+    ['fromAddress', 'pickup address', 300],
+];
+
+/** The plain message for the first typed field that is too long, or null. */
+function customerRequestTextTooLong(body: Record<string, unknown>): string | null {
+    for (const [field, label, max] of CUSTOMER_REQUEST_TEXT_LIMITS) {
+        if (String(body[field] ?? '').trim().length > max) {
+            return `Keep the ${label} under ${max} characters, then send your request again.`;
+        }
+    }
+    return null;
+}
+
 /** What a customer sees about their own request: no dealership internals. */
 function customerRequestView(quote: any) {
     return {
@@ -378,6 +409,8 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const user = req.user as IUser | undefined;
     if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
     const body = (req.body ?? {}) as Record<string, any>;
+    const tooLong = customerRequestTextTooLong(body);
+    if (tooLong) throw new ApiError(400, tooLong);
 
     const vehicleId = String(body.vehicleId ?? '').trim();
     if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
@@ -396,17 +429,17 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const orgId = String(vehicle.organizationId);
 
     // Who is asking: the signed-in account. The form only fills gaps the
-    // account doesn't have (a last name, a phone number).
+    // account doesn't have (a last name, a usable phone number).
     const accountName = splitAccountName(user.name);
     const firstName = accountName.firstName || String(body.firstName ?? '').trim();
     const lastName = accountName.lastName || String(body.lastName ?? '').trim();
     const email = String(user.email ?? '').trim().toLowerCase();
-    const phone = String((user as any).personalInfo?.phone ?? '').trim() || String(body.phone ?? '').trim();
+    const phone = usablePhone((user as any).personalInfo?.phone) || usablePhone(body.phone);
     if (!firstName || !lastName) {
         throw new ApiError(400, 'Enter your first and last name so the dealership knows who the quote is for.');
     }
     if (!phone) {
-        throw new ApiError(400, 'Enter your phone number so the dealership can reach you about shipping.');
+        throw new ApiError(400, 'Enter your phone number with the area code, for example (801) 555-0123, so the dealership can reach you about shipping.');
     }
 
     // Where to: the delivery address the customer entered.

@@ -7,6 +7,7 @@ import DriverStatusChangeRequest, {
 } from "../models/DriverStatusChangeRequest.model";
 import notificationService from "./notification.service";
 import { ApiError } from "../utils/ApiError";
+import { SUPPORT_EMAIL } from "../utils/userMessages";
 import { emitDriverPoolChange, emitToOrg, emitToUser } from "../utils/socketEmitter";
 import {
   GPS_TRACKING_LOAD_STATUSES,
@@ -305,8 +306,8 @@ export async function assertDriverCanTakeNewWork(
     throw new ApiError(
       409,
       action === "accept" || action === "request"
-        ? "Your driver account hasn't been approved yet, so you can't take loads. You'll be notified as soon as the Suprah team approves it. Questions? support@suprahai.com"
-        : "This driver's account application hasn't been approved yet, so they can't be given loads. You can assign them once the Suprah team approves it.",
+        ? `Your driver account hasn't been approved yet, so you can't take loads. You'll be notified as soon as the Suprah AI team approves it. If you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.`
+        : "This driver's account application hasn't been approved yet, so they can't be given loads. You can assign them once the Suprah AI team approves it.",
     );
   }
 

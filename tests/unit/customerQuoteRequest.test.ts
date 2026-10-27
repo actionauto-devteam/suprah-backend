@@ -205,7 +205,36 @@ describe('POST /api/quote-requests', () => {
   it('asks for a phone number when the account has none and the form left it empty', async () => {
     const result = await send({ ...formBody, phone: '' }, { ...customer, personalInfo: {} });
     expect(result.status).toBe(400);
-    expect(result.error.message).toBe('Enter your phone number so the dealership can reach you about shipping.');
+    expect(result.error.message).toBe(
+      'Enter your phone number with the area code, for example (801) 555-0123, so the dealership can reach you about shipping.',
+    );
+  });
+
+  it("refuses a typed phone number that can't be one, and uses a typed one when the account's isn't usable", async () => {
+    for (const phone of ['000', 'call me', '1'.repeat(16), `801-555-0100 ${'x'.repeat(30)}`]) {
+      const result = await send({ ...formBody, phone }, { ...customer, personalInfo: {} });
+      expect(result.status).toBe(400);
+    }
+    expect(mockQuoteCreate).not.toHaveBeenCalled();
+
+    const result = await send({ ...formBody, phone: '(385) 555-0199' }, { ...customer, personalInfo: { phone: '555' } });
+    expect(result.status).toBe(201);
+    expect(mockQuoteCreate.mock.calls[0][0].phone).toBe('(385) 555-0199');
+  });
+
+  it('refuses typed text that is too long for a quote card, saying which field', async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ lastName: 'x'.repeat(81) }, 'Keep the last name under 80 characters, then send your request again.'],
+      [{ toStreetAddress: 'x'.repeat(201) }, 'Keep the delivery street address under 200 characters, then send your request again.'],
+      [{ fullAddress: 'x'.repeat(301) }, 'Keep the delivery address under 300 characters, then send your request again.'],
+    ];
+    for (const [extra, message] of cases) {
+      const result = await send({ ...formBody, ...extra });
+      expect(result.status).toBe(400);
+      expect(result.error.message).toBe(message);
+    }
+    expect(mockQuoteCreate).not.toHaveBeenCalled();
+    expect((await send({ ...formBody, toStreetAddress: 'x'.repeat(200) })).status).toBe(201);
   });
 
   it('asks for a vehicle when none was chosen', async () => {
