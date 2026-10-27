@@ -1927,6 +1927,220 @@ export const resumeEmailAi = async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { paused: false }, 'AI agent resumed for this lead'));
 };
 
+export type LeadEmailReplyOutcome = { status: number; body: any };
+
+export async function sendLeadEmailReply(input: {
+  orgId: string;
+  userId: any;
+  leadId: string;
+  message: string;
+  attachments: Express.Multer.File[];
+  rawRequestId: unknown;
+  subject?: string;
+  ipAddress?: string;
+  source?: 'chrome_extension';
+}): Promise<LeadEmailReplyOutcome> {
+  const { orgId, userId, leadId: id, message, attachments, rawRequestId } = input;
+  const requestedSubject = input.subject;
+  const sourceDetail = input.source ? { source: input.source } : {};
+
+  if (
+    !message &&
+    attachments.length === 0
+  ) {
+    return { status: 400, body: {
+      message:
+        'Enter a reply or attach at least one file',
+    } };
+  }
+
+  const lead = await Lead.findOne({
+    _id: id,
+    organizationId: orgId,
+  });
+
+  if (!lead) {
+    return { status: 404, body: {
+      message: 'Inquiry not found',
+    } };
+  }
+
+  if (await isClosedForManualSend(orgId, lead)) {
+    return { status: 409, body: { message: CLOSED_LEAD_SEND_MESSAGE, code: 'lead_closed' } };
+  }
+
+  const clientRequestId = normalizeClientRequestId(rawRequestId);
+  if (rawRequestId !== undefined && rawRequestId !== '' && !clientRequestId) {
+    return { status: 400, body: { message: 'This send request is not valid. Refresh and try again.' } };
+  }
+
+  let claim: ComposerSendStart | null = null;
+  if (clientRequestId) {
+    try {
+      claim = await beginComposerSend({
+        organizationId: orgId,
+        leadId: lead._id,
+        channel: 'email',
+        clientRequestId,
+        requestHash: composerRequestHash([
+          'email',
+          String(lead._id),
+          message,
+          cleanEmailSubject(requestedSubject),
+          attachments.map((file) => [file.originalname, file.size]),
+        ]),
+        userId,
+      });
+    } catch (claimError) {
+      if (claimError instanceof ApiError) {
+        return { status: claimError.statusCode, body: {
+          message: claimError.message,
+          code: claimError.errors[0]?.code,
+          errors: claimError.errors,
+        } };
+      }
+      throw claimError;
+    }
+    if (claim.kind === 'duplicate') {
+      const current = await Lead.findOne({ _id: lead._id, organizationId: orgId }).lean();
+      return { status: 200, body: {
+        success: true,
+        message: 'Reply already sent',
+        duplicate: true,
+        data: current,
+        sendResult: claim.result,
+      } };
+    }
+  }
+
+  let dispatched = false;
+  try {
+    const sent = await sendLeadReplyEmail(
+      lead,
+      message,
+      userId,
+      orgId,
+      attachments,
+      undefined,
+      {
+        requireVerifiedRecipient: true,
+        subject: requestedSubject,
+        beforeDispatch: async () => {
+          dispatched = true;
+        },
+      },
+    );
+    if (claim?.kind === 'proceed') {
+      await finishComposerSend(claim.claimId, {
+        state: 'sent',
+        result: { gmailMessageId: sent.gmailMessageId, threadId: sent.threadId, subject: sent.subject },
+      });
+    }
+  } catch (gmailError) {
+    if (claim?.kind === 'proceed') {
+      const uncertain = dispatched && !isDefiniteGmailRejection(gmailError);
+      await finishComposerSend(claim.claimId, { state: uncertain ? 'uncertain' : 'failed', error: gmailError });
+      if (uncertain) {
+        console.error('[REPLY] Gmail send outcome unknown:', gmailError);
+        return { status: 409, body: { message: COMPOSER_MESSAGES.uncertain, code: SEND_UNCERTAIN_CODE } };
+      }
+    }
+    if (gmailError instanceof LeadReplyRecipientError) {
+      return { status: 400, body: {
+        message: gmailError.message,
+        code: gmailError.code,
+      } };
+    }
+    if (isContactRestrictedError(gmailError)) {
+      return { status: gmailError.statusCode, body: {
+        message: gmailError.message,
+        code: gmailError.errors[0]?.code,
+        errors: gmailError.errors,
+      } };
+    }
+
+    console.error(
+      '[REPLY] Failed to send reply via centralized account:',
+      gmailError,
+    );
+
+    return { status: 502, body: {
+      message:
+        'The reply could not be sent through Gmail',
+    } };
+  }
+
+  const previousStatus = lead.status;
+  const repliedAt = new Date();
+  const historyEntry = statusHistoryEntry(previousStatus, 'Contacted', userId);
+
+  const repliedLead =
+    (await Lead.findOneAndUpdate(
+      { _id: lead._id, organizationId: orgId, status: previousStatus },
+      {
+        $set: { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': repliedAt },
+        ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),
+      },
+      { new: true },
+    ))
+    || (await Lead.findOneAndUpdate(
+      { _id: lead._id, organizationId: orgId },
+      { $set: { isRead: true, 'followUp.lastRepResponseAt': repliedAt } },
+      { new: true },
+    ))
+    || lead;
+
+  await activityService.createActivity({
+    userId: userId.toString(),
+    organizationId: orgId,
+    type: 'other',
+    title: 'Lead Replied',
+    description:
+      attachments.length > 0
+        ? `Reply sent to lead ${lead.firstName} with ${attachments.length} attachment(s)`
+        : `Reply sent to lead ${lead.firstName}`,
+    metadata: {
+      leadId: lead._id.toString(),
+      attachmentCount:
+        attachments.length,
+      ...sourceDetail,
+    },
+    ipAddress: input.ipAddress,
+  });
+
+  logger.info(
+    {
+      leadId: lead._id,
+      userId,
+      attachmentCount:
+        attachments.length,
+      ...sourceDetail,
+    },
+    'Staff replied to lead',
+  );
+
+  await cacheService.del(
+    `lead:thread:${id}`,
+  );
+  await clearLeadConversationEmailCache(id, lead.threadId);
+
+  const io = getSocketIO();
+
+  if (io) {
+    io.to(`org:${orgId}`).emit(
+      'lead:update',
+      repliedLead,
+    );
+  }
+
+  return { status: 200, body: {
+    success: true,
+    message:
+      'Reply sent successfully',
+    data: repliedLead,
+  } };
+}
+
 export const replyToInquiry = async (
   req: Request,
   res: Response,
@@ -1954,7 +2168,6 @@ export const replyToInquiry = async (
       );
     }
 
-    const userId = user._id;
     const orgId = req.orgId;
 
     if (!orgId) {
@@ -1963,201 +2176,17 @@ export const replyToInquiry = async (
       });
     }
 
-    if (
-      !message &&
-      attachments.length === 0
-    ) {
-      return res.status(400).json({
-        message:
-          'Enter a reply or attach at least one file',
-      });
-    }
-
-    const lead = await Lead.findOne({
-      _id: id,
-      organizationId: orgId,
-    });
-
-    if (!lead) {
-      return res.status(404).json({
-        message: 'Inquiry not found',
-      });
-    }
-
-    if (await isClosedForManualSend(orgId, lead)) {
-      return res.status(409).json({ message: CLOSED_LEAD_SEND_MESSAGE, code: 'lead_closed' });
-    }
-
-    const rawRequestId = req.body?.clientRequestId;
-    const clientRequestId = normalizeClientRequestId(rawRequestId);
-    if (rawRequestId !== undefined && rawRequestId !== '' && !clientRequestId) {
-      return res.status(400).json({ message: 'This send request is not valid. Refresh and try again.' });
-    }
-    const requestedSubject = typeof req.body?.subject === 'string' ? req.body.subject : undefined;
-
-    let claim: ComposerSendStart | null = null;
-    if (clientRequestId) {
-      try {
-        claim = await beginComposerSend({
-          organizationId: orgId,
-          leadId: lead._id,
-          channel: 'email',
-          clientRequestId,
-          requestHash: composerRequestHash([
-            'email',
-            String(lead._id),
-            message,
-            cleanEmailSubject(requestedSubject),
-            attachments.map((file) => [file.originalname, file.size]),
-          ]),
-          userId,
-        });
-      } catch (claimError) {
-        if (claimError instanceof ApiError) {
-          return res.status(claimError.statusCode).json({
-            message: claimError.message,
-            code: claimError.errors[0]?.code,
-            errors: claimError.errors,
-          });
-        }
-        throw claimError;
-      }
-      if (claim.kind === 'duplicate') {
-        const current = await Lead.findOne({ _id: lead._id, organizationId: orgId }).lean();
-        return res.json({
-          success: true,
-          message: 'Reply already sent',
-          duplicate: true,
-          data: current,
-          sendResult: claim.result,
-        });
-      }
-    }
-
-    let dispatched = false;
-    try {
-      const sent = await sendLeadReplyEmail(
-        lead,
-        message,
-        userId,
-        orgId,
-        attachments,
-        undefined,
-        {
-          requireVerifiedRecipient: true,
-          subject: requestedSubject,
-          beforeDispatch: async () => {
-            dispatched = true;
-          },
-        },
-      );
-      if (claim?.kind === 'proceed') {
-        await finishComposerSend(claim.claimId, {
-          state: 'sent',
-          result: { gmailMessageId: sent.gmailMessageId, threadId: sent.threadId, subject: sent.subject },
-        });
-      }
-    } catch (gmailError) {
-      if (claim?.kind === 'proceed') {
-        const uncertain = dispatched && !isDefiniteGmailRejection(gmailError);
-        await finishComposerSend(claim.claimId, { state: uncertain ? 'uncertain' : 'failed', error: gmailError });
-        if (uncertain) {
-          console.error('[REPLY] Gmail send outcome unknown:', gmailError);
-          return res.status(409).json({ message: COMPOSER_MESSAGES.uncertain, code: SEND_UNCERTAIN_CODE });
-        }
-      }
-      if (gmailError instanceof LeadReplyRecipientError) {
-        return res.status(400).json({
-          message: gmailError.message,
-          code: gmailError.code,
-        });
-      }
-      if (isContactRestrictedError(gmailError)) {
-        return res.status(gmailError.statusCode).json({
-          message: gmailError.message,
-          code: gmailError.errors[0]?.code,
-          errors: gmailError.errors,
-        });
-      }
-
-      console.error(
-        '[REPLY] Failed to send reply via centralized account:',
-        gmailError,
-      );
-
-      return res.status(502).json({
-        message:
-          'The reply could not be sent through Gmail',
-      });
-    }
-
-    const previousStatus = lead.status;
-    const repliedAt = new Date();
-    const historyEntry = statusHistoryEntry(previousStatus, 'Contacted', userId);
-
-    const repliedLead =
-      (await Lead.findOneAndUpdate(
-        { _id: lead._id, organizationId: orgId, status: previousStatus },
-        {
-          $set: { status: 'Contacted', isRead: true, isPending: false, 'followUp.lastRepResponseAt': repliedAt },
-          ...(historyEntry ? { $push: { statusHistory: historyEntry } } : {}),
-        },
-        { new: true },
-      ))
-      || (await Lead.findOneAndUpdate(
-        { _id: lead._id, organizationId: orgId },
-        { $set: { isRead: true, 'followUp.lastRepResponseAt': repliedAt } },
-        { new: true },
-      ))
-      || lead;
-
-    await activityService.createActivity({
-      userId: userId.toString(),
-      organizationId: orgId,
-      type: 'other',
-      title: 'Lead Replied',
-      description:
-        attachments.length > 0
-          ? `Reply sent to lead ${lead.firstName} with ${attachments.length} attachment(s)`
-          : `Reply sent to lead ${lead.firstName}`,
-      metadata: {
-        leadId: lead._id.toString(),
-        attachmentCount:
-          attachments.length,
-      },
+    const outcome = await sendLeadEmailReply({
+      orgId,
+      userId: user._id,
+      leadId: id,
+      message,
+      attachments,
+      rawRequestId: req.body?.clientRequestId,
+      subject: typeof req.body?.subject === 'string' ? req.body.subject : undefined,
       ipAddress: req.ip,
     });
-
-    logger.info(
-      {
-        leadId: lead._id,
-        userId,
-        attachmentCount:
-          attachments.length,
-      },
-      'Staff replied to lead',
-    );
-
-    await cacheService.del(
-      `lead:thread:${id}`,
-    );
-    await clearLeadConversationEmailCache(id, lead.threadId);
-
-    const io = getSocketIO();
-
-    if (io) {
-      io.to(`org:${orgId}`).emit(
-        'lead:update',
-        repliedLead,
-      );
-    }
-
-    return res.json({
-      success: true,
-      message:
-        'Reply sent successfully',
-      data: repliedLead,
-    });
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error(
       '[ERROR] Error replying to inquiry:',
