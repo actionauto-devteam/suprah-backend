@@ -745,6 +745,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   const existingVehicle = await Vehicle.findOne({
     _id: req.params.id,
     organizationId: orgId,
+    isDeleted: false,
   });
 
   if (!existingVehicle) {
@@ -801,7 +802,7 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const vehicle = await Vehicle.findOneAndUpdate(
-    { _id: req.params.id, organizationId: orgId },
+    { _id: req.params.id, organizationId: orgId, isDeleted: false },
     updateOperations,
     { new: true, runValidators: true },
   ).populate("assignedTo", "email name");
@@ -911,10 +912,14 @@ const updateVehicle = asyncHandler(async (req: Request, res: Response) => {
 const deleteVehicle = asyncHandler(async (req: Request, res: Response) => {
   const userId = getUserId(req);
   const orgId = req.orgId as string;
-  const vehicle = await Vehicle.findOneAndDelete({
-    _id: req.params.id,
-    organizationId: orgId,
-  });
+  // Deleted vehicles are kept but hidden, so the leads, test drives, quotes
+  // and loads that point to them keep their details. Staff can't see or
+  // change a hidden vehicle; the dealer feed brings it back if its VIN returns.
+  const vehicle = await Vehicle.findOneAndUpdate(
+    { _id: req.params.id, organizationId: orgId, isDeleted: false },
+    { $set: { isDeleted: true } },
+    { new: true },
+  );
 
   if (!vehicle) {
     throw new ApiError(404, VEHICLE_NOT_FOUND);
@@ -1034,7 +1039,7 @@ const addVehicleNote = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const vehicle = await Vehicle.findOneAndUpdate(
-    { _id: req.params.id, organizationId: orgId },
+    { _id: req.params.id, organizationId: orgId, isDeleted: false },
     {
       $push: {
         notes: {
@@ -1428,7 +1433,7 @@ const updateVehicleStatus = asyncHandler(
     updateData.manualStatusLock = true;
 
     const vehicle = await Vehicle.findOneAndUpdate(
-      { _id: req.params.id, organizationId: orgId },
+      { _id: req.params.id, organizationId: orgId, isDeleted: false },
       updateData,
       { new: true, runValidators: true },
     ).populate("assignedTo", "email name");
@@ -1669,6 +1674,7 @@ const checkAvailability = asyncHandler(async (req: Request, res: Response) => {
   const vehicle = await Vehicle.findOne({
     _id: req.params.id,
     organizationId: orgId,
+    isDeleted: false,
   });
 
   if (!vehicle) {
@@ -1704,6 +1710,7 @@ const reserveVehicle = asyncHandler(async (req: Request, res: Response) => {
   const vehicle = await Vehicle.findOne({
     _id: req.params.id,
     organizationId: orgId,
+    isDeleted: false,
   });
 
   if (!vehicle) {

@@ -22,6 +22,20 @@ import {
     calculateETA
 } from '../utils/calculations';
 import { createLoadSchema } from '../validations/load.validation';
+import { findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
+
+/**
+ * The CRM lead for a quote's customer. Never blocks saving the quote: if the
+ * lookup fails, returns undefined so callers leave any existing link alone.
+ */
+async function leadLinkFor(orgId: string, contact: { email?: unknown; phone?: unknown }): Promise<QuoteLeadLink | null | undefined> {
+    try {
+        return await findQuoteLeadLink(orgId, contact);
+    } catch (err) {
+        logger.warn({ err, orgId }, 'Could not look up the CRM lead for a quote');
+        return undefined;
+    }
+}
 
 const QUOTE_CACHE_TTL = 60 * 5;
 
@@ -258,12 +272,14 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     );
     const rate = calculateRate(miles, units, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
+    const leadLink = await leadLinkFor(orgId, { email, phone });
 
     const quote = await Quote.create({
         firstName,
         lastName,
         email,
         phone,
+        ...leadLink,
         ...vehicleData,
         fromZip: resolvedFromZip,
         toZip: resolvedToZip,
@@ -288,7 +304,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
 
     const populatedQuote = await Quote.findById(quote._id)
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
-        .populate('createdBy', 'name email avatar');
+        .populate('createdBy', 'name email avatar')
+        .populate('leadId', 'firstName lastName');
 
     // Create notification safely
     if (userId) {
@@ -336,8 +353,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         userId: userId || 'GUEST',
         organizationId: orgId,
         type: 'quote_created',
-        title: 'Draft Created',
-        description: `New transportation draft created for ${firstName} ${lastName}`,
+        title: 'Quote Created',
+        description: `New transportation quote created for ${firstName} ${lastName}`,
         metadata: { quoteId: quote._id.toString(), vehicleName: vehicleData.vehicleName, rate },
         ipAddress: req.ip,
         userAgent: req.get('user-agent')
@@ -479,6 +496,7 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const rate = calculateRate(miles, 1, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
     const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
+    const leadLink = await leadLinkFor(orgId, { email, phone });
 
     let quote;
     try {
@@ -513,6 +531,7 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
             organizationId: orgId,
             source: 'customer_portal',
             requestedBy: user._id,
+            ...leadLink,
         });
     } catch (error: any) {
         // Another device sent the same request at the same moment and won;
@@ -642,6 +661,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         Quote.find(filter)
             .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
             .populate('createdBy', 'name email avatar')
+            .populate('leadId', 'firstName lastName')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit),
@@ -679,7 +699,8 @@ const getQuoteById = asyncHandler(async (req: Request, res: Response) => {
     const orgId = req.orgId as string;
     const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
         .populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
-        .populate('createdBy', 'name email avatar');
+        .populate('createdBy', 'name email avatar')
+        .populate('leadId', 'firstName lastName');
 
     if (!quote) {
         throw new ApiError(404, QUOTE_NOT_FOUND);
@@ -739,6 +760,23 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (lastName !== undefined) updateData.lastName = lastName;
     if (email !== undefined) updateData.email = email;
     if (phone !== undefined) updateData.phone = phone;
+
+    // New contact details can point to a different CRM lead, or to none.
+    if (email !== undefined || phone !== undefined) {
+        const current = email !== undefined && phone !== undefined
+            ? null
+            : await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+                .select('email phone')
+                .lean<{ email?: string; phone?: string }>();
+        const leadLink = await leadLinkFor(orgId, {
+            email: email !== undefined ? email : current?.email,
+            phone: phone !== undefined ? phone : current?.phone,
+        });
+        if (leadLink !== undefined) {
+            updateData.leadId = leadLink?.leadId ?? null;
+            updateData.customerRecordId = leadLink?.customerRecordId ?? null;
+        }
+    }
     if (vehicleName !== undefined) updateData.vehicleName = vehicleName;
     if (vin !== undefined) updateData.vin = vin;
     if (stockNumber !== undefined) updateData.stockNumber = stockNumber;
@@ -835,7 +873,8 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         { _id: req.params.id, organizationId: orgId },
         updateData,
         { new: true, runValidators: true }
-    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('leadId', 'firstName lastName');
 
     if (!quote) {
         throw new ApiError(404, QUOTE_NOT_FOUND);
@@ -890,7 +929,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         userId: userId || 'SYSTEM',
         organizationId: orgId,
         type: 'quote_updated',
-        title: 'Draft Updated',
+        title: 'Quote Updated',
         description: `Quote details modified for ${quote.firstName} ${quote.lastName}`,
         metadata: { quoteId: quote._id.toString(), status: quote.status },
         ipAddress: req.ip
@@ -916,7 +955,8 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         { _id: req.params.id, organizationId: orgId },
         { status },
         { new: true }
-    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState');
+    ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
+        .populate('leadId', 'firstName lastName');
 
     if (!quote) {
         throw new ApiError(404, QUOTE_NOT_FOUND);

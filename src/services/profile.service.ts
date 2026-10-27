@@ -80,7 +80,7 @@ const getProfile = async (userId: string) => {
   const [totalQuotes, totalLoads, totalAppointments] = await Promise.all([
     Quote.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
     Load.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
-    Appointment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
+    Appointment.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
   ]);
 
   const securityStatus = {
