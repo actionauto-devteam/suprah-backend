@@ -4,17 +4,27 @@ import config from '../config';
 import crmExtensionAuth from '../middleware/crmExtensionAuth.middleware';
 import {
   crmExtensionLookupLimiter,
+  crmExtensionNoteWriteLimiter,
   crmExtensionNotesLimiter,
+  crmExtensionSendLimiter,
   crmExtensionSignInIpLimiter,
   crmExtensionSignInUserLimiter,
 } from '../middleware/rate-limit.middleware';
 import { ApiError } from '../utils/ApiError';
 import {
+  addNoteHandler,
+  aiPauseHandler,
+  aiResumeHandler,
+  aiStatusHandler,
   createSessionHandler,
   deleteSessionHandler,
   getSessionHandler,
+  historyHandler,
   lookupHandler,
   notesHandler,
+  replyOptionsHandler,
+  sendEmailHandler,
+  sendTextHandler,
 } from '../controllers/crmExtension.controller';
 
 const EXTENSION_ORIGIN = /^chrome-extension:\/\/([a-p]{32})$/;
@@ -59,5 +69,13 @@ router.get('/session', crmExtensionAuth(), getSessionHandler);
 router.delete('/session', crmExtensionAuth(), deleteSessionHandler);
 router.post('/lookup', crmExtensionAuth(), crmExtensionLookupLimiter, lookupHandler);
 router.get('/leads/:id/notes', crmExtensionAuth(), crmExtensionNotesLimiter, notesHandler);
+router.post('/leads/:id/notes', crmExtensionAuth(), crmExtensionNoteWriteLimiter, addNoteHandler);
+router.get('/leads/:id/history', crmExtensionAuth(), crmExtensionNotesLimiter, historyHandler);
+router.get('/leads/:id/ai-status', crmExtensionAuth(), crmExtensionNotesLimiter, aiStatusHandler);
+router.post('/leads/:id/ai-pause', crmExtensionAuth(), crmExtensionNotesLimiter, aiPauseHandler);
+router.post('/leads/:id/ai-resume', crmExtensionAuth(), crmExtensionNotesLimiter, aiResumeHandler);
+router.get('/leads/:id/reply-options', crmExtensionAuth(), crmExtensionNotesLimiter, replyOptionsHandler);
+router.post('/leads/:id/sms', crmExtensionAuth(), crmExtensionSendLimiter, sendTextHandler);
+router.post('/leads/:id/email', crmExtensionAuth(), crmExtensionSendLimiter, sendEmailHandler);
 
 export default router;

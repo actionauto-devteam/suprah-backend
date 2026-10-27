@@ -27,6 +27,7 @@ import {
   CRM_TOKEN_COOKIE,
 } from "../middleware/crmAuth.middleware";
 import emailService from "../services/email.service";
+import { extensionMessagingServerEnabled } from "../utils/extensionMessagingSwitch";
 import {
   getSocketIO,
   emitToShiftBoard,
@@ -413,6 +414,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     ? parsedFollowUpInterval
     : 24;
   const physicalMailingAddress = metadata.physicalMailingAddress || "";
+  const extensionMessagingEnabled = metadata.extensionMessagingEnabled === true;
   const storedModes = storedModesFromMetadata(metadata);
 
   res.json(
@@ -428,6 +430,8 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         aiHandoffFallbackGroupId,
         aiFollowUpIntervalHours,
         physicalMailingAddress,
+        extensionMessagingEnabled,
+        extensionMessagingServerEnabled: extensionMessagingServerEnabled(),
         aiAgentModes: {
           sms: storedModes.sms,
           email: storedModes.email,
@@ -457,6 +461,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     aiHandoffFallbackGroupId,
     aiFollowUpIntervalHours,
     physicalMailingAddress,
+    extensionMessagingEnabled,
   } = req.body;
   const org = await Organization.findById(orgId);
   if (!org) throw new ApiError(404, "Organization not found");
@@ -520,6 +525,9 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
       .trim()
       .slice(0, 300);
   }
+  if (extensionMessagingEnabled !== undefined) {
+    metadata.extensionMessagingEnabled = extensionMessagingEnabled === true;
+  }
 
   org.metadata = metadata;
   await org.save();
@@ -537,6 +545,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,
         aiFollowUpIntervalHours: org.metadata.aiFollowUpIntervalHours,
         physicalMailingAddress: org.metadata.physicalMailingAddress,
+        extensionMessagingEnabled: org.metadata.extensionMessagingEnabled === true,
       },
       "Organization settings updated",
     ),

@@ -10,7 +10,7 @@ import Organization from '../src/models/Organization.model';
 import Session from '../src/models/Session.model';
 import SmsOptOut from '../src/models/SmsOptOut.model';
 import { CUSTOMER_IDENTITY_INDEXES } from '../src/constants/customerIdentityIndexes';
-import { issueCrmSessionToken, authTokenHash } from '../src/middleware/crmAuth.middleware';
+import { issueCrmSessionToken, authTokenHash, CRM_JWT_SECRET } from '../src/middleware/crmAuth.middleware';
 import config from '../src/config';
 import { extensionApiEnabled, isAllowedExtensionOrigin, parseExtensionIds } from '../src/routes/crmExtension.routes';
 
@@ -124,7 +124,7 @@ describe('Suprah CRM extension API (real database)', () => {
     it('returns a single match with only the fields the panel needs', async () => {
         const res = await ext('post', '/lookup', extToken).send({ phone: '(801) 555-0141' }).expect(200);
         const data = res.body.data;
-        expect(data.query).toEqual({ normalizedPhone: '+18015550141', displayPhone: '(801) 555-0141' });
+        expect(data.query).toEqual({ kind: 'phone', normalizedPhone: '+18015550141', displayPhone: '(801) 555-0141', display: '(801) 555-0141' });
         expect(data.total).toBe(1);
         expect(data.matches[0]).toEqual(expect.objectContaining({
             id: String(ids.single._id), name: 'Avery Single', status: 'New', vehicle: '2021 Toyota Tacoma', assignedTo: 'Casey Morgan', noteCount: 2, closed: false,
@@ -266,6 +266,37 @@ describe('Suprah CRM extension API (real database)', () => {
         expect(off.body.message).toBe('Account has been deactivated. Contact your administrator.');
         const missing = await request(app).post('/api/crm/login').send({ username: crmUser.username }).expect(400);
         expect(missing.body.message).toBe('Employee ID and password are required');
+    });
+
+    it('never lets request headers stand in for a valid extension sign-in', async () => {
+        const body = { phone: '801-555-0141' };
+        const noToken = await request(app).post('/api/crm/extension/lookup').set('Origin', EXT_ORIGIN).send(body).expect(401);
+        expect(noToken.body.message).toBe('Please sign in to Suprah CRM');
+        await request(app).post('/api/crm/extension/lookup').send(body).expect(401);
+        await request(app).get(`/api/crm/extension/leads/${ids.single}/notes`).expect(401);
+        await request(app).get('/api/crm/extension/session').set('Origin', EXT_ORIGIN).set('X-Forwarded-For', '10.0.0.1').expect(401);
+        const wrongSecret = jwt.sign({ id: String(crmUser._id), type: 'crm_ext', sid: String(new mongoose.Types.ObjectId()) }, 'not-the-server-secret', { expiresIn: '1h' });
+        await request(app).post('/api/crm/extension/lookup').set('Origin', EXT_ORIGIN).set('Authorization', `Bearer ${wrongSecret}`).send(body).expect(401);
+        const noSession = jwt.sign({ id: String(crmUser._id), type: 'crm_ext', sid: String(new mongoose.Types.ObjectId()) }, CRM_JWT_SECRET, { expiresIn: '1h' });
+        await request(app).post('/api/crm/extension/lookup').set('Origin', EXT_ORIGIN).set('Authorization', `Bearer ${noSession}`).send(body).expect(401);
+        await request(app).post('/api/crm/extension/lookup').set('Authorization', `Bearer ${noSession}`).send(body).expect(401);
+    });
+
+    it('cuts off an employee on the next request once they are deactivated or offboarded', async () => {
+        const temp = await CrmUser.create({ organizationId: org._id, fullName: 'Leaving Rep', username: `EXT-LEAVE-${stamp}`, email: `ext-leave-${stamp}@example.com`, password: PASSWORD, role: 'employee', isActive: true });
+        try {
+            const signIn = await ext('post', '/session').send({ username: temp.username, password: PASSWORD }).expect(200);
+            const token = signIn.body.data.token;
+            await ext('post', '/lookup', token).send({ phone: '801-555-0141' }).expect(200);
+            await CrmUser.updateOne({ _id: temp._id }, { $set: { isActive: false, isOffboarded: true, offboardedAt: new Date() } });
+            const blocked = await ext('post', '/lookup', token).send({ phone: '801-555-0141' }).expect(403);
+            expect(blocked.body.message).toBe('Your Suprah CRM account is not active');
+            await ext('get', `/leads/${ids.single}/notes`, token).expect(403);
+            await ext('post', '/session').send({ username: temp.username, password: PASSWORD }).expect(403);
+        } finally {
+            await Session.deleteMany({ crmUserId: temp._id });
+            await CrmUser.deleteOne({ _id: temp._id });
+        }
     });
 
     it('ends the session on sign-out and after expiry', async () => {
