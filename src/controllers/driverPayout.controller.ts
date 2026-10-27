@@ -77,26 +77,30 @@ const getDeliverableLoads = asyncHandler(async (req: Request, res: Response) => 
   res.json(new ApiResponse(200, result, 'Deliverable loads fetched successfully'));
 });
 
+// Same roles as the routes' staffOnly check.
+const PAYOUT_STAFF_ROLES = ['super_admin', 'admin', 'employee'];
+
 /**
  * GET /driver-payouts/pending-proofs
- * Returns Loads where proof was submitted to this specific admin and not yet confirmed.
+ * Delivered loads whose proof-of-delivery photo Dispatch hasn't confirmed yet.
+ * Staff only (the route checks this too): the list shows drivers' names,
+ * emails and delivery photos, so customers and drivers never see it.
  */
 const getPendingProofs = asyncHandler(async (req: Request, res: Response) => {
-  const userId = getUserId(req);
   const orgId = req.orgId as string;
   const role = (req.user as IUser)?.role;
-
-  const canViewAllPendingProofs = role && role !== "driver";
+  const isStaff =
+    PAYOUT_STAFF_ROLES.includes(String(role ?? '')) ||
+    PAYOUT_STAFF_ROLES.includes(String(req.orgRole ?? ''));
+  if (!isStaff) {
+    throw new ApiError(403, "Only your organization's staff can view delivery proofs.");
+  }
 
   const proofFilter: Record<string, any> = {
     organizationId: orgId,
     "proofOfDelivery.imageUrl": { $exists: true, $ne: "" },
     "proofOfDelivery.confirmedAt": { $exists: false },
   };
-
-  if (!canViewAllPendingProofs) {
-    proofFilter["proofOfDelivery.submittedTo"] = userId;
-  }
 
   const loads = await Load.find(proofFilter)
     .select(PAYOUT_LIST_OMITTED_FIELDS)

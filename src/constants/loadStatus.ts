@@ -44,12 +44,14 @@ export const VEHICLES_ON_BOARD_STATUSES = [
  * - any active status → Assigned: reassigned to another driver.
  * - Assigned / Accepted → Posted: returned to Available Loads (not after pickup).
  * - Assigned → Accepted → Picked Up → In-Transit → Delivered: the driver's steps.
+ * Nothing moves a load to Cancelled (unwanted loads are deleted). The status
+ * stays in the database rules only so any old cancelled record still loads.
  */
 export const LOAD_STATUS_TRANSITIONS: Readonly<Record<LoadStatus, readonly LoadStatus[]>> = {
-  Draft: ["Posted", "Cancelled"],
-  Posted: ["Assigned", "Draft", "Cancelled"],
-  Assigned: ["Accepted", "Assigned", "Posted", "Cancelled"],
-  Accepted: ["Picked Up", "Assigned", "Posted", "Cancelled"],
+  Draft: ["Posted"],
+  Posted: ["Assigned", "Draft"],
+  Assigned: ["Accepted", "Assigned", "Posted"],
+  Accepted: ["Picked Up", "Assigned", "Posted"],
   "Picked Up": ["In-Transit", "Assigned"],
   "In-Transit": ["Delivered", "Assigned"],
   Delivered: [],

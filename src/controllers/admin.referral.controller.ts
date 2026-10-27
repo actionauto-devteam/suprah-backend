@@ -196,9 +196,20 @@ const getWithdrawalAudit = asyncHandler(async (req: Request, res: Response) => {
         }
 
         // Fetch linked Load and Payment for "Full Receipt" verification
+        // Loads store loadNumber / pickupLocation / deliveryLocation; the
+        // screen reads them as trackingNumber / origin / destination.
         let loadInfo = null;
         if (e.loadId) {
-            loadInfo = await Load.findById(e.loadId).select('trackingNumber status origin destination').lean();
+            const load: any = await Load.findById(e.loadId).select('loadNumber status pickupLocation deliveryLocation').lean();
+            if (load) {
+                loadInfo = {
+                    _id: load._id,
+                    trackingNumber: load.loadNumber,
+                    status: load.status,
+                    origin: load.pickupLocation ? `${load.pickupLocation.city}, ${load.pickupLocation.state}` : undefined,
+                    destination: load.deliveryLocation ? `${load.deliveryLocation.city}, ${load.deliveryLocation.state}` : undefined,
+                };
+            }
         }
 
         let paymentInfo = null;

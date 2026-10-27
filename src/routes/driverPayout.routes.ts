@@ -22,7 +22,7 @@ const staffOnly = authorize(
 );
 
 router.get('/deliverable', staffOnly, driverPayoutController.getDeliverableLoads);
-router.get('/pending-proofs', driverPayoutController.getPendingProofs);
+router.get('/pending-proofs', staffOnly, driverPayoutController.getPendingProofs);
 router.get('/org-admins', staffOnly, driverPayoutController.getOrgAdmins);
 router.get('/stats', staffOnly, driverPayoutController.getPayoutStats);
 router

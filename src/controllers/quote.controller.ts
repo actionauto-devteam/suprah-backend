@@ -316,8 +316,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     notifyOrgAdmins(
         orgId,
         'quote_created',
-        'New Draft Created',
-        `A new transportation draft has been created for ${firstName} ${lastName} — ${vehicleData.vehicleName}.`,
+        'New Quote Created',
+        `A new transportation quote has been created for ${firstName} ${lastName} — ${vehicleData.vehicleName}.`,
         { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName: vehicleData.vehicleName }
     );
 
@@ -670,7 +670,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
                 { quoteId: quote._id.toString(), customerName: `${quote.firstName} ${quote.lastName}` }
             );
         }
-    }
+    }  
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 

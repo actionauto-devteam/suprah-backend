@@ -341,7 +341,8 @@ export class DashboardService {
 
         loadStats.forEach(stat => {
             if (stat._id === 'Posted') loads['Available'] = stat.count;
-            else if (stat._id === 'In-Transit') loads['In Route'] = stat.count;
+            // Picked Up and In-Transit both mean the vehicles are on the trailer.
+            else if (stat._id === 'Picked Up' || stat._id === 'In-Transit') loads['In Route'] += stat.count;
             else if (loads.hasOwnProperty(stat._id)) loads[stat._id] = stat.count;
             else if (stat._id === 'Assigned' || stat._id === 'Accepted') {
                 loads['Dispatched'] = (loads['Dispatched'] || 0) + stat.count;

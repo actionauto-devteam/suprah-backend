@@ -78,7 +78,7 @@ const getProfile = async (userId: string) => {
   const orgId = user.organizationId?.toString();
 
   const [totalQuotes, totalLoads, totalAppointments] = await Promise.all([
-    Quote.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
+    Quote.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
     Load.countDocuments({ createdBy: userId, organizationId: orgId }).catch(() => 0),
     Appointment.countDocuments({ userId, organizationId: orgId }).catch(() => 0),
   ]);
