@@ -47,6 +47,11 @@ export interface IQuote extends Document {
 
     status: 'pending' | 'accepted' | 'rejected' | 'booked';
 
+    // Set only on requests customers send from the customer portal; staff
+    // quotes leave both empty.
+    source?: 'customer_portal';
+    requestedBy?: mongoose.Types.ObjectId;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -131,10 +136,25 @@ const QuoteSchema: Schema<IQuote> = new Schema(
             type: String,
             enum: ['pending', 'accepted', 'rejected', 'booked'],
             default: 'pending'
-        }
+        },
+
+        source: { type: String, enum: ['customer_portal'], default: undefined },
+        requestedBy: { type: Schema.Types.ObjectId, ref: 'User' }
     },
     {
         timestamps: true
+    }
+);
+
+// One pending customer-portal request per customer, vehicle and destination, so
+// two devices sending the same request at the same moment can't both create one.
+// Staff quotes have no source and are never affected.
+QuoteSchema.index(
+    { requestedBy: 1, vehicleId: 1, toZip: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { source: 'customer_portal', status: 'pending' },
+        name: 'one_pending_customer_request',
     }
 );
 
