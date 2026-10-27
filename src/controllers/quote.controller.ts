@@ -933,11 +933,13 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'This quote was rejected, so it can\'t be converted into a load. If the customer still wants the shipment, create a new quote for them.');
     }
 
-    // One load per quote. A quote still marked "booked" whose load was deleted
-    // has no load anymore, so it may be converted again.
+    // One live load per quote. A quote still marked "booked" whose load was
+    // deleted or cancelled has no live load anymore, so it may be converted
+    // again (the cancelled load stays as its own record).
     const existingLoad = await Load.findOne({
         quoteId: quote._id,
         organizationId: orgId,
+        status: { $ne: "Cancelled" },
     });
 
     if (existingLoad) {

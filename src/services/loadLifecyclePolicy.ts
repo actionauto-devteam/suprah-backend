@@ -5,7 +5,13 @@
  * write filter (race protection).
  */
 
-import { ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
+import { ACTIVE_LOAD_STATUSES, CANCELLABLE_LOAD_STATUSES } from "../constants/loadStatus";
+import {
+  LOAD_CANCELLATION_NOTE_MAX,
+  LOAD_CANCELLATION_NOTE_MIN,
+  isLoadCancellationReason,
+  type LoadCancellationReason,
+} from "../constants/loadCancellation";
 
 // The shared lifecycle list (constants/loadStatus.ts has no database imports).
 export const REASSIGNABLE_LOAD_STATUSES = ACTIVE_LOAD_STATUSES;
@@ -133,4 +139,59 @@ export function checkProofOfDeliverySubmission(
     };
   }
   return { ok: true };
+}
+
+export type LoadCancellationCheck =
+  | { ok: true }
+  | { ok: false; statusCode: number; message: string };
+
+/**
+ * Staff cancel a load only before pickup. After pickup the vehicles are on the
+ * driver's truck, so the load must be delivered or handed to another driver.
+ * An already cancelled load is the caller's retry case, not checked here.
+ */
+export function checkLoadCancellation(load: LoadLike): LoadCancellationCheck {
+  const status = String(load.status ?? "");
+  if ((CANCELLABLE_LOAD_STATUSES as readonly string[]).includes(status)) return { ok: true };
+  const ref = loadRef(load).replace(/^l/, "L");
+  if (status === "Delivered") {
+    return {
+      ok: false,
+      statusCode: 409,
+      message: `${ref} is Delivered, so it can't be cancelled. It's kept as the record of the driver's work and pay.`,
+    };
+  }
+  if (status === "Picked Up" || status === "In-Transit") {
+    return {
+      ok: false,
+      statusCode: 409,
+      message: `${ref} is already ${status}, so the vehicles are on the driver's truck and it can't be cancelled. Use Reassign in Driver Tracker to hand it to another driver, or mark it as delivered.`,
+    };
+  }
+  return {
+    ok: false,
+    statusCode: 409,
+    message: `${ref} is ${status || "in a status that can't be cancelled"}. Refresh to see the latest version.`,
+  };
+}
+
+export type LoadCancellationInput =
+  | { ok: true; reason: LoadCancellationReason; note: string }
+  | { ok: false; message: string };
+
+/** The reason is required; "Other" also needs a short note. */
+export function parseLoadCancellationInput(body: unknown): LoadCancellationInput {
+  const input = (body ?? {}) as { reason?: unknown; note?: unknown };
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (!isLoadCancellationReason(reason)) {
+    return { ok: false, message: "Choose why you're cancelling this load, then try again." };
+  }
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+  if (note.length > LOAD_CANCELLATION_NOTE_MAX) {
+    return { ok: false, message: `Keep the note under ${LOAD_CANCELLATION_NOTE_MAX} characters.` };
+  }
+  if (reason === "other" && note.length < LOAD_CANCELLATION_NOTE_MIN) {
+    return { ok: false, message: "Write a short note explaining why you're cancelling this load." };
+  }
+  return { ok: true, reason, note };
 }

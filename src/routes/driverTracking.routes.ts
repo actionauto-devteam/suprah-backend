@@ -414,6 +414,15 @@ router.post(
   validateUploadedImageContent,
   driverTrackingController.markLoadDeliveredByDispatch,
 );
+// Staff cancel a load before pickup, with a required reason. Open to any
+// organization employee like Delete; once a driver is assigned, the handler
+// allows only the responsible dispatcher or an org admin.
+router.post(
+  "/loads/:id/cancel",
+  staffOnly,
+  noStoreSensitive,
+  driverTrackingController.cancelLoad,
+);
 router.post(
   "/loads/:id/release-request",
   driverOnly,

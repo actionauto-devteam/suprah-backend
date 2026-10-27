@@ -1,5 +1,6 @@
 import {
   ACTIVE_LOAD_STATUSES,
+  CANCELLABLE_LOAD_STATUSES,
   GPS_TRACKING_LOAD_STATUSES,
   LOAD_STATUSES,
   LOAD_STATUS_TRANSITIONS,
@@ -38,8 +39,14 @@ describe('load status table (DT-40)', () => {
     expect(isAllowedLoadTransition('Unknown', 'Assigned')).toBe(false);
   });
 
-  it('never moves a load to Cancelled (unwanted loads are deleted instead)', () => {
+  it('allows cancelling a load only before pickup', () => {
     for (const status of LOAD_STATUSES) {
+      expect(isAllowedLoadTransition(status, 'Cancelled')).toBe(
+        (CANCELLABLE_LOAD_STATUSES as readonly string[]).includes(status),
+      );
+    }
+    expect([...CANCELLABLE_LOAD_STATUSES]).toEqual(['Draft', 'Posted', 'Assigned', 'Accepted']);
+    for (const status of VEHICLES_ON_BOARD_STATUSES) {
       expect(isAllowedLoadTransition(status, 'Cancelled')).toBe(false);
     }
   });

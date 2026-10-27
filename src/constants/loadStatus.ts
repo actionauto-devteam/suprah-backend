@@ -38,20 +38,28 @@ export const VEHICLES_ON_BOARD_STATUSES = [
   "In-Transit",
 ] as const satisfies readonly LoadStatus[];
 
+/** Before pickup: staff can still cancel the load. */
+export const CANCELLABLE_LOAD_STATUSES = [
+  "Draft",
+  "Posted",
+  "Assigned",
+  "Accepted",
+] as const satisfies readonly LoadStatus[];
+
 /**
  * Which status changes the lifecycle allows (from → to):
  * - Posted → Assigned: a dispatcher assigns the load or approves a request.
  * - any active status → Assigned: reassigned to another driver.
  * - Assigned / Accepted → Posted: returned to Available Loads (not after pickup).
  * - Assigned → Accepted → Picked Up → In-Transit → Delivered: the driver's steps.
- * Nothing moves a load to Cancelled (unwanted loads are deleted). The status
- * stays in the database rules only so any old cancelled record still loads.
+ * - Draft / Posted / Assigned / Accepted → Cancelled: staff cancel it before
+ *   pickup (CANCELLABLE_LOAD_STATUSES). Delivered and Cancelled are final.
  */
 export const LOAD_STATUS_TRANSITIONS: Readonly<Record<LoadStatus, readonly LoadStatus[]>> = {
-  Draft: ["Posted"],
-  Posted: ["Assigned", "Draft"],
-  Assigned: ["Accepted", "Assigned", "Posted"],
-  Accepted: ["Picked Up", "Assigned", "Posted"],
+  Draft: ["Posted", "Cancelled"],
+  Posted: ["Assigned", "Draft", "Cancelled"],
+  Assigned: ["Accepted", "Assigned", "Posted", "Cancelled"],
+  Accepted: ["Picked Up", "Assigned", "Posted", "Cancelled"],
   "Picked Up": ["In-Transit", "Assigned"],
   "In-Transit": ["Delivered", "Assigned"],
   Delivered: [],

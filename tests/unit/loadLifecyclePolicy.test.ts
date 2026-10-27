@@ -2,8 +2,10 @@ import {
   REASSIGNABLE_LOAD_STATUSES,
   canStaffDeleteLoad,
   checkDeliveryConfirmation,
+  checkLoadCancellation,
   checkProofOfDeliverySubmission,
   isReassignableLoad,
+  parseLoadCancellationInput,
   proofOfDeliveryBelongsTo,
   staffDeletableLoadFilter,
 } from '../../src/services/loadLifecyclePolicy';
@@ -124,5 +126,57 @@ describe('Load schema (DT-05 / DT-14)', () => {
   it("keeps each requester's signature image out of normal queries", () => {
     const requestSchema = (Load.schema.path('driverRequests') as any).schema;
     expect(requestSchema.path('signature.signatureDataUrl').options.select).toBe(false);
+  });
+
+  it('records why, who and when a load was cancelled, and the driver history can say cancelled', () => {
+    expect(Load.schema.path('cancellation.reason')).toBeDefined();
+    expect(Load.schema.path('cancellation.by')).toBeDefined();
+    const historySchema = (Load.schema.path('assignmentHistory') as any).schema;
+    expect(historySchema.path('endReason').enumValues).toEqual(['reassigned', 'removed', 'cancelled']);
+  });
+});
+
+describe('staff cancel a load before pickup', () => {
+  it('allows Draft, Posted, Assigned and Accepted only', () => {
+    const expected: Record<string, boolean> = {
+      Draft: true, Posted: true, Assigned: true, Accepted: true,
+      'Picked Up': false, 'In-Transit': false, Delivered: false, Cancelled: false,
+    };
+    for (const status of ALL_STATUSES) {
+      expect(checkLoadCancellation({ status, loadNumber: 'LD-1' }).ok).toBe(expected[status]);
+    }
+  });
+
+  it("explains in plain words why a load can't be cancelled", () => {
+    const pickedUp = checkLoadCancellation({ status: 'Picked Up', loadNumber: 'LD-1' });
+    expect(pickedUp).toEqual({
+      ok: false,
+      statusCode: 409,
+      message:
+        "Load LD-1 is already Picked Up, so the vehicles are on the driver's truck and it can't be cancelled. Use Reassign in Driver Tracker to hand it to another driver, or mark it as delivered.",
+    });
+    expect(checkLoadCancellation({ status: 'Delivered', loadNumber: 'LD-1' })).toMatchObject({
+      ok: false,
+      statusCode: 409,
+      message: expect.stringMatching(/^Load LD-1 is Delivered, so it can't be cancelled/),
+    });
+  });
+
+  it('needs a known reason, and a short note for Other', () => {
+    expect(parseLoadCancellationInput({ reason: 'customer_cancelled' }))
+      .toEqual({ ok: true, reason: 'customer_cancelled', note: '' });
+    expect(parseLoadCancellationInput({ reason: ' duplicate_load ', note: '  Same as LD-2  ' }))
+      .toEqual({ ok: true, reason: 'duplicate_load', note: 'Same as LD-2' });
+    expect(parseLoadCancellationInput({ reason: 'other', note: 'Wrong pickup city' }))
+      .toEqual({ ok: true, reason: 'other', note: 'Wrong pickup city' });
+
+    for (const body of [undefined, null, {}, { reason: '' }, { reason: 'made_up' }, { reason: 7 }]) {
+      expect(parseLoadCancellationInput(body))
+        .toEqual({ ok: false, message: "Choose why you're cancelling this load, then try again." });
+    }
+    expect(parseLoadCancellationInput({ reason: 'other' })).toMatchObject({ ok: false });
+    expect(parseLoadCancellationInput({ reason: 'other', note: ' ab ' })).toMatchObject({ ok: false });
+    expect(parseLoadCancellationInput({ reason: 'customer_cancelled', note: 'x'.repeat(501) }))
+      .toEqual({ ok: false, message: 'Keep the note under 500 characters.' });
   });
 });

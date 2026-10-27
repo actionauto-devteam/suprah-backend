@@ -962,6 +962,126 @@ describe('Mid-trip reassign keeps the previous driver\'s evidence', () => {
   });
 });
 
+describe('Cancel load before pickup', () => {
+  const cancel = (loadId: unknown, token: string, body: Record<string, unknown>) =>
+    request(app).post(`/api/driver-tracking/loads/${loadId}/cancel`).set(auth(token)).send(body);
+
+  async function acceptedLoad(label: string) {
+    const driver = await createDriver(label);
+    const load = await seedLoad();
+    await request(app)
+      .post('/api/driver-tracking/assign-load')
+      .set(auth(dispatcherToken))
+      .send({ loadId: String(load._id), driverId: String(driver.user._id), overrideAvailability: true, overrideCapacity: true })
+      .expect(200);
+    await request(app).post(`/api/driver-tracking/loads/${load._id}/accept`).set(auth(driver.token)).send(signatureFor('Cancel Driver')).expect(200);
+    return { load, driver };
+  }
+
+  it('keeps a cancelled Posted load as a read-only record and tells drivers who requested it', async () => {
+    const requester = await createDriver('cancel-requester');
+    const load = await seedLoad({ driverRequests: [{ driverId: requester.user._id, requestedAt: new Date() }] });
+
+    const res = await cancel(load._id, dispatcherToken, { reason: 'customer_cancelled', note: 'Found another carrier' }).expect(200);
+    expect(res.body.data.status).toBe('Cancelled');
+
+    const cancelled: any = await reload(load._id);
+    expect(cancelled.status).toBe('Cancelled');
+    expect(cancelled.driverRequests).toHaveLength(0);
+    expect(cancelled.cancellation).toMatchObject({
+      reason: 'customer_cancelled',
+      note: 'Found another carrier',
+      byName: 'Dispatcher A',
+      previousStatus: 'Posted',
+    });
+    expect(String(cancelled.cancellation.by)).toBe(String(dispatcher._id));
+
+    const notice = await Notification.findOne({ userId: requester.user._id, 'metadata.loadId': String(load._id) });
+    expect(notice?.title).toBe('Requested Load Withdrawn');
+    expect(notice?.message).not.toMatch(/Found another carrier/);
+
+    // A retry is safe, and nothing else can change on it.
+    await cancel(load._id, dispatcherToken, { reason: 'customer_cancelled' }).expect(200);
+    await request(app)
+      .put(`/api/loads/${load._id}`)
+      .set(auth(dispatcherToken))
+      .send({ additionalInfo: { visibility: 'public', notes: 'Edit' }, expectedUpdatedAt: await currentVersion(load._id) })
+      .expect(400);
+    await request(app)
+      .get(`/api/driver-tracking/loads/${load._id}`)
+      .set(auth(requester.token))
+      .expect(404);
+  });
+
+  it('alerts the assigned driver, ends their assignment and keeps their history', async () => {
+    const { load, driver } = await acceptedLoad('cancel-accepted');
+
+    await cancel(load._id, dispatcherToken, { reason: 'vehicle_unavailable' }).expect(200);
+
+    const cancelled: any = await Load.findById(load._id).select('+assignmentHistory');
+    expect(cancelled.status).toBe('Cancelled');
+    expect(cancelled.assignedDriverId).toBeNull();
+    expect(cancelled.dispatchOwnerId).toBeNull();
+    expect(cancelled.cancellation).toMatchObject({ reason: 'vehicle_unavailable', previousStatus: 'Accepted', driverName: 'Driver cancel-accepted' });
+    expect(cancelled.assignmentHistory[0]).toMatchObject({ endReason: 'cancelled', statusAtEnd: 'Accepted' });
+    expect(cancelled.assignmentHistory[0].driverContract.signerName).toBe('Cancel Driver');
+
+    const alert: any = await Notification.findOne({ userId: driver.user._id, type: 'driver_dispatch_alert', 'metadata.loadId': String(load._id) });
+    expect(alert?.title).toBe('Load Cancelled');
+    expect(alert?.message).toMatch(/Stop work on the cancelled load for Load .+ and wait for Dispatch instructions\. Reason: Vehicle sold or unavailable\./);
+    expect(alert?.metadata).toMatchObject({ alertType: 'load_cancelled', priority: 'urgent', response: 'pending', allowedResponses: ['acknowledged'] });
+
+    // The driver can acknowledge it, and the load is no longer theirs.
+    await request(app).post(`/api/driver-tracking/alerts/${alert._id}/respond`).set(auth(driver.token)).send({ response: 'acknowledged' }).expect(200);
+    const myLoads = await request(app).get('/api/driver-tracking/my-loads').set(auth(driver.token)).expect(200);
+    expect(JSON.stringify(myLoads.body)).not.toContain(String(load._id));
+  });
+
+  it('refuses loads after pickup, a missing reason and other organizations', async () => {
+    for (const status of ['Picked Up', 'In-Transit', 'Delivered']) {
+      const { user } = await createDriver(`cancel-refused-${status.replace(/\W/g, '').toLowerCase()}`);
+      const load = await seedLoad({ status, assignedDriverId: user._id, dispatchOwnerId: dispatcher._id });
+      const res = await cancel(load._id, dispatcherToken, { reason: 'customer_cancelled' }).expect(409);
+      expect(res.body.message).toMatch(/can't be cancelled/);
+      expect((await reload(load._id))!.status).toBe(status);
+    }
+
+    const posted = await seedLoad();
+    const missing = await cancel(posted._id, dispatcherToken, {}).expect(400);
+    expect(missing.body.message).toBe("Choose why you're cancelling this load, then try again.");
+    await cancel(posted._id, dispatcherToken, { reason: 'other' }).expect(400);
+
+    const foreign = await seedLoad({ organizationId: orgB._id, createdBy: dispatcherB._id });
+    await cancel(foreign._id, dispatcherToken, { reason: 'duplicate_load' }).expect(404);
+    expect((await reload(foreign._id))!.status).toBe('Posted');
+
+    const { token: driverToken } = await createDriver('cancel-as-driver');
+    await cancel(posted._id, driverToken, { reason: 'duplicate_load' }).expect(403);
+    expect((await reload(posted._id))!.status).toBe('Posted');
+  });
+
+  it("lets any employee cancel an unassigned load, but only the responsible dispatcher or an admin once a driver has it", async () => {
+    const employee = await User.create({
+      email: `cancel-employee${TEST_EMAIL_DOMAIN}`,
+      name: 'Cancel Employee',
+      role: 'employee',
+      organizationId: orgA._id,
+      emailVerified: true,
+      onboardingCompleted: true,
+      isActive: true,
+    });
+    const employeeToken = tokenService.generateAccessToken(employee as any);
+
+    const unassigned = await seedLoad();
+    await cancel(unassigned._id, employeeToken, { reason: 'duplicate_load' }).expect(200);
+
+    const { load } = await acceptedLoad('cancel-not-owner');
+    const refused = await cancel(load._id, employeeToken, { reason: 'customer_cancelled' }).expect(403);
+    expect(refused.body.message).toMatch(/Only its responsible dispatcher and organization admins can/);
+    expect((await reload(load._id))!.status).toBe('Accepted');
+  });
+});
+
 describe('Organizations that are deleted or suspended', () => {
   it('suspended organizations disappear from the load board and cannot be requested', async () => {
     const suspended = await Organization.create({ name: 'Load Flow Suspended Org', slug: 'load-flow-test-org-suspended', status: 'suspended' });
