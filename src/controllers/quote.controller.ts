@@ -346,6 +346,211 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     logger.info({ quoteId: quote._id, orgId }, 'New shipping quote created');
 });
 
+const CUSTOMER_REQUEST_ALREADY_SENT = 'You already asked for this shipping quote. The dealership has your request.';
+
+function splitAccountName(name: unknown): { firstName: string; lastName: string } {
+    const parts = String(name ?? '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return { firstName: parts[0] ?? '', lastName: '' };
+    return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
+}
+
+/** What a customer sees about their own request: no dealership internals. */
+function customerRequestView(quote: any) {
+    return {
+        id: String(quote._id),
+        vehicleName: quote.vehicleName,
+        toAddress: quote.toAddress,
+        miles: quote.miles,
+        rate: quote.rate,
+        eta: quote.eta,
+        status: quote.status,
+    };
+}
+
+/**
+ * POST /api/quote-requests
+ * A customer asks for shipping on a marketplace vehicle from the customer
+ * portal. The request goes to the dealership that owns the vehicle, picks up
+ * from that dealership's lot, and uses the customer's own account details,
+ * never names or emails typed into the form.
+ */
+const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser | undefined;
+    if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
+    const body = (req.body ?? {}) as Record<string, any>;
+
+    const vehicleId = String(body.vehicleId ?? '').trim();
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
+        throw new ApiError(400, 'Choose a vehicle to get a shipping quote for.');
+    }
+    // Only vehicles customers can see on the marketplace.
+    const vehicle: any = await Vehicle.findOne({
+        _id: vehicleId,
+        isDeleted: false,
+        isArchived: { $ne: true },
+        status: 'Ready for Sale',
+    }).lean();
+    if (!vehicle?.organizationId) {
+        throw new ApiError(404, "This vehicle is no longer available, so we can't quote shipping for it. Refresh the page and choose another vehicle.");
+    }
+    const orgId = String(vehicle.organizationId);
+
+    // Who is asking: the signed-in account. The form only fills gaps the
+    // account doesn't have (a last name, a phone number).
+    const accountName = splitAccountName(user.name);
+    const firstName = accountName.firstName || String(body.firstName ?? '').trim();
+    const lastName = accountName.lastName || String(body.lastName ?? '').trim();
+    const email = String(user.email ?? '').trim().toLowerCase();
+    const phone = String((user as any).personalInfo?.phone ?? '').trim() || String(body.phone ?? '').trim();
+    if (!firstName || !lastName) {
+        throw new ApiError(400, 'Enter your first and last name so the dealership knows who the quote is for.');
+    }
+    if (!phone) {
+        throw new ApiError(400, 'Enter your phone number so the dealership can reach you about shipping.');
+    }
+
+    // Where to: the delivery address the customer entered.
+    const toZipInput = String(body.toZip ?? body.zipCode ?? '').trim();
+    const toLocation = body.toCity || body.toState
+        ? normalizeStructuredQuoteLocation(
+            { name: body.toLocationName, streetAddress: body.toStreetAddress, city: body.toCity, state: body.toState, zip: toZipInput },
+            'Destination',
+        )
+        : undefined;
+    const toZip = toLocation?.zip || toZipInput;
+    const toAddress = toLocation ? formatLegacyQuoteAddress(toLocation) : String(body.toAddress ?? body.fullAddress ?? '').trim();
+    if (!toZip || !toAddress) {
+        throw new ApiError(400, 'Enter where the vehicle should go (city, state and ZIP code).');
+    }
+    if (!ZIP_RE.test(toZip)) {
+        throw new ApiError(400, 'ZIP codes must be 5 digits. Check the delivery ZIP code.');
+    }
+
+    // Where from: the dealership's lot. The form's pickup is only used when the
+    // vehicle has no lot address on file.
+    const dealerZip = String(vehicle.dealerZip ?? '').trim();
+    const dealerState = String(vehicle.dealerState ?? '').trim().toUpperCase();
+    const fromLocation = ZIP_RE.test(dealerZip) && vehicle.dealerCity && /^[A-Z]{2}$/.test(dealerState)
+        ? {
+            name: String(vehicle.dealerName ?? '').trim(),
+            streetAddress: String(vehicle.dealerAddress ?? '').trim(),
+            city: String(vehicle.dealerCity).trim(),
+            state: dealerState,
+            zip: dealerZip,
+            country: 'US',
+        }
+        : body.fromCity || body.fromState
+            ? normalizeStructuredQuoteLocation(
+                { name: body.fromLocationName, streetAddress: body.fromStreetAddress, city: body.fromCity, state: body.fromState, zip: body.fromZip },
+                'Origin',
+            )
+            : undefined;
+    const fromZip = fromLocation?.zip || String(body.fromZip ?? '').trim();
+    const fromAddress = fromLocation ? formatLegacyQuoteAddress(fromLocation) : String(body.fromAddress ?? '').trim();
+    if (!ZIP_RE.test(fromZip) || !fromAddress) {
+        throw new ApiError(400, "We couldn't find where this vehicle is picked up from. Contact the dealership, or try again later.");
+    }
+
+    // While a request for the same car and destination is still pending,
+    // asking again returns it instead of adding a duplicate to the Quotes tab.
+    const pendingRequestFilter = {
+        source: 'customer_portal',
+        requestedBy: user._id,
+        vehicleId: vehicle._id,
+        toZip,
+        status: 'pending',
+    };
+    const repeat = await Quote.findOne(pendingRequestFilter).lean();
+    if (repeat) {
+        return res.status(200).json(new ApiResponse(200, customerRequestView(repeat), CUSTOMER_REQUEST_ALREADY_SENT));
+    }
+
+    const fromCoords = await getCoordinatesFromZip(fromZip);
+    if (!fromCoords) {
+        throw new ApiError(400, `We couldn't find the pickup ZIP code ${fromZip}. Contact the dealership, or try again later.`);
+    }
+    const toCoords = await getCoordinatesFromZip(toZip);
+    if (!toCoords) {
+        throw new ApiError(400, `We couldn't find the delivery ZIP code ${toZip}. Check it and try again.`);
+    }
+    const enclosedTrailer = body.enclosedTrailer === true;
+    const vehicleInoperable = body.vehicleInoperable === true;
+    const miles = calculateDistance(fromCoords.lat, fromCoords.lon, toCoords.lat, toCoords.lon);
+    const rate = calculateRate(miles, 1, enclosedTrailer, vehicleInoperable);
+    const eta = calculateETA(miles);
+    const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
+
+    let quote;
+    try {
+        quote = await Quote.create({
+            firstName,
+            lastName,
+            email,
+            phone,
+            vehicleId: vehicle._id,
+            vehicleName,
+            vin: vehicle.vin,
+            stockNumber: vehicle.stockNumber,
+            vehiclePrice: vehicle.price,
+            vehicleMarketPrice: vehicle.msrp,
+            vehicleLocation: vehicle.dealerCity ? `${vehicle.dealerCity}, ${vehicle.dealerState}` : 'Unknown',
+            ...(vehicle.images?.length ? { vehicleImage: vehicle.images[0] } : {}),
+            vehicleStatus: vehicle.status,
+            daysOnLot: vehicle.daysOnLot,
+            fromZip,
+            toZip,
+            fromAddress,
+            toAddress,
+            ...(fromLocation && { fromLocation }),
+            ...(toLocation && { toLocation }),
+            units: 1,
+            enclosedTrailer,
+            vehicleInoperable,
+            miles,
+            rate,
+            eta,
+            status: 'pending',
+            organizationId: orgId,
+            source: 'customer_portal',
+            requestedBy: user._id,
+        });
+    } catch (error: any) {
+        // Another device sent the same request at the same moment and won;
+        // the database rule refused this one, so return that request.
+        if (error?.code !== 11000) throw error;
+        const winner = await Quote.findOne(pendingRequestFilter).lean();
+        if (!winner) throw error;
+        return res.status(200).json(new ApiResponse(200, customerRequestView(winner), CUSTOMER_REQUEST_ALREADY_SENT));
+    }
+
+    res.status(201).json(
+        new ApiResponse(201, customerRequestView(quote), 'Your shipping quote request was sent to the dealership.'),
+    );
+
+    const destination = toLocation ? `${toLocation.city}, ${toLocation.state}` : toZip;
+    notifyOrgAdmins(
+        orgId,
+        'quote_created',
+        'New Shipping Request',
+        `${firstName} ${lastName} asked for a shipping quote for ${vehicleName} to ${destination}.`,
+        { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName, source: 'customer_portal' },
+    );
+    getSocketIO()?.to(`org:${orgId}`).emit('quote:change', { action: 'created' });
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: orgId,
+        type: 'quote_created',
+        title: 'Customer Shipping Request',
+        description: `${firstName} ${lastName} asked for a shipping quote from the customer portal`,
+        metadata: { quoteId: quote._id.toString(), vehicleName, rate, source: 'customer_portal' },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+    });
+
+    logger.info({ quoteId: quote._id, orgId }, 'Customer shipping quote request created');
+});
+
 /**
  * Get all quotes (cross-org — all orgs visible for transparency)
  */
@@ -1307,6 +1512,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
 export default {
     createQuote,
+    createCustomerQuoteRequest,
     getQuotes,
     getQuoteById,
     updateQuote,

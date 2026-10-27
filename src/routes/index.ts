@@ -4,6 +4,7 @@ import dashboardRoute from "./dashboard.route";
 import syncRoute from "./sync.route";
 import feedSyncRoute from "./feedSync.route";
 import quoteRoute from "./quote.routes";
+import customerQuoteRequestRoute from "./customerQuoteRequest.routes";
 import notificationRoute from "./notification.route";
 import crmNotificationRoute from "./crmNotification.route";
 import profileRoute from "./profile.route";
@@ -130,6 +131,10 @@ const defaultRoutes = [
   {
     path: "/quotes",
     route: quoteRoute,
+  },
+  {
+    path: "/quote-requests",
+    route: customerQuoteRequestRoute,
   },
   {
     path: "/youtube",
