@@ -3,7 +3,7 @@ import { deleteChimeMeeting, stopRecordingPipelines } from './suprahMeetAws.serv
 
 import { randomUUID } from 'crypto';
 import {
-  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingReminder,
+  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive, notifyMeetingReminder,
 } from './suprahMeetNotification.service';
 import logger from '../utils/logger';
 
@@ -24,9 +24,41 @@ async function tick() {
   running = true;
   try {
     await sendSuprahMeetNotifications().catch((err) => logger.error({ err }, '[SuprahMeet] reminder tick failed'));
+    await openDueMeetings().catch((err) => logger.error({ err }, '[SuprahMeet] scheduled-open tick failed'));
     await autoEndTick().catch((err) => logger.error({ err }, '[SuprahMeet] auto-end tick failed'));
   } finally {
     running = false;
+  }
+}
+
+/**
+ * Scheduled sessions become joinable at their scheduled instant even if the
+ * host is not present. This is an atomic claim so multiple API instances do
+ * not send duplicate live alerts; Chime is still created only on first join.
+ */
+export async function openDueMeetings(now = new Date()) {
+  const candidates = await Meeting.find({
+    status: 'scheduled',
+    scheduledAt: { $ne: null, $lte: now },
+  }).sort({ scheduledAt: 1 }).limit(50);
+
+  for (const candidate of candidates) {
+    const meeting = await Meeting.findOneAndUpdate({
+      _id: candidate._id,
+      organizationId: candidate.organizationId,
+      status: 'scheduled',
+      scheduledAt: candidate.scheduledAt,
+    }, {
+      $set: {
+        status: 'live',
+        // Preserve the promised start time, rather than the worker's polling
+        // moment, so the room clock does not claim it began early or late.
+        startedAt: candidate.scheduledAt,
+      },
+    }, { new: true });
+    if (!meeting) continue;
+    await notifyMeetingLive(meeting).catch((err) =>
+      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] scheduled live notification failed'));
   }
 }
 
