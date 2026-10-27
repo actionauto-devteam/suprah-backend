@@ -2,6 +2,7 @@ import express from "express";
 import auth from "../middleware/auth.middleware";
 import dispatchChannelController from "../controllers/dispatchChannel.controller";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
+import { dispatchChatMessageLimiter, dispatchChatUploadLimiter } from "../middleware/transportRateLimit.middleware";
 
 // Dispatch Chat channels. Signed-in drivers and staff only (checked in the
 // controller); no organization is required because members can come from
@@ -40,9 +41,9 @@ router.post("/:id/suggestions/:suggestionId/decline", dispatchChannelController.
 router
   .route("/:id/messages")
   .get(dispatchChannelController.getMessages)
-  .post(dispatchChannelController.sendMessage);
+  .post(dispatchChatMessageLimiter, dispatchChannelController.sendMessage);
 // Photos and files: same types and limits as private Dispatch Chat.
-router.post("/:id/attachments", uploadDispatchChatFiles, dispatchChannelController.uploadAttachments);
+router.post("/:id/attachments", dispatchChatUploadLimiter, uploadDispatchChatFiles, dispatchChannelController.uploadAttachments);
 router
   .route("/:id/messages/:messageId")
   .patch(dispatchChannelController.editMessage)

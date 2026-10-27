@@ -3,6 +3,7 @@ import quoteController from '../controllers/quote.controller';
 import auth from '../middleware/auth.middleware';
 import { requireOrg } from '../middleware/org.middleware';
 import authorize from '../middleware/role.middleware';
+import { quoteChangeLimiter } from '../middleware/transportRateLimit.middleware';
 
 const router = express.Router();
 
@@ -20,7 +21,7 @@ router.use(staffOnly);
 
 router
     .route('/')
-    .post(quoteController.createQuote)
+    .post(quoteChangeLimiter, quoteController.createQuote)
     .get(quoteController.getQuotes);
 
 router
@@ -32,10 +33,10 @@ router
 
 router
     .route('/:id/status')
-    .patch(quoteController.updateQuoteStatus);
+    .patch(quoteChangeLimiter, quoteController.updateQuoteStatus);
 
 router
     .route('/:id/convert-to-load')
-    .post(quoteController.convertToLoad);
+    .post(quoteChangeLimiter, quoteController.convertToLoad);
 
 export default router;

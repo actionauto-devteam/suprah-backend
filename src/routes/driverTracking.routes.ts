@@ -27,6 +27,11 @@ import { mapPlaceLookupLimiter, routeLookupLimiter, uploadLimiter } from "../mid
 import loadRouteController from "../controllers/loadRoute.controller";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
+import {
+  dispatchChatMessageLimiter,
+  dispatchChatUploadLimiter,
+  driverLoadRequestLimiter,
+} from "../middleware/transportRateLimit.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
 import { areBackgroundJobsDisabled } from "../config/backgroundJobs";
 import { requireSuperAdmin } from "../middleware/rbac.middleware";
@@ -251,10 +256,12 @@ router.get(
 );
 router.post(
   "/dispatch-chat/:driverId/messages",
+  dispatchChatMessageLimiter,
   dispatchChatController.sendMessage,
 );
 router.post(
   "/dispatch-chat/:driverId/attachments",
+  dispatchChatUploadLimiter,
   uploadDispatchChatFiles,
   dispatchChatController.uploadAttachments,
 );
@@ -299,7 +306,7 @@ router.get(
   routeLookupLimiter,
   loadRouteController.getLoadRouteForStaff,
 );
-router.post("/loads/:id/request", driverOnly, driverTrackingController.requestLoad);
+router.post("/loads/:id/request", driverOnly, driverLoadRequestLimiter, driverTrackingController.requestLoad);
 router.post(
   "/loads/:id/approve-request",
   staffOnly,
@@ -410,11 +417,13 @@ router.post(
 router.post(
   "/loads/:id/release-request",
   driverOnly,
+  driverLoadRequestLimiter,
   driverTrackingController.requestLoadRelease,
 );
 router.post(
   "/loads/:id/release-request/cancel",
   driverOnly,
+  driverLoadRequestLimiter,
   driverTrackingController.cancelReleaseRequest,
 );
 router.post(
@@ -425,7 +434,7 @@ router.post(
 // Backward-compatible driver action: before acceptance, /drop rejects the
 // assignment immediately and returns the load to Posted; after acceptance it
 // preserves the approval-based release-request workflow.
-router.post("/loads/:id/drop", driverOnly, driverTrackingController.dropLoad);
+router.post("/loads/:id/drop", driverOnly, driverLoadRequestLimiter, driverTrackingController.dropLoad);
 
 // Phone tracking with Traccar Client: the driver's own link...
 router.get("/tracking-device", driverOnly, noStoreSensitive, driverTrackingDeviceController.getMyTrackingDevice);
