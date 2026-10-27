@@ -465,7 +465,7 @@ export async function listEarlierConversations(organizationId: string, lead: any
   };
 }
 
-async function channelStateFor(organizationId: string, lead: any) {
+export async function channelStateFor(organizationId: string, lead: any) {
   const phone = normalizeIdentityPhone(lead.phone);
   const [conversation, optOut, session] = await Promise.all([
     phone ? Conversation.findOne({ orgId: orgIdsOf(organizationId), customerPhone: phone }).select('_id leadId aiPausedAt aiPausedBy aiAutoPausedUntil').lean() : Promise.resolve(null),

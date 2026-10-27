@@ -198,8 +198,14 @@ export const resumeSmsAi = asyncHandler(async (req: Request, res: Response) => {
 
 /** Start (or continue) a thread by phone/customer/lead — used by the leads
  *  page SMS Reply and the customer profile. */
-async function startComposerSms(req: Request, orgId: any, leadId: unknown, toPhone: unknown, body: unknown) {
-  const rawRequestId = req.body?.clientRequestId;
+async function startComposerSms(
+  rawRequestId: unknown,
+  userId: unknown,
+  orgId: any,
+  leadId: unknown,
+  toPhone: unknown,
+  body: unknown,
+) {
   if (rawRequestId === undefined || rawRequestId === "") return null;
   const clientRequestId = normalizeClientRequestId(rawRequestId);
   if (!clientRequestId) throw new ApiError(400, "This send request is not valid. Refresh and try again.");
@@ -216,7 +222,7 @@ async function startComposerSms(req: Request, orgId: any, leadId: unknown, toPho
     channel: "sms",
     clientRequestId,
     requestHash: composerRequestHash(["sms", String(leadId), target.e164, String(body || "").trim()]),
-    userId: actor(req).userId,
+    userId,
   });
 }
 
@@ -250,23 +256,35 @@ async function duplicateComposerSms(orgId: any, result: Record<string, unknown>)
   return new ApiResponse(200, { message, conversationId: result.conversationId || null, duplicate: true }, "Message already sent");
 }
 
-export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
-  const orgId = orgOf(req);
-  const { toPhone, body, customerId, customerName, leadId } = req.body || {};
+export type ManualLeadSmsOutcome =
+  | { duplicate: true; response: Awaited<ReturnType<typeof duplicateComposerSms>> }
+  | { duplicate: false; message: any; conversation: any };
+
+export async function sendManualLeadSms(input: {
+  orgId: any;
+  user: ReturnType<typeof actor>;
+  toPhone: any;
+  body: any;
+  customerId?: any;
+  customerName?: any;
+  leadId?: any;
+  clientRequestId?: unknown;
+  origin?: "chrome_extension";
+}): Promise<ManualLeadSmsOutcome> {
+  const { orgId, user, toPhone, body, customerId, customerName, leadId } = input;
   if (!toPhone) throw new ApiError(400, "toPhone is required");
   const phoneProblem = manualSmsPhoneProblem(toPhone);
   if (phoneProblem) throw new ApiError(400, phoneProblem);
   await assertLeadOpenForManualSend(orgId, leadId);
   await assertManualSmsAllowed(orgId, toPhone, leadId);
-  const claim = await startComposerSms(req, orgId, leadId, toPhone, body);
+  const claim = await startComposerSms(input.clientRequestId, user.userId, orgId, leadId, toPhone, body);
   if (claim?.kind === "duplicate") {
-    res.status(200).json(await duplicateComposerSms(orgId, claim.result));
-    return;
+    return { duplicate: true, response: await duplicateComposerSms(orgId, claim.result) };
   }
 
   const result = await sendComposerSms(claim, () => comm.sendSmsFromUser({
     orgId,
-    user: actor(req),
+    user,
     toPhone,
     body,
     customerId,
@@ -274,13 +292,34 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     leadId,
     destinationPolicy: "manual",
     uncertainOnTransportError: Boolean(claim),
+    ...(input.origin ? { origin: input.origin } : {}),
   }));
+  return { duplicate: false, message: result.message, conversation: result.conversation };
+}
+
+export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = orgOf(req);
+  const { toPhone, body, customerId, customerName, leadId } = req.body || {};
+  const outcome = await sendManualLeadSms({
+    orgId,
+    user: actor(req),
+    toPhone,
+    body,
+    customerId,
+    customerName,
+    leadId,
+    clientRequestId: req.body?.clientRequestId,
+  });
+  if (outcome.duplicate) {
+    res.status(200).json(outcome.response);
+    return;
+  }
 
   await recordHumanTakeover({
     kind: "sms",
     organizationId: orgId,
-    conversationId: result.conversation._id,
-    leadId: (result.conversation as any).leadId || leadId,
+    conversationId: outcome.conversation._id,
+    leadId: (outcome.conversation as any).leadId || leadId,
   });
 
   res
@@ -288,7 +327,7 @@ export const sendMessage = asyncHandler(async (req: Request, res: Response) => {
     .json(
       new ApiResponse(
         201,
-        { message: result.message, conversationId: result.conversation._id },
+        { message: outcome.message, conversationId: outcome.conversation._id },
         "Message sent"
       )
     );

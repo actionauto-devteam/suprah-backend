@@ -923,6 +923,7 @@ export async function sendSmsFromUser(opts: {
   beforeDispatch?: () => Promise<void>;
   destinationPolicy?: SmsDestinationPolicy;
   uncertainOnTransportError?: boolean;
+  origin?: "chrome_extension";
 }) {
   const to = assertSmsDestination(opts.toPhone, opts.destinationPolicy ?? "automated");
   const body = (opts.body || "").trim();
@@ -977,6 +978,7 @@ export async function sendSmsFromUser(opts: {
     to,
     status: "queued",
     sentBy: opts.user,
+    ...(opts.origin ? { origin: opts.origin } : {}),
   });
 
   let dispatched = false;

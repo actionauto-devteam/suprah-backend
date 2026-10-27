@@ -124,7 +124,7 @@ describe('Suprah CRM extension API (real database)', () => {
     it('returns a single match with only the fields the panel needs', async () => {
         const res = await ext('post', '/lookup', extToken).send({ phone: '(801) 555-0141' }).expect(200);
         const data = res.body.data;
-        expect(data.query).toEqual({ normalizedPhone: '+18015550141', displayPhone: '(801) 555-0141' });
+        expect(data.query).toEqual({ kind: 'phone', normalizedPhone: '+18015550141', displayPhone: '(801) 555-0141', display: '(801) 555-0141' });
         expect(data.total).toBe(1);
         expect(data.matches[0]).toEqual(expect.objectContaining({
             id: String(ids.single._id), name: 'Avery Single', status: 'New', vehicle: '2021 Toyota Tacoma', assignedTo: 'Casey Morgan', noteCount: 2, closed: false,
