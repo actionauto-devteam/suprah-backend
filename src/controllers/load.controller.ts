@@ -38,6 +38,7 @@
     import activityService from "../services/activity.service";
     import emailService from "../services/email.service";
     import Quote from "../models/Quote.model";
+    import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -1523,6 +1524,18 @@
             route: "/driver/available-loads",
           },
         });
+      }
+
+      // A quote converted into this load was marked "booked". With the load
+      // gone, it goes back to Pending instead of staying stuck as "Converted
+      // to Load". NON-FATAL, like the logging below.
+      if (load.quoteId) {
+        try {
+          const reopened = await reopenQuotesOfDeletedLoads(organizationId, [load.quoteId]);
+          await announceReopenedQuotes(organizationId, reopened);
+        } catch (err) {
+          logger.error({ err, loadId: load._id, quoteId: load.quoteId }, "Non-fatal: failed to reopen the quote of a deleted load");
+        }
       }
 
       // Log activity — NON-FATAL. The load is already deleted at this point;

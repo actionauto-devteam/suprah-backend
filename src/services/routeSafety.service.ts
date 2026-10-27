@@ -26,6 +26,30 @@ const MAY_BREAK_A_LIMIT = new Set([
   "SeasonalClosure",
 ]);
 
+/**
+ * Notices that say nothing about the truck's limits: tolls, line detail,
+ * driving hours, and avoid options Suprah never asks for.
+ */
+const NOT_ABOUT_LIMITS = new Set([
+  "AccuratePolylineUnavailable",
+  "PotentialViolatedAvoidTollRoadUsage",
+  "PotentialViolatedCarpoolUsage",
+  "TollsDataTemporarilyUnavailable",
+  "TollsDataUnavailable",
+  "TollTransponder",
+  "TravelTimeExceedsDriverWorkHours",
+  "ViolatedAvoidControlledAccessHighway",
+  "ViolatedAvoidDifficultTurns",
+  "ViolatedAvoidDirtRoad",
+  "ViolatedAvoidSeasonalClosure",
+  "ViolatedAvoidTollRoad",
+  "ViolatedAvoidTollTransponder",
+  "ViolatedAvoidTunnel",
+  "ViolatedAvoidUTurns",
+  "ViolatedCarpool",
+  "ViolatedStartDirection",
+]);
+
 export type LegSafety = {
   status: "ok" | "check" | "unsafe";
   /** Plain-English limits, for example "a 12 ft 6 in height limit". */
@@ -95,6 +119,22 @@ export function legSafety(notices: unknown): LegSafety {
     for (const limit of noticeLimits(notice)) if (!limits.includes(limit)) limits.push(limit);
   }
   return { status, limits: limits.slice(0, 3) };
+}
+
+/**
+ * Notice codes Suprah doesn't recognise yet ("Other", or kinds Amazon adds
+ * later), each once. They don't change the route; they're recorded so someone
+ * can check whether they affect trucks.
+ */
+export function unrecognizedNoticeCodes(notices: unknown): string[] {
+  const codes: string[] = [];
+  for (const notice of Array.isArray(notices) ? notices : []) {
+    const code = (notice as any)?.Code;
+    if (typeof code !== "string" || !code.trim()) continue;
+    if (BREAKS_A_LIMIT.has(code) || MAY_BREAK_A_LIMIT.has(code) || NOT_ABOUT_LIMITS.has(code)) continue;
+    if (!codes.includes(code)) codes.push(code);
+  }
+  return codes;
 }
 
 /** "a and b", "a, b and c". */

@@ -16,7 +16,7 @@ import {
   type DeadlineStatus,
 } from "./etaMath.service";
 import { MAX_ROUTE_ACCURACY_METERS, distanceToLineMeters, simplifyLine, type TracePoint } from "./routeTrace.service";
-import { legSafety, listOf } from "./routeSafety.service";
+import { legSafety, listOf, unrecognizedNoticeCodes } from "./routeSafety.service";
 
 /*
  * The best route and arrival time (ETA) for a load's next stop, with Amazon
@@ -40,6 +40,10 @@ import { legSafety, listOf } from "./routeSafety.service";
  *    Tracker does.
  * 7. The route fits the driver's own rig: its height and length from the
  *    Equipment page, or the company default for what the driver hasn't added.
+ * 8. Every request to Amazon Location has a time limit, and a stop placed only
+ *    from a city, ZIP code or wider match isn't routed (it needs a map pin).
+ *    Withheld routes and notice codes Suprah doesn't recognise yet are logged,
+ *    and the server log gets an hourly summary.
  *
  * A route is reused for 2 minutes per load (only worked out while someone has
  * the driver or load open). When the driver leaves the planned route, a new
@@ -72,6 +76,38 @@ export const APPROXIMATE_POSITION_METERS = 1_000;
 const STALE_POSITION_MS = 15 * 60_000;
 const PACE_WINDOW_MS = 30 * 60_000;
 const GEOCODE_REUSE_MS = 60 * 60_000;
+/** How long Amazon Location gets to answer before the request counts as failed. */
+export const AMAZON_REQUEST_TIMEOUT_MS = 10_000;
+/** How often the server log gets a summary of how routing is doing. */
+const HEALTH_SUMMARY_MS = 60 * 60_000;
+
+/**
+ * An address match this broad (a whole country, state, county, city, district
+ * or ZIP code) could put a stop miles from the real place, so it isn't used
+ * for a route; the load needs a map pin instead.
+ */
+const TOO_BROAD_PLACE_TYPES = new Set(["Country", "Region", "SubRegion", "Locality", "District", "SubDistrict", "PostalCode"]);
+
+export function preciseEnoughForAStop(placeType: unknown): boolean {
+  return !(typeof placeType === "string" && TOO_BROAD_PLACE_TYPES.has(placeType));
+}
+
+/**
+ * Runs one Amazon Location request and gives up after the time limit, so a
+ * slow answer is a failure (straight line, no arrival time) instead of a
+ * route card that keeps waiting.
+ */
+export function withTimeLimit<T>(work: (signal: AbortSignal) => Promise<T>, ms = AMAZON_REQUEST_TIMEOUT_MS): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(Object.assign(new Error("Amazon Location took too long to answer"), { name: "TimeoutError" }));
+    }, ms);
+  });
+  return Promise.race([work(controller.signal), timedOut]).finally(() => clearTimeout(timer));
+}
 
 type LatLng = { lat: number; lng: number };
 type Stop = "pickup" | "delivery";
@@ -160,7 +196,7 @@ const UNAVAILABLE_MESSAGES: Record<RouteUnavailableReason, string> = {
   routes_off: "Routes and arrival times aren't switched on yet.",
   not_tracked: "The route shows once the driver has accepted the load.",
   no_driver_position: "No recent location from the driver yet.",
-  no_destination: "This stop's address couldn't be found on the map. Add a map pin to the load.",
+  no_destination: "This stop's exact location couldn't be found from its address. Add a map pin to the load.",
   unavailable: "The route couldn't be worked out right now. It will try again shortly.",
   no_safe_route: "No truck route was found that avoids every road limit. Plan this drive in a truck navigation app.",
 };
@@ -198,11 +234,18 @@ const health = {
   /** Routes withheld because they break one of the truck's limits. */
   withheldForLimits: 0,
   geocoded: 0,
+  /** Stop addresses that only matched a whole city, ZIP code or wider area. */
+  addressTooBroad: 0,
   failed: 0,
+  /** Failures because Amazon Location didn't answer within the time limit. */
+  timedOut: 0,
   skippedByCap: 0,
+  /** Amazon notice codes Suprah doesn't recognise yet, with how often each came back. */
+  unrecognizedNotices: {} as Record<string, number>,
   lastError: null as string | null,
   lastErrorAt: null as Date | null,
 };
+let lastHealthSummaryAt = 0;
 
 function clients(region: string) {
   if (!routesClient || !placesClient || clientRegion !== region) {
@@ -232,14 +275,40 @@ function plainError(error: unknown): string {
   if (/Throttl/i.test(name)) return "Amazon Location is limiting requests right now.";
   if (/Validation/i.test(name)) return "Amazon Location didn't accept this route request.";
   if (/NoRoute/i.test(name)) return "Amazon Location found no truck route between these places.";
+  if (/Timeout|Abort/i.test(name)) return "Amazon Location took too long to answer.";
   return "Amazon Location couldn't be reached.";
 }
 
 function failed(error: unknown, what: string): void {
   health.failed += 1;
+  if (/Timeout|Abort/i.test((error as Error)?.name ?? "")) health.timedOut += 1;
   health.lastError = plainError(error);
   health.lastErrorAt = new Date();
   logger.warn({ reason: health.lastError, error: (error as Error)?.name, what }, "[AmazonLocation] Route step failed");
+}
+
+/** Notice codes Suprah doesn't know yet are logged once each and counted, so they can be reviewed. */
+function recordUnrecognizedNotices(...noticeLists: unknown[]): void {
+  for (const code of unrecognizedNoticeCodes(noticeLists.flatMap((notices) => (Array.isArray(notices) ? notices : [])))) {
+    const seenBefore = code in health.unrecognizedNotices;
+    health.unrecognizedNotices[code] = (health.unrecognizedNotices[code] ?? 0) + 1;
+    if (!seenBefore) {
+      logger.warn({ code }, "[AmazonLocation] Route notice Suprah doesn't recognise yet. Review whether it affects trucks.");
+    }
+  }
+}
+
+/** At most once an hour, a one-line summary of how routing is doing, for whoever reads the server log. */
+function logHealthSummary(): void {
+  const now = Date.now();
+  if (now - lastHealthSummaryAt < HEALTH_SUMMARY_MS) return;
+  if (health.computed + health.failed + health.withheldForLimits === 0) return;
+  lastHealthSummaryAt = now;
+  const { computed, reused, rerouted, withheldForLimits, addressTooBroad, failed: failures, timedOut, skippedByCap, unrecognizedNotices } = health;
+  logger.info(
+    { computed, reused, rerouted, withheldForLimits, addressTooBroad, failed: failures, timedOut, skippedByCap, unrecognizedNotices },
+    "[AmazonLocation] Routing summary since the server started",
+  );
 }
 
 export function nextStopFor(status: string | undefined): Stop | null {
@@ -292,13 +361,19 @@ async function stopPosition(
     return "retry";
   }
   try {
-    const response = await clients(region).places.send(
-      new GeocodeCommand({ QueryText: address, MaxResults: 1, Filter: { IncludeCountries: ["USA"] } }),
+    const response = await withTimeLimit((abortSignal) =>
+      clients(region).places.send(
+        new GeocodeCommand({ QueryText: address, MaxResults: 1, Filter: { IncludeCountries: ["USA"] } }),
+        { abortSignal },
+      ),
     );
-    const position = response.ResultItems?.[0]?.Position;
-    const found = Array.isArray(position) && Number.isFinite(position[0]) && Number.isFinite(position[1])
-      ? { lat: Number(position[1]), lng: Number(position[0]) }
-      : null;
+    const match = response.ResultItems?.[0];
+    const position = match?.Position;
+    const placed = Array.isArray(position) && Number.isFinite(position[0]) && Number.isFinite(position[1]);
+    // Only a match at street level or finer places a stop; a city or ZIP code match could be miles off.
+    const precise = preciseEnoughForAStop(match?.PlaceType);
+    if (placed && !precise) health.addressTooBroad += 1;
+    const found = placed && precise ? { lat: Number(position[1]), lng: Number(position[0]) } : null;
     health.geocoded += 1;
     geocodes.set(address, { at: Date.now(), position: found });
     return found;
@@ -441,7 +516,7 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
   let ahead: LegSummary;
   let later: LegSummary | null = null;
   try {
-    const response = await clients(config.region).routes.send(
+    const response = await withTimeLimit((abortSignal) => clients(config.region).routes.send(
       new CalculateRoutesCommand({
         Origin: [origin.lng, origin.lat],
         Destination: restOfTrip ? [restOfTrip.lng, restOfTrip.lat] : [nextStop.lng, nextStop.lat],
@@ -466,7 +541,8 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
         LegGeometryFormat: "Simple",
         LegAdditionalFeatures: ["Summary", "TypicalDuration", "Incidents"],
       }),
-    );
+      { abortSignal },
+    ));
     const route = response.Routes?.[0];
     const legs = route?.Legs ?? [];
     ahead = legSummary(legs[0]);
@@ -487,9 +563,14 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
   // A second check on Amazon's answer: its own notices against the truck's
   // limits. A route that breaks one on the way to the next stop is never
   // shown as the way to go.
+  recordUnrecognizedNotices(ahead.notices, later?.notices);
   const aheadSafety = legSafety(ahead.notices);
   if (aheadSafety.status === "unsafe") {
     health.withheldForLimits += 1;
+    logger.info(
+      { loadId: String(load._id), stop, limits: aheadSafety.limits },
+      "[AmazonLocation] Route withheld: it breaks one of the truck's limits",
+    );
     return {
       at: Date.now(),
       result: {
@@ -506,7 +587,13 @@ async function computeRoute(load: RouteLoad, stop: Stop): Promise<CachedRoute> {
   }
   const laterSafety = later ? legSafety(later.notices) : null;
   const restOfTripUnsafe = laterSafety?.status === "unsafe";
-  if (restOfTripUnsafe) health.withheldForLimits += 1;
+  if (restOfTripUnsafe) {
+    health.withheldForLimits += 1;
+    logger.info(
+      { loadId: String(load._id), stop: "pickup to delivery", limits: laterSafety?.limits ?? [] },
+      "[AmazonLocation] Rest of the trip left off the map: it breaks one of the truck's limits",
+    );
+  }
   const cautions = [
     ...(aheadSafety.status === "check" ? aheadSafety.limits : []),
     ...(laterSafety?.status === "check" ? laterSafety.limits : []),
@@ -646,6 +733,7 @@ export async function getLoadRoute(load: RouteLoad): Promise<LoadRoute> {
       // couple of minutes; a failure is retried on the next view instead.
       if (result.available || result.reason === "no_destination" || result.reason === "no_safe_route") results.set(key, computed);
       else results.delete(key);
+      logHealthSummary();
       return result;
     })
     .finally(() => inFlight.delete(key));
@@ -675,7 +763,11 @@ export function resetLoadRouteForTests() {
   geocodes.clear();
   quotaWindowStart = 0;
   quotaUsed = 0;
-  Object.assign(health, { computed: 0, reused: 0, rerouted: 0, withheldForLimits: 0, geocoded: 0, failed: 0, skippedByCap: 0, lastError: null, lastErrorAt: null });
+  Object.assign(health, {
+    computed: 0, reused: 0, rerouted: 0, withheldForLimits: 0, geocoded: 0, addressTooBroad: 0,
+    failed: 0, timedOut: 0, skippedByCap: 0, unrecognizedNotices: {}, lastError: null, lastErrorAt: null,
+  });
+  lastHealthSummaryAt = 0;
 }
 
 /** Test hook: makes the cached route for a load look older than it is. */

@@ -38,6 +38,12 @@ describe('load status table (DT-40)', () => {
     expect(isAllowedLoadTransition('Unknown', 'Assigned')).toBe(false);
   });
 
+  it('never moves a load to Cancelled (unwanted loads are deleted instead)', () => {
+    for (const status of LOAD_STATUSES) {
+      expect(isAllowedLoadTransition(status, 'Cancelled')).toBe(false);
+    }
+  });
+
   it('keeps every list inside the known statuses', () => {
     const known = new Set<string>(LOAD_STATUSES);
     for (const [from, targets] of Object.entries(LOAD_STATUS_TRANSITIONS)) {

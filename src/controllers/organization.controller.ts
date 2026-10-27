@@ -13,6 +13,7 @@ import { disconnectUserSockets, getSocketIO } from '../utils/socketEmitter';
 import { DRIVER_ACTIVE_LOAD_STATUSES } from '../services/driverReviewAccess.service';
 import { revokeTrayDevicesForEmail } from '../services/trayDevice.service';
 import { invalidateActiveOrganizations } from '../services/activeOrganizations.service';
+import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from '../services/quoteReopen.service';
 import { isValidTier, isPurchasableTier, TIER_SEAT_LIMITS, TIER_LABELS } from '../config/subscriptionTiers';
 
 export const listPublicOrganizations = asyncHandler(async (_req: Request, res: Response) => {
@@ -441,6 +442,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     const deletableStatuses = ['Draft', 'Posted'];
     let deletedLoads: any[] = [];
     let transferredLoads: any[] = [];
+    let reopenedQuoteIds: string[] = [];
 
     const session = await mongoose.startSession();
     try {
@@ -449,7 +451,7 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
                 organizationId: id,
                 createdBy: userId,
             })
-                .select('_id loadNumber status assignedDriverId driverRequests')
+                .select('_id loadNumber status assignedDriverId driverRequests quoteId')
                 .session(session)
                 .lean();
 
@@ -483,6 +485,14 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
                     ],
                 }).session(session);
             }
+
+            // Quotes converted into the deleted loads go back to Pending, the
+            // same as when Dispatch deletes a load.
+            reopenedQuoteIds = await reopenQuotesOfDeletedLoads(
+                id,
+                deletableLoads.map((load) => load.quoteId),
+                session,
+            );
 
             // Active loads this member is responsible for (as dispatcher)
             // but didn't create: the admin removing them takes over, so the
@@ -532,6 +542,12 @@ export const removeMember = asyncHandler(async (req: Request, res: Response) => 
     invalidateUserCache(userId);
     // Stop organization events reaching the removed member right away.
     disconnectUserSockets(userId);
+
+    try {
+        await announceReopenedQuotes(id, reopenedQuoteIds);
+    } catch (err) {
+        logger.error({ err, orgId: id, quoteIds: reopenedQuoteIds }, 'Non-fatal: failed to refresh quotes reopened by a member removal');
+    }
 
     // Keep Driver Page, Driver Tracker, Transportation and pending-request
     // views synchronized without requiring a manual refresh.

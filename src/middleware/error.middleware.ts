@@ -5,6 +5,7 @@ import { streamLogToAdmins } from '../utils/socketEmitter';
 import { isDbOutageError, isQuotaExceededError, DB_OUTAGE_MESSAGE } from '../utils/dbOutage';
 import { mapKnownError } from '../utils/errorMapping';
 import { redactForLog } from '../utils/logRedaction';
+import { SUPPORT_EMAIL } from '../utils/userMessages';
 
 const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
   let statusCode = err.statusCode || 500;
@@ -25,7 +26,7 @@ const errorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response
   // not show raw technical text to users. The full error is logged below.
   if (statusCode >= 500 && !(err instanceof ApiError)) {
     message =
-      "Something went wrong on our side, so this action wasn't completed. Please try again in a moment. If it keeps happening, contact support.";
+      `Something went wrong on our side, so this action wasn't completed. Please try again in a moment. If it keeps happening, contact Suprah AI support at ${SUPPORT_EMAIL}.`;
   }
 
   if (isDbOutageError(err)) {

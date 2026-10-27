@@ -6,7 +6,7 @@ import { ApiError } from "../utils/ApiError";
 import Load from "../models/Load.model";
 import { GPS_TRACKING_LOAD_STATUSES } from "../constants/loadStatus";
 import { canViewDriverExactGps } from "../services/driverLocationAccess.service";
-import { getLoadRoute, type RouteLoad } from "../services/loadRoute.service";
+import { getLoadRoute, loadRouteHealthSnapshot, type RouteLoad } from "../services/loadRoute.service";
 
 const ROUTE_LOAD_FIELDS =
   "_id organizationId assignedDriverId dispatchOwnerId loadNumber status pickupLocation deliveryLocation dates.pickupDeadline dates.deliveryDeadline";
@@ -56,4 +56,14 @@ const getMyLoadRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResp
   return res.status(200).json(new ApiResponse(200, await getLoadRoute(load as RouteLoad)));
 });
 
-export default { getLoadRouteForStaff, getMyLoadRoute };
+/**
+ * GET /api/driver-tracking/route-health
+ * Suprah team only: how routing has done since the server started (routes
+ * worked out, failures, time-outs, routes withheld for truck limits, notice
+ * codes not recognised yet). Counts only; no locations or names.
+ */
+const getRouteHealth = asyncHandler(async (_req: ExpressRequest, res: ExpressResponse) => {
+  return res.status(200).json(new ApiResponse(200, loadRouteHealthSnapshot()));
+});
+
+export default { getLoadRouteForStaff, getMyLoadRoute, getRouteHealth };
