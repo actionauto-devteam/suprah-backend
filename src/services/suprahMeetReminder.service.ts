@@ -2,9 +2,10 @@ import Meeting from '../models/Meeting.model';
 
 import { randomUUID } from 'crypto';
 import {
-  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingReminder,
+  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive, notifyMeetingReminder,
 } from './suprahMeetNotification.service';
 import logger from '../utils/logger';
+import { reconcileMeetingTimer } from './suprahMeetPresence.service';
 
 
 let timer: NodeJS.Timeout | null = null;
@@ -22,9 +23,29 @@ async function tick() {
   if (running) return;
   running = true;
   try {
+    await reconcileSuprahMeetPresence().catch((err) => logger.error({ err }, '[SuprahMeet] presence sweep failed'));
     await sendSuprahMeetNotifications().catch((err) => logger.error({ err }, '[SuprahMeet] reminder tick failed'));
   } finally {
     running = false;
+  }
+}
+
+/** Expire browser/device leases even when every meeting tab disappeared. */
+export async function reconcileSuprahMeetPresence(now = new Date()) {
+  const meetings = await Meeting.find({
+    status: 'live',
+    $or: [
+      { 'participants.sessions.0': { $exists: true } },
+      { liveNotificationPending: true },
+    ],
+  }).limit(100);
+  for (const meeting of meetings) {
+    reconcileMeetingTimer(meeting, now);
+    if (meeting.isModified()) await meeting.save();
+    if (meeting.liveNotificationPending) {
+      await notifyMeetingLive(meeting).catch((err) =>
+        logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] live notification pending retry'));
+    }
   }
 }
 

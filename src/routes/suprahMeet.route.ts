@@ -13,6 +13,7 @@ const router = Router();
 router.post('/guest/:code/request', suprahMeetController.guestRequest);
 router.post('/guest/:code/join',    suprahMeetController.guestJoin);
 router.post('/guest/:code/leave',   suprahMeetController.guestLeave);
+router.post('/guest/:code/heartbeat', suprahMeetController.guestHeartbeat);
 router.post('/guest/:code/captions', suprahMeetController.guestCaptions);
 router.get('/guest/:code/roster',   suprahMeetController.guestRoster);
 router.get('/guest/recording/:code', suprahMeetController.recordingAccess); // token-gated
@@ -34,6 +35,7 @@ router.post('/meetings/:code/waiting/:userId',  suprahMeetController.respondWait
 
 router.post('/meetings/:code/join',             suprahMeetController.joinMeeting);
 router.post('/meetings/:code/leave',            suprahMeetController.leaveMeeting);
+router.post('/meetings/:code/heartbeat',        suprahMeetController.heartbeatMeeting);
 router.post('/meetings/:code/end',              suprahMeetController.endMeeting);
 router.post('/meetings/:code/participants/:participantId/audio', suprahMeetController.setParticipantAudio);
 router.post('/meetings/:code/participants/:participantId/remove', suprahMeetController.removeParticipant);

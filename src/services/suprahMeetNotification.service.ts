@@ -6,7 +6,7 @@ export const MEET_REMINDER_WINDOW_MS = 10 * 60_000;
 
 type MeetingNotice = Pick<IMeeting,
   '_id' | 'organizationId' | 'hostCrmUserId' | 'invitees' | 'inviteAll' |
-  'title' | 'code' | 'scheduledAt'>;
+  'title' | 'code' | 'scheduledAt' | 'status'>;
 
 /** Resolve only active people in this organization, including department-expanded invitees. */
 async function recipients(meeting: MeetingNotice, includeHost: boolean) {
@@ -39,11 +39,14 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
   const isReminder = kind === 'reminder';
   const isLive = kind === 'live';
   const minutes = Math.max(1, Math.ceil(((meeting.scheduledAt?.getTime() ?? now.getTime()) - now.getTime()) / 60_000));
-  const message = isLive
+  let message = isLive
     ? `"${meeting.title}" is happening now. You're invited — open Suprah Meet to check your camera and microphone, then join.`
     : isReminder
     ? `${firstName}'s meeting "${meeting.title}" starts in ${minutes} minute${minutes === 1 ? '' : 's'}${time ? ` (${time})` : ''}. You're invited — join the meeting now.`
     : `${firstName} created "${meeting.title}"${time ? ` for ${time}` : ' and it is live now'}. You're invited${time ? ' — find it in Upcoming in Suprah Meet' : ' — join the meeting now'}.`;
+  if (kind === 'invitation' && meeting.status === 'scheduled' && !time) {
+    message = `${firstName} created "${meeting.title}". You're invited - open Suprah Meet and you'll enter as soon as the host starts it.`;
+  }
   const type = isLive ? 'suprah_meet_live' : isReminder ? 'suprah_meet_reminder' : 'suprah_meet_invited';
   // One persisted notification per recipient/session/stage. A reschedule has
   // a new reminder key; retrying a partially delivered batch reuses existing rows.
@@ -57,6 +60,7 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
         title: isLive ? 'Suprah Meet room is open' : isReminder ? 'Suprah Meet starts soon' : `${firstName} invited you to a meeting`,
         message,
         idempotencyKey: eventKey,
+        ensurePushDelivery: true,
         metadata: {
           meetingId: String(meeting._id), meetingCode: meeting.code,
           meetingTitle: meeting.title,
@@ -92,4 +96,7 @@ export async function notifyMeetingReminder(meeting: MeetingNotice, now: Date): 
 /** Sent once per meeting when a scheduled session actually goes live. */
 export async function notifyMeetingLive(meeting: MeetingNotice): Promise<void> {
   await send(meeting, 'live', new Date());
+  await Meeting.updateOne({ _id: meeting._id, organizationId: meeting.organizationId }, {
+    $set: { liveNotificationPending: false },
+  });
 }

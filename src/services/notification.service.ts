@@ -20,6 +20,8 @@ interface CreateNotificationParams {
   dedupeKey?: string;
   groupWindowMinutes?: number;
   idempotencyKey?: string;
+  /** Await device delivery and retry it when an idempotent row already exists. */
+  ensurePushDelivery?: boolean;
 }
 
 const formatOccurrenceTime = (date: Date) =>
@@ -186,7 +188,10 @@ function resolveMetadataRoute(type: string, metadata?: any): string | undefined 
 }
 
 const createNotification = async (params: CreateNotificationParams) => {
-  const { userId, organizationId, type, title, message, metadata, dedupeKey, groupWindowMinutes, idempotencyKey } = params;
+  const {
+    userId, organizationId, type, title, message, metadata, dedupeKey,
+    groupWindowMinutes, idempotencyKey, ensurePushDelivery = false,
+  } = params;
 
   if (!userId || !type || !title || !message) {
     throw new ApiError(400, 'Missing required notification fields');
@@ -223,6 +228,7 @@ const createNotification = async (params: CreateNotificationParams) => {
 
   let notification: any = null;
   let isGroupedUpdate = false;
+  let isExistingIdempotent = false;
 
   if (idempotencyKey) {
     const id = new Types.ObjectId(createHash('sha256')
@@ -231,8 +237,9 @@ const createNotification = async (params: CreateNotificationParams) => {
       $setOnInsert: { userId, organizationId, type, category, title, message,
         metadata: metadata || {}, isRead: false },
     }, { new: true, upsert: true, includeResultMetadata: true });
-    if (result.lastErrorObject?.updatedExisting) return result.value;
     notification = result.value;
+    isExistingIdempotent = Boolean(result.lastErrorObject?.updatedExisting);
+    if (isExistingIdempotent && !ensurePushDelivery) return notification;
   }
 
   if (!notification && dedupeKey) {
@@ -270,9 +277,11 @@ const createNotification = async (params: CreateNotificationParams) => {
   // a namespaced event on crm-user:{CrmUser._id}; the dashboard can therefore
   // receive CRM notifications in real time without the main NotificationContext
   // accidentally ingesting the same record as a main-account notification.
-  emitToUser(userId, realtimeEvent, notification);
-  if (isCrmTarget) {
-    emitToCrmUser(userId, `crm:${realtimeEvent}`, notification);
+  if (!isExistingIdempotent) {
+    emitToUser(userId, realtimeEvent, notification);
+    if (isCrmTarget) {
+      emitToCrmUser(userId, `crm:${realtimeEvent}`, notification);
+    }
   }
 
   try {
@@ -448,11 +457,18 @@ const createNotification = async (params: CreateNotificationParams) => {
       if (metadata.soundFile) pushPayload.data.soundFile = metadata.soundFile;
     }
 
-    UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message').catch(err =>
-      logger.error(err, `[UnifiedPushService] Failed to send push for user ${userId}`)
-    );
+    if (ensurePushDelivery) {
+      const delivery = await UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message');
+      if (delivery.failed > 0) {
+        throw new Error(`Device push failed for ${delivery.failed} subscription(s)`);
+      }
+    } else {
+      void UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message').catch((error) =>
+        logger.error(error, `[UnifiedPushService] Failed to send push for user ${userId}`));
+    }
   } catch (error: any) {
     logger.error(error, '[NotificationService] Error triggering web push');
+    if (ensurePushDelivery) throw error;
   }
 
   return notification;

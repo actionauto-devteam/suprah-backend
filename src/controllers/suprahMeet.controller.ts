@@ -17,6 +17,11 @@ import {
 } from '../services/suprahMeetAI.service';
 import { mailConfigured, sendRecordingEmail } from '../services/suprahMeetMail.service';
 import { MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive } from '../services/suprahMeetNotification.service';
+import {
+  clearParticipantSessions, hasParticipantSession, isHostPresent,
+  leaveParticipantSession, meetingTimerSnapshot, reconcileMeetingTimer,
+  stopMeetingTimer, touchParticipantSession,
+} from '../services/suprahMeetPresence.service';
 import logger from '../utils/logger';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
@@ -90,53 +95,9 @@ function isRemovedParticipant(meeting: IMeeting, participantId: string): boolean
   return ((meeting as any).removedParticipantIds ?? []).includes(participantId);
 }
 
-function isHostPresent(meeting: IMeeting): boolean {
-  return (meeting.participants ?? []).some((person: any) => person.crmUserId
-    && person.crmUserId.toString() === meeting.hostCrmUserId.toString() && !person.leftAt);
-}
-
-/**
- * The room may stay open while its host steps away, but its elapsed clock only
- * runs while the host and at least one other person are actually present.
- */
-function reconcileMeetingTimer(meeting: IMeeting, now = new Date()): { startedNow: boolean; running: boolean } {
-  const present = (meeting.participants ?? []).filter((person: any) => !person.leftAt);
-  const hostPresent = isHostPresent(meeting);
-  const hasSomeoneElse = present.some((person: any) => !(person.crmUserId
-    && person.crmUserId.toString() === meeting.hostCrmUserId.toString()));
-  const shouldRun = hostPresent && hasSomeoneElse;
-  const activeSince = (meeting as any).timerActiveSince as Date | undefined;
-  if (shouldRun && !activeSince) {
-    (meeting as any).timerActiveSince = now;
-    const startedNow = !meeting.startedAt;
-    if (startedNow) meeting.startedAt = now;
-    return { startedNow, running: true };
-  }
-  if (!shouldRun && activeSince) {
-    (meeting as any).timerElapsedMs = Math.max(0, Number((meeting as any).timerElapsedMs ?? 0)
-      + Math.max(0, now.getTime() - activeSince.getTime()));
-    (meeting as any).timerActiveSince = undefined;
-  }
-  return { startedNow: false, running: shouldRun };
-}
-
-function stopMeetingTimer(meeting: IMeeting, now = new Date()) {
-  const activeSince = (meeting as any).timerActiveSince as Date | undefined;
-  if (!activeSince) return;
-  (meeting as any).timerElapsedMs = Math.max(0, Number((meeting as any).timerElapsedMs ?? 0)
-    + Math.max(0, now.getTime() - activeSince.getTime()));
-  (meeting as any).timerActiveSince = undefined;
-}
-
-function meetingTimerSnapshot(meeting: IMeeting, now = new Date()) {
-  void now;
-  const activeSince = (meeting as any).timerActiveSince as Date | undefined;
-  return {
-    elapsedMs: Math.max(0, Number((meeting as any).timerElapsedMs ?? 0)),
-    running: Boolean(activeSince),
-    activeSince: activeSince?.toISOString?.() ?? null,
-    hostPresent: isHostPresent(meeting),
-  };
+async function refreshPersistedPresence(meeting: IMeeting): Promise<void> {
+  reconcileMeetingTimer(meeting);
+  if (typeof meeting.isModified === 'function' && meeting.isModified()) await meeting.save();
 }
 
 /** May this user enter the room without waiting? */
@@ -281,7 +242,7 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
     // It is a room reservation until its host joins; never start a timer at
     // creation just because someone pressed "New meeting".
     const meeting = await createOne({ ...base, status: 'scheduled' });
-    await notifyMeetingCreated(meeting).catch((error) => {
+    void notifyMeetingCreated(meeting).catch((error) => {
       logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Invitation delivery pending retry');
     });
     return res.status(201).json(new ApiResponse(201, serializeMeeting(meeting), 'Meeting created'));
@@ -296,10 +257,17 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
       ...base, status: 'scheduled', scheduledAt: when, seriesId: seriesId ?? undefined,
     });
     created.push(meeting);
-    await notifyMeetingCreated(meeting).catch((error) => {
-      logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Invitation delivery pending retry');
-    });
   }
+
+  // Delivery can involve many browser/PWA endpoints. Keep scheduling fast;
+  // the durable pending flag and scheduler retry anything this first pass misses.
+  void (async () => {
+    for (const meeting of created) {
+      await notifyMeetingCreated(meeting).catch((error) => {
+        logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] Invitation delivery pending retry');
+      });
+    }
+  })();
 
   res.status(201).json(new ApiResponse(201, {
     ...serializeMeeting(created[0]),
@@ -371,12 +339,15 @@ const pubParticipants = (meeting: IMeeting) =>
     avatar: p.avatar ?? null,
     role: p.role,
     isGuest: Boolean(p.isGuest),
+    joinedAt: p.joinedAt,
+    leftAt: p.leftAt ?? null,
   }));
 
 // POST /api/crm/meet/guest/:code/request   Body: { name, email? }   (public)
 const guestRequest = asyncHandler(async (req: Request, res: Response) => {
   const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
+  await refreshPersistedPresence(meeting);
   if (meeting.status === 'ended') {
     return res.json(new ApiResponse(200, { ended: true }, 'Meeting already ended'));
   }
@@ -430,6 +401,7 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
   if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
   if (g.code !== meeting.code) throw new ApiError(401, 'This guest pass is for a different meeting.');
   if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  await refreshPersistedPresence(meeting);
   if (isRemovedParticipant(meeting, `guest:${g.guestId}`)) {
     throw new ApiError(403, 'The host removed you from this meeting.');
   }
@@ -461,17 +433,18 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
     'Joining the meeting'
   );
 
-  const existing = meeting.participants.find((p: any) => p.guestId === g.guestId);
-  if (existing) {
-    existing.leftAt = undefined;
-    existing.fullName = g.name;
-    (existing as any).guestEmail = g.email || (existing as any).guestEmail;
+  let participant = meeting.participants.find((p: any) => p.guestId === g.guestId);
+  if (participant) {
+    participant.fullName = g.name;
+    (participant as any).guestEmail = g.email || (participant as any).guestEmail;
   } else {
     meeting.participants.push({
       fullName: g.name, role: 'participant', joinedAt: new Date(),
       isGuest: true, guestId: g.guestId, guestEmail: g.email || undefined,
     } as any);
+    participant = meeting.participants[meeting.participants.length - 1];
   }
+  touchParticipantSession(participant, String(attendee.AttendeeId));
   reconcileMeetingTimer(meeting);
   await meeting.save();
 
@@ -496,8 +469,8 @@ const guestLeave = asyncHandler(async (req: Request, res: Response) => {
   const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
   const participant = meeting.participants.find((p: any) => p.guestId === g.guestId);
-  if (participant && !participant.leftAt) {
-    participant.leftAt = new Date();
+  if (participant) {
+    leaveParticipantSession(participant, String(req.body?.attendeeId || '').trim() || undefined);
     reconcileMeetingTimer(meeting);
     await meeting.save();
   }
@@ -510,11 +483,31 @@ const guestRoster = asyncHandler(async (req: Request, res: Response) => {
   const g = verifyGuest(req);
   const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
+  await refreshPersistedPresence(meeting);
   res.json(new ApiResponse(200, {
     participants: pubParticipants(meeting),
     startedAt: meeting.startedAt ?? null,
     timer: meetingTimerSnapshot(meeting),
   }, 'Roster'));
+});
+
+const guestHeartbeat = asyncHandler(async (req: Request, res: Response) => {
+  const g = verifyGuest(req);
+  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
+  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  const attendeeId = String(req.body?.attendeeId || '').trim();
+  const participant = meeting.participants.find((person: any) => person.guestId === g.guestId);
+  if (!participant || !attendeeId || !hasParticipantSession(participant, attendeeId)) {
+    throw new ApiError(403, 'This meeting session is no longer active.');
+  }
+  touchParticipantSession(participant, attendeeId);
+  reconcileMeetingTimer(meeting);
+  await meeting.save();
+  res.json(new ApiResponse(200, {
+    participants: pubParticipants(meeting), startedAt: meeting.startedAt ?? null,
+    timer: meetingTimerSnapshot(meeting),
+  }, 'Presence refreshed'));
 });
 
 // ── Recording distribution (email the recording + AI summary) ───────────────
@@ -678,6 +671,7 @@ const recordingAccess = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/crm/meet/meetings/:code/request-join
 const requestJoin = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
+  await refreshPersistedPresence(meeting);
   if (meeting.status === 'ended') {
     return res.json(new ApiResponse(200, { ended: true, title: meeting.title }, 'Meeting already ended'));
   }
@@ -893,6 +887,7 @@ const getAlerts = asyncHandler(async (req: Request, res: Response) => {
 // ── POST /api/crm/meet/meetings/:code/join ──────────────────────────────────
 const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
+  await refreshPersistedPresence(meeting);
 
   if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
   if (!isAllowedIn(user, meeting)) {
@@ -929,13 +924,13 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
   const roomOpenedNow = meeting.status === 'scheduled' && host;
   if (roomOpenedNow) {
     meeting.status = 'live';
+    meeting.liveNotificationPending = true;
   }
 
-  const existing = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
-  if (existing) {
-    existing.leftAt = undefined;
-    existing.fullName = user.fullName;
-    existing.avatar = user.avatar || undefined;
+  let participant = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
+  if (participant) {
+    participant.fullName = user.fullName;
+    participant.avatar = user.avatar || undefined;
   } else {
     meeting.participants.push({
       crmUserId: user._id,
@@ -944,14 +939,16 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
       role: host ? 'host' : 'participant',
       joinedAt: new Date(),
     } as any);
+    participant = meeting.participants[meeting.participants.length - 1];
   }
+  touchParticipantSession(participant, String(attendee.AttendeeId));
   reconcileMeetingTimer(meeting);
   await meeting.save();
 
   // This is separate from the advance reminder: attendees who missed that
   // notification still receive a durable, actionable "live now" alert.
   if (roomOpenedNow) {
-    await notifyMeetingLive(meeting).catch((error) => {
+    void notifyMeetingLive(meeting).catch((error) => {
       logger.error({ error, meetingId: meeting._id }, '[SuprahMeet] live notification delivery failed');
     });
   }
@@ -971,6 +968,7 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── GET /api/crm/meet/meetings/:code ────────────────────────────────────────
 const getMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { meeting } = await findOrgMeeting(req);
+  await refreshPersistedPresence(meeting);
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting fetched'));
 });
 
@@ -1102,11 +1100,26 @@ const leaveMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
   const participant = meeting.participants.find((p) => p.crmUserId && p.crmUserId.toString() === user._id.toString());
   if (participant) {
-    participant.leftAt = new Date();
+    leaveParticipantSession(participant, String(req.body?.attendeeId || '').trim() || undefined);
     reconcileMeetingTimer(meeting);
     await meeting.save();
   }
   res.json(new ApiResponse(200, null, 'Left meeting'));
+});
+
+const heartbeatMeeting = asyncHandler(async (req: Request, res: Response) => {
+  const { user, meeting } = await findOrgMeeting(req);
+  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  const attendeeId = String(req.body?.attendeeId || '').trim();
+  const participant = meeting.participants.find((person) => person.crmUserId
+    && String(person.crmUserId) === String(user._id));
+  if (!participant || !attendeeId || !hasParticipantSession(participant, attendeeId)) {
+    throw new ApiError(403, 'This meeting session is no longer active.');
+  }
+  touchParticipantSession(participant, attendeeId);
+  reconcileMeetingTimer(meeting);
+  await meeting.save();
+  res.json(new ApiResponse(200, serializeMeeting(meeting), 'Presence refreshed'));
 });
 
 const setParticipantAudio = asyncHandler(async (req: Request, res: Response) => {
@@ -1118,9 +1131,11 @@ const setParticipantAudio = asyncHandler(async (req: Request, res: Response) => 
   const muted = req.body?.muted === true;
   if (!attendeeId || attendeeId.length > 128) throw new ApiError(400, 'A valid attendee session is required.');
   if (participantId === user._id.toString()) throw new ApiError(400, 'Use your microphone control to mute yourself.');
-  const known = meeting.participants.some((p: any) =>
+  const participant = meeting.participants.find((p: any) =>
     (p.crmUserId ? p.crmUserId.toString() : `guest:${p.guestId}`) === participantId && !p.leftAt);
-  if (!known) throw new ApiError(404, 'That participant is no longer in this meeting.');
+  if (!participant || !hasParticipantSession(participant, attendeeId)) {
+    throw new ApiError(404, 'That participant session is no longer in this meeting.');
+  }
   await wrapAws(setChimeAttendeeMuted(meeting.chimeMeetingId, attendeeId, muted), muted ? 'Muting participant' : 'Allowing participant audio');
   res.json(new ApiResponse(200, { participantId, muted }, muted ? 'Participant muted' : 'Participant can unmute'));
 });
@@ -1140,12 +1155,15 @@ const removeParticipant = asyncHandler(async (req: Request, res: Response) => {
     ? req.body.attendeeIds.map((id: unknown) => String(id).trim()).filter((id: string) => id && id.length <= 128).slice(0, 10)
     : [];
   if (attendeeIds.length === 0) throw new ApiError(400, 'A current attendee session is required.');
+  if (attendeeIds.some((attendeeId: string) => !hasParticipantSession(participant, attendeeId))) {
+    throw new ApiError(400, 'A participant session did not match that person. Refresh the People list and try again.');
+  }
   await Promise.all(attendeeIds.map((attendeeId: string) =>
     wrapAws(deleteChimeAttendee(meeting.chimeMeetingId!, attendeeId), 'Removing participant')));
   const removed = new Set<string>((meeting as any).removedParticipantIds ?? []);
   removed.add(participantId);
   (meeting as any).removedParticipantIds = [...removed];
-  participant.leftAt = new Date();
+  clearParticipantSessions(participant);
   reconcileMeetingTimer(meeting);
   await meeting.save();
   res.json(new ApiResponse(200, { participantId }, 'Participant removed'));
@@ -1178,7 +1196,7 @@ const endMeeting = asyncHandler(async (req: Request, res: Response) => {
 
   meeting.status = 'ended';
   meeting.endedAt = new Date();
-  meeting.participants.forEach((p) => { if (!p.leftAt) p.leftAt = new Date(); });
+  meeting.participants.forEach((p) => clearParticipantSessions(p));
   await meeting.save();
 
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting ended'));
@@ -1338,8 +1356,8 @@ function serializeMeeting(m: any) {
 }
 
 export default {
-  createMeeting, listMeetings, getMeeting, getPeople, joinMeeting, leaveMeeting, endMeeting, setParticipantAudio, removeParticipant, setCaptions,
+  createMeeting, listMeetings, getMeeting, getPeople, joinMeeting, leaveMeeting, heartbeatMeeting, endMeeting, setParticipantAudio, removeParticipant, setCaptions,
   deleteMeeting, updateMeeting, requestJoin, getWaiting, respondWaiting,
-  guestRequest, guestJoin, guestLeave, guestRoster, guestCaptions,
+  guestRequest, guestJoin, guestLeave, guestHeartbeat, guestRoster, guestCaptions,
   getDistribution, distributeRecording, recordingAccess, startRecording, stopRecording, getRecordings, processAi, getAi, getAlerts,
 };

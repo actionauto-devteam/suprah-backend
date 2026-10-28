@@ -30,6 +30,7 @@ import { notifyMeetingCreated, notifyMeetingReminder } from '../../src/services/
 const meeting: any = {
   _id: 'meeting-1', organizationId: 'org-1', hostCrmUserId: 'host',
   invitees: ['person'], inviteAll: false, title: 'Planning', code: 'MEET-1234',
+  status: 'scheduled',
   scheduledAt: new Date('2026-10-20T18:00:00Z'),
 };
 
@@ -47,7 +48,7 @@ beforeEach(() => {
   findHost.mockReturnValue({ select: () => ({ lean: async () => ({ fullName: 'Taylor Reed' }) }) });
   findCrmUserById.mockResolvedValue({ _id: 'person', organizationId: 'org-1', notificationPreferences: { crm: true } });
   updateMeeting.mockResolvedValue({ modifiedCount: 1 });
-  push.mockResolvedValue({ sent: 1 });
+  push.mockResolvedValue({ sent: 1, failed: 0, pruned: 0 });
 });
 
 it('persists both stages in the CRM bell and delivers distinct socket/push notices with a room URL', async () => {
@@ -70,13 +71,26 @@ it('persists both stages in the CRM bell and delivers distinct socket/push notic
   expect(push.mock.calls.every(([, , includeSpace]) => includeSpace === false)).toBe(true);
 });
 
-it('retrying the same event does not emit or push a second notification', async () => {
+it('retrying the same event reuses the row/socket but retries device delivery', async () => {
   await notifyMeetingCreated(meeting);
   await notifyMeetingCreated(meeting);
   await notifyMeetingReminder(meeting, new Date('2026-10-20T17:50:00Z'));
   await notifyMeetingReminder(meeting, new Date('2026-10-20T17:50:30Z'));
-  expect(push).toHaveBeenCalledTimes(2);
+  expect(push).toHaveBeenCalledTimes(4);
   expect(emitToCrmUser).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the meeting notification pending when device delivery fails', async () => {
+  push.mockResolvedValueOnce({ sent: 0, failed: 1, pruned: 0 });
+  await expect(notifyMeetingCreated(meeting)).rejects.toThrow('Device push failed');
+  expect(updateMeeting).not.toHaveBeenCalled();
+});
+
+it('does not describe an instant room as live before the host starts it', async () => {
+  await notifyMeetingCreated({ ...meeting, scheduledAt: null });
+  const persisted = upsertNotification.mock.calls[0][1].$setOnInsert;
+  expect(persisted.message).toContain('as soon as the host starts it');
+  expect(persisted.message).not.toContain('live now');
 });
 
 it('respects CRM and meeting-type notification preferences', async () => {

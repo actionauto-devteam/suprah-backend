@@ -10,6 +10,7 @@ export interface IMeetingParticipant {
   isGuest?: boolean;
   guestId?: string;                      // stable id from the guest pass (JWT)
   guestEmail?: string;                   // collected at guest join, used for distribution
+  sessions?: { attendeeId: string; lastSeenAt: Date }[];
 }
 
 export interface IMeetingWaiting {
@@ -46,6 +47,7 @@ export interface IMeeting extends Document {
                                    // are resolved into `invitees` at create time)
   reminderSentAt?: Date;
   invitationNotificationPending: boolean;
+  liveNotificationPending: boolean;
   reminderClaimToken?: string | null;
   reminderClaimUntil?: Date | null;
   captionsEnabled: boolean;
@@ -109,6 +111,7 @@ const MeetingSchema = new Schema<IMeeting>(
     reminderSentAt: { type: Date, default: null },
     // Explicit opt-in on creation avoids notifying historical meetings on deploy.
     invitationNotificationPending: { type: Boolean, default: false },
+    liveNotificationPending: { type: Boolean, default: false },
     reminderClaimToken: { type: String, default: null },
     reminderClaimUntil: { type: Date, default: null },
     captionsEnabled: { type: Boolean, default: false },
@@ -127,6 +130,10 @@ const MeetingSchema = new Schema<IMeeting>(
         isGuest: { type: Boolean, default: false },
         guestId: { type: String },
         guestEmail: { type: String },
+        sessions: [{
+          attendeeId: { type: String, required: true },
+          lastSeenAt: { type: Date, required: true, default: Date.now },
+        }],
       },
     ],
     waiting: [

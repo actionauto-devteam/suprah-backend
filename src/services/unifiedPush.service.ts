@@ -118,7 +118,7 @@ const sendToUser = async (userId: string, payload: object, includeSupraSpaceApp 
     return await sendToSubscriptions(recipient.model, userId, recipient.pushSubscriptions, payload);
   } catch (error: any) {
     logger.error(error, `${LOG_PREFIX} sendToUser failed for ${userId}`);
-    return { sent: 0, failed: 0, pruned: 0 };
+    return { sent: 0, failed: 1, pruned: 0 };
   }
 };
 
