@@ -373,14 +373,20 @@ describe('Vehicle API Endpoints', () => {
     });
 
     describe('DELETE /api/vehicles/:id', () => {
-        it('should delete a vehicle', async () => {
+        it('hides a deleted vehicle from staff but keeps it for the records that use it', async () => {
             await request(app)
                 .delete(`/api/vehicles/${testVehicleId}`)
                 .set('Authorization', `Bearer ${authToken}`)
                 .expect(200);
 
-            const vehicle = await Vehicle.findById(testVehicleId);
-            expect(vehicle).toBeNull();
+            const vehicle: any = await Vehicle.findById(testVehicleId).lean();
+            expect(vehicle).not.toBeNull();
+            expect(vehicle.isDeleted).toBe(true);
+
+            // Staff can't open, edit or delete it again: it behaves as gone.
+            await request(app).get(`/api/vehicles/${testVehicleId}`).set('Authorization', `Bearer ${authToken}`).expect(404);
+            await request(app).put(`/api/vehicles/${testVehicleId}`).set('Authorization', `Bearer ${authToken}`).send({ mileage: 1 }).expect(404);
+            await request(app).delete(`/api/vehicles/${testVehicleId}`).set('Authorization', `Bearer ${authToken}`).expect(404);
         });
     });
 

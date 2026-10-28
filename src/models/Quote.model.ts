@@ -52,6 +52,11 @@ export interface IQuote extends Document {
     source?: 'customer_portal';
     requestedBy?: mongoose.Types.ObjectId;
 
+    // The dealership's CRM lead for this customer (matched by email, then
+    // phone) and that lead's customer record, when there is one.
+    leadId?: mongoose.Types.ObjectId | null;
+    customerRecordId?: mongoose.Types.ObjectId | null;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -139,7 +144,9 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         },
 
         source: { type: String, enum: ['customer_portal'], default: undefined },
-        requestedBy: { type: Schema.Types.ObjectId, ref: 'User' }
+        requestedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+        leadId: { type: Schema.Types.ObjectId, ref: 'Lead' },
+        customerRecordId: { type: Schema.Types.ObjectId, ref: 'Customer' }
     },
     {
         timestamps: true

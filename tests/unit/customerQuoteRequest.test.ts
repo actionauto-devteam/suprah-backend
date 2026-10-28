@@ -33,6 +33,10 @@ jest.mock('../../src/utils/safeNotification', () => ({
 jest.mock('../../src/services/activity.service', () => ({ __esModule: true, default: { createActivity: jest.fn() } }));
 jest.mock('../../src/services/cache.service', () => ({ __esModule: true, default: { invalidateByPrefix: jest.fn() } }));
 jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null }));
+const mockFindQuoteLeadLink = jest.fn();
+jest.mock('../../src/services/quoteLeadLink.service', () => ({
+  findQuoteLeadLink: (...args: unknown[]) => mockFindQuoteLeadLink(...args),
+}));
 
 import quoteController from '../../src/controllers/quote.controller';
 
@@ -100,6 +104,7 @@ beforeEach(() => {
   mockVehicleFindOne.mockReturnValue(marketplaceVehicle);
   mockQuoteFindOne.mockReturnValue(null);
   mockQuoteCreate.mockImplementation(async (doc: any) => ({ _id: 'new-quote-id', ...doc }));
+  mockFindQuoteLeadLink.mockResolvedValue(null);
 });
 
 describe('POST /api/quote-requests', () => {
@@ -163,6 +168,21 @@ describe('POST /api/quote-requests', () => {
     expect(result.body.data.id).toBe('earlier-id');
     expect(result.body.message).toBe('You already asked for this shipping quote. The dealership has your request.');
     expect(mockQuoteCreate).not.toHaveBeenCalled();
+  });
+
+  it("links the request to the dealership's CRM lead for this customer, without showing it to the customer", async () => {
+    mockFindQuoteLeadLink.mockResolvedValue({ leadId: 'lead-1', customerRecordId: 'customer-1' });
+    const result = await send(formBody);
+    expect(mockFindQuoteLeadLink).toHaveBeenCalledWith('dealership-that-owns-the-car', { email: 'maria@example.com', phone: '801-555-0100' });
+    expect(mockQuoteCreate.mock.calls[0][0]).toMatchObject({ leadId: 'lead-1', customerRecordId: 'customer-1' });
+    expect(result.body.data.leadId).toBeUndefined();
+  });
+
+  it('still saves the request when the lead lookup fails', async () => {
+    mockFindQuoteLeadLink.mockRejectedValue(new Error('lookup failed'));
+    const result = await send(formBody);
+    expect(result.status).toBe(201);
+    expect(mockQuoteCreate.mock.calls[0][0].leadId).toBeUndefined();
   });
 
   it('treats any still-pending request for the same car and destination as the same request', async () => {
