@@ -13,6 +13,7 @@ const {
 } = process.env;
 
 export const COMPANY_NUMBER = TELNYX_PHONE_NUMBER;
+export const MESSAGING_PROFILE_ID = TELNYX_MESSAGING_PROFILE_ID;
 
 class TelnyxError extends Error {
   status: number;
@@ -62,18 +63,30 @@ async function tx<T = any>(
 
 /* --------------------------------- SMS ---------------------------------- */
 
-export async function sendSms(to: string, text: string) {
+export async function sendSms(to: string, text: string, from?: string) {
   if (isDemoPhone(to)) {
     return { id: `demo-${crypto.randomUUID()}`, to: [{ phone_number: to }] };
   }
 
   const res = await tx<{ data: { id: string; to: any[] } }>("POST", "/messages", {
-    from: TELNYX_PHONE_NUMBER,
+    from: from || TELNYX_PHONE_NUMBER,
     to,
     text,
     messaging_profile_id: TELNYX_MESSAGING_PROFILE_ID || undefined,
   });
   return res.data; // { id, ... }
+}
+
+export async function findAccountPhoneNumber(phoneNumber: string) {
+  const result = await tx<{ data?: any[] }>("GET", `/phone_numbers?filter[phone_number]=${encodeURIComponent(phoneNumber)}&page[size]=1`, undefined, 8000);
+  const digits = phoneNumber.replace(/\D/g, "");
+  const row = Array.isArray(result?.data) ? result.data.find((item) => String(item?.phone_number || "").replace(/\D/g, "") === digits) : null;
+  if (!row) return null;
+  return {
+    status: String(row.status || ""),
+    connectionId: String(row.connection_id || ""),
+    messagingProfileId: String(row.messaging_profile_id || ""),
+  };
 }
 
 /* ------------------------------ Call Control ---------------------------- */

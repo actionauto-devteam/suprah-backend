@@ -78,6 +78,7 @@ describe('IVR routing with mocked persistence and provider', () => {
     expect(stored.routing.targetGroupId).toBe(group);
     expect(mockTo).toHaveBeenCalledWith(expect.arrayContaining([`user:${group}-user`]));
     expect(mockTo).not.toHaveBeenCalledWith('org:org');
+    expect(mockTo).not.toHaveBeenCalledWith('org:org:crm-staff');
     expect(mockLeadUpdate).toHaveBeenCalledTimes(['1', '2'].includes(digit) ? 1 : 0);
     if (digit === '0') expect(stored.routing.language).toBe('Spanish');
   });
@@ -99,7 +100,8 @@ describe('IVR routing with mocked persistence and provider', () => {
     mockGather.mockRejectedValueOnce(new Error('provider timeout'));
     await initializeIvr(stored, config, { missed });
     expect(stored.status).toBe('ringing'); expect(stored.routing.allOrg).toBe(true);
-    expect(mockTo).toHaveBeenCalledWith('org:org');
+    expect(mockTo).toHaveBeenCalledWith('org:org:crm-staff');
+    expect(mockTo).not.toHaveBeenCalledWith('org:org');
   });
   it('falls back when the selected group is empty', async () => {
     mockRecipients.mockImplementation(async (_org, group) => group === 'orem' ? [] : ['reception-user']);

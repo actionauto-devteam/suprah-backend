@@ -281,7 +281,10 @@ if (require.main === module) {
     const customerIdentityTimer = areBackgroundJobsDisabled() ? undefined : setInterval(() => {
       if (syncingCustomers) return;
       syncingCustomers = true;
-      retryPendingLeadCustomers().catch(error => logger.error({ error }, 'Customer identity retry failed')).finally(() => { syncingCustomers = false; });
+      retryPendingLeadCustomers()
+        .then(() => catchUpLeadCustomersInBackground())
+        .catch(error => logger.error({ error }, 'Customer identity retry failed'))
+        .finally(() => { syncingCustomers = false; });
     }, 60000);
     customerIdentityTimer?.unref();
 
@@ -362,3 +365,4 @@ if (require.main === module) {
 
 export default app;
 import { retryPendingLeadCustomers } from './services/customerIdentity.service';
+import { catchUpLeadCustomersInBackground } from './services/customerCatchUp.service';

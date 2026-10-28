@@ -58,6 +58,7 @@ export function actor(req: Request) {
   };
 }
 const orgOf = (req: Request) => (req as any).orgId;
+const LEGACY_RINGING_RECOVERY_MS = 2 * 60 * 1000;
 
 export const SMS_OPTED_OUT_MESSAGE =
   "This customer replied STOP, so texting is turned off. Texting turns back on only after they reply START.";
@@ -800,8 +801,9 @@ export const listRingingCalls = asyncHandler(async (req: Request, res: Response)
   const orgId = orgOf(req);
   await comm.recoverPendingIvrCalls(String(orgId));
   const userId = String(actor(req).userId);
+  const legacyRingingSince = new Date(Date.now() - LEGACY_RINGING_RECOVERY_MS);
   const candidates = await CallLog.find({ orgId, status: "ringing", direction: "inbound", $or: [
-    { routing: { $exists: false } }, { 'routing.allOrg': true }, { 'routing.recipientIds': userId },
+    { routing: { $exists: false }, createdAt: { $gte: legacyRingingSince } }, { 'routing.allOrg': true }, { 'routing.recipientIds': userId },
   ] })
     .sort({ createdAt: -1 })
     .limit(50)

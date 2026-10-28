@@ -127,6 +127,19 @@ export const crmExtensionSignInUserLimiter = rateLimit({
     legacyHeaders: false,
 });
 
+export const crmExtensionSignInCodeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: extensionEmployeeKey('ext-signin-code'),
+    message: { success: false, message: 'Too many sign-in attempts. Please wait a few minutes and try again.' },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 export const crmExtensionLookupLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 30,

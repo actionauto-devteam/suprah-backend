@@ -6,6 +6,7 @@ import logger from '../utils/logger';
 import Organization from '../models/Organization.model';
 import { verifyCrmCredentials } from '../services/crmCredentials.service';
 import { issueCrmExtensionToken, revokeCrmExtensionToken } from '../middleware/crmExtensionAuth.middleware';
+import { createExtensionSignInCode, redeemExtensionSignInCode } from '../services/crmExtensionSignIn.service';
 import {
   addExtensionLeadNote,
   getExtensionReplyOptions,
@@ -44,6 +45,25 @@ export const createSessionHandler = asyncHandler(async (req: Request, res: Respo
   const user = await verifyCrmCredentials(username, password);
   if (!user.organizationId) throw new ApiError(403, 'Your account is not linked to a dealership');
   const { token, expiresAt } = await issueCrmExtensionToken(String(user._id));
+  res.json(new ApiResponse(200, {
+    token,
+    expiresAt,
+    user: publicUser(user),
+    organization: { name: await organizationName(user.organizationId) },
+  }, 'Signed in'));
+});
+
+export const createSignInCodeHandler = asyncHandler(async (req: Request, res: Response) => {
+  const result = await createExtensionSignInCode(req.crmUser?._id, req.orgId, req.body?.challenge);
+  res.json(new ApiResponse(200, result, 'Sign-in code created'));
+});
+
+export const exchangeSignInCodeHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { code, verifier } = req.body || {};
+  req.body = {};
+  const user = await redeemExtensionSignInCode(code, verifier);
+  const { token, expiresAt } = await issueCrmExtensionToken(String(user._id));
+  logger.info({ crmUserId: String(user._id), organizationId: String(user.organizationId) }, '[CrmExtension] Signed in from the Suprah CRM website');
   res.json(new ApiResponse(200, {
     token,
     expiresAt,

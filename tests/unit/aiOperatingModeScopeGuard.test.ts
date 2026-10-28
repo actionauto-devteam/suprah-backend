@@ -78,7 +78,7 @@ describe('AI operating mode — every automated AI send path is guarded', () => 
 
   it('the SMS dispatch guard runs inside the provider-boundary hook, right before Telnyx', () => {
     const source = readSrc('services/communication.service.ts');
-    expect(source).toMatch(/await opts\.beforeDispatch\?\.\(\);\s*\n\s*const sent = await telnyx\.sendSms\(to, body\);/);
+    expect(source).toMatch(/await opts\.beforeDispatch\?\.\(\);\s*\n\s*const sent = await telnyx\.sendSms\(to, body, fromNumber\);/);
   });
 
   it('the webchat AI reply is mode-checked before it is made visible to the visitor', () => {

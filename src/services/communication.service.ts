@@ -9,6 +9,8 @@ import {
 } from "../models/communication.model";
 import * as telnyx from "./telnyx.service";
 import { getSocketIO } from "../utils/socketEmitter";
+import { orgEventRoom } from "../utils/crmStaffRoom";
+import { ApiError } from "../utils/ApiError";
 import Organization from "../models/Organization.model";
 import Appointment from "../models/Appointment.model";
 import { notifyOrgAdmins } from "../utils/safeNotification";
@@ -58,6 +60,7 @@ import {
 const lifecycleIntake = () => import("./leadIntake.service");
 const inquiryRecords = () => import("./leadInquiry.service");
 import { getInboundRoutingConfig, getConfiguredInboundOrganization } from './callRoutingConfig.service';
+import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, AiReplySuppressedError, claimAiGeneration, claimAiReplyDispatch,
@@ -71,13 +74,14 @@ function emitToOrg(orgId: any, event: string, payload: any) {
   try {
     const io = getSocketIO();
     if (!io || !orgId) return;
-    io.to(`org:${String(orgId)}`).emit(event, { ...payload, orgId: String(orgId) });
+    io.to(orgEventRoom(String(orgId), event)).emit(event, { ...payload, orgId: String(orgId) });
   } catch {
     /* socket emission must never break a request or webhook */
   }
 }
 
 const RING_TIMEOUT_MS = 35_000;
+const RING_RETRY_MIN_MS = 5_000;
 
 /** Resolve the tenant dealership's display name for voice/SMS copy. */
 export async function resolveDealerName(organizationId: any): Promise<string> {
@@ -808,6 +812,7 @@ export async function getOrCreateConversation(opts: {
   customerId?: any;
   customerName?: string;
   leadId?: any;
+  inboundNumber?: string;
 }) {
   const customerPhone = normalizePhone(opts.phone);
   const update: any = {
@@ -817,6 +822,7 @@ export async function getOrCreateConversation(opts: {
   if (opts.customerId) set.customerId = opts.customerId;
   if (opts.customerName) set.customerName = opts.customerName;
   if (opts.leadId) set.leadId = opts.leadId;
+  if (opts.inboundNumber) set.lastInboundNumber = normalizePhone(opts.inboundNumber);
   if (Object.keys(set).length) update.$set = set;
 
   return Conversation.findOneAndUpdate(
@@ -839,6 +845,7 @@ export async function findOrCreateLeadForContact(opts: {
   phone: string;
   customer: any | null;
   channel: "sms" | "phone";
+  line?: DealershipLine | null;
 }): Promise<{ lead: any | null; created: boolean }> {
   if (opts.existingLead?._id) return { lead: opts.existingLead, created: false };
 
@@ -896,6 +903,7 @@ export async function findOrCreateLeadForContact(opts: {
       channel: opts.channel,
       source: opts.channel === "sms" ? LEAD_SOURCE.INBOUND_SMS : LEAD_SOURCE.INBOUND_CALL,
       status: "New",
+      ...leadFieldsForLine(opts.line),
     });
 
     return { lead, created: true };
@@ -910,6 +918,20 @@ export async function findOrCreateLeadForContact(opts: {
 }
 
 /* --------------------------------- SMS ---------------------------------- */
+
+async function lastInboundNumberFor(orgId: any, phone: string): Promise<string | undefined> {
+  try {
+    const id = String(orgId ?? "");
+    const orgIds = mongoose.isValidObjectId(id) ? [id, new mongoose.Types.ObjectId(id)] : [orgId];
+    const row: any = await Conversation.findOne({ orgId: { $in: orgIds }, customerPhone: phone, lastInboundNumber: { $nin: [null, ""] } })
+      .sort({ updatedAt: -1 })
+      .select("lastInboundNumber")
+      .lean();
+    return row?.lastInboundNumber || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function sendSmsFromUser(opts: {
   orgId: any;
@@ -966,6 +988,14 @@ export async function sendSmsFromUser(opts: {
     leadId,
   });
 
+  const sender = await resolveOutboundNumber({
+    organizationId: opts.orgId,
+    channel: "texts",
+    contactedNumber: conversation.lastInboundNumber || (await lastInboundNumberFor(opts.orgId, to)),
+    leadId,
+  }).catch(() => null);
+  const fromNumber = sender?.number || telnyx.COMPANY_NUMBER;
+
   await opts.beforeSend?.();
   const message = await CommunicationMessage.create({
     orgId: opts.orgId,
@@ -974,7 +1004,7 @@ export async function sendSmsFromUser(opts: {
     leadId,
     direction: "outbound",
     body,
-    from: telnyx.COMPANY_NUMBER,
+    from: fromNumber,
     to,
     status: "queued",
     sentBy: opts.user,
@@ -987,7 +1017,7 @@ export async function sendSmsFromUser(opts: {
     await assertContactAllowed(restrictionTarget, restrictionContext);
     dispatched = true;
     await opts.beforeDispatch?.();
-    const sent = await telnyx.sendSms(to, body);
+    const sent = await telnyx.sendSms(to, body, fromNumber);
     try {
       message.providerMessageId = sent.id;
       message.status = "sent";
@@ -1362,16 +1392,23 @@ export interface InboundSmsRetention {
   messageId: mongoose.Types.ObjectId;
   inquiryId: string | null;
   replay: boolean;
+  line?: DealershipLine | null;
 }
 
 export async function retainInboundSms(payload: any, orgOverride?: any): Promise<InboundSmsRetention | null> {
   const from = normalizePhone(payload?.from?.phone_number || payload?.from || "");
   const toEntry = Array.isArray(payload?.to) ? payload.to[0] : payload?.to;
-  const to = normalizePhone(toEntry?.phone_number || toEntry || telnyx.COMPANY_NUMBER);
+  const toRaw = toEntry?.phone_number || (typeof toEntry === "string" ? toEntry : "");
+  const to = toRaw ? normalizePhone(String(toRaw)) : "";
   const body = payload?.text || "";
   if (!from || !body) return null;
-  const orgId = orgOverride ?? (await resolveOrgForNumber(to));
-  if (!orgId) return null;
+  const dialedLine = await findDealershipLine(to);
+  const orgId = orgOverride ?? dialedLine?.organizationId ?? (await getConfiguredInboundOrganization(to)) ?? resolveCompanyNumberOrg(to);
+  const line = dialedLine && dialedLine.organizationId === String(orgId) ? dialedLine : null;
+  if (!orgId) {
+    console.error("[comm] Incoming text not assigned to any dealership: the texted number has no call routing setting and is not the configured company number with COMM_ORG_ID", { textedNumber: to || "(missing)", providerMessageId: String(payload?.id || "") });
+    return null;
+  }
   const mode = await getLeadIntakeMode(String(orgId));
   const messageId = new mongoose.Types.ObjectId();
   if (mode === "off") {
@@ -1394,6 +1431,7 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
       messageId: existing && claimedId ? new mongoose.Types.ObjectId(String(claimedId)) : messageId,
       inquiryId: null,
       replay: existing,
+      line,
     };
   }
   const customer = await findCustomerByPhone(orgId, from);
@@ -1407,6 +1445,7 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
     contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
     comments: String(body).slice(0, 10000),
     sourceIds: { smsProviderMessageId: payload?.id || undefined, communicationMessageId: messageId },
+    ...(line ? { leadDraft: leadFieldsForLine(line) } : {}),
   });
   const originalId = (event as any).sourceIds?.communicationMessageId;
   return {
@@ -1415,6 +1454,7 @@ export async function retainInboundSms(payload: any, orgOverride?: any): Promise
     messageId: created || !originalId ? messageId : new mongoose.Types.ObjectId(String(originalId)),
     inquiryId: String(event._id),
     replay: !created,
+    line,
   };
 }
 
@@ -1542,6 +1582,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       customerDisplayName(customer) ||
       (lead ? `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || undefined : undefined),
     leadId: lifecycle ? undefined : lead?._id,
+    inboundNumber: to,
   });
   if (earlyOwnerId && String(conversation.leadId || "") !== earlyOwnerId) {
     const moved = await moveConversationToLead({ organizationId: orgId, conversationId: conversation._id, leadId: lead._id })
@@ -1650,6 +1691,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
         phone: from,
         customer,
         channel: "sms",
+        line: retention.line,
       }).catch((err) => {
         console.error("[comm] findOrCreateLeadForContact (sms) failed:", err);
         return { lead: null, created: false };
@@ -1743,14 +1785,6 @@ export async function handleSmsStatus(payload: any) {
   }
 }
 
-/* ------------------------------ org resolution --------------------------- */
-/** Single shared number → single org. Set COMM_ORG_ID in env. */
-async function resolveOrgForNumber(_number: string): Promise<any | null> {
-  if (process.env.COMM_ORG_ID) return process.env.COMM_ORG_ID;
-  const anyConv: any = await Conversation.findOne().sort({ createdAt: 1 }).lean();
-  return anyConv?.orgId ?? null;
-}
-
 /* ------------------------------ voice: inbound --------------------------- */
 
 const ringTimers = new Map<string, NodeJS.Timeout>();
@@ -1772,6 +1806,68 @@ async function finishIvrMissed(call: any): Promise<void> {
 }
 
 const ivrCallbacks = { missed: finishIvrMissed };
+
+async function releaseLegacyCaller(call: any): Promise<void> {
+  if (!call?.providerCallControlId) return;
+  const dealerName = await resolveDealerName(call.orgId);
+  await telnyx.playMissedAndHangup(call.providerCallControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+}
+
+function armLegacyRingTimer(call: any, delayMs: number): void {
+  const callId = String(call._id);
+  const orgId = call.orgId;
+  const callControlId = call.providerCallControlId;
+  const existing = ringTimers.get(callId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(async () => {
+    ringTimers.delete(callId);
+    const still = await CallLog.findOneAndUpdate(
+      { _id: call._id, status: "ringing" },
+      { $set: { status: "missed", endedAt: new Date(), textBackSentAt: new Date() } },
+      { new: true }
+    );
+    if (still) {
+      emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
+      const dealerName = await resolveDealerName(orgId);
+      await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+      await sendMissedCallTextBack(still);
+    }
+  }, delayMs);
+  ringTimers.set(callId, timer);
+}
+
+async function returnLegacyCallToRinging(call: any, reason: string): Promise<boolean> {
+  const startedAt = new Date(call.startedAt || call.createdAt || Date.now()).getTime();
+  const remaining = startedAt + RING_TIMEOUT_MS - Date.now();
+  if (!(remaining >= RING_RETRY_MIN_MS)) return false;
+  const reopened = await CallLog.findOneAndUpdate(
+    { _id: call._id, status: "answering" },
+    { $set: { status: "ringing", answeredBy: null, hangupCause: String(reason || "agent-unavailable").slice(0, 200) } },
+    { new: true }
+  );
+  if (!reopened) return false;
+  armLegacyRingTimer(reopened, remaining);
+  emitToOrg(reopened.orgId, "comm:call:incoming", { call: reopened.toObject() });
+  return true;
+}
+
+const refusedInboundCalls = new Map<string, number>();
+
+async function refuseUnassignedInboundCall(callControlId: string, to: string): Promise<void> {
+  const now = Date.now();
+  for (const [id, at] of refusedInboundCalls) if (now - at > 10 * 60 * 1000) refusedInboundCalls.delete(id);
+  if (refusedInboundCalls.has(callControlId)) return;
+  refusedInboundCalls.set(callControlId, now);
+  console.error("[comm] Incoming call not assigned to any dealership: the called number has no call routing setting and is not the configured company number with COMM_ORG_ID", { calledNumber: to || "(missing)", callControlId });
+  await telnyx.playMissedAndHangup(callControlId, "Thank you for calling. We are unable to take your call right now. Please try again later.").catch(() => {});
+}
+
+function resolveCompanyNumberOrg(to: string): string | null {
+  const configured = String(process.env.COMM_ORG_ID || "").trim();
+  const companyNumber = telnyx.COMPANY_NUMBER ? normalizePhone(telnyx.COMPANY_NUMBER) : "";
+  if (!configured || !to || !companyNumber || to !== companyNumber) return null;
+  return configured;
+}
 
 export async function handleCallGatherEnded(payload: any): Promise<void> {
   await handleIvrGather(payload, ivrCallbacks);
@@ -1808,23 +1904,31 @@ export async function handleCallInitiated(payload: any) {
 
   const callControlId = payload?.call_control_id;
   const callSessionId = payload?.call_session_id;
+  if (!callControlId || typeof callControlId !== "string") return;
   const from = normalizePhone(payload?.from || "");
-  const to = normalizePhone(payload?.to || telnyx.COMPANY_NUMBER);
+  const to = payload?.to ? normalizePhone(String(payload.to)) : "";
 
   // Idempotency
   const existing = await CallLog.findOne({ providerCallControlId: callControlId }).lean();
   if (existing) return;
 
   let inboundRouting = await getInboundRoutingConfig(to);
-  const orgId = inboundRouting?.orgId ?? await getConfiguredInboundOrganization(to) ?? await resolveOrgForNumber(to);
-  if (!orgId) return;
+  const dialedLine = await findDealershipLine(to);
+  const orgId = inboundRouting?.orgId ?? dialedLine?.organizationId ?? await getConfiguredInboundOrganization(to) ?? resolveCompanyNumberOrg(to);
+  const line = dialedLine && dialedLine.organizationId === String(orgId) ? dialedLine : null;
+  if (!orgId) {
+    await refuseUnassignedInboundCall(callControlId, to);
+    return;
+  }
 
-  if (inboundRouting) {
-    try { await IvrInboundClaim.create({ callControlId, organizationId: orgId }); }
-    catch (error: any) {
-      if (error?.code === 11000) return;
+  try { await IvrInboundClaim.create({ callControlId, organizationId: orgId }); }
+  catch (error: any) {
+    if (error?.code === 11000) return;
+    if (inboundRouting) {
       console.error('[ivr] Could not reserve inbound call; using legacy inbound flow', error);
       inboundRouting = null;
+    } else {
+      console.error('[comm] Could not reserve inbound call; continuing without duplicate protection', error);
     }
   }
 
@@ -1842,6 +1946,7 @@ export async function handleCallInitiated(payload: any) {
       source: LEAD_SOURCE.INBOUND_CALL,
       contact: { phone: from, firstName, lastName: rest.join(" ") || undefined, assurance: "carrier_verified" },
       sourceIds: { callControlId },
+      ...(line ? { leadDraft: leadFieldsForLine(line) } : {}),
     }).catch((err) => {
       console.error("[comm] inbound call could not be recorded for lead intake", err);
       return null;
@@ -1862,6 +1967,7 @@ export async function handleCallInitiated(payload: any) {
     customerId: customer?._id,
     customerName: displayName,
     leadId: lifecycle ? undefined : lead?._id,
+    inboundNumber: to,
   });
 
   if (!lifecycle && !lead) {
@@ -1872,6 +1978,7 @@ export async function handleCallInitiated(payload: any) {
       phone: from,
       customer,
       channel: "phone",
+      line,
     }).catch((err) => {
       console.error("[comm] findOrCreateLeadForContact (call) failed:", err);
       return { lead: null, created: false };
@@ -1895,6 +2002,7 @@ export async function handleCallInitiated(payload: any) {
     providerCallSessionId: callSessionId,
     startedAt: new Date(),
     customerName: displayName,
+    ...(line ? { lineLabel: line.label } : {}),
   });
 
   if (intakeMode === "active" && callInquiryId) {
@@ -1915,23 +2023,7 @@ export async function handleCallInitiated(payload: any) {
   if (inboundRouting && await initializeIvr(call, inboundRouting.config, ivrCallbacks)) return;
   const legacyCall = inboundRouting ? await CallLog.findById(call._id) : call;
   emitToOrg(orgId, "comm:call:incoming", { call: legacyCall.toObject() });
-
-  // Nobody answers → answer, apologize, hang up, mark missed.
-  const timer = setTimeout(async () => {
-    ringTimers.delete(String(call._id));
-    const still = await CallLog.findOneAndUpdate(
-      { _id: call._id, status: "ringing" },
-      { $set: { status: "missed", endedAt: new Date(), textBackSentAt: new Date() } },
-      { new: true }
-    );
-    if (still) {
-      emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
-      const dealerName = await resolveDealerName(orgId);
-      await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
-      await sendMissedCallTextBack(still);
-    }
-  }, RING_TIMEOUT_MS);
-  ringTimers.set(String(call._id), timer);
+  armLegacyRingTimer(call, RING_TIMEOUT_MS);
 }
 
 /** Atomic first-to-answer claim. Two agents clicking Answer at once: exactly
@@ -1951,12 +2043,6 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
     throw Object.assign(new Error("Call already answered or ended"), { statusCode: 409 });
   }
 
-  const timer = ringTimers.get(String(call._id));
-  if (timer && !call.routing) {
-    clearTimeout(timer);
-    ringTimers.delete(String(call._id));
-  }
-
   const cred: any = await TelephonyCredential.findOne({ userId: opts.user.userId }).lean();
   if (!cred) {
     // Roll back so another agent can take it.
@@ -1968,6 +2054,12 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
       new Error("Your softphone is not registered yet — open the communications panel first"),
       { statusCode: 428 }
     );
+  }
+
+  const timer = ringTimers.get(String(call._id));
+  if (timer && !call.routing) {
+    clearTimeout(timer);
+    ringTimers.delete(String(call._id));
   }
 
   try {
@@ -1982,12 +2074,19 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
       await ivrAgentFailed(call, ivrCallbacks);
       throw Object.assign(new Error('Could not bridge the call; trying the fallback route'), { statusCode: 502 });
     }
-    await CallLog.updateOne(
-      { _id: call._id },
-      { $set: { status: "failed", hangupCause: String(err?.message).slice(0, 200), endedAt: new Date() } }
+    console.error("[comm] Could not connect the call to the employee's browser", { callId: String(call._id), error: String(err?.message || err).slice(0, 200) });
+    if (await returnLegacyCallToRinging(call, String(err?.message || "bridge-failed"))) {
+      throw new ApiError(502, "The call couldn't connect to your browser, so it is ringing for your teammates again.");
+    }
+    const failed = await CallLog.findOneAndUpdate(
+      { _id: call._id, status: "answering" },
+      { $set: { status: "failed", hangupCause: String(err?.message).slice(0, 200), endedAt: new Date() } },
+      { new: true }
     );
-    const failed = await CallLog.findById(call._id);
-    if (failed) emitToOrg(opts.orgId, "comm:call:update", { call: failed.toObject() });
+    if (failed) {
+      emitToOrg(opts.orgId, "comm:call:update", { call: failed.toObject() });
+      await releaseLegacyCaller(call);
+    }
     throw Object.assign(new Error("Could not bridge the call"), { statusCode: 502 });
   }
 
@@ -2029,7 +2128,7 @@ export async function handleCallAnswered(payload: any) {
 }
 
 /** call.hangup — finalize whichever leg ends the session. */
-export async function handleCallHangup(payload: any) {
+export async function handleCallHangup(payload: any, attempt = 0): Promise<void> {
   const sessionId = payload?.call_session_id;
   const clientState = decodeClientState(payload?.client_state);
   const cause = payload?.hangup_cause;
@@ -2063,18 +2162,32 @@ export async function handleCallHangup(payload: any) {
   }
 
   const ended = new Date();
+  const callerLeg =
+    !payload?.call_control_id || !call.providerCallControlId || payload.call_control_id === call.providerCallControlId;
   let status: string;
   if (call.status === "in-progress") status = "completed";
-  else if (call.status === "ringing") status = "canceled"; // caller gave up
-  else status = cause === "normal_clearing" ? "completed" : "missed"; // answering
+  else if (call.status === "ringing") {
+    if (!callerLeg) return;
+    status = "canceled";
+  } else if (callerLeg) status = "canceled";
+  else if (cause === "normal_clearing") status = "completed";
+  else if (await returnLegacyCallToRinging(call, cause || "agent-unavailable")) return;
+  else status = "missed";
 
-  call.status = status as any;
-  call.endedAt = ended;
-  call.hangupCause = cause;
+  const update: Record<string, unknown> = { status, endedAt: ended };
+  if (cause) update.hangupCause = cause;
   if (call.answeredAt) {
-    call.durationSec = Math.max(0, Math.round((ended.getTime() - call.answeredAt.getTime()) / 1000));
+    update.durationSec = Math.max(0, Math.round((ended.getTime() - call.answeredAt.getTime()) / 1000));
   }
-  await call.save();
+  const saved = await CallLog.findOneAndUpdate(
+    { _id: call._id, status: call.status },
+    { $set: update },
+    { new: true }
+  );
+  if (!saved) {
+    if (attempt < 1) await handleCallHangup(payload, attempt + 1);
+    return;
+  }
 
   const timer = ringTimers.get(String(call._id));
   if (timer) {
@@ -2082,9 +2195,10 @@ export async function handleCallHangup(payload: any) {
     ringTimers.delete(String(call._id));
   }
 
-  emitToOrg(call.orgId, "comm:call:update", { call: call.toObject() });
+  emitToOrg(saved.orgId, "comm:call:update", { call: saved.toObject() });
 
   if (status === "missed") {
+    await releaseLegacyCaller(saved);
     const claimed = await CallLog.findOneAndUpdate(
       { _id: call._id, textBackSentAt: null },
       { $set: { textBackSentAt: new Date() } },
@@ -2143,6 +2257,12 @@ export async function logClientCall(opts: {
       customerName,
       leadId,
     });
+    const caller = await resolveOutboundNumber({
+      organizationId: opts.orgId,
+      channel: "calls",
+      contactedNumber: conversation.lastInboundNumber || (await lastInboundNumberFor(opts.orgId, to)),
+      leadId,
+    }).catch(() => null);
     const call = await CallLog.findOneAndUpdate(
       { clientCallId: opts.clientCallId },
       {
@@ -2152,7 +2272,7 @@ export async function logClientCall(opts: {
           leadId,
           conversationId: conversation._id,
           direction: "outbound",
-          from: telnyx.COMPANY_NUMBER,
+          from: caller?.number || telnyx.COMPANY_NUMBER,
           to,
           status: "ringing",
           placedBy: opts.user,

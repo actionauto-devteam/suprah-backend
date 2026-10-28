@@ -6,6 +6,7 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { notifyUsers } from './safeNotification';
 import { notificationTemplates } from './notificationTemplates';
 import logger from './logger';
+import { crmStaffRoom } from './crmStaffRoom';
 
 export interface AddLeadNoteInput {
   organizationId: string;
@@ -111,7 +112,7 @@ export async function addLeadNoteAndNotify(input: AddLeadNoteInput) {
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${input.organizationId}`).emit('lead:update', lead);
+    io.to(crmStaffRoom(String(input.organizationId))).emit('lead:update', lead);
   }
 
   const recipientIds = Array.from(new Set([...mentionedUserIds, ...expandedGroupMemberIds])).filter(

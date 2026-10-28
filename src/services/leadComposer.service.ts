@@ -12,6 +12,8 @@ import { normalizeIdentityEmail } from '../utils/contactIdentity';
 import { resolveLeadEmailSubject } from '../utils/leadEmailSubject';
 import { contactRestrictionMessage, resolveContactRestriction } from './contactRestriction.service';
 import { isSmsOptedOut } from './communication.service';
+import { resolveOutboundNumber } from './dealershipPhoneNumber.service';
+import { Conversation } from '../models/communication.model';
 import * as telnyx from './telnyx.service';
 
 export const COMPOSER_SEND_LEASE_MS = 2 * 60 * 1000;
@@ -42,6 +44,7 @@ export interface ReplyChannelOption {
   code: string | null;
   reason: string | null;
   recipient: string | null;
+  sender?: { number: string; label: string };
 }
 
 export interface LeadReplyOptions {
@@ -90,6 +93,19 @@ async function smsOption(organizationId: string, lead: any): Promise<ReplyChanne
     return blocked('SMS_OPTED_OUT', COMPOSER_MESSAGES.smsOptedOut, destination.e164);
   }
   return { available: true, code: null, reason: null, recipient: destination.e164 };
+}
+
+async function smsSender(organizationId: string, phone: string, leadId: unknown) {
+  const orgIds = mongoose.isValidObjectId(organizationId) ? [organizationId, new mongoose.Types.ObjectId(organizationId)] : [organizationId];
+  const conversation: any = await Conversation.findOne({ orgId: { $in: orgIds }, customerPhone: phone })
+    .select('lastInboundNumber').lean().catch(() => null);
+  const sender = await resolveOutboundNumber({
+    organizationId,
+    channel: 'texts',
+    contactedNumber: conversation?.lastInboundNumber,
+    leadId,
+  }).catch(() => null);
+  return sender?.label ? { number: sender.number, label: sender.label } : null;
 }
 
 function hasUnconfirmedAddress(lead: any, dealershipAddresses: unknown[]): boolean {
@@ -158,6 +174,10 @@ export async function getLeadReplyOptions(organizationId: unknown, leadId: unkno
   if (await isClosedForManualSend(orgId, lead)) {
     sms = blocked('lead_closed', CLOSED_LEAD_SEND_MESSAGE, sms.recipient);
     email = blocked('lead_closed', CLOSED_LEAD_SEND_MESSAGE, email.recipient);
+  }
+  if (sms.available && sms.recipient) {
+    const sender = await smsSender(orgId, sms.recipient, lead._id);
+    if (sender) sms = { ...sms, sender };
   }
 
   return {

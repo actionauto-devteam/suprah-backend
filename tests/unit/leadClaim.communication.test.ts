@@ -47,6 +47,7 @@ jest.mock('../../src/models/communication.model', () => {
 jest.mock('../../src/services/telnyx.service', () => ({ COMPANY_NUMBER: '+18015550000' }));
 jest.mock('../../src/services/customerIdentity.service', () => ({ findUniqueCustomerByPhone: jest.fn().mockResolvedValue(null) }));
 jest.mock('../../src/services/callRoutingConfig.service', () => ({ getInboundRoutingConfig: jest.fn().mockResolvedValue(null), getConfiguredInboundOrganization: jest.fn().mockResolvedValue(null) }));
+jest.mock('../../src/services/dealershipPhoneNumber.service', () => ({ findDealershipLine: jest.fn().mockResolvedValue(null), leadFieldsForLine: jest.fn().mockReturnValue({}) }));
 jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: mockGetSocketIO }));
 jest.mock('../../src/models/Organization.model', () => ({ __esModule: true, default: { findById: jest.fn() } }));
 jest.mock('../../src/models/Appointment.model', () => ({
@@ -325,7 +326,7 @@ return { updateOne: mockLeadUpdateOne, findById: mockLeadFindById, create: mockL
   it.each(['org-1', 'org-2'])('keeps Lead and communication events inside %s', async (orgId) => {
     process.env.COMM_ORG_ID = orgId;
     const delivered: Array<{ recipient: string; event: string }> = [];
-    const members = new Map([['org:org-1', ['rep-1']], ['org:org-2', ['rep-2']]]);
+    const members = new Map([['org:org-1:crm-staff', ['rep-1']], ['org:org-2:crm-staff', ['rep-2']], ['org:org-1', ['customer-1']], ['org:org-2', ['customer-2']]]);
     const io = {
       emit: jest.fn(),
       to: jest.fn((room: string) => ({ emit: jest.fn((event: string) => {
@@ -338,7 +339,8 @@ return { updateOne: mockLeadUpdateOne, findById: mockLeadFindById, create: mockL
     mockLeadCreate.mockResolvedValue({ _id: 'lead-new', firstName: 'Customer' });
     await handleInboundSms({ from: '+18015550100', to: '+18015550000', text: 'Please contact me', id: 'isolated-message' });
     expect(io.emit).not.toHaveBeenCalled();
-    expect(io.to).toHaveBeenCalledWith(`org:${orgId}`);
+    expect(io.to).toHaveBeenCalledWith(`org:${orgId}:crm-staff`);
+    expect(io.to).not.toHaveBeenCalledWith(`org:${orgId}`);
     expect(delivered.filter(item => item.event === 'lead:new')).toEqual([
       { recipient: orgId === 'org-1' ? 'rep-1' : 'rep-2', event: 'lead:new' },
     ]);

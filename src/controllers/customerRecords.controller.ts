@@ -6,12 +6,29 @@ import activityService from '../services/activity.service';
 import logger from '../utils/logger';
 import { getCustomerProfile, listCustomerRecords, updateCustomerRecord } from '../services/customerRecords.service';
 import { getCustomerTimeline } from '../services/customerLifecycle.service';
+import { getCustomerCatchUpStatus } from '../services/customerCatchUp.service';
 
 const requireOrgId = (req: Request) => {
   const orgId = req.orgId ? String(req.orgId) : '';
   if (!orgId) throw new ApiError(400, 'Organization context missing');
   return orgId;
 };
+
+const isCrmAdmin = (req: Request) => {
+  const user: any = (req as any).crmUser;
+  if (!user) throw new ApiError(401, 'Please authenticate');
+  return user.role === 'admin';
+};
+
+export const getCustomerCatchUpStatusHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  if (!isCrmAdmin(req)) {
+    res.json(new ApiResponse(200, { canView: false, ready: true, remaining: 0 }, 'Customer catch-up'));
+    return;
+  }
+  const status = await getCustomerCatchUpStatus(orgId);
+  res.json(new ApiResponse(200, { canView: true, ...status }, 'Customer catch-up'));
+});
 
 export const listCustomerRecordsHandler = asyncHandler(async (req: Request, res: Response) => {
   const orgId = requireOrgId(req);

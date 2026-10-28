@@ -76,7 +76,7 @@ describe('Real-DB proof: untextable numbers never create conversation or message
     expect(conversation.customerPhone).toBe('+13855035869');
     expect(message.to).toBe('+13855035869');
     expect(message.status).toBe('sent');
-    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'Valid US text');
+    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'Valid US text', '+18015550000');
   });
 
   it('writes a manual international text to the same +63 conversation key', async () => {
@@ -90,7 +90,7 @@ describe('Real-DB proof: untextable numbers never create conversation or message
 
     const conversation: any = await Conversation.findById(result.conversation._id).lean();
     expect(conversation.customerPhone).toBe('+639171234567');
-    expect(mockSendSms).toHaveBeenCalledWith('+639171234567', 'Manual international text');
+    expect(mockSendSms).toHaveBeenCalledWith('+639171234567', 'Manual international text', '+18015550000');
   });
 
   it('keeps an existing STOP opt-out in force with no new records', async () => {
@@ -105,6 +105,6 @@ describe('Real-DB proof: untextable numbers never create conversation or message
 
   it('still sends to a Demo Lab number through the automated policy', async () => {
     await expect(sendAutomatedSms({ orgId, toPhone: '+18015550177', body: 'Demo reminder' })).resolves.toBe(true);
-    expect(mockSendSms).toHaveBeenCalledWith('+18015550177', 'Demo reminder');
+    expect(mockSendSms).toHaveBeenCalledWith('+18015550177', 'Demo reminder', '+18015550000');
   });
 });

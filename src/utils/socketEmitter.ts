@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import { resolveCrmUserIdByEmail } from './presenceBridge';
+import { CRM_STAFF_EVENTS, crmStaffRoom } from './crmStaffRoom';
 
 let io: Server | null = null;
 let supraSpaceIo: Server | null = null;
@@ -83,6 +84,10 @@ export function emitToCrmUser(userId: string, event: string, data: any) {
 }
 
 export function emitToOrg(orgId: string, event: string, data: any) {
+  if (CRM_STAFF_EVENTS.has(event)) {
+    io?.to(crmStaffRoom(orgId)).emit(event, data);
+    return;
+  }
   io?.to(`org:${orgId}`).emit(event, data);
   supraSpaceIo?.to(`org:${orgId}`).emit(event, data);
 }

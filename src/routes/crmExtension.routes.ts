@@ -18,6 +18,7 @@ import {
   aiStatusHandler,
   createSessionHandler,
   deleteSessionHandler,
+  exchangeSignInCodeHandler,
   getSessionHandler,
   historyHandler,
   lookupHandler,
@@ -65,6 +66,7 @@ router.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 router.post('/session', crmExtensionSignInIpLimiter, crmExtensionSignInUserLimiter, createSessionHandler);
+router.post('/session/exchange', crmExtensionSignInIpLimiter, exchangeSignInCodeHandler);
 router.get('/session', crmExtensionAuth(), getSessionHandler);
 router.delete('/session', crmExtensionAuth(), deleteSessionHandler);
 router.post('/lookup', crmExtensionAuth(), crmExtensionLookupLimiter, lookupHandler);

@@ -3,6 +3,7 @@ import { RoutingConfig, IvrRoutingState } from '../models/CallRoutingConfig.mode
 import { routingGroupRecipients } from './callRoutingConfig.service';
 import * as telnyx from './telnyx.service';
 import { getSocketIO } from '../utils/socketEmitter';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
 import Lead from '../models/lead.model';
 
 export interface IvrCallbacks {
@@ -21,7 +22,7 @@ export function emitIvrCall(call: any, event = 'comm:call:update'): void {
   const io = getSocketIO();
   if (!io) return;
   const payload = { call: call.toObject ? call.toObject() : call, orgId: String(call.orgId) };
-  if (call.routing?.allOrg) io.to(`org:${call.orgId}`).emit(event, payload);
+  if (call.routing?.allOrg) io.to(crmStaffRoom(String(call.orgId))).emit(event, payload);
   else {
     const ids: string[] = event === 'comm:call:incoming' ? call.routing?.recipientIds || [] : call.routing?.notifiedIds || [];
     const rooms = [...new Set(ids.flatMap(id => [`user:${id}`, `crm-user:${id}`]))];
@@ -158,7 +159,7 @@ export async function handleIvrGather(payload: any, callbacks: IvrCallbacks): Pr
   arm(selected, callbacks);
   if (option.type === 'location' && option.leadLocation && call.leadId) {
     const lead = await Lead.findOneAndUpdate({ _id: call.leadId, organizationId: call.orgId }, { $set: { location: option.leadLocation } }, { new: true });
-    if (lead) getSocketIO()?.to(`org:${call.orgId}`).emit('lead:update', lead.toObject());
+    if (lead) getSocketIO()?.to(crmStaffRoom(String(call.orgId))).emit('lead:update', lead.toObject());
   }
   return route(selected, option.type === 'language' && option.digit === '0' ? 'reception' : 'selected',
     option.type === 'language' && option.digit === '0' ? selected.routing.config.receptionGroupId : option.groupId,

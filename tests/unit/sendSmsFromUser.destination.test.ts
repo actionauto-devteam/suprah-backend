@@ -160,7 +160,7 @@ describe('sendSmsFromUser — destination validation at the central SMS boundary
       destinationPolicy: 'manual',
     });
 
-    expect(mockSendSms).toHaveBeenCalledWith('+639171234567', 'hello');
+    expect(mockSendSms).toHaveBeenCalledWith('+639171234567', 'hello', '+18015550000');
     expect(mockMessageCreate).toHaveBeenCalledWith(expect.objectContaining({ to: '+639171234567', status: 'queued' }));
     expect(result.message.status).toBe('sent');
   });
@@ -173,13 +173,13 @@ describe('sendSmsFromUser — destination validation at the central SMS boundary
       expect.anything(),
       expect.anything(),
     );
-    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'hello');
+    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'hello', '+18015550000');
     expect(result.message.status).toBe('sent');
   });
 
   it('still sends to a Demo Lab number through the automated policy', async () => {
     await sendSmsFromUser({ orgId: 'org-1', user: actor, toPhone: '+18015550142', body: 'hello' });
-    expect(mockSendSms).toHaveBeenCalledWith('+18015550142', 'hello');
+    expect(mockSendSms).toHaveBeenCalledWith('+18015550142', 'hello', '+18015550000');
   });
 
   it('still marks a provider-rejected destination as failed instead of sent', async () => {
@@ -228,7 +228,7 @@ describe('automated SMS wrappers', () => {
 
   it('sends a valid US automated text normally', async () => {
     await expect(sendAutomatedSms({ orgId: 'org-1', toPhone: '385-503-5869', body: 'hello' })).resolves.toBe(true);
-    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'hello');
+    expect(mockSendSms).toHaveBeenCalledWith('+13855035869', 'hello', '+18015550000');
   });
 });
 

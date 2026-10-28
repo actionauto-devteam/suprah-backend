@@ -285,7 +285,7 @@ describe('Stage 41B local MongoDB verification', () => {
   });
   it('missing, disabled and invalid configs leave inbound calling on legacy ringing', async () => {
     for (const mode of ['missing', 'disabled', 'invalid']) {
-      const number = `+1801${String(now).slice(-6)}${mode === 'missing' ? '1' : mode === 'disabled' ? '2' : '3'}`;
+      const number = mode === 'missing' ? '+18015550999' : `+1801${String(now).slice(-6)}${mode === 'disabled' ? '2' : '3'}`;
       if (mode !== 'missing') await CallRoutingConfig.create({ ...config, organizationId: orgId, updatedBy: crmIds[0], inboundNumber: number, enabled: mode === 'invalid', ...(mode === 'invalid' ? { receptionGroupId: null } : {}) });
       const payload = { direction: 'incoming', call_control_id: `legacy-${now}-${mode}`, call_session_id: `legacy-session-${now}-${mode}`, from: `+18015550${mode === 'missing' ? '201' : mode === 'disabled' ? '202' : '203'}`, to: number };
       await Lead.create({ organizationId: orgId, createdBy: userIds[0], firstName: 'Legacy', phone: payload.from, channel: 'phone', source: 'Phone Call' });

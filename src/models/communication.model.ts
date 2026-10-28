@@ -27,6 +27,7 @@ export interface IConversation extends Document {
   leadId?: Types.ObjectId | null;
   customerPhone: string; // E.164, e.g. +18015551234
   customerName?: string;
+  lastInboundNumber?: string;
   lastMessageAt?: Date;
   lastMessagePreview?: string;
   lastDirection?: "inbound" | "outbound";
@@ -50,6 +51,7 @@ const ConversationSchema = new Schema<IConversation>(
     leadId: { type: Schema.Types.ObjectId, ref: "Lead", default: null, index: true },
     customerPhone: { type: String, required: true },
     customerName: { type: String },
+    lastInboundNumber: { type: String },
     lastMessageAt: { type: Date, index: true },
     lastMessagePreview: { type: String },
     lastDirection: { type: String, enum: ["inbound", "outbound"] },
@@ -160,6 +162,7 @@ export interface ICallLog extends Document {
   durationSec?: number;
   hangupCause?: string;
   customerName?: string;
+  lineLabel?: string;
   textBackSentAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -192,6 +195,7 @@ const CallLogSchema = new Schema<ICallLog>(
     durationSec: { type: Number },
     hangupCause: { type: String },
     customerName: { type: String },
+    lineLabel: { type: String },
     textBackSentAt: { type: Date, default: null },
     routing: { type: Schema.Types.Mixed },
     recordingCorrelation: { type: Schema.Types.Mixed, select: false },

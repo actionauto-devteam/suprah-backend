@@ -9,6 +9,7 @@ import SupraSpaceConversation from './models/SupraSpaceConversation.model';
 import mongoose from 'mongoose';
 import { resolveCrmJwtSecret } from './utils/crmJwtSecret';
 import { addCrmOnlineUser, removeCrmOnlineUser, emitToShiftBoard, emitPresenceUpdate, DRIVER_POOL_ROOM } from './utils/socketEmitter';
+import { crmStaffRoom } from './utils/crmStaffRoom';
 import { connectionMetrics, countBy } from './utils/metrics';
 
 interface AuthSocket extends Socket {
@@ -22,7 +23,10 @@ interface AuthSocket extends Socket {
    * notification collisions on the shared socket connection.
    */
   crmUserId?: string;
+  isCrmStaff?: boolean;
 }
+
+const CRM_STAFF_ROLES = ['employee', 'admin', 'super_admin'];
 
 export const setupSocket = (io: Server) => {
   io.use(async (socket: AuthSocket, next) => {
@@ -67,6 +71,7 @@ export const setupSocket = (io: Server) => {
         // The main User id is retained as a safe synthetic fallback because
         // crmAuth deliberately uses that id when no persisted CrmUser exists.
         socket.crmUserId = socket.userId;
+        socket.isCrmStaff = CRM_STAFF_ROLES.includes(socket.role);
         if (socket.organizationId && currentUser.email) {
           try {
             const linkedCrmUser: any = await CrmUser.findOne({
@@ -79,6 +84,13 @@ export const setupSocket = (io: Server) => {
 
             if (linkedCrmUser?._id) {
               socket.crmUserId = String(linkedCrmUser._id);
+              socket.isCrmStaff = true;
+            } else if (await CrmUser.exists({
+              email: String(currentUser.email).toLowerCase(),
+              organizationId: socket.organizationId,
+              isActive: false,
+            })) {
+              socket.isCrmStaff = false;
             }
           } catch (crmLinkError) {
             // CRM alias resolution is an additive capability. A transient CRM
@@ -103,6 +115,7 @@ export const setupSocket = (io: Server) => {
           socket.crmUserId = decoded.id;
           socket.organizationId = currentCrmUser.organizationId?.toString();
           socket.role = 'crm';
+          socket.isCrmStaff = true;
         } catch (crmErr: any) {
           if (config.env === 'development' && process.env.ALLOW_INSECURE_SOCKET_DEV_FALLBACK === 'true') {
             logger.warn('Socket auth: dev fallback active');
@@ -142,6 +155,7 @@ export const setupSocket = (io: Server) => {
 
     if (socket.organizationId) {
       socket.join(`org:${socket.organizationId}`);
+      if (socket.isCrmStaff) socket.join(crmStaffRoom(socket.organizationId));
     }
 
     // Tray-app connections identify themselves via clientType so we can push

@@ -81,6 +81,7 @@ export interface ILead extends Document {
 
   vehicleId?: mongoose.Types.ObjectId;
   location?: string;
+  dealershipLine?: string;
 
   appointment?: {
     date: Date;
@@ -349,6 +350,11 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
     },
 
     location: {
+      type: String,
+      trim: true,
+    },
+
+    dealershipLine: {
       type: String,
       trim: true,
     },

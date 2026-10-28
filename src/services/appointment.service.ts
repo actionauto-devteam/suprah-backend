@@ -21,6 +21,7 @@ import {
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import CrmUser from '../models/CrmUser.model';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
 
 interface CreateAppointmentData {
   title: string;
@@ -333,7 +334,7 @@ const createAppointment = async (userId: string, orgId: string, data: CreateAppo
         );
         if (updatedLead) {
           const io = getSocketIO();
-          if (io) io.to(`org:${orgId}`).emit('lead:update', updatedLead);
+          if (io) io.to(crmStaffRoom(String(orgId))).emit('lead:update', updatedLead);
         }
       }
     } catch (error) {

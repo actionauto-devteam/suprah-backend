@@ -61,6 +61,7 @@ import { extractGmailText } from '../utils/gmailMessageParser';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { LeadReplyRecipientError, resolveLeadReplyRecipient } from '../utils/leadReplyRecipient';
 import { cleanEmailSubject, encodeEmailHeader, resolveLeadEmailSubject } from '../utils/leadEmailSubject';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
 import {
   COMPOSER_MESSAGES,
   SEND_UNCERTAIN_CODE,
@@ -422,7 +423,7 @@ export async function sendLeadReplyEmail(
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${orgId}`).emit('email:message:new', {
+    io.to(crmStaffRoom(String(orgId))).emit('email:message:new', {
       leadId: String(lead._id),
       threadId: sentThreadId || lead.threadId,
     });
@@ -660,7 +661,7 @@ export const receiveADF = async (req: Request, res: Response) => {
     const io = getSocketIO();
     if (io) {
       const orgIdString = req.query.orgId || req.body.organizationId || 'global';
-      io.to(`org:${orgIdString}`).emit('lead:new', newLead);
+      io.to(crmStaffRoom(String(orgIdString))).emit('lead:new', newLead);
     }
 
     const vehicleInterest = adfData.vehicle
@@ -831,7 +832,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'customerId customerLink normalizedEmail normalizedPhone ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
+        'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
         'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
       )
@@ -978,7 +979,7 @@ export const getLeadById = async (req: Request, res: Response) => {
         'firstName lastName email phone senderEmail senderName subject ' +
         'customerId customerLink normalizedEmail normalizedPhone ' +
         'parsedContent threadId messageId isRead isPending channel ' +
-        'source sourceProvider status vehicle vehicleId location comments address tags opportunityValue appointment createdAt updatedAt ' +
+        'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
         'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
         'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
       )
@@ -1232,7 +1233,7 @@ export const updateLeadContact = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
 
     logger.info(
@@ -1397,7 +1398,7 @@ export const updateLeadDetails = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
 
     return res.json(new ApiResponse(200, lead, 'Lead details updated'));
@@ -1483,7 +1484,7 @@ export const assignLead = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
     if (assigneeUser) {
       emitToUser(assigneeUser._id.toString(), 'lead:assigned', {
@@ -1612,7 +1613,7 @@ export const updateLead = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
 
     res.json(lead);
@@ -1682,7 +1683,7 @@ export const createInquiry = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${req.orgId}`).emit('lead:new', savedLead);
+      io.to(crmStaffRoom(String(req.orgId))).emit('lead:new', savedLead);
     }
 
     if (req.orgId) {
@@ -1744,7 +1745,7 @@ export const markAsRead = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
 
     res.json(lead);
@@ -1778,7 +1779,7 @@ export const markAsPending = async (req: Request, res: Response) => {
 
     const io = getSocketIO();
     if (io) {
-      io.to(`org:${orgId}`).emit('lead:update', lead);
+      io.to(crmStaffRoom(String(orgId))).emit('lead:update', lead);
     }
 
     res.json(lead);
@@ -1892,7 +1893,7 @@ export const pauseEmailAi = async (req: Request, res: Response) => {
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${orgId}`).emit('email:ai_paused', {
+    io.to(crmStaffRoom(String(orgId))).emit('email:ai_paused', {
       leadId: String(lead._id),
       paused: true,
       pausedBy: (user as any).fullName || (user as any).name,
@@ -1919,7 +1920,7 @@ export const resumeEmailAi = async (req: Request, res: Response) => {
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${orgId}`).emit('email:ai_paused', {
+    io.to(crmStaffRoom(String(orgId))).emit('email:ai_paused', {
       leadId: String(lead._id),
       paused: false,
     });
@@ -2127,7 +2128,7 @@ export async function sendLeadEmailReply(input: {
   const io = getSocketIO();
 
   if (io) {
-    io.to(`org:${orgId}`).emit(
+    io.to(crmStaffRoom(String(orgId))).emit(
       'lead:update',
       repliedLead,
     );
@@ -2267,7 +2268,7 @@ export const bulkReplyToInquiries = async (req: Request, res: Response) => {
 
         const io = getSocketIO();
         if (io) {
-          io.to(`org:${orgId}`).emit('lead:update', contactedLead);
+          io.to(crmStaffRoom(String(orgId))).emit('lead:update', contactedLead);
         }
 
         return lead._id.toString();
@@ -2545,7 +2546,7 @@ export const syncCentralGmail = asyncHandler(async (req: Request, res: Response)
 
           const io = getSocketIO();
           if (io) {
-            io.to(`org:${req.orgId}`).emit('lead:new', newLead);
+            io.to(crmStaffRoom(String(req.orgId))).emit('lead:new', newLead);
           }
 
           await activityService.createActivity({
@@ -2700,7 +2701,7 @@ export const setAppointmentForLead = asyncHandler(async (req: Request, res: Resp
 
   const io = getSocketIO();
   if (io) {
-    io.to(`org:${orgId}`).emit('lead:update', scheduledLead);
+    io.to(crmStaffRoom(String(orgId))).emit('lead:update', scheduledLead);
   }
 
   res.json(new ApiResponse(200, { lead: scheduledLead, appointment }, 'Appointment scheduled and synced successfully'));

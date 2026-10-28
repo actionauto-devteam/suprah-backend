@@ -262,7 +262,7 @@ describe('Real-DB: Chrome extension texting and email (local MongoDB only)', () 
       const res = await sendText(lead._id, { message: '  Hi Avery, the Tacoma is here.  ', clientRequestId: nextRequestId(), recipient: phone, toPhone: '+18015559999' }).expect(201);
       expect(res.body.data).toEqual({ channel: 'sms', duplicate: false });
       expect(mockSendSms).toHaveBeenCalledTimes(1);
-      expect(mockSendSms).toHaveBeenCalledWith(phone, 'Hi Avery, the Tacoma is here.');
+      expect(mockSendSms).toHaveBeenCalledWith(phone, 'Hi Avery, the Tacoma is here.', '+18015550999');
       const message: any = await CommunicationMessage.findOne({ leadId: lead._id, direction: 'outbound' }).lean();
       expect(message).toMatchObject({ origin: 'chrome_extension', status: 'sent', to: phone, body: 'Hi Avery, the Tacoma is here.' });
       expect(message.sentBy.name).toBe('Riley Employee');

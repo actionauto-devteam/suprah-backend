@@ -17,6 +17,29 @@ import { triggerAiReplyForNewInquiry } from './communication.service';
 import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { processGmailMessageThroughIntake } from './gmailLeadIntake';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
+
+const RECHECK_SKIPPED_MESSAGE_MS = 10 * 60 * 1000;
+const recentlyCheckedMessages = new Map<string, number>();
+
+export function wasMessageCheckedRecently(orgId: string, messageId: string) {
+    const until = recentlyCheckedMessages.get(`${orgId}:${messageId}`);
+    return until !== undefined && until > Date.now();
+}
+
+export function rememberCheckedMessage(orgId: string, messageId: string) {
+    const now = Date.now();
+    if (recentlyCheckedMessages.size >= 20000) {
+        for (const [key, until] of recentlyCheckedMessages) {
+            if (until <= now) recentlyCheckedMessages.delete(key);
+        }
+    }
+    recentlyCheckedMessages.set(`${orgId}:${messageId}`, now + RECHECK_SKIPPED_MESSAGE_MS);
+}
+
+export function forgetCheckedMessages() {
+    recentlyCheckedMessages.clear();
+}
 
 class OrgGmailService {
     private createOAuth2Client(): OAuth2Client {
@@ -148,6 +171,7 @@ class OrgGmailService {
                 const unique = [...new Map(messages.map((m) => [m.id, m])).values()];
                 const details: any[] = [];
                 for (const msg of unique) {
+                    if (wasMessageCheckedRecently(orgId, msg.id!)) continue;
                     try {
                         const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: msg.id! }));
                         details.push(detail.data);
@@ -160,7 +184,10 @@ class OrgGmailService {
                 for (const message of details) {
                     try {
                         const rawBody = this.extractBody(message);
-                        if (!rawBody || !rawBody.trim()) continue;
+                        if (!rawBody || !rawBody.trim()) {
+                            rememberCheckedMessage(orgId, message.id);
+                            continue;
+                        }
                         const result = await processGmailMessageThroughIntake({
                             organizationId: orgId,
                             message,
@@ -169,6 +196,7 @@ class OrgGmailService {
                             systemUserId,
                             allowNewInquiry: !config.leadSourceEmail || newInquiryIds.has(message.id),
                         });
+                        if (result.status === 'skipped') rememberCheckedMessage(orgId, message.id);
                         if (result.status === 'inactive' || result.status === 'skipped') continue;
                         if (result.status === 'associated' && result.created) intakeCreated++;
                         await gmail.users.messages.batchModify({
@@ -176,6 +204,7 @@ class OrgGmailService {
                             requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] },
                         });
                     } catch (err) {
+                        rememberCheckedMessage(orgId, message.id);
                         console.error(`[OrgSync] Lead intake failed for message ${message.id} for org ${orgId}:`, err);
                     }
                 }
@@ -184,12 +213,16 @@ class OrgGmailService {
             }
 
             for (const msg of messages) {
+                if (wasMessageCheckedRecently(orgId, msg.id!)) continue;
                 try {
                     const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: msg.id! }));
                     const rawBody = this.extractBody(detail.data);
 
                     // Skip empty emails
-                    if (!rawBody || !rawBody.trim()) continue;
+                    if (!rawBody || !rawBody.trim()) {
+                        rememberCheckedMessage(orgId, msg.id!);
+                        continue;
+                    }
 
                     // A message already imported into this thread is skipped up front —
                     // this is a best-effort secondary check (threadId has no unique index),
@@ -197,7 +230,10 @@ class OrgGmailService {
                     const alreadyImportedInThread = detail.data.threadId
                         ? await Lead.findOne({ organizationId: orgId, threadId: detail.data.threadId }).select('_id').lean()
                         : null;
-                    if (alreadyImportedInThread) continue;
+                    if (alreadyImportedInThread) {
+                        rememberCheckedMessage(orgId, msg.id!);
+                        continue;
+                    }
 
                     // Extract email headers for better channel detection
                     const headers = detail.data.payload?.headers || [];
@@ -249,6 +285,7 @@ class OrgGmailService {
 
                     if (upsertResult.lastErrorObject?.updatedExisting) {
                         // Another sync run already won this message — nothing left to do.
+                        rememberCheckedMessage(orgId, msg.id!);
                         continue;
                     }
 
@@ -266,7 +303,7 @@ class OrgGmailService {
 
                     // Real-time notify
                     const io = getSocketIO();
-                    if (io) io.to(`org:${orgId}`).emit('lead:new', newLead);
+                    if (io) io.to(crmStaffRoom(String(orgId))).emit('lead:new', newLead);
 
                     // Mark as READ in Gmail to prevent double processing next time
                     await gmail.users.messages.batchModify({
@@ -278,6 +315,7 @@ class OrgGmailService {
                     });
 
                 } catch (err) {
+                    rememberCheckedMessage(orgId, msg.id!);
                     console.error(`[OrgSync] Failed to process message ${msg.id} for org ${orgId}:`, err);
                 }
             }
