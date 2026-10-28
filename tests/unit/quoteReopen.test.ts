@@ -1,9 +1,10 @@
 /**
- * When a load made from a quote is deleted, the quote goes back to Pending,
- * unless another load is still linked to it. Models are stand-ins; no
- * database is used.
+ * When a load made from a quote is deleted or cancelled, the quote goes back
+ * to Pending, unless another live load is still linked to it. Models are
+ * stand-ins; no database is used.
  */
 const mockLinkedQuoteIds = jest.fn();
+const mockLoadFind = jest.fn();
 const mockBookedQuoteIds = jest.fn();
 const mockUpdateMany = jest.fn();
 const mockInvalidate = jest.fn();
@@ -15,7 +16,12 @@ const distinctChain = (result: () => unknown) => ({
 
 jest.mock('../../src/models/Load.model', () => ({
   __esModule: true,
-  default: { find: () => distinctChain(mockLinkedQuoteIds) },
+  default: {
+    find: (filter: unknown) => {
+      mockLoadFind(filter);
+      return distinctChain(mockLinkedQuoteIds);
+    },
+  },
 }));
 jest.mock('../../src/models/Quote.model', () => ({
   __esModule: true,
@@ -50,6 +56,16 @@ describe('reopenQuotesOfDeletedLoads', () => {
       { $set: { status: 'pending' } },
       { session: undefined },
     );
+  });
+
+  it("doesn't count a cancelled load as still linked", async () => {
+    mockBookedQuoteIds.mockReturnValue(['q1']);
+    expect(await reopenQuotesOfDeletedLoads('org-1', ['q1'])).toEqual(['q1']);
+    expect(mockLoadFind).toHaveBeenCalledWith({
+      organizationId: 'org-1',
+      quoteId: { $in: ['q1'] },
+      status: { $ne: 'Cancelled' },
+    });
   });
 
   it('leaves a quote alone while another load is still linked to it', async () => {

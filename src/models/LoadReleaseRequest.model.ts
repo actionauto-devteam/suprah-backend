@@ -29,6 +29,8 @@
     "return_available",
     "reassign",
     "delivery_completed",
+    // Staff cancelled the load before pickup, which closed the request.
+    "load_cancelled",
   ] as const;
   export type LoadReleaseDecision = (typeof LOAD_RELEASE_DECISIONS)[number];
 

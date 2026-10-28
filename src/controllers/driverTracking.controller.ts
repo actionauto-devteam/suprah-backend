@@ -108,10 +108,14 @@ import {
   resolveDriverReviewAccess,
 } from "../services/driverReviewAccess.service";
 import {
+  checkLoadCancellation,
   isReassignableLoad,
+  parseLoadCancellationInput,
   proofOfDeliveryBelongsTo,
   proofOfDeliveryOwnedByFilter,
 } from "../services/loadLifecyclePolicy";
+import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
+import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
@@ -1429,14 +1433,14 @@ function lifecycleAdminNotificationEvent(params: {
 
 /**
  * Snapshot of the outgoing driver's evidence and lifecycle times, kept in
- * Load.assignmentHistory when a driver leaves through Reassign or Remove,
- * instead of deleting the pickup photo, delivery photo and signature.
+ * Load.assignmentHistory when a driver leaves through Reassign, Remove or
+ * Cancel, instead of deleting the pickup photo, delivery photo and signature.
  */
 function buildAssignmentHistoryEntry(
   load: any,
   params: {
     endedBy: unknown;
-    endReason: "reassigned" | "removed";
+    endReason: "reassigned" | "removed" | "cancelled";
     replacementDriverId?: unknown;
   },
 ) {
@@ -1594,7 +1598,8 @@ function lifecycleReleaseResolutionEvent(params: {
   decision:
     | "reassign"
     | "return_available"
-    | "delivery_completed";
+    | "delivery_completed"
+    | "load_cancelled";
   reviewedBy?: string;
   replacementDriverId?: string;
 }) {
@@ -6928,6 +6933,338 @@ const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res
     .json(new ApiResponse(200, delivered, `Load ${load.loadNumber} marked as delivered`));
 });
 
+/**
+ * The urgent "Load Cancelled" Dispatch Alert for the driver who had the load,
+ * built like one sent from Driver Tracker so the driver's app shows it, plays
+ * the warning sound and offers Acknowledge. Drivers see only the reason, never
+ * the staff note.
+ */
+function cancelledLoadDriverAlertEvent(params: {
+  load: any;
+  organizationId: string;
+  driverId: string;
+  driverName: string;
+  sender: IUser;
+  dispatchOwnerId: string;
+  reasonLabel: string;
+}) {
+  const config = DRIVER_DISPATCH_ALERT_CONFIG.load_cancelled;
+  const priority = resolveDriverAlertPriority(config, config.defaultPriority);
+  const soundProfile = resolveDriverAlertSoundProfile(config, priority);
+  const loadContext = { ...buildDriverAlertLoadContext(params.load)!, status: "Cancelled" };
+  const { destinationName, address } = resolveDriverAlertDestination("load_cancelled", loadContext, config.label);
+  const message = buildDriverDispatchAlertMessage({
+    alertType: "load_cancelled",
+    alertLabel: config.label,
+    loadNumber: loadContext.loadNumber || undefined,
+    dispatcherMessage: `Reason: ${params.reasonLabel}.`,
+  });
+
+  return lifecycleUserNotificationEvent({
+    userId: params.driverId,
+    organizationId: params.organizationId,
+    type: "driver_dispatch_alert",
+    title: config.label,
+    message,
+    metadata: {
+      alertSchemaVersion: 2,
+      alertType: "load_cancelled",
+      alertLabel: config.label,
+      alertMode: config.mode,
+      priority,
+      soundProfile,
+      allowedResponses: [...config.allowedResponses],
+      quickPreset: null,
+      driverId: params.driverId,
+      driverName: params.driverName,
+      loadId: loadContext.id,
+      loadNumber: loadContext.loadNumber,
+      loadStatus: "Cancelled",
+      loadContext,
+      destinationName,
+      address,
+      dispatcherMessage: message,
+      dispatchOwnerId: params.dispatchOwnerId,
+      sentByUserId: params.sender._id.toString(),
+      sentByName: params.sender.name,
+      response: "pending",
+      playSound: true,
+      soundFile: "/sounds/warning_sound.wav",
+      route: "/driver/notifications",
+      pushSource: "Driver Tracker",
+    },
+  });
+}
+
+// POST /api/driver-tracking/loads/:id/cancel  { reason, note? }
+// Staff cancel a load before pickup (Draft, Posted, Assigned or Accepted) with
+// a required reason. The load is kept, read-only, with the reason, who
+// cancelled it and when; it can still be deleted later. A driver who had it
+// gets the urgent "Load Cancelled" alert, leaves the load (kept in its
+// assignment history like Remove) and is no longer tracked for it. Drivers who
+// only requested it are told it was withdrawn. The quote it came from goes
+// back to Pending. A load with a driver can be cancelled only by its
+// responsible dispatcher or an organization admin, like Mark as delivered.
+const cancelLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
+  const user = getUser(req);
+  const organizationId = String(req.orgId ?? "").trim();
+  if (!organizationId) throw new ApiError(403, SELECT_ORGANIZATION);
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new ApiError(400, INVALID_LINK);
+  }
+
+  const input = parseLoadCancellationInput(req.body);
+  if (!input.ok) throw new ApiError(400, input.message);
+
+  const load: any = await Load.findOne({ _id: req.params.id, organizationId });
+  if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+
+  // Safe to retry after a lost response.
+  if (load.status === "Cancelled") {
+    return res.status(200).json(new ApiResponse(200, load, `Load ${load.loadNumber} is already cancelled`));
+  }
+  const check = checkLoadCancellation(load);
+  if (!check.ok) throw new ApiError(check.statusCode, check.message);
+
+  const actorId = user._id.toString();
+  const driverId = load.assignedDriverId ? String(load.assignedDriverId) : null;
+  if (driverId) {
+    const isResponsibleDispatcher = String(load.dispatchOwnerId ?? "") === actorId;
+    if (!isResponsibleDispatcher && !isOrganizationAdminFor(user as any, load.organizationId)) {
+      throw new ApiError(
+        403,
+        `You can't cancel load ${load.loadNumber} because a driver is assigned to it. Only its responsible dispatcher and organization admins can.`,
+      );
+    }
+  }
+
+  const loadId = String(load._id);
+  const loadNumber = String(load.loadNumber ?? "");
+  const previousStatus = String(load.status);
+  const now = new Date();
+  const actorName = String(user.name || "Dispatch").trim();
+  const reasonLabel = LOAD_CANCELLATION_REASON_LABELS[input.reason];
+  const staffReason = input.note ? `${reasonLabel}: ${input.note}` : reasonLabel;
+  const requesterIds = [
+    ...new Set<string>(
+      (Array.isArray(load.driverRequests) ? load.driverRequests : [])
+        .map((request: any) => String(request?.driverId ?? "").trim())
+        .filter((id: string) => id && id !== driverId),
+    ),
+  ];
+
+  let driverName = "";
+  let dispatchOwnerId: string | null = load.dispatchOwnerId ? String(load.dispatchOwnerId) : null;
+  let pendingReleaseRequest: any = null;
+  if (driverId) {
+    const [driver, releaseRequest, originalDispatcherId]: [any, any, string | null] = await Promise.all([
+      User.findOne({ _id: driverId, role: "driver" }).select("_id name").lean(),
+      LoadReleaseRequest.findOne({
+        organizationId,
+        loadId: load._id,
+        driverId: load.assignedDriverId,
+        status: "pending",
+      }),
+      resolveOriginalDispatcherIdForSupportAudit(load, driverId),
+    ]);
+    driverName = String(driver?.name || "the assigned driver").trim();
+    pendingReleaseRequest = releaseRequest;
+    dispatchOwnerId = originalDispatcherId ?? dispatchOwnerId;
+  }
+
+  // The private Dispatch Chat row lands in the responsible dispatcher's thread
+  // with the driver. When an admin steps in, the driver isn't shown who.
+  const chatOwnerId = dispatchOwnerId || actorId;
+  const supportAction = chatOwnerId !== actorId;
+  const outbox = [
+    // Refreshes Transportation, Driver Tracker and the drivers' apps.
+    lifecycleSyncEvent(organizationId, [driverId, ...requesterIds], loadId),
+    ...(driverId
+      ? [
+          cancelledLoadDriverAlertEvent({
+            load,
+            organizationId,
+            driverId,
+            driverName,
+            sender: user,
+            dispatchOwnerId: chatOwnerId,
+            reasonLabel,
+          }),
+          lifecycleDispatchChatEvent({
+            organizationId,
+            dispatcherId: chatOwnerId,
+            driverId,
+            eventType: "driver_load_cancelled",
+            title: "Load Cancelled",
+            message: `${actorName} cancelled load ${loadNumber}. Reason: ${reasonLabel}.`,
+            metadata: {
+              loadId,
+              loadNumber,
+              action: "cancelled",
+              actorId,
+              actorName,
+              actorRole: "dispatcher",
+              driverId,
+              driverName,
+              dispatcherId: chatOwnerId,
+              previousDriverId: driverId,
+              previousDriverName: driverName,
+              reason: input.reason,
+              reasonLabel,
+              threadPreview: `Load ${loadNumber} cancelled.`,
+              unreadForParticipantIds: supportAction ? [chatOwnerId, driverId] : [driverId],
+              ...(supportAction
+                ? {
+                    originalDispatcherId: chatOwnerId,
+                    performedByUserId: actorId,
+                    performedByName: actorName,
+                    hidePerformerIdentityFromDriver: true,
+                  }
+                : {}),
+              audienceMessages: {
+                actorDispatcher: `You cancelled load ${loadNumber}. Reason: ${reasonLabel}.`,
+                threadDispatcher: supportAction
+                  ? `${actorName} cancelled load ${loadNumber}. Reason: ${reasonLabel}.`
+                  : `You cancelled load ${loadNumber}. Reason: ${reasonLabel}.`,
+                dispatcher: `${actorName} cancelled load ${loadNumber}. Reason: ${reasonLabel}.`,
+                driver: `Dispatch cancelled load ${loadNumber}. Reason: ${reasonLabel}.`,
+              },
+            },
+            ...(supportAction
+              ? { performedByUserId: actorId, performedByName: actorName, notifyThreadOwner: true }
+              : {}),
+          }),
+        ]
+      : []),
+    ...requesterIds.map((requesterId) =>
+      lifecycleUserNotificationEvent({
+        userId: requesterId,
+        organizationId,
+        type: "general",
+        title: "Requested Load Withdrawn",
+        message: `Load ${loadNumber} that you requested was cancelled by Dispatch, so your request was closed.`,
+        metadata: { loadId, loadNumber, route: "/driver/available-loads" },
+      }),
+    ),
+    // The responsible dispatcher hears about it when someone else cancelled.
+    ...(dispatchOwnerId && dispatchOwnerId !== actorId
+      ? [
+          lifecycleUserNotificationEvent({
+            userId: dispatchOwnerId,
+            organizationId,
+            type: "general",
+            title: "Load Cancelled",
+            message: `${actorName} cancelled load ${loadNumber}, which you were dispatching. Reason: ${staffReason}.`,
+            metadata: { loadId, loadNumber, route: `/transportation/load/${encodeURIComponent(loadId)}` },
+          }),
+        ]
+      : []),
+    lifecycleActivityEvent({
+      userId: actorId,
+      organizationId,
+      type: "load_updated",
+      title: "Load Cancelled",
+      description: `${actorName} cancelled load ${loadNumber} (it was ${previousStatus}). Reason: ${staffReason}`,
+      loadId,
+      metadata: { cancelled: true, reason: input.reason, previousStatus, ...(driverId ? { driverId } : {}) },
+    }),
+    ...(pendingReleaseRequest && driverId
+      ? [
+          lifecycleReleaseResolutionEvent({
+            request: pendingReleaseRequest,
+            organizationId,
+            loadId,
+            driverId,
+            status: "cancelled",
+            decision: "load_cancelled",
+            reviewedBy: actorId,
+          }),
+        ]
+      : []),
+  ];
+
+  const update: Record<string, any> = {
+    $set: {
+      status: "Cancelled",
+      // Open requests are closed (requesters are told above).
+      driverRequests: [],
+      cancellation: {
+        reason: input.reason,
+        ...(input.note ? { note: input.note } : {}),
+        by: user._id,
+        byName: actorName,
+        at: now,
+        previousStatus,
+        ...(driverId ? { driverId: load.assignedDriverId, driverName } : {}),
+      },
+    },
+  };
+  if (driverId) {
+    // Same hand-back as Remove: the driver's evidence and times move to
+    // assignmentHistory, and the load no longer counts as theirs.
+    update.$unset = {
+      assignedDriverId: "",
+      dispatchOwnerId: "",
+      assignmentMaterialFingerprint: "",
+      assignmentCompatibilityOverrides: "",
+      assignmentReconfirmedAt: "",
+      assignmentReconfirmedBy: "",
+      proofOfPickup: "",
+      driverContract: "",
+      acceptedAt: "",
+    };
+    update.$push = {
+      assignmentHistory: {
+        $each: [buildAssignmentHistoryEntry(load, { endedBy: user._id, endReason: "cancelled" })],
+        $slice: -50,
+      },
+    };
+  }
+
+  const cancelled = await updateLoadIfCurrent({
+    load,
+    actorId,
+    expected: {
+      organizationId,
+      status: previousStatus,
+      assignedDriverId: driverId ?? null,
+    },
+    update: appendLoadLifecycleOutbox(update, outbox),
+    action: "cancelling it",
+  });
+
+  await flushLifecycleOutbox(loadId);
+  // Drivers' new-load alerts stop offering it.
+  void markNewLoadAlertsUnavailable(loadId);
+  for (const requesterId of requesterIds) {
+    emitToUser(requesterId, "driver:load_request_updated", { reason: "load_cancelled", loadId });
+  }
+
+  // NON-FATAL: the load is already cancelled.
+  if (load.quoteId) {
+    try {
+      const reopened = await reopenQuotesOfDeletedLoads(organizationId, [load.quoteId]);
+      await announceReopenedQuotes(organizationId, reopened);
+    } catch (err) {
+      logger.error({ err, loadId, quoteId: load.quoteId }, "Non-fatal: failed to reopen the quote of a cancelled load");
+    }
+  }
+  if (driverId) {
+    try {
+      await clearDriverExactLocationIfUnneeded(driverId, "load_cancelled");
+    } catch (err) {
+      logger.error({ err, driverId, loadId }, "Non-fatal: failed to clear exact GPS after cancelling a load");
+    }
+    try {
+      await finalizeDriverStatusChangeIfClear(driverId, organizationId);
+    } catch (err) {
+      logger.error({ err, driverId }, "Non-fatal: failed to finalize driver status transition after cancelling a load");
+    }
+  }
+
+  return res.status(200).json(new ApiResponse(200, cancelled, `Load ${loadNumber} cancelled`));
+});
+
 // POST /api/driver-tracking/loads/:id/release-request
 // POST /api/driver-tracking/loads/:id/drop (compatibility alias)
 // A driver can request release, but only Dispatch can change ownership/state.
@@ -8304,6 +8641,7 @@ export default {
   markArrived,
   completeDelivery,
   markLoadDeliveredByDispatch,
+  cancelLoad,
   requestLoadRelease,
   cancelReleaseRequest,
   rejectReleaseRequest,

@@ -6,6 +6,11 @@ import {
   CONDITION_STOPS,
   SIGNATURE_DATA_URL_MAX_LENGTH,
 } from "../constants/conditionReport";
+import {
+  LOAD_CANCELLATION_NOTE_MAX,
+  LOAD_CANCELLATION_REASONS,
+  type LoadCancellationReason,
+} from "../constants/loadCancellation";
 
 export type LoadStatus =
   | "Draft"
@@ -141,6 +146,17 @@ export interface ILoad extends Document {
     driverName?: string;
   };
   deliveryOverride?: Record<string, any>;
+  /** Set when staff cancelled the load before pickup (see the schema). */
+  cancellation?: {
+    reason: LoadCancellationReason;
+    note?: string;
+    by: mongoose.Types.ObjectId;
+    byName?: string;
+    at: Date;
+    previousStatus?: string;
+    driverId?: mongoose.Types.ObjectId;
+    driverName?: string;
+  };
   /** When drivers were told this load is on the board (once per load). */
   boardAlertSentAt?: Date;
   createdAt: Date;
@@ -302,17 +318,17 @@ const loadDriverAmendmentSchema = new Schema(
 );
 
 /**
- * One entry per driver who left this load through Reassign or Remove. Keeps
- * that driver's evidence (pickup/delivery photos, contract signature) and
- * lifecycle times instead of deleting them, so the dispatchers involved can
- * review who had the load and when.
+ * One entry per driver who left this load through Reassign, Remove or Cancel.
+ * Keeps that driver's evidence (pickup/delivery photos, contract signature)
+ * and lifecycle times instead of deleting them, so the dispatchers involved
+ * can review who had the load and when.
  */
 const loadAssignmentHistorySchema = new Schema(
   {
     driverId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     dispatchOwnerId: { type: Schema.Types.ObjectId, ref: "User" },
     statusAtEnd: { type: String, required: true, maxlength: 40 },
-    endReason: { type: String, enum: ["reassigned", "removed"], required: true },
+    endReason: { type: String, enum: ["reassigned", "removed", "cancelled"], required: true },
     endedAt: { type: Date, required: true },
     endedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
     replacementDriverId: { type: Schema.Types.ObjectId, ref: "User" },
@@ -593,6 +609,25 @@ const loadSchema = new Schema<ILoad>(
           reason: { type: String, trim: true, maxlength: 500, required: true },
           previousStatus: { type: String, trim: true, maxlength: 40 },
           proofAdded: { type: Boolean, default: false },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
+    // Set when staff cancelled the load before pickup (cancelLoad in
+    // driverTracking.controller): why, who, when, from which status, and the
+    // driver who had it. A cancelled load stays as a read-only record.
+    cancellation: {
+      type: new Schema(
+        {
+          reason: { type: String, enum: LOAD_CANCELLATION_REASONS, required: true },
+          note: { type: String, trim: true, maxlength: LOAD_CANCELLATION_NOTE_MAX },
+          by: { type: Schema.Types.ObjectId, ref: "User", required: true },
+          byName: { type: String, trim: true, maxlength: 200 },
+          at: { type: Date, required: true },
+          previousStatus: { type: String, trim: true, maxlength: 40 },
+          driverId: { type: Schema.Types.ObjectId, ref: "User" },
+          driverName: { type: String, trim: true, maxlength: 200 },
         },
         { _id: false },
       ),

@@ -7,13 +7,14 @@ import { getSocketIO } from "../utils/socketEmitter";
 /**
  * A quote converted into a load is marked "booked" ("Converted to Load").
  * When that load is deleted (by Dispatch, or with a removed team member's
- * unassigned work), the quote goes back to Pending instead of staying stuck:
- * staff confirm with the customer before converting it again.
+ * unassigned work) or cancelled, the quote goes back to Pending instead of
+ * staying stuck: staff confirm with the customer before converting it again.
  */
 
 /**
  * Reopens the booked quotes that no remaining load is linked to, and returns
- * their ids. Pass the session when the loads were deleted in a transaction.
+ * their ids. A cancelled load doesn't count as linked. Pass the session when
+ * the loads were deleted in a transaction.
  */
 export async function reopenQuotesOfDeletedLoads(
   organizationId: string,
@@ -25,7 +26,7 @@ export async function reopenQuotesOfDeletedLoads(
 
   const stillLinked = new Set(
     (
-      await Load.find({ organizationId, quoteId: { $in: ids } })
+      await Load.find({ organizationId, quoteId: { $in: ids }, status: { $ne: "Cancelled" } })
         .distinct("quoteId")
         .session(session ?? null)
     ).map(String),

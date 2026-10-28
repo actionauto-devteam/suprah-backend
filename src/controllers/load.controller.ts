@@ -52,6 +52,7 @@
       canStaffDeleteLoad,
       checkDeliveryConfirmation,
       checkProofOfDeliverySubmission,
+      staffDeleteBlockedMessage,
       staffDeletableLoadFilter,
     } from "../services/loadLifecyclePolicy";
     import { announceNewBoardLoad, markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
@@ -1468,10 +1469,7 @@
         );
       }
       if (!canStaffDeleteLoad(load)) {
-        throw new ApiError(
-          409,
-          `Load ${load.loadNumber} can't be deleted because it is ${load.status} with a driver assigned. Remove the driver in Driver Tracker first, then delete the load.`,
-        );
+        throw new ApiError(409, staffDeleteBlockedMessage(load));
       }
 
       // Conditional delete: a concurrent assign or start-route must not be
