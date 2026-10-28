@@ -398,6 +398,11 @@ const createNotification = async (params: CreateNotificationParams) => {
         dispatcherId: metadata?.dispatcherId,
         pushPresentation: metadata?.pushPresentation,
         soundProfile: metadata?.soundProfile,
+        priority: metadata?.priority,
+        meetingId: metadata?.meetingId,
+        meetingCode: metadata?.meetingCode,
+        meetingTitle: metadata?.meetingTitle,
+        scheduledAt: metadata?.scheduledAt,
       },
     };
 

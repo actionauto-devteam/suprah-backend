@@ -15,7 +15,7 @@ jest.mock('../../src/services/suprahMeetNotification.service', () => ({
 jest.mock('../../src/services/suprahMeetAws.service', () => ({}));
 jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { error: logError } }));
 
-import { sendSuprahMeetNotifications } from '../../src/services/suprahMeetReminder.service';
+import { openDueMeetings, sendSuprahMeetNotifications } from '../../src/services/suprahMeetReminder.service';
 
 const now = new Date('2026-10-20T17:50:00Z');
 const meeting = { _id: 'meet-1', organizationId: 'org-1', scheduledAt: new Date('2026-10-20T18:00:00Z') };
@@ -28,6 +28,12 @@ beforeEach(() => {
   updateMeeting.mockResolvedValue({ modifiedCount: 1 });
   notifyCreated.mockResolvedValue(undefined);
   notifyReminder.mockResolvedValue(undefined);
+});
+
+it('never turns a due scheduled meeting live without the host', async () => {
+  await openDueMeetings(now);
+  expect(findMeetings).not.toHaveBeenCalled();
+  expect(claimMeeting).not.toHaveBeenCalled();
 });
 
 it('queries only unsent, non-ended sessions within the next ten minutes', async () => {

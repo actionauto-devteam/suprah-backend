@@ -35,6 +35,8 @@ router.post('/meetings/:code/waiting/:userId',  suprahMeetController.respondWait
 router.post('/meetings/:code/join',             suprahMeetController.joinMeeting);
 router.post('/meetings/:code/leave',            suprahMeetController.leaveMeeting);
 router.post('/meetings/:code/end',              suprahMeetController.endMeeting);
+router.post('/meetings/:code/participants/:participantId/audio', suprahMeetController.setParticipantAudio);
+router.post('/meetings/:code/participants/:participantId/remove', suprahMeetController.removeParticipant);
 router.post('/meetings/:code/captions',         suprahMeetController.setCaptions);
 router.post('/meetings/:code/recording/start',  suprahMeetController.startRecording);
 router.post('/meetings/:code/recording/stop',   suprahMeetController.stopRecording);

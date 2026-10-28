@@ -3,16 +3,20 @@ const deleteChimeMeeting = jest.fn();
 const stopRecordingPipelines = jest.fn();
 const getChimeMeeting = jest.fn();
 const createChimeAttendee = jest.fn();
+const deleteChimeAttendee = jest.fn();
+const setChimeAttendeeMuted = jest.fn();
+const notifyMeetingLive = jest.fn();
 
 jest.mock('../../src/utils/asyncHandler', () => ({ asyncHandler: (handler: unknown) => handler }));
 jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { findOne: findMeeting } }));
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/services/suprahMeetAws.service', () => ({
   deleteChimeMeeting, stopRecordingPipelines, getChimeMeeting, createChimeAttendee,
+  deleteChimeAttendee, setChimeAttendeeMuted,
 }));
 jest.mock('../../src/services/suprahMeetAI.service', () => ({}));
 jest.mock('../../src/services/suprahMeetMail.service', () => ({}));
-jest.mock('../../src/services/suprahMeetNotification.service', () => ({ MEET_REMINDER_WINDOW_MS: 600_000 }));
+jest.mock('../../src/services/suprahMeetNotification.service', () => ({ MEET_REMINDER_WINDOW_MS: 600_000, notifyMeetingLive }));
 jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { error: jest.fn() } }));
 
 import controller from '../../src/controllers/suprahMeet.controller';
@@ -45,6 +49,9 @@ beforeEach(() => {
   stopRecordingPipelines.mockResolvedValue(undefined);
   getChimeMeeting.mockResolvedValue({ MeetingId: 'chime-1' });
   createChimeAttendee.mockResolvedValue({ AttendeeId: 'attendee-1' });
+  deleteChimeAttendee.mockResolvedValue(undefined);
+  setChimeAttendeeMuted.mockResolvedValue(undefined);
+  notifyMeetingLive.mockResolvedValue(undefined);
 });
 
 it.each(['employee', 'admin', 'manager', 'super_admin'])(
@@ -109,6 +116,59 @@ it.each([
   const res = response();
   await invoke(controller.joinMeeting, request(id as string, role as string), res);
   expect(res.json.mock.calls[0][0].data.self).toMatchObject({ canControl, canEndForAll });
+});
+
+it('does not let a scheduled timestamp or attendee start the meeting', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 60_000);
+  await expect(invoke(controller.joinMeeting, request('participant'), response()))
+    .rejects.toMatchObject({ statusCode: 409, message: 'This meeting has not started yet. Only the host can start it.' });
+  expect(meeting.status).toBe('scheduled');
+  expect(createChimeAttendee).not.toHaveBeenCalled();
+});
+
+it('opens a scheduled room for its host, but starts its clock only when another person joins', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 60_000);
+  meeting.participants = [];
+  await invoke(controller.joinMeeting, request('host'), response());
+  expect(meeting.status).toBe('live');
+  expect(meeting.startedAt).toBeUndefined();
+  expect(notifyMeetingLive).toHaveBeenCalledWith(meeting);
+
+  await invoke(controller.joinMeeting, request('participant'), response());
+  expect(meeting.startedAt).toBeInstanceOf(Date);
+  expect((meeting as any).timerActiveSince).toBeInstanceOf(Date);
+});
+
+it('keeps attendee audio moderation host-only and uses Chime enforcement', async () => {
+  await expect(invoke(controller.setParticipantAudio, {
+    ...request('participant', 'admin'), params: { code: 'MEET-1234', participantId: 'host' },
+    body: { attendeeId: 'attendee-host', muted: true },
+  }, response())).rejects.toMatchObject({ statusCode: 403 });
+
+  await invoke(controller.setParticipantAudio, {
+    ...request('host'), params: { code: 'MEET-1234', participantId: 'participant' },
+    body: { attendeeId: 'attendee-participant', muted: true },
+  }, response());
+  expect(setChimeAttendeeMuted).toHaveBeenCalledWith('chime-1', 'attendee-participant', true);
+});
+
+it('pauses the elapsed clock when the host leaves without ending the room', async () => {
+  meeting.timerElapsedMs = 30_000;
+  meeting.timerActiveSince = new Date(Date.now() - 2_000);
+  await invoke(controller.leaveMeeting, request('host'), response());
+  expect(meeting.status).toBe('live');
+  expect(meeting.timerActiveSince).toBeUndefined();
+  expect(meeting.timerElapsedMs).toBeGreaterThanOrEqual(30_000);
+  expect(deleteChimeMeeting).not.toHaveBeenCalled();
+});
+
+it('does not admit a new attendee while the host has stepped away', async () => {
+  meeting.participants[0].leftAt = new Date();
+  await expect(invoke(controller.joinMeeting, request('participant'), response()))
+    .rejects.toMatchObject({ statusCode: 409, message: 'The host has stepped away. You can join when they return.' });
+  expect(createChimeAttendee).not.toHaveBeenCalled();
 });
 
 it('does not grant access to a meeting outside the caller organization', async () => {

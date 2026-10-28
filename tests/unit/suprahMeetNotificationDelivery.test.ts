@@ -62,6 +62,11 @@ it('persists both stages in the CRM bell and delivers distinct socket/push notic
   expect(payloads.every((payload) => payload.data.url === '/crm/suprah-meet/room/MEET-1234')).toBe(true);
   expect(payloads[0].tag).not.toBe(payloads[1].tag);
   expect(payloads[0].source).toBe('Suprah Meet');
+  // Meeting alerts must bypass the SW's ordinary background burst summary so
+  // their distinct room URL remains immediately tappable on desktop and PWA.
+  expect(payloads.every((payload) => payload.data.soundProfile === 'attention')).toBe(true);
+  expect(payloads.every((payload) => payload.data.priority === 'high')).toBe(true);
+  expect(payloads.every((payload) => payload.data.meetingTitle === 'Planning')).toBe(true);
   expect(push.mock.calls.every(([, , includeSpace]) => includeSpace === false)).toBe(true);
 });
 

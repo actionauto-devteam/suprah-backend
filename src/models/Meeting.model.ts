@@ -55,6 +55,10 @@ export interface IMeeting extends Document {
   mediaRegion?: string;
   participants: IMeetingParticipant[];
   waiting: IMeetingWaiting[];      // waiting-room requests (join-by-code users)
+  removedParticipantIds: string[];
+  /** Accumulated time with both the host and another person present. */
+  timerElapsedMs: number;
+  timerActiveSince?: Date;
   recording: {
     status: 'idle' | 'recording' | 'processing' | 'ready' | 'failed';
     capturePipelineId?: string;
@@ -138,6 +142,9 @@ const MeetingSchema = new Schema<IMeeting>(
         respondedAt: { type: Date },
       },
     ],
+    removedParticipantIds: [{ type: String }],
+    timerElapsedMs: { type: Number, default: 0 },
+    timerActiveSince: { type: Date, default: null },
     recording: {
       status: { type: String, enum: ['idle', 'recording', 'processing', 'ready', 'failed'], default: 'idle' },
       capturePipelineId: { type: String },

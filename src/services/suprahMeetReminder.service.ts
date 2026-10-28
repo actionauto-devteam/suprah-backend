@@ -1,9 +1,8 @@
 import Meeting from '../models/Meeting.model';
-import { deleteChimeMeeting, stopRecordingPipelines } from './suprahMeetAws.service';
 
 import { randomUUID } from 'crypto';
 import {
-  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive, notifyMeetingReminder,
+  MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingReminder,
 } from './suprahMeetNotification.service';
 import logger from '../utils/logger';
 
@@ -16,7 +15,7 @@ export function initSuprahMeetReminders() {
   timer = setInterval(() => { void tick(); }, 30_000);
   timer.unref();
   void tick();
-  console.log('[SuprahMeet] scheduler started (ten-minute reminders + auto-end sweep)');
+  console.log('[SuprahMeet] scheduler started (ten-minute reminders)');
 }
 
 async function tick() {
@@ -24,42 +23,16 @@ async function tick() {
   running = true;
   try {
     await sendSuprahMeetNotifications().catch((err) => logger.error({ err }, '[SuprahMeet] reminder tick failed'));
-    await openDueMeetings().catch((err) => logger.error({ err }, '[SuprahMeet] scheduled-open tick failed'));
-    await autoEndTick().catch((err) => logger.error({ err }, '[SuprahMeet] auto-end tick failed'));
   } finally {
     running = false;
   }
 }
 
-/**
- * Scheduled sessions become joinable at their scheduled instant even if the
- * host is not present. This is an atomic claim so multiple API instances do
- * not send duplicate live alerts; Chime is still created only on first join.
- */
+/** A deprecated compatibility export. The host is the only start authority. */
 export async function openDueMeetings(now = new Date()) {
-  const candidates = await Meeting.find({
-    status: 'scheduled',
-    scheduledAt: { $ne: null, $lte: now },
-  }).sort({ scheduledAt: 1 }).limit(50);
-
-  for (const candidate of candidates) {
-    const meeting = await Meeting.findOneAndUpdate({
-      _id: candidate._id,
-      organizationId: candidate.organizationId,
-      status: 'scheduled',
-      scheduledAt: candidate.scheduledAt,
-    }, {
-      $set: {
-        status: 'live',
-        // Preserve the promised start time, rather than the worker's polling
-        // moment, so the room clock does not claim it began early or late.
-        startedAt: candidate.scheduledAt,
-      },
-    }, { new: true });
-    if (!meeting) continue;
-    await notifyMeetingLive(meeting).catch((err) =>
-      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] scheduled live notification failed'));
-  }
+  // A scheduled time is a reminder, not authorization to open a room. Keep
+  // this compatibility export inert for callers from older deployments.
+  void now;
 }
 
 /** Exported for focused tests; importing this module never starts the scheduler. */
@@ -115,51 +88,5 @@ export async function sendSuprahMeetNotifications(now = new Date()) {
 }
 
 /* ── 2. Auto-end abandoned live meetings ──────────────────────────────── */
-// Rules (all must hold):
-//  - status is "live" and it started at least 5 minutes ago
-//  - every participant has a leftAt (nobody is in the room)
-//  - the last person left more than 10 minutes ago (grace for refresh/rejoin,
-//    since a page refresh briefly looks like "everyone left")
-const ABANDON_GRACE_MS = 10 * 60_000;
-
-async function autoEndTick() {
-  const now = Date.now();
-  const candidates = await Meeting.find({
-    status: 'live',
-    startedAt: { $lte: new Date(now - 5 * 60_000) },
-  }).limit(50);
-
-  for (const meeting of candidates) {
-    const people = meeting.participants ?? [];
-    if (people.length === 0) {
-      // Live for 5+ minutes yet nobody ever joined (crashed before join completed).
-      if ((meeting.startedAt?.getTime() ?? 0) > now - ABANDON_GRACE_MS) continue;
-    } else {
-      const somebodyPresent = people.some((p) => !p.leftAt);
-      if (somebodyPresent) continue;
-      const lastLeft = Math.max(...people.map((p) => p.leftAt?.getTime() ?? 0));
-      if (lastLeft > now - ABANDON_GRACE_MS) continue; // still inside the grace window
-    }
-
-    // Close it out exactly like endMeeting does.
-    if (meeting.recording.status === 'recording' && meeting.recording.capturePipelineId) {
-      try {
-        await stopRecordingPipelines(meeting.recording.capturePipelineId);
-        meeting.recording.status = 'processing';
-        meeting.recording.stoppedAt = new Date();
-      } catch (err: any) {
-        meeting.recording.status = 'failed';
-        meeting.recording.error = err?.message || 'Failed to stop recording (auto-end)';
-      }
-    }
-    if (meeting.chimeMeetingId) await deleteChimeMeeting(meeting.chimeMeetingId).catch(() => {});
-
-    const lastLeft = people.length
-      ? Math.max(...people.map((p) => p.leftAt?.getTime() ?? 0))
-      : now;
-    meeting.status = 'ended';
-    meeting.endedAt = new Date(lastLeft || now);
-    await meeting.save();
-    console.log(`[SuprahMeet] auto-ended abandoned meeting ${meeting.code}`);
-  }
-}
+// Meetings are never auto-ended. Only the host's explicit end action may end
+// a room, so the host can leave and return without losing the meeting.

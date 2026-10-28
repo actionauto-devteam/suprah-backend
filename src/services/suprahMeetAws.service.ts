@@ -1,6 +1,7 @@
 import {
   ChimeSDKMeetingsClient, CreateMeetingCommand, CreateAttendeeCommand,
-  GetMeetingCommand, DeleteMeetingCommand, NotFoundException,
+  GetMeetingCommand, DeleteMeetingCommand, DeleteAttendeeCommand,
+  UpdateAttendeeCapabilitiesCommand, NotFoundException,
   StartMeetingTranscriptionCommand, StopMeetingTranscriptionCommand,
   type TranscribeLanguageCode,
 } from '@aws-sdk/client-chime-sdk-meetings';
@@ -64,6 +65,28 @@ export async function deleteChimeMeeting(meetingId: string) {
   } catch (err) {
     if (!(err instanceof NotFoundException)) throw err;
   }
+}
+
+/** Remove one attendee's current Chime session. Their join token is revoked. */
+export async function deleteChimeAttendee(meetingId: string, attendeeId: string) {
+  try {
+    await meetingsClient.send(new DeleteAttendeeCommand({ MeetingId: meetingId, AttendeeId: attendeeId }));
+  } catch (err) {
+    if (!(err instanceof NotFoundException)) throw err;
+  }
+}
+
+/** Server-enforced audio send permission for a current attendee session. */
+export async function setChimeAttendeeMuted(meetingId: string, attendeeId: string, muted: boolean) {
+  await meetingsClient.send(new UpdateAttendeeCapabilitiesCommand({
+    MeetingId: meetingId,
+    AttendeeId: attendeeId,
+    Capabilities: {
+      Audio: muted ? 'Receive' : 'SendReceive',
+      Video: 'SendReceive',
+      Content: 'SendReceive',
+    },
+  }));
 }
 
 export async function startMeetingCaptions(meetingId: string, languageCode: TranscribeLanguageCode) {

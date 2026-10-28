@@ -54,15 +54,21 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
     const results = await Promise.allSettled(targets.slice(i, i + 10).map((userId) =>
       notificationService.createNotification({
         userId, organizationId: String(meeting.organizationId), type,
-        title: isLive ? 'Suprah Meet is live now' : isReminder ? 'Suprah Meet starts soon' : `${firstName} invited you to a meeting`,
+        title: isLive ? 'Suprah Meet room is open' : isReminder ? 'Suprah Meet starts soon' : `${firstName} invited you to a meeting`,
         message,
         idempotencyKey: eventKey,
         metadata: {
           meetingId: String(meeting._id), meetingCode: meeting.code,
+          meetingTitle: meeting.title,
           scheduledAt: meeting.scheduledAt?.toISOString() ?? null,
           hostCrmUserId: String(meeting.hostCrmUserId),
           route: `/crm/suprah-meet/room/${encodeURIComponent(meeting.code)}`,
+          // Meeting stages must remain individually actionable while the app
+          // is backgrounded. The service worker intentionally summarizes
+          // ordinary CRM bursts, but an invite, imminent reminder, or live
+          // session is time-sensitive and needs its own room deep link.
           pushSource: 'Suprah Meet', pushTag: eventKey, pushTopic: eventKey,
+          soundProfile: 'attention', priority: 'high',
         },
       }),
     ));
