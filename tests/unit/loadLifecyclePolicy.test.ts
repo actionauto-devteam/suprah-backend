@@ -7,6 +7,7 @@ import {
   isReassignableLoad,
   parseLoadCancellationInput,
   proofOfDeliveryBelongsTo,
+  staffDeleteBlockedMessage,
   staffDeletableLoadFilter,
 } from '../../src/services/loadLifecyclePolicy';
 import { DRIVER_ACTIVE_LOAD_STATUSES } from '../../src/services/driverReviewAccess.service';
@@ -42,6 +43,16 @@ describe('staff load deletion (DT-04)', () => {
     expect(canStaffDeleteLoad({ status: 'Posted', assignedDriverId: DRIVER })).toBe(false);
     expect(canStaffDeleteLoad({ status: 'Draft', assignedDriverId: DRIVER })).toBe(false);
     expect(canStaffDeleteLoad({ status: 'Delivered', assignedDriverId: DRIVER })).toBe(false);
+  });
+
+  it('points to Cancel load before pickup, and to delivery or Reassign after it', () => {
+    expect(staffDeleteBlockedMessage({ status: 'Accepted', loadNumber: 'LD-1', assignedDriverId: DRIVER })).toBe(
+      "Load LD-1 can't be deleted because it is Accepted with a driver assigned. If the shipment isn't happening, open the load and choose Cancel load. You can delete it after that.",
+    );
+    expect(staffDeleteBlockedMessage({ status: 'In-Transit', loadNumber: 'LD-1', assignedDriverId: DRIVER })).toBe(
+      "Load LD-1 can't be deleted because it is In-Transit and the vehicles are on the driver's truck. Finish the delivery, or use Reassign in Driver Tracker to hand it to another driver.",
+    );
+    expect(staffDeleteBlockedMessage({ status: 'Picked Up', assignedDriverId: DRIVER })).toMatch(/^This load can't be deleted/);
   });
 
   it('uses the same rule in the conditional delete filter', () => {

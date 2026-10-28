@@ -5,7 +5,11 @@
  * write filter (race protection).
  */
 
-import { ACTIVE_LOAD_STATUSES, CANCELLABLE_LOAD_STATUSES } from "../constants/loadStatus";
+import {
+  ACTIVE_LOAD_STATUSES,
+  CANCELLABLE_LOAD_STATUSES,
+  VEHICLES_ON_BOARD_STATUSES,
+} from "../constants/loadStatus";
 import {
   LOAD_CANCELLATION_NOTE_MAX,
   LOAD_CANCELLATION_NOTE_MIN,
@@ -29,6 +33,8 @@ type LoadLike = {
 
 const hasId = (value: unknown) => String(value ?? "").trim() !== "";
 const loadRef = (load: LoadLike) => (load.loadNumber ? `load ${load.loadNumber}` : "this load");
+/** loadRef at the start of a sentence: "Load LD-1" or "This load". */
+const sentenceLoadRef = (load: LoadLike) => (load.loadNumber ? `Load ${load.loadNumber}` : "This load");
 
 // Unassigned work that was never handed to a driver, plus cancelled loads.
 // Delivered loads are never deleted: they are the record of the driver's work
@@ -43,6 +49,23 @@ export function canStaffDeleteLoad(load: LoadLike): boolean {
     (UNASSIGNED_DELETABLE_LOAD_STATUSES as readonly string[]).includes(status) &&
     !hasId(load.assignedDriverId)
   );
+}
+
+/**
+ * Why staff can't delete a load that a driver has (Delivered loads have their
+ * own message). Before pickup the load can be cancelled instead and deleted
+ * after that; after pickup the vehicles are on the driver's truck.
+ */
+export function staffDeleteBlockedMessage(load: LoadLike): string {
+  const status = String(load.status ?? "");
+  const ref = sentenceLoadRef(load);
+  if ((VEHICLES_ON_BOARD_STATUSES as readonly string[]).includes(status)) {
+    return `${ref} can't be deleted because it is ${status} and the vehicles are on the driver's truck. Finish the delivery, or use Reassign in Driver Tracker to hand it to another driver.`;
+  }
+  if ((CANCELLABLE_LOAD_STATUSES as readonly string[]).includes(status)) {
+    return `${ref} can't be deleted because it is ${status} with a driver assigned. If the shipment isn't happening, open the load and choose Cancel load. You can delete it after that.`;
+  }
+  return `${ref} can't be deleted because it is ${status || "in a status that can't be deleted"}. Refresh to see the latest version.`;
 }
 
 /** Mongo filter equivalent of canStaffDeleteLoad, for the conditional delete. */
@@ -153,7 +176,7 @@ export type LoadCancellationCheck =
 export function checkLoadCancellation(load: LoadLike): LoadCancellationCheck {
   const status = String(load.status ?? "");
   if ((CANCELLABLE_LOAD_STATUSES as readonly string[]).includes(status)) return { ok: true };
-  const ref = loadRef(load).replace(/^l/, "L");
+  const ref = sentenceLoadRef(load);
   if (status === "Delivered") {
     return {
       ok: false,
