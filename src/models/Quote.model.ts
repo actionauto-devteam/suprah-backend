@@ -57,6 +57,11 @@ export interface IQuote extends Document {
     leadId?: mongoose.Types.ObjectId | null;
     customerRecordId?: mongoose.Types.ObjectId | null;
 
+    // Set when a waiting customer request was closed because its vehicle
+    // left the marketplace (sold, removed or no longer for sale).
+    closedReason?: 'vehicle_unavailable';
+    closedAt?: Date;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -146,7 +151,9 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         source: { type: String, enum: ['customer_portal'], default: undefined },
         requestedBy: { type: Schema.Types.ObjectId, ref: 'User' },
         leadId: { type: Schema.Types.ObjectId, ref: 'Lead' },
-        customerRecordId: { type: Schema.Types.ObjectId, ref: 'Customer' }
+        customerRecordId: { type: Schema.Types.ObjectId, ref: 'Customer' },
+        closedReason: { type: String, enum: ['vehicle_unavailable'], default: undefined },
+        closedAt: { type: Date }
     },
     {
         timestamps: true

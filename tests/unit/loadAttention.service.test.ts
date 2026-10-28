@@ -124,3 +124,99 @@ describe('buildLoadAttention', () => {
     expect(result.items).toHaveLength(25);
   });
 });
+
+describe("work waiting for Dispatch", () => {
+  const HOUR = 3_600_000;
+
+  it("flags a load with no driver from its pickup day on, but not before", () => {
+    const result = build({
+      unassignedLoads: [
+        load({ _id: "today", status: "Posted", assignedDriverId: null, dates: { pickupDeadline: new Date("2026-10-13T00:00:00Z") } }),
+        load({ _id: "past", status: "Draft", assignedDriverId: null, dates: { pickupDeadline: new Date("2026-10-11T00:00:00Z") } }),
+        load({ _id: "tomorrow", status: "Posted", assignedDriverId: null, dates: { pickupDeadline: new Date("2026-10-14T00:00:00Z") } }),
+        load({ _id: "has-driver", status: "Posted", dates: { pickupDeadline: new Date("2026-10-12T00:00:00Z") } }),
+      ],
+    });
+    expect(result.counts.unassigned_pickup).toBe(2);
+    expect(result.items.filter((item) => item.kind === "unassigned_pickup").map((item) => item.loadId)).toEqual(["past", "today"]);
+  });
+
+  it("flags an assignment the driver has not accepted after 2 hours", () => {
+    const result = build({
+      activeLoads: [
+        load({ _id: "old", status: "Assigned", assignedAt: new Date(now - 2 * HOUR - 1) }),
+        load({ _id: "new", status: "Assigned", assignedAt: new Date(now - HOUR) }),
+        load({ _id: "accepted", status: "Accepted", assignedAt: new Date(now - 5 * HOUR) }),
+      ],
+    });
+    expect(result.counts.not_accepted).toBe(1);
+    expect(result.items.find((item) => item.kind === "not_accepted")).toMatchObject({ loadId: "old", driverName: "Sam Driver" });
+  });
+
+  it("lists release requests on loads the driver has, emergencies first", () => {
+    const activeLoads = [load({ _id: "a" }), load({ _id: "b" })];
+    const result = build({
+      activeLoads,
+      releaseRequests: [
+        { loadId: "a", driverId: "driver-1", priority: "standard", requestedAt: new Date(now - 3 * HOUR) },
+        { loadId: "b", driverId: "driver-1", priority: "emergency", requestedAt: new Date(now - HOUR) },
+        { loadId: "gone", driverId: "driver-1", priority: "standard", requestedAt: new Date(now - HOUR) },
+      ],
+    });
+    expect(result.items.filter((item) => item.kind === "release_request").map((item) => [item.loadId, item.emergency])).toEqual([
+      ["b", true],
+      ["a", false],
+    ]);
+  });
+
+  it("counts drivers waiting on a posted load and keeps the earliest request time", () => {
+    const result = build({
+      requestedLoads: [
+        load({
+          _id: "board",
+          status: "Posted",
+          assignedDriverId: null,
+          driverRequests: [
+            { driverId: "d1", requestedAt: new Date(now - HOUR) },
+            { driverId: "d2", requestedAt: new Date(now - 3 * HOUR) },
+          ],
+        }),
+        load({ _id: "taken", status: "Assigned", driverRequests: [{ driverId: "d3", requestedAt: new Date(now) }] }),
+      ],
+    });
+    expect(result.counts.load_request).toBe(1);
+    expect(result.items.find((item) => item.kind === "load_request")).toMatchObject({
+      loadId: "board",
+      requestCount: 2,
+      since: new Date(now - 3 * HOUR).toISOString(),
+    });
+  });
+
+  it("lists waiting customer shipping requests, oldest first, without a load", () => {
+    const result = build({
+      customerRequests: [
+        { _id: "q2", firstName: "Maria", lastName: "Santos", vehicleName: "2021 Toyota Camry", createdAt: new Date(now - HOUR) },
+        { _id: "q1", firstName: "", lastName: "", createdAt: new Date(now - 5 * HOUR) },
+      ],
+    });
+    const items = result.items.filter((item) => item.kind === "customer_request");
+    expect(items.map((item) => item.quoteId)).toEqual(["q1", "q2"]);
+    expect(items[0]).toMatchObject({ loadId: "", customerName: "A customer" });
+    expect(items[1]).toMatchObject({ customerName: "Maria Santos", vehicleName: "2021 Toyota Camry" });
+  });
+});
+
+describe("vehicles removed from inventory", () => {
+  it("lists a load before pickup and a waiting quote whose vehicle was removed", () => {
+    const result = build({
+      removedVehicles: [
+        { load: load({ _id: "load-1", status: "Posted", assignedDriverId: null }), vehicleName: "2020 Honda Civic" },
+        { quote: { _id: "quote-1", firstName: "Maria", lastName: "Santos", vehicleName: "2021 Toyota Camry", createdAt: new Date(now) } },
+      ],
+    });
+    expect(result.counts.vehicle_removed).toBe(2);
+    const items = result.items.filter((item) => item.kind === "vehicle_removed");
+    expect(items[0]).toMatchObject({ loadId: "load-1", vehicleName: "2020 Honda Civic" });
+    expect(items[1]).toMatchObject({ loadId: "", quoteId: "quote-1", customerName: "Maria Santos", vehicleName: "2021 Toyota Camry" });
+  });
+});

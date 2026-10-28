@@ -23,6 +23,8 @@ import {
 } from '../utils/calculations';
 import { createLoadSchema } from '../validations/load.validation';
 import { findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
+import { listCustomerShipments, notifyQuoteCustomer } from '../services/customerShipments.service';
+import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 
 /**
  * The CRM lead for a quote's customer. Never blocks saving the quote: if the
@@ -604,6 +606,18 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
 });
 
 /**
+ * GET /api/quote-requests/mine
+ * The signed-in customer's own shipping requests and how each shipment is
+ * going (no driver details or location), newest first.
+ */
+const getMyShipments = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser | undefined;
+    if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
+    const shipments = await listCustomerShipments(String(user._id));
+    return res.status(200).json(new ApiResponse(200, shipments, 'Your shipments'));
+});
+
+/**
  * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
@@ -707,10 +721,24 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     const orgMap = new Map<string, { name: string; logoUrl?: string }>();
     orgs.forEach(o => orgMap.set(o._id.toString(), { name: o.name, logoUrl: o.logoUrl }));
 
-    const quotesWithOrg = quotes.map(q => ({
-        ...(q.toJSON()),
-        organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' },
-    }));
+    // Staff see when a quote's vehicle was sold or removed from inventory.
+    const vehicleIdOf = (q: any) => String(q.populated?.('vehicleId') ?? q.vehicleId?._id ?? q.vehicleId ?? '');
+    const quoteVehicleIds = [...new Set(quotes.map(vehicleIdOf).filter((id) => /^[0-9a-fA-F]{24}$/.test(id)))];
+    const vehicleStates = new Map<string, VehicleState>();
+    if (quoteVehicleIds.length) {
+        const vehicles = await Vehicle.find({ _id: { $in: quoteVehicleIds } }).select('status isDeleted isArchived').lean<any[]>();
+        const found = new Map(vehicles.map((vehicle) => [String(vehicle._id), vehicle]));
+        for (const id of quoteVehicleIds) vehicleStates.set(id, vehicleStateOf(found.get(id)));
+    }
+
+    const quotesWithOrg = quotes.map(q => {
+        const vehicleState = vehicleStates.get(vehicleIdOf(q));
+        return {
+            ...(q.toJSON()),
+            organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' },
+            ...(vehicleState && vehicleState !== 'available' ? { vehicleState } : {}),
+        };
+    });
 
     const totalPages = Math.ceil(total / limit);
     const responseData = {
@@ -902,6 +930,18 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
         }
     }
 
+    // The status before this edit, so a customer is told only when it really changes.
+    const statusBefore = status !== undefined
+        ? await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+            .select('status source')
+            .lean<{ status?: string; source?: string }>()
+        : null;
+    // A request closed because its vehicle left the marketplace stops saying
+    // so once staff give it another status.
+    if (status !== undefined && status !== 'rejected') {
+        updateData.$unset = { closedReason: '', closedAt: '' };
+    }
+
     const quote = await Quote.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
         updateData,
@@ -951,6 +991,15 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
 
     res.json(new ApiResponse(200, quote, 'Quote updated successfully'));
 
+    // A customer who sent this request from the customer portal hears the answer.
+    if (
+        statusBefore?.source === 'customer_portal' &&
+        statusBefore.status !== status &&
+        (status === 'accepted' || status === 'rejected')
+    ) {
+        await notifyQuoteCustomer(orgId, quote._id, status === 'accepted' ? 'accepted' : 'declined');
+    }
+
     // Real-time: notify org members
     const _ioU = getSocketIO();
     if (_ioU) _ioU.to(`org:${orgId}`).emit('quote:change', { action: 'updated' });
@@ -984,9 +1033,18 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Choose a valid quote status: Pending, Accepted, Rejected or Booked.');
     }
 
+    // The status before this change, so a customer is told only when it really changes.
+    const before = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+        .select('status source')
+        .lean<{ status?: string; source?: string }>();
+
     const quote = await Quote.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
-        { status },
+        // A request closed because its vehicle left the marketplace stops
+        // saying so once staff give it another status.
+        status === 'rejected'
+            ? { $set: { status } }
+            : { $set: { status }, $unset: { closedReason: '', closedAt: '' } },
         { new: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
         .populate('leadId', 'firstName lastName');
@@ -1030,6 +1088,15 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
     }
 
     res.json(new ApiResponse(200, quote, 'Quote status updated successfully'));
+
+    // A customer who sent this request from the customer portal hears the answer.
+    if (
+        before?.source === 'customer_portal' &&
+        before.status !== status &&
+        (status === 'accepted' || status === 'rejected')
+    ) {
+        await notifyQuoteCustomer(orgId, quote._id, status === 'accepted' ? 'accepted' : 'declined');
+    }
 
     // Invalidate quote cache on status change
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
@@ -1540,6 +1607,12 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         }).catch((err) => logger.error(err, 'Failed to notify admins of quote conversion'));
     }
 
+    // A customer who sent this request from the customer portal hears it's
+    // booked. In the background, like the admins' notice; it never throws.
+    if (quote.source === 'customer_portal') {
+        void notifyQuoteCustomer(orgId, quote._id, 'booked', { loadNumber: load.loadNumber });
+    }
+
     logger.info(
         {
             quoteId: quote._id,
@@ -1588,6 +1661,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 export default {
     createQuote,
     createCustomerQuoteRequest,
+    getMyShipments,
     getQuotes,
     getQuoteById,
     updateQuote,
