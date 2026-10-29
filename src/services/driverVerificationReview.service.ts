@@ -309,10 +309,12 @@ export async function reviewDriverDocument(args: {
         message:
           args.decision === "approved"
             ? `Your ${document.label} has been verified.`
-            : `Your ${document.label} was rejected: ${args.reason}`,
+            : `Your ${document.label} was rejected: ${String(args.reason ?? "").trim().replace(/[.\s]+$/, "")}. Upload a new one from Documents.`,
         metadata: {
           documentId: args.documentId,
           documentType: document.type,
+          // Opens the driver's Documents page, where they can upload a new one.
+          route: "/driver/documents",
         },
       });
     } catch (error) {

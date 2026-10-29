@@ -23,7 +23,7 @@ import {
 } from '../utils/calculations';
 import { createLoadSchema } from '../validations/load.validation';
 import { findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
-import { listCustomerShipments, notifyQuoteCustomer } from '../services/customerShipments.service';
+import { listCustomerShipments, notifyCustomerOfDeletedRequest, notifyQuoteCustomer } from '../services/customerShipments.service';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 
 /**
@@ -365,6 +365,9 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     logger.info({ quoteId: quote._id, orgId }, 'New shipping quote created');
 });
 
+/** The longest reason staff can give a customer when declining their request. */
+const DECLINE_REASON_MAX = 300;
+
 const CUSTOMER_REQUEST_ALREADY_SENT = 'You already asked for this shipping quote. The dealership has your request.';
 
 function splitAccountName(name: unknown): { firstName: string; lastName: string } {
@@ -633,6 +636,11 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     if (status && status !== 'all') {
         filter.status = status;
     }
+    // The Quotes tab's "From customer portal" filter.
+    const customerRequestsOnly = req.query.source === 'customer_portal';
+    if (customerRequestsOnly) {
+        filter.source = 'customer_portal';
+    }
     const safeSearch = normalizeSearchQuery(search);
     const safeOrigin = normalizeSearchQuery(origin);
     const safeDestination = normalizeSearchQuery(destination);
@@ -694,7 +702,7 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
     }
 
     const isCacheable = !safeSearch && !safeOrigin && !safeDestination;
-    const cacheKey = `quotes:${orgId}:list:${status || 'all'}:p${page}:l${limit}`;
+    const cacheKey = `quotes:${orgId}:list:${status || 'all'}${customerRequestsOnly ? ':customer_portal' : ''}:p${page}:l${limit}`;
 
     if (isCacheable) {
         const cached = await cacheService.get(cacheKey);
@@ -939,7 +947,7 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     // A request closed because its vehicle left the marketplace stops saying
     // so once staff give it another status.
     if (status !== undefined && status !== 'rejected') {
-        updateData.$unset = { closedReason: '', closedAt: '' };
+        updateData.$unset = { closedReason: '', closedAt: '', declineReason: '' };
     }
 
     const quote = await Quote.findOneAndUpdate(
@@ -1033,6 +1041,14 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         throw new ApiError(400, 'Choose a valid quote status: Pending, Accepted, Rejected or Booked.');
     }
 
+    // An optional reason when declining, which a customer portal requester sees.
+    const declineReason = status === 'rejected' && typeof req.body?.declineReason === 'string'
+        ? req.body.declineReason.trim()
+        : '';
+    if (declineReason.length > DECLINE_REASON_MAX) {
+        throw new ApiError(400, `Keep the reason under ${DECLINE_REASON_MAX} characters, then decline again.`);
+    }
+
     // The status before this change, so a customer is told only when it really changes.
     const before = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
         .select('status source')
@@ -1040,11 +1056,13 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
     const quote = await Quote.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
-        // A request closed because its vehicle left the marketplace stops
-        // saying so once staff give it another status.
+        // A request closed because its vehicle left the marketplace (or a
+        // decline reason) stops applying once staff give it another status.
         status === 'rejected'
-            ? { $set: { status } }
-            : { $set: { status }, $unset: { closedReason: '', closedAt: '' } },
+            ? declineReason
+                ? { $set: { status, declineReason } }
+                : { $set: { status }, $unset: { declineReason: '' } }
+            : { $set: { status }, $unset: { closedReason: '', closedAt: '', declineReason: '' } },
         { new: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
         .populate('leadId', 'firstName lastName');
@@ -1095,7 +1113,12 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         before.status !== status &&
         (status === 'accepted' || status === 'rejected')
     ) {
-        await notifyQuoteCustomer(orgId, quote._id, status === 'accepted' ? 'accepted' : 'declined');
+        await notifyQuoteCustomer(
+            orgId,
+            quote._id,
+            status === 'accepted' ? 'accepted' : 'declined',
+            declineReason ? { declineReason } : {},
+        );
     }
 
     // Invalidate quote cache on status change
@@ -1129,6 +1152,25 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
      * DELETE as success makes the endpoint idempotent and prevents the UI from
      * remaining stuck on "Deleting..." because of a harmless 404.
      */
+    // A customer's request linked to a load (not cancelled) stays: the
+    // customer follows that shipment in My Shipments.
+    if (mongoose.Types.ObjectId.isValid(String(quoteId))) {
+        const existing = await Quote.findOne({ _id: quoteId, organizationId: orgId })
+            .select('source')
+            .lean<{ source?: string }>();
+        if (existing?.source === 'customer_portal') {
+            const liveLoad = await Load.findOne({ quoteId, organizationId: orgId, status: { $ne: 'Cancelled' } })
+                .select('loadNumber')
+                .lean<{ loadNumber?: string }>();
+            if (liveLoad) {
+                throw new ApiError(
+                    409,
+                    `This customer's request is linked to load ${liveLoad.loadNumber}, which they follow in My Shipments, so it can't be deleted. If that shipment isn't happening, cancel the load first, then delete the request.`,
+                );
+            }
+        }
+    }
+
     const quote = await Quote.findOneAndDelete({
         _id: quoteId,
         organizationId: orgId,
@@ -1182,6 +1224,12 @@ const deleteQuote = asyncHandler(async (req: Request, res: Response) => {
 
     void (async () => {
         const backgroundTasks: Promise<unknown>[] = [];
+
+        // A customer whose open request was deleted is told it was closed,
+        // so it doesn't just vanish from My Shipments.
+        if (quote.source === 'customer_portal' && ['pending', 'accepted'].includes(String(quote.status))) {
+            backgroundTasks.push(notifyCustomerOfDeletedRequest(orgId, quote));
+        }
 
         if (userId) {
             const { title, message } = notificationTemplates.quote_deleted({
