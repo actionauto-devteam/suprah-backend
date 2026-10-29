@@ -27,6 +27,7 @@ import { listCustomerShipments, notifyCustomerOfDeletedRequest, notifyQuoteCusto
 import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
+import { findVehicleShipping } from '../services/vehicleShipping.service';
 
 /**
  * The CRM lead for a quote's customer. Never blocks saving the quote: if the
@@ -1722,10 +1723,23 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         );
     }
 
+    // Other live loads for the same car, so staff can check the new one isn't
+    // a duplicate. Never blocks the conversion.
+    const sameVehicleLoads = await findVehicleShipping(
+        orgId,
+        { vehicleIds: quote.vehicleId ? [String(quote.vehicleId)] : [], vins: quote.vin ? [quote.vin] : [] },
+        { excludeLoadId: load._id },
+    )
+        .then((result) => result.loads.map(({ _id, loadNumber, status }) => ({ _id, loadNumber, status })))
+        .catch((err) => {
+            logger.warn({ err, quoteId: quote._id, loadId: load._id }, 'Could not check for other loads with the same car');
+            return [];
+        });
+
     return res.status(201).json(
         new ApiResponse(
             201,
-            load,
+            { ...load.toJSON(), sameVehicleLoads },
             'Quote converted to load successfully'
         )
     );

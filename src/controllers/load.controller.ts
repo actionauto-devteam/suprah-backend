@@ -57,6 +57,7 @@
       staffDeletableLoadFilter,
     } from "../services/loadLifecyclePolicy";
     import { announceNewBoardLoad, markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
+    import { findVehicleShipping } from "../services/vehicleShipping.service";
 
 
     const getUser = (req: Request) => req.user as IUser;
@@ -896,6 +897,21 @@
       }
 
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
+    });
+
+    /**
+     * Which of these cars the dealership is already shipping
+     * GET /api/loads/vehicle-shipping?vehicleIds=a,b&vins=X,Y&excludeLoadId=&quotes=1
+     * Inventory tags its cars with it, and Create Load warns before saving.
+     */
+    const getVehicleShipping = asyncHandler(async (req: Request, res: Response) => {
+      const organizationId = req.orgId as string;
+      const result = await findVehicleShipping(
+        organizationId,
+        { vehicleIds: req.query.vehicleIds, vins: req.query.vins },
+        { excludeLoadId: req.query.excludeLoadId, includeQuotes: req.query.quotes === "1" },
+      );
+      return res.status(200).json(new ApiResponse(200, result, "Vehicle shipping status fetched"));
     });
 
     const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set<string>(GPS_TRACKING_LOAD_STATUSES);
@@ -2030,4 +2046,4 @@
       res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
     });
 
-    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
