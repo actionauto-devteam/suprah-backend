@@ -24,7 +24,8 @@ export type CustomerShipmentEvent =
   | "booked"
   | "on_the_way"
   | "delivered"
-  | "cancelled";
+  | "cancelled"
+  | "closed";
 
 export interface CustomerShipmentContext {
   vehicleName?: string;
@@ -32,6 +33,8 @@ export interface CustomerShipmentContext {
   loadNumber?: string;
   /** The cancellation reason's label, never the staff note. */
   reasonLabel?: string;
+  /** The reason staff wrote when declining, meant for the customer. */
+  declineReason?: string;
 }
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
@@ -53,12 +56,15 @@ export function customerShipmentNotice(
         title: "Shipping Request Accepted",
         message: `${dealer} accepted your shipping request for ${theVehicle}. They'll contact you to arrange the details.`,
       };
-    case "declined":
+    case "declined": {
+      // Drop a trailing period so the sentence doesn't end with "..".
+      const reason = String(ctx.declineReason ?? "").trim().replace(/[.\s]+$/, "");
       return {
         type: "shipment_status_changed",
         title: "Shipping Request Declined",
-        message: `${dealer} declined your shipping request for ${theVehicle}. Contact them if you have questions.`,
+        message: `${dealer} declined your shipping request for ${theVehicle}${reason ? `. Reason: ${reason}` : ""}. Contact them if you have questions.`,
       };
+    }
     case "unavailable":
       return {
         type: "shipment_status_changed",
@@ -90,6 +96,12 @@ export function customerShipmentNotice(
         message: `${dealer} cancelled the shipment for ${yourVehicle}${
           ctx.reasonLabel ? `. Reason: ${ctx.reasonLabel}` : ""
         }. Contact them if you have questions.`,
+      };
+    case "closed":
+      return {
+        type: "shipment_status_changed",
+        title: "Shipping Request Closed",
+        message: `${dealer} closed your shipping request for ${theVehicle}. Contact them if you have questions.`,
       };
   }
 }
@@ -128,7 +140,7 @@ export function customerShipmentNotification(
   customer: QuoteCustomer,
   organizationId: string,
   event: CustomerShipmentEvent,
-  extra: Pick<CustomerShipmentContext, "loadNumber" | "reasonLabel"> = {},
+  extra: Pick<CustomerShipmentContext, "loadNumber" | "reasonLabel" | "declineReason"> = {},
 ) {
   const notice = customerShipmentNotice(event, { ...customer, ...extra });
   return {
@@ -153,7 +165,7 @@ export async function notifyQuoteCustomer(
   organizationId: string,
   quoteId: unknown,
   event: CustomerShipmentEvent,
-  extra: Pick<CustomerShipmentContext, "loadNumber" | "reasonLabel"> = {},
+  extra: Pick<CustomerShipmentContext, "loadNumber" | "reasonLabel" | "declineReason"> = {},
 ): Promise<boolean> {
   try {
     const customer = await findQuoteCustomer(organizationId, quoteId);
@@ -162,6 +174,35 @@ export async function notifyQuoteCustomer(
     return true;
   } catch (err) {
     logger.error({ err, organizationId, quoteId: String(quoteId ?? ""), event }, "Non-fatal: failed to notify the customer about their shipment");
+    return false;
+  }
+}
+
+/**
+ * Tells the customer their request was closed after staff deleted it. The
+ * quote is already gone, so the customer comes from the deleted record.
+ * Never throws.
+ */
+export async function notifyCustomerOfDeletedRequest(
+  organizationId: string,
+  deleted: { _id: unknown; requestedBy?: unknown; vehicleName?: string },
+): Promise<boolean> {
+  try {
+    const customerId = String(deleted.requestedBy ?? "").trim();
+    if (!mongoose.Types.ObjectId.isValid(customerId)) return false;
+    const org = mongoose.Types.ObjectId.isValid(organizationId)
+      ? await Organization.findById(organizationId).select("name").lean<{ name?: string }>()
+      : null;
+    const customer: QuoteCustomer = {
+      customerId,
+      quoteId: String(deleted._id),
+      vehicleName: deleted.vehicleName,
+      dealerName: org?.name,
+    };
+    await notificationService.createNotification(customerShipmentNotification(customer, organizationId, "closed") as any);
+    return true;
+  } catch (err) {
+    logger.error({ err, organizationId, quoteId: String(deleted?._id ?? "") }, "Non-fatal: failed to tell the customer their request was closed");
     return false;
   }
 }
@@ -216,7 +257,7 @@ const isoOrNull = (value: unknown) => {
 /** The customer's own shipping requests, newest first, for "My Shipments". */
 export async function listCustomerShipments(customerId: string, limit = 50) {
   const quotes = await Quote.find({ requestedBy: customerId, source: "customer_portal" })
-    .select("_id organizationId vehicleName vehicleImage toAddress miles rate eta status closedReason createdAt")
+    .select("_id organizationId vehicleName vehicleImage toAddress miles rate eta status closedReason declineReason createdAt")
     .sort({ createdAt: -1 })
     .limit(limit)
     .lean<any[]>();
@@ -244,6 +285,7 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
 
   return quotes.map((quote) => {
     const load = loadByQuote.get(String(quote._id)) ?? null;
+    const stage = customerShipmentStage(quote, load);
     return {
       id: String(quote._id),
       vehicleName: quote.vehicleName ?? "",
@@ -254,7 +296,9 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
       rate: quote.rate ?? null,
       eta: quote.eta ?? null,
       requestedAt: isoOrNull(quote.createdAt),
-      stage: customerShipmentStage(quote, load),
+      stage,
+      // What staff wrote for the customer when declining (optional).
+      declineReason: stage === "declined" ? String(quote.declineReason ?? "").trim() || null : null,
       shipment: load
         ? {
             number: String(load.loadNumber ?? ""),

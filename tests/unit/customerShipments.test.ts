@@ -48,6 +48,7 @@ import {
   customerShipmentNotice,
   customerShipmentStage,
   listCustomerShipments,
+  notifyCustomerOfDeletedRequest,
   notifyQuoteCustomer,
   type CustomerShipmentEvent,
 } from '../../src/services/customerShipments.service';
@@ -64,7 +65,7 @@ beforeEach(() => {
 });
 
 describe('customer shipment notifications', () => {
-  const events: CustomerShipmentEvent[] = ['accepted', 'declined', 'unavailable', 'booked', 'on_the_way', 'delivered', 'cancelled'];
+  const events: CustomerShipmentEvent[] = ['accepted', 'declined', 'unavailable', 'booked', 'on_the_way', 'delivered', 'cancelled', 'closed'];
 
   it('uses notification types the platform accepts, with plain titles', () => {
     for (const event of events) {
@@ -167,5 +168,43 @@ describe('My Shipments status', () => {
     mockQuoteFind.mockReturnValue([]);
     expect(await listCustomerShipments(CUSTOMER)).toEqual([]);
     expect(mockLoadFind).not.toHaveBeenCalled();
+  });
+});
+
+describe('declines and closed requests', () => {
+  it("adds the dealership's reason to a decline, without a double period", () => {
+    expect(customerShipmentNotice('declined', { vehicleName: 'Camry', dealerName: 'Action Auto', declineReason: "We don't ship to Alaska." }).message).toBe(
+      "Action Auto declined your shipping request for the Camry. Reason: We don't ship to Alaska. Contact them if you have questions.",
+    );
+    expect(customerShipmentNotice('declined', { dealerName: 'Action Auto', declineReason: 'No trucks this week' }).message).toBe(
+      'Action Auto declined your shipping request for the vehicle. Reason: No trucks this week. Contact them if you have questions.',
+    );
+    expect(customerShipmentNotice('declined', { dealerName: 'Action Auto' }).message).toBe(
+      'Action Auto declined your shipping request for the vehicle. Contact them if you have questions.',
+    );
+  });
+
+  it('tells the customer when their request is deleted, from the deleted record', async () => {
+    expect(await notifyCustomerOfDeletedRequest(ORG, { _id: QUOTE, requestedBy: CUSTOMER, vehicleName: 'Camry' })).toBe(true);
+    expect(mockCreateNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: CUSTOMER,
+        title: 'Shipping Request Closed',
+        message: 'Action Auto closed your shipping request for the Camry. Contact them if you have questions.',
+        metadata: { quoteId: QUOTE, route: CUSTOMER_SHIPMENTS_ROUTE },
+      }),
+    );
+    expect(await notifyCustomerOfDeletedRequest(ORG, { _id: QUOTE })).toBe(false);
+  });
+
+  it('shows the decline reason only on a declined request', async () => {
+    mockQuoteFind.mockReturnValue([
+      { _id: QUOTE, organizationId: ORG, status: 'rejected', declineReason: 'Too far', createdAt: new Date() },
+      { _id: '64b0000000000000000000c2', organizationId: ORG, status: 'rejected', closedReason: 'vehicle_unavailable', declineReason: 'Old', createdAt: new Date() },
+    ]);
+    mockLoadFind.mockReturnValue([]);
+    const [declined, closed] = await listCustomerShipments(CUSTOMER);
+    expect(declined).toMatchObject({ stage: 'declined', declineReason: 'Too far' });
+    expect(closed).toMatchObject({ stage: 'unavailable', declineReason: null });
   });
 });

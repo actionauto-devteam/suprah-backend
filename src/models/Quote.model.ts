@@ -61,6 +61,9 @@ export interface IQuote extends Document {
     // left the marketplace (sold, removed or no longer for sale).
     closedReason?: 'vehicle_unavailable';
     closedAt?: Date;
+    // The reason staff gave when declining a customer's request (optional;
+    // the customer sees it).
+    declineReason?: string;
 
     createdAt: Date;
     updatedAt: Date;
@@ -153,7 +156,8 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         leadId: { type: Schema.Types.ObjectId, ref: 'Lead' },
         customerRecordId: { type: Schema.Types.ObjectId, ref: 'Customer' },
         closedReason: { type: String, enum: ['vehicle_unavailable'], default: undefined },
-        closedAt: { type: Date }
+        closedAt: { type: Date },
+        declineReason: { type: String, trim: true, maxlength: 300 }
     },
     {
         timestamps: true
