@@ -136,7 +136,11 @@ describe('converting a quote into a load', () => {
 
   beforeEach(() => {
     mockLoadFindOne.mockReturnValue(null);
-    mockLoadCreate.mockImplementation((doc: any) => ({ _id: 'load-1', loadNumber: 'LD-1', ...doc }));
+    // Like a saved load document, which can turn itself into plain data.
+    mockLoadCreate.mockImplementation((doc: any) => {
+      const load = { _id: 'load-1', loadNumber: 'LD-1', ...doc };
+      return { ...load, toJSON: () => load };
+    });
   });
 
   it("makes the quote's customer the delivery contact", async () => {
