@@ -1,25 +1,22 @@
 import { createHash, randomBytes } from 'crypto';
 import { z } from 'zod';
 import { CallLog } from '../models/communication.model';
-import { CallRecording, CallRecordingPolicy, CallRecordingEvent, CallRecordingShare } from '../models/CallRecording.model';
+import { CallRecording, CallRecordingEvent, CallRecordingShare, CallRecordingSettings, DEFAULT_RECORDING_ANNOUNCEMENT } from '../models/CallRecording.model';
 import { ApiError } from '../utils/ApiError';
 import * as telnyx from './telnyx.service';
 import * as media from './callRecordingStorage.service';
-import { RecordingPrincipal, requireRecordingPermission, recordingAudit } from './callRecordingAccess.service';
+import { RecordingPrincipal, recordingAudit } from './callRecordingAccess.service';
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
-export const recordingPolicyInput = z.object({
-  name: z.string().trim().min(1).max(120), number: z.string().regex(/^\+[1-9]\d{7,14}$/), direction: z.enum(['inbound', 'outbound']),
-  enabled: z.boolean().default(false), retentionMonths: z.number().int().min(1).max(120).default(6),
-  connectionId: z.string().max(120).default(''), legalApproved: z.boolean().default(false), providerVerified: z.boolean().default(false),
-  disclosureOwner: z.enum(['pending', 'suprah', 'provider']).default('pending'), disclosureText: z.string().trim().max(3000).default(''),
-  disclosureLanguage: z.string().regex(/^[a-z]{2}-[A-Z]{2}$/).default('en-US'), providerDisclosureVerified: z.boolean().default(false),
-  consentMode: z.enum(['pending', 'notice', 'staff-confirmed']).default('pending'),
-}).strict().superRefine((input, ctx) => {
-  if (input.enabled && (!input.legalApproved || !input.providerVerified || !input.connectionId || input.consentMode === 'pending' || input.disclosureOwner === 'pending' || (input.disclosureOwner === 'suprah' && !input.disclosureText) || (input.disclosureOwner === 'provider' && !input.providerDisclosureVerified))) {
-    ctx.addIssue({ code: 'custom', message: 'Legal, provider, connection, disclosure and consent configuration must be verified before enabling recording' });
-  }
-});
+export const recordingSettingsInput = z.object({
+  announcementText: z.string().trim().min(1, 'Write the announcement callers hear').max(300, 'Keep the announcement under 300 characters'),
+  retentionMonths: z.number().int().min(1, 'Keep recordings for at least 1 month').max(120, 'Keep recordings for at most 120 months'),
+}).strict();
+
+export async function getRecordingSettings(organizationId: string) {
+  const row: any = await CallRecordingSettings.findOne({ organizationId }).lean();
+  return { announcementText: row?.announcementText || DEFAULT_RECORDING_ANNOUNCEMENT, announcementLanguage: row?.announcementLanguage || 'en-US', retentionMonths: row?.retentionMonths || 6 };
+}
 
 export function addCalendarMonths(date: Date, months: number): Date {
   const result = new Date(date);
@@ -35,13 +32,14 @@ export function decodeRecordingState(value: string | undefined): any {
   try { return value ? JSON.parse(Buffer.from(value, 'base64').toString('utf8')) : null; } catch { return null; }
 }
 
-async function policyFor(call: any, enabled = true): Promise<any> {
-  const policy: any = await CallRecordingPolicy.findOne({ organizationId: String(call.orgId), number: call.direction === 'inbound' ? call.to : call.from, direction: call.direction, ...(enabled ? { enabled: true } : {}) }).lean();
-  if (!policy) return null;
-  const { _id, __v, createdAt, updatedAt, organizationId, version, updatedBy, ...input } = policy;
-  const parsed = recordingPolicyInput.safeParse(input);
-  return parsed.success ? policy : null;
+export function recordingReady(call: any): boolean {
+  const evidence = call?.recordingCorrelation || {};
+  return call?.status === 'in-progress' && call.answeredVia !== 'phone' && Boolean(evidence.verified && evidence.answerControlId && evidence.connectionId) && (call.direction !== 'inbound' || Boolean(evidence.bridged));
 }
+
+export const callRepId = (call: any) => String((call?.answeredBy || call?.placedBy)?.userId || '');
+
+const restartable = (record: any) => record?.state === 'failed' && !record.startedAt && !record.files?.length;
 
 export async function createOutboundCorrelation(call: any, principal: RecordingPrincipal) {
   if (call.direction !== 'outbound' || String(call.placedBy?.userId) !== principal.id) throw new ApiError(403, 'Call ownership required');
@@ -56,8 +54,8 @@ async function locate(payload: any): Promise<any> {
     if (!/^[a-f0-9]{24}$/i.test(tag.callLogId || '') || typeof tag.token !== 'string') return null;
     const call: any = await CallLog.findById(tag.callLogId).select('+recordingCorrelation');
     if (!call || call.direction !== 'outbound' || hashToken(tag.token) !== call.recordingCorrelation?.tokenHash) return null;
-    const policy = await policyFor(call, false);
-    if (!policy?.connectionId || policy.connectionId !== payload.connection_id || payload.to !== call.to || payload.from !== call.from) return null;
+    const known = call.recordingCorrelation?.connectionId;
+    if (!payload.connection_id || (known && known !== payload.connection_id) || payload.to !== call.to || payload.from !== call.from) return null;
     return call;
   }
   if (!payload.call_session_id) return null;
@@ -79,38 +77,44 @@ async function markFailure(record: any, error: unknown) {
   await CallRecording.updateOne({ _id: record._id }, { $set: { state: 'failed', incomplete: true, error: error instanceof Error ? error.message.slice(0, 300) : 'Recording failed' } });
 }
 
-export async function maybeStartRecording(callId: string): Promise<void> {
-  const call: any = await CallLog.findById(callId).select('+recordingCorrelation');
-  if (!call || !call.recordingCorrelation?.verified || !call.recordingCorrelation?.answerControlId || (call.direction === 'inbound' && !call.recordingCorrelation.bridged) || !['in-progress', 'answering', 'ringing'].includes(call.status)) return;
-  const policy = await policyFor(call);
-  if (!policy || policy.connectionId !== call.recordingCorrelation.connectionId) return;
-  const record: any = await CallRecording.findOneAndUpdate({ callLogId: call._id }, { $setOnInsert: {
-    organizationId: String(call.orgId), callLogId: call._id, leadId: call.leadId, customerId: call.customerId, conversationId: call.conversationId,
-    direction: call.direction, employeeId: String((call.answeredBy || call.placedBy)?.userId || ''), policy,
-    controlId: call.direction === 'inbound' ? call.providerCallControlId : call.recordingCorrelation.answerControlId,
-    sessionId: call.providerCallSessionId, legId: call.direction === 'inbound' ? call.recordingCorrelation.customerLegId : call.recordingCorrelation.legId,
-  } }, { upsert: true, new: true });
-  if (record.state === 'waiting') {
-    if (policy.disclosureOwner === 'suprah') {
-      const reserved = await change(record, 'disclosing');
-      if (!reserved) return;
-      try {
-        await recordingAudit({ orgId: record.organizationId }, 'disclosure.requested', record._id, { policyVersion: policy.version });
-        const tag = { ...decodeRecordingState(call.recordingCorrelation.clientState), recordingDisclosureId: String(record._id) };
-        await telnyx.recordingDisclosure(record.controlId, policy.disclosureText, policy.disclosureLanguage, `recording-disclosure-${record._id}`, Buffer.from(JSON.stringify(tag)).toString('base64'));
-      } catch (err) { await markFailure(record, err); }
-      return;
-    }
-    await change(record, policy.consentMode === 'staff-confirmed' ? 'awaiting-consent' : 'starting', { disclosureCompletedAt: new Date() });
+export async function startManualRecording(principal: RecordingPrincipal, callId: string) {
+  const call: any = await CallLog.findOne({ _id: callId, orgId: principal.orgId }).select('+recordingCorrelation');
+  if (!call || callRepId(call) !== principal.id) throw new ApiError(403, 'Only the rep on this call can record it');
+  if (!recordingReady(call)) throw new ApiError(409, 'The call is still connecting. Try again in a few seconds.');
+  const existing: any = await CallRecording.findOne({ callLogId: call._id });
+  if (existing && !restartable(existing)) throw new ApiError(409, 'This call is already being recorded');
+  if (existing) await CallRecording.deleteOne({ _id: existing._id, state: 'failed', startedAt: null });
+  const settings = await getRecordingSettings(principal.orgId);
+  const evidence = call.recordingCorrelation;
+  const policy = { retentionMonths: settings.retentionMonths, connectionId: evidence.connectionId, disclosureOwner: 'suprah', disclosureText: settings.announcementText, disclosureLanguage: settings.announcementLanguage, consentMode: 'notice', version: 1 };
+  let record: any;
+  try {
+    record = await CallRecording.create({
+      organizationId: String(call.orgId), callLogId: call._id, leadId: call.leadId, customerId: call.customerId, conversationId: call.conversationId,
+      direction: call.direction, employeeId: principal.id, startedBy: principal.id, policy, state: 'disclosing',
+      controlId: call.direction === 'inbound' ? call.providerCallControlId : evidence.answerControlId,
+      sessionId: call.providerCallSessionId, legId: call.direction === 'inbound' ? evidence.customerLegId : evidence.legId,
+    });
+  } catch (err: any) {
+    if (err?.code === 11000) throw new ApiError(409, 'This call is already being recorded');
+    throw err;
   }
-  await startReservedRecording(record._id);
+  await recordingAudit(principal, 'recording.requested', record._id);
+  try {
+    const tag = { ...decodeRecordingState(evidence.clientState), recordingDisclosureId: String(record._id) };
+    await telnyx.recordingDisclosure(record.controlId, policy.disclosureText, policy.disclosureLanguage, `recording-disclosure-${record._id}`, Buffer.from(JSON.stringify(tag)).toString('base64'));
+  } catch (err) {
+    await markFailure(record, err);
+    throw new ApiError(502, "We couldn't start the recording. Try again.");
+  }
+  return record;
 }
 
 async function startReservedRecording(id: unknown) {
   const record: any = await CallRecording.findById(id);
   if (!record || record.state !== 'starting' || record.manualPaused) return;
   const call: any = await CallLog.findById(record.callLogId).select('+recordingCorrelation');
-  if (!call || ['completed', 'canceled', 'missed', 'failed'].includes(call.status) || !await policyFor(call)) return markFailure(record, new Error('Recording cannot start on an ended or disabled call'));
+  if (!call || ['completed', 'canceled', 'missed', 'failed'].includes(call.status)) return markFailure(record, new Error('Recording cannot start on an ended call'));
   const reserved = await change(record, 'start-pending', { startedAt: new Date(), error: '' });
   if (!reserved) return;
   try {
@@ -124,25 +128,16 @@ async function startReservedRecording(id: unknown) {
 }
 
 export async function recordingOwnCall(principal: RecordingPrincipal, callId: string) {
-  await requireRecordingPermission(principal, 'control');
   const call: any = await CallLog.findOne({ _id: callId, orgId: principal.orgId });
-  if (!call || String((call.answeredBy || call.placedBy)?.userId) !== principal.id || call.status !== 'in-progress') throw new ApiError(403, 'Only the connected rep may control recording');
+  if (!call || callRepId(call) !== principal.id || call.status !== 'in-progress') throw new ApiError(403, 'Only the rep on this call can control the recording');
   const record: any = await CallRecording.findOne({ callLogId: call._id, organizationId: principal.orgId });
   if (!record) throw new ApiError(409, 'Recording is not available for this call');
   return record;
 }
 
-export async function controlRecording(principal: RecordingPrincipal, callId: string, action: 'pause' | 'resume' | 'consent') {
+export async function controlRecording(principal: RecordingPrincipal, callId: string, action: 'pause' | 'resume') {
   const record = await recordingOwnCall(principal, callId);
-  if (action === 'consent') {
-    if (record.state !== 'awaiting-consent') throw new ApiError(409, 'Consent is not pending');
-    await recordingAudit(principal, 'consent.confirmed', record._id, { policyVersion: record.policy.version });
-    const next = await change(record, 'starting', { consentConfirmedAt: new Date(), consentConfirmedBy: principal.id });
-    if (next) await startReservedRecording(next._id);
-    return;
-  }
   if ((action === 'pause' && record.state !== 'recording') || (action === 'resume' && record.state !== 'paused')) throw new ApiError(409, 'Recording control is pending or unavailable');
-  if (action === 'resume' && !await policyFor(await CallLog.findById(record.callLogId))) throw new ApiError(409, 'Recording policy is disabled');
   await recordingAudit(principal, `${action}.requested`, record._id);
   const next = await change(record, action === 'pause' ? 'pausing' : 'resuming', { ...(action === 'pause' ? { manualPaused: true } : {}) });
   if (!next) throw new ApiError(409, 'Another control is in progress');
@@ -161,14 +156,14 @@ export async function controlRecording(principal: RecordingPrincipal, callId: st
 export async function observeRecordingCall(type: string, payload: any) {
   const call = await locate(payload);
   if (!call) return;
-  const policy = await policyFor(call, false);
-  if (!policy?.connectionId) return;
   const tag = decodeRecordingState(payload.client_state);
   const taggedAgent = call.direction === 'inbound' && tag?.kind === 'agent-leg';
-  if (!taggedAgent && policy.connectionId !== payload.connection_id) return;
-  if (taggedAgent && !call.recordingCorrelation?.connectionId) throw new Error('Customer connection evidence is pending');
-  if (taggedAgent && policy.connectionId !== call.recordingCorrelation?.connectionId) return;
-  const update: any = { 'recordingCorrelation.connectionId': policy.connectionId };
+  const known = String(call.recordingCorrelation?.connectionId || '');
+  if (taggedAgent && !known) throw new Error('Customer connection evidence is pending');
+  const firstEvidence = call.direction === 'inbound' ? type === 'call.initiated' && payload.call_control_id === call.providerCallControlId : tag?.kind === 'recording-outbound';
+  const connectionId = known || (firstEvidence ? String(payload.connection_id || '') : '');
+  if (!connectionId || (!taggedAgent && payload.connection_id !== connectionId)) return;
+  const update: any = { 'recordingCorrelation.connectionId': connectionId };
   if (type === 'call.hangup') {
     if (![call.providerCallControlId, call.agentLegCallControlId, call.recordingCorrelation?.answerControlId].includes(payload.call_control_id)) return;
     if (call.direction === 'outbound' && call.recordingCorrelation?.verified && !call.endedAt) {
@@ -201,7 +196,6 @@ export async function observeRecordingCall(type: string, payload: any) {
     if (type === 'call.bridged') update['recordingCorrelation.bridged'] = true;
   }
   await CallLog.updateOne({ _id: call._id }, { $set: update });
-  await maybeStartRecording(String(call._id));
 }
 
 export async function finishRecordingDisclosure(payload: any): Promise<boolean> {
@@ -211,7 +205,7 @@ export async function finishRecordingDisclosure(payload: any): Promise<boolean> 
   const record: any = await CallRecording.findOne({ _id: tag.recordingDisclosureId, controlId: payload.call_control_id, state: 'disclosing' });
   if (!record) return true;
   if (payload.status && payload.status !== 'completed') { await markFailure(record, new Error('Recording disclosure did not complete')); return true; }
-  const next = await change(record, record.policy.consentMode === 'staff-confirmed' ? 'awaiting-consent' : 'starting', { disclosureCompletedAt: new Date() });
+  const next = await change(record, 'starting', { disclosureCompletedAt: new Date() });
   if (next) await startReservedRecording(next._id);
   return true;
 }

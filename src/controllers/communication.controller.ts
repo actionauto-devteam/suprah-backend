@@ -803,7 +803,9 @@ export const listRingingCalls = asyncHandler(async (req: Request, res: Response)
   const userId = String(actor(req).userId);
   const legacyRingingSince = new Date(Date.now() - LEGACY_RINGING_RECOVERY_MS);
   const candidates = await CallLog.find({ orgId, status: "ringing", direction: "inbound", $or: [
-    { routing: { $exists: false }, createdAt: { $gte: legacyRingingSince } }, { 'routing.allOrg': true }, { 'routing.recipientIds': userId },
+    { routing: { $exists: false }, createdAt: { $gte: legacyRingingSince }, $or: [
+      { ringRecipientIds: { $exists: false } }, { ringRecipientIds: { $size: 0 } }, { ringRecipientIds: userId },
+    ] }, { 'routing.allOrg': true }, { 'routing.recipientIds': userId },
   ] })
     .sort({ createdAt: -1 })
     .limit(50)

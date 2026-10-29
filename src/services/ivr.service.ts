@@ -5,9 +5,13 @@ import * as telnyx from './telnyx.service';
 import { getSocketIO } from '../utils/socketEmitter';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
 import Lead from '../models/lead.model';
+import DealershipPhoneNumber from '../models/DealershipPhoneNumber.model';
+import mongoose from 'mongoose';
 
 export interface IvrCallbacks {
   missed: (call: any) => Promise<void>;
+  ringing?: (call: any) => Promise<void>;
+  stopRinging?: (call: any) => Promise<void>;
 }
 
 const timers = new Map<string, NodeJS.Timeout>();
@@ -72,12 +76,14 @@ async function finishMissed(call: any, callbacks: IvrCallbacks): Promise<void> {
   if (!final) return;
   clearIvrTimer(String(call._id));
   emitIvrCall(final);
+  await callbacks.stopRinging?.(final).catch(() => undefined);
   await callbacks.missed(final);
 }
 
 async function route(call: any, stage: 'selected' | 'reception' | 'all-org', groupId: string | null, reason: string, callbacks: IvrCallbacks): Promise<void> {
   const lock = await advance(call, 'routing', reason, { status: 'ivr', 'routing.deadline': new Date(Date.now() + 20000) });
   if (!lock) return;
+  await callbacks.stopRinging?.(lock).catch(() => undefined);
   clearIvrTimer(String(call._id));
   arm(lock, callbacks);
   if (call.status === 'answering' && call.agentLegCallControlId) {
@@ -100,6 +106,7 @@ async function route(call: any, stage: 'selected' | 'reception' | 'all-org', gro
   if (!next) return;
   emitRouteChange(call, next);
   arm(next, callbacks);
+  void callbacks.ringing?.(next).catch(() => undefined);
   await telnyx.speakIvr(next.providerCallControlId, 'Please hold while we connect your call.', {
     kind: 'ivr-hold', callLogId: String(next._id), revision: next.routing.revision,
   }).catch(error => console.error('[ivr] Hold announcement failed', error));
@@ -149,17 +156,28 @@ export async function handleIvrGather(payload: any, callbacks: IvrCallbacks): Pr
   if (!call || String(call._id) !== tag.callLogId) return;
   const option = call.routing.config.options.find((entry: any) => entry.digit === payload.digits);
   if (!option || (payload.status && payload.status !== 'valid')) return retryOrReception(call, callbacks);
+  const line: any = option.type === 'number' && option.phoneNumberId && mongoose.isValidObjectId(String(option.phoneNumberId))
+    ? await DealershipPhoneNumber.findOne({ _id: option.phoneNumberId, organizationId: call.orgId }).select('label kind location ringGroupId').lean()
+    : null;
+  const leadLocation = option.type === 'number' ? (line?.kind === 'location' ? line.location : '') : (option.type === 'location' ? option.leadLocation : '');
   const selected = await advance(call, 'routing', 'digit-selected', {
     'routing.selectedDigit': option.digit, 'routing.selectedLabel': option.label,
     'routing.type': option.type, 'routing.language': option.language,
-    'routing.leadLocation': option.type === 'location' ? option.leadLocation : '',
+    'routing.leadLocation': leadLocation,
     'routing.deadline': new Date(Date.now() + 20000),
+    ...(line ? { lineLabel: line.label } : {}),
   });
   if (!selected) return;
   arm(selected, callbacks);
-  if (option.type === 'location' && option.leadLocation && call.leadId) {
-    const lead = await Lead.findOneAndUpdate({ _id: call.leadId, organizationId: call.orgId }, { $set: { location: option.leadLocation } }, { new: true });
+  if (leadLocation && call.leadId) {
+    const lead = await Lead.findOneAndUpdate({ _id: call.leadId, organizationId: call.orgId }, { $set: { location: leadLocation } }, { new: true });
     if (lead) getSocketIO()?.to(crmStaffRoom(String(call.orgId))).emit('lead:update', lead.toObject());
+  }
+  if (option.type === 'number') {
+    if (!line) return route(selected, 'reception', selected.routing.config.receptionGroupId, 'number-unavailable', callbacks);
+    return line.ringGroupId
+      ? route(selected, 'selected', String(line.ringGroupId), 'option-selected', callbacks)
+      : route(selected, 'all-org', null, 'option-selected', callbacks);
   }
   return route(selected, option.type === 'language' && option.digit === '0' ? 'reception' : 'selected',
     option.type === 'language' && option.digit === '0' ? selected.routing.config.receptionGroupId : option.groupId,

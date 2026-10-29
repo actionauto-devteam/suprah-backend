@@ -12,14 +12,15 @@ router.use((req, res, next) => {
 
 router.get('/recordings/media/:id', recording.mediaSession);
 router.use(crmAuth());
+router.get('/recording-access', recording.getAccess);
 router.get('/recording-settings', recording.getSettings);
-router.post('/recording-settings', recording.savePolicy);
-router.put('/recording-settings/:id', recording.savePolicy);
+router.put('/recording-settings', recording.saveSettings);
 router.put('/recording-grants', recording.saveGrant);
 router.get('/calls/:id/recording', recording.getCallRecording);
 router.post('/calls/:id/recording/control', recording.control);
 router.get('/recording-shares/:id', recording.resolveShare);
 router.delete('/recording-shares/:id', recording.revokeShare);
+router.get('/recordings', recording.listRecordings);
 router.get('/recordings/:id', recording.getRecording);
 router.post('/recordings/:id/review', recording.reviewRecording);
 router.post('/recordings/:id/retry', recording.retryImport);

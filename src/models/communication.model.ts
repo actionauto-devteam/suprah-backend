@@ -163,6 +163,10 @@ export interface ICallLog extends Document {
   hangupCause?: string;
   customerName?: string;
   lineLabel?: string;
+  ringGroupId?: string | null;
+  ringRecipientIds?: string[];
+  answeredVia?: "browser" | "phone";
+  phoneLegs?: { userId: string; phone: string; callControlId: string; state: "dialing" | "answered" | "ended"; at: Date }[];
   textBackSentAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -196,6 +200,10 @@ const CallLogSchema = new Schema<ICallLog>(
     hangupCause: { type: String },
     customerName: { type: String },
     lineLabel: { type: String },
+    ringGroupId: { type: String, default: null },
+    ringRecipientIds: { type: [String], default: undefined },
+    answeredVia: { type: String, enum: ["browser", "phone"] },
+    phoneLegs: { type: [Schema.Types.Mixed], default: undefined },
     textBackSentAt: { type: Date, default: null },
     routing: { type: Schema.Types.Mixed },
     recordingCorrelation: { type: Schema.Types.Mixed, select: false },

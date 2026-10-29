@@ -4,6 +4,7 @@ import CallRoutingConfig, { RoutingConfig } from '../models/CallRoutingConfig.mo
 import CrmLeadGroup from '../models/CrmLeadGroup.model';
 import User from '../models/User.model';
 import CrmUser from '../models/CrmUser.model';
+import DealershipPhoneNumber from '../models/DealershipPhoneNumber.model';
 import { ApiError } from '../utils/ApiError';
 
 export function routingPhone(value: string): string {
@@ -26,22 +27,28 @@ const inputSchema = z.object({
   options: z.array(z.object({
     digit: z.string().regex(/^[0-9]$/),
     label: z.string().trim().min(1).max(80),
-    type: z.enum(['location', 'department', 'language']),
+    type: z.enum(['location', 'department', 'language', 'number']),
     groupId: group,
     leadLocation: z.string().trim().max(120),
     language: z.string().trim().max(40),
     externalDestination: z.string().trim().max(30),
+    phoneNumberId: z.string().refine(value => mongoose.isValidObjectId(value), 'Invalid phone number').nullable().optional(),
   }).strict()).min(1).max(10),
 }).strict();
 
 export function parseRoutingConfig(input: unknown, currentIngress = ''): RoutingConfig {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) throw new ApiError(400, parsed.error.issues.map(issue => issue.message).join('; '));
-  const config = parsed.data;
+  const config: RoutingConfig = {
+    ...parsed.data,
+    options: parsed.data.options.map(option => ({ ...option, phoneNumberId: option.type === 'number' ? option.phoneNumberId || null : null })),
+  };
   if (new Set(config.options.map(option => option.digit)).size !== config.options.length) {
     throw new ApiError(400, 'Each IVR digit must be unique');
   }
-  if (config.enabled && (!config.receptionGroupId || config.options.some(option => !option.groupId && !(option.digit === '0' && option.type === 'language')))) {
+  const missingNumber = config.options.find(option => option.type === 'number' && !option.phoneNumberId);
+  if (missingNumber) throw new ApiError(400, `Choose the dealership number for option ${missingNumber.digit}`);
+  if (config.enabled && (!config.receptionGroupId || config.options.some(option => option.type !== 'number' && !option.groupId && !(option.digit === '0' && option.type === 'language')))) {
     throw new ApiError(400, 'Reception and every enabled option require a Lead Group');
   }
   for (const option of config.options) {
@@ -66,6 +73,13 @@ export async function validateRoutingGroups(orgId: string, config: RoutingConfig
   if (count !== ids.length) throw new ApiError(400, 'Routing groups must be active and belong to this organization');
 }
 
+export async function validateRoutingNumbers(orgId: string, config: RoutingConfig): Promise<void> {
+  const ids = [...new Set(config.options.map(option => option.type === 'number' ? option.phoneNumberId : null).filter(Boolean))];
+  if (!ids.length) return;
+  const count = await DealershipPhoneNumber.countDocuments({ _id: { $in: ids }, organizationId: orgId });
+  if (count !== ids.length) throw new ApiError(400, "Menu options must use this dealership's phone numbers");
+}
+
 export async function getInboundRoutingConfig(number: string): Promise<{ orgId: string; config: RoutingConfig } | null> {
   try {
     const row = await CallRoutingConfig.findOne({ inboundNumber: routingPhone(number), enabled: true }).lean();
@@ -76,6 +90,7 @@ export async function getInboundRoutingConfig(number: string): Promise<{ orgId: 
       receptionGroupId: row.receptionGroupId, allOrgFallback: row.allOrgFallback, options: row.options.map(option => ({
         digit: option.digit, label: option.label, type: option.type, groupId: option.groupId,
         leadLocation: option.leadLocation, language: option.language, externalDestination: option.externalDestination,
+        phoneNumberId: option.phoneNumberId ?? null,
       })),
     });
     await validateRoutingGroups(String(row.organizationId), config);

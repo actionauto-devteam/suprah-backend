@@ -3,11 +3,12 @@ import mongoose, { Schema } from 'mongoose';
 export interface RoutingOption {
   digit: string;
   label: string;
-  type: 'location' | 'department' | 'language';
+  type: 'location' | 'department' | 'language' | 'number';
   groupId: string | null;
   leadLocation: string;
   language: string;
   externalDestination: string;
+  phoneNumberId?: string | null;
 }
 
 export interface RoutingConfig {
@@ -50,6 +51,7 @@ const optionSchema = new Schema({
   leadLocation: { type: String, default: '' },
   language: { type: String, default: '' },
   externalDestination: { type: String, default: '' },
+  phoneNumberId: { type: String, default: null },
 }, { _id: false });
 
 const schema = new Schema({
