@@ -122,6 +122,11 @@ import {
   type CustomerShipmentEvent,
 } from "../services/customerShipments.service";
 import {
+  findQuoteSalesperson,
+  salespersonNotification,
+  type SalespersonOptions,
+} from "../services/leadSalesperson.service";
+import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
   listDriverReviewEvents,
@@ -1651,6 +1656,37 @@ async function customerShipmentEvents(
       : [];
   } catch (err) {
     logger.error({ err, loadId: String(load?._id ?? ""), event }, "Non-fatal: failed to prepare the customer's shipment notice");
+    return [];
+  }
+}
+
+/**
+ * The notice for the salesperson on the CRM lead linked to this load's quote
+ * (see leadSalesperson.service), queued with the load's own change like the
+ * customer's. Never blocks the driver's or Dispatch's step.
+ */
+async function salespersonEvents(
+  organizationId: string,
+  load: any,
+  event: "delivered" | "cancelled",
+  options: SalespersonOptions & { reason?: string } = {},
+) {
+  if (!load?.quoteId) return [];
+  try {
+    const salesperson = await findQuoteSalesperson(organizationId, load.quoteId, options);
+    return salesperson
+      ? [
+          lifecycleUserNotificationEvent(
+            salespersonNotification(salesperson, organizationId, event, {
+              loadId: String(load._id),
+              loadNumber: String(load.loadNumber ?? ""),
+              ...(options.reason ? { reason: options.reason } : {}),
+            }),
+          ),
+        ]
+      : [];
+  } catch (err) {
+    logger.error({ err, loadId: String(load?._id ?? ""), event }, "Non-fatal: failed to prepare the salesperson's shipment notice");
     return [];
   }
 }
@@ -6685,9 +6721,15 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
 
   const deliveryGpsFlag = await buildMissingGpsFlag(load, user, "delivered");
   const deliveryCustomerEvents = await customerShipmentEvents(organizationId, load, "delivered");
+  // Admins already get "Load Delivered" below.
+  const deliverySalespersonEvents = await salespersonEvents(organizationId, load, "delivered", {
+    excludeUserIds: [user._id.toString()],
+    skipAdmins: true,
+  });
   const deliveryOutbox = [
     ...(deliveryGpsFlag ? [deliveryGpsFlag.event] : []),
     ...deliveryCustomerEvents,
+    ...deliverySalespersonEvents,
     ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
     lifecycleSyncEvent(
       organizationId,
@@ -6878,9 +6920,13 @@ const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res
   const now = new Date();
   const actorName = String(user.name || "Dispatch");
   const customerEvents = await customerShipmentEvents(organizationId, load, "delivered");
+  const deliverySalespersonEvents = await salespersonEvents(organizationId, load, "delivered", {
+    excludeUserIds: [user._id.toString()],
+  });
   const outbox = [
     ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
     ...customerEvents,
+    ...deliverySalespersonEvents,
     // Refreshes open screens (Transportation, Driver Tracker, the driver's
     // app). Not a notification.
     lifecycleSyncEvent(organizationId, [driverId], loadId),
@@ -7119,10 +7165,16 @@ const cancelLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   const supportAction = chatOwnerId !== actorId;
   // The customer who asked for this shipment hears the reason, never the note.
   const customerEvents = await customerShipmentEvents(organizationId, load, "cancelled", { reasonLabel });
+  // Not the person who cancelled, and not the dispatcher, who's told below.
+  const cancelSalespersonEvents = await salespersonEvents(organizationId, load, "cancelled", {
+    excludeUserIds: [actorId, dispatchOwnerId],
+    reason: staffReason,
+  });
   const outbox = [
     // Refreshes Transportation, Driver Tracker and the drivers' apps.
     lifecycleSyncEvent(organizationId, [driverId, ...requesterIds], loadId),
     ...customerEvents,
+    ...cancelSalespersonEvents,
     ...(driverId
       ? [
           cancelledLoadDriverAlertEvent({
