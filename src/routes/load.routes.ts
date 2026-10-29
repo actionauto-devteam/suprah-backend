@@ -46,6 +46,8 @@ router.get("/address-at", staffOnly, mapPlaceLookupLimiter, mapPlacesController.
 router.get("/stats", staffOnly, loadController.getLoadStats);
 // Transportation's "Needs attention" list. Declared before /:id so it isn't read as a load id.
 router.get("/attention", staffOnly, loadAttentionController.getLoadAttention);
+// Which cars are already on a live load or a waiting quote (Inventory tags, Create Load warning).
+router.get("/vehicle-shipping", staffOnly, loadController.getVehicleShipping);
 
 router
   .route("/")
