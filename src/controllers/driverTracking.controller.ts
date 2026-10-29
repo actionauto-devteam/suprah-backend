@@ -117,6 +117,11 @@ import {
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
+  customerShipmentNotification,
+  findQuoteCustomer,
+  type CustomerShipmentEvent,
+} from "../services/customerShipments.service";
+import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
   listDriverReviewEvents,
@@ -1618,6 +1623,36 @@ function lifecycleReleaseResolutionEvent(params: {
       requestSnapshot: releaseRequestSnapshot(params.request),
     },
   );
+}
+
+/**
+ * The notice for the customer who asked for this shipment from the customer
+ * portal (when the load came from their request), queued with the load's own
+ * change so it's sent exactly once. Never blocks the driver's or Dispatch's step.
+ */
+async function customerShipmentEvents(
+  organizationId: string,
+  load: any,
+  event: CustomerShipmentEvent,
+  extra: { reasonLabel?: string } = {},
+) {
+  if (!load?.quoteId) return [];
+  try {
+    const customer = await findQuoteCustomer(organizationId, load.quoteId);
+    return customer
+      ? [
+          lifecycleUserNotificationEvent(
+            customerShipmentNotification(customer, organizationId, event, {
+              loadNumber: String(load.loadNumber ?? ""),
+              ...extra,
+            }),
+          ),
+        ]
+      : [];
+  } catch (err) {
+    logger.error({ err, loadId: String(load?._id ?? ""), event }, "Non-fatal: failed to prepare the customer's shipment notice");
+    return [];
+  }
 }
 
 async function flushLifecycleOutbox(loadId: string) {
@@ -6459,8 +6494,10 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   );
 
   const routeGpsFlag = await buildMissingGpsFlag(load, user, "in_transit");
+  const routeCustomerEvents = await customerShipmentEvents(organizationId, load, "on_the_way");
   const routeOutbox = [
     ...(routeGpsFlag ? [routeGpsFlag.event] : []),
+    ...routeCustomerEvents,
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -6647,8 +6684,10 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   });
 
   const deliveryGpsFlag = await buildMissingGpsFlag(load, user, "delivered");
+  const deliveryCustomerEvents = await customerShipmentEvents(organizationId, load, "delivered");
   const deliveryOutbox = [
     ...(deliveryGpsFlag ? [deliveryGpsFlag.event] : []),
+    ...deliveryCustomerEvents,
     ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
     lifecycleSyncEvent(
       organizationId,
@@ -6838,8 +6877,10 @@ const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res
 
   const now = new Date();
   const actorName = String(user.name || "Dispatch");
+  const customerEvents = await customerShipmentEvents(organizationId, load, "delivered");
   const outbox = [
     ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
+    ...customerEvents,
     // Refreshes open screens (Transportation, Driver Tracker, the driver's
     // app). Not a notification.
     lifecycleSyncEvent(organizationId, [driverId], loadId),
@@ -7076,9 +7117,12 @@ const cancelLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   // with the driver. When an admin steps in, the driver isn't shown who.
   const chatOwnerId = dispatchOwnerId || actorId;
   const supportAction = chatOwnerId !== actorId;
+  // The customer who asked for this shipment hears the reason, never the note.
+  const customerEvents = await customerShipmentEvents(organizationId, load, "cancelled", { reasonLabel });
   const outbox = [
     // Refreshes Transportation, Driver Tracker and the drivers' apps.
     lifecycleSyncEvent(organizationId, [driverId, ...requesterIds], loadId),
+    ...customerEvents,
     ...(driverId
       ? [
           cancelledLoadDriverAlertEvent({

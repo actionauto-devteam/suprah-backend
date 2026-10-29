@@ -41,4 +41,11 @@ router.post(
   quoteController.createCustomerQuoteRequest,
 );
 
+// The customer's own requests and how each shipment is going ("My Shipments").
+router.get(
+  "/mine",
+  authorize("customer", "My Shipments is for customer accounts. Staff see quotes and loads on the Transportation page."),
+  quoteController.getMyShipments,
+);
+
 export default router;

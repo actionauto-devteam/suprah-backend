@@ -15,7 +15,10 @@ jest.mock('../../src/middleware/auth.middleware', () => ({
 }));
 jest.mock('../../src/controllers/quote.controller', () => ({
   __esModule: true,
-  default: { createCustomerQuoteRequest: (_req: any, res: any) => res.status(201).json({ ok: true }) },
+  default: {
+    createCustomerQuoteRequest: (_req: any, res: any) => res.status(201).json({ ok: true }),
+    getMyShipments: (_req: any, res: any) => res.status(200).json({ ok: true }),
+  },
 }));
 
 import customerQuoteRequestRoutes from '../../src/routes/customerQuoteRequest.routes';
@@ -58,5 +61,22 @@ describe('POST /api/quote-requests', () => {
       "You've asked for a lot of shipping quotes in the last hour. Wait a while, then try again. If this keeps happening, contact Suprah AI support at support@suprahai.com.",
     );
     expect((await sendAs('customer', 'another-customer')).status).toBe(201);
+  });
+});
+
+describe("GET /api/quote-requests/mine", () => {
+  it("lets a customer see their own shipments", async () => {
+    expect((await request(app).get("/api/quote-requests/mine").set("x-test-role", "customer")).status).toBe(200);
+  });
+
+  it.each(["employee", "admin", "driver"])("keeps %s accounts out", async (role) => {
+    const res = await request(app).get("/api/quote-requests/mine").set("x-test-role", role);
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe("My Shipments is for customer accounts. Staff see quotes and loads on the Transportation page.");
+  });
+
+  it("is never cached", async () => {
+    const res = await request(app).get("/api/quote-requests/mine").set("x-test-role", "customer");
+    expect(res.headers["cache-control"]).toBe("private, no-store, max-age=0");
   });
 });
