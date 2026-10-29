@@ -171,6 +171,41 @@ export async function deleteProviderRecording(id: string) {
   return tx('DELETE', `/recordings/${encodeURIComponent(id)}`, undefined, 8000);
 }
 
+const encodeState = (state: Record<string, unknown>) => Buffer.from(JSON.stringify(state)).toString("base64");
+
+export async function dialPhone(opts: { to: string; from: string; timeoutSecs: number; clientState: Record<string, unknown> }) {
+  const connectionId = process.env.TELNYX_VOICE_APP_ID || "";
+  if (!connectionId) throw new Error("TELNYX_VOICE_APP_ID is not configured");
+  const res = await tx<{ data?: { call_control_id?: string } }>("POST", "/calls", {
+    connection_id: connectionId,
+    to: opts.to,
+    from: opts.from,
+    timeout_secs: opts.timeoutSecs,
+    client_state: encodeState(opts.clientState),
+  }, 8000);
+  const callControlId = String(res?.data?.call_control_id || "");
+  if (!callControlId) throw new Error("Telnyx did not return a call id");
+  return { callControlId };
+}
+
+export async function gatherDigit(callControlId: string, payload: string, clientState: Record<string, unknown>) {
+  return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/gather_using_speak`, {
+    payload, voice: "female", language: "en-US",
+    minimum_digits: 1, maximum_digits: 1, maximum_tries: 2, valid_digits: "1", timeout_millis: 8000,
+    client_state: encodeState(clientState),
+  }, 8000);
+}
+
+export async function speakFinal(callControlId: string, payload: string) {
+  return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
+    payload, voice: "female", language: "en-US", client_state: encodeState({ kind: "phone-bye" }),
+  }, 8000);
+}
+
+export async function bridgeCalls(callControlId: string, otherCallControlId: string) {
+  return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/bridge`, { call_control_id: otherCallControlId }, 8000);
+}
+
 /** Answer + play an "we missed you" message + hang up (missed-call path). */
 export async function playMissedAndHangup(callControlId: string, message: string) {
   try {

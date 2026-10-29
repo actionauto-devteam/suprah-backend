@@ -6,9 +6,11 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
-import { CallRecording, CallRecordingPolicy, CallRecordingGrant, CallRecordingAudit, CallRecordingShare, CallRecordingMediaSession, CallRecordingEvent, RECORDING_PERMISSIONS } from '../models/CallRecording.model';
+import Lead from '../models/lead.model';
+import { CallLog } from '../models/communication.model';
+import { CallRecording, CallRecordingSettings, CallRecordingGrant, CallRecordingAudit, CallRecordingShare, CallRecordingMediaSession, CallRecordingEvent, RECORDING_PERMISSIONS, GRANTABLE_RECORDING_PERMISSIONS } from '../models/CallRecording.model';
 import { recordingPrincipal, recordingPermissions, requireRecordingPermission, recordingAudit, RecordingPrincipal } from '../services/callRecordingAccess.service';
-import { recordingPolicyInput, controlRecording, deleteRecording, hashToken } from '../services/callRecording.service';
+import { recordingSettingsInput, getRecordingSettings, controlRecording, startManualRecording, recordingReady, callRepId, deleteRecording, hashToken } from '../services/callRecording.service';
 import { streamRecordingFile } from '../services/callRecordingStorage.service';
 import { recordingMediaAuth } from '../services/recordingMediaAuth.service';
 
@@ -21,8 +23,14 @@ async function admin(req: Request) {
   if (!p.admin) throw new ApiError(403, 'Verified administrator required');
   return p;
 }
+const grantable = (permissions: unknown) => (Array.isArray(permissions) ? permissions : []).filter((p: any) => (GRANTABLE_RECORDING_PERMISSIONS as readonly string[]).includes(p));
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+async function principalName(p: RecordingPrincipal) {
+  if (p.kind === 'crm') return String((await CrmUser.findById(p.id).select('fullName').lean() as any)?.fullName || '');
+  return String((await User.findById(p.id).select('name').lean() as any)?.name || '');
+}
 function summary(record: any) {
-  return { _id: record._id, callLogId: record.callLogId, direction: record.direction, state: record.state, manualPaused: record.manualPaused, incomplete: record.incomplete, error: record.error, startedAt: record.startedAt, endedAt: record.endedAt, expiresAt: record.expiresAt, files: record.files.map((f: any) => ({ _id: f._id, bytes: f.bytes, startedAt: f.startedAt, endedAt: f.endedAt })) };
+  return { _id: record._id, callLogId: record.callLogId, direction: record.direction, state: record.state, manualPaused: record.manualPaused, incomplete: record.incomplete, error: record.error, startedAt: record.startedAt, endedAt: record.endedAt, expiresAt: record.expiresAt, reviewedAt: record.reviewedAt, reviewedByName: record.reviewedByName, files: record.files.map((f: any) => ({ _id: f._id, bytes: f.bytes, startedAt: f.startedAt, endedAt: f.endedAt })) };
 }
 async function accessible(p: RecordingPrincipal, id: string, permission: typeof RECORDING_PERMISSIONS[number] = 'view') {
   await requireRecordingPermission(p, permission);
@@ -30,47 +38,120 @@ async function accessible(p: RecordingPrincipal, id: string, permission: typeof 
   if (!record || ['deleted', 'deleting'].includes(record.state) || (record.expiresAt && record.expiresAt <= new Date())) throw new ApiError(404, 'Recording unavailable');
   return record;
 }
+export const getAccess = asyncHandler(async (req: Request, res: Response) => {
+  const p = await principal(req);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ data: { permissions: await recordingPermissions(p), admin: p.admin } });
+});
 export const getSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
-  const policies = await CallRecordingPolicy.find({ organizationId: p.orgId }).lean();
-  const grants: any[] = await CallRecordingGrant.find({ organizationId: p.orgId }).lean();
+  const settings = await getRecordingSettings(p.orgId);
+  const grants: any[] = (await CallRecordingGrant.find({ organizationId: p.orgId }).lean()).map((g: any) => ({ ...g, permissions: grantable(g.permissions) }));
   const crm: any[] = await CrmUser.find({ organizationId: p.orgId, isActive: true, isSystem: { $ne: true }, isOffboarded: { $ne: true } }).select('fullName email role department avatar').lean();
   const main: any[] = await User.find({ organizationId: p.orgId, isActive: true, role: { $in: ['employee', 'admin', 'super_admin'] }, $or: [{ email: { $nin: crm.map(u => u.email) } }, { _id: { $in: grants.filter(g => g.principalKind === 'main' && g.permissions.length).map(g => g.principalId) } }] }).select('name email role personalInfo.department avatar').lean();
-  res.json({ data: { policies, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: RECORDING_PERMISSIONS } });
+  res.json({ data: { settings: { announcementText: settings.announcementText, retentionMonths: settings.retentionMonths }, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: GRANTABLE_RECORDING_PERMISSIONS } });
 });
-export const savePolicy = asyncHandler(async (req: Request, res: Response) => {
+export const saveSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
-  const parsed = recordingPolicyInput.safeParse(req.body);
+  const parsed = recordingSettingsInput.safeParse(req.body);
   if (!parsed.success) throw new ApiError(400, parsed.error.issues.map(i => i.message).join('; '));
-  const query = req.params.id ? { _id: validId(req.params.id), organizationId: p.orgId } : { organizationId: p.orgId, number: parsed.data.number, direction: parsed.data.direction };
-  const row = await CallRecordingPolicy.findOneAndUpdate(query, { $set: { ...parsed.data, organizationId: p.orgId, updatedBy: p.id }, $inc: { version: 1 } }, { new: true, upsert: !req.params.id, runValidators: true });
-  if (!row) throw new ApiError(404, 'Policy not found');
-  await recordingAudit(p, 'policy.saved', undefined, { policyId: row._id, enabled: row.enabled, version: row.version });
-  res.json({ data: row });
+  await CallRecordingSettings.updateOne({ organizationId: p.orgId }, { $set: { ...parsed.data, updatedBy: p.id } }, { upsert: true });
+  await recordingAudit(p, 'settings.saved', undefined, parsed.data);
+  res.json({ data: { settings: parsed.data } });
 });
 export const saveGrant = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
   const input = z.object({ principalId: z.string(), principalKind: z.enum(['crm', 'main']), permissions: z.array(z.enum(RECORDING_PERMISSIONS)).max(RECORDING_PERMISSIONS.length) }).safeParse(req.body);
   if (!input.success) throw new ApiError(400, 'Invalid recording grant');
   await recordingPrincipal(validId(input.data.principalId), p.orgId, input.data.principalKind);
-  await CallRecordingGrant.updateOne({ organizationId: p.orgId, principalId: input.data.principalId, principalKind: input.data.principalKind }, { $set: { permissions: [...new Set(input.data.permissions)], updatedBy: p.id } }, { upsert: true });
+  await CallRecordingGrant.updateOne({ organizationId: p.orgId, principalId: input.data.principalId, principalKind: input.data.principalKind }, { $set: { permissions: [...new Set(grantable(input.data.permissions))], updatedBy: p.id } }, { upsert: true });
   await recordingAudit(p, 'permission.changed', undefined, input.data);
   res.json({ data: { saved: true } });
 });
 export const getCallRecording = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);
   const permissions = await recordingPermissions(p);
+  const call: any = await CallLog.findOne({ _id: validId(req.params.id), orgId: p.orgId }).select('+recordingCorrelation');
+  const own = Boolean(call && callRepId(call) === p.id);
+  if (!own && !permissions.includes('view')) throw new ApiError(403, 'Recording permission required');
   const record: any = await CallRecording.findOne({ callLogId: validId(req.params.id), organizationId: p.orgId });
-  const own = record && record.employeeId === p.id;
-  if (!permissions.includes('view') && !(permissions.includes('control') && own)) throw new ApiError(403, 'Recording permission required');
+  const restartable = !record || (record.state === 'failed' && !record.startedAt && !record.files.length);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ data: { recording: record ? summary(record) : null, permissions, canControl: Boolean(own && permissions.includes('control')) } });
+  res.json({ data: { recording: record ? summary(record) : null, permissions, canStart: Boolean(own && restartable && recordingReady(call)), canControl: Boolean(own && call?.status === 'in-progress') } });
 });
 export const control = asyncHandler(async (req: Request, res: Response) => {
-  const action = z.enum(['pause', 'resume', 'consent']).safeParse(req.body?.action);
+  const action = z.enum(['start', 'pause', 'resume']).safeParse(req.body?.action);
   if (!action.success) throw new ApiError(400, 'Invalid control');
-  await controlRecording(await principal(req), validId(req.params.id), action.data);
+  const p = await principal(req);
+  if (action.data === 'start') await startManualRecording(p, validId(req.params.id));
+  else await controlRecording(p, validId(req.params.id), action.data);
   res.json({ data: { accepted: true } });
+});
+const listInput = z.object({
+  page: z.coerce.number().int().min(1).max(10000).default(1),
+  from: z.string().datetime().optional(), to: z.string().datetime().optional(),
+  reviewed: z.enum(['all', 'reviewed', 'unreviewed']).default('all'),
+  repId: z.string().regex(/^[a-f0-9]{24}$/i).optional(),
+  search: z.string().trim().max(80).optional(),
+});
+const PAGE_SIZE = 25;
+async function staffNames(ids: string[]) {
+  const valid = [...new Set(ids.filter(id => mongoose.isValidObjectId(id)))];
+  if (!valid.length) return new Map<string, string>();
+  const [crm, main]: any[] = await Promise.all([CrmUser.find({ _id: { $in: valid } }).select('fullName').lean(), User.find({ _id: { $in: valid } }).select('name').lean()]);
+  return new Map<string, string>([...main.map((u: any) => [String(u._id), u.name]), ...crm.map((u: any) => [String(u._id), u.fullName])] as [string, string][]);
+}
+export const listRecordings = asyncHandler(async (req: Request, res: Response) => {
+  const p = await principal(req);
+  await requireRecordingPermission(p, 'view');
+  const input = listInput.safeParse(req.query);
+  if (!input.success) throw new ApiError(400, 'Invalid recording filters');
+  const { page, from, to, reviewed, repId, search } = input.data;
+  const filter: any = { organizationId: p.orgId, state: { $nin: ['deleted', 'deleting'] }, startedAt: { $ne: null, ...(from ? { $gte: new Date(from) } : {}), ...(to ? { $lte: new Date(to) } : {}) }, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] };
+  if (reviewed === 'reviewed') filter.reviewedAt = { $ne: null };
+  if (reviewed === 'unreviewed') filter.reviewedAt = null;
+  if (repId) filter.employeeId = repId;
+  if (search) {
+    const digits = search.replace(/\D/g, '');
+    const words = new RegExp(escapeRegex(search), 'i');
+    const parts = search.split(/\s+/).filter(Boolean);
+    const leadClauses: any[] = [{ firstName: words }, { lastName: words }];
+    if (parts.length > 1) leadClauses.push({ firstName: new RegExp(escapeRegex(parts[0]), 'i'), lastName: new RegExp(escapeRegex(parts[1]), 'i') });
+    if (digits.length >= 3) leadClauses.push({ phone: new RegExp(digits.split('').join('\\D*')) });
+    const [leads, calls]: any[] = await Promise.all([
+      Lead.find({ organizationId: p.orgId, $or: leadClauses }).select('_id').limit(500).lean(),
+      digits.length >= 3 ? CallLog.find({ orgId: p.orgId, $or: [{ from: new RegExp(digits) }, { to: new RegExp(digits) }] }).select('_id').limit(500).lean() : [],
+    ]);
+    filter.$and = [{ $or: [{ leadId: { $in: leads.map((l: any) => l._id) } }, { callLogId: { $in: calls.map((c: any) => c._id) } }] }];
+  }
+  const [total, rows, repIds]: any[] = await Promise.all([
+    CallRecording.countDocuments(filter),
+    CallRecording.find(filter).sort({ startedAt: -1 }).skip((page - 1) * PAGE_SIZE).limit(PAGE_SIZE).lean(),
+    CallRecording.distinct('employeeId', { organizationId: p.orgId, state: { $nin: ['deleted', 'deleting'] }, startedAt: { $ne: null } }),
+  ]);
+  const calls: any[] = await CallLog.find({ _id: { $in: rows.map((r: any) => r.callLogId) } }).select('from to direction durationSec answeredAt endedAt lineLabel answeredBy placedBy leadId').lean();
+  const callById = new Map(calls.map(c => [String(c._id), c]));
+  const leadIds = rows.map((r: any) => r.leadId || callById.get(String(r.callLogId))?.leadId).filter(Boolean);
+  const leads: any[] = leadIds.length ? await Lead.find({ _id: { $in: leadIds }, organizationId: p.orgId }).select('firstName lastName phone').lean() : [];
+  const leadById = new Map(leads.map(l => [String(l._id), l]));
+  const names = await staffNames([...rows.map((r: any) => String(r.employeeId || '')), ...repIds.map(String)]);
+  const items = rows.map((r: any) => {
+    const call = callById.get(String(r.callLogId)) || {};
+    const leadId = String(r.leadId || call.leadId || '');
+    const lead = leadById.get(leadId);
+    const customerPhone = call.direction === 'outbound' ? call.to : call.from;
+    const customerName = lead ? [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() : '';
+    const answered = call.answeredAt && call.endedAt ? Math.max(0, Math.round((new Date(call.endedAt).getTime() - new Date(call.answeredAt).getTime()) / 1000)) : null;
+    return {
+      _id: r._id, callLogId: r.callLogId, leadId: lead ? leadId : null, customerName: customerName || '', customerPhone: customerPhone || lead?.phone || '',
+      repId: r.employeeId || '', repName: names.get(String(r.employeeId)) || (call.answeredBy || call.placedBy)?.name || '',
+      direction: r.direction || call.direction, line: call.lineLabel || (call.direction === 'outbound' ? call.from : call.to) || '',
+      durationSec: typeof call.durationSec === 'number' ? call.durationSec : answered,
+      startedAt: r.startedAt, endedAt: r.endedAt, state: r.state, incomplete: Boolean(r.incomplete), reviewedAt: r.reviewedAt || null, reviewedByName: r.reviewedByName || '',
+    };
+  });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ data: { items, total, page, pageSize: PAGE_SIZE, reps: repIds.map((id: string) => ({ id: String(id), name: names.get(String(id)) || 'Former employee' })).sort((a: any, b: any) => a.name.localeCompare(b.name)) } });
 });
 export const getRecording = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);
@@ -84,8 +165,11 @@ export const getRecording = asyncHandler(async (req: Request, res: Response) => 
 export const reviewRecording = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);
   const record = await accessible(p, req.params.id, 'review');
+  const reviewedAt = new Date();
+  const reviewedByName = await principalName(p);
+  await CallRecording.updateOne({ _id: record._id }, { $set: { reviewedAt, reviewedBy: p.id, reviewedByName } });
   await recordingAudit(p, 'recording.reviewed', record._id);
-  res.json({ data: { reviewed: true } });
+  res.json({ data: { reviewed: true, reviewedAt, reviewedByName } });
 });
 export const removeRecording = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);

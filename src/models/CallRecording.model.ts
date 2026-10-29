@@ -2,6 +2,8 @@ import mongoose, { Schema } from 'mongoose';
 
 export const RECORDING_PERMISSIONS = ['view', 'download', 'share', 'review', 'control', 'delete'] as const;
 export type RecordingPermission = typeof RECORDING_PERMISSIONS[number];
+export const GRANTABLE_RECORDING_PERMISSIONS = ['view', 'download', 'share', 'review', 'delete'] as const;
+export const DEFAULT_RECORDING_ANNOUNCEMENT = 'This call is now being recorded.';
 
 const policy = new Schema({
   organizationId: { type: String, required: true }, name: { type: String, required: true },
@@ -27,8 +29,15 @@ const recording = new Schema({
   intervals: [{ action: String, at: Date, actorId: String, revision: Number }],
   files: [{ eventId: String, providerId: String, legId: String, key: String, bytes: Number, checksum: String, startedAt: Date, endedAt: Date }],
   pendingFiles: [new Schema({ providerId: String, key: String }, { _id: false })],
+  startedBy: String, reviewedAt: Date, reviewedBy: String, reviewedByName: String,
 }, { timestamps: true });
 recording.index({ expiresAt: 1, state: 1 });
+recording.index({ organizationId: 1, startedAt: -1 });
+const settings = new Schema({
+  organizationId: { type: String, required: true, unique: true },
+  announcementText: { type: String, default: DEFAULT_RECORDING_ANNOUNCEMENT }, announcementLanguage: { type: String, default: 'en-US' },
+  retentionMonths: { type: Number, default: 6 }, updatedBy: String,
+}, { timestamps: true });
 
 const grant = new Schema({ organizationId: { type: String, required: true }, principalId: { type: String, required: true }, principalKind: { type: String, enum: ['crm', 'main'], required: true }, permissions: [{ type: String, enum: RECORDING_PERMISSIONS }], updatedBy: String }, { timestamps: true });
 grant.index({ organizationId: 1, principalId: 1, principalKind: 1 }, { unique: true });
@@ -48,3 +57,4 @@ export const CallRecordingAudit = mongoose.models.CallRecordingAudit || mongoose
 export const CallRecordingEvent = mongoose.models.CallRecordingEvent || mongoose.model('CallRecordingEvent', event);
 export const CallRecordingShare = mongoose.models.CallRecordingShare || mongoose.model('CallRecordingShare', share);
 export const CallRecordingMediaSession = mongoose.models.CallRecordingMediaSession || mongoose.model('CallRecordingMediaSession', media);
+export const CallRecordingSettings = mongoose.models.CallRecordingSettings || mongoose.model('CallRecordingSettings', settings);

@@ -21,6 +21,7 @@ export interface IDealershipPhoneNumber extends Document {
   kind: PhoneNumberKind;
   location: string;
   department: string;
+  ringGroupId: mongoose.Types.ObjectId | null;
   telnyx: TelnyxNumberCheck;
   createdBy: mongoose.Types.ObjectId;
   updatedBy: mongoose.Types.ObjectId;
@@ -43,6 +44,7 @@ const DealershipPhoneNumberSchema = new Schema<IDealershipPhoneNumber>({
   kind: { type: String, enum: PHONE_NUMBER_KINDS, required: true },
   location: { type: String, default: '', trim: true, maxlength: 80 },
   department: { type: String, default: '', trim: true, maxlength: 60 },
+  ringGroupId: { type: Schema.Types.ObjectId, ref: 'CrmLeadGroup', default: null },
   telnyx: { type: TelnyxCheckSchema, default: () => ({}) },
   createdBy: { type: Schema.Types.ObjectId, required: true },
   updatedBy: { type: Schema.Types.ObjectId, required: true },

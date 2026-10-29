@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import DealershipPhoneNumber, { PHONE_NUMBER_KINDS, PhoneNumberKind, TelnyxNumberCheck } from '../models/DealershipPhoneNumber.model';
 import CallRoutingConfig from '../models/CallRoutingConfig.model';
+import CrmLeadGroup from '../models/CrmLeadGroup.model';
 import * as telnyx from './telnyx.service';
 import { ApiError } from '../utils/ApiError';
 
@@ -14,6 +15,7 @@ export interface DealershipLine {
   kind: PhoneNumberKind;
   location: string;
   department: string;
+  ringGroupId: string | null;
 }
 
 export interface PhoneNumberInput {
@@ -22,6 +24,7 @@ export interface PhoneNumberInput {
   kind: PhoneNumberKind;
   location: string;
   department: string;
+  ringGroupId: string | null;
 }
 
 export function normalizeDealershipNumber(value: unknown): string | null {
@@ -46,14 +49,16 @@ export function parsePhoneNumberInput(raw: any): PhoneNumberInput {
   const department = kind === 'department' ? text(raw?.department, 60) : '';
   if (kind === 'department' && !department) throw new ApiError(400, 'Enter the department for this number, for example "Service".');
   if (department.length > 60) throw new ApiError(400, 'The department can be up to 60 characters.');
-  return { number, label, kind, location, department };
+  const ringGroupId = String(raw?.ringGroupId ?? '').trim() || null;
+  if (ringGroupId && !mongoose.isValidObjectId(ringGroupId)) throw new ApiError(400, 'Choose a team from your Lead Groups.');
+  return { number, label, kind, location, department, ringGroupId };
 }
 
 export async function findDealershipLine(number: unknown): Promise<DealershipLine | null> {
   const normalized = normalizeDealershipNumber(number);
   if (!normalized) return null;
   const row: any = await DealershipPhoneNumber.findOne({ number: normalized })
-    .select('organizationId number label kind location department').lean().catch(() => null);
+    .select('organizationId number label kind location department ringGroupId').lean().catch(() => null);
   if (!row) return null;
   return {
     organizationId: String(row.organizationId),
@@ -62,6 +67,7 @@ export async function findDealershipLine(number: unknown): Promise<DealershipLin
     kind: row.kind,
     location: row.location || '',
     department: row.department || '',
+    ringGroupId: row.ringGroupId ? String(row.ringGroupId) : null,
   };
 }
 
@@ -178,6 +184,12 @@ async function assertNumberAvailable(organizationId: string, number: string, exc
   }
 }
 
+async function assertRingGroup(organizationId: string, ringGroupId: string | null) {
+  if (!ringGroupId) return;
+  const exists = await CrmLeadGroup.exists({ _id: ringGroupId, organizationId, isActive: true });
+  if (!exists) throw new ApiError(400, 'Choose an active Lead Group for this number.');
+}
+
 function duplicateError(error: any): never {
   if (error?.code === 11000) {
     if (String(error?.message || '').includes('dealership_phone_one_main_per_org') || error?.keyPattern?.kind) {
@@ -190,12 +202,20 @@ function duplicateError(error: any): never {
 
 export async function listDealershipNumbers(organizationId: string) {
   const rows = await DealershipPhoneNumber.find({ organizationId }).lean();
-  return rows.sort((a, b) => PHONE_NUMBER_KINDS.indexOf(a.kind) - PHONE_NUMBER_KINDS.indexOf(b.kind) || a.label.localeCompare(b.label));
+  const groupIds = rows.map((row) => row.ringGroupId).filter(Boolean);
+  const groups = groupIds.length
+    ? await CrmLeadGroup.find({ _id: { $in: groupIds }, organizationId }).select('name isActive').lean()
+    : [];
+  const names = new Map(groups.map((group: any) => [String(group._id), group.isActive ? group.name : '']));
+  return rows
+    .map((row) => ({ ...row, ringGroupName: row.ringGroupId ? names.get(String(row.ringGroupId)) || '' : '' }))
+    .sort((a, b) => PHONE_NUMBER_KINDS.indexOf(a.kind) - PHONE_NUMBER_KINDS.indexOf(b.kind) || a.label.localeCompare(b.label));
 }
 
 export async function createDealershipNumber(organizationId: string, userId: string, raw: unknown) {
   const input = parsePhoneNumberInput(raw);
   await assertNumberAvailable(organizationId, input.number);
+  await assertRingGroup(organizationId, input.ringGroupId);
   const telnyxCheck = await checkNumberInTelnyx(input.number);
   try {
     return (await DealershipPhoneNumber.create({ ...input, organizationId, telnyx: telnyxCheck, createdBy: userId, updatedBy: userId })).toObject();
@@ -210,6 +230,7 @@ export async function updateDealershipNumber(organizationId: string, id: string,
   if (!existing) throw new ApiError(404, 'Phone number not found');
   const input = parsePhoneNumberInput(raw);
   if (input.number !== existing.number) await assertNumberAvailable(organizationId, input.number, id);
+  await assertRingGroup(organizationId, input.ringGroupId);
   const telnyxCheck = input.number !== existing.number ? await checkNumberInTelnyx(input.number) : existing.telnyx;
   try {
     return await DealershipPhoneNumber.findOneAndUpdate(

@@ -99,6 +99,7 @@ import leadIntakeRoute from "./leadIntake.routes";
 import crmLocationRoute from "./crmLocation.routes";
 import crmPhoneNumberRoute from "./crmPhoneNumber.routes";
 import crmExtensionSignInRoute from "./crmExtensionSignIn.routes";
+import crmMyCallPhoneRoute from "./crmMyCallPhone.routes";
 import aiKnowledgeBaseRoute from "./aiKnowledgeBase.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
@@ -309,6 +310,10 @@ const defaultRoutes = [
   {
     path: "/crm/extension-sign-in",
     route: crmExtensionSignInRoute,
+  },
+  {
+    path: "/crm/my-call-phone",
+    route: crmMyCallPhoneRoute,
   },
   {
     path: "/crm/knowledge-base",

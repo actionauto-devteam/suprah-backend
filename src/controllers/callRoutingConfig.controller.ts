@@ -4,7 +4,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
 import CallRoutingConfig from '../models/CallRoutingConfig.model';
-import { parseRoutingConfig, validateRoutingGroups } from '../services/callRoutingConfig.service';
+import { parseRoutingConfig, validateRoutingGroups, validateRoutingNumbers } from '../services/callRoutingConfig.service';
 import { COMPANY_NUMBER } from '../services/telnyx.service';
 
 function admin(req: Request) {
@@ -22,6 +22,7 @@ export const saveRoutingConfig = asyncHandler(async (req: Request, res: Response
   const { orgId, userId } = admin(req);
   const config = parseRoutingConfig(req.body, COMPANY_NUMBER);
   await validateRoutingGroups(orgId, config);
+  await validateRoutingNumbers(orgId, config);
   const id = req.params.id;
   if (id && !mongoose.isValidObjectId(id)) throw new ApiError(400, 'Invalid configuration ID');
   const externalNumbers = config.options.map(option => option.externalDestination).filter(Boolean);

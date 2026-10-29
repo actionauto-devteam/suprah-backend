@@ -13,7 +13,8 @@ import { orgEventRoom } from "../utils/crmStaffRoom";
 import { ApiError } from "../utils/ApiError";
 import Organization from "../models/Organization.model";
 import Appointment from "../models/Appointment.model";
-import { notifyOrgAdmins } from "../utils/safeNotification";
+import { notifyOrgAdmins, notifyUsers } from "../utils/safeNotification";
+import User from "../models/User.model";
 import { createAiAgentTaskAndNotify } from "../utils/aiAgentTask";
 import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from "../utils/leadNote";
 import { describeSmsFailure } from "../utils/smsFailure";
@@ -59,7 +60,10 @@ import {
 
 const lifecycleIntake = () => import("./leadIntake.service");
 const inquiryRecords = () => import("./leadInquiry.service");
-import { getInboundRoutingConfig, getConfiguredInboundOrganization } from './callRoutingConfig.service';
+import { getInboundRoutingConfig, getConfiguredInboundOrganization, routingGroupRecipients } from './callRoutingConfig.service';
+import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './staffCallPhone.service';
+import StaffCallPhone from "../models/StaffCallPhone.model";
+import CrmUser from "../models/CrmUser.model";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -1803,9 +1807,279 @@ async function finishIvrMissed(call: any): Promise<void> {
   const timer = setTimeout(() => telnyx.hangupCall(call.providerCallControlId).catch(() => {}), 15000);
   timer.unref();
   await sendMissedCallTextBack(claimed);
+  await notifyMissedCall(claimed);
 }
 
-const ivrCallbacks = { missed: finishIvrMissed };
+const PHONE_LEG_LIMIT = 15;
+
+function spokenCaller(call: any): string {
+  if (call.customerName) return String(call.customerName);
+  const digits = String(call.from || "").replace(/\D/g, "").slice(-10);
+  if (digits.length !== 10) return "an unknown number";
+  const spaced = (part: string) => part.split("").join(" ");
+  return `${spaced(digits.slice(0, 3))}, ${spaced(digits.slice(3, 6))}, ${spaced(digits.slice(6))}`;
+}
+
+async function staffDisplayName(userId: string): Promise<string> {
+  if (!mongoose.isValidObjectId(userId)) return "Team member";
+  const crm: any = await CrmUser.findById(userId).select("fullName").lean().catch(() => null);
+  if (crm?.fullName) return String(crm.fullName);
+  const user: any = await User.findById(userId).select("name").lean().catch(() => null);
+  return String(user?.name || "Team member");
+}
+
+async function activeStaffIds(orgId: string, userIds: string[]): Promise<Set<string>> {
+  const valid = userIds.filter((id) => mongoose.isValidObjectId(id));
+  const [crm, users] = await Promise.all([
+    CrmUser.find({ _id: { $in: valid }, organizationId: orgId, isActive: true, isOffboarded: { $ne: true } }).select("_id").lean(),
+    User.find({ _id: { $in: valid }, organizationId: orgId, isActive: true }).select("_id").lean(),
+  ]);
+  return new Set([...crm, ...users].map((row: any) => String(row._id)));
+}
+
+async function phoneTargets(call: any): Promise<{ userId: string; phone: string }[]> {
+  const orgId = String(call.orgId);
+  const ids: string[] | null = call.routing
+    ? (call.routing.allOrg ? null : (call.routing.recipientIds || []))
+    : (call.ringRecipientIds?.length ? call.ringRecipientIds : null);
+  if (ids && !ids.length) return [];
+  const rows: any[] = await StaffCallPhone.find({
+    organizationId: orgId, enabled: true, verifiedAt: { $ne: null }, ...(ids ? { userId: { $in: ids } } : {}),
+  }).select("userId phone").limit(PHONE_LEG_LIMIT * 3).lean();
+  if (!rows.length) return [];
+  const active = await activeStaffIds(orgId, rows.map((row) => String(row.userId)));
+  const seen = new Set<string>([normalizePhone(call.from || "")]);
+  const targets: { userId: string; phone: string }[] = [];
+  for (const row of rows) {
+    if (!active.has(String(row.userId)) || seen.has(row.phone)) continue;
+    seen.add(row.phone);
+    targets.push({ userId: String(row.userId), phone: row.phone });
+    if (targets.length === PHONE_LEG_LIMIT) break;
+  }
+  return targets;
+}
+
+async function markPhoneLegs(callId: any, callControlIds: string[], state: "answered" | "ended"): Promise<void> {
+  if (!callControlIds.length) return;
+  await CallLog.updateOne(
+    { _id: callId },
+    { $set: { "phoneLegs.$[leg].state": state } },
+    { arrayFilters: [{ "leg.callControlId": { $in: callControlIds } }] },
+  ).catch(() => undefined);
+}
+
+async function stopPhoneLegs(call: any, keep?: string): Promise<void> {
+  const fresh: any = await CallLog.findById(call._id).select("phoneLegs").lean().catch(() => null);
+  const legs = (fresh?.phoneLegs || []).filter((leg: any) => leg.state !== "ended" && leg.callControlId !== keep);
+  if (!legs.length) return;
+  await Promise.all(legs.map((leg: any) => telnyx.hangupCall(leg.callControlId).catch(() => {})));
+  await markPhoneLegs(call._id, legs.map((leg: any) => leg.callControlId), "ended");
+}
+
+async function startPhoneLegs(call: any): Promise<void> {
+  try {
+    const targets = await phoneTargets(call);
+    if (!targets.length) return;
+    const deadline = call.routing?.deadline
+      ? new Date(call.routing.deadline).getTime()
+      : new Date(call.startedAt || call.createdAt || Date.now()).getTime() + RING_TIMEOUT_MS;
+    const timeoutSecs = Math.max(10, Math.min(35, Math.round((deadline - Date.now()) / 1000)));
+    const from = call.to || telnyx.COMPANY_NUMBER;
+    await Promise.all(targets.map(async (target) => {
+      try {
+        const { callControlId } = await telnyx.dialPhone({
+          to: target.phone,
+          from,
+          timeoutSecs,
+          clientState: { kind: "phone-leg", callLogId: String(call._id), userId: target.userId, ...(call.routing ? { revision: call.routing.revision } : {}) },
+        });
+        await CallLog.updateOne({ _id: call._id }, { $push: { phoneLegs: { userId: target.userId, phone: target.phone, callControlId, state: "dialing", at: new Date() } } });
+        const stillRinging = await CallLog.exists({ _id: call._id, status: "ringing", ...(call.routing ? { "routing.revision": call.routing.revision } : {}) });
+        if (!stillRinging) {
+          await telnyx.hangupCall(callControlId).catch(() => {});
+          await markPhoneLegs(call._id, [callControlId], "ended");
+        }
+      } catch (error: any) {
+        if (!(error instanceof telnyx.LocalUiAcceptanceModeBlockedError)) {
+          console.error("[comm] Could not ring an employee phone", { callId: String(call._id), error: String(error?.message || error).slice(0, 200) });
+        }
+      }
+    }));
+  } catch (error) {
+    console.error("[comm] Employee phone ringing failed", error);
+  }
+}
+
+async function phoneLegCall(state: any) {
+  if (!state?.callLogId || !mongoose.isValidObjectId(String(state.callLogId))) return null;
+  const call: any = await CallLog.findById(state.callLogId);
+  if (!call) return null;
+  if (call.routing && call.routing.revision !== state.revision) return { call, current: false };
+  return { call, current: call.status === "ringing" };
+}
+
+async function handlePhoneLegAnswered(payload: any, state: any): Promise<void> {
+  const leg = String(payload?.call_control_id || "");
+  const found = await phoneLegCall(state);
+  if (!found?.current) {
+    await telnyx.hangupCall(leg).catch(() => {});
+    if (found?.call) await markPhoneLegs(found.call._id, [leg], "ended");
+    return;
+  }
+  const { call } = found;
+  await markPhoneLegs(call._id, [leg], "answered");
+  const line = call.lineLabel || (await resolveDealerName(call.orgId));
+  await telnyx.gatherDigit(leg, `Call for ${line} from ${spokenCaller(call)}. Press 1 to take the call.`, {
+    kind: "phone-accept", callLogId: String(call._id), userId: String(state.userId), ...(call.routing ? { revision: call.routing.revision } : {}),
+  }).catch(async () => {
+    await telnyx.hangupCall(leg).catch(() => {});
+    await markPhoneLegs(call._id, [leg], "ended");
+  });
+}
+
+async function handlePhoneAccept(payload: any, state: any): Promise<void> {
+  const leg = String(payload?.call_control_id || "");
+  const found = await phoneLegCall(state);
+  if (!found?.call) {
+    await telnyx.hangupCall(leg).catch(() => {});
+    return;
+  }
+  if (String(payload?.digits || "") !== "1") {
+    await telnyx.hangupCall(leg).catch(() => {});
+    await markPhoneLegs(found.call._id, [leg], "ended");
+    return;
+  }
+  const pending = found.call;
+  const knownLeg = (pending.phoneLegs || []).some((item: any) => item.callControlId === leg && String(item.userId) === String(state.userId));
+  const claimed: any = knownLeg && found.current ? await CallLog.findOneAndUpdate(
+    { _id: pending._id, status: "ringing", ...(pending.routing ? { "routing.revision": pending.routing.revision } : {}) },
+    { $set: { status: "answering", answeredBy: { userId: String(state.userId), name: await staffDisplayName(String(state.userId)) }, answeredVia: "phone", agentLegCallControlId: leg } },
+    { new: true },
+  ) : null;
+  if (!claimed) {
+    await telnyx.speakFinal(leg, "Sorry, someone else already answered this call. Goodbye.").catch(() => telnyx.hangupCall(leg).catch(() => {}));
+    await markPhoneLegs(pending._id, [leg], "ended");
+    return;
+  }
+  if (claimed.routing) clearIvrTimer(String(claimed._id));
+  const timer = ringTimers.get(String(claimed._id));
+  if (timer) {
+    clearTimeout(timer);
+    ringTimers.delete(String(claimed._id));
+  }
+  await stopPhoneLegs(claimed, leg);
+  emitCallUpdate(claimed);
+  try {
+    if (!claimed.routing?.customerAnswered) await telnyx.answerCall(claimed.providerCallControlId);
+    await telnyx.bridgeCalls(claimed.providerCallControlId, leg);
+    const live = await CallLog.findOneAndUpdate(
+      { _id: claimed._id, status: "answering", agentLegCallControlId: leg },
+      { $set: { status: "in-progress", answeredAt: new Date(), ...(claimed.routing ? { "routing.deadline": null } : {}) } },
+      { new: true },
+    );
+    if (live) emitCallUpdate(live);
+  } catch (error: any) {
+    console.error("[comm] Could not connect the call to the employee phone", { callId: String(claimed._id), error: String(error?.message || error).slice(0, 200) });
+    await telnyx.hangupCall(leg).catch(() => {});
+    await markPhoneLegs(claimed._id, [leg], "ended");
+    const reset = await CallLog.findOneAndUpdate(
+      { _id: claimed._id, status: { $in: ["answering", "in-progress"] }, agentLegCallControlId: leg },
+      { $set: { status: "answering" } },
+      { new: true },
+    );
+    if (!reset) return;
+    if (reset.routing) await ivrAgentFailed(reset, ivrCallbacks);
+    else if (!(await returnLegacyCallToRinging(reset, "phone-connect-failed"))) {
+      const missed = await CallLog.findOneAndUpdate(
+        { _id: reset._id, status: "answering" },
+        { $set: { status: "missed", endedAt: new Date(), answeredBy: null, textBackSentAt: new Date() } },
+        { new: true },
+      );
+      if (missed) {
+        emitCallUpdate(missed);
+        await releaseLegacyCaller(missed);
+        await sendMissedCallTextBack(missed);
+        await notifyMissedCall(missed);
+      }
+    }
+  }
+}
+
+async function handlePhoneLegHangup(payload: any, state: any): Promise<void> {
+  const leg = String(payload?.call_control_id || "");
+  if (!state?.callLogId || !mongoose.isValidObjectId(String(state.callLogId))) return;
+  await markPhoneLegs(state.callLogId, [leg], "ended");
+  const call: any = await CallLog.findById(state.callLogId).lean();
+  if (call && call.answeredVia === "phone" && call.agentLegCallControlId === leg && ["answering", "in-progress"].includes(call.status)) {
+    await telnyx.hangupCall(call.providerCallControlId).catch(() => {});
+  }
+}
+
+const ivrCallbacks = { missed: finishIvrMissed, ringing: startPhoneLegs, stopRinging: (call: any) => stopPhoneLegs(call) };
+
+function prettyPhone(value: string): string {
+  const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(String(value || ""));
+  return match ? `(${match[1]}) ${match[2]}-${match[3]}` : String(value || "an unknown number");
+}
+
+async function notifyMissedCall(call: any): Promise<void> {
+  try {
+    const orgId = String(call.orgId);
+    const { title, message } = notificationTemplates.missed_call({
+      caller: call.customerName || prettyPhone(call.from),
+      line: call.lineLabel || "",
+    });
+    const metadata = {
+      callId: String(call._id),
+      ...(call.leadId ? { leadId: String(call.leadId), route: `/crm/leads?leadId=${call.leadId}` } : { route: "/crm/leads" }),
+    };
+    const recipients = new Set<string>();
+    const groupId = call.ringGroupId || call.routing?.targetGroupId || null;
+    if (groupId && mongoose.isValidObjectId(String(groupId))) {
+      (await routingGroupRecipients(orgId, String(groupId)).catch(() => [] as string[])).forEach((id) => recipients.add(id));
+    }
+    if (call.leadId) {
+      const lead: any = await mongoose.model("Lead").findOne({ _id: call.leadId, organizationId: orgId }).select("assignedTo").lean().catch(() => null);
+      if (lead?.assignedTo && mongoose.isValidObjectId(String(lead.assignedTo))) {
+        recipients.add(String(lead.assignedTo));
+        const assignee: any = await User.findOne({ _id: lead.assignedTo, organizationId: orgId }).select("email").lean();
+        const linked: any = assignee?.email
+          ? await CrmUser.findOne({ organizationId: orgId, email: String(assignee.email).toLowerCase(), isActive: true }).select("_id").lean()
+          : null;
+        if (linked) recipients.add(String(linked._id));
+      }
+    }
+    if (recipients.size) {
+      const [admins, crmAdmins] = await Promise.all([
+        User.find({ organizationId: orgId, role: { $in: ["admin", "super_admin"] } }).select("_id").lean(),
+        CrmUser.find({ organizationId: orgId, role: { $in: ["admin", "manager"] }, isActive: true }).select("_id").lean(),
+      ]);
+      [...admins, ...crmAdmins].forEach((admin: any) => recipients.delete(String(admin._id)));
+    }
+    if (recipients.size) await notifyUsers([...recipients], orgId, "missed_call", title, message, metadata);
+    await notifyOrgAdmins(orgId, "missed_call", title, message, metadata);
+  } catch (error) {
+    console.error("[comm] missed call notification failed", error);
+  }
+}
+
+function ringRooms(call: any): string[] {
+  return [...new Set<string>((call.ringRecipientIds || []).flatMap((id: string) => [`user:${id}`, `crm-user:${id}`]))];
+}
+
+function emitRingingCall(call: any, event: "comm:call:incoming" | "comm:call:update" = "comm:call:incoming"): void {
+  const payload = { call: call.toObject ? call.toObject() : call };
+  const rooms = ringRooms(call);
+  if (!rooms.length) {
+    emitToOrg(call.orgId, event, payload);
+    return;
+  }
+  try {
+    getSocketIO()?.to(rooms).emit(event, { ...payload, orgId: String(call.orgId) });
+  } catch {
+    return;
+  }
+}
 
 async function releaseLegacyCaller(call: any): Promise<void> {
   if (!call?.providerCallControlId) return;
@@ -1828,9 +2102,11 @@ function armLegacyRingTimer(call: any, delayMs: number): void {
     );
     if (still) {
       emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
+      await stopPhoneLegs(still);
       const dealerName = await resolveDealerName(orgId);
       await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
       await sendMissedCallTextBack(still);
+      await notifyMissedCall(still);
     }
   }, delayMs);
   ringTimers.set(callId, timer);
@@ -1847,7 +2123,8 @@ async function returnLegacyCallToRinging(call: any, reason: string): Promise<boo
   );
   if (!reopened) return false;
   armLegacyRingTimer(reopened, remaining);
-  emitToOrg(reopened.orgId, "comm:call:incoming", { call: reopened.toObject() });
+  emitRingingCall(reopened);
+  void startPhoneLegs(reopened);
   return true;
 }
 
@@ -1870,6 +2147,15 @@ function resolveCompanyNumberOrg(to: string): string | null {
 }
 
 export async function handleCallGatherEnded(payload: any): Promise<void> {
+  const state = decodeClientState(payload?.client_state);
+  if (state?.kind === 'phone-verify-gather') {
+    await handleStaffPhoneVerifyGather(payload, state);
+    return;
+  }
+  if (state?.kind === 'phone-accept') {
+    await handlePhoneAccept(payload, state);
+    return;
+  }
   await handleIvrGather(payload, ivrCallbacks);
 }
 
@@ -1879,6 +2165,7 @@ export async function recoverPendingIvrCalls(orgId?: string): Promise<void> {
 
 function emitCallUpdate(call: any): void {
   if (call.routing) emitIvrCall(call);
+  else if (call.status === 'ringing' && call.ringRecipientIds?.length) emitRingingCall(call, 'comm:call:update');
   else emitToOrg(call.orgId, 'comm:call:update', { call: call.toObject() });
 }
 
@@ -1989,6 +2276,9 @@ export async function handleCallInitiated(payload: any) {
     }
   }
 
+  const ringTeam = !inboundRouting && line?.ringGroupId
+    ? await routingGroupRecipients(String(orgId), line.ringGroupId).catch(() => [] as string[])
+    : [];
   const call = await CallLog.create({
     orgId,
     customerId: lead?.customerLink?.status === 'linked' ? lead.customerId : customer?._id ?? null,
@@ -2003,6 +2293,7 @@ export async function handleCallInitiated(payload: any) {
     startedAt: new Date(),
     customerName: displayName,
     ...(line ? { lineLabel: line.label } : {}),
+    ...(ringTeam.length ? { ringGroupId: line!.ringGroupId, ringRecipientIds: ringTeam } : {}),
   });
 
   if (intakeMode === "active" && callInquiryId) {
@@ -2022,8 +2313,9 @@ export async function handleCallInitiated(payload: any) {
 
   if (inboundRouting && await initializeIvr(call, inboundRouting.config, ivrCallbacks)) return;
   const legacyCall = inboundRouting ? await CallLog.findById(call._id) : call;
-  emitToOrg(orgId, "comm:call:incoming", { call: legacyCall.toObject() });
+  emitRingingCall(legacyCall);
   armLegacyRingTimer(call, RING_TIMEOUT_MS);
+  void startPhoneLegs(legacyCall);
 }
 
 /** Atomic first-to-answer claim. Two agents clicking Answer at once: exactly
@@ -2033,6 +2325,9 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
   if (!pending) throw Object.assign(new Error('Call already answered or ended'), { statusCode: 409 });
   if (pending?.routing && !await canReceiveIvrCall(pending, String(opts.user.userId))) {
     throw Object.assign(new Error('This call is routed to another group'), { statusCode: 403 });
+  }
+  if (!pending.routing && pending.ringRecipientIds?.length && !pending.ringRecipientIds.includes(String(opts.user.userId))) {
+    throw Object.assign(new Error('This call is for another team'), { statusCode: 403 });
   }
   const call = await CallLog.findOneAndUpdate(
     { _id: opts.callId, orgId: opts.orgId, status: "ringing", ...(pending?.routing ? { 'routing.revision': pending.routing.revision } : {}) },
@@ -2061,6 +2356,7 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
     clearTimeout(timer);
     ringTimers.delete(String(call._id));
   }
+  await stopPhoneLegs(call);
 
   try {
     await telnyx.transferToAgent(call.providerCallControlId!, cred.sipUsername, {
@@ -2097,6 +2393,15 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
 /** call.answered — the agent leg picked up → call is live. */
 export async function handleCallAnswered(payload: any) {
   const clientState = decodeClientState(payload?.client_state);
+  if (clientState?.kind === 'phone-verify') {
+    await handleStaffPhoneVerifyAnswered(payload, clientState);
+    return;
+  }
+  if (clientState?.kind === 'phone-leg') {
+    await handlePhoneLegAnswered(payload, clientState);
+    return;
+  }
+  if (String(clientState?.kind || '').startsWith('phone-')) return;
   const sessionId = payload?.call_session_id;
 
   const query = clientState?.callLogId
@@ -2132,6 +2437,11 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
   const sessionId = payload?.call_session_id;
   const clientState = decodeClientState(payload?.client_state);
   const cause = payload?.hangup_cause;
+  if (clientState?.kind === 'phone-leg' || clientState?.kind === 'phone-accept') {
+    await handlePhoneLegHangup(payload, clientState);
+    return;
+  }
+  if (String(clientState?.kind || '').startsWith('phone-')) return;
 
   const query: any = clientState?.callLogId
     ? { _id: clientState.callLogId }
@@ -2158,6 +2468,7 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
     }, { new: true });
     clearIvrTimer(String(call._id));
     if (final) emitIvrCall(final);
+    await stopPhoneLegs(call);
     return;
   }
 
@@ -2194,6 +2505,7 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
     clearTimeout(timer);
     ringTimers.delete(String(call._id));
   }
+  await stopPhoneLegs(saved);
 
   emitToOrg(saved.orgId, "comm:call:update", { call: saved.toObject() });
 
@@ -2205,6 +2517,7 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
       { new: true }
     );
     if (claimed) await sendMissedCallTextBack(claimed);
+    await notifyMissedCall(saved);
   }
 }
 
@@ -2212,6 +2525,10 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
 export async function handleSpeakEnded(payload: any) {
   const id = payload?.call_control_id;
   const tag = decodeClientState(payload?.client_state);
+  if (String(tag?.kind || '').startsWith('phone-')) {
+    if (tag.kind === 'phone-bye' && id) await telnyx.hangupCall(id).catch(() => {});
+    return;
+  }
   const call = id ? await CallLog.findOne({ providerCallControlId: id }) : null;
   if (call?.routing || String(tag?.kind || '').startsWith('ivr-')) {
     if (call?.status === 'missed') await telnyx.hangupCall(id).catch(() => {});

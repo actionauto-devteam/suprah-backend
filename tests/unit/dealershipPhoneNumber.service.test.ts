@@ -38,14 +38,14 @@ describe('dealership phone numbers', () => {
 
   it('keeps only the field that matches the type of number', () => {
     expect(parsePhoneNumberInput({ number: '8015550900', kind: 'main', label: '', location: 'LEHI', department: 'Sales' }))
-      .toEqual({ number: '+18015550900', label: 'Main', kind: 'main', location: '', department: '' });
+      .toEqual({ number: '+18015550900', label: 'Main', kind: 'main', location: '', department: '', ringGroupId: null });
     expect(parsePhoneNumberInput({ number: '8015550910', kind: 'location', label: ' Lehi   Sales ', location: 'LEHI', department: 'Sales' }))
-      .toEqual({ number: '+18015550910', label: 'Lehi Sales', kind: 'location', location: 'LEHI', department: '' });
+      .toEqual({ number: '+18015550910', label: 'Lehi Sales', kind: 'location', location: 'LEHI', department: '', ringGroupId: null });
     expect(() => parsePhoneNumberInput({ number: '8015550910', kind: 'location', label: 'x'.repeat(61), location: 'LEHI' })).toThrow(/up to 60/);
   });
 
   it('tags new leads with the line, and with the location only for location numbers', () => {
-    const base = { organizationId: 'org', number: '+18015550910', label: 'Lehi Sales', location: 'LEHI', department: '' };
+    const base = { organizationId: 'org', number: '+18015550910', label: 'Lehi Sales', location: 'LEHI', department: '', ringGroupId: null };
     expect(leadFieldsForLine({ ...base, kind: 'location' })).toEqual({ dealershipLine: 'Lehi Sales', location: 'LEHI' });
     expect(leadFieldsForLine({ ...base, kind: 'department', label: 'Service', location: '' })).toEqual({ dealershipLine: 'Service' });
     expect(leadFieldsForLine(null)).toEqual({});

@@ -273,6 +273,11 @@ export const notificationTemplates = {
     message: `${data.authorName} mentioned you on ${data.customerName}'s lead`,
   }),
 
+  missed_call: (data: { caller: string; line: string }) => ({
+    title: 'Missed call',
+    message: `Missed call from ${data.caller}${data.line ? ` to ${data.line}` : ''}. Open the lead to call or text them back.`,
+  }),
+
   // ==================== CRM & LEADS ====================
   new_lead: (data: LeadData) => ({
     title: 'New Lead Received',
