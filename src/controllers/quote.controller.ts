@@ -24,6 +24,8 @@ import {
 import { createLoadSchema } from '../validations/load.validation';
 import { findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
 import { listCustomerShipments, notifyCustomerOfDeletedRequest, notifyQuoteCustomer } from '../services/customerShipments.service';
+import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
+import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 
 /**
@@ -592,6 +594,9 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
         `${firstName} ${lastName} asked for a shipping quote for ${vehicleName} to ${destination}.`,
         { quoteId: quote._id.toString(), customerName: `${firstName} ${lastName}`, vehicleName, source: 'customer_portal' },
     );
+    // The linked lead's salesperson hears it too, unless they're an admin
+    // and already got the notice above.
+    void notifyQuoteSalesperson(orgId, quote._id, { skipAdmins: true });
     getSocketIO()?.to(`org:${orgId}`).emit('quote:change', { action: 'created' });
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
     await activityService.createActivity({
@@ -1051,8 +1056,15 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
     // The status before this change, so a customer is told only when it really changes.
     const before = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
-        .select('status source')
-        .lean<{ status?: string; source?: string }>();
+        .select('status source leadId email phone')
+        .lean<{ status?: string; source?: string; leadId?: unknown; email?: string; phone?: string }>();
+
+    // A lead added to the CRM after the quote was made is linked when staff
+    // accept or decline it. An existing link is never changed here.
+    const lateLeadLink = before && !before.leadId && (status === 'accepted' || status === 'rejected')
+        ? await leadLinkFor(orgId, { email: before.email, phone: before.phone })
+        : undefined;
+    const statusSet = { status, ...(lateLeadLink ?? {}) };
 
     const quote = await Quote.findOneAndUpdate(
         { _id: req.params.id, organizationId: orgId },
@@ -1060,9 +1072,9 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
         // decline reason) stops applying once staff give it another status.
         status === 'rejected'
             ? declineReason
-                ? { $set: { status, declineReason } }
-                : { $set: { status }, $unset: { declineReason: '' } }
-            : { $set: { status }, $unset: { closedReason: '', closedAt: '', declineReason: '' } },
+                ? { $set: { ...statusSet, declineReason } }
+                : { $set: statusSet, $unset: { declineReason: '' } }
+            : { $set: statusSet, $unset: { closedReason: '', closedAt: '', declineReason: '' } },
         { new: true }
     ).populate('vehicleId', 'year make modelName vin stockNumber images dealerCity dealerState')
         .populate('leadId', 'firstName lastName');
@@ -1522,12 +1534,16 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
         requestedPickup,
     );
 
-    const deliveryLocation = mergeConversionLocation(
-        quote.toAddress,
-        quote.toZip,
-        quote.toLocation as any,
-        requestedDelivery,
-    );
+    const deliveryLocation = {
+        ...mergeConversionLocation(
+            quote.toAddress,
+            quote.toZip,
+            quote.toLocation as any,
+            requestedDelivery,
+        ),
+        // The quote's customer is who receives the car.
+        ...quoteDeliveryContact(quote),
+    };
 
     // Quote only stores open/enclosed. Map that choice to an existing,
     // canonical Load trailer type so converted loads behave like manually
@@ -1625,6 +1641,15 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
 
     // Preserve the quote for history and mark it as converted.
     quote.status = 'booked';
+    // A lead added to the CRM after the quote was made is linked now, so the
+    // load page and the salesperson's notices find it. An existing link stays.
+    if (!quote.leadId) {
+        const lateLeadLink = await leadLinkFor(orgId, { email: quote.email, phone: quote.phone });
+        if (lateLeadLink) {
+            quote.leadId = lateLeadLink.leadId;
+            if (lateLeadLink.customerRecordId) quote.customerRecordId = lateLeadLink.customerRecordId;
+        }
+    }
     await quote.save();
 
     // Clear cached quote lists so the booked status is reflected.

@@ -1,11 +1,14 @@
 /**
  * A quote links to the dealership's existing CRM lead for its customer: an
  * email match wins over a phone-only match, the newest lead wins among equal
- * matches, and the lead's customer record comes along. Leads are stand-ins;
- * no database is used.
+ * matches, and the lead's customer record comes along. A load made from a
+ * quote shows the quote's customer and lead. Models are stand-ins; no
+ * database is used.
  */
 const mockLeadFindOne = jest.fn();
 const mockSort = jest.fn();
+const mockQuoteFindOne = jest.fn();
+const mockPopulate = jest.fn();
 
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
@@ -19,9 +22,25 @@ jest.mock('../../src/models/lead.model', () => ({
   },
 }));
 
-import { findQuoteLeadLink } from '../../src/services/quoteLeadLink.service';
+jest.mock('../../src/models/Quote.model', () => ({
+  __esModule: true,
+  default: {
+    findOne: (filter: unknown) => {
+      const self: any = {
+        select: () => self,
+        populate: (...args: unknown[]) => { mockPopulate(...args); return self; },
+        lean: () => Promise.resolve(mockQuoteFindOne(filter)),
+      };
+      return self;
+    },
+  },
+}));
+
+import { findLoadQuoteOrigin, findQuoteLeadLink } from '../../src/services/quoteLeadLink.service';
 
 const ORG = '64b0000000000000000000aa';
+const QUOTE = '64b0000000000000000000ab';
+const LEAD = '64b0000000000000000000ac';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -65,5 +84,30 @@ describe('findQuoteLeadLink', () => {
   it('never searches outside a valid dealership', async () => {
     expect(await findQuoteLeadLink('not-an-org', { email: 'maria@example.com' })).toBeNull();
     expect(mockLeadFindOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('findLoadQuoteOrigin', () => {
+  it("gives the load page the quote's customer and linked lead", async () => {
+    mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: ' Santos ', leadId: { _id: LEAD, firstName: 'Maria', lastName: 'Santos' } });
+    expect(await findLoadQuoteOrigin(ORG, QUOTE)).toEqual({
+      quoteId: QUOTE,
+      customerName: 'Maria Santos',
+      lead: { _id: LEAD, firstName: 'Maria', lastName: 'Santos' },
+    });
+    expect(mockQuoteFindOne).toHaveBeenCalledWith({ _id: QUOTE, organizationId: ORG });
+    expect(mockPopulate).toHaveBeenCalledWith('leadId', 'firstName lastName');
+  });
+
+  it('shows no lead when the quote has none or its lead was deleted', async () => {
+    mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: 'Santos', leadId: null });
+    expect((await findLoadQuoteOrigin(ORG, QUOTE))?.lead).toBeNull();
+  });
+
+  it('returns nothing when the quote is gone or the id is not valid', async () => {
+    mockQuoteFindOne.mockReturnValue(null);
+    expect(await findLoadQuoteOrigin(ORG, QUOTE)).toBeNull();
+    expect(await findLoadQuoteOrigin(ORG, 'not-an-id')).toBeNull();
+    expect(await findLoadQuoteOrigin('', QUOTE)).toBeNull();
   });
 });

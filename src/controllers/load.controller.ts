@@ -39,6 +39,7 @@
     import emailService from "../services/email.service";
     import Quote from "../models/Quote.model";
     import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
+    import { findLoadQuoteOrigin } from "../services/quoteLeadLink.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -884,6 +885,15 @@
       await signPickupProof(loadObj);
       await signInspectionPhotos(loadObj);
       await presentConditionReportsForStaff(loadObj);
+
+      // Who the shipment is for and their CRM lead, when the load came from a
+      // quote. Never blocks the load page.
+      if (loadObj.quoteId) {
+        loadObj.quoteOrigin = await findLoadQuoteOrigin(organizationId, loadObj.quoteId).catch((err) => {
+          logger.warn({ err, loadId: String(loadObj._id) }, "Could not look up the quote this load came from");
+          return null;
+        });
+      }
 
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
     });
