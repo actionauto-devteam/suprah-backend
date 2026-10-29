@@ -1988,7 +1988,21 @@ const getDeliveredMessage = asyncHandler(async (req: Request, res: Response) => 
   if (!conversation) throw new ApiError(404, 'Conversation not found');
   if (!canReadConversationHistory(conversation, userId)) throw new ApiError(403, 'Not a member of this conversation');
 
-  const message = await SupraSpaceMessage.findOne({ _id: messageId, conversationId: id, isDeleted: false })
+  const historyFilter: any = { _id: messageId, conversationId: id, isDeleted: false };
+  const clearedAt = (conversation as any).clearedAt?.[userId.toString()];
+  const leftAt = getConversationLeftAt(conversation, userId);
+  // Default reads reconcile sends, including a sender's newly scheduled message.
+  // Navigation opts into the normal timeline boundaries without changing that contract.
+  if (req.query.history === 'true') {
+    historyFilter.scheduledStatus = { $ne: 'pending' };
+    if (clearedAt || leftAt) {
+      historyFilter.createdAt = {
+        ...(clearedAt ? { $gt: new Date(clearedAt) } : {}),
+        ...(leftAt ? { $lte: leftAt } : {}),
+      };
+    }
+  }
+  const message = await SupraSpaceMessage.findOne(historyFilter)
     .populate('sender', 'fullName username avatar')
     .populate({ path: 'replyTo', populate: { path: 'sender', select: 'fullName username avatar' } });
   if (!message) throw new ApiError(404, 'Message not found');
@@ -2196,44 +2210,76 @@ const searchInConversation = asyncHandler(async (req: Request, res: Response) =>
 
 const searchMessages = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.crmUser!._id;
-  const q = (req.query.q as string) || '';
-  const conversationId = req.query.conversationId as string | undefined;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : undefined;
   if (!q.trim() || q.trim().length < 2) return res.json(new ApiResponse(200, [], 'No query'));
 
   let convIds: any[];
+  let readableConversations: any[];
   if (conversationId) {
     const conv = await SupraSpaceConversation.findOne({
       _id: conversationId,
       members: userId,
       isActive: true,
       deletedFor: { $ne: userId },
-    }).select('_id').lean();
+    }).select('_id clearedAt leftAt leftBy').lean();
     if (!conv) return res.json(new ApiResponse(200, [], 'No query'));
     convIds = [conv._id];
+    readableConversations = [conv];
   } else {
     const convs = await SupraSpaceConversation.find({
       members: userId,
       isActive: true,
       deletedFor: { $ne: userId },
       'metadata.type': { $nin: ['customer_concern', 'customer_call'] },
-    }).select('_id').lean();
+    }).select('_id clearedAt leftAt leftBy').lean();
     convIds = convs.map((c: any) => c._id);
+    readableConversations = convs;
   }
 
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
-  const messages = await SupraSpaceMessage.find({
+  const pageSize = 30;
+  const filter: any = {
     conversationId: { $in: convIds },
     isDeleted: false,
     scheduledStatus: { $ne: 'pending' },
     content: rx,
-  })
+  };
+  // A result must obey the same history boundaries as the destination loader.
+  // Cleared history should never show up as an apparently clickable old result.
+  filter.$and = [{ $or: readableConversations.map(conversation => {
+    const scope: any = { conversationId: conversation._id };
+    const clearedAt = conversation.clearedAt?.[userId.toString()];
+    const leftAt = getConversationLeftAt(conversation, userId);
+    if (clearedAt || leftAt) scope.createdAt = {
+      ...(clearedAt ? { $gt: new Date(clearedAt) } : {}),
+      ...(leftAt ? { $lte: leftAt } : {}),
+    };
+    return scope;
+  }) }];
+  if (convIds.length === 0) return res.json(new ApiResponse(200, [], 'Search results'));
+  if (req.query.before) {
+    const before = new Date(String(req.query.before));
+    const beforeId = String(req.query.beforeId || '');
+    if (Number.isNaN(before.getTime()) || !mongoose.isValidObjectId(beforeId)) throw new ApiError(400, 'Invalid search cursor');
+    filter.$or = [
+      { createdAt: { $lt: before } },
+      { createdAt: before, _id: { $lt: new mongoose.Types.ObjectId(beforeId) } },
+    ];
+  }
+  const messages = await SupraSpaceMessage.find(filter)
     .populate('sender', 'fullName username avatar')
     .populate('conversationId', 'name type members avatar')
-    .sort({ createdAt: -1 })
-    .limit(30)
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(pageSize + 1)
     .lean();
 
-  res.json(new ApiResponse(200, messages, 'Search results'));
+  const page = messages.slice(0, pageSize);
+  const last = page[page.length - 1];
+  res.json({
+    ...new ApiResponse(200, page, 'Search results'),
+    nextCursor: messages.length > pageSize && last ? { before: last.createdAt, beforeId: last._id } : null,
+  });
 });
 
 const searchGifs = asyncHandler(async (req: Request, res: Response) => {
