@@ -3,6 +3,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { buildLeadConversation, getEarlierConversation } from '../services/leadConversation.service';
+import { isOrganizationAdmin } from '../services/contactRestriction.service';
 
 function orgOf(req: Request) {
   const user = (req as any).user || (req as any).crmUser;
@@ -14,10 +15,14 @@ function orgOf(req: Request) {
 
 export const getLeadConversation = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);
-  const data = await buildLeadConversation(orgId, String(req.params.id), {
+  const data: any = await buildLeadConversation(orgId, String(req.params.id), {
     before: req.query.before ? String(req.query.before) : null,
     limit: Number(req.query.limit) || undefined,
   });
+  if (data.combine) {
+    const user = (req as any).user || (req as any).crmUser;
+    data.combine.canUndo = await isOrganizationAdmin(user, orgId).catch(() => false);
+  }
   res.json(new ApiResponse(200, data, 'Conversation'));
 });
 

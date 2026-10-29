@@ -308,10 +308,26 @@ describe('Real-DB: lifecycle intake Milestone 2 (local MongoDB only)', () => {
       expect((await Appointment.findById(appointment._id).lean() as any).status).toBe('confirmed');
     });
 
-    it('sends a text to review when the phone belongs to two open leads and never guesses', async () => {
+    it('adds a text to the newest open lead when the phone belongs to two open leads', async () => {
+      const phone = nextPhone();
+      await makeLead({ phone }, { email: nextEmail(), createdAt: new Date(Date.now() - 2 * 86400000) });
+      const newest = await makeLead({ phone }, { email: nextEmail(), firstName: 'Sam', createdAt: new Date(Date.now() - 86400000) });
+      const message: any = await sms(phone, 'Hello?');
+      const stored: any = await CommunicationMessage.findById(message._id).lean();
+      expect(String(stored.leadId)).toBe(String(newest._id));
+      const event: any = await LeadInquiry.findOne({ 'sourceIds.communicationMessageId': message._id }).lean();
+      expect(event).toMatchObject({ association: { state: 'associated', outcome: 'appended' } });
+      expect(String(event.association.leadId)).toBe(String(newest._id));
+      expect(await Lead.countDocuments({ organizationId: orgId, phone })).toBe(2);
+    });
+
+    it('sends a text to review when a matching lead has a status it cannot read', async () => {
       const phone = nextPhone();
       await makeLead({ phone }, { email: nextEmail() });
-      await makeLead({ phone }, { email: nextEmail(), firstName: 'Sam' });
+      await Lead.collection.insertOne({
+        organizationId: orgId, createdBy: ids.owner, firstName: 'Sam', lastName: 'Lee', phone, email: nextEmail(),
+        source: 'Manual Entry', channel: 'sms', status: 'Legacy Waiting', isRead: true, createdAt: new Date(), updatedAt: new Date(),
+      });
       const message: any = await sms(phone, 'Hello?');
       const stored: any = await CommunicationMessage.findById(message._id).lean();
       expect(stored.leadId ?? null).toBeNull();
@@ -427,7 +443,11 @@ describe('Real-DB: lifecycle intake Milestone 2 (local MongoDB only)', () => {
     async function pendingTextReview() {
       const phone = nextPhone();
       const first = await makeLead({ phone }, { email: nextEmail(), assignedTo: ids.rep });
-      const second = await makeLead({ phone }, { email: nextEmail(), firstName: 'Sam' });
+      const inserted = await Lead.collection.insertOne({
+        organizationId: orgId, createdBy: ids.owner, firstName: 'Sam', lastName: 'Lee', phone, email: nextEmail(),
+        source: 'Manual Entry', channel: 'sms', status: 'Legacy Waiting', isRead: true, createdAt: new Date(), updatedAt: new Date(),
+      });
+      const second = { _id: inserted.insertedId };
       const message: any = await sms(phone, 'Can someone call me?');
       const event: any = await LeadInquiry.findOne({ 'sourceIds.communicationMessageId': message._id }).lean();
       return { phone, first, second, message, event };
@@ -500,7 +520,7 @@ describe('Real-DB: lifecycle intake Milestone 2 (local MongoDB only)', () => {
   });
 
   describe('closed-lead composer', () => {
-    it('points a closed lead to the customer’s active lead, never guesses between two, and can start a fresh one', async () => {
+    it('points a closed lead to the customer’s active lead, picks the newest of two, and can start a fresh one', async () => {
       const phone = nextPhone();
       const email = nextEmail();
       const closed = await makeLead({ phone, email }, { status: 'Closed' });
@@ -512,10 +532,9 @@ describe('Real-DB: lifecycle intake Milestone 2 (local MongoDB only)', () => {
       const single = await request(app).get(`/api/crm/lead-intake/leads/${closed._id}/active-lead`).set(auth('employee'));
       expect(single.body.data).toMatchObject({ leadClosed: true, status: 'single', lead: { _id: fresh.body.data.leadId } });
 
-      await makeLead({ phone, email }, { status: 'Contacted' });
-      const multiple = await request(app).get(`/api/crm/lead-intake/leads/${closed._id}/active-lead`).set(auth('employee'));
-      expect(multiple.body.data.status).toBe('multiple');
-      expect(multiple.body.data.candidates).toHaveLength(2);
+      const newer = await makeLead({ phone, email }, { status: 'Contacted', createdAt: new Date(Date.now() + 60000) });
+      const two = await request(app).get(`/api/crm/lead-intake/leads/${closed._id}/active-lead`).set(auth('employee'));
+      expect(two.body.data).toMatchObject({ leadClosed: true, status: 'single', lead: { _id: String(newer._id) } });
     });
 
     it('blocks a manual text from a closed lead while intake is on, and allows it when intake is off', async () => {

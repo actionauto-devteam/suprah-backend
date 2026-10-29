@@ -4,6 +4,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import { isOrganizationAdmin } from '../services/contactRestriction.service';
 import { getLeadIntakeControl, setLeadIntakeMode } from '../services/leadIntakeControl.service';
+import { getDuplicateCombineStatus, undoLeadCombine } from '../services/leadDuplicateCombine.service';
 import {
   canResolveLeadReviews,
   countPendingLeadReviews,
@@ -106,6 +107,26 @@ export const getActiveLead = asyncHandler(async (req: Request, res: Response) =>
   staffOf(req);
   const orgId = String((req as any).orgId || '');
   res.json(new ApiResponse(200, await findActiveLeadForClosedLead(orgId, String(req.params.leadId)), 'Active lead'));
+});
+
+async function requireAdmin(req: Request) {
+  const { user, actor } = staffOf(req);
+  const orgId = String((req as any).orgId || '');
+  if (!(await isOrganizationAdmin(user, orgId))) {
+    throw new ApiError(403, 'Only an organization admin can do this.');
+  }
+  return { orgId, actor };
+}
+
+export const getDuplicateLeads = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = await requireAdmin(req);
+  res.json(new ApiResponse(200, await getDuplicateCombineStatus(orgId), 'Duplicate leads'));
+});
+
+export const undoCombine = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId, actor } = await requireAdmin(req);
+  const result = await undoLeadCombine(orgId, String(req.params.leadId), actor);
+  res.json(new ApiResponse(200, result, 'Combine undone'));
 });
 
 export const startFreshLead = asyncHandler(async (req: Request, res: Response) => {

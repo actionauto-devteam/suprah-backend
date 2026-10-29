@@ -14,5 +14,7 @@ router.post('/reviews/:inquiryId/resolve', ctrl.resolveReview);
 router.get('/leads/:leadId/active-lead', ctrl.getActiveLead);
 router.post('/leads/:leadId/link', ctrl.linkLead);
 router.post('/leads/:leadId/fresh-lead', ctrl.startFreshLead);
+router.get('/duplicates', ctrl.getDuplicateLeads);
+router.post('/leads/:leadId/undo-combine', ctrl.undoCombine);
 
 export default router;

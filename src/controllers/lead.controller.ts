@@ -748,6 +748,7 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     const query: any = {
       organizationId: orgId,
+      'combinedInto.leadId': { $exists: false },
     };
 
     if (search) {
@@ -879,7 +880,7 @@ export const getLeadStatusCounts = async (req: Request, res: Response) => {
     }
 
     const results = await Lead.aggregate([
-      { $match: { organizationId: new mongoose.Types.ObjectId(orgId) } },
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), 'combinedInto.leadId': { $exists: false } } },
       { $group: { _id: '$status', count: { $sum: 1 } } },
     ]);
 
@@ -909,7 +910,7 @@ export const getLeadLocationCounts = async (req: Request, res: Response) => {
     }
 
     const results = await Lead.aggregate([
-      { $match: { organizationId: new mongoose.Types.ObjectId(orgId) } },
+      { $match: { organizationId: new mongoose.Types.ObjectId(orgId), 'combinedInto.leadId': { $exists: false } } },
       {
         $group: {
           _id: {
