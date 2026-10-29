@@ -222,6 +222,9 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
   }
 
   const { inviteeList, deptKeys } = await resolveAudience(user, invitees, inviteDepartments);
+  if (scheduledDates.length > 0 && !Boolean(inviteAll) && inviteeList.length === 0) {
+    throw new ApiError(400, 'Choose at least one person, department, or All CRM users so the scheduled meeting can be seen and notified.');
+  }
 
   const base = {
     organizationId: user.organizationId,
@@ -790,6 +793,9 @@ const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
   // Any audience field present → the audience was re-picked; replace it wholesale.
   if (invitees !== undefined || inviteAll !== undefined || inviteDepartments !== undefined) {
     const { inviteeList, deptKeys } = await resolveAudience(user, invitees, inviteDepartments);
+    if (!Boolean(inviteAll) && inviteeList.length === 0) {
+      throw new ApiError(400, 'Choose at least one person, department, or All CRM users so the scheduled meeting can be seen and notified.');
+    }
     shared.invitees = inviteeList;
     shared.inviteAll = Boolean(inviteAll);
     shared.inviteDepartments = deptKeys;
@@ -838,18 +844,38 @@ const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── GET /api/crm/meet/meetings ──────────────────────────────────────────────
 const listMeetings = asyncHandler(async (req: Request, res: Response) => {
   const user = requireCrmUser(req);
-  const meetings = await Meeting.find({
+  const invitedToUser = [
+    { hostCrmUserId: user._id },
+    { inviteAll: true },
+    { invitees: user._id },
+    { 'participants.crmUserId': user._id },
+  ];
+  const visibleHistoryToUser = {
     organizationId: user.organizationId,
-    $or: [
-      { hostCrmUserId: user._id },
-      { inviteAll: true },
-      { invitees: user._id },
-      { 'participants.crmUserId': user._id },
-    ],
-  })
-    .sort({ status: 1, scheduledAt: 1, createdAt: -1 })
-    .limit(200) // room for multiple 30-session series + history (frontend paginates)
-    .lean();
+    $or: invitedToUser,
+  };
+
+  // Never let a large history hide an active or scheduled meeting. The old
+  // alphabetical status sort put `ended` first, so 200 historical rows could
+  // consume the limit before a user's upcoming schedule was reached.
+  const [activeMeetings, endedMeetings] = await Promise.all([
+    // Public rooms are discoverable to the organization even when someone
+    // forgot to send that person the code. Private schedules remain limited
+    // to their intended audience.
+    Meeting.find({
+      organizationId: user.organizationId,
+      status: { $in: ['scheduled', 'live'] },
+      $or: [{ visibility: { $ne: 'private' } }, ...invitedToUser],
+    })
+      .sort({ scheduledAt: 1, createdAt: -1 })
+      .limit(200)
+      .lean(),
+    Meeting.find({ ...visibleHistoryToUser, status: 'ended' })
+      .sort({ endedAt: -1, createdAt: -1 })
+      .limit(100)
+      .lean(),
+  ]);
+  const meetings = [...activeMeetings, ...endedMeetings];
   res.json(new ApiResponse(200, {
     meetings: meetings.map(serializeMeeting),
     selfCrmUserId: user._id.toString(),
@@ -863,16 +889,21 @@ const getAlerts = asyncHandler(async (req: Request, res: Response) => {
   const now = Date.now();
   const soon = new Date(now + MEET_REMINDER_WINDOW_MS);
 
-  const invitedFilter = {
+  const visibleFilter = {
     organizationId: user.organizationId,
-    $or: [{ inviteAll: true }, { invitees: user._id }, { hostCrmUserId: user._id }],
+    $or: [
+      { visibility: { $ne: 'private' } },
+      { inviteAll: true },
+      { invitees: user._id },
+      { hostCrmUserId: user._id },
+    ],
   };
 
   const [live, startingSoon] = await Promise.all([
-    Meeting.find({ ...invitedFilter, status: 'live', timerActiveSince: { $ne: null } })
+    Meeting.find({ ...visibleFilter, status: 'live', timerActiveSince: { $ne: null } })
       .select('code title scheduledAt startedAt hostCrmUserId').limit(10).lean(),
     Meeting.find({
-      ...invitedFilter,
+      ...visibleFilter,
       status: 'scheduled',
       scheduledAt: { $gte: new Date(now - 5 * 60_000), $lte: soon },
     }).select('code title scheduledAt hostCrmUserId').limit(10).lean(),

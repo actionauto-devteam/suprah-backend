@@ -32,10 +32,10 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-it('queues and sends invitations immediately when creating an instant meeting', async () => {
+it('keeps an instant room reserved until its host joins and queues its invitation', async () => {
   const res = response();
   await invoke(controller.createMeeting, { crmUser: host, body: { title: 'Quick call' } }, res);
-  expect(createMeeting.mock.calls[0][0]).toMatchObject({ status: 'live', invitationNotificationPending: true });
+  expect(createMeeting.mock.calls[0][0]).toMatchObject({ status: 'scheduled', invitationNotificationPending: true });
   expect(notifyCreated).toHaveBeenCalledWith(expect.objectContaining({ title: 'Quick call', _id: 'session-1' }));
   expect(res.status).toHaveBeenCalledWith(201);
 });
@@ -43,8 +43,9 @@ it('queues and sends invitations immediately when creating an instant meeting', 
 it('notifies for every recurring session, keeping Mountain wall time conversion', async () => {
   const res = response();
   await invoke(controller.createMeeting, { crmUser: host, body: {
-    title: 'Planning', occurrences: ['2026-10-21T12:00', '2026-10-22T12:00'],
+    title: 'Planning', inviteAll: true, occurrences: ['2026-10-21T12:00', '2026-10-22T12:00'],
   } }, res);
+  await Promise.resolve();
   expect(notifyCreated).toHaveBeenCalledTimes(2);
   expect(createMeeting.mock.calls[0][0]).toMatchObject({
     invitationNotificationPending: true, scheduledAt: new Date('2026-10-21T18:00:00Z'),
@@ -76,9 +77,17 @@ it('expands selected departments and deduplicates people already invited directl
 it('returns the created meeting on notification failure, retaining durable recovery state', async () => {
   notifyCreated.mockRejectedValue(new Error('notification DB unavailable'));
   const res = response();
-  await invoke(controller.createMeeting, { crmUser: host, body: { scheduledAt: '2026-10-21T12:00' } }, res);
+  await invoke(controller.createMeeting, { crmUser: host, body: { inviteAll: true, scheduledAt: '2026-10-21T12:00' } }, res);
   expect(res.status).toHaveBeenCalledWith(201);
   expect(createMeeting.mock.calls[0][0].invitationNotificationPending).toBe(true);
+});
+
+it('rejects a scheduled meeting with nobody selected to see or receive its alerts', async () => {
+  const res = response();
+  await expect(invoke(controller.createMeeting, {
+    crmUser: host, body: { scheduledAt: '2026-10-21T12:00', invitees: [], inviteAll: false },
+  }, res)).rejects.toThrow('Choose at least one person');
+  expect(createMeeting).not.toHaveBeenCalled();
 });
 
 it('rescheduling resets the sent marker and invalidates an old reminder lease', async () => {
