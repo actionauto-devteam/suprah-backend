@@ -164,6 +164,23 @@ describe('My Shipments status', () => {
     expect(JSON.stringify(entry)).not.toMatch(/internal/);
   });
 
+  it("shows the load's delivery deadline while the car is coming, never after", async () => {
+    const deadline = new Date('2026-11-03T00:00:00Z');
+    const entryFor = async (status: string, dates?: Record<string, unknown>) => {
+      mockQuoteFind.mockReturnValue([{ _id: QUOTE, organizationId: ORG, status: 'booked', createdAt: new Date() }]);
+      mockLoadFind.mockReturnValue([{ quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-3', status, dates }]);
+      const [entry] = await listCustomerShipments(CUSTOMER);
+      return entry.shipment?.expectedBy;
+    };
+    for (const status of ['Posted', 'Picked Up', 'In-Transit']) {
+      expect(await entryFor(status, { deliveryDeadline: deadline })).toBe('2026-11-03T00:00:00.000Z');
+    }
+    expect(await entryFor('Delivered', { deliveryDeadline: deadline })).toBeNull();
+    expect(await entryFor('Cancelled', { deliveryDeadline: deadline })).toBeNull();
+    expect(await entryFor('Posted')).toBeNull();
+    expect(await entryFor('Posted', { deliveryDeadline: 'not a date' })).toBeNull();
+  });
+
   it('returns an empty list without other lookups when there are no requests', async () => {
     mockQuoteFind.mockReturnValue([]);
     expect(await listCustomerShipments(CUSTOMER)).toEqual([]);
