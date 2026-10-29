@@ -19,6 +19,7 @@ import { loadLeadAssociationInputs } from './leadLifecycle.service';
 import { decideLeadIntake } from './leadIntakeDecision';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { describeWebchatContactPolicy } from './contactRestriction.service';
+import { combineInfoForLead } from './leadDuplicateCombine.service';
 
 export type ConversationChannel = 'sms' | 'email' | 'webchat' | 'call' | 'note' | 'inquiry';
 export type DeliveryCode = 'sending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed' | 'received';
@@ -196,7 +197,7 @@ const isOlder = (item: ConversationItem, cursor: Cursor | null) =>
 const newestFirst = (a: ConversationItem, b: ConversationItem) =>
   a.occurredAt === b.occurredAt ? (a.id < b.id ? 1 : -1) : a.occurredAt < b.occurredAt ? 1 : -1;
 
-const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId sourceInquiryId intakeIdentity identityEmailExcluded customerId aiPausedAt aiPausedBy aiAutoPausedUntil vehicle';
+const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId sourceInquiryId intakeIdentity identityEmailExcluded customerId aiPausedAt aiPausedBy aiAutoPausedUntil vehicle combinedInto';
 
 function leadName(lead: any) {
   return [lead?.firstName, lead?.lastName].filter(Boolean).join(' ').trim() || lead?.email || lead?.phone || 'Customer';
@@ -442,7 +443,7 @@ export async function listEarlierConversations(organizationId: string, lead: any
   const same = await sameCustomerLeadIds(organizationId, lead);
   if (!same.available) return { available: false, reason: same.reason, leads: [], unlinkedCount: 0 };
   const leads = same.leadIds.length
-    ? await Lead.find({ _id: { $in: same.leadIds }, organizationId }).select('firstName lastName status source channel createdAt updatedAt').sort({ createdAt: -1 }).limit(10).lean()
+    ? await Lead.find({ _id: { $in: same.leadIds }, organizationId }).select('firstName lastName status source channel createdAt updatedAt combinedInto').sort({ createdAt: -1 }).limit(10).lean()
     : [];
   let unlinkedCount = 0;
   if (same.phoneSafe && lead.phone) {
@@ -461,6 +462,8 @@ export async function listEarlierConversations(organizationId: string, lead: any
       channel: entry.channel || null,
       createdAt: entry.createdAt,
       closed: LIFECYCLE_TERMINAL_STATUSES.includes(entry.status),
+      combined: Boolean(entry.combinedInto?.leadId),
+      previousStatus: entry.combinedInto?.previousStatus || null,
     })),
   };
 }
@@ -510,13 +513,14 @@ async function loadLead(organizationId: string, leadId: string) {
 
 export async function buildLeadConversation(organizationId: string, leadId: string, options: { before?: string | null; limit?: number } = {}) {
   const lead = await loadLead(organizationId, leadId);
-  const [page, earlier, channelState, intakeMode] = await Promise.all([
+  const [page, earlier, channelState, intakeMode, combine] = await Promise.all([
     loadConversationItems(organizationId, lead, options),
     options.before
       ? Promise.resolve(null)
       : listEarlierConversations(organizationId, lead).catch(() => ({ available: false, reason: 'unavailable', leads: [], unlinkedCount: 0 })),
     channelStateFor(organizationId, lead).catch(() => null),
     getLeadIntakeMode(organizationId).catch(() => 'off' as const),
+    options.before ? Promise.resolve(null) : combineInfoForLead(organizationId, lead).catch(() => null),
   ]);
   const closed = LIFECYCLE_TERMINAL_STATUSES.includes(lead.status);
   return {
@@ -538,6 +542,7 @@ export async function buildLeadConversation(organizationId: string, leadId: stri
     unavailableSources: page.unavailableSources,
     earlier,
     channelState,
+    combine,
   };
 }
 

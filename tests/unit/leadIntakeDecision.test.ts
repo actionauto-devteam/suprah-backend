@@ -44,16 +44,14 @@ describe('decideLeadIntake', () => {
     expect(contactHasNoEmail).toMatchObject({ action: 'append', leadId: 'a' });
   });
 
-  it('creates a separate normal lead when the phone matches but the email differs', () => {
+  it('joins the open lead when only the phone matches and the email differs', () => {
     const decision = decide([lead('a', { normalizedEmail: 'someone.else@example.com', matchedBy: ['phone'] })]);
-    expect(decision).toMatchObject({ action: 'create', reason: 'contact_conflict_separate_lead', separateLeadIds: ['a'] });
-    expect(decision.intakeSlots).toEqual([`email:${EMAIL}|first`]);
+    expect(decision).toMatchObject({ action: 'append', leadId: 'a', reason: 'single_active_lead', separateLeadIds: [] });
   });
 
-  it('creates a separate normal lead when the email matches but the phone differs', () => {
+  it('joins the open lead when only the email matches and the phone differs', () => {
     const decision = decide([lead('a', { normalizedPhone: '+18015550199', matchedBy: ['email'] })]);
-    expect(decision).toMatchObject({ action: 'create', reason: 'contact_conflict_separate_lead' });
-    expect(decision.intakeSlots).toEqual([`phone:${PHONE}|first`]);
+    expect(decision).toMatchObject({ action: 'append', leadId: 'a', reason: 'single_active_lead' });
   });
 
   it('creates a fresh lead once the earlier lead is closed', () => {
@@ -62,29 +60,50 @@ describe('decideLeadIntake', () => {
     expect(decision.intakeSlots).toEqual([`phone:${PHONE}|after:old@1759276800000`, `email:${EMAIL}|after:old@1759276800000`]);
   });
 
-  it('never attaches to a closed lead even when an open one belongs to someone else', () => {
+  it('never attaches to a closed lead and joins the open one that shares a detail', () => {
     const decision = decide([closed('old'), lead('other', { normalizedEmail: 'other@example.com', matchedBy: ['phone'] })]);
-    expect(decision).toMatchObject({ action: 'create', reason: 'previous_lead_finished' });
-    expect(decision.leadId).toBeUndefined();
+    expect(decision).toMatchObject({ action: 'append', leadId: 'other' });
+    expect(decide([closed('new-closed', { createdAt: new Date('2026-10-29T00:00:00Z') }), lead('open', { createdAt: new Date('2026-10-01T00:00:00Z') })]))
+      .toMatchObject({ action: 'append', leadId: 'open' });
   });
 
-  it('sends uncertain cases to review instead of guessing', () => {
-    expect(decide([lead('a'), lead('b')])).toMatchObject({ action: 'review', reason: 'multiple_active_leads' });
+  it('joins the newest open lead when the customer already has several', () => {
+    const decision = decide([
+      lead('oldest', { createdAt: new Date('2026-10-27T10:00:00Z') }),
+      lead('newest', { createdAt: new Date('2026-10-29T10:00:00Z'), matchedBy: ['email'], normalizedPhone: null }),
+      lead('middle', { createdAt: new Date('2026-10-28T10:00:00Z') }),
+    ]);
+    expect(decision).toMatchObject({ action: 'append', leadId: 'newest', reason: 'newest_active_lead' });
+    expect([...decision.candidateLeadIds].sort()).toEqual(['middle', 'newest', 'oldest']);
+  });
+
+  it('falls back to the lead id time when the created date is missing', () => {
+    const older = '65f000000000000000000001';
+    const newer = '66f000000000000000000001';
+    expect(decide([lead(older), lead(newer)])).toMatchObject({ action: 'append', leadId: newer, reason: 'newest_active_lead' });
+  });
+
+  it('still sends cases it cannot read safely to review', () => {
     expect(decide([lead('a')], { lookupComplete: false })).toMatchObject({ action: 'review', reason: 'lookup_incomplete' });
-    expect(decide([lead('a')], { identity: { status: 'ambiguous' } })).toMatchObject({ action: 'review', reason: 'identity_ambiguous' });
     expect(decide([lead('a', { lifecycle: 'unknown', status: 'Odd' })])).toMatchObject({ action: 'review', reason: 'unknown_lead_status' });
+    expect(decide([lead('a'), lead('b', { lifecycle: 'unknown', status: 'Odd' })])).toMatchObject({ action: 'review', reason: 'unknown_lead_status' });
   });
 
-  it('keeps a lead that belongs to another customer separate', () => {
+  it('joins the open lead even when the details match more than one customer record', () => {
+    expect(decide([lead('a')], { identity: { status: 'ambiguous' } })).toMatchObject({ action: 'append', leadId: 'a' });
     const decision = decide([lead('a', { customerId: 'customer-b' })], { identity: { status: 'linked', customerId: 'customer-a' } });
-    expect(decision).toMatchObject({ action: 'create', separateLeadIds: ['a'] });
+    expect(decision).toMatchObject({ action: 'append', leadId: 'a', customerId: 'customer-a' });
   });
 
-  it('uses the context lead only while it is open and the same customer', () => {
+  it('uses the context lead only while it is open and shares a contact detail', () => {
     const context = lead('ctx');
     expect(decide([context], { contextLead: context })).toMatchObject({ action: 'append', leadId: 'ctx', reason: 'context_lead' });
-    const otherEmail = lead('ctx', { normalizedEmail: 'other@example.com' });
-    expect(decide([], { contextLead: otherEmail })).toMatchObject({ action: 'review', reason: 'context_conflicts_with_contact' });
+    const sharesPhone = lead('ctx', { normalizedEmail: 'other@example.com', matchedBy: ['phone'] });
+    expect(decide([sharesPhone], { contextLead: sharesPhone })).toMatchObject({ action: 'append', leadId: 'ctx', reason: 'context_lead' });
+    const someoneElse = lead('ctx', { normalizedPhone: '+18015550199', normalizedEmail: 'other@example.com', matchedBy: [] });
+    expect(decide([], { contextLead: someoneElse })).toMatchObject({ action: 'review', reason: 'context_conflicts_with_contact' });
+    const noDetails = lead('ctx', { normalizedPhone: null, normalizedEmail: null, matchedBy: [] });
+    expect(decide([], { contextLead: noDetails })).toMatchObject({ action: 'append', leadId: 'ctx', reason: 'context_lead' });
     expect(decide([closed('ctx')], { contextLead: closed('ctx') })).toMatchObject({ action: 'create', reason: 'previous_lead_finished' });
   });
 

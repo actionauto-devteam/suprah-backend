@@ -591,26 +591,25 @@ describe('Real-DB: lifecycle intake safety (local MongoDB only)', () => {
     beforeAll(async () => { await setMode('active'); });
     beforeEach(async () => { await setMode('active'); });
 
-    it('opens a separate lead for a website inquiry with the same phone but a different email', async () => {
+    it('adds a website inquiry with the same phone but a different email to the open lead', async () => {
       const phone = nextPhone();
       const open = await makeLead(orgId, { phone, email: nextEmail() });
       const other = nextEmail();
       await leadService.processInquiry({ organizationId: ORG, customerId: String(new mongoose.Types.ObjectId()), vehicleId: String(truckId), customerName: { first: 'Sam', last: 'Lee' }, customerEmail: other, customerPhone: phone, comments: 'Different person' });
-      const created: any = await Lead.findOne({ organizationId: orgId, email: other }).lean();
-      expect(created).toBeTruthy();
-      expect(String(created._id)).not.toBe(String(open._id));
-      const untouched: any = await Lead.findById(open._id).lean();
-      expect(untouched.isRead).toBe(true);
-      expect(untouched.inquiryCount ?? 1).toBe(1);
+      expect(await Lead.countDocuments({ organizationId: orgId, email: other })).toBe(0);
+      expect(await Lead.countDocuments({ organizationId: orgId, phone })).toBe(1);
+      const joined: any = await Lead.findById(open._id).lean();
+      expect(joined.isRead).toBe(false);
+      expect(joined.inquiryCount).toBe(2);
     });
 
-    it('opens a separate lead for a booking with the same email but a different phone', async () => {
+    it('adds a booking with the same email but a different phone to the open lead', async () => {
       const email = nextEmail();
       const open = await makeLead(orgId, { phone: nextPhone(), email });
       const res = await request(app).post('/public/book').send({ vehicleId: String(truckId), firstName: 'Sam', lastName: 'Lee', email, phone: nextPhone(), startTime: new Date(Date.now() + 86400000).toISOString() });
       expect(res.status).toBe(201);
-      expect(String(res.body.data.leadId)).not.toBe(String(open._id));
-      expect(await Lead.countDocuments({ organizationId: orgId, email })).toBe(2);
+      expect(String(res.body.data.leadId)).toBe(String(open._id));
+      expect(await Lead.countDocuments({ organizationId: orgId, email })).toBe(1);
     });
 
     it('adds a provider lead with the same phone and email to the open lead', async () => {

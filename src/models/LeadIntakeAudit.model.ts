@@ -6,6 +6,8 @@ export const LEAD_INTAKE_AUDIT_EVENTS = [
   'inquiry_moved_to_review',
   'review_reopened',
   'lead_linked',
+  'duplicates_combined',
+  'duplicates_uncombined',
 ] as const;
 export type LeadIntakeAuditEvent = (typeof LEAD_INTAKE_AUDIT_EVENTS)[number];
 

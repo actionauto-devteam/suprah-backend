@@ -223,17 +223,21 @@ describe('Real-DB: unified lead conversation (local MongoDB only)', () => {
     expect((await get(`/api/leads/${fresh._id}/conversation/earlier/${stranger._id}`)).status).toBe(404);
   });
 
-  it('never shows another customer’s history because they share a phone number', async () => {
+  it('treats leads that share a phone number as the same customer, but keeps each lead’s own timeline separate', async () => {
     const phone = nextPhone();
     const first = await makeLead({ phone, email: nextEmail() });
     const second = await makeLead({ phone, email: nextEmail() });
-    await text(first, phone, 'inbound', 'First customer message', 30);
+    const stranger = await makeLead({ phone: nextPhone(), email: nextEmail() });
+    await text(first, phone, 'inbound', 'First lead message', 30);
     await text(null, phone, 'inbound', 'Unlinked message', 60, 'received', null);
     const view = await get(`/api/leads/${second._id}/conversation`);
-    expect(view.body.data.items.map((item: any) => item.body)).not.toContain('First customer message');
-    expect(view.body.data.earlier).toMatchObject({ available: true, leads: [], unlinkedCount: 0 });
-    expect((await get(`/api/leads/${second._id}/conversation/earlier/${first._id}`)).status).toBe(404);
-    expect((await get(`/api/leads/${second._id}/conversation/earlier/unlinked`)).status).toBe(404);
+    expect(view.body.data.items.map((item: any) => item.body)).not.toContain('First lead message');
+    expect(view.body.data.earlier).toMatchObject({ available: true, unlinkedCount: 1 });
+    expect(view.body.data.earlier.leads.map((entry: any) => entry._id)).toEqual([String(first._id)]);
+    const earlier = await get(`/api/leads/${second._id}/conversation/earlier/${first._id}`);
+    expect(earlier.status).toBe(200);
+    expect(earlier.body.data.items.map((item: any) => item.body)).toContain('First lead message');
+    expect((await get(`/api/leads/${second._id}/conversation/earlier/${stranger._id}`)).status).toBe(404);
   });
 
   it('shows no earlier history for an unverified chat lead', async () => {
@@ -317,9 +321,10 @@ describe('Real-DB: unified lead conversation (local MongoDB only)', () => {
     expect(closedBodies).not.toContain(`${mode} new`);
     expect(closedBodies).not.toContain(`${mode} stranger`);
     const freshView = (await get(`/api/leads/${fresh._id}/conversation`)).body.data;
-    expect(freshView.earlier.leads.map((entry: any) => entry._id)).toEqual([String(closed._id)]);
+    expect(freshView.items.map((item: any) => item.body)).toEqual(expect.not.arrayContaining([`${mode} old`, `${mode} stranger`]));
+    expect(freshView.earlier.leads.map((entry: any) => entry._id).sort()).toEqual([String(closed._id), String(stranger._id)].sort());
     const strangerView = (await get(`/api/leads/${stranger._id}/conversation`)).body.data;
-    expect(strangerView.earlier.leads).toEqual([]);
+    expect(strangerView.earlier.leads.map((entry: any) => entry._id).sort()).toEqual([String(closed._id), String(fresh._id)].sort());
     expect(strangerView.items.map((item: any) => item.body)).toEqual(expect.not.arrayContaining([`${mode} old`, `${mode} new`]));
     await setMode('off');
   });

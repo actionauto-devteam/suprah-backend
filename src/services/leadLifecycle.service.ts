@@ -5,7 +5,7 @@ import {
   LeadLifecycleState,
   classifyLeadLifecycle,
 } from '../constants/leadStatus';
-import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
+import { isPlaceholderEmail, isPlaceholderPhone, matchableIdentityEmail, matchableIdentityPhone } from '../utils/contactIdentity';
 import { CustomerLinkStatus, evaluateCustomerIdentity, findIdentityCustomers } from './customerIdentity.service';
 
 const LEAD_MATCH_FIELDS =
@@ -27,6 +27,7 @@ export interface LeadAssociationCandidate {
   terminalAt: Date | null;
   terminalMarker?: string | null;
   unverified?: boolean;
+  createdAt?: Date | null;
 }
 
 export interface LeadAssociationIdentity {
@@ -85,13 +86,15 @@ export function resolveLeadTerminalAt(lead: TerminalSource): Date | null {
   return terminalSince(lead).at;
 }
 
-function effectiveContact(doc: any) {
-  const normalizedPhone = doc.normalizedPhone !== undefined ? doc.normalizedPhone || null : normalizeIdentityPhone(doc.phone);
-  const normalizedEmail = doc.identityEmailExcluded
+export function effectiveContact(doc: any) {
+  const storedPhone = doc.normalizedPhone !== undefined ? doc.normalizedPhone || null : matchableIdentityPhone(doc.phone);
+  const normalizedPhone = storedPhone && !isPlaceholderPhone(storedPhone) ? storedPhone : null;
+  const storedEmail = doc.identityEmailExcluded
     ? null
     : doc.normalizedEmail !== undefined
       ? doc.normalizedEmail || null
-      : normalizeIdentityEmail(doc.email);
+      : matchableIdentityEmail(doc.email);
+  const normalizedEmail = storedEmail && !isPlaceholderEmail(storedEmail) ? storedEmail : null;
   return { normalizedPhone, normalizedEmail };
 }
 
@@ -115,6 +118,7 @@ export function toAssociationCandidate(
     terminalAt: terminal.at,
     terminalMarker: terminal.at ? (terminal.fromHistory ? String(terminal.at.getTime()) : 'legacy') : null,
     unverified: doc.intakeIdentity === 'unverified',
+    createdAt: toDate(doc.createdAt),
   };
 }
 
@@ -269,8 +273,8 @@ export async function loadLeadAssociationInputs(input: {
     throw new Error('A valid organization is required for lead matching');
   }
   const contact = {
-    normalizedPhone: normalizeIdentityPhone(input.phone),
-    normalizedEmail: input.emailExcluded ? null : normalizeIdentityEmail(input.email),
+    normalizedPhone: matchableIdentityPhone(input.phone),
+    normalizedEmail: input.emailExcluded ? null : matchableIdentityEmail(input.email),
   };
   let identity: LeadAssociationIdentity = { status: 'none' };
   if (contact.normalizedPhone || contact.normalizedEmail) {
@@ -314,8 +318,8 @@ export async function findContactRestriction(input: {
   if (!input.organizationId || !mongoose.isValidObjectId(input.organizationId)) {
     throw new Error('A valid organization is required for the contact restriction lookup');
   }
-  const phone = normalizeIdentityPhone(input.phone);
-  const email = input.emailExcluded ? null : normalizeIdentityEmail(input.email);
+  const phone = matchableIdentityPhone(input.phone);
+  const email = input.emailExcluded ? null : matchableIdentityEmail(input.email);
   const customerId = input.customerId && mongoose.isValidObjectId(input.customerId) ? String(input.customerId) : '';
   const { indexed, legacy } = contactConditions({ normalizedPhone: phone, normalizedEmail: email });
   const conditions: Record<string, unknown>[] = [...indexed, ...legacy];

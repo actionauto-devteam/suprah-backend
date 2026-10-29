@@ -99,6 +99,7 @@ export interface ILead extends Document {
   sourceSubmittedAt?: Date;
   sourceInquiryId?: mongoose.Types.ObjectId;
   intakeIdentity?: 'unverified';
+  combinedInto?: { leadId: mongoose.Types.ObjectId; at: Date; previousStatus: string };
   intakeSlots?: string[];
   lastInquiryAt?: Date;
   inquiryCount?: number;
@@ -393,6 +394,17 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
     sourceSubmittedAt: { type: Date },
     sourceInquiryId: { type: Schema.Types.ObjectId, ref: 'LeadInquiry' },
     intakeIdentity: { type: String, enum: ['unverified'] },
+    combinedInto: {
+      type: new mongoose.Schema(
+        {
+          leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', required: true },
+          at: { type: Date, required: true },
+          previousStatus: { type: String, required: true },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+    },
     intakeSlots: { type: [String], default: undefined },
     lastInquiryAt: { type: Date },
     inquiryCount: { type: Number, min: 0 },
@@ -697,6 +709,10 @@ LeadSchema.index({
   organizationId: 1,
   location: 1,
 });
+LeadSchema.index(
+  { organizationId: 1, 'combinedInto.leadId': 1 },
+  { partialFilterExpression: { 'combinedInto.leadId': { $exists: true } }, name: 'lead_org_combined_into' },
+);
 
 for (const { collection, key, name } of CUSTOMER_IDENTITY_INDEXES) {
   if (collection === 'leads') LeadSchema.index(key, { name });

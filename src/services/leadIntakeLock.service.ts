@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import LeadIntakeLock from '../models/LeadIntakeLock.model';
-import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
+import { matchableIdentityEmail, matchableIdentityPhone } from '../utils/contactIdentity';
 
 export interface LeadIntakeLockHandle {
   organizationId: string;
@@ -40,9 +40,9 @@ export function leadIntakeLockKeys(input: { customerId?: unknown; phone?: unknow
   const keys: string[] = [];
   const customerId = input.customerId ? String(input.customerId).trim() : '';
   if (customerId) keys.push(`customer:${customerId}`);
-  const phone = normalizeIdentityPhone(input.phone);
+  const phone = matchableIdentityPhone(input.phone);
   if (phone) keys.push(`phone:${phone}`);
-  const email = normalizeIdentityEmail(input.email);
+  const email = matchableIdentityEmail(input.email);
   if (email) keys.push(`email:${email}`);
   return [...new Set(keys)].sort();
 }

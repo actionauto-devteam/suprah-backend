@@ -182,24 +182,28 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
     expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id) });
   });
 
-  it('creates a separate normal lead when the phone matches but the email is different, without touching the other lead', async () => {
+  it('adds the inquiry to the open lead when only the phone matches, keeping that lead\'s own email', async () => {
     const phone = nextPhone();
     const existingEmail = nextEmail();
     const lead = await openLead({ phone, email: existingEmail });
     const result: any = await submitLeadInquiry(inquiry({ phone, email: nextEmail() }));
-    expect(result).toMatchObject({ status: 'associated', created: true, reason: 'contact_conflict_separate_lead' });
-    expect(result.leadId).not.toBe(String(lead._id));
-    expect((await Lead.findById(lead._id).lean() as any)).toMatchObject({ email: existingEmail, phone });
-    const fresh: any = await Lead.findById(result.leadId).lean();
-    expect(fresh.status).toBe('New');
-    expect(fresh.intakeSlots).not.toEqual(expect.arrayContaining([`phone:${phone}|first`]));
+    expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id), reason: 'single_active_lead' });
+    expect((await Lead.findById(lead._id).lean() as any)).toMatchObject({ email: existingEmail, phone, inquiryCount: 2 });
+    expect(await leadsFor({ phone })).toBe(1);
   });
 
-  it('creates a separate normal lead when the email matches but the phone is different', async () => {
+  it('adds the inquiry to the open lead when only the email matches', async () => {
     const email = nextEmail();
     const lead = await openLead({ phone: nextPhone(), email });
     const result: any = await submitLeadInquiry(inquiry({ phone: nextPhone(), email }));
-    expect(result).toMatchObject({ status: 'associated', created: true, reason: 'contact_conflict_separate_lead' });
+    expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id), reason: 'single_active_lead' });
+    expect(await leadsFor({ email })).toBe(1);
+  });
+
+  it('never matches on the name alone', async () => {
+    const lead = await openLead({ phone: nextPhone(), email: nextEmail() });
+    const result: any = await submitLeadInquiry(inquiry({ phone: nextPhone(), email: nextEmail(), firstName: 'Pat' }));
+    expect(result).toMatchObject({ status: 'associated', created: true, reason: 'no_matching_lead' });
     expect(result.leadId).not.toBe(String(lead._id));
   });
 
@@ -229,18 +233,35 @@ describe('Real-DB: lead intake lifecycle (local MongoDB only)', () => {
     expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(lead._id) });
   });
 
-  it('sends a customer with two open leads to review and tells the admins, without creating anything', async () => {
+  it('adds the inquiry to the newest open lead when the customer has several, without creating anything', async () => {
     const phone = nextPhone();
     const email = nextEmail();
-    await openLead({ phone, email });
-    await openLead({ phone, email });
+    const older = await openLead({ phone, email }, { createdAt: new Date(Date.now() - 3 * 86400000) });
+    const newest = await openLead({ email }, { createdAt: new Date(Date.now() - 86400000) });
+    const middle = await openLead({ phone, email }, { createdAt: new Date(Date.now() - 2 * 86400000) });
+    const result: any = await submitLeadInquiry(inquiry({ phone, email }));
+    expect(result).toMatchObject({ status: 'associated', created: false, leadId: String(newest._id), reason: 'newest_active_lead' });
+    expect(await leadsFor({ email })).toBe(3);
+    expect((await Lead.findById(newest._id).lean() as any).inquiryCount).toBe(2);
+    expect((await Lead.findById(older._id).lean() as any).inquiryCount ?? 1).toBe(1);
+    expect((await Lead.findById(middle._id).lean() as any).inquiryCount ?? 1).toBe(1);
+    expect(await LeadInquiry.countDocuments({ _id: result.inquiryId, 'association.state': 'pending_review' })).toBe(0);
+  });
+
+  it('sends a lead with a status it cannot read to review and tells the admins, without creating anything', async () => {
+    const phone = nextPhone();
+    const email = nextEmail();
+    await Lead.collection.insertOne({
+      organizationId: orgId, createdBy: ids.owner, firstName: 'Pat', lastName: 'Lee', phone, email,
+      source: 'Manual Entry', channel: 'sms', status: 'Legacy Waiting', createdAt: new Date(), updatedAt: new Date(),
+    });
     const before = await leadsFor({ phone });
     const result: any = await submitLeadInquiry(inquiry({ phone, email }));
-    expect(result).toMatchObject({ status: 'review', reason: 'multiple_active_leads' });
+    expect(result).toMatchObject({ status: 'review', reason: 'unknown_lead_status' });
     expect(await leadsFor({ phone })).toBe(before);
     const event: any = await LeadInquiry.findById(result.inquiryId).lean();
     expect(event).toMatchObject({ association: { state: 'pending_review' }, review: { state: 'pending', kind: 'unassigned' } });
-    expect(event.review.candidateLeadIds).toHaveLength(2);
+    expect(event.review.candidateLeadIds).toHaveLength(1);
     expect(await Notification.countDocuments({ type: 'lead_inquiry_review', 'metadata.inquiryId': result.inquiryId })).toBeGreaterThanOrEqual(1);
   });
 

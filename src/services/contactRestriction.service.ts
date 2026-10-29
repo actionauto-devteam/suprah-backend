@@ -7,7 +7,7 @@ import ContactRestrictionAudit, {
 import ContactRestrictionIdentifier from '../models/ContactRestrictionIdentifier.model';
 import { ApiError } from '../utils/ApiError';
 import { CONTACT_RESTRICTED_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
-import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
+import { matchableIdentityEmail, matchableIdentityPhone, normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import { LEAD_SOURCE_EMAILS } from '../utils/leadReplyRecipient';
 import logger from '../utils/logger';
 
@@ -207,11 +207,11 @@ export async function resolveContactRestriction(target: ContactRestrictionTarget
     const customerIds = new Set<string>();
     const restrictedLeadIds = new Set<string>();
     const addPhone = (value: unknown) => {
-      const phone = normalizeIdentityPhone(value);
+      const phone = matchableIdentityPhone(value);
       if (phone) phones.add(phone);
     };
     const addEmail = (value: unknown) => {
-      const email = normalizeIdentityEmail(value);
+      const email = matchableIdentityEmail(value);
       if (email) emails.add(email);
     };
     const addCustomer = (value: unknown) => {
