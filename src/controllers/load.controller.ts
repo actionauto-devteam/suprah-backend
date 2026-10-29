@@ -39,7 +39,6 @@
     import emailService from "../services/email.service";
     import Quote from "../models/Quote.model";
     import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
-    import { findVehicleShipping } from "../services/vehicleShipping.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -57,6 +56,7 @@
       staffDeletableLoadFilter,
     } from "../services/loadLifecyclePolicy";
     import { announceNewBoardLoad, markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
+    import { findVehicleShipping } from "../services/vehicleShipping.service";
 
 
     const getUser = (req: Request) => req.user as IUser;
