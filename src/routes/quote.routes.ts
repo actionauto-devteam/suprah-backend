@@ -24,6 +24,9 @@ router
     .post(quoteChangeLimiter, quoteController.createQuote)
     .get(quoteController.getQuotes);
 
+// A CRM lead's quotes and loads (lead page). Declared before /:id.
+router.get('/for-lead/:leadId', quoteController.getQuotesForLead);
+
 router
     .route('/:id')
     .get(quoteController.getQuoteById)

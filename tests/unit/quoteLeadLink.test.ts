@@ -9,6 +9,8 @@ const mockLeadFindOne = jest.fn();
 const mockSort = jest.fn();
 const mockQuoteFindOne = jest.fn();
 const mockPopulate = jest.fn();
+const mockQuoteFind = jest.fn();
+const mockLoadFind = jest.fn();
 
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
@@ -34,10 +36,24 @@ jest.mock('../../src/models/Quote.model', () => ({
       };
       return self;
     },
+    find: (filter: unknown) => {
+      const self: any = { select: () => self, sort: () => self, limit: () => self, lean: () => Promise.resolve(mockQuoteFind(filter)) };
+      return self;
+    },
   },
 }));
 
-import { findLeadLinkById, findLoadQuoteOrigin, findQuoteLeadLink } from '../../src/services/quoteLeadLink.service';
+jest.mock('../../src/models/Load.model', () => ({
+  __esModule: true,
+  default: {
+    find: (filter: unknown) => {
+      const self: any = { select: () => self, sort: () => self, lean: () => Promise.resolve(mockLoadFind(filter)) };
+      return self;
+    },
+  },
+}));
+
+import { findLeadLinkById, findLoadQuoteOrigin, findQuoteLeadLink, listLeadShipments } from '../../src/services/quoteLeadLink.service';
 
 const ORG = '64b0000000000000000000aa';
 const QUOTE = '64b0000000000000000000ab';
@@ -127,5 +143,42 @@ describe('findLeadLinkById', () => {
     expect(await findLeadLinkById(ORG, LEAD)).toBeNull();
     expect(await findLeadLinkById(ORG, 'not-an-id')).toBeNull();
     expect(await findLeadLinkById('not-an-org', LEAD)).toBeNull();
+  });
+});
+
+describe('listLeadShipments', () => {
+  it("lists a lead's quotes in this dealership, newest first, with the load each became", async () => {
+    mockQuoteFind.mockReturnValue([
+      { _id: 'q2', status: 'booked', source: 'customer_portal', vehicleName: '2021 Toyota Camry', rate: 950, createdAt: new Date('2026-10-29T00:00:00Z') },
+      { _id: 'q1', status: 'pending', vehicleName: ' Honda Civic ', createdAt: new Date('2026-10-20T00:00:00Z') },
+    ]);
+    mockLoadFind.mockReturnValue([
+      { _id: 'l3', quoteId: 'q2', loadNumber: 'LD-3', status: 'Cancelled' },
+      { _id: 'l2', quoteId: 'q2', loadNumber: 'LD-2', status: 'In-Transit' },
+    ]);
+    expect(await listLeadShipments(ORG, LEAD)).toEqual([
+      { quoteId: 'q2', status: 'booked', source: 'customer_portal', vehicleName: '2021 Toyota Camry', rate: 950, createdAt: '2026-10-29T00:00:00.000Z', load: { _id: 'l2', loadNumber: 'LD-2', status: 'In-Transit' } },
+      { quoteId: 'q1', status: 'pending', source: 'staff', vehicleName: 'Honda Civic', rate: null, createdAt: '2026-10-20T00:00:00.000Z', load: null },
+    ]);
+    expect(mockQuoteFind).toHaveBeenCalledWith({ organizationId: ORG, leadId: LEAD });
+    expect(mockLoadFind.mock.calls[0][0]).toMatchObject({ organizationId: ORG });
+  });
+
+  it('shows a cancelled load only when there is nothing newer, and skips the load lookup when there are no quotes', async () => {
+    mockQuoteFind.mockReturnValue([{ _id: 'q1', status: 'pending' }]);
+    mockLoadFind.mockReturnValue([{ _id: 'l1', quoteId: 'q1', loadNumber: 'LD-1', status: 'Cancelled' }]);
+    expect((await listLeadShipments(ORG, LEAD))[0].load).toEqual({ _id: 'l1', loadNumber: 'LD-1', status: 'Cancelled' });
+
+    mockLoadFind.mockClear();
+    mockQuoteFind.mockReturnValue([]);
+    expect(await listLeadShipments(ORG, LEAD)).toEqual([]);
+    expect(mockLoadFind).not.toHaveBeenCalled();
+  });
+
+  it('returns nothing for an id that is not valid or a missing dealership', async () => {
+    mockQuoteFind.mockClear();
+    expect(await listLeadShipments(ORG, 'not-an-id')).toEqual([]);
+    expect(await listLeadShipments('', LEAD)).toEqual([]);
+    expect(mockQuoteFind).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Lead from "../models/lead.model";
 import Quote from "../models/Quote.model";
+import Load from "../models/Load.model";
 import { normalizeIdentityEmail, normalizeIdentityPhone } from "../utils/contactIdentity";
 
 export interface QuoteLeadLink {
@@ -87,4 +88,60 @@ export async function findLeadLinkById(organizationId: string, leadId: unknown):
     .lean<{ _id: mongoose.Types.ObjectId; customerId?: mongoose.Types.ObjectId | null }>();
   if (!lead) return null;
   return { leadId: lead._id, ...(lead.customerId ? { customerRecordId: lead.customerId } : {}) };
+}
+
+export interface LeadShipment {
+  quoteId: string;
+  status: string;
+  source: string;
+  vehicleName: string;
+  rate: number | null;
+  createdAt: string | null;
+  /** The newest load made from the quote (a cancelled one only when there's nothing newer). */
+  load: { _id: string; loadNumber: string; status: string } | null;
+}
+
+/** How many of a lead's quotes the lead page lists, newest first. */
+export const LEAD_SHIPMENTS_LIMIT = 20;
+
+/**
+ * The shipping quotes linked to a CRM lead, with the load each became, for
+ * the lead page (decided 2026-10-30). Staff only, this dealership's records
+ * only, read-only, and no driver details.
+ */
+export async function listLeadShipments(organizationId: string, leadId: unknown): Promise<LeadShipment[]> {
+  const id = String(leadId ?? "").trim();
+  if (!organizationId || !mongoose.Types.ObjectId.isValid(id)) return [];
+  const quotes = await Quote.find({ organizationId, leadId: id })
+    .select("_id status source vehicleName rate createdAt")
+    .sort({ createdAt: -1 })
+    .limit(LEAD_SHIPMENTS_LIMIT)
+    .lean<any[]>();
+  if (quotes.length === 0) return [];
+
+  const loads = await Load.find({ organizationId, quoteId: { $in: quotes.map((quote) => quote._id) } })
+    .select("_id quoteId loadNumber status createdAt")
+    .sort({ createdAt: -1 })
+    .lean<any[]>();
+  const loadByQuote = new Map<string, any>();
+  for (const load of loads) {
+    const key = String(load.quoteId);
+    const current = loadByQuote.get(key);
+    // Prefer a live load; a cancelled one shows only when it's the only one.
+    if (!current || (current.status === "Cancelled" && load.status !== "Cancelled")) loadByQuote.set(key, load);
+  }
+
+  return quotes.map((quote) => {
+    const load = loadByQuote.get(String(quote._id));
+    const created = quote.createdAt ? new Date(quote.createdAt) : null;
+    return {
+      quoteId: String(quote._id),
+      status: String(quote.status ?? ""),
+      source: String(quote.source ?? "staff"),
+      vehicleName: String(quote.vehicleName ?? "").trim(),
+      rate: typeof quote.rate === "number" && Number.isFinite(quote.rate) ? quote.rate : null,
+      createdAt: created && Number.isFinite(created.getTime()) ? created.toISOString() : null,
+      load: load ? { _id: String(load._id), loadNumber: String(load.loadNumber ?? ""), status: String(load.status ?? "") } : null,
+    };
+  });
 }

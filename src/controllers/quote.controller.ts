@@ -22,7 +22,7 @@ import {
     calculateETA
 } from '../utils/calculations';
 import { createLoadSchema } from '../validations/load.validation';
-import { findLeadLinkById, findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
+import { findLeadLinkById, findQuoteLeadLink, listLeadShipments, QuoteLeadLink } from '../services/quoteLeadLink.service';
 import { listCustomerShipments, notifyCustomerOfDeletedRequest, notifyQuoteCustomer } from '../services/customerShipments.service';
 import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
@@ -634,6 +634,17 @@ const getMyShipments = asyncHandler(async (req: Request, res: Response) => {
     if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
     const shipments = await listCustomerShipments(String(user._id));
     return res.status(200).json(new ApiResponse(200, shipments, 'Your shipments'));
+});
+
+/**
+ * GET /api/quotes/for-lead/:leadId
+ * A CRM lead's shipping quotes and the load each became, newest first, for
+ * the lead page. Staff only; this dealership's records only.
+ */
+const getQuotesForLead = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const shipments = await listLeadShipments(orgId, req.params.leadId);
+    return res.status(200).json(new ApiResponse(200, shipments, 'Shipping quotes for this lead'));
 });
 
 /**
@@ -1759,6 +1770,7 @@ export default {
     createQuote,
     createCustomerQuoteRequest,
     getMyShipments,
+    getQuotesForLead,
     getQuotes,
     getQuoteById,
     updateQuote,
