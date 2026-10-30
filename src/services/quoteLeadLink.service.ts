@@ -73,3 +73,18 @@ export async function findLoadQuoteOrigin(organizationId: string, quoteId: unkno
     lead: lead ? { _id: String(lead._id), firstName: lead.firstName, lastName: lead.lastName } : null,
   };
 }
+
+/**
+ * The link for a quote made from a specific CRM lead (Create shipping quote on
+ * the lead page), only when that lead belongs to this dealership. Null when it
+ * doesn't, so the usual email/phone match applies instead.
+ */
+export async function findLeadLinkById(organizationId: string, leadId: unknown): Promise<QuoteLeadLink | null> {
+  const id = String(leadId ?? "").trim();
+  if (!mongoose.Types.ObjectId.isValid(organizationId) || !mongoose.Types.ObjectId.isValid(id)) return null;
+  const lead = await Lead.findOne({ _id: id, organizationId: new mongoose.Types.ObjectId(organizationId) })
+    .select("_id customerId")
+    .lean<{ _id: mongoose.Types.ObjectId; customerId?: mongoose.Types.ObjectId | null }>();
+  if (!lead) return null;
+  return { leadId: lead._id, ...(lead.customerId ? { customerRecordId: lead.customerId } : {}) };
+}

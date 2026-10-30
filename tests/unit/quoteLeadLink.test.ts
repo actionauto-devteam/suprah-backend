@@ -18,6 +18,7 @@ jest.mock('../../src/models/lead.model', () => ({
         mockSort(order);
         return { select: () => ({ lean: () => Promise.resolve(mockLeadFindOne(filter)) }) };
       },
+      select: () => ({ lean: () => Promise.resolve(mockLeadFindOne(filter)) }),
     }),
   },
 }));
@@ -36,7 +37,7 @@ jest.mock('../../src/models/Quote.model', () => ({
   },
 }));
 
-import { findLoadQuoteOrigin, findQuoteLeadLink } from '../../src/services/quoteLeadLink.service';
+import { findLeadLinkById, findLoadQuoteOrigin, findQuoteLeadLink } from '../../src/services/quoteLeadLink.service';
 
 const ORG = '64b0000000000000000000aa';
 const QUOTE = '64b0000000000000000000ab';
@@ -109,5 +110,22 @@ describe('findLoadQuoteOrigin', () => {
     expect(await findLoadQuoteOrigin(ORG, QUOTE)).toBeNull();
     expect(await findLoadQuoteOrigin(ORG, 'not-an-id')).toBeNull();
     expect(await findLoadQuoteOrigin('', QUOTE)).toBeNull();
+  });
+});
+
+describe('findLeadLinkById', () => {
+  it('links a quote made from a lead to that lead, with its customer record', async () => {
+    mockLeadFindOne.mockReturnValue({ _id: LEAD, customerId: 'customer-9' });
+    expect(await findLeadLinkById(ORG, LEAD)).toEqual({ leadId: LEAD, customerRecordId: 'customer-9' });
+    const filter = mockLeadFindOne.mock.calls[0][0];
+    expect(filter._id).toBe(LEAD);
+    expect(String(filter.organizationId)).toBe(ORG);
+  });
+
+  it("never links another dealership's lead or an id that isn't valid", async () => {
+    mockLeadFindOne.mockReturnValue(null);
+    expect(await findLeadLinkById(ORG, LEAD)).toBeNull();
+    expect(await findLeadLinkById(ORG, 'not-an-id')).toBeNull();
+    expect(await findLeadLinkById('not-an-org', LEAD)).toBeNull();
   });
 });

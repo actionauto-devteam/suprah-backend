@@ -22,7 +22,7 @@ import {
     calculateETA
 } from '../utils/calculations';
 import { createLoadSchema } from '../validations/load.validation';
-import { findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
+import { findLeadLinkById, findQuoteLeadLink, QuoteLeadLink } from '../services/quoteLeadLink.service';
 import { listCustomerShipments, notifyCustomerOfDeletedRequest, notifyQuoteCustomer } from '../services/customerShipments.service';
 import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
@@ -140,7 +140,9 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
         toLocation,
         units = 1,
         enclosedTrailer = false,
-        vehicleInoperable = false
+        vehicleInoperable = false,
+        // Set when staff create the quote from a CRM lead (Create shipping quote).
+        leadId: requestedLeadId,
     } = req.body;
     const orgId = req.orgId as string;
 
@@ -277,7 +279,15 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
     );
     const rate = calculateRate(miles, units, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
-    const leadLink = await leadLinkFor(orgId, { email, phone });
+    // A quote made from a lead links to that lead when it's this dealership's;
+    // otherwise the usual email/phone match applies.
+    const chosenLeadLink = requestedLeadId
+        ? await findLeadLinkById(orgId, requestedLeadId).catch((err) => {
+            logger.warn({ err, orgId }, 'Could not look up the lead a quote was made from');
+            return null;
+        })
+        : null;
+    const leadLink = chosenLeadLink ?? await leadLinkFor(orgId, { email, phone });
 
     const quote = await Quote.create({
         firstName,
