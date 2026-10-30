@@ -2,8 +2,10 @@ import mongoose from 'mongoose';
 import DealershipPhoneNumber, { PHONE_NUMBER_KINDS, PhoneNumberKind, TelnyxNumberCheck } from '../models/DealershipPhoneNumber.model';
 import CallRoutingConfig from '../models/CallRoutingConfig.model';
 import CrmLeadGroup from '../models/CrmLeadGroup.model';
+import CrmLocation from '../models/CrmLocation.model';
 import * as telnyx from './telnyx.service';
 import { ApiError } from '../utils/ApiError';
+import { normalizeLocationKey } from '../utils/locationKey';
 
 const US_E164 = /^\+1[2-9]\d{9}$/;
 const REFERENCE_CACHE_MS = 10 * 60 * 1000;
@@ -81,6 +83,14 @@ export interface OutboundNumber {
 
 const sameText = (a: unknown, b: unknown) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 
+async function locationRowForLead(organizationId: string, rows: any[], leadLocation: string) {
+  const exact = rows.find((item) => sameText(item.location, leadLocation));
+  if (exact) return exact;
+  const crmLocation: any = await CrmLocation.findOne({ organizationId, aliasKeys: normalizeLocationKey(leadLocation) }).select('aliasKeys').lean().catch(() => null);
+  const keys: string[] = crmLocation?.aliasKeys || [];
+  return rows.find((item) => keys.includes(normalizeLocationKey(item.location))) || null;
+}
+
 export async function resolveOutboundNumber(opts: {
   organizationId: unknown;
   channel: OutboundChannel;
@@ -107,7 +117,7 @@ export async function resolveOutboundNumber(opts: {
   const locationRows = ready.filter((row) => row.kind === 'location' && row.location);
   if (locationRows.length && opts.leadId && mongoose.isValidObjectId(String(opts.leadId))) {
     const lead: any = await mongoose.model('Lead').findOne({ _id: opts.leadId, organizationId: orgId }).select('location').lean().catch(() => null);
-    const row = lead?.location ? locationRows.find((item) => sameText(item.location, lead.location)) : null;
+    const row = lead?.location ? await locationRowForLead(orgId, locationRows, lead.location) : null;
     if (row) return { number: row.number, label: row.label, source: 'location' };
   }
 
