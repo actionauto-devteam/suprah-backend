@@ -13,7 +13,7 @@ jest.mock('../../src/services/notification.service', () => ({
   __esModule: true, default: { createNotification },
 }));
 
-import { notifyMeetingCreated, notifyMeetingReminder } from '../../src/services/suprahMeetNotification.service';
+import { notifyMeetingCreated, notifyMeetingLive, notifyMeetingReminder } from '../../src/services/suprahMeetNotification.service';
 
 const now = new Date('2026-10-20T17:50:00Z');
 const buildMeeting = (overrides: Record<string, unknown> = {}): any => ({
@@ -118,4 +118,10 @@ it('honors suppressed notifications without leaving an endless pending retry', a
   createNotification.mockResolvedValue(null);
   await notifyMeetingCreated(buildMeeting());
   expect(updateMeeting).toHaveBeenCalledTimes(1);
+});
+
+it('includes the host in room-open device alerts so an away host also learns that the scheduled room opened', async () => {
+  await notifyMeetingLive(buildMeeting());
+  expect(createNotification.mock.calls.map(([notice]) => notice.userId)).toEqual(['host', 'person-1', 'department-member']);
+  expect(createNotification.mock.calls.every(([notice]) => notice.type === 'suprah_meet_live' && notice.ensurePushDelivery)).toBe(true);
 });

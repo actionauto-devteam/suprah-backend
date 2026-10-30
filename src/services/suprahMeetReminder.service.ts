@@ -1,18 +1,29 @@
 import Meeting from '../models/Meeting.model';
+import { closeAbandonedMeeting, openScheduledMeeting, reconcilePersistedPresence } from './suprahMeetLifecycle.service';
 
 import { randomUUID } from 'crypto';
 import {
   MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive, notifyMeetingReminder,
 } from './suprahMeetNotification.service';
 import logger from '../utils/logger';
-import { reconcileMeetingTimer } from './suprahMeetPresence.service';
+import { MEET_HOST_AWAY_GRACE_MS } from './suprahMeetPresence.service';
 
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
+let opening = false;
 
 export function initSuprahMeetReminders() {
   if (timer) return;
+  // The one-second opening worker is separate from slower reminders/presence work.
+  const openingTimer = setInterval(() => {
+    if (opening) return;
+    opening = true;
+    void openDueMeetings().catch((err) => logger.error({ err }, '[SuprahMeet] scheduled opening failed'))
+      .finally(() => { opening = false; });
+  }, 1000);
+  openingTimer.unref();
+  void openDueMeetings().catch((err) => logger.error({ err }, '[SuprahMeet] scheduled opening failed'));
   timer = setInterval(() => { void tick(); }, 30_000);
   timer.unref();
   void tick();
@@ -32,28 +43,45 @@ async function tick() {
 
 /** Expire browser/device leases even when every meeting tab disappeared. */
 export async function reconcileSuprahMeetPresence(now = new Date()) {
-  const meetings = await Meeting.find({
-    status: 'live',
-    $or: [
-      { 'participants.sessions.0': { $exists: true } },
-      { liveNotificationPending: true },
-    ],
-  }).limit(100);
-  for (const meeting of meetings) {
-    reconcileMeetingTimer(meeting, now);
-    if (meeting.isModified()) await meeting.save();
-    if (meeting.liveNotificationPending) {
-      await notifyMeetingLive(meeting).catch((err) =>
-        logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] live notification pending retry'));
+  let afterId: string | undefined;
+  for (;;) {
+    const meetings = await Meeting.find({
+      ...(afterId ? { _id: { $gt: afterId } } : {}),
+      $or: [
+        { status: 'live' },
+        { status: 'scheduled', scheduledAt: null, createdAt: { $lte: new Date(now.getTime() - MEET_HOST_AWAY_GRACE_MS) } },
+      ],
+    }).sort({ _id: 1 }).limit(100);
+    for (const meeting of meetings) {
+      try {
+        const current = await closeAbandonedMeeting(meeting, now);
+        if (current !== meeting || current.status === 'ended') continue;
+        const reconciled = await reconcilePersistedPresence(meeting, now);
+        if (reconciled.status === 'live' && reconciled.liveNotificationPending) {
+          await notifyMeetingLive(reconciled).catch((err) =>
+            logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] live notification pending retry'));
+        }
+      } catch (err) {
+        logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] presence reconciliation failed');
+      }
     }
+    if (meetings.length < 100) break;
+    afterId = String(meetings[meetings.length - 1]._id);
   }
 }
 
-/** A deprecated compatibility export. The host is the only start authority. */
+/** Open due rooms independently of the host; each row is claimed across workers. */
 export async function openDueMeetings(now = new Date()) {
-  // A scheduled time is a reminder, not authorization to open a room. Keep
-  // this compatibility export inert for callers from older deployments.
-  void now;
+  const due = await Meeting.find({ status: 'scheduled', scheduledAt: { $lte: now, $ne: null } })
+    .sort({ scheduledAt: 1 }).limit(100);
+  for (const meeting of due) {
+    try {
+      const opened = await openScheduledMeeting(meeting, now);
+      await closeAbandonedMeeting(opened, now);
+    } catch (err) {
+      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] scheduled room reconciliation failed');
+    }
+  }
 }
 
 /** Exported for focused tests; importing this module never starts the scheduler. */
@@ -63,10 +91,15 @@ export async function sendSuprahMeetNotifications(now = new Date()) {
   const pending = await Meeting.find({
     invitationNotificationPending: true,
     status: { $in: ['scheduled', 'live'] },
-  }).sort({ createdAt: 1 }).limit(20);
+  }).sort({ updatedAt: 1 }).limit(20);
   for (const meeting of pending) {
-    await notifyMeetingCreated(meeting).catch((err) =>
-      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] Invitation retry failed'));
+    await notifyMeetingCreated(meeting).catch(async (err) => {
+      // Rotate failed/no-subscription jobs behind other pending invitations.
+      // Their immutable per-notification expiry still bounds the retry window.
+      await Meeting.updateOne({ _id: meeting._id, organizationId: meeting.organizationId },
+        { $set: { updatedAt: now } });
+      logger.error({ err, meetingId: meeting._id }, '[SuprahMeet] Invitation retry failed');
+    });
   }
 
   const due = await Meeting.find({
@@ -107,7 +140,3 @@ export async function sendSuprahMeetNotifications(now = new Date()) {
     }
   }
 }
-
-/* ── 2. Auto-end abandoned live meetings ──────────────────────────────── */
-// Meetings are never auto-ended. Only the host's explicit end action may end
-// a room, so the host can leave and return without losing the meeting.

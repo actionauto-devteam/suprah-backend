@@ -6,7 +6,7 @@ export const MEET_REMINDER_WINDOW_MS = 10 * 60_000;
 
 type MeetingNotice = Pick<IMeeting,
   '_id' | 'organizationId' | 'hostCrmUserId' | 'invitees' | 'inviteAll' |
-  'title' | 'code' | 'scheduledAt' | 'status'>;
+  'title' | 'code' | 'scheduledAt' | 'status' | 'openedAt' | 'createdAt'>;
 
 /** Resolve only active people in this organization, including department-expanded invitees. */
 async function recipients(meeting: MeetingNotice, includeHost: boolean) {
@@ -51,7 +51,11 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
   // One persisted notification per recipient/session/stage. A reschedule has
   // a new reminder key; retrying a partially delivered batch reuses existing rows.
   const eventKey = `meet:${String(meeting._id)}:${kind}${isReminder ? `:${meeting.scheduledAt?.toISOString()}` : ''}`;
-  const targets = await recipients(meeting, isReminder);
+  const targets = await recipients(meeting, isReminder || isLive);
+  const scheduledMs = meeting.scheduledAt?.getTime();
+  const pushExpiresAt = new Date(isReminder && scheduledMs ? scheduledMs
+    : isLive ? Math.min(scheduledMs ?? now.getTime(), meeting.openedAt?.getTime() ?? now.getTime()) + 3_600_000
+    : Math.min(scheduledMs ?? now.getTime() + 15 * 60_000, now.getTime() + 86_400_000)).toISOString();
   // Bounded batches keep an invite-all meeting from opening hundreds of writes at once.
   for (let i = 0; i < targets.length; i += 10) {
     const results = await Promise.allSettled(targets.slice(i, i + 10).map((userId) =>
@@ -72,7 +76,7 @@ async function send(meeting: MeetingNotice, kind: 'invitation' | 'reminder' | 'l
           // ordinary CRM bursts, but an invite, imminent reminder, or live
           // session is time-sensitive and needs its own room deep link.
           pushSource: 'Suprah Meet', pushTag: eventKey, pushTopic: eventKey,
-          soundProfile: 'attention', priority: 'high',
+          soundProfile: 'attention', priority: 'high', pushExpiresAt,
         },
       }),
     ));

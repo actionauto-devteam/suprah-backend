@@ -29,6 +29,7 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-10-20T15:00:00Z').getTime());
   createMeeting.mockImplementation(async (data) => ({ ...data, _id: `session-${createMeeting.mock.calls.length}` }));
   notifyCreated.mockResolvedValue(undefined);
+  updateMeeting.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 });
 afterEach(() => jest.restoreAllMocks());
 

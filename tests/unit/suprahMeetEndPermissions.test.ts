@@ -1,17 +1,24 @@
 const findMeeting = jest.fn();
+const transitionMeeting = jest.fn();
+const deleteScheduled = jest.fn();
+const deleteSeries = jest.fn();
+const updateScheduled = jest.fn();
+const updateSeries = jest.fn();
+const findById = jest.fn();
 const deleteChimeMeeting = jest.fn();
 const stopRecordingPipelines = jest.fn();
 const getChimeMeeting = jest.fn();
+const createChimeMeeting = jest.fn();
 const createChimeAttendee = jest.fn();
 const deleteChimeAttendee = jest.fn();
 const setChimeAttendeeMuted = jest.fn();
 const notifyMeetingLive = jest.fn();
 
 jest.mock('../../src/utils/asyncHandler', () => ({ asyncHandler: (handler: unknown) => handler }));
-jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { findOne: findMeeting } }));
+jest.mock('../../src/models/Meeting.model', () => ({ __esModule: true, default: { findOne: findMeeting, findOneAndUpdate: transitionMeeting, deleteOne: deleteScheduled, deleteMany: deleteSeries, updateOne: updateScheduled, updateMany: updateSeries, findById } }));
 jest.mock('../../src/models/CrmUser.model', () => ({ __esModule: true, default: {} }));
 jest.mock('../../src/services/suprahMeetAws.service', () => ({
-  deleteChimeMeeting, stopRecordingPipelines, getChimeMeeting, createChimeAttendee,
+  deleteChimeMeeting, stopRecordingPipelines, getChimeMeeting, createChimeMeeting, createChimeAttendee,
   deleteChimeAttendee, setChimeAttendeeMuted,
 }));
 jest.mock('../../src/services/suprahMeetAI.service', () => ({}));
@@ -45,6 +52,7 @@ beforeEach(() => {
     save: jest.fn().mockResolvedValue(undefined),
   };
   findMeeting.mockResolvedValue(meeting);
+  transitionMeeting.mockImplementation(async (_filter, update) => Object.assign(meeting, update.$set));
   deleteChimeMeeting.mockResolvedValue(undefined);
   stopRecordingPipelines.mockResolvedValue(undefined);
   getChimeMeeting.mockResolvedValue({ MeetingId: 'chime-1' });
@@ -118,11 +126,11 @@ it.each([
   expect(res.json.mock.calls[0][0].data.self).toMatchObject({ canControl, canEndForAll });
 });
 
-it('does not let a scheduled timestamp or attendee start the meeting', async () => {
+it('does not let an attendee open a meeting before its scheduled time', async () => {
   meeting.status = 'scheduled';
-  meeting.scheduledAt = new Date(Date.now() - 60_000);
+  meeting.scheduledAt = new Date(Date.now() + 60_000);
   await expect(invoke(controller.joinMeeting, request('participant'), response()))
-    .rejects.toMatchObject({ statusCode: 409, message: 'This meeting has not started yet. Only the host can start it.' });
+    .rejects.toMatchObject({ statusCode: 409, message: 'This meeting has not started yet. Wait for its scheduled time or for the host to start it early.' });
   expect(meeting.status).toBe('scheduled');
   expect(createChimeAttendee).not.toHaveBeenCalled();
 });
@@ -177,4 +185,114 @@ it('does not grant access to a meeting outside the caller organization', async (
     .rejects.toMatchObject({ statusCode: 404 });
   expect(findMeeting).toHaveBeenCalledWith({ organizationId: 'org-1', code: 'MEET-1234' });
   expect(deleteChimeMeeting).not.toHaveBeenCalled();
+});
+
+it.each(['employee', 'admin', 'manager', 'super_admin'])(
+  'rejects non-host %s schedule edits and deletions', async (role) => {
+    meeting.status = 'scheduled';
+    await expect(invoke(controller.updateMeeting, request('participant', role), response()))
+      .rejects.toMatchObject({ statusCode: 403 });
+    await expect(invoke(controller.deleteMeeting, request('participant', role), response()))
+      .rejects.toMatchObject({ statusCode: 403 });
+  },
+);
+
+it('allows an ordinary host to edit their upcoming meeting with a scheduled-state guard', async () => {
+  meeting.status = 'scheduled';
+  updateScheduled.mockResolvedValue({ modifiedCount: 1 });
+  findById.mockReturnValue({ lean: async () => ({ ...meeting, title: 'Updated' }) });
+  const res = response();
+  await invoke(controller.updateMeeting, { ...request('host'), body: { title: 'Updated' }, query: {} }, res);
+  expect(updateScheduled).toHaveBeenCalledWith({ _id: 'meeting-1', hostCrmUserId: 'host', status: 'scheduled' },
+    { $set: { title: 'Updated' } });
+  expect(res.json.mock.calls[0][0].data.title).toBe('Updated');
+});
+it('limits host series deletion to their own scheduled sessions and organization', async () => {
+  meeting.status = 'scheduled';
+  meeting.seriesId = 'series-1';
+  deleteSeries.mockResolvedValue({ deletedCount: 3 });
+  await invoke(controller.deleteMeeting, { ...request('host'), query: { series: '1' } }, response());
+  expect(deleteSeries).toHaveBeenCalledWith({ organizationId: 'org-1', seriesId: 'series-1',
+    hostCrmUserId: 'host', status: 'scheduled' });
+});
+it('limits series editing to the host scheduled sessions without changing other session dates', async () => {
+  meeting.status = 'scheduled';
+  meeting.seriesId = 'series-1';
+  updateSeries.mockResolvedValue({ modifiedCount: 3 });
+  findById.mockReturnValue({ lean: async () => meeting });
+  await invoke(controller.updateMeeting, { ...request('host'), query: { series: '1' }, body: { title: 'Series' } }, response());
+  expect(updateSeries).toHaveBeenCalledWith({ organizationId: 'org-1', seriesId: 'series-1',
+    hostCrmUserId: 'host', status: 'scheduled' }, { $set: { title: 'Series' } });
+  expect(updateScheduled).not.toHaveBeenCalled();
+});
+
+it('does not report a successful edit if the host starts the meeting concurrently', async () => {
+  meeting.status = 'scheduled';
+  updateScheduled.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
+  await expect(invoke(controller.updateMeeting, { ...request('host'), body: { title: 'Too late' }, query: {} }, response()))
+    .rejects.toMatchObject({ statusCode: 409 });
+});
+it('does not report a successful deletion if the host starts the meeting concurrently', async () => {
+  meeting.status = 'scheduled';
+  deleteScheduled.mockResolvedValue({ deletedCount: 0 });
+  await expect(invoke(controller.deleteMeeting, { ...request('host'), query: {} }, response()))
+    .rejects.toMatchObject({ statusCode: 409 });
+});
+
+it('opens a due scheduled room and admits an invited attendee while its host is absent', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 1_000);
+  meeting.participants = [];
+  const res = response();
+  await invoke(controller.joinMeeting, request('participant'), res);
+  expect(transitionMeeting).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduledAt: meeting.scheduledAt }),
+    { $set: { status: 'live', openedAt: meeting.scheduledAt, liveNotificationPending: true } }, { new: true });
+  expect(res.json.mock.calls[0][0].data.meeting.status).toBe('live');
+  expect(res.json.mock.calls[0][0].data.self.canEndForAll).toBe(false);
+  expect(createChimeAttendee).toHaveBeenCalledTimes(1);
+});
+it('automatically clears the scheduled waiting gate at the scheduled time without a host', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 1_000);
+  meeting.participants = [];
+  const res = response();
+  await invoke(controller.requestJoin, request('participant'), res);
+  expect(res.json.mock.calls[0][0].data).toMatchObject({ admitted: true });
+});
+it('admits a public guest to a due scheduled room without its host', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 1_000);
+  meeting.participants = [];
+  const pass = response();
+  await invoke(controller.guestRequest, { params: { code: meeting.code }, headers: {}, body: { name: 'Guest visitor' } }, pass);
+  expect(pass.json.mock.calls[0][0].data.live).toBe(true);
+  const token = pass.json.mock.calls[0][0].data.guestToken;
+  const joined = response();
+  await invoke(controller.guestJoin, { params: { code: meeting.code }, headers: { authorization: `Bearer ${token}` } }, joined);
+  expect(joined.json.mock.calls[0][0].data.self.isGuest).toBe(true);
+});
+it('keeps private admission enforced after the scheduled room opens', async () => {
+  meeting.status = 'scheduled';
+  meeting.scheduledAt = new Date(Date.now() - 1_000);
+  meeting.visibility = 'private';
+  meeting.participants = [];
+  meeting.waiting = [];
+  await expect(invoke(controller.joinMeeting, request('unknown'), response())).rejects.toMatchObject({ statusCode: 403 });
+  expect(createChimeAttendee).not.toHaveBeenCalled();
+});
+
+it('uses the same room creation token for simultaneous first scheduled attendees', async () => {
+  meeting.status = 'live';
+  meeting.scheduledAt = new Date(Date.now() - 1_000);
+  meeting.chimeMeetingId = undefined;
+  findMeeting.mockImplementation(async () => ({ ...meeting, participants: [], save: jest.fn() }));
+  getChimeMeeting.mockResolvedValue(null);
+  createChimeMeeting.mockResolvedValue({ MeetingId: 'shared-chime', MediaRegion: 'us-east-1' });
+  await Promise.all([
+    invoke(controller.joinMeeting, request('a'), response()),
+    invoke(controller.joinMeeting, request('b'), response()),
+  ]);
+  expect(createChimeMeeting).toHaveBeenCalledTimes(2);
+  expect(createChimeMeeting.mock.calls[0][1]).toBe(createChimeMeeting.mock.calls[1][1]);
+  expect(createChimeMeeting.mock.calls[0][1]).toMatch(/^[a-f0-9]{64}$/);
 });

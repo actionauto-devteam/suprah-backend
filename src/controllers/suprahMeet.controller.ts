@@ -18,16 +18,20 @@ import {
 import { mailConfigured, sendRecordingEmail } from '../services/suprahMeetMail.service';
 import { MEET_REMINDER_WINDOW_MS, notifyMeetingCreated, notifyMeetingLive } from '../services/suprahMeetNotification.service';
 import {
-  clearParticipantSessions, hasParticipantSession, isHostPresent,
+  clearParticipantSessions, hasParticipantSession, hasScheduledMeetingOpened, isHostPresent, meetingEndedMessage,
   leaveParticipantSession, meetingTimerSnapshot, reconcileMeetingTimer,
   stopMeetingTimer, touchParticipantSession,
 } from '../services/suprahMeetPresence.service';
 import logger from '../utils/logger';
+import { closeAbandonedMeeting, openScheduledMeeting, reconcilePersistedPresence } from '../services/suprahMeetLifecycle.service';
 
 const COMPANY_TZ = 'America/Denver'; // Mountain time — MDT/MST with automatic DST
 const MAX_SERIES_SESSIONS = 30;
 
 const makeCode = () => `MEET-${crypto.randomInt(1000, 10000)}`;
+// Simultaneous first attendees must receive the same AWS room, including guests.
+const chimeRequestToken = (meeting: IMeeting) => crypto.createHash('sha256')
+  .update(`${meeting._id}:${meeting.chimeMeetingId ?? 'initial'}`).digest('hex');
 
 /** Log the real AWS error server-side, then throw a descriptive ApiError. */
 function wrapAws<T>(p: Promise<T>, what: string): Promise<T> {
@@ -95,9 +99,11 @@ function isRemovedParticipant(meeting: IMeeting, participantId: string): boolean
   return ((meeting as any).removedParticipantIds ?? []).includes(participantId);
 }
 
-async function refreshPersistedPresence(meeting: IMeeting): Promise<void> {
-  reconcileMeetingTimer(meeting);
-  if (typeof meeting.isModified === 'function' && meeting.isModified()) await meeting.save();
+async function refreshPersistedPresence(found: IMeeting): Promise<IMeeting> {
+  let meeting = await openScheduledMeeting(found);
+  meeting = await closeAbandonedMeeting(meeting);
+  if (meeting.status !== 'ended') meeting = await reconcilePersistedPresence(meeting);
+  return meeting;
 }
 
 /** May this user enter the room without waiting? */
@@ -282,8 +288,8 @@ const createMeeting = asyncHandler(async (req: Request, res: Response) => {
 // ── DELETE /api/crm/meet/meetings/:code (?series=1 removes the whole series) ─
 const deleteMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  if (!canControl(user, meeting)) {
-    throw new ApiError(403, 'Only the host or an admin/manager can delete this meeting.');
+  if (!isHost(user, meeting)) {
+    throw new ApiError(403, 'Only the meeting host can delete this meeting.');
   }
   if (meeting.status === 'live') {
     throw new ApiError(400, 'This meeting is live — end it instead of deleting it.');
@@ -296,11 +302,12 @@ const deleteMeeting = asyncHandler(async (req: Request, res: Response) => {
   const result = wholeSeries
     ? await Meeting.deleteMany({
         organizationId: user.organizationId,
-        seriesId: meeting.seriesId,
+        seriesId: meeting.seriesId, hostCrmUserId: user._id,
         status: 'scheduled', // never touch sessions that already ran
       })
-    : await Meeting.deleteOne({ _id: meeting._id });
+    : await Meeting.deleteOne({ _id: meeting._id, organizationId: user.organizationId, hostCrmUserId: user._id, status: 'scheduled' });
 
+  if (result.deletedCount === 0) throw new ApiError(409, 'This meeting changed. Refresh the meeting list and try again.');
   res.json(new ApiResponse(200, { deletedCount: result.deletedCount ?? 0 },
     wholeSeries ? 'Series deleted' : 'Meeting deleted'));
 });
@@ -348,11 +355,11 @@ const pubParticipants = (meeting: IMeeting) =>
 
 // POST /api/crm/meet/guest/:code/request   Body: { name, email? }   (public)
 const guestRequest = asyncHandler(async (req: Request, res: Response) => {
-  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  let meeting: IMeeting | null = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
-  await refreshPersistedPresence(meeting);
+  meeting = await refreshPersistedPresence(meeting);
   if (meeting.status === 'ended') {
-    return res.json(new ApiResponse(200, { ended: true }, 'Meeting already ended'));
+    return res.json(new ApiResponse(200, { ended: true, endedReason: meetingEndedMessage(meeting.endedReason) }, 'Meeting already ended'));
   }
   const name = String(req.body?.name || '').trim().slice(0, 60);
   if (name.length < 2) throw new ApiError(400, 'Please enter your name (at least 2 characters).');
@@ -367,7 +374,7 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
     code: meeting.code, guestId, name, email,
     organizationId: meeting.organizationId.toString(),
   });
-  const live = meeting.status === 'live' && isHostPresent(meeting);
+  const live = meeting.status === 'live' && (isHostPresent(meeting) || hasScheduledMeetingOpened(meeting));
   const scheduledAt = meeting.scheduledAt?.toISOString() ?? null;
 
   if (isRemovedParticipant(meeting, `guest:${guestId}`)) {
@@ -400,19 +407,20 @@ const guestRequest = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/crm/meet/guest/:code/join   (guest pass required)
 const guestJoin = asyncHandler(async (req: Request, res: Response) => {
   const g = verifyGuest(req);
-  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  let meeting: IMeeting | null = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting) throw new ApiError(404, 'No meeting found for that link.');
   if (g.code !== meeting.code) throw new ApiError(401, 'This guest pass is for a different meeting.');
-  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
-  await refreshPersistedPresence(meeting);
+  if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
+  meeting = await refreshPersistedPresence(meeting);
+  if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
   if (isRemovedParticipant(meeting, `guest:${g.guestId}`)) {
     throw new ApiError(403, 'The host removed you from this meeting.');
   }
   // Guests can never START a meeting — only join one that is live.
   if (meeting.status === 'scheduled') {
-    throw new ApiError(409, "This meeting hasn't started yet. You'll join automatically once the host starts it.");
+    throw new ApiError(409, "This meeting hasn't started yet. It opens at its scheduled time or when the host starts it early.");
   }
-  if (!isHostPresent(meeting)) {
+  if (!isHostPresent(meeting) && !hasScheduledMeetingOpened(meeting)) {
     throw new ApiError(409, "The host has stepped away. You'll be able to join when they return.");
   }
   if ((meeting as any).visibility === 'private') {
@@ -424,7 +432,7 @@ const guestJoin = asyncHandler(async (req: Request, res: Response) => {
 
   let chimeMeeting = meeting.chimeMeetingId ? await getChimeMeeting(meeting.chimeMeetingId) : null;
   if (!chimeMeeting) {
-    chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
+    chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString(), chimeRequestToken(meeting)), 'Creating the meeting');
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
     meeting.captionsEnabled = false;
@@ -484,13 +492,15 @@ const guestLeave = asyncHandler(async (req: Request, res: Response) => {
 // Lets the guest UI show real names/avatars of people who join after them.
 const guestRoster = asyncHandler(async (req: Request, res: Response) => {
   const g = verifyGuest(req);
-  const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
+  let meeting: IMeeting | null = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
-  await refreshPersistedPresence(meeting);
+  meeting = await refreshPersistedPresence(meeting);
   res.json(new ApiResponse(200, {
     participants: pubParticipants(meeting),
     startedAt: meeting.startedAt ?? null,
     timer: meetingTimerSnapshot(meeting),
+    status: meeting.status,
+    endedReason: meeting.status === 'ended' ? meetingEndedMessage(meeting.endedReason) : null,
   }, 'Roster'));
 });
 
@@ -498,7 +508,7 @@ const guestHeartbeat = asyncHandler(async (req: Request, res: Response) => {
   const g = verifyGuest(req);
   const meeting = await findMeetingByCodePublic(String(req.params.code || ''));
   if (!meeting || g.code !== meeting.code) throw new ApiError(404, 'No meeting found for that link.');
-  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
   const attendeeId = String(req.body?.attendeeId || '').trim();
   const participant = meeting.participants.find((person: any) => person.guestId === g.guestId);
   if (!participant || !attendeeId || !hasParticipantSession(participant, attendeeId)) {
@@ -673,10 +683,10 @@ const recordingAccess = asyncHandler(async (req: Request, res: Response) => {
 
 // POST /api/crm/meet/meetings/:code/request-join
 const requestJoin = asyncHandler(async (req: Request, res: Response) => {
-  const { user, meeting } = await findOrgMeeting(req);
-  await refreshPersistedPresence(meeting);
+  let { user, meeting } = await findOrgMeeting(req);
+  meeting = await refreshPersistedPresence(meeting);
   if (meeting.status === 'ended') {
-    return res.json(new ApiResponse(200, { ended: true, title: meeting.title }, 'Meeting already ended'));
+    return res.json(new ApiResponse(200, { ended: true, title: meeting.title, endedReason: meetingEndedMessage(meeting.endedReason) }, 'Meeting already ended'));
   }
   if (isRemovedParticipant(meeting, user._id.toString())) {
     return res.json(new ApiResponse(200, { denied: true, title: meeting.title }, 'Removed by the host'));
@@ -685,13 +695,9 @@ const requestJoin = asyncHandler(async (req: Request, res: Response) => {
   const notStarted = meeting.status === 'scheduled';
   const hostPresent = isHostPresent(meeting);
 
-  // A scheduled room is not a live room just because an attendee opens its
-  // link or the scheduled time arrives. Everyone except the host receives a
-  // refresh-safe waiting room until the host explicitly starts it.
-  // Keep the existing private-room admission boundary intact: invited people
-  // wait for the scheduled opening, while unknown code-only users still enter
-  // the host's approval queue instead of learning private meeting details.
-  if ((notStarted || !hostPresent) && !host && isAllowedIn(user, meeting)) {
+  // Private approval still applies. Dated rooms open at their scheduled time;
+  // instant rooms remain host-controlled until started.
+  if ((notStarted || (!hostPresent && !hasScheduledMeetingOpened(meeting))) && !host && isAllowedIn(user, meeting)) {
     return res.json(new ApiResponse(200, {
       notStarted: true, title: meeting.title,
       scheduledAt: meeting.scheduledAt?.toISOString() ?? null,
@@ -773,8 +779,8 @@ const respondWaiting = asyncHandler(async (req: Request, res: Response) => {
 // session in the series; the time always applies to this session only.
 const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  if (!canControl(user, meeting)) {
-    throw new ApiError(403, 'Only the host or an admin/manager can edit this meeting.');
+  if (!isHost(user, meeting)) {
+    throw new ApiError(403, 'Only the meeting host can edit this meeting.');
   }
   if (meeting.status !== 'scheduled') {
     throw new ApiError(400, 'Only upcoming meetings can be edited.');
@@ -825,15 +831,17 @@ const updateMeeting = asyncHandler(async (req: Request, res: Response) => {
   let seriesUpdated = 0;
   if (wholeSeries && Object.keys(shared).length > 0) {
     const result = await Meeting.updateMany(
-      { organizationId: user.organizationId, seriesId: meeting.seriesId, status: 'scheduled' },
+      { organizationId: user.organizationId, seriesId: meeting.seriesId, hostCrmUserId: user._id, status: 'scheduled' },
       { $set: shared }
     );
     seriesUpdated = result.modifiedCount ?? 0;
     if (Object.keys(own).length > 0) {
-      await Meeting.updateOne({ _id: meeting._id }, { $set: own });
+      const result = await Meeting.updateOne({ _id: meeting._id, hostCrmUserId: user._id, status: 'scheduled' }, { $set: own });
+      if (result.matchedCount === 0) throw new ApiError(409, 'This meeting has already started or changed. Refresh and try again.');
     }
   } else {
-    await Meeting.updateOne({ _id: meeting._id }, { $set: { ...shared, ...own } });
+    const result = await Meeting.updateOne({ _id: meeting._id, hostCrmUserId: user._id, status: 'scheduled' }, { $set: { ...shared, ...own } });
+    if (result.matchedCount === 0) throw new ApiError(409, 'This meeting has already started or changed. Refresh and try again.');
   }
 
   const fresh = await Meeting.findById(meeting._id).lean();
@@ -879,7 +887,7 @@ const listMeetings = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, {
     meetings: meetings.map(serializeMeeting),
     selfCrmUserId: user._id.toString(),
-    canManageAll: user.role === 'admin' || user.role === 'manager',
+    canManageAll: false,
   }, 'Meetings fetched'));
 });
 
@@ -917,25 +925,25 @@ const getAlerts = asyncHandler(async (req: Request, res: Response) => {
 
 // ── POST /api/crm/meet/meetings/:code/join ──────────────────────────────────
 const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
-  const { user, meeting } = await findOrgMeeting(req);
-  await refreshPersistedPresence(meeting);
+  let { user, meeting } = await findOrgMeeting(req);
+  meeting = await refreshPersistedPresence(meeting);
 
-  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
   if (!isAllowedIn(user, meeting)) {
     throw new ApiError(403, 'The host has not admitted you to this meeting yet.');
   }
 
   const host = isHost(user, meeting);
   if (meeting.status === 'scheduled' && !host) {
-    throw new ApiError(409, 'This meeting has not started yet. Only the host can start it.');
+    throw new ApiError(409, 'This meeting has not started yet. Wait for its scheduled time or for the host to start it early.');
   }
-  if (meeting.status === 'live' && !host && !isHostPresent(meeting)) {
+  if (meeting.status === 'live' && !host && !isHostPresent(meeting) && !hasScheduledMeetingOpened(meeting)) {
     throw new ApiError(409, 'The host has stepped away. You can join when they return.');
   }
 
   let chimeMeeting = meeting.chimeMeetingId ? await getChimeMeeting(meeting.chimeMeetingId) : null;
   if (!chimeMeeting) {
-    chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString()), 'Creating the meeting');
+    chimeMeeting = await wrapAws(createChimeMeeting(meeting._id.toString(), chimeRequestToken(meeting)), 'Creating the meeting');
     meeting.chimeMeetingId = chimeMeeting.MeetingId!;
     meeting.mediaRegion = chimeMeeting.MediaRegion;
     meeting.captionsEnabled = false;
@@ -950,11 +958,11 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
     'Joining the meeting'
   );
 
-  // The host explicitly starts a scheduled room by joining it. A timestamp or
-  // another attendee can never promote a room to live.
+  // Hosts can start early; due dated rooms were atomically opened by the lifecycle.
   const roomOpenedNow = meeting.status === 'scheduled' && host;
   if (roomOpenedNow) {
     meeting.status = 'live';
+    meeting.openedAt = new Date();
     meeting.liveNotificationPending = true;
   }
 
@@ -998,8 +1006,8 @@ const joinMeeting = asyncHandler(async (req: Request, res: Response) => {
 
 // ── GET /api/crm/meet/meetings/:code ────────────────────────────────────────
 const getMeeting = asyncHandler(async (req: Request, res: Response) => {
-  const { meeting } = await findOrgMeeting(req);
-  await refreshPersistedPresence(meeting);
+  let { meeting } = await findOrgMeeting(req);
+  meeting = await refreshPersistedPresence(meeting);
   res.json(new ApiResponse(200, serializeMeeting(meeting), 'Meeting fetched'));
 });
 
@@ -1140,7 +1148,7 @@ const leaveMeeting = asyncHandler(async (req: Request, res: Response) => {
 
 const heartbeatMeeting = asyncHandler(async (req: Request, res: Response) => {
   const { user, meeting } = await findOrgMeeting(req);
-  if (meeting.status === 'ended') throw new ApiError(410, 'This meeting has already ended.');
+  if (meeting.status === 'ended') throw new ApiError(410, meetingEndedMessage(meeting.endedReason));
   const attendeeId = String(req.body?.attendeeId || '').trim();
   const participant = meeting.participants.find((person) => person.crmUserId
     && String(person.crmUserId) === String(user._id));
@@ -1226,6 +1234,7 @@ const endMeeting = asyncHandler(async (req: Request, res: Response) => {
   if (meeting.chimeMeetingId) await deleteChimeMeeting(meeting.chimeMeetingId).catch(() => {});
 
   meeting.status = 'ended';
+  meeting.endedReason = 'host-ended';
   meeting.endedAt = new Date();
   meeting.participants.forEach((p) => clearParticipantSessions(p));
   await meeting.save();
@@ -1382,6 +1391,8 @@ function serializeMeeting(m: any) {
     ai: { status: m.ai?.status ?? 'idle', summary: m.ai?.summary, generatedAt: m.ai?.generatedAt },
     startedAt: m.startedAt,
     endedAt: m.endedAt,
+    endedReason: m.status === 'ended' ? meetingEndedMessage(m.endedReason) : null,
+    openedAt: m.openedAt ?? null,
     createdAt: m.createdAt,
   };
 }

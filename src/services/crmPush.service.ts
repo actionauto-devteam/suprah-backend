@@ -17,6 +17,10 @@ const STALE_FAILURE_THRESHOLD = 5;
 
 type CrmPushSendOptions = {
   deviceHints?: string[];
+  ttlSeconds?: number;
+  timeoutMs?: number;
+  /** Used by durable meeting delivery to retry only devices that did not accept the push. */
+  onDelivered?: (endpoint: string) => void;
   // Restricts delivery to subscriptions registered from these app origins
   // ('main' | 'supraspace' — see ICrmPushSubscription.appSource). Undefined/
   // empty matches everything, same leniency as deviceHints, so subscriptions
@@ -205,10 +209,11 @@ export class CrmPushService {
               await webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: sub.keys },
                 stringifiedPayload,
-                { TTL: 86400, urgency: 'high', ...(topic ? { topic } : {}) }
+                { TTL: options.ttlSeconds ?? 86400, urgency: 'high', ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}), ...(topic ? { topic } : {}) }
               );
               stats.sent += 1;
               endpointsSucceeded.push(sub.endpoint);
+              options.onDelivered?.(sub.endpoint);
             } catch (error: any) {
               if (error.statusCode === 410 || error.statusCode === 404) {
                 endpointsToPrune.push(sub.endpoint);

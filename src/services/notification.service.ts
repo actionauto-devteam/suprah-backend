@@ -459,7 +459,10 @@ const createNotification = async (params: CreateNotificationParams) => {
       if (metadata.soundFile) pushPayload.data.soundFile = metadata.soundFile;
     }
 
-    if (ensurePushDelivery) {
+    if (ensurePushDelivery && isCrmTarget && type.startsWith('suprah_meet_')) {
+      const { deliverMeetingDevicePush } = await import('./suprahMeetPush.service');
+      await deliverMeetingDevicePush(notification, crmUser?.pushSubscriptions ?? [], pushPayload);
+    } else if (ensurePushDelivery) {
       const delivery = await UnifiedPushService.sendToUser(userId, pushPayload, type === 'crm_message');
       if (delivery.failed > 0) {
         throw new Error(`Device push failed for ${delivery.failed} subscription(s)`);

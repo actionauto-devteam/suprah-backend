@@ -44,6 +44,10 @@ jest.mock('../../src/models/communication.model', () => {
     ActorRefSchema: new Schema({ userId: Schema.Types.Mixed, name: String, email: String }, { _id: false }),
   };
 });
+jest.mock('../../src/models/StaffCallPhone.model', () => ({
+  __esModule: true,
+  default: { find: jest.fn(() => ({ select: () => ({ limit: () => ({ lean: async () => [] }) }) })) },
+}));
 jest.mock('../../src/services/telnyx.service', () => ({ COMPANY_NUMBER: '+18015550000' }));
 jest.mock('../../src/services/customerIdentity.service', () => ({ findUniqueCustomerByPhone: jest.fn().mockResolvedValue(null) }));
 jest.mock('../../src/services/callRoutingConfig.service', () => ({ getInboundRoutingConfig: jest.fn().mockResolvedValue(null), getConfiguredInboundOrganization: jest.fn().mockResolvedValue(null) }));

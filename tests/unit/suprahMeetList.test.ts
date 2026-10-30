@@ -15,6 +15,7 @@ jest.mock('../../src/services/suprahMeetNotification.service', () => ({
   notifyMeetingLive: jest.fn(),
 }));
 jest.mock('../../src/services/suprahMeetPresence.service', () => ({
+  meetingEndedMessage: () => 'This meeting has already ended.',
   clearParticipantSessions: jest.fn(),
   hasParticipantSession: jest.fn(),
   isHostPresent: jest.fn(),

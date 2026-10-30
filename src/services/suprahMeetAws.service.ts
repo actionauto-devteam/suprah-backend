@@ -32,9 +32,9 @@ function assertConfigured() {
   if (!AWS_ACCOUNT_ID) throw new Error('AWS_ACCOUNT_ID is not set');
 }
 
-export async function createChimeMeeting(externalMeetingId: string) {
+export async function createChimeMeeting(externalMeetingId: string, requestToken: string = randomUUID()) {
   const res = await meetingsClient.send(new CreateMeetingCommand({
-    ClientRequestToken: randomUUID(),
+    ClientRequestToken: requestToken,
     MediaRegion: MEDIA_REGION,
     ExternalMeetingId: externalMeetingId.slice(0, 64),
   }));

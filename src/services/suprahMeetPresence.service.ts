@@ -88,7 +88,12 @@ export function pruneParticipantSessions(meeting: IMeeting, now = new Date()): v
   }
 }
 
-/** The elapsed clock runs only while the host and another active identity are present. */
+/** Dated rooms become available at their scheduled instant even without the host. */
+export function hasScheduledMeetingOpened(meeting: IMeeting, now = new Date()): boolean {
+  return Boolean(meeting.scheduledAt && new Date(meeting.scheduledAt).getTime() <= now.getTime());
+}
+
+/** Scheduled calls count active time with two people, even when the host is away. */
 export function reconcileMeetingTimer(
   meeting: IMeeting,
   now = new Date(),
@@ -97,7 +102,7 @@ export function reconcileMeetingTimer(
   const present = (meeting.participants ?? []).filter((person) => isParticipantPresent(person, now));
   const hostPresent = isHostPresent(meeting, now);
   const hasSomeoneElse = present.some((person) => participantKey(person) !== String(meeting.hostCrmUserId));
-  const shouldRun = hostPresent && hasSomeoneElse;
+  const shouldRun = hasScheduledMeetingOpened(meeting, now) ? present.length >= 2 : hostPresent && hasSomeoneElse;
   const activeSince = meeting.timerActiveSince;
   if (shouldRun && !activeSince) {
     meeting.timerActiveSince = now;
@@ -128,5 +133,54 @@ export function meetingTimerSnapshot(meeting: IMeeting, now = new Date()) {
     running: Boolean(activeSince),
     activeSince: activeSince ? new Date(activeSince).toISOString() : null,
     hostPresent: isHostPresent(meeting, now),
+    scheduledOpen: hasScheduledMeetingOpened(meeting, now),
   };
+}
+
+/** Reconnect grace: empty rooms close after 5 minutes; host-away rooms after 15. */
+export const MEET_NO_SHOW_GRACE_MS = 60 * 60_000;
+export const MEET_EMPTY_GRACE_MS = 5 * 60_000;
+export const MEET_HOST_AWAY_GRACE_MS = 15 * 60_000;
+
+export function abandonedMeetingReason(meeting: IMeeting, now = new Date()): string | null {
+  const timestamp = (value: Date | undefined) => value ? new Date(value).getTime() : 0;
+  const current = now.getTime();
+  if (meeting.status === 'scheduled') {
+    return !meeting.scheduledAt && timestamp(meeting.createdAt) > 0
+      && current - timestamp(meeting.createdAt) >= MEET_HOST_AWAY_GRACE_MS
+      ? 'never-started' : null;
+  }
+  if (meeting.status !== 'live') return null;
+  // An early host visit must not cancel a future scheduled session.
+  if (meeting.scheduledAt && !hasScheduledMeetingOpened(meeting, now)) return null;
+  const activity = (person: IMeetingParticipant) => Math.max(
+    timestamp(person.joinedAt), timestamp(person.leftAt),
+    ...(person.sessions ?? []).map((session) => timestamp(session.lastSeenAt) + MEET_PRESENCE_LEASE_MS),
+  );
+  const present = (person: IMeetingParticipant) => isParticipantPresent(person, now)
+    && ((person.sessions?.length ?? 0) > 0 || current - activity(person) < MEET_PRESENCE_LEASE_MS);
+  const people = meeting.participants ?? [];
+  const scheduledOpen = hasScheduledMeetingOpened(meeting, now);
+  const baseline = Math.max(timestamp(meeting.openedAt), timestamp(meeting.startedAt),
+    scheduledOpen ? timestamp(meeting.scheduledAt) : timestamp(meeting.createdAt));
+  if (scheduledOpen && !people.some(present) && people.every((person) => activity(person) < timestamp(meeting.scheduledAt))) {
+    return current - timestamp(meeting.scheduledAt) >= MEET_NO_SHOW_GRACE_MS ? 'no-show' : null;
+  }
+  const lastActivity = Math.max(baseline, ...people.map(activity));
+  if (!people.some(present) && lastActivity > 0 && current - lastActivity >= MEET_EMPTY_GRACE_MS) return 'empty';
+  const host = people.filter((person) => String(person.crmUserId) === String(meeting.hostCrmUserId));
+  const hostActivity = Math.max(baseline, ...host.map(activity));
+  if (!scheduledOpen && !host.some(present) && hostActivity > 0 && current - hostActivity >= MEET_HOST_AWAY_GRACE_MS) return 'host-away';
+  return null;
+}
+
+export function meetingEndedMessage(reason?: string): string {
+  switch (reason) {
+    case 'no-show': return 'This meeting closed because nobody joined within one hour of its scheduled time.';
+    case 'empty': return 'This meeting closed after everyone left and the reconnect grace period expired.';
+    case 'host-away': return 'This meeting closed because the host was away for more than fifteen minutes.';
+    case 'never-started': return 'This instant meeting closed because nobody started it within fifteen minutes.';
+    case 'host-ended': return 'The host ended this meeting for everyone.';
+    default: return 'This meeting has already ended.';
+  }
 }

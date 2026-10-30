@@ -91,6 +91,8 @@ export interface IMeeting extends Document {
   };
   startedAt?: Date;
   endedAt?: Date;
+  endedReason?: string;
+  openedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -191,10 +193,13 @@ const MeetingSchema = new Schema<IMeeting>(
     },
     startedAt: { type: Date },
     endedAt: { type: Date },
+    endedReason: { type: String },
+    openedAt: { type: Date },
   },
   { timestamps: true }
 );
 
+MeetingSchema.index({ status: 1, scheduledAt: 1 });
 MeetingSchema.index({ organizationId: 1, code: 1 }, { unique: true });
 MeetingSchema.index({ organizationId: 1, status: 1, scheduledAt: 1 });
 
