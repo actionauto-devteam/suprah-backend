@@ -11,7 +11,6 @@ export interface IDriverLocation extends Document {
     lat: number;
     lng: number;
   };
-  shipmentIds: mongoose.Types.ObjectId[];
   lastSeenAt: Date;
   locationRecordedAt?: Date | null;
   accuracy?: number | null;
@@ -62,12 +61,6 @@ const DriverLocationSchema = new Schema<IDriverLocation>(
       lat: { type: Number, required: true },
       lng: { type: Number, required: true },
     },
-    shipmentIds: [
-      {
-        type: Schema.Types.ObjectId,
-        ref: "Shipment",
-      },
-    ],
     locationRecordedAt: { type: Date, default: null },
     accuracy: { type: Number, min: 0, default: null },
     source: { type: String, enum: ["browser", "traccar"], default: "browser" },

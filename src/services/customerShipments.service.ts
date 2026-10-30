@@ -254,6 +254,9 @@ const isoOrNull = (value: unknown) => {
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
 };
 
+/** The stages where the customer sees when to expect the car. */
+const EXPECTED_BY_STAGES = new Set<CustomerShipmentStage>(["booked", "picked_up", "on_the_way"]);
+
 /** The customer's own shipping requests, newest first, for "My Shipments". */
 export async function listCustomerShipments(customerId: string, limit = 50) {
   const quotes = await Quote.find({ requestedBy: customerId, source: "customer_portal" })
@@ -267,7 +270,7 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
   const orgIds = [...new Set(quotes.map((quote) => String(quote.organizationId ?? "")).filter((id) => mongoose.Types.ObjectId.isValid(id)))];
   const [loads, orgs] = await Promise.all([
     Load.find({ quoteId: { $in: quoteIds } })
-      .select("quoteId organizationId loadNumber status createdAt pickedUpAt inTransitAt deliveredAt cancellation.reason cancellation.at")
+      .select("quoteId organizationId loadNumber status createdAt pickedUpAt inTransitAt deliveredAt cancellation.reason cancellation.at dates.deliveryDeadline")
       .sort({ createdAt: -1 })
       .lean<any[]>(),
     orgIds.length ? Organization.find({ _id: { $in: orgIds } }).select("name").lean<any[]>() : Promise.resolve([]),
@@ -308,6 +311,9 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
             deliveredAt: isoOrNull(load.deliveredAt),
             cancelledAt: load.status === "Cancelled" ? isoOrNull(load.cancellation?.at) : null,
             cancelReason: load.status === "Cancelled" ? customerCancellationReason(load.cancellation?.reason) ?? null : null,
+            // The load's delivery deadline (decided 2026-10-29), only while the
+            // shipment is still coming; never after delivery or cancellation.
+            expectedBy: EXPECTED_BY_STAGES.has(stage) ? isoOrNull(load.dates?.deliveryDeadline) : null,
           }
         : null,
     };
