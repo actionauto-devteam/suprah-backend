@@ -48,6 +48,8 @@ router.get("/stats", staffOnly, loadController.getLoadStats);
 router.get("/attention", staffOnly, loadAttentionController.getLoadAttention);
 // Which cars are already on a live load or a waiting quote (Inventory tags, Create Load warning).
 router.get("/vehicle-shipping", staffOnly, loadController.getVehicleShipping);
+// Pickup windows and delivery deadlines for the Suprah Calendar.
+router.get("/calendar", staffOnly, loadController.getCalendarShipments);
 
 router
   .route("/")

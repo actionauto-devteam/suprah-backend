@@ -58,6 +58,7 @@
     } from "../services/loadLifecyclePolicy";
     import { announceNewBoardLoad, markNewLoadAlertsUnavailable } from "../services/newLoadAlert.service";
     import { findVehicleShipping } from "../services/vehicleShipping.service";
+    import { listCalendarShipments } from "../services/calendarShipments.service";
 
 
     const getUser = (req: Request) => req.user as IUser;
@@ -912,6 +913,26 @@
         { excludeLoadId: req.query.excludeLoadId, includeQuotes: req.query.quotes === "1" },
       );
       return res.status(200).json(new ApiResponse(200, result, "Vehicle shipping status fetched"));
+    });
+
+    /**
+     * Pickup windows and delivery deadlines for the Suprah Calendar
+     * GET /api/loads/calendar?from=<ISO>&to=<ISO>
+     * Admins get all live loads; anyone else only the loads they dispatch.
+     */
+    const getCalendarShipments = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+      const effectiveRole = String((req as { orgRole?: string }).orgRole ?? user.role ?? "");
+      const isAdmin = user.role === "super_admin" || ["admin", "super_admin"].includes(effectiveRole);
+      const items = await listCalendarShipments({
+        organizationId,
+        userId: user._id.toString(),
+        isAdmin,
+        from: req.query.from,
+        to: req.query.to,
+      });
+      return res.status(200).json(new ApiResponse(200, { items, scope: isAdmin ? "all" : "mine" }, "Calendar shipments fetched"));
     });
 
     const DRIVER_ACK_REQUIRED_LOAD_STATUSES = new Set<string>(GPS_TRACKING_LOAD_STATUSES);
@@ -2046,4 +2067,4 @@
       res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
     });
 
-    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, getCalendarShipments, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
