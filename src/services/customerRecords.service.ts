@@ -8,6 +8,7 @@ import { normalizeLeadSourceForDisplay } from '../constants/leadSource';
 import customerService from './customer.service';
 import { countAdditionalInquiries, findReturningVisits, inventoryStatusFor, inventoryStatusOf, isSoldStatus, soldStatusDate } from './customerLifecycle.service';
 import { ApiError } from '../utils/ApiError';
+import { cleanSearchText, phoneSearchDigits } from '../utils/searchText';
 
 export type CustomerRecordStatusFilter = 'active' | 'inactive' | 'all';
 export type CustomerRecordSort = 'recent' | 'name' | 'newest';
@@ -49,12 +50,11 @@ const earliest = (...values: Array<Date | string | null | undefined>) => {
 };
 
 export function buildCustomerSearch(raw: unknown): Record<string, unknown> | null {
-  const search = String(raw ?? '').trim().slice(0, 80);
+  const search = cleanSearchText(raw, 80);
   if (!search) return null;
   if (search.includes('@')) return { normalizedEmail: { $regex: escapeRegex(search.toLowerCase()) } };
-  const digits = search.replace(/\D/g, '');
-  const phoneLike = search.replace(/[\s()+.-]/g, '');
-  if (digits.length >= 4 && digits.length === phoneLike.length) {
+  const digits = phoneSearchDigits(search);
+  if (digits) {
     const pattern = escapeRegex(digits);
     return { $or: [{ normalizedPhone: { $regex: pattern } }, { normalizedAlternatePhone: { $regex: pattern } }] };
   }
@@ -114,6 +114,36 @@ async function linkedLeadSummaries(orgId: string, customerIds: mongoose.Types.Ob
   return summaries;
 }
 
+async function recentCustomerPage(orgId: string, filter: Record<string, unknown>, skip: number, limit: number): Promise<any[]> {
+  const projection = Object.fromEntries(CONTACT_FIELDS.split(' ').filter(Boolean).map((field) => [field, 1]));
+  return Customer.aggregate([
+    { $match: filter },
+    {
+      $lookup: {
+        from: Lead.collection.name,
+        localField: '_id',
+        foreignField: 'customerId',
+        pipeline: [
+          { $match: { organizationId: orgObjectId(orgId), 'customerLink.status': LINKED } },
+          { $group: { _id: null, at: { $max: { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] } } } },
+        ],
+        as: 'leadActivity',
+      },
+    },
+    {
+      $addFields: {
+        recentActivityAt: {
+          $ifNull: [{ $arrayElemAt: ['$leadActivity.at', 0] }, { $ifNull: ['$stats.lastContactedAt', '$createdAt'] }],
+        },
+      },
+    },
+    { $sort: { recentActivityAt: -1, _id: -1 } },
+    { $skip: skip },
+    { $limit: limit },
+    { $project: projection },
+  ]).option({ maxTimeMS: 5000 });
+}
+
 export async function listCustomerRecords(orgId: string, query: CustomerRecordsQuery) {
   if (!orgId) throw new ApiError(400, 'Organization context missing');
   const page = toInt(query.page, 1, 1, 100000);
@@ -127,12 +157,13 @@ export async function listCustomerRecords(orgId: string, query: CustomerRecordsQ
   if (search) filter.$and = [search];
   const sort: Record<string, 1 | -1> = sortKey === 'name'
     ? { lastName: 1, firstName: 1, _id: 1 }
-    : sortKey === 'newest'
-      ? { createdAt: -1, _id: -1 }
-      : { 'stats.lastContactedAt': -1, updatedAt: -1, _id: -1 };
+    : { createdAt: -1, _id: -1 };
+  const skip = (page - 1) * limit;
   const [total, customers] = await Promise.all([
     Customer.countDocuments(filter).maxTimeMS(5000),
-    Customer.find(filter).select(CONTACT_FIELDS).sort(sort).skip((page - 1) * limit).limit(limit).maxTimeMS(5000).lean(),
+    sortKey === 'recent'
+      ? recentCustomerPage(orgId, filter, skip, limit)
+      : Customer.find(filter).select(CONTACT_FIELDS).sort(sort).skip(skip).limit(limit).maxTimeMS(5000).lean().exec(),
   ]);
   const summaries = await linkedLeadSummaries(orgId, customers.map((customer: any) => customer._id));
   return {

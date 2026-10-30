@@ -47,9 +47,12 @@ export const crmCalendarController = {
    */
   callback: asyncHandler(async (req: Request, res: Response) => {
     const { code, state } = req.query;
+    const backToAppointments = (result: 'connected' | 'cancelled' | 'error') =>
+      res.redirect(`${config.frontendUrl}/crm/appointments?calendar=${result}`);
 
     if (!code || !state) {
-      throw new ApiError(400, 'Missing code or state from Google');
+      backToAppointments(req.query.error === 'access_denied' ? 'cancelled' : 'error');
+      return;
     }
 
     const oauth2Client = new google.auth.OAuth2(
@@ -58,27 +61,33 @@ export const crmCalendarController = {
       CRM_REDIRECT_URI
     );
 
-    const { tokens } = await oauth2Client.getToken(code as string);
     const crmUserId = state as string;
+    try {
+      const { tokens } = await oauth2Client.getToken(code as string);
 
-    // Get user info to get email
-    oauth2Client.setCredentials(tokens);
-    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
-    const userInfo = await oauth2.userinfo.get();
+      // Get user info to get email
+      oauth2Client.setCredentials(tokens);
+      const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+      const userInfo = await oauth2.userinfo.get();
 
-    // Update CrmUser with tokens
-    await CrmUser.findByIdAndUpdate(crmUserId, {
-      $set: {
-        googleCalendar: {
-          calendarConnected: true,
-          gmailAddress: userInfo.data.email,
-          accessToken: encrypt(tokens.access_token!),
-          refreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
-          expiryDate: tokens.expiry_date,
-          lastSyncAt: new Date(),
+      // Update CrmUser with tokens
+      await CrmUser.findByIdAndUpdate(crmUserId, {
+        $set: {
+          googleCalendar: {
+            calendarConnected: true,
+            gmailAddress: userInfo.data.email,
+            accessToken: encrypt(tokens.access_token!),
+            refreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
+            expiryDate: tokens.expiry_date,
+            lastSyncAt: new Date(),
+          },
         },
-      },
-    });
+      });
+    } catch (err) {
+      console.error(`Google Calendar connect failed for CrmUser ${crmUserId}:`, err);
+      backToAppointments('error');
+      return;
+    }
 
     // Start initial sync in background
     googleCalendarService.syncCrmUserCalendar(crmUserId).catch(err => {
@@ -86,7 +95,7 @@ export const crmCalendarController = {
     });
 
     // Redirect to frontend CRM settings
-    res.redirect(`${config.frontendUrl}/crm/appointments?calendar=connected`);
+    backToAppointments('connected');
   }),
 
   /**

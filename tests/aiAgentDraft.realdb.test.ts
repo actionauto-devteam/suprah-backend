@@ -171,7 +171,7 @@ describe('Real-DB: staff AI draft assistant (local MongoDB only)', () => {
     const res = await draft(lead._id, 'sms');
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ draft: 'Thanks Pat, I will confirm that with the team and text you back shortly.', channel: 'sms', agentName: 'Anna', note: null });
+    expect(res.body.data).toEqual({ draft: 'Thanks Pat, I will confirm that with the team and text you back shortly.', channel: 'sms', agentName: 'Anna', note: null, safetyWarning: null });
     const call = mockGenerateReply.mock.calls[0][0];
     expect(call).toMatchObject({ agentName: 'Anna', dealerName: 'Summit Motors', channel: 'sms', draftFor: { name: 'Erin Employee' } });
     expect(call.transcript).toEqual(expect.arrayContaining([
@@ -302,12 +302,13 @@ describe('Real-DB: staff AI draft assistant (local MongoDB only)', () => {
     expect(await usage()).toBe(usageBefore);
   });
 
-  it('holds back an unsafe suggestion', async () => {
+  it('shows a flagged suggestion with a warning instead of hiding it', async () => {
     const lead = await makeLead();
     mockGenerateReply.mockResolvedValue({ text: 'Good news, it is $2,000 off this week!' });
     const res = await draft(lead._id, 'sms');
-    expect(res.status).toBe(422);
-    expect(codeOf(res)).toBe('AI_DRAFT_UNSAFE');
+    expect(res.status).toBe(200);
+    expect(res.body.data.draft).toBe('Good news, it is $2,000 off this week!');
+    expect(res.body.data.safetyWarning).toContain('Check this before sending');
   });
 
   it('rejects an overlapping request for the same lead and channel', async () => {

@@ -163,9 +163,9 @@ export function validateOutboundEmailMessage(text: string, allowedPrices: number
 export function hasGuaranteedAvailabilityLanguage(text: string): boolean {
   if (ALWAYS_UNSAFE_AVAILABILITY.test(text)) return true;
   for (const match of text.matchAll(CONDITIONAL_AVAILABILITY_PHRASES)) {
-    const start = Math.max(0, (match.index ?? 0) - 30);
-    const context = text.slice(start, match.index);
-    if (!AVAILABILITY_HEDGE_WORDS.test(context)) return true;
+    const before = text.slice(0, match.index);
+    const sentenceStart = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n')) + 1;
+    if (!AVAILABILITY_HEDGE_WORDS.test(before.slice(sentenceStart))) return true;
   }
   return false;
 }
@@ -214,7 +214,7 @@ export async function classifySafety(
     client,
     {
       model: opts.model,
-      max_tokens: 10,
+      max_tokens: 64,
       temperature: 0,
       messages: [
         { role: 'system', content: opts.systemPrompt },
@@ -225,8 +225,12 @@ export async function classifySafety(
     opts.logLabel,
   )
     .then((completion: any) => {
-      const raw = String(completion?.choices?.[0]?.message?.content || '').trim().toUpperCase();
-      return raw === 'SAFE' ? 'SAFE' : 'UNSAFE';
+      const raw = String(completion?.choices?.[0]?.message?.content || '').trim();
+      const answer = raw.toUpperCase().replace(/[^A-Z]/g, '');
+      if (answer === 'SAFE') return 'SAFE' as const;
+      if (answer === 'UNSAFE') return 'UNSAFE' as const;
+      logger.warn({ answer: raw.slice(0, 40) }, `[${opts.logLabel}] Classifier gave no clear answer`);
+      return 'ERROR' as const;
     })
     .catch((err) => {
       logger.error({ err }, `[${opts.logLabel}] Classifier call failed`);

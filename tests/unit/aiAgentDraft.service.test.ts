@@ -101,7 +101,7 @@ describe('staff AI draft service', () => {
 
   it('returns a draft for review and records only the usage counter', async () => {
     const result = await request();
-    expect(result).toEqual({ draft: 'Thanks Pat, I can check that for you today.', channel: 'sms', agentName: 'Anna', note: null });
+    expect(result).toEqual({ draft: 'Thanks Pat, I can check that for you today.', channel: 'sms', agentName: 'Anna', note: null, safetyWarning: null });
     expect(mockGenerateReply).toHaveBeenCalledWith(expect.objectContaining({ agentName: 'Anna', dealerName: 'Summit Motors', channel: 'sms', isFirstReply: false, draftFor: { name: 'Erin' } }));
     expect(mockRecordUsage).toHaveBeenCalledWith(ORG, 'staff_draft');
   });
@@ -197,20 +197,65 @@ describe('staff AI draft service', () => {
     expect(err.message).toBe(STAFF_DRAFT_MESSAGES.failed);
   });
 
-  it('holds back a draft that breaks the deterministic safety rules', async () => {
+  it('shows a draft that breaks the safety rules twice, with a warning naming what it mentions', async () => {
     mockGenerateReply.mockResolvedValue({ text: 'It is $500 off today and still available!' });
-    const err = await failure(request());
-    expect(err.statusCode).toBe(422);
-    expect(err.errors[0].code).toBe(STAFF_DRAFT_CODES.unsafe);
+    const result = await request();
+    expect(result.draft).toBe('It is $500 off today and still available!');
+    expect(result.safetyWarning).toBe('Check this before sending. It mentions a price, that the vehicle is available or guaranteed.');
+    expect(mockGenerateReply).toHaveBeenCalledTimes(2);
     expect(mockClassify).not.toHaveBeenCalled();
   });
 
-  it('holds back a draft the classifier marks unsafe, and fails closed on classifier errors', async () => {
-    mockClassify.mockResolvedValueOnce('UNSAFE');
-    expect((await failure(request())).statusCode).toBe(422);
+  it('tells the AI what was flagged when it tries again', async () => {
+    mockGenerateReply
+      .mockResolvedValueOnce({ text: 'We can help with your trade-in today.' })
+      .mockResolvedValueOnce({ text: 'Thanks Pat, the team will follow up with you today.' });
+    const result = await request();
+    expect(result.safetyWarning).toBeNull();
+    expect(mockGenerateReply.mock.calls[0][0].retryNote).toBeUndefined();
+    expect(mockGenerateReply.mock.calls[1][0].retryNote).toContain('a trade-in');
+  });
+
+  it('writes a new draft once when the first one breaks the safety rules', async () => {
+    mockGenerateReply
+      .mockResolvedValueOnce({ text: 'It is $500 off today and still available!' })
+      .mockResolvedValueOnce({ text: 'Thanks Pat, I will check with the team and get back to you today.' });
+    const result = await request();
+    expect(result.draft).toBe('Thanks Pat, I will check with the team and get back to you today.');
+    expect(result.safetyWarning).toBeNull();
+    expect(mockGenerateReply).toHaveBeenCalledTimes(2);
+    expect(mockClassify).toHaveBeenCalledTimes(1);
+    expect(mockRecordUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a new draft once when the classifier marks the first one unsafe', async () => {
+    mockClassify.mockResolvedValueOnce('UNSAFE').mockResolvedValueOnce('SAFE');
+    const result = await request();
+    expect(result.draft).toBe('Thanks Pat, I can check that for you today.');
+    expect(mockGenerateReply).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a draft the classifier marks unsafe twice, with a warning', async () => {
+    mockClassify.mockResolvedValueOnce('UNSAFE').mockResolvedValueOnce('UNSAFE');
+    const result = await request();
+    expect(result.safetyWarning).toBe('Check this before sending. The safety check flagged something in this suggestion.');
+    expect(mockGenerateReply).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a draft with a different warning when the safety check could not finish', async () => {
     mockClassify.mockResolvedValueOnce('ERROR');
-    expect((await failure(request())).statusCode).toBe(502);
-    expect(mockRecordUsage).not.toHaveBeenCalled();
+    const result = await request();
+    expect(result.safetyWarning).toBe("Check this before sending. The safety check couldn't finish for this suggestion.");
+    expect(mockGenerateReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('looks up the price once when an email draft is flagged twice', async () => {
+    setLead({ ...smsLead, channel: 'email' });
+    mockGenerateEmailReply.mockResolvedValue({ text: 'Hi Pat, the price is $45,000 and it is still available today.' });
+    const result = await request({ channel: 'email' });
+    expect(result.safetyWarning).toContain('a price we could not confirm');
+    expect(mockGenerateEmailReply).toHaveBeenCalledTimes(2);
+    expect(mockResolvePrice).toHaveBeenCalledTimes(1);
   });
 
   it('gives up with the friendly message after the deadline', async () => {

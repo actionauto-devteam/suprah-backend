@@ -26,7 +26,8 @@ import { decrypt, encrypt } from '../utils/crypto';
 import { cacheService } from '../services/cache.service';
 import { ApiError } from '../utils/ApiError';
 import CrmUser from '../models/CrmUser.model';
-import { UNANSWERED_LEAD_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
+import { buildLeadSearchCondition } from '../utils/leadSearch';
+import { LEAD_STATUS_CATEGORIES, LIFECYCLE_TERMINAL_STATUSES, UNANSWERED_LEAD_STATUSES, isContactRestrictedStatus } from '../constants/leadStatus';
 import {
   assertContactAllowed,
   isContactRestrictedError,
@@ -751,24 +752,14 @@ export const getAllLeads = async (req: Request, res: Response) => {
       'combinedInto.leadId': { $exists: false },
     };
 
-    if (search) {
-      const escapedSearch = escapeRegex(search);
-      appendLeadCondition(query, {
-        $or: [
-          { firstName: { $regex: escapedSearch, $options: 'i' } },
-          { lastName: { $regex: escapedSearch, $options: 'i' } },
-          { email: { $regex: escapedSearch, $options: 'i' } },
-          { phone: { $regex: escapedSearch, $options: 'i' } },
-          { source: { $regex: escapedSearch, $options: 'i' } },
-          { sourceProvider: { $regex: escapedSearch, $options: 'i' } },
-          { 'vehicle.make': { $regex: escapedSearch, $options: 'i' } },
-          { 'vehicle.model': { $regex: escapedSearch, $options: 'i' } },
-        ],
-      });
-    }
+    const searchCondition = buildLeadSearchCondition(search);
+    if (searchCondition) appendLeadCondition(query, searchCondition);
 
+    const statusGroup = typeof req.query.statusGroup === 'string' ? req.query.statusGroup : '';
     if (status && status !== 'All') {
       query.status = status;
+    } else if (statusGroup && Object.prototype.hasOwnProperty.call(LEAD_STATUS_CATEGORIES, statusGroup)) {
+      query.status = { $in: LEAD_STATUS_CATEGORIES[statusGroup as keyof typeof LEAD_STATUS_CATEGORIES] };
     }
 
     if (assignedTo) {
@@ -807,13 +798,12 @@ export const getAllLeads = async (req: Request, res: Response) => {
       case "oldest":
         sort = {
           createdAt: 1,
+          _id: 1,
         };
         break;
 
       case "waiting_longest":
         sort = {
-          lastInboundAt: 1,
-          updatedAt: 1,
           createdAt: 1,
         };
         break;
@@ -822,25 +812,52 @@ export const getAllLeads = async (req: Request, res: Response) => {
       default:
         sort = {
           createdAt: -1,
+          _id: -1,
         };
         break;
     }
 
     const totalLeads = await Lead.countDocuments(query);
 
-    const leads = await Lead.find(query)
-      .select(
-        'firstName lastName email phone senderEmail senderName subject ' +
-        'customerId customerLink normalizedEmail normalizedPhone ' +
-        'parsedContent threadId messageId isRead isPending channel ' +
-        'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
-        'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
-        'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt'
-      )
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const listFields =
+      'firstName lastName email phone senderEmail senderName subject ' +
+      'customerId customerLink normalizedEmail normalizedPhone ' +
+      'parsedContent threadId messageId isRead isPending channel ' +
+      'source sourceProvider status vehicle vehicleId location dealershipLine comments address tags opportunityValue appointment createdAt updatedAt ' +
+      'centralIngestion labels followUp statusHistory notes assignedTo assignedAt aiSummary aiSummaryGeneratedAt ' +
+      'aiPausedAt aiPausedBy aiAutoPausedUntil intakeIdentity sourceInquiryId inquiryCount lastInquiryAt';
+
+    let leads: any[];
+    if (sortBy === "waiting_longest") {
+      const customerAt = { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] };
+      const repAt = { $ifNull: ['$followUp.lastRepResponseAt', new Date(0)] };
+      leads = await Lead.aggregate([
+        { $match: Lead.find().cast(Lead, { ...query }) },
+        {
+          $addFields: {
+            waitingSince: {
+              $cond: [
+                { $and: [{ $gt: [customerAt, repAt] }, { $not: [{ $in: ['$status', LIFECYCLE_TERMINAL_STATUSES] }] }] },
+                customerAt,
+                null,
+              ],
+            },
+          },
+        },
+        { $addFields: { waitingRank: { $cond: [{ $eq: ['$waitingSince', null] }, 1, 0] } } },
+        { $sort: { waitingRank: 1, waitingSince: 1, createdAt: 1, _id: 1 } },
+        { $skip: skip },
+        { $limit: limit },
+        { $project: Object.fromEntries(listFields.split(' ').filter(Boolean).map((field) => [field, 1])) },
+      ]);
+    } else {
+      leads = await Lead.find(query)
+        .select(listFields)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .lean();
+    }
 
     const normalizedLeads = leads.map((lead: any) => {
       const isDemoLead = isGenuineDemoLead(lead.source, lead.phone);

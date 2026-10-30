@@ -1061,10 +1061,14 @@ export async function sendSmsFromUser(opts: {
     await message.save();
     await bumpConversation(conversation._id, message);
     emitToOrg(opts.orgId, "comm:message:new", { message: message.toObject() });
-    throw Object.assign(new Error("SMS provider rejected the message"), {
-      statusCode: 502,
-      detail: message.errorDetail,
-    });
+    const failure = describeSmsFailure(message.errorDetail);
+    throw Object.assign(
+      new ApiError(
+        502,
+        failure?.friendlyMessage || "The text couldn't be sent to this number. Check the number or contact the customer another way.",
+      ),
+      { detail: message.errorDetail },
+    );
   }
 
   await bumpConversation(conversation._id, message);

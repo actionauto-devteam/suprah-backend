@@ -102,6 +102,8 @@ jest.mock('../../src/services/ivr.service', () => ({
 }));
 
 import { sendSmsFromUser, sendStaffAttributedSms, SmsDeliveryUncertainError, handleSmsStatus } from '../../src/services/communication.service';
+import { describeSmsFailure } from '../../src/utils/smsFailure';
+import { ApiError } from '../../src/utils/ApiError';
 
 describe('sendSmsFromUser — delivery outcome vs. local recording failure', () => {
   const actor = { userId: 'ai-agent', name: 'Alex' };
@@ -131,11 +133,30 @@ describe('sendSmsFromUser — delivery outcome vs. local recording failure', () 
 
     await expect(
       sendSmsFromUser({ orgId: 'org-1', user: actor, toPhone: '+18015550123', body: 'hello' }),
-    ).rejects.toMatchObject({ statusCode: 502 });
+    ).rejects.toMatchObject({
+      statusCode: 502,
+      message: "The text couldn't be sent to this number. Check the number or contact the customer another way.",
+    });
 
     expect(doc.status).toBe('failed');
     expect(doc.errorDetail).toContain('Telnyx rejected');
     expect(mockMessageUpdateOne).not.toHaveBeenCalled();
+  });
+
+  it('on a confirmed provider rejection, shows the plain reason for the number instead of a generic server error', async () => {
+    const doc = makeMessageDoc();
+    mockMessageCreate.mockResolvedValue(doc);
+    mockSendSms.mockRejectedValue(new Error('Telnyx rejected: invalid destination'));
+    jest.mocked(describeSmsFailure).mockReturnValueOnce({
+      friendlyMessage: "This number couldn't be reached — it may be invalid.",
+      category: 'invalid_number',
+    });
+
+    const err = await sendSmsFromUser({ orgId: 'org-1', user: actor, toPhone: '+18015550123', body: 'hello' }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ statusCode: 502, message: "This number couldn't be reached — it may be invalid." });
+    expect(jest.mocked(describeSmsFailure)).toHaveBeenCalledWith(expect.stringContaining('Telnyx rejected'));
   });
 
   it('on an ambiguous outcome (provider accepts, local save throws), throws SmsDeliveryUncertainError with the real provider id instead of marking the message failed', async () => {

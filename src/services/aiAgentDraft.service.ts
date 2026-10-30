@@ -8,6 +8,7 @@ import { hasGeminiApiKey, validateOutboundEmailMessage, validateOutboundMessage 
 import { assertLeadOpenForManualSend } from '../utils/closedLeadGuard';
 import {
   AiAgentTranscriptEntry,
+  GenerateAlexReplyResult,
   HISTORY_LIMIT,
   classifyAlexEmailReplySafety,
   classifyAlexReplySafety,
@@ -27,7 +28,6 @@ export const STAFF_DRAFT_CHANNELS: StaffDraftChannel[] = ['sms', 'email', 'webch
 
 export const STAFF_DRAFT_CODES = {
   failed: 'AI_DRAFT_FAILED',
-  unsafe: 'AI_DRAFT_UNSAFE',
   inProgress: 'AI_DRAFT_IN_PROGRESS',
   timeout: 'AI_DRAFT_TIMEOUT',
   unavailable: 'AI_DRAFT_UNAVAILABLE',
@@ -36,12 +36,29 @@ export const STAFF_DRAFT_CODES = {
 
 export const STAFF_DRAFT_MESSAGES = {
   failed: "Couldn't generate a reply right now. Please try again.",
-  unsafe: "Couldn't write a suggestion that passes the safety checks. Try again, or write your own reply.",
   inProgress: 'A suggestion is already being written for this conversation.',
   wrongChannel: 'Choose Text or Email for this lead, or reply in the Web Chat.',
 };
 
 const DEADLINE_MS = parseInt(process.env.AI_STAFF_DRAFT_DEADLINE_MS || '35000', 10);
+const SAFETY_ATTEMPTS = 2;
+const SAFETY_REASON_WORDS: Record<string, string> = {
+  'currency amount': 'a price',
+  'price mention': 'a price',
+  'unverified price figure': 'a price we could not confirm',
+  'percent-off': 'a percentage',
+  'discount/incentive language': 'a discount or promotion',
+  'financing/payment language': 'financing or payments',
+  'trade-in mention': 'a trade-in',
+  'guaranteed-availability language': 'that the vehicle is available or guaranteed',
+  'unexpected phone number': 'a phone number',
+  'unexpected link': 'a website link',
+  'unexpected email address': 'an email address',
+};
+const SAFETY_WARNINGS = {
+  flagged: 'Check this before sending. The safety check flagged something in this suggestion.',
+  unchecked: "Check this before sending. The safety check couldn't finish for this suggestion.",
+};
 const MAX_ENTRY_LENGTH = 1500;
 const LEAD_FIELDS = 'firstName lastName email phone status channel source sourceProvider subject comments parsedContent createdAt notes threadId sourceInquiryId intakeIdentity identityEmailExcluded customerId vehicle';
 
@@ -52,6 +69,7 @@ export interface StaffDraftResult {
   channel: StaffDraftChannel;
   agentName: string;
   note: string | null;
+  safetyWarning: string | null;
 }
 
 function clip(text: string): string {
@@ -86,6 +104,10 @@ function draftError(statusCode: number, message: string, code: string): ApiError
   return new ApiError(statusCode, message, [{ code }]);
 }
 
+function safetyReasonWords(reasons: string[]): string {
+  return Array.from(new Set(reasons.map((reason) => SAFETY_REASON_WORDS[reason]).filter(Boolean))).join(', ');
+}
+
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<null>((resolve) => {
@@ -101,7 +123,7 @@ async function buildDraft(input: {
   agentName: string;
   dealerName: string;
   staffName?: string;
-}): Promise<{ draft: string; note: string | null }> {
+}): Promise<{ draft: string; note: string | null; safetyWarning: string | null }> {
   const { organizationId, lead, channel, agentName, dealerName } = input;
   const { items } = await loadConversationItems(organizationId, lead, { limit: 60 });
   const transcript = draftTranscriptFromItems(items, agentName);
@@ -113,14 +135,14 @@ async function buildDraft(input: {
   const vehicleContextNote = pinned ? buildVehicleContextNote(pinned) : undefined;
   const draftFor = { name: input.staffName };
 
-  let generation;
+  let generate: (retryNote?: string) => Promise<GenerateAlexReplyResult>;
   let prices: number[] = [];
   if (channel === 'email') {
     const price = await resolveCurrentVehicleAndPrice(lead).catch(() => null);
     prices = [price?.price, price?.previousPrice].filter((value): value is number => typeof value === 'number');
-    generation = await generateAlexEmailReply({
+    generate = (retryNote) => generateAlexEmailReply({
       agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, isFirstReply: false,
-      confirmedPrice: price?.price, confirmedPreviousPrice: price?.previousPrice, phone: lead.phone, vehicleContextNote, draftFor,
+      confirmedPrice: price?.price, confirmedPreviousPrice: price?.previousPrice, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
     });
   } else {
     let coachingNotes: string[] = [];
@@ -131,35 +153,42 @@ async function buildDraft(input: {
       });
       if (selection.status !== 'error') coachingNotes = selection.appliedRules.map((rule) => rule.instruction);
     }
-    generation = await generateAlexReply({
+    generate = (retryNote) => generateAlexReply({
       agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel, isFirstReply: false,
-      coachingNotes, phone: lead.phone, vehicleContextNote, draftFor,
+      coachingNotes, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
     });
   }
 
-  if (!generation.text) {
-    logger.warn({ organizationId, leadId: String(lead._id), channel, reason: generation.error }, '[AiAgentDraft] No draft was generated');
-    throw draftError(502, STAFF_DRAFT_MESSAGES.failed, STAFF_DRAFT_CODES.failed);
+  let retryNote: string | undefined;
+  for (let attempt = 1; ; attempt += 1) {
+    const generation = await generate(retryNote);
+    if (!generation.text) {
+      logger.warn({ organizationId, leadId: String(lead._id), channel, reason: generation.error }, '[AiAgentDraft] No draft was generated');
+      throw draftError(502, STAFF_DRAFT_MESSAGES.failed, STAFF_DRAFT_CODES.failed);
+    }
+    const text = generation.text;
+    const note = generation.handoffReason ? `${agentName} suggests a team member follows up: ${generation.handoffReason}` : null;
+    const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices) : validateOutboundMessage(text);
+    if (!deterministic.ok) {
+      logger.info({ organizationId, leadId: String(lead._id), channel, attempt, reasons: deterministic.reasons }, '[AiAgentDraft] Draft flagged by the safety rules');
+      const words = safetyReasonWords(deterministic.reasons);
+      if (attempt < SAFETY_ATTEMPTS) {
+        retryNote = `Your previous suggestion was flagged${words ? ` because it mentioned ${words}` : ''}. Write a new reply that does not mention this. Say the team will follow up instead.`;
+        continue;
+      }
+      return { draft: text, note, safetyWarning: words ? `Check this before sending. It mentions ${words}.` : SAFETY_WARNINGS.flagged };
+    }
+    const verdict = channel === 'email'
+      ? await classifyAlexEmailReplySafety(text, lead.phone)
+      : await classifyAlexReplySafety(text, lead.phone);
+    if (verdict === 'SAFE') return { draft: text, note, safetyWarning: null };
+    logger.info({ organizationId, leadId: String(lead._id), channel, attempt, verdict }, '[AiAgentDraft] Draft flagged by the safety check');
+    if (verdict === 'UNSAFE' && attempt < SAFETY_ATTEMPTS) {
+      retryNote = 'Your previous suggestion was flagged by the safety check. Write a simpler reply with no prices, payments, discounts or promises. Say the team will follow up instead.';
+      continue;
+    }
+    return { draft: text, note, safetyWarning: verdict === 'UNSAFE' ? SAFETY_WARNINGS.flagged : SAFETY_WARNINGS.unchecked };
   }
-  const text = generation.text;
-  const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices) : validateOutboundMessage(text);
-  if (!deterministic.ok) {
-    logger.info({ organizationId, leadId: String(lead._id), channel, reasons: deterministic.reasons }, '[AiAgentDraft] Draft held back by the safety rules');
-    throw draftError(422, STAFF_DRAFT_MESSAGES.unsafe, STAFF_DRAFT_CODES.unsafe);
-  }
-  const verdict = channel === 'email'
-    ? await classifyAlexEmailReplySafety(text, lead.phone)
-    : await classifyAlexReplySafety(text, lead.phone);
-  if (verdict !== 'SAFE') {
-    logger.info({ organizationId, leadId: String(lead._id), channel, verdict }, '[AiAgentDraft] Draft held back by the safety check');
-    throw verdict === 'UNSAFE'
-      ? draftError(422, STAFF_DRAFT_MESSAGES.unsafe, STAFF_DRAFT_CODES.unsafe)
-      : draftError(502, STAFF_DRAFT_MESSAGES.failed, STAFF_DRAFT_CODES.failed);
-  }
-  return {
-    draft: text,
-    note: generation.handoffReason ? `${agentName} suggests a team member follows up: ${generation.handoffReason}` : null,
-  };
 }
 
 export async function generateStaffDraft(input: {
@@ -217,7 +246,7 @@ export async function generateStaffDraft(input: {
       throw draftError(502, STAFF_DRAFT_MESSAGES.failed, STAFF_DRAFT_CODES.timeout);
     }
     await recordAiUsage(organizationId, 'staff_draft');
-    return { draft: built.draft, channel, agentName: identity.name, note: built.note };
+    return { draft: built.draft, channel, agentName: identity.name, note: built.note, safetyWarning: built.safetyWarning };
   } catch (err) {
     if (err instanceof ApiError) throw err;
     logger.error({ err, organizationId, leadId, channel }, '[AiAgentDraft] Draft generation failed');

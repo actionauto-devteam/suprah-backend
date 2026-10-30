@@ -19,6 +19,12 @@ describe('buildCustomerSearch', () => {
     });
   });
 
+  it('still finds a pasted number with hidden characters or long dashes', () => {
+    const expected = buildCustomerSearch('8012013320');
+    expect(buildCustomerSearch('\u202A(801) 201-3320\u202C')).toEqual(expected);
+    expect(buildCustomerSearch('801\u2013201\u20133320')).toEqual(expected);
+  });
+
   it('does not treat short or mixed text as a phone search', () => {
     const short = buildCustomerSearch('555') as any;
     const mixed = buildCustomerSearch('Jordan 2022') as any;

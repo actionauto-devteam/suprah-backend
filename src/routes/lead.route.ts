@@ -31,6 +31,7 @@ import { getLeadConversation, getLeadEarlierConversation } from "../controllers/
 import { generateLeadAiDraftHandler, getLeadReplyOptionsHandler } from "../controllers/leadComposer.controller";
 import { staffAiDraftLimiter } from "../middleware/trainingLabRateLimit";
 import { getLeadVehiclePreviewHandler } from "../controllers/leadVehiclePreview.controller";
+import { getLicensePossibleMatchesHandler } from "../controllers/licensePossibleMatch.controller";
 import crmAuth from "../middleware/crmAuth.middleware";
 import {
   adfLimiter,
@@ -63,6 +64,7 @@ router.post("/", syncLimiter, createInquiry);
 
 router.get("/status-counts", getLeadStatusCounts);
 router.get("/location-counts", getLeadLocationCounts);
+router.get("/possible-matches", getLicensePossibleMatchesHandler);
 
 router.post(
   "/bulk-reply",

@@ -60,12 +60,18 @@ describe('validateOutboundMessage', () => {
     'Hi Jordan, we just got in a vehicle similar to one you asked about before. Stop by anytime.',
     "Thanks for asking about the Audi! I'll check with the team to confirm if it is still available and get back to you.",
     'Let me verify whether it is still available before I promise anything.',
+    'I will confirm whether the 2019 Toyota RAV4 Limited AWD is still available and get back to you.',
   ];
 
   it.each(shouldPass)('passes: %s', (text) => {
     const result = validateOutboundMessage(text);
     expect(result.ok).toBe(true);
     expect(result.reasons).toHaveLength(0);
+  });
+
+  it('only counts a hedge from the same sentence', () => {
+    const result = validateOutboundMessage('I will follow up today. The 2019 Toyota RAV4 is still available.');
+    expect(result.reasons).toContain('guaranteed-availability language');
   });
 
   it('still blocks an unhedged availability claim even without urgency language', () => {
@@ -263,14 +269,23 @@ describe('classifySafety', () => {
     await expect(classifySafety(client, 'hello', opts)).resolves.toBe('UNSAFE');
   });
 
-  it('treats an empty response as unsafe', async () => {
-    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: '' } }] });
+  it('accepts the one-word answer with punctuation or formatting around it', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: '**Safe.**' } }] });
+    await expect(classifySafety(client, 'hello', opts)).resolves.toBe('SAFE');
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'UNSAFE.' } }] });
     await expect(classifySafety(client, 'hello', opts)).resolves.toBe('UNSAFE');
   });
 
-  it('treats a rambling non-exact response as unsafe', async () => {
+  it('reports an empty response as an error, never as safe', async () => {
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: '' } }] });
+    await expect(classifySafety(client, 'hello', opts)).resolves.toBe('ERROR');
+  });
+
+  it('reports a rambling response as an error, never as safe', async () => {
     mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'I think this is safe' } }] });
-    await expect(classifySafety(client, 'hello', opts)).resolves.toBe('UNSAFE');
+    await expect(classifySafety(client, 'hello', opts)).resolves.toBe('ERROR');
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'NOT SAFE' } }] });
+    await expect(classifySafety(client, 'hello', opts)).resolves.toBe('ERROR');
   });
 
   it('resolves to ERROR, not a rejection, when the provider call throws', async () => {

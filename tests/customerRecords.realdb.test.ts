@@ -244,6 +244,21 @@ describe('Customer Records (real database)', () => {
         expect(JSON.stringify(row)).not.toMatch(/lifetimeValue/);
     });
 
+    it('sorts Recent activity by the newest customer activity on linked leads', async () => {
+        await Lead.updateOne({ _id: ids.single._id }, { $set: { 'followUp.lastCustomerActivityAt': new Date(Date.now() + 60_000) } });
+        const first = await list('?sort=recent&status=all').expect(200);
+        expect(first.body.data.customers[0].id).toBe(String(ids.customerSingle._id));
+        await Lead.updateOne({ _id: ids.multiC._id }, { $set: { 'followUp.lastCustomerActivityAt': new Date(Date.now() + 120_000) } });
+        await Lead.collection.updateOne({ _id: ids.stale.insertedId }, { $set: { 'followUp.lastCustomerActivityAt': new Date(Date.now() + 600_000) } });
+        const second = await list('?sort=recent&status=all').expect(200);
+        expect(second.body.data.customers.slice(0, 2).map((c: any) => c.id)).toEqual([String(ids.customerA._id), String(ids.customerSingle._id)]);
+        expect(second.body.data.total).toBe(4);
+        const paged = await list('?sort=recent&status=all&limit=1&page=2').expect(200);
+        expect(paged.body.data.customers.map((c: any) => c.id)).toEqual([String(ids.customerSingle._id)]);
+        expect(paged.body.data.customers[0].firstName).toBe('Morgan');
+        expect(paged.body.data.customers[0].leads.total).toBe(1);
+    });
+
     it('handles missing contact information', async () => {
         const res = await profile(ids.manual._id).expect(200);
         expect(res.body.data.customer.email).toBe('');
