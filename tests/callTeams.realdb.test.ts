@@ -74,6 +74,7 @@ import { CallLog, Conversation, TelephonyCredential } from '../src/models/commun
 import { generateCrmToken } from '../src/middleware/crmAuth.middleware';
 import { errorHandler } from '../src/middleware/error.middleware';
 import communicationRoutes from '../src/routes/communication.routes';
+import leadRoutes from '../src/routes/lead.route';
 import phoneNumberRoutes from '../src/routes/crmPhoneNumber.routes';
 import telnyxWebhookRoute from '../src/routes/telnyxWebhook.route';
 
@@ -82,6 +83,7 @@ app.use(express.json({ verify: (req: any, _res, buf) => { req.rawBody = buf.toSt
 app.use('/api/webhooks/telnyx', telnyxWebhookRoute);
 app.use('/api/crm/communications', communicationRoutes);
 app.use('/api/crm/phone-numbers', phoneNumberRoutes);
+app.use('/api/leads', leadRoutes);
 app.use(errorHandler);
 
 const orgId = new mongoose.Types.ObjectId();
@@ -274,6 +276,39 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
     expect(rings).toHaveLength(1);
     expect(rings[0][0]).toBe(`org:${ORG}:crm-staff`);
     expect(await ringingFor('repCrm')).toContain(String(call._id));
+  });
+
+  test('an admin sees exactly the people a team rings, and nobody else can read the list', async () => {
+    const goneUser = new mongoose.Types.ObjectId();
+    const mixedTeam = new mongoose.Types.ObjectId();
+    const goneEmail = `p12c-gone-${orgId}@example.com`;
+    await User.collection.insertOne({ _id: goneUser, name: 'Gina Gone', email: goneEmail, password: 'x', role: 'employee', organizationId: orgId, isActive: true } as any);
+    await CrmUser.collection.insertOne({ organizationId: orgId, fullName: 'Gina Gone', username: `p12c-gone-${orgId}`, email: goneEmail, role: 'employee', isActive: true, isOffboarded: true, password: 'x' } as any);
+    await CrmLeadGroup.collection.insertOne({ _id: mixedTeam, organizationId: orgId, name: 'Mixed Team', isActive: true, memberIds: [ids.techUser, goneUser, ids.repUser], createdBy: ids.adminCrm } as any);
+    const members = (team: unknown, who = 'adminCrm') =>
+      request(app).get(`/api/crm/phone-numbers/teams/${team}/members`).set('Authorization', `Bearer ${tokens[who]}`);
+
+    const mixed = await members(mixedTeam);
+    expect(mixed.status).toBe(200);
+    expect(mixed.body.data.members).toEqual([
+      { id: String(ids.repUser), name: 'Remy Rep' },
+      { id: String(ids.techUser), name: 'Toni Tech' },
+    ]);
+    expect((await members(ids.emptyTeam)).body.data.members).toEqual([]);
+    expect((await members(ids.oldTeam)).body.data.members).toEqual([]);
+    expect((await members(ids.foreignTeam)).body.data.members).toEqual([]);
+    expect((await members('nope')).status).toBe(400);
+    expect((await members(mixedTeam, 'repCrm')).status).toBe(403);
+  });
+
+  test('a text to a number with a team is not limited to that team: someone outside it sees the lead', async () => {
+    const from = nextPhone();
+    const sent = await webhook('message.received', { id: `p12c-sms-${++serial}`, from: { phone_number: from }, to: [{ phone_number: SERVICE }], text: 'Is the truck still there?' });
+    expect(sent.status).toBe(200);
+    const lead: any = await until(() => Lead.findOne({ organizationId: orgId, phone: from }).lean(), Boolean);
+    const listed = await request(app).get('/api/leads?limit=100').set('Authorization', `Bearer ${tokens.repCrm}`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.data.leads.map((row: any) => String(row._id))).toContain(String(lead._id));
   });
 
   test('a team with no active members falls back to ringing everyone so the call is never lost', async () => {

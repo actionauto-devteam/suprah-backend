@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -10,6 +11,7 @@ import {
   recheckDealershipNumber,
   updateDealershipNumber,
 } from '../services/dealershipPhoneNumber.service';
+import { routingGroupMembers } from '../services/callRoutingConfig.service';
 
 function admin(req: Request) {
   if (!req.orgId) throw new ApiError(400, 'Organization context missing');
@@ -21,6 +23,13 @@ export const listPhoneNumbersHandler = asyncHandler(async (req: Request, res: Re
   const { orgId } = admin(req);
   const [numbers, suggestion] = await Promise.all([listDealershipNumbers(orgId), currentNumberSuggestion(orgId)]);
   res.json(new ApiResponse(200, { numbers, suggestion }, 'Phone numbers'));
+});
+
+export const listTeamMembersHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = admin(req);
+  const groupId = String(req.params.groupId);
+  if (!mongoose.isValidObjectId(groupId)) throw new ApiError(400, 'Invalid team ID');
+  res.json(new ApiResponse(200, { members: await routingGroupMembers(orgId, groupId) }, 'Team members'));
 });
 
 export const createPhoneNumberHandler = asyncHandler(async (req: Request, res: Response) => {

@@ -108,18 +108,30 @@ export async function getConfiguredInboundOrganization(number: string): Promise<
   } catch { return null; }
 }
 
-export async function routingGroupRecipients(orgId: string, groupId: string | null): Promise<string[]> {
+async function activeGroupMembers(orgId: string, groupId: string | null) {
   if (!groupId) return [];
   const groupRow = await CrmLeadGroup.findOne({ _id: groupId, organizationId: orgId, isActive: true }).lean();
   if (!groupRow) return [];
-  const members = await User.find({ _id: { $in: groupRow.memberIds }, organizationId: orgId, isActive: true }).select('_id email').lean();
+  const members = await User.find({ _id: { $in: groupRow.memberIds }, organizationId: orgId, isActive: true }).select('_id email name').lean();
   const linked = await CrmUser.find({ organizationId: orgId, email: { $in: members.map(member => member.email.toLowerCase()) } }).select('_id email isActive isOffboarded').lean();
-  const ids = new Set<string>();
-  for (const member of members) {
+  return members.flatMap((member) => {
     const crm = linked.find(user => user.email.toLowerCase() === member.email.toLowerCase());
-    if (crm && (!crm.isActive || crm.isOffboarded)) continue;
+    return crm && (!crm.isActive || crm.isOffboarded) ? [] : [{ member, crm }];
+  });
+}
+
+export async function routingGroupRecipients(orgId: string, groupId: string | null): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const { member, crm } of await activeGroupMembers(orgId, groupId)) {
     ids.add(String(member._id));
     if (crm) ids.add(String(crm._id));
   }
   return [...ids];
+}
+
+export async function routingGroupMembers(orgId: string, groupId: string | null): Promise<{ id: string; name: string }[]> {
+  const rows = await activeGroupMembers(orgId, groupId);
+  return rows
+    .map(({ member }) => ({ id: String(member._id), name: member.name || member.email }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }

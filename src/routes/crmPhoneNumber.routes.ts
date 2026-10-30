@@ -4,6 +4,7 @@ import {
   createPhoneNumberHandler,
   deletePhoneNumberHandler,
   listPhoneNumbersHandler,
+  listTeamMembersHandler,
   recheckPhoneNumberHandler,
   updatePhoneNumberHandler,
 } from '../controllers/dealershipPhoneNumber.controller';
@@ -13,6 +14,7 @@ const router = express.Router();
 router.use(crmAuth());
 
 router.get('/', listPhoneNumbersHandler);
+router.get('/teams/:groupId/members', listTeamMembersHandler);
 router.post('/', createPhoneNumberHandler);
 router.patch('/:id', updatePhoneNumberHandler);
 router.post('/:id/check', recheckPhoneNumberHandler);

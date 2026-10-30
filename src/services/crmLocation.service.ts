@@ -5,6 +5,7 @@ import Lead from '../models/lead.model';
 import Vehicle from '../models/Vehicle.model';
 import Organization from '../models/Organization.model';
 import { ApiError } from '../utils/ApiError';
+import { normalizeLocationKey } from '../utils/locationKey';
 import { runTrainingWrite } from './aiTraining.service';
 import { suspendKnowledgeForLocation } from './aiKnowledgeInvalidation.service';
 import { flushKnowledgeAuditMany } from './aiKnowledgeAudit';
@@ -57,14 +58,7 @@ export function locationActor(user: any): CrmLocationActorRef {
   return { userId: String(user?._id || ''), name: String(name).slice(0, 120), role: locationAccess(user) === 'admin' ? 'admin' : 'manager' };
 }
 
-export function normalizeLocationKey(value: unknown): string {
-  return String(value ?? '')
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
+export { normalizeLocationKey };
 
 export function locationLabelIssues(field: string, label: string, text: string): LocationIssue[] {
   if (EMAIL_PATTERN.test(text)) return [{ field, code: 'contact_info', message: `${label} can't include an email address.` }];

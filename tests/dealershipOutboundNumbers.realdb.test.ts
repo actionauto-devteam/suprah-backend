@@ -65,6 +65,7 @@ import Organization from '../src/models/Organization.model';
 import User from '../src/models/User.model';
 import Lead from '../src/models/lead.model';
 import DealershipPhoneNumber from '../src/models/DealershipPhoneNumber.model';
+import CrmLocation from '../src/models/CrmLocation.model';
 import { IvrInboundClaim } from '../src/models/CallRoutingConfig.model';
 import { CallLog, Conversation, CommunicationMessage } from '../src/models/communication.model';
 import { errorHandler } from '../src/middleware/error.middleware';
@@ -210,6 +211,19 @@ describe('Real-DB: texts and calls go out from the right dealership number (loca
     const { phone, lead } = await newLead({ location: 'Lehi' });
     await reply(phone, { leadId: lead._id });
     expect(lastSentFrom()).toBe(LEHI);
+  });
+
+  test('a number set to a CRM location is used for a lead labelled with one of that location\'s aliases', async () => {
+    const line = '+18015550950';
+    const actor = { userId: String(owner), name: 'Olivia Owner', role: 'admin' };
+    await CrmLocation.create({ organizationId: ORG, code: 'riverton', name: 'Action Auto Riverton', aliases: ['RIVERTON'], aliasKeys: ['action auto riverton', 'riverton'], status: 'active', revision: 1, createdBy: actor, updatedBy: actor });
+    await DealershipPhoneNumber.create({ organizationId: orgId, number: line, label: 'Riverton Sales', kind: 'location', location: 'Action Auto Riverton', department: '', telnyx: ready, createdBy: owner, updatedBy: owner });
+    const alias = await newLead({ location: 'RIVERTON' });
+    await reply(alias.phone, { leadId: alias.lead._id });
+    expect(lastSentFrom()).toBe(line);
+    const unknown = await newLead({ location: 'SPRINGVILLE' });
+    await reply(unknown.phone, { leadId: unknown.lead._id });
+    expect(lastSentFrom()).toBe(MAIN);
   });
 
   test('texts and calls are checked separately: Orem is ready for texts but not calls, so the call uses the main number', async () => {
