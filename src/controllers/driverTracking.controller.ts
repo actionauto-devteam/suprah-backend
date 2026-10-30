@@ -115,6 +115,7 @@ import {
   proofOfDeliveryOwnedByFilter,
 } from "../services/loadLifecyclePolicy";
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
+import { inventoryVehicleIdsFollowingLoad } from "../services/loadInventoryStatus";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
   customerShipmentNotification,
@@ -1384,18 +1385,13 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
 
 // Stock vehicles on this load follow it in Inventory (see
 // deliverInventoryStatus): In Transit from pickup, Ready for Sale at delivery.
+// Loads made from a quote ship a car out to a customer and leave it alone.
 function lifecycleInventoryStatusEvents(
   organizationId: string,
   load: any,
   toStatus: "In Transit" | "Ready for Sale",
 ) {
-  const vehicleIds = [
-    ...new Set<string>(
-      (Array.isArray(load?.vehicles) ? load.vehicles : [])
-        .map((vehicle: any) => String(vehicle?.vehicleId ?? "").trim())
-        .filter((id: string) => mongoose.Types.ObjectId.isValid(id)),
-    ),
-  ];
+  const vehicleIds = inventoryVehicleIdsFollowingLoad(load);
   if (!vehicleIds.length) return [];
   return [
     createLoadLifecycleOutboxEvent("inventory_status", {
