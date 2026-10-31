@@ -6,6 +6,7 @@ import { getSocketIO } from '../utils/socketEmitter';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
 import Lead from '../models/lead.model';
 import DealershipPhoneNumber from '../models/DealershipPhoneNumber.model';
+import config from '../config';
 import mongoose from 'mongoose';
 
 export interface IvrCallbacks {
@@ -15,6 +16,8 @@ export interface IvrCallbacks {
 }
 
 const timers = new Map<string, NodeJS.Timeout>();
+const HOLD_MUSIC_PATH = '/sounds/hold-music.wav';
+const GREETING_LEAD_IN_MS = 2000;
 
 export function clearIvrTimer(callId: string): void {
   const timer = timers.get(callId);
@@ -58,6 +61,27 @@ function arm(call: any, callbacks: IvrCallbacks): void {
   timers.set(String(call._id), timer);
 }
 
+export async function startHoldAudio(call: any): Promise<void> {
+  const claimed = await CallLog.findOneAndUpdate(
+    { _id: call._id, status: 'ringing', 'routing.customerAnswered': true, 'routing.holdPlaying': { $ne: true } },
+    { $set: { 'routing.holdPlaying': true } },
+    { new: true },
+  );
+  if (!claimed) return;
+  await telnyx.playHoldMusic(claimed.providerCallControlId, `${config.frontendUrl}${HOLD_MUSIC_PATH}`, {
+    kind: 'ivr-music', callLogId: String(claimed._id), revision: claimed.routing.revision,
+  }).catch(async (error: unknown) => {
+    console.error('[ivr] Hold music failed', error);
+    await CallLog.updateOne({ _id: claimed._id }, { $set: { 'routing.holdPlaying': false } }).catch(() => undefined);
+  });
+}
+
+export async function stopHoldAudio(call: any): Promise<void> {
+  if (!call?.routing?.customerAnswered) return;
+  await CallLog.updateOne({ _id: call._id }, { $set: { 'routing.holdPlaying': false } }).catch(() => undefined);
+  await telnyx.stopPlayback(call.providerCallControlId).catch(() => undefined);
+}
+
 async function advance(call: any, stage: IvrRoutingState['stage'], reason: string, values: Record<string, unknown> = {}): Promise<any> {
   return CallLog.findOneAndUpdate({
     _id: call._id, orgId: call.orgId, 'routing.revision': call.routing.revision,
@@ -77,6 +101,7 @@ async function finishMissed(call: any, callbacks: IvrCallbacks): Promise<void> {
   clearIvrTimer(String(call._id));
   emitIvrCall(final);
   await callbacks.stopRinging?.(final).catch(() => undefined);
+  await stopHoldAudio(final);
   await callbacks.missed(final);
 }
 
@@ -107,9 +132,18 @@ async function route(call: any, stage: 'selected' | 'reception' | 'all-org', gro
   emitRouteChange(call, next);
   arm(next, callbacks);
   void callbacks.ringing?.(next).catch(() => undefined);
+  if (!next.routing.customerAnswered) return;
+  if (next.routing.holdAnnounced) {
+    await startHoldAudio(next);
+    return;
+  }
+  await CallLog.updateOne({ _id: next._id }, { $set: { 'routing.holdAnnounced': true } });
   await telnyx.speakIvr(next.providerCallControlId, 'Please hold while we connect your call.', {
     kind: 'ivr-hold', callLogId: String(next._id), revision: next.routing.revision,
-  }).catch(error => console.error('[ivr] Hold announcement failed', error));
+  }).catch(async error => {
+    console.error('[ivr] Hold announcement failed', error);
+    await startHoldAudio(next);
+  });
 }
 
 async function menu(call: any, callbacks: IvrCallbacks, initial = false): Promise<void> {
@@ -118,7 +152,7 @@ async function menu(call: any, callbacks: IvrCallbacks, initial = false): Promis
     await telnyx.gatherIvr(call.providerCallControlId, call.routing.config.greeting,
       call.routing.config.options.map((option: any) => option.digit).join(''), {
         kind: 'ivr-menu', callLogId: String(call._id), revision: call.routing.revision,
-      });
+      }, initial ? GREETING_LEAD_IN_MS : 0);
   } catch (error) {
     console.error('[ivr] Gather failed; routing to reception', error);
     await route(call, initial ? 'all-org' : 'reception', initial ? null : call.routing.config.receptionGroupId,
@@ -142,11 +176,19 @@ export async function initializeIvr(call: any, config: RoutingConfig, callbacks:
     await route(initial, 'all-org', null, 'legacy-initialization-fallback', callbacks);
     return true;
   }
-  const ready = await advance(initial, 'menu', 'customer-leg-answered', {
+  await CallLog.updateOne({ _id: call._id }, { $set: { 'routing.customerAnswered': true } });
+  return true;
+}
+
+export async function handleIvrCustomerAnswered(payload: any, callbacks: IvrCallbacks): Promise<void> {
+  const tag = state(payload);
+  if (tag?.kind !== 'ivr-customer' || !mongoose.isValidObjectId(String(tag.callLogId))) return;
+  const call = await CallLog.findOne({ _id: tag.callLogId, status: 'ivr', 'routing.stage': 'initializing' });
+  if (!call) return;
+  const ready = await advance(call, 'menu', 'customer-leg-answered', {
     'routing.customerAnswered': true, 'routing.deadline': new Date(Date.now() + 60000),
   });
   if (ready) await menu(ready, callbacks, true);
-  return true;
 }
 
 export async function handleIvrGather(payload: any, callbacks: IvrCallbacks): Promise<void> {

@@ -9,6 +9,7 @@ import { normalizeLocationKey } from '../utils/locationKey';
 
 const US_E164 = /^\+1[2-9]\d{9}$/;
 const REFERENCE_CACHE_MS = 10 * 60 * 1000;
+const SUPRAH_WEBHOOK_PATH = '/api/webhooks/telnyx';
 
 export interface DealershipLine {
   organizationId: string;
@@ -155,17 +156,18 @@ export async function checkNumberInTelnyx(number: string): Promise<TelnyxNumberC
       return { status: 'not_in_account', readyForCalls: false, readyForTexts: false, message: "This number isn't in Suprah's Telnyx account yet.", checkedAt };
     }
     const reference = number === normalizeDealershipNumber(telnyx.COMPANY_NUMBER) ? found : await referenceNumber();
-    const expectedConnection = reference?.connectionId || '';
     const expectedProfile = telnyx.MESSAGING_PROFILE_ID || reference?.messagingProfileId || '';
     const active = !found.status || found.status === 'active';
-    const readyForCalls = active && Boolean(found.connectionId) && (!expectedConnection || found.connectionId === expectedConnection);
+    const voiceApp = found.connectionId ? await telnyx.findVoiceApplication(found.connectionId) : null;
+    const reachesSuprah = Boolean(voiceApp?.webhookUrl.replace(/\/+$/, '').endsWith(SUPRAH_WEBHOOK_PATH));
+    const readyForCalls = active && reachesSuprah;
     const readyForTexts = active && Boolean(found.messagingProfileId) && (!expectedProfile || found.messagingProfileId === expectedProfile);
     const problems: string[] = [];
     if (!active) problems.push(`Telnyx shows this number as "${found.status}".`);
     if (active && !readyForCalls) {
-      problems.push(found.connectionId
-        ? 'Calls to this number go to a different calling setup in Telnyx than the one Suprah uses.'
-        : 'Calls to this number are not connected to Suprah in Telnyx yet.');
+      if (!found.connectionId) problems.push('Calls to this number are not connected to Suprah in Telnyx yet.');
+      else if (!voiceApp) problems.push('This number is not on a Voice API application in Telnyx, so calls will not reach Suprah.');
+      else problems.push('The Voice API application for this number does not send calls to Suprah. Check its Webhook URL in Telnyx.');
     }
     if (active && !readyForTexts) {
       problems.push(found.messagingProfileId

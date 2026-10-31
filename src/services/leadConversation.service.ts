@@ -7,10 +7,12 @@ import SmsOptOut from '../models/SmsOptOut.model';
 import WebChatSession from '../models/WebChatSession.model';
 import WebChatMessage from '../models/WebChatMessage.model';
 import { CallLog, CommunicationMessage, Conversation } from '../models/communication.model';
+import { CallRecording } from '../models/CallRecording.model';
 import { LIFECYCLE_TERMINAL_STATUSES } from '../constants/leadStatus';
 import { ApiError } from '../utils/ApiError';
 import { cacheService } from './cache.service';
 import { describeSmsFailure } from '../utils/smsFailure';
+import { customerNumberOf, dealershipNumberOf, isLiveCall } from '../utils/callActivity';
 import { extractGmailText, gmailAttachmentNames, gmailHeader, stripQuotedReply } from '../utils/gmailMessageParser';
 import { isLocalUiAcceptanceMode } from '../utils/aiOutboundSafety';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
@@ -34,7 +36,23 @@ export interface ConversationItem {
   subject?: string;
   author: { name: string; kind: 'customer' | 'staff' | 'ai' | 'system'; userId?: string | null };
   status?: { code: DeliveryCode; label: string; failureMessage?: string; errorDetail?: string };
-  call?: { status: string; label: string; durationSec?: number | null; answeredBy?: string | null };
+  call?: {
+    id: string;
+    status: string;
+    label: string;
+    live: boolean;
+    durationSec?: number | null;
+    answeredBy?: string | null;
+    placedBy?: string | null;
+    number?: string | null;
+    customerNumber?: string | null;
+    lineLabel?: string | null;
+    selectedOption?: string | null;
+    startedAt?: string | null;
+    answeredAt?: string | null;
+    endedAt?: string | null;
+    recording?: { id: string; state: string } | null;
+  };
   inquiry?: { isOriginal: boolean; kind: string; source?: string | null; sourceProvider?: string | null; channel?: string | null; vehicle?: Record<string, unknown> | null };
   attachments?: string[];
   messageId?: string;
@@ -242,6 +260,17 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       : Promise.resolve([] as any[]),
   ]);
 
+  const recordings: any[] = (calls as any[]).length
+    ? await safe('call', () => CallRecording.find({
+        organizationId,
+        callLogId: { $in: (calls as any[]).map((call) => call._id) },
+        startedAt: { $ne: null },
+        state: { $nin: ['deleted', 'deleting'] },
+        $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
+      }).select('callLogId state').lean(), [] as any[])
+    : [];
+  const recordingByCall = new Map(recordings.map((recording) => [String(recording.callLogId), recording]));
+
   const items: ConversationItem[] = [];
   for (const message of sms as any[]) {
     const inbound = message.direction === 'inbound';
@@ -258,6 +287,8 @@ export async function loadConversationItems(organizationId: string, lead: any, o
     });
   }
   for (const call of calls as any[]) {
+    const recording = recordingByCall.get(String(call._id));
+    const live = isLiveCall(call);
     items.push({
       id: `call:${call._id}`,
       kind: 'call',
@@ -269,10 +300,21 @@ export async function loadConversationItems(organizationId: string, lead: any, o
         ? authorFor(call.placedBy, customerName, false)
         : { name: customerName, kind: 'customer' },
       call: {
+        id: String(call._id),
         status: call.status,
         label: CALL_LABELS[call.status] || call.status,
+        live,
         durationSec: call.durationSec ?? null,
         answeredBy: call.answeredBy?.name || null,
+        placedBy: call.placedBy?.name || null,
+        number: dealershipNumberOf(call),
+        customerNumber: customerNumberOf(call),
+        lineLabel: call.lineLabel || null,
+        selectedOption: call.routing?.selectedLabel || null,
+        startedAt: call.startedAt ? toIso(call.startedAt) : null,
+        answeredAt: call.answeredAt ? toIso(call.answeredAt) : null,
+        endedAt: call.endedAt ? toIso(call.endedAt) : null,
+        recording: recording ? { id: String(recording._id), state: recording.state } : null,
       },
     });
   }
@@ -573,7 +615,7 @@ export async function getEarlierConversation(organizationId: string, leadId: str
         occurredAt: toIso(call.startedAt || call.createdAt),
         body: call.direction === 'outbound' ? 'Outgoing call' : 'Incoming call',
         author: { name: customerName, kind: 'customer' as const },
-        call: { status: call.status, label: CALL_LABELS[call.status] || call.status, durationSec: call.durationSec ?? null, answeredBy: call.answeredBy?.name || null },
+        call: { id: String(call._id), status: call.status, label: CALL_LABELS[call.status] || call.status, live: false, durationSec: call.durationSec ?? null, answeredBy: call.answeredBy?.name || null },
       })),
     ].sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : 1));
     return { lead: null, items };

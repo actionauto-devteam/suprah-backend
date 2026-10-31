@@ -796,6 +796,10 @@ export const listCalls = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { items, total, page, limit }, "Calls"));
 });
 
+export const listActiveCalls = asyncHandler(async (req: Request, res: Response) => {
+  res.json(new ApiResponse(200, { items: await comm.listActiveCalls(orgOf(req)) }, "Active calls"));
+});
+
 /** Ringing inbound calls (page-load recovery if a socket event was missed). */
 export const listRingingCalls = asyncHandler(async (req: Request, res: Response) => {
   const orgId = orgOf(req);

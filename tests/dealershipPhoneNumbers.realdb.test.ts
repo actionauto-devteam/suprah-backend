@@ -8,6 +8,7 @@ const mockTelnyx = {
   gatherIvr: jest.fn(),
   sendSms: jest.fn(),
   findAccountPhoneNumber: jest.fn(),
+  findVoiceApplication: jest.fn(),
 };
 const mockRoomEmit = jest.fn();
 
@@ -32,6 +33,7 @@ jest.mock('../src/services/telnyx.service', () => {
     gatherIvr: forward('gatherIvr'),
     sendSms: forward('sendSms'),
     findAccountPhoneNumber: forward('findAccountPhoneNumber'),
+    findVoiceApplication: forward('findVoiceApplication'),
     createTelephonyCredential: jest.fn(),
     createRtcLoginToken: jest.fn(),
     recordingCommand: jest.fn(),
@@ -177,6 +179,11 @@ describe('Real-DB: dealership phone numbers (local MongoDB, simulated Telnyx onl
     mockTelnyx.sendSms.mockImplementation(async (to: string) => ({ id: `sim-${++serial}`, to: [{ phone_number: to }] }));
     mockTelnyx.playMissedAndHangup.mockResolvedValue(undefined);
     mockTelnyx.findAccountPhoneNumber.mockImplementation(async (number: string) => account.get(number) ?? null);
+    mockTelnyx.findVoiceApplication.mockImplementation(async (id: string) => {
+      if (id === 'conn-suprah') return { webhookUrl: 'https://api.suprah-app.com/api/webhooks/telnyx' };
+      if (id === 'conn-someone-else') return { webhookUrl: 'https://elsewhere.example.com/hook' };
+      return null;
+    });
     resetTelnyxReferenceCache();
     account.clear();
     account.set(COMPANY, { status: 'active', connectionId: 'conn-suprah', messagingProfileId: 'mp-suprah' });
@@ -223,7 +230,16 @@ describe('Real-DB: dealership phone numbers (local MongoDB, simulated Telnyx onl
     expect(rechecked.body.data.telnyx).toMatchObject({ status: 'ready', readyForCalls: true, readyForTexts: true, message: '' });
     account.set(LEHI, { status: 'active', connectionId: 'conn-someone-else', messagingProfileId: 'mp-suprah' });
     const wrong = await api().check(created.lehi);
-    expect(wrong.body.data.telnyx.message).toMatch(/different calling setup/);
+    expect(wrong.body.data.telnyx.message).toMatch(/does not send calls to Suprah/);
+    account.set(LEHI, { status: 'active', connectionId: 'conn-browser-sip', messagingProfileId: 'mp-suprah' });
+    const sip = await api().check(created.lehi);
+    expect(sip.body.data.telnyx).toMatchObject({ status: 'needs_setup', readyForCalls: false, readyForTexts: true });
+    expect(sip.body.data.telnyx.message).toMatch(/not on a Voice API application/);
+    account.set(COMPANY, { status: 'active', connectionId: 'conn-browser-sip', messagingProfileId: 'mp-suprah' });
+    account.set(LEHI, { status: 'active', connectionId: 'conn-suprah', messagingProfileId: 'mp-suprah' });
+    resetTelnyxReferenceCache();
+    const moved = await api().check(created.lehi);
+    expect(moved.body.data.telnyx).toMatchObject({ status: 'ready', readyForCalls: true, readyForTexts: true });
     mockTelnyx.findAccountPhoneNumber.mockRejectedValueOnce(new Error('timeout'));
     const failed = await api().check(created.service);
     expect(failed.body.data.telnyx).toMatchObject({ status: 'error' });

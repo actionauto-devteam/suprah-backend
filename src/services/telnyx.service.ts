@@ -89,6 +89,16 @@ export async function findAccountPhoneNumber(phoneNumber: string) {
   };
 }
 
+export async function findVoiceApplication(connectionId: string) {
+  try {
+    const result = await tx<{ data?: { webhook_event_url?: string } }>("GET", `/call_control_applications/${encodeURIComponent(connectionId)}`, undefined, 8000);
+    return { webhookUrl: String(result?.data?.webhook_event_url || "") };
+  } catch (error) {
+    if (error instanceof TelnyxError && (error.status === 404 || error.status === 422)) return null;
+    throw error;
+  }
+}
+
 /* ------------------------------ Call Control ---------------------------- */
 /** Bridge an unanswered inbound call to an agent's WebRTC endpoint.
  *  Transferring without answering first keeps ringback playing for the
@@ -114,22 +124,56 @@ export async function answerCall(callControlId: string, clientState?: Record<str
   } : {}, clientState ? 8000 : undefined);
 }
 
-export async function gatherIvr(callControlId: string, payload: string, digits: string, clientState: Record<string, unknown>) {
-  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/gather_using_speak`, {
-    payload, voice: 'female', language: 'en-US',
+const IVR_VOICE = 'AWS.Polly.Joanna-Neural';
+const STANDARD_VOICE = { voice: 'female', language: 'en-US' };
+const SPEECH_LIMIT = 3000;
+
+const escapeSsml = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function ivrSpeech(text: string, leadInMs: number): Record<string, unknown> {
+  const pause = leadInMs > 0 ? `<break time="${leadInMs}ms"/>` : '';
+  const payload = `<speak>${pause}<prosody volume="+6dB">${escapeSsml(text)}</prosody></speak>`;
+  return payload.length <= SPEECH_LIMIT ? { payload, payload_type: 'ssml', voice: IVR_VOICE } : { payload: text, voice: IVR_VOICE };
+}
+
+async function withVoiceFallback<T>(text: string, leadInMs: number, send: (speech: Record<string, unknown>, attempt: string) => Promise<T>): Promise<T> {
+  try {
+    return await send(ivrSpeech(text, leadInMs), '');
+  } catch (error) {
+    if (!(error instanceof TelnyxError)) throw error;
+    console.error('[ivr] Voice refused; using the standard voice', error.message);
+    return send({ payload: text, ...STANDARD_VOICE }, '-standard');
+  }
+}
+
+export async function gatherIvr(callControlId: string, payload: string, digits: string, clientState: Record<string, unknown>, leadInMs = 0) {
+  return withVoiceFallback(payload, leadInMs, (speech, attempt) => tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/gather_using_speak`, {
+    ...speech,
     minimum_digits: 1, maximum_digits: 1, maximum_tries: 1,
     valid_digits: digits, timeout_millis: 10000,
     client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
-    command_id: `ivr-menu-${clientState.callLogId}-${clientState.revision}`,
-  }, 8000);
+    command_id: `ivr-menu-${clientState.callLogId}-${clientState.revision}${attempt}`,
+  }, 8000));
 }
 
 export async function speakIvr(callControlId: string, payload: string, clientState: Record<string, unknown>) {
-  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
-    payload, voice: 'female', language: 'en-US',
+  return withVoiceFallback(payload, 0, (speech, attempt) => tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
+    ...speech,
     client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
-    command_id: `ivr-speak-${clientState.callLogId}-${clientState.revision}-${clientState.kind}`,
+    command_id: `ivr-speak-${clientState.callLogId}-${clientState.revision}-${clientState.kind}${attempt}`,
+  }, 8000));
+}
+
+export async function playHoldMusic(callControlId: string, audioUrl: string, clientState: Record<string, unknown>) {
+  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/playback_start`, {
+    audio_url: audioUrl, loop: 'infinity', target_legs: 'self',
+    client_state: Buffer.from(JSON.stringify(clientState)).toString('base64'),
+    command_id: `ivr-music-${clientState.callLogId}-${clientState.revision}`,
   }, 8000);
+}
+
+export async function stopPlayback(callControlId: string) {
+  return tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/playback_stop`, { stop: 'all' }, 8000);
 }
 
 export async function speak(callControlId: string, payload: string) {

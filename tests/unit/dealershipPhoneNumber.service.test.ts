@@ -1,4 +1,5 @@
 const mockFindAccountPhoneNumber = jest.fn();
+const mockFindVoiceApplication = jest.fn();
 
 jest.mock('../../src/services/telnyx.service', () => {
   class LocalUiAcceptanceModeBlockedError extends Error {}
@@ -7,6 +8,7 @@ jest.mock('../../src/services/telnyx.service', () => {
     MESSAGING_PROFILE_ID: '',
     LocalUiAcceptanceModeBlockedError,
     findAccountPhoneNumber: (...args: unknown[]) => mockFindAccountPhoneNumber(...args),
+    findVoiceApplication: (...args: unknown[]) => mockFindVoiceApplication(...args),
   };
 });
 
@@ -55,9 +57,26 @@ describe('dealership phone numbers', () => {
     mockFindAccountPhoneNumber.mockImplementation(async (number: string) => (number === '+18015550900'
       ? { status: 'active', connectionId: 'conn-1', messagingProfileId: 'mp-1' }
       : { status: 'active', connectionId: 'conn-1', messagingProfileId: 'mp-2' }));
+    mockFindVoiceApplication.mockResolvedValue({ webhookUrl: 'https://api.suprah-app.com/api/webhooks/telnyx/' });
     const result = await checkNumberInTelnyx('+18015550910');
     expect(result).toMatchObject({ status: 'needs_setup', readyForCalls: true, readyForTexts: false });
     expect(result.message).toMatch(/different messaging profile/);
+  });
+
+  it('says plainly when a number is on a browser calling connection and not a Voice API application', async () => {
+    mockFindAccountPhoneNumber.mockResolvedValue({ status: 'active', connectionId: 'conn-sip', messagingProfileId: 'mp-1' });
+    mockFindVoiceApplication.mockResolvedValue(null);
+    const result = await checkNumberInTelnyx('+18015550910');
+    expect(result).toMatchObject({ status: 'needs_setup', readyForCalls: false });
+    expect(result.message).toMatch(/not on a Voice API application/);
+  });
+
+  it('does not count a Voice API application that sends calls somewhere else', async () => {
+    mockFindAccountPhoneNumber.mockResolvedValue({ status: 'active', connectionId: 'conn-2', messagingProfileId: 'mp-1' });
+    mockFindVoiceApplication.mockResolvedValue({ webhookUrl: 'https://elsewhere.example.com/hook' });
+    const result = await checkNumberInTelnyx('+18015550910');
+    expect(result).toMatchObject({ readyForCalls: false });
+    expect(result.message).toMatch(/Check its Webhook URL/);
   });
 
   it('reports a number that is not active in Telnyx', async () => {

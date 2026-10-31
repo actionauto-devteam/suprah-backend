@@ -6,6 +6,8 @@ const mockTelnyx = {
   speak: jest.fn(),
   speakIvr: jest.fn(),
   gatherIvr: jest.fn(),
+  playHoldMusic: jest.fn(),
+  stopPlayback: jest.fn(),
   sendSms: jest.fn(),
   findAccountPhoneNumber: jest.fn(),
   dialPhone: jest.fn(),
@@ -230,6 +232,8 @@ describe('Real-DB: customer calls also ring employees\' confirmed phones; first 
     mockTelnyx.answerCall.mockResolvedValue({});
     mockTelnyx.gatherIvr.mockResolvedValue({});
     mockTelnyx.speakIvr.mockResolvedValue({});
+    mockTelnyx.playHoldMusic.mockResolvedValue({});
+    mockTelnyx.stopPlayback.mockResolvedValue({});
     mockTelnyx.findAccountPhoneNumber.mockResolvedValue(null);
     mockTelnyx.dialPhone.mockImplementation(async (opts: any) => ({ callControlId: `v3:leg-${opts.to}-${++serial}` }));
     mockTelnyx.gatherDigit.mockResolvedValue({ data: { result: 'ok' } });
@@ -358,6 +362,7 @@ describe('Real-DB: customer calls also ring employees\' confirmed phones; first 
 
   test('after the phone menu, the chosen team\'s phones ring and pressing 1 connects without answering twice', async () => {
     const { call, controlId } = await incoming(nextPhone(), MENU);
+    await webhook('call.answered', { call_control_id: controlId, client_state: encode({ kind: 'ivr-customer', callLogId: String(call._id) }) });
     const menuCall: any = await until(() => CallLog.findById(call._id).lean(), (row: any) => row?.routing?.stage === 'menu');
     await webhook('call.gather.ended', { call_control_id: controlId, client_state: encode({ kind: 'ivr-menu', callLogId: String(call._id), revision: menuCall.routing.revision }), digits: '1', status: 'valid' });
     await until(async () => dialsFor(call._id).length, (count) => count === 2);
@@ -374,6 +379,7 @@ describe('Real-DB: customer calls also ring employees\' confirmed phones; first 
   async function pressMenu(digit: string) {
     const from = nextPhone();
     const { call, controlId } = await incoming(from, MENU);
+    await webhook('call.answered', { call_control_id: controlId, client_state: encode({ kind: 'ivr-customer', callLogId: String(call._id) }) });
     const menuCall: any = await until(() => CallLog.findById(call._id).lean(), (row: any) => row?.routing?.stage === 'menu');
     mockRoomEmit.mockReset();
     await webhook('call.gather.ended', { call_control_id: controlId, client_state: encode({ kind: 'ivr-menu', callLogId: String(call._id), revision: menuCall.routing.revision }), digits: digit, status: 'valid' });

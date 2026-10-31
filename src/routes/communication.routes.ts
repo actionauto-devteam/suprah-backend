@@ -37,6 +37,7 @@ router.get("/threads/by-phone", ctrl.getThreadByPhone);
 router.post("/messages", ctrl.sendMessage);
 router.get("/lookup", ctrl.lookupCaller);
 router.get("/calls/ringing", ctrl.listRingingCalls);
+router.get("/calls/active", ctrl.listActiveCalls);
 router.post("/calls/log", ctrl.logClientCall);
 router.get("/calls", ctrl.listCalls);
 router.post("/rtc/token", ctrl.getRtcToken);

@@ -39,6 +39,8 @@ export interface IvrRoutingState {
   notifiedIds: string[];
   allOrg: boolean;
   customerAnswered?: boolean;
+  holdAnnounced?: boolean;
+  holdPlaying?: boolean;
   deadline?: Date | null;
   history: { stage: string; reason: string; at: Date }[];
 }

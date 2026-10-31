@@ -213,6 +213,21 @@ describe('Real-DB: texts and calls go out from the right dealership number (loca
     expect(lastSentFrom()).toBe(LEHI);
   });
 
+  test('a new lead is called from the Main number, even though the company number is different', async () => {
+    const { phone, lead } = await newLead({});
+    const outbound: any = await startCall(phone, { leadId: lead._id });
+    expect(outbound.from).toBe(MAIN);
+    expect(outbound.from).not.toBe(COMPANY);
+  });
+
+  test('a customer who last contacted the company number is still called back from it', async () => {
+    const from = nextPhone();
+    await call(from, COMPANY);
+    await until(() => Conversation.findOne({ customerPhone: from, lastInboundNumber: COMPANY }).lean(), Boolean);
+    const outbound: any = await startCall(from);
+    expect(outbound.from).toBe(COMPANY);
+  });
+
   test('a number set to a CRM location is used for a lead labelled with one of that location\'s aliases', async () => {
     const line = '+18015550950';
     const actor = { userId: String(owner), name: 'Olivia Owner', role: 'admin' };

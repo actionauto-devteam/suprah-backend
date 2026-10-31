@@ -10,6 +10,7 @@ jest.mock('../src/utils/socketEmitter', () => ({ getSocketIO: () => mockIo, emit
 jest.mock('../src/services/telnyx.service', () => ({
   COMPANY_NUMBER: '+18015550999', answerCall: jest.fn().mockResolvedValue({}),
   gatherIvr: jest.fn().mockResolvedValue({}), speakIvr: jest.fn().mockResolvedValue({}),
+  playHoldMusic: jest.fn().mockResolvedValue({}), stopPlayback: jest.fn().mockResolvedValue({}),
   transferToAgent: jest.fn().mockResolvedValue({}), hangupCall: jest.fn().mockResolvedValue({}),
   playMissedAndHangup: jest.fn().mockResolvedValue({}), sendSms: jest.fn().mockResolvedValue({ id: 'test-sms' }),
 }));
@@ -28,7 +29,7 @@ import CrmLeadGroup from '../src/models/CrmLeadGroup.model';
 import CallRoutingConfig, { IvrInboundClaim, RoutingConfig } from '../src/models/CallRoutingConfig.model';
 import { CallLog, Conversation, CommunicationMessage, TelephonyCredential } from '../src/models/communication.model';
 import { getInboundRoutingConfig, routingGroupRecipients, validateRoutingGroups } from '../src/services/callRoutingConfig.service';
-import { initializeIvr, handleIvrGather, expireIvr, recoverIvrCalls, clearIvrTimer } from '../src/services/ivr.service';
+import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, expireIvr, recoverIvrCalls, clearIvrTimer } from '../src/services/ivr.service';
 import * as comm from '../src/services/communication.service';
 import * as telnyx from '../src/services/telnyx.service';
 import { listRingingCalls } from '../src/controllers/communication.controller';
@@ -57,6 +58,7 @@ async function freshCall() {
   const call = await CallLog.create({ orgId, direction: 'inbound', from: phone, to: config.inboundNumber, status: 'ivr',
     leadId: lead._id, providerCallControlId: `ivr-test-${now}-${serial}`, providerCallSessionId: `session-${now}-${serial}` });
   await initializeIvr(call, config, callbacks);
+  await handleIvrCustomerAnswered({ call_control_id: call.providerCallControlId, client_state: tag('ivr-customer', call) }, callbacks);
   return CallLog.findById(call._id);
 }
 async function select(digit: string) {
@@ -156,6 +158,76 @@ describe('Stage 41B local MongoDB verification', () => {
     await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
     expect(telnyx.hangupCall).not.toHaveBeenCalled();
   });
+  it('waits until the customer line is answered before the greeting starts, and plays it once', async () => {
+    const phone = `+1801555${String(++serial).padStart(4, '0')}`;
+    const call = await CallLog.create({ orgId, direction: 'inbound', from: phone, to: config.inboundNumber, status: 'ivr', providerCallControlId: `ivr-wait-${now}-${serial}`, providerCallSessionId: `session-wait-${now}-${serial}` });
+    await initializeIvr(call, config, callbacks);
+    expect(telnyx.answerCall).toHaveBeenCalledTimes(1);
+    expect(telnyx.gatherIvr).not.toHaveBeenCalled();
+    const answered = { call_control_id: call.providerCallControlId, call_session_id: call.providerCallSessionId, client_state: tag('ivr-customer', call) };
+    await Promise.all([comm.handleCallAnswered(answered), comm.handleCallAnswered(answered)]);
+    expect(telnyx.gatherIvr).toHaveBeenCalledTimes(1);
+    expect((await CallLog.findById(call._id)).routing.stage).toBe('menu');
+  });
+  it('says the hold line once, then keeps the music going through every ring stage', async () => {
+    const original = config; config = { ...config, allOrgFallback: true };
+    try {
+      const call = await select('1');
+      expect(telnyx.speakIvr).toHaveBeenCalledTimes(1);
+      expect(telnyx.playHoldMusic).not.toHaveBeenCalled();
+      await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
+      expect(telnyx.playHoldMusic).toHaveBeenCalledTimes(1);
+      expect((telnyx.playHoldMusic as jest.Mock).mock.calls[0][1]).toMatch(/\/sounds\/hold-music\.wav$/);
+      await expireIvr(String(call._id), call.routing.revision, callbacks);
+      const reception = await CallLog.findById(call._id);
+      expect(reception.routing.stage).toBe('reception');
+      await expireIvr(String(call._id), reception.routing.revision, callbacks);
+      expect((await CallLog.findById(call._id)).routing.stage).toBe('all-org');
+      expect(telnyx.speakIvr).toHaveBeenCalledTimes(1);
+      expect(telnyx.playHoldMusic).toHaveBeenCalledTimes(1);
+    } finally { config = original; }
+  });
+  it('stops the music before connecting the employee, and brings it back if that employee fails', async () => {
+    const call = await select('1');
+    await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
+    (telnyx.transferToAgent as jest.Mock).mockRejectedValueOnce(new Error('bridge failed'));
+    await expect(comm.claimInboundCall({ callId: String(call._id), orgId, user: { userId: crmIds[1] } })).rejects.toMatchObject({ statusCode: 502 });
+    expect(telnyx.stopPlayback).toHaveBeenCalledWith(call.providerCallControlId);
+    expect((telnyx.stopPlayback as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan((telnyx.transferToAgent as jest.Mock).mock.invocationCallOrder[0]);
+    const retry = await CallLog.findById(call._id);
+    expect(retry.routing.stage).toBe('reception');
+    expect(telnyx.playHoldMusic).toHaveBeenCalledTimes(2);
+    expect(telnyx.speakIvr).toHaveBeenCalledTimes(1);
+  });
+  it('stops the music when the employee picks up, and no music starts after the call is taken', async () => {
+    const call = await select('1');
+    await comm.claimInboundCall({ callId: String(call._id), orgId, user: { userId: crmIds[1] } });
+    await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
+    expect(telnyx.playHoldMusic).not.toHaveBeenCalled();
+    const taken = await CallLog.findById(call._id);
+    (telnyx.stopPlayback as jest.Mock).mockClear();
+    await comm.handleCallAnswered({ call_session_id: call.providerCallSessionId, call_control_id: 'agent', client_state: tag('agent-leg', taken) });
+    expect((await CallLog.findById(call._id)).status).toBe('in-progress');
+    expect(telnyx.stopPlayback).toHaveBeenCalledTimes(1);
+  });
+  it('stops the music before the missed-call message so the caller can hear it', async () => {
+    const call = await select('1');
+    await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
+    await expireIvr(String(call._id), call.routing.revision, callbacks);
+    const reception = await CallLog.findById(call._id);
+    await expireIvr(String(call._id), reception.routing.revision, callbacks);
+    expect((await CallLog.findById(call._id)).status).toBe('missed');
+    expect(missed).toHaveBeenCalledTimes(1);
+    expect((telnyx.stopPlayback as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(missed.mock.invocationCallOrder[0]);
+  });
+  it('a failed music start never drops the call', async () => {
+    (telnyx.playHoldMusic as jest.Mock).mockRejectedValueOnce(new Error('music unavailable'));
+    const call = await select('1');
+    await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: tag('ivr-hold', call) });
+    const after = await CallLog.findById(call._id);
+    expect(after.status).toBe('ringing');
+    expect(after.routing.holdPlaying).toBe(false);
+  });
   it('ringing recovery hides calls from other groups and claims reject non-members', async () => {
     const call = await select('2');
     const outsider = await request(app).get('/ringing').set('x-user', crmIds[5]);
@@ -234,6 +306,8 @@ describe('Stage 41B local MongoDB verification', () => {
       const phone = `+1801${String(now).slice(-7)}`;
       const payload = { direction: 'incoming', call_control_id: `new-lead-${now}`, call_session_id: `new-lead-session-${now}`, from: phone, to: config.inboundNumber };
       await comm.handleCallInitiated(payload);
+      const initiated = await CallLog.findOne({ orgId, providerCallControlId: payload.call_control_id });
+      await comm.handleCallAnswered({ call_control_id: payload.call_control_id, call_session_id: payload.call_session_id, client_state: tag('ivr-customer', initiated) });
       const call = await CallLog.findOne({ orgId, providerCallControlId: payload.call_control_id });
       expect(call.status).toBe('ivr'); expect(call.leadId).toBeTruthy();
       const lead = await Lead.findById(call.leadId); expect(lead.phone).toBe(phone);
@@ -266,6 +340,8 @@ describe('Stage 41B local MongoDB verification', () => {
     await Promise.all([comm.handleCallInitiated(payload), comm.handleCallInitiated(payload)]);
     expect(await CallLog.countDocuments({ orgId, providerCallControlId: control })).toBe(1);
     expect(telnyx.answerCall).toHaveBeenCalledTimes(1);
+    const initiated = await CallLog.findOne({ orgId, providerCallControlId: control });
+    await comm.handleCallAnswered({ call_control_id: control, call_session_id: payload.call_session_id, client_state: tag('ivr-customer', initiated) });
     const call = await CallLog.findOne({ orgId, providerCallControlId: control });
     const event = gather(call, '2'); await Promise.all([comm.handleCallGatherEnded(event), comm.handleCallGatherEnded(event)]);
     const selected = await CallLog.findById(call._id);

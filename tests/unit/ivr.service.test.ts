@@ -8,14 +8,17 @@ const mockGather = jest.fn();
 const mockSpeak = jest.fn();
 const mockHangup = jest.fn();
 const mockLeadUpdate = jest.fn();
+const mockUpdateOne = jest.fn();
+const mockPlay = jest.fn();
+const mockStop = jest.fn();
 
-jest.mock('../../src/models/communication.model', () => ({ CallLog: { findOne: mockFindOne, findOneAndUpdate: mockUpdate, find: jest.fn() } }));
+jest.mock('../../src/models/communication.model', () => ({ CallLog: { findOne: mockFindOne, findOneAndUpdate: mockUpdate, updateOne: mockUpdateOne, find: jest.fn() } }));
 jest.mock('../../src/services/callRoutingConfig.service', () => ({ routingGroupRecipients: mockRecipients }));
-jest.mock('../../src/services/telnyx.service', () => ({ answerCall: mockAnswer, gatherIvr: mockGather, speakIvr: mockSpeak, hangupCall: mockHangup }));
+jest.mock('../../src/services/telnyx.service', () => ({ answerCall: mockAnswer, gatherIvr: mockGather, speakIvr: mockSpeak, hangupCall: mockHangup, playHoldMusic: mockPlay, stopPlayback: mockStop }));
 jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => ({ to: mockTo }) }));
 jest.mock('../../src/models/lead.model', () => ({ __esModule: true, default: { findOneAndUpdate: mockLeadUpdate } }));
 
-import { initializeIvr, handleIvrGather, expireIvr, clearIvrTimer, canReceiveIvrCall } from '../../src/services/ivr.service';
+import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, expireIvr, clearIvrTimer, canReceiveIvrCall } from '../../src/services/ivr.service';
 
 const config = {
   enabled: true, name: 'Test', inboundNumber: '+18015550100', mainNumber: '+18017666137',
@@ -39,10 +42,20 @@ function payload(digits: string, revision = stored.routing.revision) {
   return { call_control_id: 'control', digits, status: 'valid', client_state: Buffer.from(JSON.stringify({ kind: 'ivr-menu', callLogId: 'call', revision })).toString('base64') };
 }
 
+async function start() {
+  await initializeIvr(stored, config, { missed });
+  const client_state = Buffer.from(JSON.stringify({ kind: 'ivr-customer', callLogId: '507f1f77bcf86cd799439011' })).toString('base64');
+  await handleIvrCustomerAnswered({ call_control_id: 'control', client_state }, { missed });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   stored = { _id: 'call', orgId: 'org', leadId: 'lead', providerCallControlId: 'control', status: 'ivr' };
   mockAnswer.mockResolvedValue({}); mockGather.mockResolvedValue({}); mockSpeak.mockResolvedValue({}); mockHangup.mockResolvedValue({});
+  mockPlay.mockResolvedValue({}); mockStop.mockResolvedValue({});
+  mockUpdateOne.mockImplementation(async (_filter: any, update: any) => {
+    for (const [path, value] of Object.entries(update.$set || {})) setPath(stored, path, value);
+  });
   mockRecipients.mockImplementation(async (_org, group) => [`${group}-user`]);
   mockLeadUpdate.mockResolvedValue(null); missed.mockResolvedValue(undefined);
   mockFindOne.mockImplementation(async (filter: any) => {
@@ -66,13 +79,13 @@ afterEach(() => clearIvrTimer('call'));
 
 describe('IVR routing with mocked persistence and provider', () => {
   it('answers the customer and gathers without broadcasting a call', async () => {
-    await initializeIvr(stored, config, { missed });
+    await start();
     expect(stored.status).toBe('ivr'); expect(stored.routing.stage).toBe('menu');
-    expect(mockAnswer).toHaveBeenCalled(); expect(mockGather).toHaveBeenCalledWith('control', 'Test menu', '01234', expect.objectContaining({ kind: 'ivr-menu' }));
+    expect(mockAnswer).toHaveBeenCalled(); expect(mockGather).toHaveBeenCalledWith('control', 'Test menu', '01234', expect.objectContaining({ kind: 'ivr-menu' }), 2000);
     expect(mockEmit).not.toHaveBeenCalled();
   });
   it.each(['0', '1', '2', '3', '4'])('routes digit %s and applies only location metadata', async digit => {
-    await initializeIvr(stored, config, { missed });
+    await start();
     await handleIvrGather(payload(digit), { missed });
     const group = ['reception', 'orem', 'lehi', 'service', 'titles'][Number(digit)];
     expect(stored.routing.targetGroupId).toBe(group);
@@ -83,14 +96,15 @@ describe('IVR routing with mocked persistence and provider', () => {
     if (digit === '0') expect(stored.routing.language).toBe('Spanish');
   });
   it('retries invalid input once then routes to Reception', async () => {
-    await initializeIvr(stored, config, { missed });
+    await start();
     await handleIvrGather(payload('9'), { missed });
     expect(mockGather).toHaveBeenCalledTimes(2);
+    expect(mockGather.mock.calls[1][4]).toBe(0);
     await handleIvrGather(payload(''), { missed });
     expect(stored.routing.stage).toBe('reception');
   });
   it('falls back from selected group to Reception, then finishes missed once', async () => {
-    await initializeIvr(stored, config, { missed }); await handleIvrGather(payload('1'), { missed });
+    await start(); await handleIvrGather(payload('1'), { missed });
     await expireIvr('call', stored.routing.revision, { missed }); expect(stored.routing.stage).toBe('reception');
     const revision = stored.routing.revision;
     await expireIvr('call', revision, { missed }); await expireIvr('call', revision, { missed });
@@ -98,24 +112,24 @@ describe('IVR routing with mocked persistence and provider', () => {
   });
   it('uses approved legacy ringing when initialization cannot complete', async () => {
     mockGather.mockRejectedValueOnce(new Error('provider timeout'));
-    await initializeIvr(stored, config, { missed });
+    await start();
     expect(stored.status).toBe('ringing'); expect(stored.routing.allOrg).toBe(true);
     expect(mockTo).toHaveBeenCalledWith('org:org:crm-staff');
     expect(mockTo).not.toHaveBeenCalledWith('org:org');
   });
   it('falls back when the selected group is empty', async () => {
     mockRecipients.mockImplementation(async (_org, group) => group === 'orem' ? [] : ['reception-user']);
-    await initializeIvr(stored, config, { missed }); await handleIvrGather(payload('1'), { missed });
+    await start(); await handleIvrGather(payload('1'), { missed });
     expect(stored.routing.stage).toBe('reception');
   });
   it('ignores duplicate/stale gather results', async () => {
-    await initializeIvr(stored, config, { missed }); const event = payload('1');
+    await start(); const event = payload('1');
     await handleIvrGather(event, { missed }); const revision = stored.routing.revision;
     await handleIvrGather(event, { missed });
     expect(stored.routing.revision).toBe(revision); expect(mockLeadUpdate).toHaveBeenCalledTimes(1);
   });
   it('checks live group membership as well as the stored recipient list', async () => {
-    await initializeIvr(stored, config, { missed }); await handleIvrGather(payload('1'), { missed });
+    await start(); await handleIvrGather(payload('1'), { missed });
     expect(await canReceiveIvrCall(stored, 'other-user')).toBe(false);
     mockRecipients.mockResolvedValue([]);
     expect(await canReceiveIvrCall(stored, 'orem-user')).toBe(false);

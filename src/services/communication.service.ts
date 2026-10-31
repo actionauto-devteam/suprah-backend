@@ -70,7 +70,8 @@ import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAi
   canSendAiReply, assertAiReplyAllowed, AiReplySuppressedError, claimAiGeneration, claimAiReplyDispatch,
   attentionOrgIds, recoverAiHumanAttention } from './aiHumanAttention.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode, AiWorkflow } from './aiOperatingMode.service';
-import { initializeIvr, handleIvrGather, emitIvrCall, clearIvrTimer, canReceiveIvrCall, ivrAgentFailed, recoverIvrCalls } from './ivr.service';
+import { customerNumberOf, dealershipNumberOf, LIVE_CALL_STATUSES, liveCallCutoff } from "../utils/callActivity";
+import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, emitIvrCall, clearIvrTimer, canReceiveIvrCall, ivrAgentFailed, recoverIvrCalls, startHoldAudio, stopHoldAudio } from './ivr.service';
 
 const AI_AGENT_ACTOR_ID = "ai-agent";
 
@@ -1975,6 +1976,7 @@ async function handlePhoneAccept(payload: any, state: any): Promise<void> {
   emitCallUpdate(claimed);
   try {
     if (!claimed.routing?.customerAnswered) await telnyx.answerCall(claimed.providerCallControlId);
+    if (claimed.routing) await stopHoldAudio(claimed);
     await telnyx.bridgeCalls(claimed.providerCallControlId, leg);
     const live = await CallLog.findOneAndUpdate(
       { _id: claimed._id, status: "answering", agentLegCallControlId: leg },
@@ -2361,6 +2363,7 @@ export async function claimInboundCall(opts: { callId: string; orgId: any; user:
     ringTimers.delete(String(call._id));
   }
   await stopPhoneLegs(call);
+  if (call.routing) await stopHoldAudio(call);
 
   try {
     await telnyx.transferToAgent(call.providerCallControlId!, cred.sipUsername, {
@@ -2406,6 +2409,10 @@ export async function handleCallAnswered(payload: any) {
     return;
   }
   if (String(clientState?.kind || '').startsWith('phone-')) return;
+  if (clientState?.kind === 'ivr-customer') {
+    await handleIvrCustomerAnswered(payload, ivrCallbacks);
+    return;
+  }
   const sessionId = payload?.call_session_id;
 
   const query = clientState?.callLogId
@@ -2431,7 +2438,10 @@ export async function handleCallAnswered(payload: any) {
     { new: true }
   );
   if (call) {
-    if (call.routing) clearIvrTimer(String(call._id));
+    if (call.routing) {
+      clearIvrTimer(String(call._id));
+      await stopHoldAudio(call);
+    }
     emitCallUpdate(call);
   }
 }
@@ -2536,6 +2546,7 @@ export async function handleSpeakEnded(payload: any) {
   const call = id ? await CallLog.findOne({ providerCallControlId: id }) : null;
   if (call?.routing || String(tag?.kind || '').startsWith('ivr-')) {
     if (call?.status === 'missed') await telnyx.hangupCall(id).catch(() => {});
+    else if (call && tag?.kind === 'ivr-hold') await startHoldAudio(call);
     return;
   }
   if (id) await telnyx.hangupCall(id).catch(() => {});
@@ -2571,6 +2582,16 @@ export async function logClientCall(opts: {
       const lead = await findLeadByPhone(opts.orgId, to);
       if (lead) leadId = lead._id;
     }
+    const restriction = await checkContactForSend(
+      { organizationId: opts.orgId, phone: to, leadId, customerId },
+      { purpose: "manual_call", actor: auditActorFromRef(opts.user) },
+    );
+    if (restriction.status === "restricted") {
+      throw new ApiError(403, "This customer is marked Do Not Contact, so you can't call them. Only an admin can remove Do Not Contact.");
+    }
+    if (restriction.status !== "allowed") {
+      throw new ApiError(503, "We couldn't confirm this customer can be contacted, so the call wasn't placed. Please try again in a moment.");
+    }
     const conversation = await getOrCreateConversation({
       orgId: opts.orgId,
       phone: to,
@@ -2597,6 +2618,7 @@ export async function logClientCall(opts: {
           to,
           status: "ringing",
           placedBy: opts.user,
+          ...(caller?.label ? { lineLabel: caller.label } : {}),
           startedAt: new Date(),
           customerName,
           clientCallId: opts.clientCallId,
@@ -2635,6 +2657,29 @@ export async function logClientCall(opts: {
   await call.save();
   emitToOrg(opts.orgId, "comm:call:update", { call: call.toObject() });
   return call;
+}
+
+export async function listActiveCalls(orgId: unknown) {
+  const calls: any[] = await CallLog.find({
+    orgId: { $in: attentionOrgIds(String(orgId)) },
+    leadId: { $ne: null },
+    status: { $in: LIVE_CALL_STATUSES },
+    createdAt: { $gte: liveCallCutoff() },
+  })
+    .select("leadId status direction from to lineLabel startedAt answeredAt createdAt")
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .lean();
+  return calls.map((call) => ({
+    callId: String(call._id),
+    leadId: String(call.leadId),
+    status: call.status,
+    direction: call.direction,
+    number: dealershipNumberOf(call),
+    customerNumber: customerNumberOf(call),
+    lineLabel: call.lineLabel || null,
+    since: call.answeredAt || call.startedAt || call.createdAt,
+  }));
 }
 
 /* ----------------------------- WebRTC tokens ---------------------------- */
