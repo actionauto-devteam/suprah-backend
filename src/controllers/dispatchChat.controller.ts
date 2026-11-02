@@ -20,6 +20,7 @@ import {
 import logger from "../utils/logger";
 import { recordAvailableLoadInquiry } from "../services/availableLoadInquiry.service";
 import { safeCreateNotification } from "../utils/safeNotification";
+import { loadContactIds, NO_DISPATCH_CHAT_CONTACT, pickLoadContact } from "../services/dispatchChatContact";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const MAX_MESSAGE_LENGTH = 4000;
@@ -875,10 +876,59 @@ async function backfillSafeDriverThreads(
   }
 }
 
+/**
+ * The active staff on these loads and, for dealerships where none of them can
+ * take the chat, the fallback admin (see dispatchChatContact). Two queries
+ * however many loads.
+ */
+async function loadContactDirectory(loads: any[]) {
+  const ids = [...new Set(loads.flatMap((load) => loadContactIds(load)))];
+  const staff: any[] = ids.length
+    ? await User.find({ _id: { $in: ids }, role: { $in: STAFF_ROLES }, isActive: true })
+        .select("_id name email avatar role organizationId isActive")
+        .lean()
+    : [];
+  const staffById = new Map(staff.map((user) => [String(user._id), user]));
+
+  const orgsNeedingAdmin = [
+    ...new Set(
+      loads
+        .map((load) => ({ load, organizationId: String(load?.organizationId ?? "").trim() }))
+        .filter(({ load, organizationId }) =>
+          organizationId &&
+          !pickLoadContact(load, staffById, null, (user) => isValidDispatcherReferenceForThread(user, organizationId)))
+        .map(({ organizationId }) => organizationId),
+    ),
+  ];
+  const admins: any[] = orgsNeedingAdmin.length
+    ? await User.find({ organizationId: { $in: orgsNeedingAdmin }, role: "admin", isActive: true })
+        .sort({ createdAt: 1, _id: 1 })
+        .select("_id name email avatar role organizationId isActive")
+        .lean()
+    : [];
+  const adminByOrg = new Map<string, any>();
+  for (const admin of admins) {
+    const key = String(admin.organizationId);
+    if (!adminByOrg.has(key)) adminByOrg.set(key, admin);
+  }
+  return { staffById, adminByOrg };
+}
+
+/** Who the driver reaches about this load, or null when nobody can take the chat. */
+function reachableLoadContact(
+  load: any,
+  organizationId: string,
+  directory: Awaited<ReturnType<typeof loadContactDirectory>>,
+) {
+  return pickLoadContact(load, directory.staffById, directory.adminByOrg.get(organizationId), (user) =>
+    isValidDispatcherReferenceForThread(user, organizationId));
+}
+
 // POST /api/driver-tracking/dispatch-chat/load/:loadId/open
-// Driver-only entry point for the Load Board. The server derives the exact
-// dispatcher from Load.createdBy instead of trusting a client-supplied staff id,
-// so a driver cannot use this route to open arbitrary staff conversations.
+// Driver-only entry point for the Load Board. The server derives the
+// dispatcher from the load (see dispatchChatContact) instead of trusting a
+// client-supplied staff id, so a driver cannot use this route to open
+// arbitrary staff conversations.
 // ensureDispatchChatThread reuses the same exact dispatcher↔driver thread when
 // one already exists, preserving the previous Suprah Dispatch Chat history.
 const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
@@ -902,7 +952,7 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
       { assignedDriverId: { $exists: false } },
     ],
   })
-    .select('_id loadNumber createdBy organizationId')
+    .select('_id loadNumber createdBy dispatchOwnerId organizationId')
     .lean();
 
   if (!load) {
@@ -914,23 +964,8 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
     throw new ApiError(409, 'This load can\'t be discussed in Dispatch Chat right now. Please contact support.');
   }
 
-  const creatorId = String(load.createdBy ?? '').trim();
-  if (!creatorId || !mongoose.Types.ObjectId.isValid(creatorId)) {
-    throw new ApiError(
-      409,
-      'The dispatcher who posted this load isn\'t available in Dispatch Chat right now. Try again later.',
-    );
-  }
-
-  const [dispatcher, driver] = await Promise.all([
-    User.findOne({
-      _id: creatorId,
-      organizationId,
-      role: { $in: STAFF_ROLES },
-      isActive: true,
-    })
-      .select('_id name email avatar isActive role')
-      .lean(),
+  const [directory, driver] = await Promise.all([
+    loadContactDirectory([load]),
     User.findOne({
       _id: actor._id,
       role: 'driver',
@@ -939,12 +974,10 @@ const openLoadCreatorThread = asyncHandler(async (req: ExpressRequest, res: Expr
       .select('_id name email avatar isActive role')
       .lean(),
   ]);
+  const dispatcher: any = reachableLoadContact(load, organizationId, directory);
 
   if (!dispatcher) {
-    throw new ApiError(
-      409,
-      'The dispatcher who posted this load isn\'t available in Dispatch Chat right now. Try again later.',
-    );
+    throw new ApiError(409, NO_DISPATCH_CHAT_CONTACT);
   }
   if (!driver) {
     throw new ApiError(403, 'Your account can\'t use Suprah Dispatch Chat right now. Refresh the page and try again.');
@@ -1030,21 +1063,16 @@ function myCurrentAndRecentLoadsFilter(driverId: mongoose.Types.ObjectId) {
   };
 }
 
-/** The dispatcher responsible for a load, falling back to whoever created it. */
-function loadDispatcherId(load: any): string {
-  const id = String(load?.dispatchOwnerId || load?.createdBy || "").trim();
-  return mongoose.Types.ObjectId.isValid(id) ? id : "";
-}
-
 function loadRouteText(location: any): string {
   return [location?.city, location?.state].filter(Boolean).join(", ");
 }
 
 // GET /api/driver-tracking/dispatch-chat/contacts
 // The dispatchers a driver can start a conversation with: the dispatcher of
-// each load they have now or delivered in the last 30 days. The same checks as
-// a private conversation apply: an active staff member of the load's
-// organization (or a super admin).
+// each load they have now or delivered in the last 30 days (see
+// dispatchChatContact for who stands in when that account is switched off).
+// The same checks as a private conversation apply: an active staff member of
+// the load's organization (or a super admin).
 const getMyLoadContacts = asyncHandler(async (req: ExpressRequest, res: ExpressResponse) => {
   const actor = getUser(req);
   if (actor.role !== "driver") {
@@ -1057,13 +1085,7 @@ const getMyLoadContacts = asyncHandler(async (req: ExpressRequest, res: ExpressR
     .limit(100)
     .lean();
 
-  const dispatcherIds = [...new Set(loads.map(loadDispatcherId).filter(Boolean))];
-  const dispatchers: any[] = dispatcherIds.length
-    ? await User.find({ _id: { $in: dispatcherIds }, role: { $in: STAFF_ROLES }, isActive: true })
-        .select("_id name avatar role organizationId isActive")
-        .lean()
-    : [];
-  const dispatcherById = new Map(dispatchers.map((dispatcher) => [String(dispatcher._id), dispatcher]));
+  const directory = await loadContactDirectory(loads);
 
   // One entry per dispatcher and organization. Loads are newest first, so the
   // first load seen is the latest; a load the driver has now wins over a
@@ -1071,8 +1093,8 @@ const getMyLoadContacts = asyncHandler(async (req: ExpressRequest, res: ExpressR
   const contacts = new Map<string, { organizationId: string; dispatcher: any; current: boolean; load: any; loadCount: number }>();
   for (const load of loads) {
     const organizationId = String(load.organizationId ?? "").trim();
-    const dispatcher = dispatcherById.get(loadDispatcherId(load));
-    if (!organizationId || !dispatcher || !isValidDispatcherReferenceForThread(dispatcher, organizationId)) continue;
+    const dispatcher = organizationId ? reachableLoadContact(load, organizationId, directory) : null;
+    if (!organizationId || !dispatcher) continue;
     const key = `${organizationId}:${dispatcher._id}`;
     const current = ACTIVE_LOAD_STATUSES.includes(String(load.status));
     const existing = contacts.get(key);
@@ -1145,20 +1167,16 @@ const openMyLoadThread = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   }
 
   const organizationId = String(load.organizationId ?? "").trim();
-  const dispatcherId = loadDispatcherId(load);
-  const [dispatcher, driver]: any[] = await Promise.all([
-    dispatcherId
-      ? User.findOne({ _id: dispatcherId, role: { $in: STAFF_ROLES }, isActive: true })
-          .select("_id name email avatar isActive role organizationId")
-          .lean()
-      : null,
+  const [directory, driver]: any[] = await Promise.all([
+    loadContactDirectory([load]),
     User.findOne({ _id: actor._id, role: "driver", isActive: true })
       .select("_id name email avatar isActive role")
       .lean(),
   ]);
+  const dispatcher: any = organizationId ? reachableLoadContact(load, organizationId, directory) : null;
 
-  if (!organizationId || !dispatcher || !isValidDispatcherReferenceForThread(dispatcher, organizationId)) {
-    throw new ApiError(409, "The dispatcher for this load isn't available in Dispatch Chat right now. Try again later.");
+  if (!dispatcher) {
+    throw new ApiError(409, NO_DISPATCH_CHAT_CONTACT);
   }
   if (!driver) {
     throw new ApiError(403, "Your account can't use Suprah Dispatch Chat right now. Refresh the page and try again.");
