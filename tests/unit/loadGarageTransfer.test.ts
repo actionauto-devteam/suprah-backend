@@ -113,7 +113,7 @@ describe('adding the car to the garage', () => {
   });
 
   it("doesn't tell the customer twice or mark a Sold car again", async () => {
-    car.status = 'Sold';
+    Object.assign(car, { status: 'Sold', manualStatusLock: true });
     mockOwnedFindOne.mockReturnValue({ _id: 'owned-1', status: 'ACTIVE', currentMileage: 200, images: ['x.jpg'], save: jest.fn() });
     const result = await addLoadCarToGarage(ORG, deliveredLoad(), STAFF);
     expect(result).toMatchObject({ alreadyInGarage: true, vehicleMarkedSold: false });
@@ -121,6 +121,15 @@ describe('adding the car to the garage', () => {
     expect(mockOwnedCreate).not.toHaveBeenCalled();
     expect(mockTransferCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'already_in_garage' }));
     expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  it('locks a car already marked Sold at delivery, so the feed keeps it Sold', async () => {
+    const soldAt = new Date('2026-11-01T10:00:00Z');
+    Object.assign(car, { status: 'Sold', dateSold: soldAt });
+    const result = await addLoadCarToGarage(ORG, deliveredLoad(), STAFF);
+    expect(result).toMatchObject({ vehicleMarkedSold: false });
+    expect(car).toMatchObject({ status: 'Sold', manualStatusLock: true, dateSold: soldAt });
+    expect(car.save).toHaveBeenCalled();
   });
 
   it('copes with two taps at the same moment', async () => {

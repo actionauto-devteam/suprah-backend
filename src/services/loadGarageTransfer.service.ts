@@ -170,13 +170,16 @@ export async function addLoadCarToGarage(
   }
 
   // Marked Sold and locked, so the nightly feed doesn't put it back on sale.
+  // A car already marked Sold at delivery still gets the lock.
   let vehicleMarkedSold = false;
-  if (vehicle.status !== "Sold") {
-    vehicle.status = "Sold";
-    vehicle.dateSold = new Date();
+  if (vehicle.status !== "Sold" || !vehicle.manualStatusLock) {
+    if (vehicle.status !== "Sold") {
+      vehicle.status = "Sold";
+      vehicle.dateSold = new Date();
+      vehicleMarkedSold = true;
+    }
     vehicle.manualStatusLock = true;
     await vehicle.save();
-    vehicleMarkedSold = true;
     await cacheService.invalidateByPrefix("veh:").catch(() => undefined);
   }
 
