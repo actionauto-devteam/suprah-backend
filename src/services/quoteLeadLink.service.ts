@@ -109,6 +109,8 @@ export interface LeadShipment {
   status: string;
   source: string;
   vehicleName: string;
+  /** The quoted car's VIN, so staff can tell two similar cars apart ("" when unknown). */
+  vin: string;
   rate: number | null;
   createdAt: string | null;
   /** The newest load made from the quote (a cancelled one only when there's nothing newer). */
@@ -127,7 +129,7 @@ export async function listLeadShipments(organizationId: string, leadId: unknown)
   const id = String(leadId ?? "").trim();
   if (!organizationId || !mongoose.Types.ObjectId.isValid(id)) return [];
   const quotes = await Quote.find({ organizationId, leadId: id })
-    .select("_id status source vehicleName rate createdAt")
+    .select("_id status source vehicleName vin rate createdAt")
     .sort({ createdAt: -1 })
     .limit(LEAD_SHIPMENTS_LIMIT)
     .lean<any[]>();
@@ -153,6 +155,7 @@ export async function listLeadShipments(organizationId: string, leadId: unknown)
       status: String(quote.status ?? ""),
       source: String(quote.source ?? "staff"),
       vehicleName: String(quote.vehicleName ?? "").trim(),
+      vin: String(quote.vin ?? "").trim().toUpperCase(),
       rate: typeof quote.rate === "number" && Number.isFinite(quote.rate) ? quote.rate : null,
       createdAt: created && Number.isFinite(created.getTime()) ? created.toISOString() : null,
       load: load ? { _id: String(load._id), loadNumber: String(load.loadNumber ?? ""), status: String(load.status ?? "") } : null,

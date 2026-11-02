@@ -178,15 +178,15 @@ describe('listLeadShipments', () => {
   it("lists a lead's quotes in this dealership, newest first, with the load each became", async () => {
     mockQuoteFind.mockReturnValue([
       { _id: 'q2', status: 'booked', source: 'customer_portal', vehicleName: '2021 Toyota Camry', rate: 950, createdAt: new Date('2026-10-29T00:00:00Z') },
-      { _id: 'q1', status: 'pending', vehicleName: ' Honda Civic ', createdAt: new Date('2026-10-20T00:00:00Z') },
+      { _id: 'q1', status: 'pending', vehicleName: ' Honda Civic ', vin: ' 2hgfc2f59kh500001 ', createdAt: new Date('2026-10-20T00:00:00Z') },
     ]);
     mockLoadFind.mockReturnValue([
       { _id: 'l3', quoteId: 'q2', loadNumber: 'LD-3', status: 'Cancelled' },
       { _id: 'l2', quoteId: 'q2', loadNumber: 'LD-2', status: 'In-Transit' },
     ]);
     expect(await listLeadShipments(ORG, LEAD)).toEqual([
-      { quoteId: 'q2', status: 'booked', source: 'customer_portal', vehicleName: '2021 Toyota Camry', rate: 950, createdAt: '2026-10-29T00:00:00.000Z', load: { _id: 'l2', loadNumber: 'LD-2', status: 'In-Transit' } },
-      { quoteId: 'q1', status: 'pending', source: 'staff', vehicleName: 'Honda Civic', rate: null, createdAt: '2026-10-20T00:00:00.000Z', load: null },
+      { quoteId: 'q2', status: 'booked', source: 'customer_portal', vehicleName: '2021 Toyota Camry', vin: '', rate: 950, createdAt: '2026-10-29T00:00:00.000Z', load: { _id: 'l2', loadNumber: 'LD-2', status: 'In-Transit' } },
+      { quoteId: 'q1', status: 'pending', source: 'staff', vehicleName: 'Honda Civic', vin: '2HGFC2F59KH500001', rate: null, createdAt: '2026-10-20T00:00:00.000Z', load: null },
     ]);
     expect(mockQuoteFind).toHaveBeenCalledWith({ organizationId: ORG, leadId: LEAD });
     expect(mockLoadFind.mock.calls[0][0]).toMatchObject({ organizationId: ORG });
