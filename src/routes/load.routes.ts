@@ -48,6 +48,8 @@ router.get("/stats", staffOnly, loadController.getLoadStats);
 router.get("/attention", staffOnly, loadAttentionController.getLoadAttention);
 // Which cars are already on a live load or a waiting quote (Inventory tags, Create Load warning).
 router.get("/vehicle-shipping", staffOnly, loadController.getVehicleShipping);
+// A delivered customer request's car goes to the customer's My Garage (and is marked Sold).
+router.post("/:id/add-to-garage", staffOnly, loadController.addToGarage);
 
 router
   .route("/")

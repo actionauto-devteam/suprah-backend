@@ -40,6 +40,7 @@
     import Quote from "../models/Quote.model";
     import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
     import { findLoadQuoteOrigin } from "../services/quoteLeadLink.service";
+    import { addLoadCarToGarage, loadGarageState } from "../services/loadGarageTransfer.service";
     import {
       buildLoadMaterialChanges,
       getLoadAcceptanceMaterialVersion,
@@ -896,7 +897,54 @@
         });
       }
 
+      // Whether a delivered customer request's car can go to the customer's
+      // My Garage. Never blocks the load page.
+      if (loadObj.status === "Delivered" && loadObj.quoteId) {
+        loadObj.garage = await loadGarageState(organizationId, loadObj).catch((err) => {
+          logger.warn({ err, loadId: String(loadObj._id) }, "Could not check whether this car can go to the customer's garage");
+          return null;
+        });
+      }
+
       return res.status(200).json(new ApiResponse(200, loadObj, "Load fetched successfully"));
+    });
+
+    /**
+     * Add a delivered customer request's car to the customer's My Garage
+     * POST /api/loads/:id/add-to-garage
+     * Marks the car Sold and tells the customer (see loadGarageTransfer.service).
+     */
+    const addToGarage = asyncHandler(async (req: Request, res: Response) => {
+      const user = getUser(req);
+      const organizationId = req.orgId as string;
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) throw new ApiError(404, LOAD_NOT_FOUND);
+      const load = await Load.findOne({ _id: req.params.id, organizationId })
+        .select("status quoteId vehicles loadNumber")
+        .lean();
+      if (!load) throw new ApiError(404, LOAD_NOT_FOUND);
+
+      const result = await addLoadCarToGarage(organizationId, load, user);
+      const car = result.vehicleLabel || "car";
+      const message = result.alreadyInGarage
+        ? `The ${car} was already in ${result.customerName}'s My Garage.`
+        : `Added the ${car} to ${result.customerName}'s My Garage. They've been told.`;
+
+      try {
+        await activityService.createActivity({
+          userId: user._id.toString(),
+          organizationId,
+          type: "load_updated",
+          title: "Added to customer's garage",
+          description: `${user.name || "Staff"} added the ${car} from load ${load.loadNumber} to ${result.customerName}'s My Garage`,
+          metadata: { loadId: String(load._id), vehicleMarkedSold: result.vehicleMarkedSold },
+          ipAddress: req.ip,
+          userAgent: req.get("user-agent"),
+        });
+      } catch (err) {
+        logger.error({ err, loadId: String(load._id) }, "Car was added to the garage, but activity logging failed");
+      }
+
+      return res.status(200).json(new ApiResponse(200, result, message));
     });
 
     /**
@@ -2046,4 +2094,4 @@
       res.json(new ApiResponse(200, { sentTo: email }, "Load details email sent successfully"));
     });
 
-    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
+    export default { lookupVin, getInventoryVehicles, calculateLoadRate, createLoad, getLoads, getLoadStats, getLoadById, getVehicleShipping, addToGarage, updateLoad, deleteLoad, submitProofOfPickup, submitProofOfDelivery, streamProofImage, confirmDelivery, addNote, sendDetailsEmail, uploadInspectionPhoto };
