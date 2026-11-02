@@ -741,7 +741,8 @@ export const getAllLeads = async (req: Request, res: Response) => {
 
     const sortBy =
       req.query.sortBy === "oldest" ||
-      req.query.sortBy === "waiting_longest"
+      req.query.sortBy === "waiting_longest" ||
+      req.query.sortBy === "latest_activity"
         ? req.query.sortBy
         : "newest";
 
@@ -850,6 +851,22 @@ export const getAllLeads = async (req: Request, res: Response) => {
         { $limit: limit },
         { $project: Object.fromEntries(listFields.split(' ').filter(Boolean).map((field) => [field, 1])) },
       ]);
+    } else if (sortBy === "latest_activity") {
+      const ranked: Array<{ _id: unknown }> = await Lead.aggregate([
+        { $match: Lead.find().cast(Lead, { ...query }) },
+        {
+          $project: {
+            createdAt: 1,
+            activityAt: { $max: ['$createdAt', { $ifNull: ['$followUp.lastCustomerActivityAt', '$createdAt'] }] },
+          },
+        },
+        { $sort: { activityAt: -1, createdAt: -1, _id: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ]);
+      const rows = await Lead.find({ _id: { $in: ranked.map((row) => row._id) } }).select(listFields).lean();
+      const byId = new Map(rows.map((row: any) => [String(row._id), row]));
+      leads = ranked.map((row) => byId.get(String(row._id))).filter(Boolean);
     } else {
       leads = await Lead.find(query)
         .select(listFields)
