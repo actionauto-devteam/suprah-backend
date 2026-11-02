@@ -19,6 +19,7 @@ import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
 import { purgeArchivedTimeproof } from '../utils/timeproofArchivePurge.util';
+import { checkTrayAccess, sendTrayActiveElsewhere } from '../services/trayClaim.service';
 import { hasPayrollAccess } from '../utils/payrollAccess.util';
 import { SystemLog } from '../models/SystemLog.model';
 import { HourlyRateChangeLog } from '../models/HourlyRateChangeLog.model';
@@ -30,7 +31,7 @@ import { isDeviceSwitchEnabledForUser, isMonitoringDevice } from '../utils/devic
 import { getAutoSwitchAwayMs, isAwayBlockActive } from '../utils/autoSwitch.util';
 import { getActiveDevice } from '../utils/monitoringDeviceState.util';
 import MonitoringDeviceState from '../models/MonitoringDeviceState.model';
-import { getCompanyDayRange, isPayoutUnblurWindow } from '../utils/companyTimezone';
+import { COMPANY_TZ, getCompanyDayRange, getCompanyToday, isPayoutUnblurWindow } from '../utils/companyTimezone';
 import { getPayPeriodBounds, getPayPeriodBoundsFor } from '../utils/payPeriod';
 import { computeWeeklyOvertime, sumRegularSecondsInPeriod, WEEKLY_OT_THRESHOLD_SECONDS } from '../utils/payrollOvertime';
 import { fireShiftAlert, postBatchedShiftAlertMessages } from '../services/shiftAlerts.service';
@@ -57,7 +58,6 @@ const IDLE_GRACE_WINDOW_MS = 3 * 60 * 1000;
 
 const MAX_PUSH_SUBSCRIPTIONS = 6;
 
-const COMPANY_TZ_OFFSET_MINUTES = -360;
 function dedupeUsersByEmail<T extends { email?: string; lastActive?: Date; updatedAt?: Date }>(users: T[]): T[] {
   const byEmail = new Map<string, T>();
   const noEmail: T[] = [];
@@ -135,9 +135,9 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     timestamp: { $gte: startDate, $lte: endDate },
   }).sort({ timestamp: 1 }).lean();
 
-  const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const calendar = buildCalendarMap(logs, COMPANY_TZ);
 
-  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ);
   const allActivityIntervals = await ActivityInterval.find({
     userId: user._id,
     shiftDate: { $in: Object.keys(calendar) },
@@ -173,9 +173,9 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
 
   attachWeekTotals(calendar);
 
-  const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const summary = aggregateSummary(calendar, COMPANY_TZ);
+  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ);
+  const hourPattern = buildHourPattern(logs, COMPANY_TZ);
 
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
@@ -209,10 +209,8 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
   }
 
-  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
-  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
-  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
-  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const startDate = getCompanyDayRange(startDateStr as string).start;
+  const endDate = new Date(getCompanyDayRange(endDateStr as string).end.getTime() - 1);
 
   const logs = await TimeLog.find({
     userId: user._id,
@@ -226,7 +224,7 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
   }).select('startAt endAt').lean();
 
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
-  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -240,8 +238,7 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const nowMDT = new Date(now.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
+  const todayMDTStr = getCompanyToday(now).todayStr;
   const weekStart = getWeekStart(now);
   const todayStr = todayMDTStr;
 
@@ -324,15 +321,15 @@ export const getAllUsersTimeproof = asyncHandler(async (req: Request, res: Respo
     people.map(async (u) => {
       const logs = logsByUser.get(u._id.toString()) ?? [];
 
-      const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+      const calendar = buildCalendarMap(logs, COMPANY_TZ);
       const userDeductions = deductionsByUser.get(u._id.toString());
       if (userDeductions) {
         for (const [date, seconds] of userDeductions) {
           if (calendar[date]) calendar[date].totalSeconds = Math.max(0, calendar[date].totalSeconds - seconds);
         }
       }
-      const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
-      const { streak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
+      const summary = aggregateSummary(calendar, COMPANY_TZ);
+      const { streak } = computeStreak(calendar, COMPANY_TZ);
       const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
       let isOnShift = false;
@@ -459,9 +456,9 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
     timestamp: { $gte: startDate, $lte: endDate },
   }).sort({ timestamp: 1 }).lean();
 
-  const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const calendar = buildCalendarMap(logs, COMPANY_TZ);
 
-  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ);
   const allUserIntervals = await ActivityInterval.find({
     userId,
     shiftDate: { $in: Object.keys(calendar) },
@@ -498,9 +495,9 @@ export const getUserTimeproof = asyncHandler(async (req: Request, res: Response)
 
   attachWeekTotals(calendar);
 
-  const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const summary = aggregateSummary(calendar, COMPANY_TZ);
+  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ);
+  const hourPattern = buildHourPattern(logs, COMPANY_TZ);
 
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
@@ -567,10 +564,8 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
   const targetUser = await CrmUser.findOne({ _id: userId, organizationId: requestor.organizationId }).select('_id department organizationId');
   if (!targetUser) throw new ApiError(404, 'User not found');
 
-  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
-  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
-  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
-  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const startDate = getCompanyDayRange(startDateStr as string).start;
+  const endDate = new Date(getCompanyDayRange(endDateStr as string).end.getTime() - 1);
 
   const logs = await TimeLog.find({
     userId,
@@ -584,7 +579,7 @@ export const getUserIdleLog = asyncHandler(async (req: Request, res: Response) =
   }).select('startAt endAt').lean();
 
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
-  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  const idleLog = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -646,7 +641,7 @@ export const getUserActivityLog = asyncHandler(async (req: Request, res: Respons
   ]);
 
   const idleExempt = await isIdleDetectionExemptDept(targetUser.organizationId?.toString(), targetUser.department);
-  const idlePeriods = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  const idlePeriods = idleExempt ? [] : buildIdleLog(logs, activityIntervals, COMPANY_TZ);
   const idleDetected = idleExempt
     ? []
     : diagnosticLogs.filter((l) => l.event === 'idle_detected').map((l) => ({ at: l.timestamp }));
@@ -842,10 +837,8 @@ export const getShiftState = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const { todayStr: todayMDTStr, start: todayStartDate } = getCompanyToday();
+  const todayMDTStartUTC = todayStartDate.getTime();
 
   const allSessions = buildSessions(logs);
   const todayTotalWorkedSeconds = allSessions
@@ -952,7 +945,20 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     currentIntervalStartAt,
     screenRecordingGranted = null,
     appVersion = null,
+    inputAgeSec,
   } = req.body;
+
+  if (!(await checkTrayAccess({
+    req,
+    userId: user._id,
+    userModel: 'CrmUser',
+    organizationId: user.organizationId?.toString(),
+    displayName: user.fullName,
+    inputAgeSec,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const idleExempt = await isIdleDetectionExemptDept(user.organizationId?.toString(), user.department);
   const mobileMonitoringActive = isDeviceSwitchEnabledForUser(user)
@@ -1303,6 +1309,16 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
   const user = req.crmUser!;
 
   if (!req.file) throw new ApiError(400, 'Screenshot file is required');
+  if (!(await checkTrayAccess({
+    req,
+    userId: user._id,
+    userModel: 'CrmUser',
+    organizationId: user.organizationId?.toString(),
+    displayName: user.fullName,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const { capturedAt, shiftDate, idleDetected = 'false', breakEvent, idleStage } = req.body;
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
@@ -1342,6 +1358,16 @@ export const submitScreenshot = asyncHandler(async (req: Request, res: Response)
  */
 export const submitScreenshotPlaceholder = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
+  if (!(await checkTrayAccess({
+    req,
+    userId: user._id,
+    userModel: 'CrmUser',
+    organizationId: user.organizationId?.toString(),
+    displayName: user.fullName,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
   const { capturedAt, shiftDate, reason } = req.body as { capturedAt?: string; shiftDate?: string; reason?: string };
 
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
@@ -1470,6 +1496,16 @@ export const submitIdleRecording = asyncHandler(async (req: Request, res: Respon
   const user = req.crmUser!;
 
   if (!req.file) throw new ApiError(400, 'Recording file is required');
+  if (!(await checkTrayAccess({
+    req,
+    userId: user._id,
+    userModel: 'CrmUser',
+    organizationId: user.organizationId?.toString(),
+    displayName: user.fullName,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const { shiftDate, idleStartMs, chunkIndex, status } = req.body as { shiftDate?: string; idleStartMs?: string; chunkIndex?: string; status?: string };
   if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
@@ -2085,7 +2121,7 @@ export const getPayrollStatus = asyncHandler(async (req: Request, res: Response)
 
   const results = users.map((u) => {
     const uLogs = logsByUser.get(u._id.toString()) || [];
-    const calendar = buildCalendarMap(uLogs, COMPANY_TZ_OFFSET_MINUTES);
+    const calendar = buildCalendarMap(uLogs, COMPANY_TZ);
     const totalSeconds = sumRegularSecondsInPeriod(calendar, periodStart, periodEnd);
     const lock = lockByUser.get(u._id.toString());
     const rate = u.hourlyRate ?? null;
@@ -2139,7 +2175,7 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
   }
   const weekStartDate = getCompanyDayRange(weekStartStr).start;
   const weekEndExclusive = new Date(weekStartDate.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const saturdayStr = toLocalDateStr(new Date(weekStartDate.getTime() + 6 * 24 * 60 * 60 * 1000), COMPANY_TZ_OFFSET_MINUTES);
+  const saturdayStr = toLocalDateStr(new Date(weekStartDate.getTime() + 6 * 24 * 60 * 60 * 1000), COMPANY_TZ);
 
   const crmUsersRaw = await CrmUser.find({ organizationId: requestor.organizationId, isActive: true, hourlyTrackingExempt: { $ne: true } })
     .select('fullName username department payrollLocation email')
@@ -2196,7 +2232,7 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
 
   const employees = users.map((u) => {
     const uLogs = logsByUser.get(u._id.toString()) || [];
-    const calendar = buildCalendarMap(uLogs, COMPANY_TZ_OFFSET_MINUTES);
+    const calendar = buildCalendarMap(uLogs, COMPANY_TZ);
 
     for (const d of deductionsByUser.get(u._id.toString()) || []) {
       if (calendar[d.date]) {
@@ -2237,7 +2273,7 @@ export const getWeeklyOvertimeReport = asyncHandler(async (req: Request, res: Re
 
   res.json(new ApiResponse(200, {
     weekStart: weekStartStr,
-    weekEnd: toLocalDateStr(new Date(weekEndExclusive.getTime() - 1), COMPANY_TZ_OFFSET_MINUTES),
+    weekEnd: toLocalDateStr(new Date(weekEndExclusive.getTime() - 1), COMPANY_TZ),
     employees: dedupedEmployees,
   }, 'Weekly overtime report generated'));
 });
@@ -2537,6 +2573,16 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   const { startAt, endAt } = req.body;
 
   if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+  if (!(await checkTrayAccess({
+    req,
+    userId: user._id,
+    userModel: 'CrmUser',
+    organizationId: user.organizationId?.toString(),
+    displayName: user.fullName,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const start = new Date(startAt);
   const end = new Date(endAt);
@@ -2549,7 +2595,7 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   const CLOCK_DRIFT_TOLERANCE_MS = 60 * 60 * 1000;
   const serverNow = new Date();
   const clientClockLooksWrong = Math.abs(serverNow.getTime() - end.getTime()) > CLOCK_DRIFT_TOLERANCE_MS;
-  const shiftDate = toLocalDateStr(clientClockLooksWrong ? serverNow : start, COMPANY_TZ_OFFSET_MINUTES);
+  const shiftDate = toLocalDateStr(clientClockLooksWrong ? serverNow : start, COMPANY_TZ);
 
   await ActivityInterval.create({
     userId: user._id,
@@ -2651,10 +2697,8 @@ export const wipeAllScreenshotsHandler = asyncHandler(async (req: Request, res: 
 export const getResumableShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const { todayStr: todayMDTStr, start: todayStartDate } = getCompanyToday();
+  const todayMDTStartUTC = todayStartDate.getTime();
 
   const todayLogs = await TimeLog.find({
     userId: user._id,
@@ -2681,10 +2725,8 @@ export const getResumableShift = asyncHandler(async (req: Request, res: Response
 export const resumeShift = asyncHandler(async (req: Request, res: Response) => {
   const user = req.crmUser!;
 
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime()
-    - COMPANY_TZ_OFFSET_MINUTES * 60_000;
+  const { todayStr: todayMDTStr, start: todayStartDate } = getCompanyToday();
+  const todayMDTStartUTC = todayStartDate.getTime();
 
   const todayLogs = await TimeLog.find({
     userId: user._id,

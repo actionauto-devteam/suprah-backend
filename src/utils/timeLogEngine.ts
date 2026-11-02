@@ -1,3 +1,5 @@
+import { zoneOffsetMinutes, zoneMidnightUtc, addDaysToDateStr } from './companyTimezone';
+
 // v1.4.0
 /**
  * Shared TimeLog "core math" — pairing raw time-in/time-out/break-in/break-out
@@ -47,9 +49,19 @@ export interface HoursSummary {
 /** Date → "YYYY-MM-DD" (UTC) */
 export const toDateStr = (date: Date): string => date.toISOString().split('T')[0];
 
+export type TzSpec = number | string;
+
+const offsetMinutesAt = (date: Date, tz: TzSpec): number =>
+  typeof tz === 'number' ? tz : zoneOffsetMinutes(date, tz);
+
+const localMidnightUtcMs = (dateStr: string, tz: TzSpec): number =>
+  typeof tz === 'number'
+    ? new Date(`${dateStr}T00:00:00.000Z`).getTime() - tz * 60_000
+    : zoneMidnightUtc(dateStr, tz).getTime();
+
 /** Date → "YYYY-MM-DD" in the user's local timezone (tzOffsetMinutes = minutes east of UTC) */
-export const toLocalDateStr = (date: Date, tzOffsetMinutes: number): string => {
-  const local = new Date(date.getTime() + tzOffsetMinutes * 60_000);
+export const toLocalDateStr = (date: Date, tzOffsetMinutes: TzSpec): string => {
+  const local = new Date(date.getTime() + offsetMinutesAt(date, tzOffsetMinutes) * 60_000);
   return local.toISOString().split('T')[0];
 };
 
@@ -165,15 +177,14 @@ export const buildBreakSessions = (logs: TimeLogEntry[]): BreakSession[] => {
 export const getMidnightSegments = (
   startTime: Date,
   endTime: Date,
-  tzOffsetMinutes: number
+  tzOffsetMinutes: TzSpec
 ): Array<{ date: string; segStart: Date; segEnd: Date }> => {
   const result: Array<{ date: string; segStart: Date; segEnd: Date }> = [];
   let segStart = new Date(startTime);
 
   while (true) {
     const segDateStr = toLocalDateStr(segStart, tzOffsetMinutes);
-    const localDayStartUTC = new Date(segDateStr + 'T00:00:00.000Z').getTime();
-    const nextLocalMidnightUTC = new Date(localDayStartUTC + 24 * 60 * 60 * 1000 - tzOffsetMinutes * 60_000);
+    const nextLocalMidnightUTC = new Date(localMidnightUtcMs(addDaysToDateStr(segDateStr, 1), tzOffsetMinutes));
 
     if (endTime <= nextLocalMidnightUTC) {
       result.push({ date: segDateStr, segStart: new Date(segStart), segEnd: new Date(endTime) });
@@ -219,7 +230,7 @@ export const attachWeekTotals = (calendar: Record<string, CalendarDay>): void =>
 };
 
 /** Build per-day calendar map from raw log array with local-midnight-split support */
-export const buildCalendarMap = (logs: TimeLogEntry[], tzOffsetMinutes = 0): Record<string, CalendarDay> => {
+export const buildCalendarMap = (logs: TimeLogEntry[], tzOffsetMinutes: TzSpec = 0): Record<string, CalendarDay> => {
   const allSessions = buildSessions(logs);
   const allBreaks = buildBreakSessions(logs);
 
@@ -279,10 +290,10 @@ export const buildCalendarMap = (logs: TimeLogEntry[], tzOffsetMinutes = 0): Rec
 /** Compute consecutive working-day streak using local calendar dates */
 export const computeStreak = (
   calendar: Record<string, CalendarDay>,
-  tzOffsetMinutes = 0
+  tzOffsetMinutes: TzSpec = 0
 ): { streak: number; longestStreak: number } => {
   const now = new Date();
-  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
+  const localNow = new Date(now.getTime() + offsetMinutesAt(now, tzOffsetMinutes) * 60_000);
   const todayStr = localNow.toISOString().split('T')[0];
 
   let streak = 0;
@@ -320,11 +331,12 @@ export const computeStreak = (
 };
 
 /** Build 24-element array: how many clock-ins per hour-of-day (in user's local time) */
-export const buildHourPattern = (logs: TimeLogEntry[], tzOffsetMinutes = 0): number[] => {
+export const buildHourPattern = (logs: TimeLogEntry[], tzOffsetMinutes: TzSpec = 0): number[] => {
   const pattern = new Array(24).fill(0);
   for (const log of logs) {
     if (log.type === 'time-in') {
-      const localTs = new Date(new Date(log.timestamp).getTime() + tzOffsetMinutes * 60_000);
+      const ts = new Date(log.timestamp);
+      const localTs = new Date(ts.getTime() + offsetMinutesAt(ts, tzOffsetMinutes) * 60_000);
       pattern[localTs.getUTCHours()]++;
     }
   }
@@ -341,10 +353,10 @@ export const formatHours = (seconds: number): HoursSummary => ({
 /** Aggregate per-day data into today/week/month buckets using local calendar dates */
 export const aggregateSummary = (
   calendar: Record<string, CalendarDay>,
-  tzOffsetMinutes = 0
+  tzOffsetMinutes: TzSpec = 0
 ): { today: HoursSummary; thisWeek: HoursSummary; thisMonth: HoursSummary } => {
   const now = new Date();
-  const localNow = new Date(now.getTime() + tzOffsetMinutes * 60_000);
+  const localNow = new Date(now.getTime() + offsetMinutesAt(now, tzOffsetMinutes) * 60_000);
   const todayStr = localNow.toISOString().split('T')[0];
 
   const localDay = localNow.getUTCDay(); // 0=Sun ... 6=Sat
@@ -395,7 +407,7 @@ export interface IdlePeriod {
 export const buildIdleLog = (
   logs: TimeLogEntry[],
   activityIntervals: ActivityIntervalLike[],
-  tzOffsetMinutes = 0
+  tzOffsetMinutes: TzSpec = 0
 ): IdlePeriod[] => {
   const sessions = buildSessions(logs);
   const breaks = buildBreakSessions(logs);

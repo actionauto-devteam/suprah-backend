@@ -22,6 +22,7 @@ import { decideLeadIntake } from './leadIntakeDecision';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { describeWebchatContactPolicy } from './contactRestriction.service';
 import { combineInfoForLead } from './leadDuplicateCombine.service';
+import { AI_AGENT_FALLBACK_LABEL, resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
 
 export type ConversationChannel = 'sms' | 'email' | 'webchat' | 'call' | 'note' | 'inquiry';
 export type DeliveryCode = 'sending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed' | 'received';
@@ -51,7 +52,7 @@ export interface ConversationItem {
     startedAt?: string | null;
     answeredAt?: string | null;
     endedAt?: string | null;
-    recording?: { id: string; state: string } | null;
+    recording?: { id: string; state: string; employeeId: string | null; kind: 'call' | 'voicemail'; listenerIds: string[]; openToAllStaff: boolean; summaryReady: boolean } | null;
   };
   inquiry?: { isOriginal: boolean; kind: string; source?: string | null; sourceProvider?: string | null; channel?: string | null; vehicle?: Record<string, unknown> | null };
   attachments?: string[];
@@ -104,12 +105,13 @@ const CALL_LABELS: Record<string, string> = {
 
 const AI_ACTOR = 'ai-agent';
 const SYSTEM_ACTORS = ['system', 'system-webchat-ack'];
+const OLD_AUTOMATIC_NAME = 'Suprah AI';
 
-function authorFor(sentBy: any, customerName: string, inbound: boolean) {
+function authorFor(sentBy: any, customerName: string, inbound: boolean, agentName = AI_AGENT_FALLBACK_LABEL) {
   if (inbound) return { name: customerName, kind: 'customer' as const };
   const userId = sentBy?.userId ? String(sentBy.userId) : null;
   if (userId === AI_ACTOR) return { name: sentBy?.name || 'AI Agent', kind: 'ai' as const, userId };
-  if (userId && SYSTEM_ACTORS.includes(userId)) return { name: sentBy?.name || 'Automatic message', kind: 'system' as const, userId };
+  if (userId && SYSTEM_ACTORS.includes(userId)) return { name: sentBy?.name === OLD_AUTOMATIC_NAME ? agentName : sentBy?.name || 'Automatic message', kind: 'system' as const, userId };
   return { name: sentBy?.name || 'Team member', kind: 'staff' as const, userId };
 }
 
@@ -240,7 +242,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
   const timeFilter = cursorDate ? { $lte: cursorDate } : undefined;
   const fetchLimit = limit + 1;
 
-  const [sms, calls, chats, inquiries, emails, foreignGmail] = await Promise.all([
+  const [sms, calls, chats, inquiries, emails, foreignGmail, agent] = await Promise.all([
     safe('sms', () => CommunicationMessage.find({ orgId: orgIds, leadId, ...(timeFilter ? { createdAt: timeFilter } : {}) })
       .sort({ createdAt: -1, _id: -1 }).limit(fetchLimit).lean(), [] as any[]),
     safe('call', () => CallLog.find({ orgId: orgIds, leadId, ...(timeFilter ? { createdAt: timeFilter } : {}) })
@@ -258,6 +260,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
           $or: [{ 'association.leadId': { $ne: new mongoose.Types.ObjectId(leadId) } }, { 'association.state': { $in: ['received', 'pending_review'] } }],
         }).select('sourceIds.gmailMessageId association').lean(), [] as any[])
       : Promise.resolve([] as any[]),
+    resolveAiAgentIdentity(organizationId),
   ]);
 
   const recordings: any[] = (calls as any[]).length
@@ -267,7 +270,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
         startedAt: { $ne: null },
         state: { $nin: ['deleted', 'deleting'] },
         $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
-      }).select('callLogId state').lean(), [] as any[])
+      }).select('callLogId state employeeId kind listenerIds openToAllStaff summaryAt summaryError').lean(), [] as any[])
     : [];
   const recordingByCall = new Map(recordings.map((recording) => [String(recording.callLogId), recording]));
 
@@ -281,7 +284,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       direction: inbound ? 'inbound' : 'outbound',
       occurredAt: toIso(message.createdAt),
       body: message.body || '',
-      author: authorFor(message.sentBy, customerName, inbound),
+      author: authorFor(message.sentBy, customerName, inbound, agent.displayName),
       status: smsDeliveryStatus(message),
       messageId: String(message._id),
     });
@@ -314,7 +317,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
         startedAt: call.startedAt ? toIso(call.startedAt) : null,
         answeredAt: call.answeredAt ? toIso(call.answeredAt) : null,
         endedAt: call.endedAt ? toIso(call.endedAt) : null,
-        recording: recording ? { id: String(recording._id), state: recording.state } : null,
+        recording: recording ? { id: String(recording._id), state: recording.state, employeeId: recording.employeeId ? String(recording.employeeId) : null, kind: recording.kind === 'voicemail' ? 'voicemail' : 'call', listenerIds: (recording.listenerIds || []).map(String), openToAllStaff: Boolean(recording.openToAllStaff), summaryReady: Boolean(recording.summaryAt || recording.summaryError) } : null,
       },
     });
   }
@@ -327,7 +330,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       direction: inbound ? 'inbound' : 'outbound',
       occurredAt: toIso(chat.createdAt),
       body: chat.body || '',
-      author: authorFor(chat.sentBy, customerName, inbound),
+      author: authorFor(chat.sentBy, customerName, inbound, agent.displayName),
       status: deliveryStatus(inbound ? 'received' : 'sent'),
       messageId: String(chat._id),
     });
@@ -594,7 +597,7 @@ export async function getEarlierConversation(organizationId: string, leadId: str
   if (!same.available) throw new ApiError(404, 'Earlier conversations are not available for this lead');
   if (earlierId === 'unlinked') {
     if (!same.phoneSafe || !lead.phone) throw new ApiError(404, 'No earlier messages for this number');
-    const { messages, calls } = await unlinkedPhoneRecords(organizationId, lead.phone);
+    const [{ messages, calls }, agent] = await Promise.all([unlinkedPhoneRecords(organizationId, lead.phone), resolveAiAgentIdentity(organizationId)]);
     const customerName = leadName(lead);
     const items: ConversationItem[] = [
       ...messages.map((message: any) => ({
@@ -604,7 +607,7 @@ export async function getEarlierConversation(organizationId: string, leadId: str
         direction: message.direction === 'inbound' ? 'inbound' as const : 'outbound' as const,
         occurredAt: toIso(message.createdAt),
         body: message.body || '',
-        author: authorFor(message.sentBy, customerName, message.direction === 'inbound'),
+        author: authorFor(message.sentBy, customerName, message.direction === 'inbound', agent.displayName),
         status: smsDeliveryStatus(message),
       })),
       ...calls.map((call: any) => ({

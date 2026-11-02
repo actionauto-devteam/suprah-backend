@@ -3,6 +3,7 @@ import { cleanAiAgentName, identityFromMetadata, isValidAiAgentName } from "../u
 import { Request, Response } from "express";
 import { revokeRecordingMediaForLogin } from "../services/recordingMediaAuth.service";
 import { asyncHandler } from "../utils/asyncHandler";
+import { getCompanyToday } from "../utils/companyTimezone";
 import { verifyCrmCredentials } from "../services/crmCredentials.service";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
@@ -108,7 +109,6 @@ const COOKIE_OPTIONS = {
   maxAge: 12 * 60 * 60 * 1000,
 };
 
-const COMPANY_TZ_OFFSET_MINUTES = -360;
 const CRM_AVATAR_FILENAME = /^\d{13}-\d{1,10}\.(?:jpe?g|png|webp|gif)$/i;
 const CRM_AVATAR_DATABASE_ID = /^db-([a-f\d]{24})$/i;
 // Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts —
@@ -189,13 +189,8 @@ const getMe = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(401, "Not authenticated");
   }
 
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split("T")[0];
-  const todayMDTStartUTC =
-    new Date(todayMDTStr + "T00:00:00.000Z").getTime() -
-    COMPANY_TZ_OFFSET_MINUTES * 60_000;
-  const today = new Date(todayMDTStartUTC);
-  const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
+  const { start: today, end: tomorrow } = getCompanyToday();
+  const todayMDTStartUTC = today.getTime();
 
   // Look back 2 days so a shift that started "yesterday" (crossed midnight,
   // e.g. an overnight shift) is still detected as an open time-in today —
@@ -569,13 +564,8 @@ const timeClock = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split("T")[0];
-  const todayMDTStartUTC =
-    new Date(todayMDTStr + "T00:00:00.000Z").getTime() -
-    COMPANY_TZ_OFFSET_MINUTES * 60_000;
-  const today = new Date(todayMDTStartUTC);
-  const tomorrow = new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000);
+  const { start: today, end: tomorrow } = getCompanyToday();
+  const todayMDTStartUTC = today.getTime();
 
   const lookbackStart = new Date();
   lookbackStart.setDate(lookbackStart.getDate() - 2);

@@ -5,17 +5,24 @@ import { CallRecording, CallRecordingEvent, CallRecordingShare, CallRecordingSet
 import { ApiError } from '../utils/ApiError';
 import * as telnyx from './telnyx.service';
 import * as media from './callRecordingStorage.service';
-import { RecordingPrincipal, recordingAudit } from './callRecordingAccess.service';
+import { RecordingPrincipal, recordingAudit, recordingPrincipal } from './callRecordingAccess.service';
+import { getSocketIO } from '../utils/socketEmitter';
+import { crmStaffRoom } from '../utils/crmStaffRoom';
+import { summarizeCallTranscript } from './callSummary.service';
+
+export const VOICEMAIL_MAX_SECONDS = 120;
+const VOICEMAIL_RECORDING = { channels: 'single', recording_track: 'inbound', play_beep: true, max_length: VOICEMAIL_MAX_SECONDS };
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 export const recordingSettingsInput = z.object({
   announcementText: z.string().trim().min(1, 'Write the announcement callers hear').max(300, 'Keep the announcement under 300 characters'),
   retentionMonths: z.number().int().min(1, 'Keep recordings for at least 1 month').max(120, 'Keep recordings for at most 120 months'),
+  autoRecord: z.boolean().optional(),
 }).strict();
 
 export async function getRecordingSettings(organizationId: string) {
   const row: any = await CallRecordingSettings.findOne({ organizationId }).lean();
-  return { announcementText: row?.announcementText || DEFAULT_RECORDING_ANNOUNCEMENT, announcementLanguage: row?.announcementLanguage || 'en-US', retentionMonths: row?.retentionMonths || 6 };
+  return { announcementText: row?.announcementText || DEFAULT_RECORDING_ANNOUNCEMENT, announcementLanguage: row?.announcementLanguage || 'en-US', retentionMonths: row?.retentionMonths || 6, autoRecord: row?.autoRecord !== false };
 }
 
 export function addCalendarMonths(date: Date, months: number): Date {
@@ -81,6 +88,26 @@ export async function startManualRecording(principal: RecordingPrincipal, callId
   const call: any = await CallLog.findOne({ _id: callId, orgId: principal.orgId }).select('+recordingCorrelation');
   if (!call || callRepId(call) !== principal.id) throw new ApiError(403, 'Only the rep on this call can record it');
   if (!recordingReady(call)) throw new ApiError(409, 'The call is still connecting. Try again in a few seconds.');
+  return beginRecording(call, principal, 'recording.requested');
+}
+
+export async function startAutoRecording(callId: unknown) {
+  const call: any = await CallLog.findById(callId).select('+recordingCorrelation');
+  if (!call || !recordingReady(call) || await CallRecording.exists({ callLogId: call._id })) return null;
+  if (!(await getRecordingSettings(String(call.orgId))).autoRecord) return null;
+  const repId = callRepId(call);
+  if (!repId) return null;
+  const principal = await recordingPrincipal(repId, String(call.orgId)).catch(() => null);
+  if (!principal) return null;
+  try {
+    return await beginRecording(call, principal, 'recording.auto-requested');
+  } catch (err) {
+    if (err instanceof ApiError && err.statusCode === 409) return null;
+    throw err;
+  }
+}
+
+async function beginRecording(call: any, principal: RecordingPrincipal, auditAction: string) {
   const existing: any = await CallRecording.findOne({ callLogId: call._id });
   if (existing && !restartable(existing)) throw new ApiError(409, 'This call is already being recorded');
   if (existing) await CallRecording.deleteOne({ _id: existing._id, state: 'failed', startedAt: null });
@@ -99,7 +126,7 @@ export async function startManualRecording(principal: RecordingPrincipal, callId
     if (err?.code === 11000) throw new ApiError(409, 'This call is already being recorded');
     throw err;
   }
-  await recordingAudit(principal, 'recording.requested', record._id);
+  await recordingAudit(principal, auditAction, record._id);
   try {
     const tag = { ...decodeRecordingState(evidence.clientState), recordingDisclosureId: String(record._id) };
     await telnyx.recordingDisclosure(record.controlId, policy.disclosureText, policy.disclosureLanguage, `recording-disclosure-${record._id}`, Buffer.from(JSON.stringify(tag)).toString('base64'));
@@ -108,6 +135,38 @@ export async function startManualRecording(principal: RecordingPrincipal, callId
     throw new ApiError(502, "We couldn't start the recording. Try again.");
   }
   return record;
+}
+
+export async function startVoicemailRecording(call: any) {
+  const evidence = call?.recordingCorrelation || {};
+  if (!call || !['missed', 'failed'].includes(call.status) || !evidence.connectionId || !evidence.customerLegId) return null;
+  const settings = await getRecordingSettings(String(call.orgId));
+  const openToAllStaff = call.routing ? Boolean(call.routing.allOrg) : !(call.ringRecipientIds || []).length;
+  const listenerIds = openToAllStaff ? [] : [...new Set<string>((call.routing ? call.routing.notifiedIds : call.ringRecipientIds) || [])].map(String);
+  let record: any;
+  try {
+    record = await CallRecording.create({
+      organizationId: String(call.orgId), callLogId: call._id, leadId: call.leadId, customerId: call.customerId, conversationId: call.conversationId,
+      direction: 'inbound', kind: 'voicemail', listenerIds, openToAllStaff, state: 'start-pending', startedAt: new Date(),
+      policy: { retentionMonths: settings.retentionMonths, connectionId: evidence.connectionId },
+      controlId: call.providerCallControlId, sessionId: call.providerCallSessionId, legId: evidence.customerLegId,
+    });
+  } catch (err: any) {
+    if (err?.code === 11000) return CallRecording.findOne({ callLogId: call._id });
+    throw err;
+  }
+  try {
+    await telnyx.recordingCommand(call.providerCallControlId, 'start', `voicemail-start-${record._id}`, VOICEMAIL_RECORDING);
+    await CallRecording.updateOne({ _id: record._id, state: 'start-pending' }, { $set: { state: 'recording' }, $inc: { revision: 1 } });
+  } catch (err) {
+    console.error('[voicemail] Recording could not start', err);
+    await CallRecording.deleteOne({ _id: record._id });
+    await telnyx.hangupCall(call.providerCallControlId).catch(() => {});
+    return null;
+  }
+  const timer = setTimeout(() => telnyx.hangupCall(call.providerCallControlId).catch(() => {}), (VOICEMAIL_MAX_SECONDS + 15) * 1000);
+  timer.unref?.();
+  return CallRecording.findById(record._id);
 }
 
 async function startReservedRecording(id: unknown) {
@@ -196,6 +255,9 @@ export async function observeRecordingCall(type: string, payload: any) {
     if (type === 'call.bridged') update['recordingCorrelation.bridged'] = true;
   }
   await CallLog.updateOne({ _id: call._id }, { $set: update });
+  if (type === 'call.answered' || type === 'call.bridged') {
+    await startAutoRecording(call._id).catch((err) => console.error('[recording] Automatic recording could not start', err));
+  }
 }
 
 export async function finishRecordingDisclosure(payload: any): Promise<boolean> {
@@ -243,7 +305,42 @@ async function importSaved(event: any) {
   if (!next) {
     const current: any = await CallRecording.findById(record._id);
     if (!current?.files.some((file: any) => file.key === key)) await media.deleteRecordingFile(key);
+    return;
   }
+  if (next.kind === 'voicemail') await telnyx.hangupCall(next.controlId).catch(() => {});
+  notifyLead(next);
+}
+
+function notifyLead(record: any) {
+  if (record?.leadId) getSocketIO()?.to(crmStaffRoom(String(record.organizationId))).emit('lead:update', { leadId: String(record.leadId) });
+}
+
+async function saveTranscription(event: any) {
+  const payload = event.payload || {};
+  const record: any = await CallRecording.findOne({ sessionId: payload.call_session_id, ...(payload.call_leg_id ? { legId: payload.call_leg_id } : {}) });
+  if (!record) throw new Error('Transcription has no verified call association');
+  if (['deleting', 'deleted'].includes(record.state)) return;
+  if (payload.connection_id && record.policy?.connectionId && payload.connection_id !== record.policy.connectionId) throw new Error('Transcription connection mismatch');
+  const partId = String(payload.recording_transcription_id || payload.recording_id || event.eventId);
+  if ((record.transcriptParts || []).some((part: any) => part.partId === partId)) return;
+  if (payload.status && payload.status !== 'completed') {
+    await CallRecording.updateOne({ _id: record._id }, { $set: { summaryError: 'The transcript could not be made for this recording.' } });
+    return;
+  }
+  const updated: any = await CallRecording.findOneAndUpdate(
+    { _id: record._id, state: { $nin: ['deleting', 'deleted'] }, 'transcriptParts.partId': { $ne: partId } },
+    { $push: { transcriptParts: { partId, text: String(payload.transcription_text || '').trim(), at: new Date() } } },
+    { new: true },
+  );
+  if (!updated) return;
+  const transcript = updated.transcriptParts.map((part: any) => part.text).filter(Boolean).join('\n\n');
+  const summary = transcript ? await summarizeCallTranscript(transcript, updated.kind === 'voicemail') : null;
+  await CallRecording.updateOne({ _id: record._id, state: { $nin: ['deleting', 'deleted'] } }, {
+    $set: summary
+      ? { summaryPoints: summary.points, summarySentiment: summary.sentiment, summaryAt: new Date(), summaryError: '' }
+      : { summaryError: transcript ? 'The summary is not available right now.' : 'No speech was found in this recording.' },
+  });
+  notifyLead(updated);
 }
 
 export async function deleteRecording(record: any, principal?: RecordingPrincipal) {
@@ -260,7 +357,10 @@ export async function deleteRecording(record: any, principal?: RecordingPrincipa
       await telnyx.deleteProviderRecording(file.id).catch((err: any) => { if (err.status !== 404) throw err; });
     }
   }
-  await CallRecording.updateOne({ _id: record._id }, { $set: { state: 'deleted', deletedAt: new Date() }, $unset: { error: '' } });
+  for (const part of record.transcriptParts || []) {
+    if (part.partId) await telnyx.deleteRecordingTranscription(part.partId).catch((err: any) => { if (err.status !== 404) throw err; });
+  }
+  await CallRecording.updateOne({ _id: record._id }, { $set: { state: 'deleted', deletedAt: new Date() }, $unset: { error: '', transcriptParts: '', summaryPoints: '', summarySentiment: '', summaryAt: '', summaryError: '' } });
   await recordingAudit(principal || { orgId: record.organizationId }, 'recording.deleted', record._id);
 }
 
@@ -273,12 +373,13 @@ export async function recoverRecordings(): Promise<void> {
       const event: any = await CallRecordingEvent.findOneAndUpdate({ attempts: { $lt: 8 }, nextAttemptAt: { $lte: new Date() }, $or: [{ state: 'pending' }, { state: 'working', leaseUntil: { $lte: new Date() } }] }, { $set: { state: 'working', leaseUntil: new Date(Date.now() + 120000) }, $inc: { attempts: 1 } }, { new: true, sort: { createdAt: 1 } });
       if (!event) break;
       try {
-        if (event.type.startsWith('call.recording.')) await importSaved(event);
+        if (event.type === 'call.recording.transcription.saved') await saveTranscription(event);
+        else if (event.type.startsWith('call.recording.')) await importSaved(event);
         else if (event.type === 'call.speak.ended') await finishRecordingDisclosure(event.payload);
         else await observeRecordingCall(event.type, event.payload);
         await CallRecordingEvent.updateOne({ _id: event._id }, { $set: { state: 'done' }, $unset: { payload: '', error: '' } });
       } catch (err) {
-        if (event.type.startsWith('call.recording.')) await CallRecording.updateOne({ sessionId: event.payload.call_session_id, legId: event.payload.call_leg_id, state: { $nin: ['deleted', 'deleting'] } }, { $set: { incomplete: true, error: 'Recording import failed; recovery pending', ...(event.attempts >= 8 ? { state: 'failed' } : {}) } });
+        if (event.type.startsWith('call.recording.') && event.type !== 'call.recording.transcription.saved') await CallRecording.updateOne({ sessionId: event.payload.call_session_id, legId: event.payload.call_leg_id, state: { $nin: ['deleted', 'deleting'] } }, { $set: { incomplete: true, error: 'Recording import failed; recovery pending', ...(event.attempts >= 8 ? { state: 'failed' } : {}) } });
         await CallRecordingEvent.updateOne({ _id: event._id }, { $set: { state: event.attempts >= 8 ? 'failed' : 'pending', nextAttemptAt: new Date(Date.now() + Math.min(3600000, 10000 * 2 ** event.attempts)), error: err instanceof Error ? err.message.slice(0, 300) : 'Processing failed' } });
       }
     }

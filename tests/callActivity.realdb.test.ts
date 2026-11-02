@@ -162,7 +162,7 @@ describe('Real-DB: calling from Leads and live call status (local MongoDB, no li
       return (await callItem(lead._id)).call.recording;
     };
     const shown = await row({});
-    expect(shown).toEqual({ id: expect.any(String), state: 'ready' });
+    expect(shown).toEqual({ id: expect.any(String), state: 'ready', employeeId: null, kind: 'call', listenerIds: [], openToAllStaff: false, summaryReady: false });
     expect(await row({ state: 'deleted' })).toBeNull();
     expect(await row({ expiresAt: new Date(Date.now() - 1000) })).toBeNull();
     expect(await row({ startedAt: null, state: 'failed' })).toBeNull();

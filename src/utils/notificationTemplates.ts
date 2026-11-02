@@ -273,6 +273,14 @@ export const notificationTemplates = {
     message: `${data.authorName} mentioned you on ${data.customerName}'s lead`,
   }),
 
+  lead_message: (data: { customerName: string; channel: 'sms' | 'email'; preview: string }) => {
+    const preview = String(data.preview || '').replace(/\s+/g, ' ').trim();
+    return {
+      title: `New ${data.channel === 'email' ? 'email' : 'text'} from ${data.customerName}`,
+      message: preview ? (preview.length > 140 ? `${preview.slice(0, 137).trimEnd()}...` : preview) : `${data.customerName} sent a new ${data.channel === 'email' ? 'email' : 'text'}.`,
+    };
+  },
+
   missed_call: (data: { caller: string; line: string }) => ({
     title: 'Missed call',
     message: `Missed call from ${data.caller}${data.line ? ` to ${data.line}` : ''}. Open the lead to call or text them back.`,

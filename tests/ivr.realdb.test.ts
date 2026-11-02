@@ -13,6 +13,7 @@ jest.mock('../src/services/telnyx.service', () => ({
   playHoldMusic: jest.fn().mockResolvedValue({}), stopPlayback: jest.fn().mockResolvedValue({}),
   transferToAgent: jest.fn().mockResolvedValue({}), hangupCall: jest.fn().mockResolvedValue({}),
   playMissedAndHangup: jest.fn().mockResolvedValue({}), sendSms: jest.fn().mockResolvedValue({ id: 'test-sms' }),
+  recordingCommand: jest.fn().mockResolvedValue({ data: { result: 'ok' } }),
 }));
 jest.mock('../src/utils/safeNotification', () => ({ notifyOrgAdmins: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../src/utils/aiAgentTask', () => ({ createAiAgentTaskAndNotify: jest.fn() }));
@@ -28,6 +29,7 @@ import CustomerIdentityLock from '../src/models/CustomerIdentityLock.model';
 import CrmLeadGroup from '../src/models/CrmLeadGroup.model';
 import CallRoutingConfig, { IvrInboundClaim, RoutingConfig } from '../src/models/CallRoutingConfig.model';
 import { CallLog, Conversation, CommunicationMessage, TelephonyCredential } from '../src/models/communication.model';
+import { CallRecording } from '../src/models/CallRecording.model';
 import { getInboundRoutingConfig, routingGroupRecipients, validateRoutingGroups } from '../src/services/callRoutingConfig.service';
 import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, expireIvr, recoverIvrCalls, clearIvrTimer } from '../src/services/ivr.service';
 import * as comm from '../src/services/communication.service';
@@ -253,6 +255,65 @@ describe('Stage 41B local MongoDB verification', () => {
     expect((await CallLog.findById(call._id)).status).toBe('in-progress');
     await comm.handleCallInitiated({ direction: 'outgoing', call_session_id: call.providerCallSessionId, call_control_id: 'agent', client_state: tag('agent-leg', selected) });
     expect(telnyx.hangupCall).not.toHaveBeenCalled();
+  });
+  it('counts an untagged answer from the employee leg as picked up, so the ring timer cannot cut in', async () => {
+    const call = await select('1');
+    await comm.claimInboundCall({ callId: String(call._id), orgId, user: { userId: crmIds[1] } });
+    const claimed = await CallLog.findById(call._id);
+    await comm.handleCallAnswered({ call_session_id: call.providerCallSessionId, call_control_id: 'agent-untagged', client_state: null });
+    const live = await CallLog.findById(call._id);
+    expect(live.status).toBe('in-progress');
+    expect(live.agentLegCallControlId).toBe('agent-untagged');
+    expect(live.routing.deadline).toBeNull();
+    await expireIvr(String(call._id), claimed.routing.revision, callbacks);
+    await expireIvr(String(call._id), live.routing.revision, callbacks);
+    const after = await CallLog.findById(call._id);
+    expect(after.status).toBe('in-progress');
+    expect(after.routing.stage).toBe(live.routing.stage);
+    expect(missed).not.toHaveBeenCalled();
+    expect(telnyx.playMissedAndHangup).not.toHaveBeenCalled();
+  });
+  it('an untagged answer on the customer line, or before anyone takes the call, does not count', async () => {
+    const ringing = await select('1');
+    await comm.handleCallAnswered({ call_session_id: ringing.providerCallSessionId, call_control_id: 'someone-else', client_state: null });
+    expect((await CallLog.findById(ringing._id)).status).toBe('ringing');
+    await comm.claimInboundCall({ callId: String(ringing._id), orgId, user: { userId: crmIds[1] } });
+    await comm.handleCallAnswered({ call_session_id: ringing.providerCallSessionId, call_control_id: ringing.providerCallControlId, client_state: null });
+    expect((await CallLog.findById(ringing._id)).status).toBe('answering');
+  });
+  it('when nobody answers, the operator invites a voicemail, then records up to 2 minutes after a beep for the people the call rang', async () => {
+    const call = await select('1');
+    await CallLog.updateOne({ _id: call._id }, { $set: { 'recordingCorrelation.connectionId': 'voice-app', 'recordingCorrelation.customerLegId': 'customer-leg' } });
+    for (let i = 0; i < 3 && (await CallLog.findById(call._id)).status !== 'missed'; i++) {
+      await CallLog.updateOne({ _id: call._id }, { $set: { 'routing.deadline': new Date(Date.now() - 1000) } });
+      await comm.recoverPendingIvrCalls(orgId);
+    }
+    const missedCall: any = await CallLog.findById(call._id);
+    expect(missedCall.status).toBe('missed');
+    const greeting: any = (telnyx.speakIvr as jest.Mock).mock.calls.find(([id, , state]) => id === call.providerCallControlId && state?.kind === 'voicemail-greeting');
+    expect(greeting?.[1]).toMatch(/busy right now\. Please leave a message after the tone/);
+    expect(telnyx.playMissedAndHangup).not.toHaveBeenCalled();
+    expect(telnyx.sendSms).toHaveBeenCalledTimes(1);
+    expect(telnyx.recordingCommand).not.toHaveBeenCalled();
+    const ended = { call_control_id: call.providerCallControlId, client_state: Buffer.from(JSON.stringify(greeting[2])).toString('base64'), status: 'completed' };
+    await comm.handleSpeakEnded(ended);
+    await comm.handleSpeakEnded(ended);
+    expect(telnyx.recordingCommand).toHaveBeenCalledTimes(1);
+    expect(telnyx.recordingCommand).toHaveBeenCalledWith(call.providerCallControlId, 'start', expect.stringMatching(/^voicemail-start-/), expect.objectContaining({ play_beep: true, max_length: 120, channels: 'single' }));
+    const voicemail: any = await CallRecording.findOne({ callLogId: call._id });
+    expect(voicemail).toMatchObject({ kind: 'voicemail', state: 'recording', legId: 'customer-leg', openToAllStaff: false });
+    expect(voicemail.listenerIds.length).toBeGreaterThan(0);
+    expect(voicemail.listenerIds).toEqual(expect.arrayContaining(missedCall.routing.notifiedIds.map(String)));
+    expect(telnyx.hangupCall).not.toHaveBeenCalledWith(call.providerCallControlId);
+    await CallRecording.deleteMany({ callLogId: call._id });
+  });
+  it('a caller who hangs up during the voicemail greeting leaves no recording', async () => {
+    const call = await select('1');
+    await CallLog.updateOne({ _id: call._id }, { $set: { status: 'missed', endedAt: new Date(), 'recordingCorrelation.connectionId': 'voice-app', 'recordingCorrelation.customerLegId': 'customer-leg' } });
+    const interrupted = { call_control_id: call.providerCallControlId, client_state: Buffer.from(JSON.stringify({ kind: 'voicemail-greeting', callLogId: String(call._id), revision: call.routing.revision })).toString('base64'), status: 'call_hangup' };
+    await comm.handleSpeakEnded(interrupted);
+    expect(telnyx.recordingCommand).not.toHaveBeenCalled();
+    expect(await CallRecording.countDocuments({ callLogId: call._id })).toBe(0);
   });
   it('invalid/no input replays once then routes to Reception, ignoring repeated delivery', async () => {
     const call = await freshCall(); const invalid = gather(call, '9');

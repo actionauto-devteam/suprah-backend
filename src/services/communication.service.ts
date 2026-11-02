@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { startVoicemailRecording } from "./callRecording.service";
 import {
   Conversation,
   CommunicationMessage,
@@ -43,6 +44,7 @@ import {
   classifyInquiryScope,
 } from "./vehicleInquiryContext.service";
 import { resolveOrgSystemUserId } from "../utils/orgSystemUser";
+import { resolveAiAgentIdentity } from "../utils/aiAgentIdentity";
 import { retryDbWrite } from "../utils/retryDbWrite";
 import { LEAD_SOURCE } from "../constants/leadSource";
 import { getLeadIntakeMode } from "./leadIntakeControl.service";
@@ -64,6 +66,8 @@ import { getInboundRoutingConfig, getConfiguredInboundOrganization, routingGroup
 import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './staffCallPhone.service';
 import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
+import UnifiedPushService from "./unifiedPush.service";
+import { notifyLeadMessage } from "./leadMessageNotice.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -135,20 +139,49 @@ function buildMissedCallMessage(dealerName: string): string {
   return `Thank you for calling ${dealerName}. All of our team members are currently unavailable. Please send us a text message and we will get back to you as soon as possible.`;
 }
 
-function buildMissedCallTextBackMessage(dealerName: string): string {
-  return `Sorry we missed your call, ${dealerName} here! Reply to this text and we'll get right back to you. Reply STOP to opt out.`;
+function buildVoicemailGreeting(dealerName: string): string {
+  return `Thank you for calling ${dealerName}. All of our team members are busy right now. Please leave a message after the tone, and we will call you back as soon as we can.`;
+}
+
+async function startVoicemail(call: any): Promise<void> {
+  const dealerName = await resolveDealerName(call.orgId);
+  try {
+    if (!call.routing?.customerAnswered) await telnyx.answerCall(call.providerCallControlId);
+    await telnyx.speakIvr(call.providerCallControlId, buildVoicemailGreeting(dealerName), {
+      kind: 'voicemail-greeting', callLogId: String(call._id), revision: call.routing?.revision ?? 0,
+    });
+  } catch (err) {
+    console.error("[voicemail] Greeting could not play; using the short missed-call message", err);
+    await telnyx.playMissedAndHangup(call.providerCallControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+  }
+}
+
+export function senderIntro(dealerName: string, agentName?: string | null): string {
+  return agentName ? `${agentName} from ${dealerName}` : dealerName;
+}
+
+async function resolveSenderIntro(orgId: any): Promise<string> {
+  const [dealerName, agent] = await Promise.all([resolveDealerName(orgId), resolveAiAgentIdentity(orgId)]);
+  return senderIntro(dealerName, agent.name);
+}
+
+async function automatedActor(orgId: any): Promise<IActorRef> {
+  const agent = await resolveAiAgentIdentity(orgId);
+  return { userId: "system", name: agent.displayName };
+}
+
+export function buildMissedCallTextBackMessage(sender: string): string {
+  return `Hi, this is ${sender}. Sorry we missed your call! Reply to this text and we'll get right back to you. Reply STOP to opt out.`;
 }
 
 function buildNoShowFollowUpMessage(
-  dealerName: string,
+  sender: string,
   firstName: string,
   title: string,
   timeLabel: string
 ): string {
-  return `Hi ${firstName}, ${dealerName} here. We missed you at your appointment "${title}" on ${timeLabel}. Reply to this text and we'll get you rebooked. Reply STOP to opt out.`;
+  return `Hi ${firstName}, this is ${sender}. We missed you at your appointment "${title}" on ${timeLabel}. Reply to this text and we'll get you rebooked. Reply STOP to opt out.`;
 }
-
-const SYSTEM_ACTOR: IActorRef = { userId: "system", name: "Suprah AI" };
 
 export class SmsDeliveryUncertainError extends Error {
   messageId: string;
@@ -191,7 +224,7 @@ export async function sendAutomatedSms(opts: {
   const { aiWorkflow, ...rest } = opts;
   await sendSmsFromUser({
     ...rest,
-    user: SYSTEM_ACTOR,
+    user: await automatedActor(opts.orgId),
     beforeDispatch: aiWorkflow ? aiSmsDispatchGuard(opts.orgId, aiWorkflow, opts.toPhone, opts.leadId) : undefined,
   });
   return true;
@@ -255,11 +288,11 @@ export async function sendStaffAttributedSms(opts: {
 
 async function sendMissedCallTextBack(call: any): Promise<void> {
   try {
-    const dealerName = await resolveDealerName(call.orgId);
+    const sender = await resolveSenderIntro(call.orgId);
     await sendAutomatedSms({
       orgId: call.orgId,
       toPhone: call.from,
-      body: buildMissedCallTextBackMessage(dealerName),
+      body: buildMissedCallTextBackMessage(sender),
       customerId: call.customerId,
       customerName: call.customerName,
       leadId: call.leadId,
@@ -559,7 +592,7 @@ export async function sendSystemSms(opts: {
   customerName?: string;
   leadId?: any;
 }): Promise<AppointmentTextResult> {
-  return toAppointmentTextResult(await sendStaffAttributedSms({ ...opts, actor: SYSTEM_ACTOR }));
+  return toAppointmentTextResult(await sendStaffAttributedSms({ ...opts, actor: await automatedActor(opts.orgId) }));
 }
 
 export async function notifyCustomerOfReschedule(appointment: any): Promise<AppointmentTextResult> {
@@ -567,7 +600,7 @@ export async function notifyCustomerOfReschedule(appointment: any): Promise<Appo
   if (!phone) return false;
 
   const firstName = appointment.customerBooking?.firstName?.trim() || "there";
-  const [dealerName, { agentName }, delivery] = await Promise.all([
+  const [dealerName, { agentName, agentNameConfigured }, delivery] = await Promise.all([
     resolveDealerName(appointment.organizationId),
     resolveAiAgentSettings(String(appointment.organizationId)),
     decideAiDelivery({
@@ -599,7 +632,7 @@ export async function notifyCustomerOfReschedule(appointment: any): Promise<Appo
   return sendSystemSms({
     orgId: appointment.organizationId,
     toPhone: phone,
-    body: `Hi ${firstName}, ${dealerName} here. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`,
+    body: `Hi ${firstName}, this is ${senderIntro(dealerName, agentNameConfigured ? agentName : null)}. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`,
     leadId: appointment.leadId,
   });
 }
@@ -609,13 +642,13 @@ export async function sendNoShowFollowUpText(appointment: any): Promise<boolean>
   if (!phone) return false;
 
   const firstName = appointment.customerBooking?.firstName?.trim() || "there";
-  const dealerName = await resolveDealerName(appointment.organizationId);
+  const sender = await resolveSenderIntro(appointment.organizationId);
   const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
 
   return sendAutomatedSms({
     orgId: appointment.organizationId,
     toPhone: phone,
-    body: buildNoShowFollowUpMessage(dealerName, firstName, appointment.title, timeLabel),
+    body: buildNoShowFollowUpMessage(sender, firstName, appointment.title, timeLabel),
     leadId: appointment.leadId,
   });
 }
@@ -626,26 +659,26 @@ export function pickVariant<T>(variants: T[], seed: string): T {
   return variants[hash % variants.length];
 }
 
-export type NurtureMessageBuilder = (dealerName: string, firstName: string, subject: string) => string;
+export type NurtureMessageBuilder = (sender: string, firstName: string, subject: string) => string;
 
 export const NURTURE_MESSAGES: NurtureMessageBuilder[][] = [
   [
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, ${dealerName} here. Just checking in on ${subject}. Do you have any questions I can help with? Reply anytime. Reply STOP to opt out.`,
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, it's ${dealerName} — wanted to follow up on ${subject}. Anything I can answer for you? Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, this is ${sender}. Just checking in on ${subject}. Do you have any questions I can help with? Reply anytime. Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, it's ${sender} — wanted to follow up on ${subject}. Anything I can answer for you? Reply STOP to opt out.`,
   ],
   [
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, this is ${dealerName}. Would you like to set up a time to see ${subject} in person? Reply with a day that works for you and we'll get it scheduled. Reply STOP to opt out.`,
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, ${dealerName} here again. If you'd like to come take a look at ${subject}, just reply with a day that works and we'll get you set up. Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, this is ${sender}. Would you like to set up a time to see ${subject} in person? Reply with a day that works for you and we'll get it scheduled. Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, it's ${sender} again. If you'd like to come take a look at ${subject}, just reply with a day that works and we'll get you set up. Reply STOP to opt out.`,
   ],
   [
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, ${dealerName} here. This is my last check-in on ${subject}. If you're still interested, just reply and we'll take it from there. No worries if not! Reply STOP to opt out.`,
-    (dealerName, firstName, subject) =>
-      `Hi ${firstName}, it's ${dealerName} one more time about ${subject}. Still interested? Just reply and we'll pick up from here — totally fine if not. Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, it's ${sender}. This is my last check-in on ${subject}. If you're still interested, just reply and we'll take it from there. No worries if not! Reply STOP to opt out.`,
+    (sender, firstName, subject) =>
+      `Hi ${firstName}, it's ${sender} one more time about ${subject}. Still interested? Just reply and we'll pick up from here — totally fine if not. Reply STOP to opt out.`,
   ],
 ];
 
@@ -700,7 +733,7 @@ export async function sendLeadNurtureText(lead: any, step: number): Promise<bool
   if (!lead.phone) return false;
 
   const firstName = lead.firstName?.trim() || "there";
-  const dealerName = await resolveDealerName(lead.organizationId);
+  const sender = await resolveSenderIntro(lead.organizationId);
   const vehicleLabel = [lead.vehicle?.year, lead.vehicle?.make, lead.vehicle?.model]
     .filter(Boolean)
     .join(" ");
@@ -711,7 +744,7 @@ export async function sendLeadNurtureText(lead: any, step: number): Promise<bool
   return sendAutomatedSms({
     orgId: lead.organizationId,
     toPhone: lead.phone,
-    body: buildMessage(dealerName, firstName, subject),
+    body: buildMessage(sender, firstName, subject),
     leadId: lead._id,
   });
 }
@@ -760,8 +793,8 @@ export async function sendReviewRequestText(appointment: any): Promise<boolean> 
   });
 }
 
-function buildWebchatFallbackMessage(dealerName: string, firstName: string): string {
-  return `Hi ${firstName}, ${dealerName} here. We got your message on our website chat and a team member will reply there shortly. Feel free to reply to this text instead if that's easier. Reply STOP to opt out.`;
+function buildWebchatFallbackMessage(sender: string, firstName: string): string {
+  return `Hi ${firstName}, this is ${sender}. We got your message on our website chat and a team member will reply there shortly. Feel free to reply to this text instead if that's easier. Reply STOP to opt out.`;
 }
 
 export async function sendWebchatFallbackSms(opts: {
@@ -770,11 +803,11 @@ export async function sendWebchatFallbackSms(opts: {
   firstName?: string;
   leadId?: any;
 }): Promise<boolean> {
-  const dealerName = await resolveDealerName(opts.orgId);
+  const sender = await resolveSenderIntro(opts.orgId);
   return sendAutomatedSms({
     orgId: opts.orgId,
     toPhone: opts.phone,
-    body: buildWebchatFallbackMessage(dealerName, opts.firstName?.trim() || "there"),
+    body: buildWebchatFallbackMessage(sender, opts.firstName?.trim() || "there"),
     leadId: opts.leadId,
   });
 }
@@ -1731,6 +1764,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       }
     }
 
+    if (lead) void notifyLeadMessage(orgId, lead, "sms", body);
     triggerSmsAiReply(orgId, conversation, lead, check, body, screened).catch((err) => {
       console.error("[comm] triggerSmsAiReply failed:", err);
     });
@@ -1803,14 +1837,7 @@ async function finishIvrMissed(call: any): Promise<void> {
     $set: { textBackSentAt: new Date() },
   }, { new: true });
   if (!claimed) return;
-  const dealerName = await resolveDealerName(call.orgId);
-  if (call.routing.customerAnswered) {
-    await telnyx.speakIvr(call.providerCallControlId, buildMissedCallMessage(dealerName), {
-      kind: 'ivr-missed', callLogId: String(call._id), revision: call.routing.revision,
-    }).catch(() => telnyx.hangupCall(call.providerCallControlId).catch(() => {}));
-  } else await telnyx.playMissedAndHangup(call.providerCallControlId, buildMissedCallMessage(dealerName));
-  const timer = setTimeout(() => telnyx.hangupCall(call.providerCallControlId).catch(() => {}), 15000);
-  timer.unref();
+  await startVoicemail(claimed);
   await sendMissedCallTextBack(claimed);
   await notifyMissedCall(claimed);
 }
@@ -2021,7 +2048,35 @@ async function handlePhoneLegHangup(payload: any, state: any): Promise<void> {
   }
 }
 
-const ivrCallbacks = { missed: finishIvrMissed, ringing: startPhoneLegs, stopRinging: (call: any) => stopPhoneLegs(call) };
+async function pushIncomingCall(call: any): Promise<void> {
+  try {
+    const routed = call?.routing;
+    let ids: string[] = (routed ? (routed.allOrg ? [] : routed.recipientIds) : call?.ringRecipientIds) || [];
+    if (!ids.length && (!routed || routed.allOrg)) {
+      const staff: any[] = await CrmUser.find({ organizationId: call.orgId, isActive: true, isSystem: { $ne: true }, isOffboarded: { $ne: true } }).select("_id").lean();
+      ids = staff.map((user) => String(user._id));
+    }
+    const caller = call.customerName || prettyPhone(call.from);
+    const payload = {
+      title: "Incoming call",
+      body: [caller, call.lineLabel ? `Calling ${call.lineLabel}` : ""].filter(Boolean).join(" · "),
+      tag: `incoming-call-${call._id}`,
+      data: { url: call.leadId ? `/crm/leads?leadId=${call.leadId}` : "/crm/leads" },
+    };
+    await Promise.allSettled([...new Set(ids.map(String))].map((id) => UnifiedPushService.sendToUser(id, payload)));
+  } catch (error) {
+    console.error("[comm] Incoming call push failed", error);
+  }
+}
+
+const ivrCallbacks = {
+  missed: finishIvrMissed,
+  ringing: async (call: any) => {
+    await startPhoneLegs(call);
+    void pushIncomingCall(call);
+  },
+  stopRinging: (call: any) => stopPhoneLegs(call),
+};
 
 function prettyPhone(value: string): string {
   const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(String(value || ""));
@@ -2074,6 +2129,7 @@ function ringRooms(call: any): string[] {
 }
 
 function emitRingingCall(call: any, event: "comm:call:incoming" | "comm:call:update" = "comm:call:incoming"): void {
+  if (call.leadId) emitToOrg(call.orgId, "lead:update", { leadId: String(call.leadId) });
   const payload = { call: call.toObject ? call.toObject() : call };
   const rooms = ringRooms(call);
   if (!rooms.length) {
@@ -2089,14 +2145,12 @@ function emitRingingCall(call: any, event: "comm:call:incoming" | "comm:call:upd
 
 async function releaseLegacyCaller(call: any): Promise<void> {
   if (!call?.providerCallControlId) return;
-  const dealerName = await resolveDealerName(call.orgId);
-  await telnyx.playMissedAndHangup(call.providerCallControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+  await startVoicemail(call);
 }
 
 function armLegacyRingTimer(call: any, delayMs: number): void {
   const callId = String(call._id);
   const orgId = call.orgId;
-  const callControlId = call.providerCallControlId;
   const existing = ringTimers.get(callId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(async () => {
@@ -2109,8 +2163,7 @@ function armLegacyRingTimer(call: any, delayMs: number): void {
     if (still) {
       emitToOrg(orgId, "comm:call:update", { call: still.toObject() });
       await stopPhoneLegs(still);
-      const dealerName = await resolveDealerName(orgId);
-      await telnyx.playMissedAndHangup(callControlId, buildMissedCallMessage(dealerName)).catch(() => {});
+      await startVoicemail(still);
       await sendMissedCallTextBack(still);
       await notifyMissedCall(still);
     }
@@ -2172,7 +2225,10 @@ export async function recoverPendingIvrCalls(orgId?: string): Promise<void> {
 function emitCallUpdate(call: any): void {
   if (call.routing) emitIvrCall(call);
   else if (call.status === 'ringing' && call.ringRecipientIds?.length) emitRingingCall(call, 'comm:call:update');
-  else emitToOrg(call.orgId, 'comm:call:update', { call: call.toObject() });
+  else {
+    emitToOrg(call.orgId, 'comm:call:update', { call: call.toObject() });
+    if (call.leadId) emitToOrg(call.orgId, 'lead:update', { leadId: String(call.leadId) });
+  }
 }
 
 /** call.initiated webhook. Fresh inbound calls create a ringing CallLog and
@@ -2279,6 +2335,11 @@ export async function handleCallInitiated(payload: any) {
     lead = result.lead;
     if (lead && result.created) {
       emitToOrg(orgId, "lead:new", lead.toObject ? lead.toObject() : lead);
+      const customerNameForNotice = [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || prettyPhone(from);
+      const { title, message: notificationMessage } = notificationTemplates.new_lead({ customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL });
+      notifyOrgAdmins(String(orgId), "new_lead", title, notificationMessage, {
+        leadId: String(lead._id), customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL, channel: "phone", route: `/crm/leads?leadId=${lead._id}`,
+      }).catch(() => undefined);
     }
   }
 
@@ -2301,6 +2362,7 @@ export async function handleCallInitiated(payload: any) {
     ...(line ? { lineLabel: line.label } : {}),
     ...(ringTeam.length ? { ringGroupId: line!.ringGroupId, ringRecipientIds: ringTeam } : {}),
   });
+  if (call.leadId) void touchLeadOnInbound(call.leadId, orgId);
 
   if (intakeMode === "active" && callInquiryId) {
     const inquiryId = callInquiryId;
@@ -2314,6 +2376,7 @@ export async function handleCallInitiated(payload: any) {
       if (!owner || String(owner._id) === earlyCallOwnerId) return;
       const updated = await CallLog.findOneAndUpdate({ _id: call._id }, { $set: { leadId: owner._id } }, { new: true });
       if (updated) emitCallUpdate(updated);
+      await touchLeadOnInbound(owner._id, orgId);
     }).catch((err) => console.error("[comm] lead intake for inbound call failed:", err));
   }
 
@@ -2322,6 +2385,7 @@ export async function handleCallInitiated(payload: any) {
   emitRingingCall(legacyCall);
   armLegacyRingTimer(call, RING_TIMEOUT_MS);
   void startPhoneLegs(legacyCall);
+  void pushIncomingCall(legacyCall);
 }
 
 /** Atomic first-to-answer claim. Two agents clicking Answer at once: exactly
@@ -2420,8 +2484,10 @@ export async function handleCallAnswered(payload: any) {
     : { providerCallSessionId: sessionId };
 
   const existingCall = await CallLog.findOne(query);
+  const untaggedAgentLeg = !clientState && Boolean(payload?.call_control_id) && payload.call_control_id !== existingCall?.providerCallControlId;
   if (existingCall?.routing) {
-    if (clientState?.kind !== 'agent-leg' || clientState.revision !== existingCall.routing.revision || existingCall.status !== 'answering') return;
+    const taggedAgentLeg = clientState?.kind === 'agent-leg' && clientState.revision === existingCall.routing.revision;
+    if (!(taggedAgentLeg || untaggedAgentLeg) || existingCall.status !== 'answering') return;
   } else if (String(clientState?.kind || '').startsWith('ivr-')) return;
 
   const call = await CallLog.findOneAndUpdate(
@@ -2430,9 +2496,10 @@ export async function handleCallAnswered(payload: any) {
       $set: {
         status: "in-progress",
         answeredAt: new Date(),
-        ...(clientState?.kind === "agent-leg" && payload?.call_control_id
+        ...((clientState?.kind === "agent-leg" || (existingCall?.routing && untaggedAgentLeg)) && payload?.call_control_id
           ? { agentLegCallControlId: payload.call_control_id }
           : {}),
+        ...(existingCall?.routing ? { "routing.deadline": null } : {}),
       },
     },
     { new: true }
@@ -2541,6 +2608,15 @@ export async function handleSpeakEnded(payload: any) {
   const tag = decodeClientState(payload?.client_state);
   if (String(tag?.kind || '').startsWith('phone-')) {
     if (tag.kind === 'phone-bye' && id) await telnyx.hangupCall(id).catch(() => {});
+    return;
+  }
+  if (tag?.kind === 'voicemail-greeting') {
+    if (payload?.status && payload.status !== 'completed') return;
+    const missed = id && mongoose.isValidObjectId(String(tag.callLogId))
+      ? await CallLog.findOne({ _id: tag.callLogId, providerCallControlId: id, status: { $in: ['missed', 'failed'] } }).select('+recordingCorrelation')
+      : null;
+    const started = missed ? await startVoicemailRecording(missed) : null;
+    if (!started && id) await telnyx.hangupCall(id).catch(() => {});
     return;
   }
   const call = id ? await CallLog.findOne({ providerCallControlId: id }) : null;

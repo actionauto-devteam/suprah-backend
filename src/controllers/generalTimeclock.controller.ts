@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler';
+import { COMPANY_TZ, getCompanyDayRange, getCompanyToday } from '../utils/companyTimezone';
+import { checkTrayAccess, sendTrayActiveElsewhere } from '../services/trayClaim.service';
 import { ApiResponse } from '../utils/ApiResponse';
 import { ApiError } from '../utils/ApiError';
 import TimeLog from '../models/TimeLog.model';
@@ -21,7 +23,6 @@ import AuditLog from '../models/AuditLog.model';
 import logger from '../utils/logger';
 
 
-const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT UTC-6
 // Keep in sync with BREAK_LIMIT_SECONDS in crmTimeproof.controller.ts and
 // crm.controller.ts — same 1-hour allotment, enforced here as a hard cap on
 // starting a new break.
@@ -95,10 +96,8 @@ import {
 
 
 function getTodayMDTWindow() {
-  const nowMDT = new Date(Date.now() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const todayMDTStr = nowMDT.toISOString().split('T')[0];
-  const todayMDTStartUTC = new Date(todayMDTStr + 'T00:00:00.000Z').getTime() - COMPANY_TZ_OFFSET_MINUTES * 60_000;
-  return { todayMDTStr, today: new Date(todayMDTStartUTC), tomorrow: new Date(todayMDTStartUTC + 24 * 60 * 60 * 1000) };
+  const { todayStr: todayMDTStr, start, end } = getCompanyToday();
+  return { todayMDTStr, today: start, tomorrow: end };
 }
 
 
@@ -570,8 +569,8 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     timestamp: { $gte: startDate, $lte: endDate },
   }).sort({ timestamp: 1 }).lean();
 
-  const calendar = buildCalendarMap(logs, COMPANY_TZ_OFFSET_MINUTES);
-  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ_OFFSET_MINUTES);
+  const calendar = buildCalendarMap(logs, COMPANY_TZ);
+  const todayStr = toLocalDateStr(new Date(), COMPANY_TZ);
 
   // Ghost-hours correction for past open sessions (no tray app, no ActivityIntervals)
   for (const dateStr of Object.keys(calendar)) {
@@ -582,9 +581,9 @@ export const getMyTimeproof = asyncHandler(async (req: Request, res: Response) =
     }
   }
 
-  const summary = aggregateSummary(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ_OFFSET_MINUTES);
-  const hourPattern = buildHourPattern(logs, COMPANY_TZ_OFFSET_MINUTES);
+  const summary = aggregateSummary(calendar, COMPANY_TZ);
+  const { streak, longestStreak } = computeStreak(calendar, COMPANY_TZ);
+  const hourPattern = buildHourPattern(logs, COMPANY_TZ);
   const isLive = !!calendar[todayStr]?.sessions.find(s => s.isLive);
 
   res.json(new ApiResponse(200, {
@@ -621,10 +620,8 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     throw new ApiError(400, 'endDate is required (YYYY-MM-DD)');
   }
 
-  const startDate = new Date(`${startDateStr}T00:00:00.000Z`);
-  startDate.setUTCMinutes(startDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
-  const endDate = new Date(`${endDateStr}T23:59:59.999Z`);
-  endDate.setUTCMinutes(endDate.getUTCMinutes() - COMPANY_TZ_OFFSET_MINUTES);
+  const startDate = getCompanyDayRange(startDateStr as string).start;
+  const endDate = new Date(getCompanyDayRange(endDateStr as string).end.getTime() - 1);
 
   const logs = await TimeLog.find({
     userId: actor.id,
@@ -637,7 +634,7 @@ export const getMyIdleLog = asyncHandler(async (req: Request, res: Response) => 
     endAt: { $gte: startDate },
   }).select('startAt endAt').lean();
 
-  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ_OFFSET_MINUTES);
+  const idleLog = buildIdleLog(logs, activityIntervals, COMPANY_TZ);
 
   res.json(new ApiResponse(200, { idleLog, range: { startDate: startDateStr, endDate: endDateStr } }, 'Idle log fetched'));
 });
@@ -747,7 +744,20 @@ export const postHeartbeat = asyncHandler(async (req: Request, res: Response) =>
     breakDurationSeconds = 0,
     isOnShift = false,
     currentIntervalStartAt,
+    inputAgeSec,
   } = req.body;
+
+  if (!(await checkTrayAccess({
+    req,
+    userId: actor.id,
+    userModel: actor.model,
+    organizationId: actor.orgId,
+    displayName: actor.fullName,
+    inputAgeSec,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const existing = await AgentHeartbeat.findOne({ userId: actor.id }).lean();
   const wasOnBreak = (existing as any)?.isOnBreak ?? false;
@@ -783,6 +793,16 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
   const { startAt, endAt } = req.body;
 
   if (!startAt || !endAt) throw new ApiError(400, 'startAt and endAt are required');
+  if (!(await checkTrayAccess({
+    req,
+    userId: actor.id,
+    userModel: actor.model,
+    organizationId: actor.orgId,
+    displayName: actor.fullName,
+  }))) {
+    sendTrayActiveElsewhere(res);
+    return;
+  }
 
   const start = new Date(startAt);
   const end = new Date(endAt);
@@ -792,7 +812,7 @@ export const postActivityInterval = asyncHandler(async (req: Request, res: Respo
     return res.json(new ApiResponse(200, { durationSeconds: 0 }, 'Interval too short, skipped'));
   }
 
-  const shiftDate = toLocalDateStr(start, COMPANY_TZ_OFFSET_MINUTES);
+  const shiftDate = toLocalDateStr(start, COMPANY_TZ);
 
   await ActivityInterval.create({
     userId: actor.id,

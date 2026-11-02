@@ -69,7 +69,7 @@ jest.mock('../../src/services/ivr.service', () => ({
   recoverIvrCalls: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { pickVariant, NURTURE_MESSAGES, buildReviewRequestMessage } from '../../src/services/communication.service';
+import { pickVariant, NURTURE_MESSAGES, buildReviewRequestMessage, senderIntro, buildMissedCallTextBackMessage } from '../../src/services/communication.service';
 
 describe('pickVariant', () => {
   it('is deterministic: the same seed always selects the same variant', () => {
@@ -119,6 +119,24 @@ describe('NURTURE_MESSAGES (nurture follow-up variety)', () => {
       Array.from({ length: 20 }, (_, i) => pickVariant(stepVariants, `lead-${i}`)('Action Auto', 'Jordan', 'the 2022 Civic')),
     );
     expect(texts.size).toBeGreaterThan(1);
+  });
+});
+
+describe('Automatic texts introduce the AI agent by name', () => {
+  it('names the AI agent and the dealership, or just the dealership when no AI agent name is set', () => {
+    expect(senderIntro('Action Auto Utah', 'Maya')).toBe('Maya from Action Auto Utah');
+    expect(senderIntro('Action Auto Utah', null)).toBe('Action Auto Utah');
+    expect(buildMissedCallTextBackMessage('Maya from Action Auto Utah')).toBe("Hi, this is Maya from Action Auto Utah. Sorry we missed your call! Reply to this text and we'll get right back to you. Reply STOP to opt out.");
+  });
+
+  it('no nurture text opens with the old "Dealership here" greeting', () => {
+    for (const stepVariants of NURTURE_MESSAGES) {
+      for (const build of stepVariants) {
+        const text = build('Maya from Action Auto Utah', 'Jordan', 'the 2022 Civic');
+        expect(text).toContain('Maya from Action Auto Utah');
+        expect(text).not.toMatch(/Action Auto Utah here/);
+      }
+    }
   });
 });
 

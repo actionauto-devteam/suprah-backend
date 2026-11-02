@@ -109,10 +109,12 @@ export async function transferToAgent(
   sipUsername: string,
   clientState: Record<string, any>
 ) {
+  const state = Buffer.from(JSON.stringify(clientState)).toString("base64");
   return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/transfer`, {
     to: `sip:${sipUsername}@sip.telnyx.com`,
     from: TELNYX_PHONE_NUMBER,
-    client_state: Buffer.from(JSON.stringify(clientState)).toString("base64"),
+    client_state: state,
+    target_leg_client_state: state,
     timeout_secs: 45,
   }, clientState.revision !== undefined ? 8000 : undefined);
 }
@@ -188,10 +190,10 @@ export async function hangupCall(callControlId: string) {
   return tx("POST", `/calls/${encodeURIComponent(callControlId)}/actions/hangup`, {});
 }
 
-export async function recordingCommand(callControlId: string, action: 'start' | 'pause' | 'resume' | 'stop', commandId: string) {
+export async function recordingCommand(callControlId: string, action: 'start' | 'pause' | 'resume' | 'stop', commandId: string, options: Record<string, unknown> = {}) {
   const response = await tx('POST', `/calls/${encodeURIComponent(callControlId)}/actions/record_${action}`, {
     command_id: commandId,
-    ...(action === 'start' ? { format: 'mp3', channels: 'dual', recording_track: 'both', transcription: false, play_beep: false } : {}),
+    ...(action === 'start' ? { format: 'mp3', channels: 'dual', recording_track: 'both', transcription: true, transcription_engine: 'A', transcription_language: 'en-US', play_beep: false, ...options } : {}),
   }, 8000);
   if (response?.data?.result !== 'ok') throw new Error('Provider recording command was not acknowledged');
   return response;
@@ -203,6 +205,10 @@ export async function recordingDisclosure(callControlId: string, text: string, l
   }, 8000);
   if (response?.data?.result !== 'ok') throw new Error('Provider disclosure command was not acknowledged');
   return response;
+}
+
+export async function deleteRecordingTranscription(id: string) {
+  return tx('DELETE', `/recording_transcriptions/${encodeURIComponent(id)}`, undefined, 8000);
 }
 
 export async function findRecordings(callSessionId: string) {

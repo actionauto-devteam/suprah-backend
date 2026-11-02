@@ -2,7 +2,8 @@ const mockFindOne = jest.fn();
 const mockUpdate = jest.fn();
 const mockRecipients = jest.fn();
 const mockEmit = jest.fn();
-const mockTo = jest.fn(() => ({ emit: mockEmit }));
+const mockRoomEvents: Array<[unknown, string]> = [];
+const mockTo = jest.fn((room: unknown) => ({ emit: (event: string, ...args: unknown[]) => { mockRoomEvents.push([room, event]); return mockEmit(event, ...args); } }));
 const mockAnswer = jest.fn();
 const mockGather = jest.fn();
 const mockSpeak = jest.fn();
@@ -50,6 +51,7 @@ async function start() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockRoomEvents.length = 0;
   stored = { _id: 'call', orgId: 'org', leadId: 'lead', providerCallControlId: 'control', status: 'ivr' };
   mockAnswer.mockResolvedValue({}); mockGather.mockResolvedValue({}); mockSpeak.mockResolvedValue({}); mockHangup.mockResolvedValue({});
   mockPlay.mockResolvedValue({}); mockStop.mockResolvedValue({});
@@ -91,7 +93,8 @@ describe('IVR routing with mocked persistence and provider', () => {
     expect(stored.routing.targetGroupId).toBe(group);
     expect(mockTo).toHaveBeenCalledWith(expect.arrayContaining([`user:${group}-user`]));
     expect(mockTo).not.toHaveBeenCalledWith('org:org');
-    expect(mockTo).not.toHaveBeenCalledWith('org:org:crm-staff');
+    expect(mockRoomEvents.filter(([room, event]) => room === 'org:org:crm-staff' && event !== 'lead:update')).toEqual([]);
+    expect(mockRoomEvents).toContainEqual(['org:org:crm-staff', 'lead:update']);
     expect(mockLeadUpdate).toHaveBeenCalledTimes(['1', '2'].includes(digit) ? 1 : 0);
     if (digit === '0') expect(stored.routing.language).toBe('Spanish');
   });

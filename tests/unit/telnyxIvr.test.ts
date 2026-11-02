@@ -56,6 +56,29 @@ describe('Telnyx IVR commands without live provider access', () => {
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, text: async () => '{"errors":[]}' } as Response);
     await expect(telnyx.findVoiceApplication('down')).rejects.toThrow();
   });
+  it('tags the employee leg of a transfer too, so its answer and hang-up are recognized', async () => {
+    await telnyx.transferToAgent('control', 'agent-sip', { kind: 'agent-leg', callLogId: 'log', userId: 'user', revision: 4 });
+    const [url, request] = fetchMock.mock.calls[0];
+    const body = JSON.parse(request.body);
+    const decode = (value: string) => JSON.parse(Buffer.from(value, 'base64').toString());
+    expect(url).toContain('/calls/control/actions/transfer');
+    expect(body.to).toBe('sip:agent-sip@sip.telnyx.com');
+    expect(decode(body.target_leg_client_state)).toEqual({ kind: 'agent-leg', callLogId: 'log', userId: 'user', revision: 4 });
+    expect(body.client_state).toBe(body.target_leg_client_state);
+  });
+  it('records calls with a transcript, and a voicemail as one track with a beep and a 2-minute limit', async () => {
+    await telnyx.recordingCommand('control', 'start', 'recording-start-1');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ format: 'mp3', channels: 'dual', transcription: true, transcription_engine: 'A', transcription_language: 'en-US', play_beep: false });
+    await telnyx.recordingCommand('control', 'start', 'voicemail-start-1', { channels: 'single', recording_track: 'inbound', play_beep: true, max_length: 120 });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channels: 'single', recording_track: 'inbound', play_beep: true, max_length: 120, transcription: true });
+    await telnyx.recordingCommand('control', 'pause', 'recording-pause-1');
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ command_id: 'recording-pause-1' });
+  });
+  it('deletes a saved transcript at the provider', async () => {
+    await telnyx.deleteRecordingTranscription('transcript-1');
+    const [url, request] = fetchMock.mock.calls[0];
+    expect(url).toContain('/recording_transcriptions/transcript-1'); expect(request.method).toBe('DELETE');
+  });
   it('keeps hold and terminal announcement commands distinct', async () => {
     await telnyx.speakIvr('control', 'Please hold', { kind: 'ivr-hold', callLogId: 'log', revision: 2 });
     await telnyx.speakIvr('control', 'Missed', { kind: 'ivr-missed', callLogId: 'log', revision: 3 });

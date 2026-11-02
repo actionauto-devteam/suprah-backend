@@ -49,13 +49,13 @@ describe('lead sync scheduler', () => {
     else process.env.LEAD_SYNC_CRON = savedCron;
   });
 
-  it('checks the lead inbox every minute by default instead of once an hour', () => {
-    expect(loadLeadSyncTask().expression).toBe('* * * * *');
+  it('checks the lead inbox every 15 seconds by default', () => {
+    expect(loadLeadSyncTask().expression).toBe('*/15 * * * * *');
   });
 
   it('uses LEAD_SYNC_CRON when it is a valid schedule and ignores an invalid one', () => {
     expect(loadLeadSyncTask('*/2 * * * *').expression).toBe('*/2 * * * *');
-    expect(loadLeadSyncTask('not a schedule').expression).toBe('* * * * *');
+    expect(loadLeadSyncTask('not a schedule').expression).toBe('*/15 * * * * *');
   });
 
   it('never starts a second sync while the previous one is still running', async () => {
