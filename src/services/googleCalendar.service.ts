@@ -20,6 +20,17 @@ interface GoogleTokens {
 
 const MAX_PAGES = 5;
 
+/**
+ * Transportation writes shipment events (pickup windows and delivery
+ * deadlines) to a dispatcher's Google Calendar with this private property.
+ * They're one-way: the import below skips them, so they never become
+ * appointments.
+ */
+export const SHIPMENT_EVENT_PROPERTY = 'suprahShipment';
+
+export const isShipmentEvent = (event: calendar_v3.Schema$Event | null | undefined): boolean =>
+  Boolean(event?.extendedProperties?.private?.[SHIPMENT_EVENT_PROPERTY]);
+
 class GoogleCalendarService {
 
   private createOAuthClient() {
@@ -268,7 +279,9 @@ class GoogleCalendarService {
       }
     }
 
-    const { items: finalEvents, nextSyncToken: finalSyncToken } = result;
+    const { items: fetchedEvents, nextSyncToken: finalSyncToken } = result;
+    // Transportation's shipment events are one-way and never imported.
+    const finalEvents = fetchedEvents.filter((event) => !isShipmentEvent(event));
 
     // 3. Process Events
     // SENIOR FIX: Deletions are processed globally. Inserts/Updates are filtered by window.
@@ -470,6 +483,51 @@ class GoogleCalendarService {
       await calendar.events.delete({ calendarId: 'primary', eventId });
     } catch (error) {
       console.error('Failed to delete from Google Calendar:', error);
+    }
+  }
+
+  // ─── Transportation shipment events (one-way) ───────────────────────────────
+
+  /**
+   * Writes one shipment event to a CRM user's Google Calendar: updates it
+   * when it exists, or adds it again if it was deleted in Google. Returns the
+   * event id, or null when it couldn't be written (not connected, or Google
+   * refused); the caller tries again later.
+   */
+  async upsertShipmentEvent(
+    target: { type: 'crmUser'; id: string },
+    eventId: string | null,
+    event: calendar_v3.Schema$Event,
+  ): Promise<string | null> {
+    try {
+      const calendar = await this.getCalendarClient(target);
+      if (eventId) {
+        try {
+          const response = await calendar.events.update({ calendarId: 'primary', eventId, requestBody: event });
+          return response.data.id ?? eventId;
+        } catch (error: any) {
+          // Deleted in Google: Suprah AI stays in charge, so it's added again.
+          if (error?.code !== 404 && error?.code !== 410) throw error;
+        }
+      }
+      const response = await calendar.events.insert({ calendarId: 'primary', requestBody: event });
+      return response.data.id ?? null;
+    } catch (error: any) {
+      console.error('Failed to write a shipment event to Google Calendar:', error?.message ?? error);
+      return null;
+    }
+  }
+
+  /** Removes one shipment event. True when it's gone (already deleted counts). */
+  async deleteShipmentEvent(target: { type: 'crmUser'; id: string }, eventId: string): Promise<boolean> {
+    try {
+      const calendar = await this.getCalendarClient(target);
+      await calendar.events.delete({ calendarId: 'primary', eventId });
+      return true;
+    } catch (error: any) {
+      if (error?.code === 404 || error?.code === 410) return true;
+      console.error('Failed to remove a shipment event from Google Calendar:', error?.message ?? error);
+      return false;
     }
   }
 

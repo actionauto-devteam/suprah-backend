@@ -77,6 +77,14 @@ export interface ILoad extends Document {
   }>;
   /** True while lifecycleOutbox holds undelivered events (worker claim index). */
   lifecycleOutboxPending?: boolean;
+  /** The dispatcher's Google Calendar events for this load (query-hidden, internal). */
+  calendarSync?: {
+    crmUserId?: mongoose.Types.ObjectId;
+    events: Array<{ kind: "pickup" | "delivery"; eventId: string }>;
+    fingerprint?: string;
+    syncedAt?: Date;
+  };
+  calendarSyncLockedUntil?: Date | null;
   /** Set while a driver payout for this load is being sent. */
   payoutClaimedAt?: Date | null;
   assignmentHistory?: Array<Record<string, any>>;
@@ -512,6 +520,31 @@ const loadSchema = new Schema<ILoad>(
     // with undelivered events through a small partial index instead of
     // scanning every Load.
     lifecycleOutboxPending: { type: Boolean, select: false },
+    // The dispatcher's Google Calendar events for this load's pickup window and
+    // delivery deadline (calendarShipments.service). Internal, never in APIs.
+    calendarSync: {
+      type: new Schema(
+        {
+          crmUserId: { type: Schema.Types.ObjectId, ref: "CrmUser" },
+          events: {
+            type: [
+              new Schema(
+                { kind: { type: String, enum: ["pickup", "delivery"], required: true }, eventId: { type: String, required: true } },
+                { _id: false },
+              ),
+            ],
+            default: [],
+          },
+          fingerprint: { type: String, default: "" },
+          syncedAt: { type: Date },
+        },
+        { _id: false },
+      ),
+      default: undefined,
+      select: false,
+    },
+    // Held while one server writes this load's Google events, so two never do.
+    calendarSyncLockedUntil: { type: Date, select: false },
     // Set while a driver payout for this load is being sent (driverPayout.controller).
     payoutClaimedAt: { type: Date, select: false },
     // Material edits made after the driver has accepted are recorded in the
