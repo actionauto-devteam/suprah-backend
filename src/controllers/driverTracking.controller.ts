@@ -1385,13 +1385,14 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
 
 // Stock vehicles on this load follow it in Inventory (see
 // deliverInventoryStatus): In Transit from pickup, Ready for Sale at delivery.
-// Loads made from a quote ship a car out to a customer and leave it alone.
+// A car shipped out to a customer (load from a quote) goes In Transit but is
+// never put back on sale at delivery.
 function lifecycleInventoryStatusEvents(
   organizationId: string,
   load: any,
   toStatus: "In Transit" | "Ready for Sale",
 ) {
-  const vehicleIds = inventoryVehicleIdsFollowingLoad(load);
+  const vehicleIds = inventoryVehicleIdsFollowingLoad(load, toStatus);
   if (!vehicleIds.length) return [];
   return [
     createLoadLifecycleOutboxEvent("inventory_status", {
