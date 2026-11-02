@@ -116,7 +116,6 @@ import {
 } from "../services/loadLifecyclePolicy";
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
 import { inventoryVehicleIdsFollowingLoad } from "../services/loadInventoryStatus";
-import { emailStaffQuoteCustomer, type StaffQuoteEmailEvent } from "../services/staffQuoteCustomerEmail";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
   customerShipmentNotification,
@@ -128,6 +127,7 @@ import {
   salespersonNotification,
   type SalespersonOptions,
 } from "../services/leadSalesperson.service";
+import { emailStaffQuoteCustomer, type StaffQuoteEmailEvent } from "../services/staffQuoteCustomerEmail";
 import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
