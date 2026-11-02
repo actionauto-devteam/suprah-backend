@@ -28,14 +28,20 @@ import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 import { findVehicleShipping } from '../services/vehicleShipping.service';
+import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 
 /**
- * The CRM lead for a quote's customer. Never blocks saving the quote: if the
- * lookup fails, returns undefined so callers leave any existing link alone.
+ * The CRM lead for a quote's customer, preferring the lead about the quote's
+ * car. Never blocks saving the quote: if the lookup fails, returns undefined
+ * so callers leave any existing link alone.
  */
-async function leadLinkFor(orgId: string, contact: { email?: unknown; phone?: unknown }): Promise<QuoteLeadLink | null | undefined> {
+async function leadLinkFor(
+    orgId: string,
+    contact: { email?: unknown; phone?: unknown },
+    car: { vehicleId?: unknown; vin?: unknown },
+): Promise<QuoteLeadLink | null | undefined> {
     try {
-        return await findQuoteLeadLink(orgId, contact);
+        return await findQuoteLeadLink(orgId, contact, car);
     } catch (err) {
         logger.warn({ err, orgId }, 'Could not look up the CRM lead for a quote');
         return undefined;
@@ -287,7 +293,8 @@ const createQuote = asyncHandler(async (req: Request, res: Response) => {
             return null;
         })
         : null;
-    const leadLink = chosenLeadLink ?? await leadLinkFor(orgId, { email, phone });
+    const leadLink = chosenLeadLink
+        ?? await leadLinkFor(orgId, { email, phone }, { vehicleId: vehicleData.vehicleId, vin: vehicleData.vin });
 
     const quote = await Quote.create({
         firstName,
@@ -547,7 +554,7 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const rate = calculateRate(miles, 1, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
     const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
-    const leadLink = await leadLinkFor(orgId, { email, phone });
+    const leadLink = await leadLinkFor(orgId, { email, phone }, { vehicleId: vehicle._id, vin: vehicle.vin });
 
     let quote;
     try {
@@ -858,19 +865,26 @@ const updateQuote = asyncHandler(async (req: Request, res: Response) => {
     if (phone !== undefined) updateData.phone = phone;
 
     // New contact details can point to a different CRM lead, or to none.
+    // Unchanged details keep the current link, so a quote made from a lead
+    // stays with that lead when staff edit something else.
     if (email !== undefined || phone !== undefined) {
-        const current = email !== undefined && phone !== undefined
-            ? null
-            : await Quote.findOne({ _id: req.params.id, organizationId: orgId })
-                .select('email phone')
-                .lean<{ email?: string; phone?: string }>();
-        const leadLink = await leadLinkFor(orgId, {
-            email: email !== undefined ? email : current?.email,
-            phone: phone !== undefined ? phone : current?.phone,
-        });
-        if (leadLink !== undefined) {
-            updateData.leadId = leadLink?.leadId ?? null;
-            updateData.customerRecordId = leadLink?.customerRecordId ?? null;
+        const current = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+            .select('email phone vehicleId vin leadId')
+            .lean<{ email?: string; phone?: string; vehicleId?: unknown; vin?: string; leadId?: unknown }>();
+        const nextEmail = email !== undefined ? email : current?.email;
+        const nextPhone = phone !== undefined ? phone : current?.phone;
+        const contactChanged = normalizeIdentityEmail(nextEmail) !== normalizeIdentityEmail(current?.email)
+            || normalizeIdentityPhone(nextPhone) !== normalizeIdentityPhone(current?.phone);
+        if (contactChanged || !current?.leadId) {
+            const leadLink = await leadLinkFor(
+                orgId,
+                { email: nextEmail, phone: nextPhone },
+                { vehicleId: current?.vehicleId, vin: vin !== undefined ? vin : current?.vin },
+            );
+            if (leadLink !== undefined) {
+                updateData.leadId = leadLink?.leadId ?? null;
+                updateData.customerRecordId = leadLink?.customerRecordId ?? null;
+            }
         }
     }
     if (vehicleName !== undefined) updateData.vehicleName = vehicleName;
@@ -1078,13 +1092,13 @@ const updateQuoteStatus = asyncHandler(async (req: Request, res: Response) => {
 
     // The status before this change, so a customer is told only when it really changes.
     const before = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
-        .select('status source leadId email phone')
-        .lean<{ status?: string; source?: string; leadId?: unknown; email?: string; phone?: string }>();
+        .select('status source leadId email phone vehicleId vin')
+        .lean<{ status?: string; source?: string; leadId?: unknown; email?: string; phone?: string; vehicleId?: unknown; vin?: string }>();
 
     // A lead added to the CRM after the quote was made is linked when staff
     // accept or decline it. An existing link is never changed here.
     const lateLeadLink = before && !before.leadId && (status === 'accepted' || status === 'rejected')
-        ? await leadLinkFor(orgId, { email: before.email, phone: before.phone })
+        ? await leadLinkFor(orgId, { email: before.email, phone: before.phone }, { vehicleId: before.vehicleId, vin: before.vin })
         : undefined;
     const statusSet = { status, ...(lateLeadLink ?? {}) };
 
@@ -1666,7 +1680,7 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     // A lead added to the CRM after the quote was made is linked now, so the
     // load page and the salesperson's notices find it. An existing link stays.
     if (!quote.leadId) {
-        const lateLeadLink = await leadLinkFor(orgId, { email: quote.email, phone: quote.phone });
+        const lateLeadLink = await leadLinkFor(orgId, { email: quote.email, phone: quote.phone }, { vehicleId: quote.vehicleId, vin: quote.vin });
         if (lateLeadLink) {
             quote.leadId = lateLeadLink.leadId;
             if (lateLeadLink.customerRecordId) quote.customerRecordId = lateLeadLink.customerRecordId;

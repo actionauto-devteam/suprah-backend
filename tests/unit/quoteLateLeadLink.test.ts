@@ -81,9 +81,14 @@ describe('linking a lead added later, on Accept and Decline', () => {
   it('links an unlinked quote when staff accept or decline it', async () => {
     for (const status of ['accepted', 'rejected']) {
       jest.clearAllMocks();
-      mockQuoteFindOne.mockReturnValue({ status: 'pending', email: 'maria@example.com', phone: '8015550100' });
+      mockQuoteFindOne.mockReturnValue({ status: 'pending', email: 'maria@example.com', phone: '8015550100', vehicleId: 'car-1', vin: 'VIN123' });
       await call(quoteController.updateQuoteStatus, { status });
-      expect(mockFindLeadLink).toHaveBeenCalledWith('org-1', { email: 'maria@example.com', phone: '8015550100' });
+      // The quote's car helps pick the right lead when the customer has several.
+      expect(mockFindLeadLink).toHaveBeenCalledWith(
+        'org-1',
+        { email: 'maria@example.com', phone: '8015550100' },
+        { vehicleId: 'car-1', vin: 'VIN123' },
+      );
       expect(mockQuoteFindOneAndUpdate.mock.calls[0][1].$set).toMatchObject({
         status,
         leadId: LEAD_ID,
@@ -112,6 +117,31 @@ describe('linking a lead added later, on Accept and Decline', () => {
     for (const [, update] of mockQuoteFindOneAndUpdate.mock.calls) {
       expect(update.$set).toEqual({ status: 'accepted' });
     }
+  });
+});
+
+describe('editing a quote', () => {
+  it('keeps the lead the quote was made from when the contact details stay the same', async () => {
+    mockQuoteFindOne.mockReturnValue({ email: 'maria@example.com', phone: '(801) 555-0100', leadId: 'chosen-lead' });
+    expect((await call(quoteController.updateQuote, { email: ' Maria@Example.com ', phone: '801-555-0100', rate: 900 })).status).toBe(200);
+    expect(mockFindLeadLink).not.toHaveBeenCalled();
+    expect(mockQuoteFindOneAndUpdate.mock.calls[0][1]).not.toHaveProperty('leadId');
+  });
+
+  it('links again when the contact details change, or when the quote has no lead yet', async () => {
+    mockQuoteFindOne.mockReturnValue({ email: 'maria@example.com', phone: '8015550100', leadId: 'old-lead', vehicleId: 'car-1', vin: 'VIN123' });
+    await call(quoteController.updateQuote, { email: 'maria.santos@example.com' });
+    expect(mockFindLeadLink).toHaveBeenCalledWith(
+      'org-1',
+      { email: 'maria.santos@example.com', phone: '8015550100' },
+      { vehicleId: 'car-1', vin: 'VIN123' },
+    );
+    expect(mockQuoteFindOneAndUpdate.mock.calls[0][1]).toMatchObject({ leadId: LEAD_ID, customerRecordId: CUSTOMER_RECORD_ID });
+
+    jest.clearAllMocks();
+    mockQuoteFindOne.mockReturnValue({ email: 'maria@example.com', phone: '8015550100' });
+    await call(quoteController.updateQuote, { email: 'maria@example.com' });
+    expect(mockFindLeadLink).toHaveBeenCalledTimes(1);
   });
 });
 

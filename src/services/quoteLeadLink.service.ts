@@ -12,13 +12,17 @@ export interface QuoteLeadLink {
 /**
  * The dealership's existing CRM lead for a quote's customer, so staff can open
  * it from the quote (decided 2026-10-27). A lead with the same email wins over
- * a phone-only match; among equal matches the most recently updated lead is
- * chosen. The lead's customer record comes along when it has one. Leads are
- * never created here; returns null when nothing matches.
+ * a phone-only match. A customer can have several leads, so among those the
+ * lead about the quote's car wins, then the newest lead by when it was created
+ * (not last updated: background jobs touch old leads all the time, which made
+ * quotes link to a customer's first lead; fixed 2026-11-02). The lead's
+ * customer record comes along when it has one. Leads are never created here;
+ * returns null when nothing matches.
  */
 export async function findQuoteLeadLink(
   organizationId: string,
   contact: { email?: unknown; phone?: unknown },
+  car: { vehicleId?: unknown; vin?: unknown } = {},
 ): Promise<QuoteLeadLink | null> {
   if (!mongoose.Types.ObjectId.isValid(organizationId)) return null;
   const orgId = new mongoose.Types.ObjectId(organizationId);
@@ -29,11 +33,21 @@ export async function findQuoteLeadLink(
   if (normalizedEmail) matches.push({ normalizedEmail });
   if (normalizedPhone) matches.push({ normalizedPhone });
 
-  for (const match of matches) {
-    const lead = await Lead.findOne({ organizationId: orgId, ...match })
-      .sort({ updatedAt: -1 })
+  const vehicleId = String(car.vehicleId ?? "").trim();
+  const vin = typeof car.vin === "string" ? car.vin.trim() : "";
+  const sameCar: Record<string, unknown>[] = [];
+  if (mongoose.Types.ObjectId.isValid(vehicleId)) sameCar.push({ vehicleId: new mongoose.Types.ObjectId(vehicleId) });
+  if (vin) sameCar.push({ "vehicle.vin": { $in: [...new Set([vin, vin.toUpperCase()])] } });
+
+  const newest = (filter: Record<string, unknown>) =>
+    Lead.findOne(filter)
+      .sort({ createdAt: -1 })
       .select("_id customerId")
       .lean<{ _id: mongoose.Types.ObjectId; customerId?: mongoose.Types.ObjectId | null }>();
+
+  for (const match of matches) {
+    const base = { organizationId: orgId, ...match };
+    const lead = (sameCar.length ? await newest({ ...base, $or: sameCar }) : null) ?? (await newest(base));
     if (lead) {
       return { leadId: lead._id, ...(lead.customerId ? { customerRecordId: lead.customerId } : {}) };
     }

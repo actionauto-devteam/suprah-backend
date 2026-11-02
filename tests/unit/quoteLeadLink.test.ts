@@ -1,7 +1,8 @@
 /**
  * A quote links to the dealership's existing CRM lead for its customer: an
- * email match wins over a phone-only match, the newest lead wins among equal
- * matches, and the lead's customer record comes along. A load made from a
+ * email match wins over a phone-only match, the lead about the quote's car
+ * wins among equal matches, then the newest lead by when it was created, and
+ * the lead's customer record comes along. A load made from a
  * quote shows the quote's customer and lead. Models are stand-ins; no
  * database is used.
  */
@@ -83,10 +84,37 @@ describe('findQuoteLeadLink', () => {
     expect(mockLeadFindOne.mock.calls[1][0]).toMatchObject({ normalizedPhone: '+18015550100' });
   });
 
-  it('picks the most recently updated lead when several match', async () => {
+  it('picks the newest lead by when it was created, not when it was last touched', async () => {
     mockLeadFindOne.mockReturnValue({ _id: 'newest' });
     await findQuoteLeadLink(ORG, { email: 'maria@example.com' });
-    expect(mockSort).toHaveBeenCalledWith({ updatedAt: -1 });
+    expect(mockSort).toHaveBeenCalledWith({ createdAt: -1 });
+    expect(mockSort).not.toHaveBeenCalledWith({ updatedAt: -1 });
+    // No car given: only the plain email search runs.
+    expect(mockLeadFindOne).toHaveBeenCalledTimes(1);
+    expect(mockLeadFindOne.mock.calls[0][0]).not.toHaveProperty('$or');
+  });
+
+  it("prefers the customer's lead about the quote's car", async () => {
+    const CAR = '64b0000000000000000000ad';
+    mockLeadFindOne.mockImplementation((filter: any) => (filter.$or ? { _id: 'lead-for-this-car' } : { _id: 'newest-other-lead' }));
+    const link = await findQuoteLeadLink(ORG, { email: 'maria@example.com' }, { vehicleId: CAR, vin: ' 1hgcm82633a004352 ' });
+    expect(link).toEqual({ leadId: 'lead-for-this-car' });
+    const sameCar = mockLeadFindOne.mock.calls[0][0].$or;
+    expect(String(sameCar[0].vehicleId)).toBe(CAR);
+    expect(sameCar[1]).toEqual({ 'vehicle.vin': { $in: ['1hgcm82633a004352', '1HGCM82633A004352'] } });
+  });
+
+  it("falls back to the customer's newest lead when none is about the car", async () => {
+    mockLeadFindOne.mockImplementation((filter: any) => (filter.$or ? null : { _id: 'newest-lead' }));
+    const link = await findQuoteLeadLink(ORG, { email: 'maria@example.com' }, { vin: 'VIN123' });
+    expect(link).toEqual({ leadId: 'newest-lead' });
+    expect(mockLeadFindOne).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a car reference that is not a real id', async () => {
+    mockLeadFindOne.mockReturnValue({ _id: 'newest' });
+    await findQuoteLeadLink(ORG, { email: 'maria@example.com' }, { vehicleId: 'stock-42' });
+    expect(mockLeadFindOne.mock.calls[0][0]).not.toHaveProperty('$or');
   });
 
   it('returns no link when nothing matches', async () => {
