@@ -23,6 +23,7 @@ jest.mock('../../src/services/vehicleShipping.service', () => ({
   findVehicleShipping: (...args: unknown[]) => mockFindVehicleShipping(...args),
 }));
 jest.mock('../../src/services/quoteLeadLink.service', () => ({ findQuoteLeadLink: jest.fn(() => Promise.resolve(null)) }));
+jest.mock('../../src/services/staffQuoteCustomerEmail', () => ({ emailStaffQuoteCustomer: jest.fn() }));
 jest.mock('../../src/services/customerShipments.service', () => ({
   notifyQuoteCustomer: jest.fn(),
   notifyCustomerOfDeletedRequest: jest.fn(),

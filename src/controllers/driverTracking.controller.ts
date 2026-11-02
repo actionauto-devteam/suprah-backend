@@ -116,6 +116,7 @@ import {
 } from "../services/loadLifecyclePolicy";
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
 import { inventoryVehicleIdsFollowingLoad } from "../services/loadInventoryStatus";
+import { emailStaffQuoteCustomer, type StaffQuoteEmailEvent } from "../services/staffQuoteCustomerEmail";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
   customerShipmentNotification,
@@ -1655,6 +1656,15 @@ async function customerShipmentEvents(
     logger.error({ err, loadId: String(load?._id ?? ""), event }, "Non-fatal: failed to prepare the customer's shipment notice");
     return [];
   }
+}
+
+/**
+ * A staff-made quote's customer hears about this step by email (see
+ * staffQuoteCustomerEmail), after the step is saved. Never blocks the step.
+ */
+function emailQuoteCustomerStep(organizationId: string, load: any, event: StaffQuoteEmailEvent) {
+  if (!load?.quoteId) return;
+  void emailStaffQuoteCustomer(organizationId, load.quoteId, event, { loadNumber: load.loadNumber });
 }
 
 /**
@@ -6578,6 +6588,7 @@ const startRoute = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   );
 
   await flushLifecycleOutbox(load._id.toString());
+  emailQuoteCustomerStep(organizationId, load, "on_the_way");
 
   return res.status(200).json(new ApiResponse(200, load, "Route started"));
 });
@@ -6816,6 +6827,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
   });
 
   await flushLifecycleOutbox(load._id.toString());
+  emailQuoteCustomerStep(organizationId, load, "delivered");
 
   try {
     await clearDriverExactLocationIfUnneeded(
@@ -7000,6 +7012,7 @@ const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res
     outboxEventIds: outbox.map((event) => event.eventId),
   });
   await flushLifecycleOutbox(loadId);
+  emailQuoteCustomerStep(organizationId, delivered, "delivered");
 
   try {
     await clearDriverExactLocationIfUnneeded(driverId, "load_delivered");

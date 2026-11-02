@@ -28,6 +28,7 @@ import { notifyQuoteSalesperson } from '../services/leadSalesperson.service';
 import { quoteDeliveryContact } from '../services/quoteDeliveryContact';
 import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailability';
 import { findVehicleShipping } from '../services/vehicleShipping.service';
+import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 
 /**
@@ -1720,6 +1721,9 @@ const convertToLoad = asyncHandler(async (req: Request, res: Response) => {
     // booked. In the background, like the admins' notice; it never throws.
     if (quote.source === 'customer_portal') {
         void notifyQuoteCustomer(orgId, quote._id, 'booked', { loadNumber: load.loadNumber });
+    } else {
+        // A customer of a staff-made quote hears it by email instead.
+        void emailStaffQuoteCustomer(orgId, quote._id, 'booked', { loadNumber: load.loadNumber });
     }
 
     logger.info(
