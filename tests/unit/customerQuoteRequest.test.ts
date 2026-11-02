@@ -173,7 +173,12 @@ describe('POST /api/quote-requests', () => {
   it("links the request to the dealership's CRM lead for this customer, without showing it to the customer", async () => {
     mockFindQuoteLeadLink.mockResolvedValue({ leadId: 'lead-1', customerRecordId: 'customer-1' });
     const result = await send(formBody);
-    expect(mockFindQuoteLeadLink).toHaveBeenCalledWith('dealership-that-owns-the-car', { email: 'maria@example.com', phone: '801-555-0100' });
+    expect(mockFindQuoteLeadLink).toHaveBeenCalledWith(
+      'dealership-that-owns-the-car',
+      { email: 'maria@example.com', phone: '801-555-0100' },
+      // The car asked about, so the customer's lead for this car is preferred.
+      expect.objectContaining({ vehicleId: expect.anything() }),
+    );
     expect(mockQuoteCreate.mock.calls[0][0]).toMatchObject({ leadId: 'lead-1', customerRecordId: 'customer-1' });
     expect(result.body.data.leadId).toBeUndefined();
   });
