@@ -60,6 +60,7 @@ jest.mock('../src/utils/safeNotification', () => ({
 }));
 
 import crypto from 'crypto';
+import UnifiedPushService from '../src/services/unifiedPush.service';
 import express from 'express';
 import request from 'supertest';
 import mongoose from 'mongoose';
@@ -256,6 +257,14 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
     expect(rooms.some((room) => room.includes(String(ids.repCrm)) || room.startsWith('org:'))).toBe(false);
     expect(await ringingFor('techCrm')).toContain(String(call._id));
     expect(await ringingFor('repCrm')).not.toContain(String(call._id));
+    const pushed = await until(async () => (UnifiedPushService.sendToUser as jest.Mock).mock.calls
+      .filter(([, payload]: any[]) => payload?.tag === `incoming-call-${call._id}`), (rows: any[]) => rows.length >= 2);
+    expect(pushed.map(([id]: any[]) => String(id))).toEqual(expect.arrayContaining([String(ids.techUser), String(ids.techCrm)]));
+    expect(pushed.map(([id]: any[]) => String(id))).not.toContain(String(ids.repCrm));
+    expect(pushed[0][1]).toMatchObject({ title: 'Incoming call', data: { url: `/crm/leads?leadId=${call.leadId}` } });
+    expect(pushed[0][1].body).toContain('Calling Service Department');
+    const newLead = await until(async () => mockNotifyOrgAdmins.mock.calls.filter((args: any[]) => args[1] === 'new_lead' && args[4]?.leadId === String(call.leadId)), (rows: any[]) => rows.length >= 1);
+    expect(newLead[0][4]).toMatchObject({ source: 'Inbound Call', channel: 'phone', route: `/crm/leads?leadId=${call.leadId}` });
   });
 
   test('someone outside the team cannot take the call; a team member can', async () => {
@@ -325,7 +334,8 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
     await ringTimers[0].fn();
     const missed: any = await until(() => CallLog.findById(call._id).lean(), (row: any) => row?.status === 'missed');
     expect(missed.status).toBe('missed');
-    expect(mockTelnyx.playMissedAndHangup.mock.calls.filter(([id]) => id === controlId)).toHaveLength(1);
+    expect(mockTelnyx.playMissedAndHangup.mock.calls.filter(([id]) => id === controlId)).toHaveLength(0);
+    expect(mockTelnyx.speakIvr.mock.calls.filter(([id, text, state]) => id === controlId && (state as any)?.kind === 'voicemail-greeting' && /busy right now/.test(String(text)))).toHaveLength(1);
     await until(async () => mockTelnyx.sendSms.mock.calls.length, (count) => count > 0);
     expect(mockTelnyx.sendSms.mock.calls[0][0]).toBe(from);
     expect(mockTelnyx.sendSms.mock.calls[0][2]).toBe(SERVICE);
@@ -343,9 +353,9 @@ describe('Real-DB: calls ring the number\'s team, and missed calls notify people
   test('a missed call to the main number notifies the admins', async () => {
     const { call } = await incoming(nextPhone(), MAIN);
     await ringTimers[0].fn();
-    await until(async () => mockNotifyOrgAdmins.mock.calls.length, (count) => count > 0);
+    const missedNotice = await until<any[] | undefined>(async () => mockNotifyOrgAdmins.mock.calls.find((args: any[]) => args[1] === 'missed_call'), Boolean);
     expect(mockNotifyUsers).not.toHaveBeenCalled();
-    expect(mockNotifyOrgAdmins.mock.calls[0][3]).toMatch(/to Main\./);
+    expect(missedNotice![3]).toMatch(/to Main\./);
     expect((await CallLog.findById(call._id).lean() as any).status).toBe('missed');
   });
 });

@@ -21,6 +21,7 @@ const recording = new Schema({
   organizationId: { type: String, required: true }, callLogId: { type: Schema.Types.ObjectId, required: true, unique: true },
   leadId: Schema.Types.ObjectId, conversationId: Schema.Types.ObjectId, customerId: Schema.Types.ObjectId,
   direction: String, employeeId: String, policy: Schema.Types.Mixed,
+  kind: { type: String, enum: ['call', 'voicemail'], default: 'call' }, listenerIds: [String], openToAllStaff: { type: Boolean, default: false },
   state: { type: String, default: 'waiting', enum: ['waiting', 'disclosing', 'awaiting-consent', 'starting', 'start-pending', 'recording', 'pausing', 'paused', 'resuming', 'unknown', 'processing', 'ready', 'failed', 'deleting', 'deleted'] },
   revision: { type: Number, default: 0 }, controlId: String, sessionId: String, legId: String,
   manualPaused: { type: Boolean, default: false }, incomplete: { type: Boolean, default: false }, error: String,
@@ -30,13 +31,15 @@ const recording = new Schema({
   files: [{ eventId: String, providerId: String, legId: String, key: String, bytes: Number, checksum: String, startedAt: Date, endedAt: Date }],
   pendingFiles: [new Schema({ providerId: String, key: String }, { _id: false })],
   startedBy: String, reviewedAt: Date, reviewedBy: String, reviewedByName: String,
+  transcriptParts: [new Schema({ partId: String, text: String, at: Date }, { _id: false })],
+  summaryPoints: [String], summarySentiment: String, summaryAt: Date, summaryError: String,
 }, { timestamps: true });
 recording.index({ expiresAt: 1, state: 1 });
 recording.index({ organizationId: 1, startedAt: -1 });
 const settings = new Schema({
   organizationId: { type: String, required: true, unique: true },
   announcementText: { type: String, default: DEFAULT_RECORDING_ANNOUNCEMENT }, announcementLanguage: { type: String, default: 'en-US' },
-  retentionMonths: { type: Number, default: 6 }, updatedBy: String,
+  retentionMonths: { type: Number, default: 6 }, autoRecord: { type: Boolean, default: true }, updatedBy: String,
 }, { timestamps: true });
 
 const grant = new Schema({ organizationId: { type: String, required: true }, principalId: { type: String, required: true }, principalKind: { type: String, enum: ['crm', 'main'], required: true }, permissions: [{ type: String, enum: RECORDING_PERMISSIONS }], updatedBy: String }, { timestamps: true });

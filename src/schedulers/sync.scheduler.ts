@@ -8,7 +8,7 @@ import { notifyOrgAdmins, notifyAllOrganizations } from '../utils/safeNotificati
 // Org-scoped inventory sync (ACTION_AUTO_ORG_ID); constant duplicated here
 // to avoid reaching into sync.service.ts internals
 const ACTION_AUTO_ORG_ID = process.env.ACTION_AUTO_ORG_ID || '69d6a26499bee4596c1ea94c';
-const LEAD_SYNC_CRON = cron.validate(process.env.LEAD_SYNC_CRON || '') ? String(process.env.LEAD_SYNC_CRON) : '* * * * *';
+const LEAD_SYNC_CRON = cron.validate(process.env.LEAD_SYNC_CRON || '') ? String(process.env.LEAD_SYNC_CRON) : '*/15 * * * * *';
 let leadSyncRunning = false;
 
 export const initSyncScheduler = () => {

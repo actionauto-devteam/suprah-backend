@@ -1,7 +1,7 @@
 import CrmUser from '../models/CrmUser.model';
 import User from '../models/User.model';
 import { ApiError } from '../utils/ApiError';
-import { CallRecordingGrant, CallRecordingAudit, RecordingPermission } from '../models/CallRecording.model';
+import { CallRecordingGrant, CallRecordingAudit, RecordingPermission, GRANTABLE_RECORDING_PERMISSIONS } from '../models/CallRecording.model';
 
 export interface RecordingPrincipal { id: string; kind: 'crm' | 'main'; orgId: string; admin: boolean }
 
@@ -17,6 +17,7 @@ export async function recordingPrincipal(id: string, orgId: string, kind?: 'crm'
 }
 
 export async function recordingPermissions(principal: RecordingPrincipal): Promise<RecordingPermission[]> {
+  if (principal.admin) return [...GRANTABLE_RECORDING_PERMISSIONS];
   const grant: any = await CallRecordingGrant.findOne({ organizationId: principal.orgId, principalId: principal.id, principalKind: principal.kind }).lean();
   return grant?.permissions || [];
 }

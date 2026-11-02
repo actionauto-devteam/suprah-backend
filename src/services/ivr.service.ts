@@ -35,6 +35,7 @@ export function emitIvrCall(call: any, event = 'comm:call:update'): void {
     const rooms = [...new Set(ids.flatMap(id => [`user:${id}`, `crm-user:${id}`]))];
     if (rooms.length) io.to(rooms).emit(event, payload);
   }
+  if (call.leadId) io.to(crmStaffRoom(String(call.orgId))).emit('lead:update', { leadId: String(call.leadId), orgId: String(call.orgId) });
 }
 
 function emitRouteChange(previous: any, next: any): void {

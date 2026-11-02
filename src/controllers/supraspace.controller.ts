@@ -877,11 +877,10 @@ function dayPulseDateLabel(value: Date | string): string {
 }
 
 function dayPulseMountainTimeLabel(value: Date | string): string {
-  const mdt = new Date(new Date(value).getTime() - 6 * 60 * 60 * 1000);
-  return mdt.toLocaleTimeString('en-US', {
+  return new Date(value).toLocaleTimeString('en-US', {
     hour: '2-digit',
     minute: '2-digit',
-    timeZone: 'UTC',
+    timeZone: 'America/Denver',
   });
 }
 

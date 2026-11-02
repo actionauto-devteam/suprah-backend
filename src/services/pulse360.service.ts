@@ -7,6 +7,7 @@ import CrmUser from '../models/CrmUser.model';
 import TimeLog from '../models/TimeLog.model';
 import { getSocketIO } from '../utils/socketEmitter';
 import { buildSessions, buildBreakSessions } from '../utils/timeLogEngine';
+import { getCompanyToday, toCompanyDateStr, toCompanyLocal } from '../utils/companyTimezone';
 import CrmPushService from '../services/crmPush.service';
 import logger from '../utils/logger';
 import scoring from './pulse360.scoring';
@@ -26,7 +27,6 @@ import taskAdapter, { PulseTask, urgencyScore, hoursUntilDue } from './pulse360.
  * anything that scans is done by the scheduler in jobs/pulse360.scheduler.ts.
  */
 
-const COMPANY_TZ_OFFSET_MINUTES = -360; // MDT, matching crm.controller.ts
 const SETTINGS_TTL_MS = 60_000;
 const HEALTH_TREND_CAP = 60;
 
@@ -78,13 +78,11 @@ export function isMonitored(settings: IPulseSetting, department?: string | null)
 
 /** Start of "today" in company time, expressed as a UTC Date. */
 export function companyDayStart(ref = new Date()): Date {
-  const shifted = new Date(ref.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
-  const dayStr = shifted.toISOString().split('T')[0];
-  return new Date(new Date(`${dayStr}T00:00:00.000Z`).getTime() - COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  return getCompanyToday(ref).start;
 }
 
 export function companyHour(ref = new Date()): number {
-  return new Date(ref.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000).getUTCHours();
+  return toCompanyLocal(ref).getUTCHours();
 }
 
 // ── Signals ─────────────────────────────────────────────────────────────────
@@ -536,7 +534,7 @@ export async function getAttendanceFacts(userId: string, windowStart: Date): Pro
   const attendedDays = new Set(
     logs
       .filter((l) => l.type === 'time-in' && l.timestamp >= windowStart)
-      .map((l) => new Date(l.timestamp.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000).toISOString().split('T')[0])
+      .map((l) => toCompanyDateStr(l.timestamp))
   );
 
   const windowSessions = buildSessions(

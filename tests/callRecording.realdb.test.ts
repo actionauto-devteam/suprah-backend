@@ -4,7 +4,8 @@ import request from 'supertest';
 import cookieParser from 'cookie-parser';
 import { Readable } from 'stream';
 jest.mock('../src/config', () => ({ __esModule: true, default: { bcryptSaltRounds: 4, jwt: { accessSecret: 'local-recording-access', refreshSecret: 'local-recording-refresh', accessExpiration: '15m', refreshExpiration: '7d' } } }));
-jest.mock('../src/services/telnyx.service', () => ({ recordingCommand: jest.fn().mockResolvedValue({}), recordingDisclosure: jest.fn().mockResolvedValue({}), findRecordings: jest.fn().mockResolvedValue([]), deleteProviderRecording: jest.fn().mockResolvedValue({}) }));
+jest.mock('../src/services/telnyx.service', () => ({ recordingCommand: jest.fn().mockResolvedValue({}), recordingDisclosure: jest.fn().mockResolvedValue({}), findRecordings: jest.fn().mockResolvedValue([]), deleteProviderRecording: jest.fn().mockResolvedValue({}), hangupCall: jest.fn().mockResolvedValue({}), deleteRecordingTranscription: jest.fn().mockResolvedValue({}) }));
+jest.mock('../src/services/callSummary.service', () => ({ summarizeCallTranscript: jest.fn().mockResolvedValue({ points: ['Customer asked if the Tacoma is still available.', 'Rep offered a test drive on Saturday.'], sentiment: 'Interested and friendly.' }) }));
 jest.mock('../src/services/callRecordingStorage.service', () => ({ importRecordingFile: jest.fn().mockResolvedValue({ bytes: 8, checksum: 'test' }), deleteRecordingFile: jest.fn().mockResolvedValue(undefined), streamRecordingFile: jest.fn(async () => ({ stream: Readable.from(Buffer.from('test-mp3')), length: 8, type: 'audio/mpeg' })) }));
 import CrmUser from '../src/models/CrmUser.model';
 import User from '../src/models/User.model';
@@ -13,9 +14,10 @@ import Customer from '../src/models/Customer.model';
 import { CallLog } from '../src/models/communication.model';
 import { CallRecording, CallRecordingPolicy, CallRecordingSettings, CallRecordingGrant, CallRecordingAudit, CallRecordingEvent, CallRecordingShare, CallRecordingMediaSession, DEFAULT_RECORDING_ANNOUNCEMENT } from '../src/models/CallRecording.model';
 import { recordingPrincipal, requireRecordingPermission } from '../src/services/callRecordingAccess.service';
-import { startManualRecording, observeRecordingCall, createOutboundCorrelation, controlRecording, finishRecordingDisclosure, enqueueRecordingEvent, recoverRecordings } from '../src/services/callRecording.service';
+import { startManualRecording, observeRecordingCall, createOutboundCorrelation, controlRecording, finishRecordingDisclosure, enqueueRecordingEvent, recoverRecordings, startVoicemailRecording } from '../src/services/callRecording.service';
 import * as provider from '../src/services/telnyx.service';
 import * as storage from '../src/services/callRecordingStorage.service';
+import * as callSummary from '../src/services/callSummary.service';
 import * as ctrl from '../src/controllers/callRecording.controller';
 import crmAuth, { issueCrmSessionToken } from '../src/middleware/crmAuth.middleware';
 import Session from '../src/models/Session.model';
@@ -73,7 +75,7 @@ describe('Call recordings on local MongoDB', () => {
     const linked = await User.create({ organizationId: org, email: boss.email, name: 'Linked Admin', role: 'admin', password: 'Password123!', isActive: true });
     try {
       let response = await request(app).get('/settings'); expect(response.status).toBe(200);
-      expect(response.body.data.settings).toEqual({ announcementText: DEFAULT_RECORDING_ANNOUNCEMENT, retentionMonths: 6 });
+      expect(response.body.data.settings).toEqual({ announcementText: DEFAULT_RECORDING_ANNOUNCEMENT, retentionMonths: 6, autoRecord: true });
       expect(response.body.data.permissions).toEqual(['view', 'download', 'share', 'review', 'delete']);
       expect(response.body.data.staff.find((u: any) => u.id === String(rep._id))).toMatchObject({ kind: 'crm', role: 'employee', department: 'Sales' });
       expect(response.body.data.staff.find((u: any) => u.id === String(outsider._id))).toMatchObject({ kind: 'main', role: 'employee', department: 'QA' });
@@ -92,6 +94,9 @@ describe('Call recordings on local MongoDB', () => {
     expect((await request(app).put('/settings').send({ announcementText: 'ok', retentionMonths: 0 })).status).toBe(400);
     expect((await request(app).put('/settings').send({ announcementText: 'x'.repeat(301), retentionMonths: 6 })).status).toBe(400);
     expect((await request(app).put('/settings').send({ announcementText: 'ok', retentionMonths: 6, enabled: true })).status).toBe(400);
+    expect((await request(app).put('/settings').send({ announcementText: 'ok', retentionMonths: 6, autoRecord: false })).status).toBe(200);
+    expect((await request(app).get('/settings')).body.data.settings.autoRecord).toBe(false);
+    expect((await request(app).put('/settings').send({ announcementText: 'ok', retentionMonths: 6, autoRecord: 'yes' })).status).toBe(400);
   });
   it('saves a full permission set in one audited update, drops the old pause/resume permission and revokes through an empty set', async () => {
     const input = { principalId: String(outsider._id), principalKind: 'main', permissions: ['view', 'review', 'download', 'share', 'control', 'delete'] };
@@ -116,12 +121,12 @@ describe('Call recordings on local MongoDB', () => {
     } finally { await CrmUser.deleteOne({ _id: foreign._id }); }
   });
   it('reports each person\'s own access for the menu', async () => {
-    expect((await request(app).get('/access')).body.data).toEqual({ permissions: ['view', 'download', 'share', 'review', 'delete'], admin: true });
-    expect((await request(app).get('/access').set('x-user', String(rep._id))).body.data).toEqual({ permissions: [], admin: false });
+    expect((await request(app).get('/access')).body.data).toEqual({ permissions: ['view', 'download', 'share', 'review', 'delete'], admin: true, principalId: String(boss._id) });
+    expect((await request(app).get('/access').set('x-user', String(rep._id))).body.data).toEqual({ permissions: [], admin: false, principalId: String(rep._id) });
     expect((await request(app).get('/access').set('x-org', otherOrg)).status).toBe(403);
   });
-  it('nothing records by itself; the rep on the call presses Record, hears the announcement, then recording starts', async () => {
-    await CallRecordingSettings.create({ organizationId: org, announcementText: 'This call is now being recorded for quality.', retentionMonths: 3 });
+  it('when automatic recording is turned off, nothing records by itself; the rep presses Record, hears the announcement, then recording starts', async () => {
+    await CallRecordingSettings.create({ organizationId: org, announcementText: 'This call is now being recorded for quality.', retentionMonths: 3, autoRecord: false });
     const c = await call();
     await observeRecordingCall('call.bridged', { call_control_id: c.providerCallControlId, call_session_id: c.providerCallSessionId, connection_id: 'customer-connection' });
     expect(provider.recordingCommand).not.toHaveBeenCalled(); expect(await CallRecording.countDocuments({ callLogId: c._id })).toBe(0);
@@ -168,6 +173,7 @@ describe('Call recordings on local MongoDB', () => {
     expect(provider.recordingCommand).not.toHaveBeenCalled();
   });
   it('inbound: the menu answer is not enough; the rep answering in the browser plus the bridge makes Record available', async () => {
+    await CallRecordingSettings.create({ organizationId: org, autoRecord: false });
     const c = await call('inbound', { recordingCorrelation: {}, status: 'in-progress', routing: { revision: 3 } });
     const payload = { call_control_id: c.providerCallControlId, call_session_id: c.providerCallSessionId, connection_id: 'customer-connection', call_leg_id: 'customer-leg', client_state: encode({ kind: 'ivr-menu' }) };
     await observeRecordingCall('call.initiated', payload); await observeRecordingCall('call.answered', payload);
@@ -185,6 +191,7 @@ describe('Call recordings on local MongoDB', () => {
     const r: any = await startRecording(c); expect(r.state).toBe('recording'); expect(r.controlId).toBe(c.providerCallControlId); expect(r.legId).toBe('customer-leg');
   });
   it('outbound browser calls need the signed call token and matching numbers; the first verified connection is kept', async () => {
+    await CallRecordingSettings.create({ organizationId: org, autoRecord: false });
     const c = await call('outbound', { recordingCorrelation: {}, providerCallSessionId: undefined, providerCallControlId: undefined });
     expect((await request(app).post(`/calls/${c._id}/control`).set('x-user', String(rep._id)).send({ action: 'start' })).status).toBe(409);
     const correlation = await createOutboundCorrelation(c, await recordingPrincipal(String(rep._id), org));
@@ -198,6 +205,107 @@ describe('Call recordings on local MongoDB', () => {
     const stored: any = await CallLog.findById(c._id).select('+recordingCorrelation');
     expect(stored.providerCallSessionId).toBe('outbound-session'); expect(stored.recordingCorrelation.connectionId).toBe('browser-connection');
     const r: any = await startRecording(c); expect(r.state).toBe('recording'); expect(r.controlId).toBe('outbound-control'); expect(r.direction).toBe('outbound');
+  });
+  it('records automatically by default: once the rep answers in the browser and the call is bridged, the announcement plays, then recording starts', async () => {
+    const c = await call('inbound', { recordingCorrelation: {}, status: 'in-progress', routing: { revision: 3 } });
+    const payload = { call_control_id: c.providerCallControlId, call_session_id: c.providerCallSessionId, connection_id: 'customer-connection', call_leg_id: 'customer-leg', client_state: encode({ kind: 'ivr-menu' }) };
+    await observeRecordingCall('call.initiated', payload);
+    const agent = { ...payload, connection_id: 'sip-connection', call_control_id: c.agentLegCallControlId, call_leg_id: 'agent-leg', client_state: encode({ kind: 'agent-leg', callLogId: String(c._id), userId: String(rep._id), revision: 3 }) };
+    await observeRecordingCall('call.answered', agent);
+    expect(provider.recordingDisclosure).not.toHaveBeenCalled();
+    await observeRecordingCall('call.bridged', agent); await observeRecordingCall('call.bridged', agent);
+    expect(provider.recordingDisclosure).toHaveBeenCalledTimes(1);
+    expect(provider.recordingDisclosure).toHaveBeenCalledWith(c.providerCallControlId, DEFAULT_RECORDING_ANNOUNCEMENT, 'en-US', expect.any(String), expect.any(String));
+    let r: any = await CallRecording.findOne({ callLogId: c._id });
+    expect(r).toMatchObject({ state: 'disclosing', employeeId: String(rep._id), controlId: c.providerCallControlId, legId: 'customer-leg' });
+    expect(provider.recordingCommand).not.toHaveBeenCalled();
+    await finishRecordingDisclosure({ call_control_id: c.providerCallControlId, client_state: encode({ recordingDisclosureId: String(r._id) }), status: 'completed' });
+    r = await CallRecording.findById(r._id); expect(r.state).toBe('recording');
+    expect(provider.recordingCommand).toHaveBeenCalledWith(c.providerCallControlId, 'start', expect.any(String));
+    expect(await CallRecordingAudit.countDocuments({ recordingId: r._id, action: 'recording.auto-requested', actorId: String(rep._id) })).toBe(1);
+    expect((await request(app).get(`/calls/${c._id}`).set('x-user', String(rep._id))).body.data).toMatchObject({ canStart: false, canControl: true, recording: { state: 'recording' } });
+  });
+  it('records outbound browser calls automatically once the verified call is answered', async () => {
+    const c = await call('outbound', { recordingCorrelation: {}, providerCallSessionId: undefined, providerCallControlId: undefined });
+    const correlation = await createOutboundCorrelation(c, await recordingPrincipal(String(rep._id), org));
+    const payload = { client_state: encode({ kind: 'recording-outbound', ...correlation }), call_control_id: 'auto-outbound-control', call_session_id: 'auto-outbound-session', call_leg_id: 'auto-outbound-leg', connection_id: 'browser-connection', to: c.to, from: c.from };
+    await observeRecordingCall('call.answered', { ...payload, client_state: encode({ kind: 'recording-outbound', ...correlation, token: 'forged' }) });
+    expect(provider.recordingDisclosure).not.toHaveBeenCalled();
+    await observeRecordingCall('call.answered', payload);
+    expect(provider.recordingDisclosure).toHaveBeenCalledTimes(1);
+    expect(provider.recordingDisclosure).toHaveBeenCalledWith('auto-outbound-control', DEFAULT_RECORDING_ANNOUNCEMENT, 'en-US', expect.any(String), expect.any(String));
+    expect(await CallRecording.findOne({ callLogId: c._id })).toMatchObject({ direction: 'outbound', employeeId: String(rep._id), state: 'disclosing' });
+  });
+  it('does not record by itself when the call is not connected in the browser, or was taken on a phone', async () => {
+    const phone = await call('inbound', { answeredVia: 'phone' });
+    await observeRecordingCall('call.bridged', { call_control_id: phone.providerCallControlId, call_session_id: phone.providerCallSessionId, connection_id: 'customer-connection' });
+    const connecting = await call('inbound', { recordingCorrelation: { verified: true, connectionId: 'customer-connection', answerControlId: 'agent-y', bridged: false }, status: 'answering' });
+    await observeRecordingCall('call.answered', { call_control_id: connecting.providerCallControlId, call_session_id: connecting.providerCallSessionId, connection_id: 'customer-connection' });
+    expect(provider.recordingDisclosure).not.toHaveBeenCalled();
+    expect(await CallRecording.countDocuments({ callLogId: { $in: [phone._id, connecting._id] } })).toBe(0);
+  });
+  it('a voicemail is saved on the missed call, then the line hangs up; only admins and the people the call rang can listen', async () => {
+    const c = await call('inbound', { status: 'missed', endedAt: new Date(), answeredBy: undefined, routing: { revision: 4, allOrg: false, notifiedIds: [String(rep2._id)] } });
+    const started: any = await startVoicemailRecording(await CallLog.findById(c._id).select('+recordingCorrelation'));
+    expect(started).toMatchObject({ kind: 'voicemail', state: 'recording', listenerIds: [String(rep2._id)], openToAllStaff: false, controlId: c.providerCallControlId });
+    expect(provider.recordingCommand).toHaveBeenCalledWith(c.providerCallControlId, 'start', expect.stringMatching(/^voicemail-start-/), expect.objectContaining({ play_beep: true, max_length: 120 }));
+    expect(provider.recordingDisclosure).not.toHaveBeenCalled();
+    await enqueueRecordingEvent(`recording-test-${stamp}-voicemail`, 'call.recording.saved', { call_session_id: c.providerCallSessionId, call_leg_id: started.legId, connection_id: 'customer-connection', recording_id: `voicemail-${stamp}`, recording_started_at: new Date(started.startedAt.getTime() + 500).toISOString(), recording_ended_at: new Date(started.startedAt.getTime() + 30500).toISOString(), recording_urls: { mp3: 'https://bucket.s3.amazonaws.com/voicemail.mp3' } });
+    await recoverRecordings();
+    const saved: any = await CallRecording.findById(started._id);
+    expect(saved.state).toBe('ready'); expect(saved.files).toHaveLength(1);
+    expect(provider.hangupCall).toHaveBeenCalledWith(c.providerCallControlId);
+    expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(rep2._id))).status).toBe(200);
+    expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(rep._id))).status).toBe(403);
+    expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(outsider._id))).status).toBe(403);
+    expect((await request(app).get(`/recordings/${started._id}`)).status).toBe(200);
+    expect((await request(app).post(`/recordings/${started._id}/media`).set('x-user', String(rep2._id)).send({ mode: 'download', fileId: String(saved.files[0]._id) })).status).toBe(403);
+    expect((await request(app).get(`/calls/${c._id}`).set('x-user', String(rep2._id))).status).toBe(200);
+  });
+  it('a voicemail on a call that rang everyone can be heard by all staff; nothing starts without the customer leg details', async () => {
+    const c = await call('inbound', { status: 'missed', endedAt: new Date(), answeredBy: undefined });
+    const open: any = await startVoicemailRecording(await CallLog.findById(c._id).select('+recordingCorrelation'));
+    expect(open).toMatchObject({ kind: 'voicemail', openToAllStaff: true, listenerIds: [] });
+    await CallRecording.updateOne({ _id: open._id }, { $set: { state: 'ready', files: [{ _id: new mongoose.Types.ObjectId(), key: 'k', bytes: 1, startedAt: new Date(), endedAt: new Date() }] } });
+    expect((await request(app).get(`/recordings/${open._id}`).set('x-user', String(rep._id))).status).toBe(200);
+    const missing = await call('inbound', { status: 'missed', recordingCorrelation: {} });
+    expect(await startVoicemailRecording(await CallLog.findById(missing._id).select('+recordingCorrelation'))).toBeNull();
+    const live = await call('inbound');
+    expect(await startVoicemailRecording(await CallLog.findById(live._id).select('+recordingCorrelation'))).toBeNull();
+  });
+  it('saves the call transcript and an AI summary on the recording, once, for people who can listen', async () => {
+    const c = await call(); const r: any = await startRecording(c);
+    const transcription = { call_session_id: c.providerCallSessionId, call_leg_id: r.legId, connection_id: 'customer-connection', recording_id: `rec-${stamp}`, recording_transcription_id: `tr-${stamp}`, status: 'completed', transcription_text: 'Hi, is the Tacoma still available? Yes, want to come Saturday?' };
+    await enqueueRecordingEvent(`recording-test-${stamp}-transcript`, 'call.recording.transcription.saved', transcription);
+    await enqueueRecordingEvent(`recording-test-${stamp}-transcript-again`, 'call.recording.transcription.saved', transcription);
+    await recoverRecordings();
+    const saved: any = await CallRecording.findById(r._id);
+    expect(saved.transcriptParts).toHaveLength(1);
+    expect(saved.state).toBe('recording'); expect(saved.incomplete).toBe(false);
+    expect(callSummary.summarizeCallTranscript).toHaveBeenCalledWith('Hi, is the Tacoma still available? Yes, want to come Saturday?', false);
+    const detail = await request(app).get(`/recordings/${r._id}`).set('x-user', String(rep._id));
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.recording).toMatchObject({ transcript: 'Hi, is the Tacoma still available? Yes, want to come Saturday?', transcriptReady: true, summaryPoints: ['Customer asked if the Tacoma is still available.', 'Rep offered a test drive on Saturday.'], summarySentiment: 'Interested and friendly.', summaryError: '' });
+    expect((await request(app).get(`/recordings/${r._id}`).set('x-user', String(rep2._id))).status).toBe(403);
+  });
+  it('a failed transcript is explained, silence gives no summary, and deleting the recording removes the transcript everywhere', async () => {
+    const c = await call(); const r: any = await startRecording(c);
+    await enqueueRecordingEvent(`recording-test-${stamp}-transcript-failed`, 'call.recording.transcription.saved', { call_session_id: c.providerCallSessionId, call_leg_id: r.legId, connection_id: 'customer-connection', recording_transcription_id: `trf-${stamp}`, status: 'failed' });
+    await recoverRecordings();
+    expect((await CallRecording.findById(r._id)).summaryError).toContain('could not be made');
+    (callSummary.summarizeCallTranscript as jest.Mock).mockClear();
+    await enqueueRecordingEvent(`recording-test-${stamp}-transcript-silent`, 'call.recording.transcription.saved', { call_session_id: c.providerCallSessionId, call_leg_id: r.legId, connection_id: 'customer-connection', recording_transcription_id: `trs-${stamp}`, status: 'completed', transcription_text: '' });
+    await recoverRecordings();
+    expect(callSummary.summarizeCallTranscript).not.toHaveBeenCalled();
+    expect((await CallRecording.findById(r._id)).summaryError).toContain('No speech');
+    await enqueueRecordingEvent(`recording-test-${stamp}-transcript-other`, 'call.recording.transcription.saved', { call_session_id: c.providerCallSessionId, call_leg_id: r.legId, connection_id: 'another-connection', recording_transcription_id: `tro-${stamp}`, status: 'completed', transcription_text: 'not ours' });
+    await recoverRecordings();
+    expect((await CallRecording.findById(r._id)).transcriptParts.map((part: any) => part.text)).not.toContain('not ours');
+    const done: any = await finishCall(c, r, 'transcribed');
+    expect((await request(app).delete(`/recordings/${done._id}`)).status).toBe(200);
+    const gone: any = await CallRecording.findById(r._id).lean();
+    expect(gone.state).toBe('deleted'); expect(gone.transcriptParts).toBeUndefined(); expect(gone.summaryError).toBeUndefined();
+    expect(provider.deleteRecordingTranscription).toHaveBeenCalledWith(`trs-${stamp}`);
   });
   it('the rep on the call can pause and resume without any permission; pause stays until they resume', async () => {
     const c = await call(); await startRecording(c); const p = await recordingPrincipal(String(rep._id), org);
@@ -231,13 +339,21 @@ describe('Call recordings on local MongoDB', () => {
     const c = await call(); const r: any = await startRecording(c);
     const requests = [() => request(app).get(`/recordings/${r._id}`), () => request(app).get('/recordings'), () => request(app).post(`/recordings/${r._id}/media`).send({ mode: 'play', fileId: String(new mongoose.Types.ObjectId()) }), () => request(app).post(`/recordings/${r._id}/media`).send({ mode: 'download', fileId: String(new mongoose.Types.ObjectId()) }), () => request(app).post(`/recordings/${r._id}/shares`), () => request(app).post(`/recordings/${r._id}/review`), () => request(app).delete(`/recordings/${r._id}`)];
     for (const make of requests) expect((await make().set('x-user', String(outsider._id))).status).toBe(403);
-    for (const make of requests) expect((await make().set('x-user', String(rep._id))).status).toBe(403);
+    for (const make of requests) expect((await make().set('x-user', String(rep2._id))).status).toBe(403);
     for (const make of requests) expect((await make().set('x-org', otherOrg)).status).toBe(403);
+    expect((await requests[0]().set('x-user', String(rep._id))).status).toBe(200);
+    expect((await requests[2]().set('x-user', String(rep._id))).status).not.toBe(403);
+    for (const make of [requests[1], requests[3], requests[4], requests[5], requests[6]]) expect((await make().set('x-user', String(rep._id))).status).toBe(403);
   });
-  it('requires explicit permissions, even for a real admin', async () => {
-    const p = await recordingPrincipal(String(boss._id), org);
-    await expect(requireRecordingPermission(p, 'control')).rejects.toThrow('permission');
-    await expect(requireRecordingPermission(p, 'view')).resolves.toBeUndefined();
+  it('admins have every recording permission without a grant; other staff still need a grant', async () => {
+    const admin2 = await CrmUser.create({ organizationId: org, email: `recording-admin2-${stamp}@example.com`, fullName: 'Second Admin', username: `recording-admin2-${stamp}`, role: 'admin', password: 'Password123!', isActive: true });
+    try {
+      const p = await recordingPrincipal(String(admin2._id), org);
+      expect(await CallRecordingGrant.countDocuments({ organizationId: org, principalId: String(admin2._id) })).toBe(0);
+      for (const permission of ['view', 'download', 'share', 'review', 'delete'] as const) await expect(requireRecordingPermission(p, permission)).resolves.toBeUndefined();
+      await expect(requireRecordingPermission(p, 'control')).rejects.toThrow('permission');
+      await expect(requireRecordingPermission(await recordingPrincipal(String(rep2._id), org), 'view')).rejects.toThrow('permission');
+    } finally { await CrmUser.deleteOne({ _id: admin2._id }); }
   });
   it('rejects synthetic admin elevation and foreign org staff', async () => {
     expect((await request(app).get('/settings').set('x-user', String(outsider._id))).status).toBe(403);
@@ -307,22 +423,25 @@ describe('Call recordings on local MongoDB', () => {
     await enqueueRecordingEvent(`recording-test-${stamp}-saved`, 'call.recording.saved', {}); await recoverRecordings();
     expect(r.files).toHaveLength(1); expect(r.state).toBe('ready'); expect(storage.importRecordingFile).toHaveBeenCalledTimes(1);
     const detail = await request(app).get(`/recordings/${r._id}`); expect(detail.status).toBe(200); expect(JSON.stringify(detail.body)).not.toContain('s3.amazonaws'); expect(detail.body.data.recording.files[0].key).toBeUndefined();
-    expect((await request(app).get(`/recordings/${r._id}`).set('x-user', String(rep._id))).status).toBe(403);
+    expect((await request(app).get(`/recordings/${r._id}`).set('x-user', String(rep2._id))).status).toBe(403);
+    expect((await request(app).get(`/recordings/${r._id}`).set('x-user', String(rep._id))).status).toBe(200);
     const share = await request(app).post(`/recordings/${r._id}/shares`); const shareId = share.body.data.shareId;
-    expect((await request(app).get(`/shares/${shareId}`).set('x-user', String(rep._id))).status).toBe(403);
+    expect((await request(app).get(`/shares/${shareId}`).set('x-user', String(rep2._id))).status).toBe(403);
     const authCookie = `crm_token=${await issueCrmSessionToken(String(boss._id))}`;
     const session = await request(app).post(`/recordings/${r._id}/media`).set('Cookie', authCookie).send({ mode: 'play', fileId: String(r.files[0]._id), shareId }); expect(session.status).toBe(200);
     const cookie = [authCookie, ...session.headers['set-cookie'].map((value: string) => value.split(';')[0])]; expect((await request(app).get(session.body.data.path).set('Cookie', cookie)).status).toBe(200);
     await request(app).delete(`/shares/${shareId}`); expect((await request(app).get(session.body.data.path).set('Cookie', cookie)).status).toBe(404);
     expect(await CallRecordingAudit.countDocuments({ recordingId: r._id, action: 'playback.accessed' })).toBe(1);
     await request(app).post(`/recordings/${r._id}/review`); expect(await CallRecordingAudit.countDocuments({ recordingId: r._id, action: 'recording.reviewed' })).toBe(1);
-    const download = await request(app).post(`/recordings/${r._id}/media`).set('Cookie', authCookie).send({ mode: 'download', fileId: String(r.files[0]._id) });
-    const downloadCookies = [authCookie, ...download.headers['set-cookie'].map((value: string) => value.split(';')[0])];
+    await CallRecordingGrant.create({ organizationId: org, principalId: String(rep2._id), principalKind: 'crm', permissions: ['view', 'download'] });
+    const rep2Cookie = `crm_token=${await issueCrmSessionToken(String(rep2._id))}`;
+    const download = await request(app).post(`/recordings/${r._id}/media`).set('Cookie', rep2Cookie).send({ mode: 'download', fileId: String(r.files[0]._id) });
+    const downloadCookies = [rep2Cookie, ...download.headers['set-cookie'].map((value: string) => value.split(';')[0])];
     const downloaded = await request(app).get(download.body.data.path).set('Cookie', downloadCookies); expect(downloaded.headers['content-disposition']).toContain('attachment');
     expect((await request(app).get(download.body.data.path)).status).toBe(401);
-    await CallRecordingGrant.updateOne({ principalId: String(boss._id), organizationId: org }, { $pull: { permissions: 'download' } });
+    await CallRecordingGrant.updateOne({ principalId: String(rep2._id), organizationId: org }, { $pull: { permissions: 'download' } });
     expect((await request(app).get(download.body.data.path).set('Cookie', downloadCookies)).status).toBe(403);
-    await CallRecordingGrant.updateOne({ principalId: String(boss._id), organizationId: org }, { $addToSet: { permissions: 'download' } });
+    await CallRecordingGrant.deleteOne({ principalId: String(rep2._id), organizationId: org });
     await CallRecording.updateOne({ _id: r._id }, { $set: { expiresAt: new Date(Date.now() - 1) } }); await recoverRecordings();
     expect(storage.deleteRecordingFile).toHaveBeenCalled(); expect(provider.deleteProviderRecording).toHaveBeenCalledWith(`saved-${stamp}`); expect((await CallRecording.findById(r._id)).state).toBe('deleted');
   });

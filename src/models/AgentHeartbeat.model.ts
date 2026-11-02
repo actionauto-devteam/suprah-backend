@@ -29,6 +29,9 @@ export interface IAgentHeartbeat extends Document {
   // see who's still on an old/stale build without digging through diagnostic logs.
   // null on old tray builds that predate this field.
   appVersion: string | null;
+  activeTrayId: string | null;
+  activeTraySegmentId: string | null;
+  standbyAlertKey: string | null;
   lastSeenAt: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -96,6 +99,18 @@ const AgentHeartbeatSchema = new Schema<IAgentHeartbeat>(
       default: null,
     },
     appVersion: {
+      type: String,
+      default: null,
+    },
+    activeTrayId: {
+      type: String,
+      default: null,
+    },
+    activeTraySegmentId: {
+      type: String,
+      default: null,
+    },
+    standbyAlertKey: {
       type: String,
       default: null,
     },

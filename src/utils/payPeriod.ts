@@ -1,4 +1,4 @@
-import { COMPANY_TZ_OFFSET_MINUTES, getCompanyDayRange } from './companyTimezone';
+import { getCompanyDayRange, toCompanyLocal } from './companyTimezone';
 
 /**
  * Fixed bi-monthly pay periods: 1st–15th (paid the 20th of the same month)
@@ -16,7 +16,7 @@ const pad2 = (n: number) => String(n).padStart(2, '0');
 
 /** Returns the pay period (and its fixed payday) that the given date falls into. */
 export function getPayPeriodBounds(date: Date): PayPeriodBounds {
-  const local = new Date(date.getTime() + COMPANY_TZ_OFFSET_MINUTES * 60_000);
+  const local = toCompanyLocal(date);
   const year = local.getUTCFullYear();
   const month = local.getUTCMonth(); // 0-indexed
   const day = local.getUTCDate();

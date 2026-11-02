@@ -18,6 +18,8 @@ import { triggerAiEmailReplyForNewInquiry } from './aiEmailReply.service';
 import { getLeadIntakeMode } from './leadIntakeControl.service';
 import { processGmailMessageThroughIntake } from './gmailLeadIntake';
 import { crmStaffRoom } from '../utils/crmStaffRoom';
+import { cacheService } from './cache.service';
+import { notificationTemplates } from '../utils/notificationTemplates';
 
 const RECHECK_SKIPPED_MESSAGE_MS = 10 * 60 * 1000;
 const recentlyCheckedMessages = new Map<string, number>();
@@ -35,6 +37,30 @@ export function rememberCheckedMessage(orgId: string, messageId: string) {
         }
     }
     recentlyCheckedMessages.set(`${orgId}:${messageId}`, now + RECHECK_SKIPPED_MESSAGE_MS);
+}
+
+export async function notifyCustomerEmailReply(orgId: string, message: any): Promise<boolean> {
+    if (!message?.threadId) return false;
+    const lead: any = await Lead.findOne({ organizationId: orgId, threadId: message.threadId, 'combinedInto.leadId': { $exists: false } }).select('_id firstName lastName phone email assignedTo createdAt').lean();
+    if (!lead) return false;
+    const at = new Date(Number(message.internalDate) || Date.now());
+    const touched = await Lead.updateOne(
+        { _id: lead._id, $or: [{ 'followUp.lastCustomerActivityAt': { $lt: at } }, { 'followUp.lastCustomerActivityAt': null }] },
+        { $set: { 'followUp.lastCustomerActivityAt': at, isRead: false } },
+    );
+    await cacheService.del(`lead:thread:${lead._id}`).catch(() => undefined);
+    const { clearLeadConversationEmailCache } = await import('./leadConversation.service');
+    await clearLeadConversationEmailCache(lead._id, message.threadId);
+    const io = getSocketIO();
+    if (io) {
+        io.to(crmStaffRoom(orgId)).emit('email:message:new', { leadId: String(lead._id), threadId: message.threadId });
+        io.to(crmStaffRoom(orgId)).emit('lead:update', { leadId: String(lead._id) });
+    }
+    if (touched.modifiedCount > 0) {
+        const { notifyLeadMessage } = await import('./leadMessageNotice.service');
+        await notifyLeadMessage(orgId, lead, 'email', String(message.snippet || ''));
+    }
+    return true;
 }
 
 export function forgetCheckedMessages() {
@@ -199,6 +225,7 @@ class OrgGmailService {
                         if (result.status === 'skipped') rememberCheckedMessage(orgId, message.id);
                         if (result.status === 'inactive' || result.status === 'skipped') continue;
                         if (result.status === 'associated' && result.created) intakeCreated++;
+                        await notifyCustomerEmailReply(orgId, message);
                         await gmail.users.messages.batchModify({
                             userId: 'me',
                             requestBody: { ids: [message.id], removeLabelIds: ['UNREAD'] },
@@ -293,6 +320,11 @@ class OrgGmailService {
                     syncedCount++;
 
                     if (newLead) {
+                        const customerName = [newLead.firstName, newLead.lastName].filter(Boolean).join(' ').trim() || newLead.email || 'A new customer';
+                        const notice = notificationTemplates.new_lead({ customerName, source: newLead.sourceProvider || newLead.source });
+                        import('../utils/safeNotification')
+                            .then(({ notifyOrgAdmins }) => notifyOrgAdmins(orgId, 'new_lead', notice.title, notice.message, { leadId: String(newLead._id), customerName, source: newLead.source, channel: newLead.channel, route: `/crm/leads?leadId=${newLead._id}` }))
+                            .catch(() => undefined);
                         triggerAiReplyForNewInquiry(orgId, newLead, newLead.phone, newLead.comments).catch((err) => {
                             console.error('[OrgSync] triggerAiReplyForNewInquiry failed:', err);
                         });
@@ -317,6 +349,24 @@ class OrgGmailService {
                 } catch (err) {
                     rememberCheckedMessage(orgId, msg.id!);
                     console.error(`[OrgSync] Failed to process message ${msg.id} for org ${orgId}:`, err);
+                }
+            }
+
+            if (config.leadSourceEmail) {
+                const replies: any = await withRetry(() => gmail.users.messages.list({
+                    userId: 'me',
+                    q: `is:unread after:${oneDayAgo} -from:${config.leadSourceEmail}`,
+                    maxResults: 100,
+                }));
+                for (const reply of replies.data.messages || []) {
+                    if (!reply.id || wasMessageCheckedRecently(orgId, reply.id)) continue;
+                    rememberCheckedMessage(orgId, reply.id);
+                    try {
+                        const detail = await withRetry(() => gmail.users.messages.get({ userId: 'me', id: reply.id!, format: 'metadata' }));
+                        await notifyCustomerEmailReply(orgId, detail.data);
+                    } catch (err) {
+                        console.error(`[OrgSync] Could not check reply ${reply.id} for org ${orgId}:`, err);
+                    }
                 }
             }
 

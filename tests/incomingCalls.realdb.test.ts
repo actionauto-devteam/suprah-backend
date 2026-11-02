@@ -162,7 +162,8 @@ const backdate = (callId: unknown, seconds: number) =>
   CallLog.collection.updateOne({ _id: new mongoose.Types.ObjectId(String(callId)) }, { $set: { startedAt: new Date(Date.now() - seconds * 1000) } });
 const refusalsFor = (controlId: string) => mockTelnyx.playMissedAndHangup.mock.calls.filter(([id, message]) => id === controlId && /unable to take your call/.test(String(message))).length;
 const textBacksTo = (phone: string) => mockTelnyx.sendSms.mock.calls.filter(([to]) => to === phone).length;
-const missedReleasesFor = (controlId: string) => mockTelnyx.playMissedAndHangup.mock.calls.filter(([id]) => id === controlId).length;
+const voicemailGreetingsFor = (controlId: string) => mockTelnyx.speakIvr.mock.calls.filter(([id, text, state]) => id === controlId && (state as any)?.kind === 'voicemail-greeting' && /leave a message after the tone/.test(String(text))).length;
+const missedReleasesFor = (controlId: string) => mockTelnyx.playMissedAndHangup.mock.calls.filter(([id]) => id === controlId).length + voicemailGreetingsFor(controlId);
 
 async function answeredCall(from = nextPhone()) {
   const started = await incoming(from);
@@ -587,6 +588,37 @@ describe('Real-DB: incoming calls (local MongoDB, simulated Telnyx only)', () =>
     expect(await fireRing(0)).toBe(true);
     expect((await CallLog.findById(started.call._id).lean() as any).status).toBe('missed');
     expect(textBacksTo(from)).toBe(0);
+  });
+
+  test('21c. the missed-call text comes from the AI agent by name, and older automatic texts show that name instead of Suprah AI', async () => {
+    await Organization.updateOne({ _id: orgId }, { $set: { 'metadata.aiAgentName': 'Maya' } });
+    try {
+      const from = nextPhone();
+      const started = await incoming(from);
+      expect(await fireRing(0)).toBe(true);
+      const sent = mockTelnyx.sendSms.mock.calls.find(([to]) => to === from);
+      expect(sent?.[1]).toBe("Hi, this is Maya from Phase Eleven Motors. Sorry we missed your call! Reply to this text and we'll get right back to you. Reply STOP to opt out.");
+      const textBack: any = await CommunicationMessage.findOne({ to: from, direction: 'outbound' }).lean();
+      expect(textBack.sentBy).toMatchObject({ userId: 'system', name: 'Maya' });
+      const missed: any = await CallLog.findById(started.call._id).lean();
+      const [older] = await CommunicationMessage.create([{ orgId: ORG, conversationId: textBack.conversationId, leadId: missed.leadId, direction: 'outbound', body: 'Older automatic text', from: COMPANY, to: from, status: 'delivered', sentBy: { userId: 'system', name: 'Suprah AI' } }] as any);
+      const conversation = await buildLeadConversation(ORG, String(missed.leadId));
+      const names = conversation.items.filter((entry: any) => entry.kind === 'message').map((entry: any) => entry.author?.name);
+      expect(conversation.items.find((entry: any) => entry.id === `sms:${older._id}`)?.author).toMatchObject({ name: 'Maya', kind: 'system' });
+      expect(names).not.toContain('Suprah AI');
+    } finally {
+      await Organization.updateOne({ _id: orgId }, { $unset: { 'metadata.aiAgentName': '' } });
+    }
+  });
+
+  test('21d. without an AI agent name the missed-call text still reads like a person, and the sender shows AI Agent', async () => {
+    const from = nextPhone();
+    await incoming(from);
+    expect(await fireRing(0)).toBe(true);
+    const sent = mockTelnyx.sendSms.mock.calls.find(([to]) => to === from);
+    expect(sent?.[1]).toBe("Hi, this is Phase Eleven Motors. Sorry we missed your call! Reply to this text and we'll get right back to you. Reply STOP to opt out.");
+    const textBack: any = await CommunicationMessage.findOne({ to: from, direction: 'outbound' }).lean();
+    expect(textBack.sentBy).toMatchObject({ userId: 'system', name: 'AI Agent' });
   });
 
   test('S1. an incoming text to the company number is filed under the COMM_ORG_ID dealership as before', async () => {

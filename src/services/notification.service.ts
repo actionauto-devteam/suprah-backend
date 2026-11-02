@@ -67,6 +67,7 @@ const TYPE_CATEGORY_MAP: Record<string, NotificationCategory> = {
   ai_technical_failures_alert: 'crm',
   lead_note_mention: 'crm',
   missed_call: 'crm',
+  lead_message: 'crm',
   suprah_meet_invited: 'crm', suprah_meet_reminder: 'crm', suprah_meet_live: 'crm',
 
   feed_mention_post: 'feeds', feed_mention_comment: 'feeds', feed_comment_on_post: 'feeds', feed_announcement: 'feeds',
@@ -312,7 +313,8 @@ const createNotification = async (params: CreateNotificationParams) => {
       ai_technical_failures_alert: metadata?.route || '/crm/ai-tasks',
       lead_note_mention: metadata?.route || '/crm/leads',
       missed_call: metadata?.route || '/crm/leads',
-      new_lead: '/crm/dashboard',
+      lead_message: metadata?.route || '/crm/leads',
+      new_lead: metadata?.route || '/crm/dashboard',
       lead_assigned: '/crm/dashboard',
       lead_status_changed: '/crm/dashboard',
       lead_new_inquiry: metadata?.route || '/crm/leads',

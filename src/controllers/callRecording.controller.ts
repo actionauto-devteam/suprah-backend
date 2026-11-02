@@ -30,18 +30,23 @@ async function principalName(p: RecordingPrincipal) {
   return String((await User.findById(p.id).select('name').lean() as any)?.name || '');
 }
 function summary(record: any) {
-  return { _id: record._id, callLogId: record.callLogId, direction: record.direction, state: record.state, manualPaused: record.manualPaused, incomplete: record.incomplete, error: record.error, startedAt: record.startedAt, endedAt: record.endedAt, expiresAt: record.expiresAt, reviewedAt: record.reviewedAt, reviewedByName: record.reviewedByName, files: record.files.map((f: any) => ({ _id: f._id, bytes: f.bytes, startedAt: f.startedAt, endedAt: f.endedAt })) };
+  const transcript = (record.transcriptParts || []).map((part: any) => part.text).filter(Boolean).join('\n\n');
+  return { _id: record._id, callLogId: record.callLogId, direction: record.direction, kind: record.kind || 'call', state: record.state, manualPaused: record.manualPaused, incomplete: record.incomplete, error: record.error, startedAt: record.startedAt, endedAt: record.endedAt, expiresAt: record.expiresAt, reviewedAt: record.reviewedAt, reviewedByName: record.reviewedByName, files: record.files.map((f: any) => ({ _id: f._id, bytes: f.bytes, startedAt: f.startedAt, endedAt: f.endedAt })), transcript, transcriptReady: Boolean((record.transcriptParts || []).length), summaryPoints: record.summaryPoints || [], summarySentiment: record.summarySentiment || '', summaryAt: record.summaryAt || null, summaryError: record.summaryError || '' };
+}
+function canHear(record: any, p: RecordingPrincipal) {
+  return String(record.employeeId || '') === p.id || (record.kind === 'voicemail' && (record.openToAllStaff || (record.listenerIds || []).includes(p.id)));
 }
 async function accessible(p: RecordingPrincipal, id: string, permission: typeof RECORDING_PERMISSIONS[number] = 'view') {
-  await requireRecordingPermission(p, permission);
+  const permitted = (await recordingPermissions(p)).includes(permission);
   const record: any = await CallRecording.findOne({ _id: validId(id), organizationId: p.orgId });
+  if (!permitted && !(permission === 'view' && record && canHear(record, p))) throw new ApiError(403, `Recording ${permission} permission required`);
   if (!record || ['deleted', 'deleting'].includes(record.state) || (record.expiresAt && record.expiresAt <= new Date())) throw new ApiError(404, 'Recording unavailable');
   return record;
 }
 export const getAccess = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ data: { permissions: await recordingPermissions(p), admin: p.admin } });
+  res.json({ data: { permissions: await recordingPermissions(p), admin: p.admin, principalId: p.id } });
 });
 export const getSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
@@ -49,7 +54,7 @@ export const getSettings = asyncHandler(async (req: Request, res: Response) => {
   const grants: any[] = (await CallRecordingGrant.find({ organizationId: p.orgId }).lean()).map((g: any) => ({ ...g, permissions: grantable(g.permissions) }));
   const crm: any[] = await CrmUser.find({ organizationId: p.orgId, isActive: true, isSystem: { $ne: true }, isOffboarded: { $ne: true } }).select('fullName email role department avatar').lean();
   const main: any[] = await User.find({ organizationId: p.orgId, isActive: true, role: { $in: ['employee', 'admin', 'super_admin'] }, $or: [{ email: { $nin: crm.map(u => u.email) } }, { _id: { $in: grants.filter(g => g.principalKind === 'main' && g.permissions.length).map(g => g.principalId) } }] }).select('name email role personalInfo.department avatar').lean();
-  res.json({ data: { settings: { announcementText: settings.announcementText, retentionMonths: settings.retentionMonths }, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: GRANTABLE_RECORDING_PERMISSIONS } });
+  res.json({ data: { settings: { announcementText: settings.announcementText, retentionMonths: settings.retentionMonths, autoRecord: settings.autoRecord }, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: GRANTABLE_RECORDING_PERMISSIONS } });
 });
 export const saveSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
@@ -73,8 +78,8 @@ export const getCallRecording = asyncHandler(async (req: Request, res: Response)
   const permissions = await recordingPermissions(p);
   const call: any = await CallLog.findOne({ _id: validId(req.params.id), orgId: p.orgId }).select('+recordingCorrelation');
   const own = Boolean(call && callRepId(call) === p.id);
-  if (!own && !permissions.includes('view')) throw new ApiError(403, 'Recording permission required');
   const record: any = await CallRecording.findOne({ callLogId: validId(req.params.id), organizationId: p.orgId });
+  if (!own && !permissions.includes('view') && !(record && canHear(record, p))) throw new ApiError(403, 'Recording permission required');
   const restartable = !record || (record.state === 'failed' && !record.startedAt && !record.files.length);
   res.setHeader('Cache-Control', 'no-store');
   res.json({ data: { recording: record ? summary(record) : null, permissions, canStart: Boolean(own && restartable && recordingReady(call)), canControl: Boolean(own && call?.status === 'in-progress') } });
