@@ -128,6 +128,7 @@ describe('My Shipments status', () => {
     expect(customerShipmentStage({ status: 'accepted' })).toBe('accepted');
     expect(customerShipmentStage({ status: 'rejected' })).toBe('declined');
     expect(customerShipmentStage({ status: 'rejected', closedReason: 'vehicle_unavailable' })).toBe('unavailable');
+    expect(customerShipmentStage({ status: 'rejected', closedReason: 'customer_withdrew' })).toBe('withdrawn');
     expect(customerShipmentStage({ status: 'booked' }, { status: 'Assigned' })).toBe('booked');
     expect(customerShipmentStage({ status: 'booked' }, { status: 'Picked Up' })).toBe('picked_up');
     expect(customerShipmentStage({ status: 'booked' }, { status: 'In-Transit' })).toBe('on_the_way');

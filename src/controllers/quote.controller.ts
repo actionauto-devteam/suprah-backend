@@ -644,6 +644,63 @@ const getMyShipments = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/quote-requests/:id/withdraw
+ * The customer withdraws their own request while it's still waiting for the
+ * dealership (decided 2026-11-02). It closes as withdrawn, kept for history,
+ * and the dealership's admins and the lead's salesperson are told. Once the
+ * dealership has answered, the customer contacts them instead.
+ */
+const withdrawCustomerQuoteRequest = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser | undefined;
+    if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
+    const quoteId = String(req.params.id ?? '').trim();
+    if (!mongoose.Types.ObjectId.isValid(quoteId)) {
+        throw new ApiError(400, "This request link isn't valid. Open My Shipments and try again.");
+    }
+
+    const mine = { _id: quoteId, requestedBy: user._id, source: 'customer_portal' };
+    const quote: any = await Quote.findOneAndUpdate(
+        { ...mine, status: 'pending' },
+        { $set: { status: 'rejected', closedReason: 'customer_withdrew', closedAt: new Date() }, $unset: { declineReason: '' } },
+        { new: true },
+    ).lean();
+    if (!quote) {
+        const existing = await Quote.findOne(mine).select('status closedReason').lean<{ status?: string; closedReason?: string }>();
+        if (!existing) throw new ApiError(404, "We couldn't find this request. Refresh My Shipments to see your latest requests.");
+        if (existing.status === 'rejected' && existing.closedReason === 'customer_withdrew') {
+            return res.status(200).json(new ApiResponse(200, { id: quoteId, stage: 'withdrawn' }, 'You already withdrew this request.'));
+        }
+        throw new ApiError(409, 'The dealership has already answered this request, so it can\'t be withdrawn here. Contact the dealership to cancel it.');
+    }
+
+    res.status(200).json(new ApiResponse(200, { id: quoteId, stage: 'withdrawn' }, 'Your request was withdrawn. The dealership has been told.'));
+
+    const orgId = String(quote.organizationId ?? '');
+    const customerName = [quote.firstName, quote.lastName].map((part: unknown) => String(part ?? '').trim()).filter(Boolean).join(' ') || 'A customer';
+    const vehicleName = String(quote.vehicleName ?? '').trim() || 'a vehicle';
+    notifyOrgAdmins(
+        orgId,
+        'quote_updated',
+        'Shipping Request Withdrawn',
+        `${customerName} withdrew their shipping request for ${vehicleName}. No action is needed.`,
+        { quoteId, customerName, vehicleName, source: 'customer_portal' },
+    );
+    void notifyQuoteSalesperson(orgId, quote._id, { skipAdmins: true }, 'withdrawn');
+    getSocketIO()?.to(`org:${orgId}`).emit('quote:change', { action: 'updated' });
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+    await activityService.createActivity({
+        userId: user._id.toString(),
+        organizationId: orgId,
+        type: 'quote_updated',
+        title: 'Customer Withdrew a Shipping Request',
+        description: `${customerName} withdrew their shipping request from the customer portal`,
+        metadata: { quoteId, vehicleName, source: 'customer_portal' },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+    });
+});
+
+/**
  * GET /api/quotes/for-lead/:leadId
  * A CRM lead's shipping quotes and the load each became, newest first, for
  * the lead page. Staff only; this dealership's records only.
@@ -1784,6 +1841,7 @@ export default {
     createQuote,
     createCustomerQuoteRequest,
     getMyShipments,
+    withdrawCustomerQuoteRequest,
     getQuotesForLead,
     getQuotes,
     getQuoteById,

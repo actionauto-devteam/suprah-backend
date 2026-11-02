@@ -14,7 +14,7 @@ import logger from "../utils/logger";
  * notice for it.
  */
 
-export type SalespersonEvent = "request" | "delivered" | "cancelled";
+export type SalespersonEvent = "request" | "withdrawn" | "delivered" | "cancelled";
 
 export interface SalespersonContext {
   customerName?: string;
@@ -42,6 +42,12 @@ export function salespersonNotice(
         type: "quote_created",
         title: "Your Customer Sent a Shipping Request",
         message: `${customer} asked for a shipping quote for ${theVehicle} from the customer portal. You'll find it under Quotes in Transportation.`,
+      };
+    case "withdrawn":
+      return {
+        type: "quote_updated",
+        title: "Your Customer Withdrew a Shipping Request",
+        message: `${customer} withdrew their shipping request for ${theVehicle}. No action is needed.`,
       };
     case "delivered":
       return {
@@ -151,18 +157,19 @@ export function salespersonNotification(
 }
 
 /**
- * Tells the salesperson about a new customer request, right away. Never
- * throws: the customer's request has already been saved.
+ * Tells the salesperson about a new customer request, or one the customer
+ * withdrew, right away. Never throws: the request has already been saved.
  */
 export async function notifyQuoteSalesperson(
   organizationId: string,
   quoteId: unknown,
   options: SalespersonOptions = {},
+  event: Extract<SalespersonEvent, "request" | "withdrawn"> = "request",
 ): Promise<boolean> {
   try {
     const salesperson = await findQuoteSalesperson(organizationId, quoteId, options);
     if (!salesperson) return false;
-    await notificationService.createNotification(salespersonNotification(salesperson, organizationId, "request") as any);
+    await notificationService.createNotification(salespersonNotification(salesperson, organizationId, event) as any);
     return true;
   } catch (err) {
     logger.error({ err, organizationId, quoteId: String(quoteId ?? "") }, "Non-fatal: failed to tell the salesperson about their customer's request");
