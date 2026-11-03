@@ -177,6 +177,34 @@ describe('Real-DB proof: P2c Podium import into the Knowledge Base (local MongoD
     expect((await entryDoc(offEntry._id)).status).toBe('draft');
   });
 
+  it('imports Podium answers with prices as drafts instead of holding them, and promises are still held', async () => {
+    const t = tag();
+    const deposit = faq(`Deposit ${t}`, `How much is the deposit ${t}?`, '$500 which is non-refundable, but goes towards the purchase of the vehicle.', { source_status: 'on', topic: 'general' });
+    const promise = faq(`Approval ${t}`, `Can I get approved ${t}?`, 'Everyone gets approved with a $500 deposit.', { topic: 'general' });
+    const payload = body([deposit, promise]);
+    const shown = await preview('manager', payload);
+    const depositRow = rowOf(shown, deposit.title);
+    expect(depositRow.status).toBe('parked_knowledge');
+    expect(depositRow.issues.find((issue: any) => issue.code === 'money_amounts')).toMatchObject({ severity: 'warning' });
+    expect(depositRow.issues.find((issue: any) => issue.code === 'money_amounts').message).toContain('$500');
+    expect(rowOf(shown, promise.title).status).toBe('blocked_guardrail');
+    const res = await commit('manager', payload);
+    expect(res.status).toBe(201);
+    const items = await itemsOf(res.body.data.batch.id);
+    const entry = await entryFor(String(items[0]._id));
+    expect(entry).toMatchObject({ status: 'draft', source: { sourceStatus: 'on' } });
+    expect(await entryFor(String(items[1]._id))).toBeNull();
+    const view = (await call('get', `${KB}/entries/${entry._id}`, 'manager2').expect(200)).body.data;
+    expect(view.check.errors).toEqual([]);
+    expect(view.check.amounts).toEqual(['$500']);
+    expect((await kbAct('manager', entry._id, 'submit')).status).toBe(200);
+    const refused = await kbAct('manager2', entry._id, 'approve');
+    expect(refused.status).toBe(400);
+    expect(refused.body.errors.map((issue: any) => issue.code)).toEqual(['amounts_need_approval']);
+    expect((await kbAct('manager2', entry._id, 'approve', { allowAmounts: true })).status).toBe(200);
+    expect(await entryDoc(entry._id)).toMatchObject({ status: 'approved', amountApproval: { amounts: ['$500'], by: { userId: String(users.manager2) } } });
+  });
+
   it('requires an explicit choice for unmapped Podium locations and never falls back to All Locations', async () => {
     const t = tag();
     const unmapped = faq(`Springville hours ${t}`, `Is the Springville store open late ${t}?`, 'The Springville store is open until eight.', { location: 'Springville' });

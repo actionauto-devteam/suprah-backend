@@ -789,4 +789,132 @@ describe('Real-DB: lifecycle intake safety (local MongoDB only)', () => {
       expect(result.leadId).not.toBe(String(closed._id));
     });
   });
+  describe('appointment YES and NO replies', () => {
+    beforeAll(async () => { await setMode('active', AI_ORG); });
+
+    const at = (msAgo: number) => new Date(Date.now() - msAgo);
+    const sentBodies = () => mockSendSms.mock.calls.map((call) => String(call[1] ?? ''));
+    const confirmTexts = () => sentBodies().filter((body) => body.startsWith("You're confirmed")).length;
+
+    async function booked(phone: string, extra: Record<string, unknown> = {}) {
+      return Appointment.create({
+        organizationId: AI_ORG, createdBy: ids.aiOwner, createdByModel: 'User', participants: [ids.aiOwner], participantModel: 'User',
+        title: 'Test drive', startTime: new Date(Date.now() + 2 * 86400000), endTime: new Date(Date.now() + 2 * 86400000 + HOUR),
+        type: 'test-drive', entryType: 'appointment', status: 'scheduled',
+        customerBooking: { firstName: 'Pat', lastName: 'Lee', email: nextEmail(), phone, isCustomerBooking: false }, ...extra,
+      });
+    }
+
+    async function history(phone: string, texts: Array<[string, Date]>) {
+      await makeLead(aiOrgId, { phone }, { source: 'Inbound SMS' });
+      const conversationId = new mongoose.Types.ObjectId();
+      await Conversation.collection.insertOne({ _id: conversationId, orgId: AI_ORG, customerPhone: phone, messageCount: texts.length, createdAt: at(3 * HOUR), updatedAt: new Date() } as any);
+      if (texts.length) {
+        await CommunicationMessage.collection.insertMany(texts.map(([body, when]) => ({ orgId: AI_ORG, conversationId, direction: 'outbound', body, from: '+18015550999', to: phone, status: 'delivered', sentBy: { userId: 'system', name: 'Ava' }, createdAt: when, updatedAt: when })) as any[]);
+      }
+    }
+
+    async function reply(phone: string, text: string) {
+      const sent: any = await sms(AI_ORG, phone, text);
+      await settle(700);
+      await Promise.allSettled(alexRuns.splice(0));
+      const message: any = await CommunicationMessage.findById(sent._id).lean();
+      return message;
+    }
+
+    it('gives a plain Yes to the AI agent when there is no appointment, but a lone Yes from an unknown number still makes no lead', async () => {
+      const phone = nextPhone();
+      await history(phone, [['Would tomorrow afternoon work for a test drive?', at(10 * 60_000)]]);
+      const message = await reply(phone, 'Yes');
+      expect(message.leadId).toBeTruthy();
+      expect(alexCallsFor(message.leadId)).toBe(1);
+      expect(confirmTexts()).toBe(0);
+      const stranger = nextPhone();
+      const lone = await reply(stranger, 'Yes');
+      expect(lone.leadId ?? null).toBeNull();
+      expect(await Lead.countDocuments({ organizationId: aiOrgId, phone: stranger })).toBe(0);
+      expect(confirmTexts()).toBe(0);
+    });
+
+    it('gives Yes to the AI agent when an upcoming appointment was never asked about', async () => {
+      const phone = nextPhone();
+      const appointment = await booked(phone);
+      await history(phone, [['Want me to send the price breakdown?', at(10 * 60_000)]]);
+      const message = await reply(phone, 'YES');
+      expect((await Appointment.findById(appointment._id).lean() as any).status).toBe('scheduled');
+      expect(alexCallsFor(message.leadId)).toBe(1);
+      expect(confirmTexts()).toBe(0);
+    });
+
+    it('confirms when the last text was the reminder, and a later OK goes to the AI agent without a second confirmation', async () => {
+      const phone = nextPhone();
+      const appointment = await booked(phone, { reminderSent: true, reminderSentAt: at(2 * HOUR) });
+      await history(phone, [['Reminder: your appointment "Test drive" is scheduled for Thu. Reply YES to confirm or CANCEL if you need to reschedule.', at(2 * HOUR)]]);
+      const first = await reply(phone, 'YES');
+      const saved: any = await Appointment.findById(appointment._id).lean();
+      expect(saved.status).toBe('confirmed');
+      expect(saved.confirmedReplyAt).toBeTruthy();
+      expect(confirmTexts()).toBe(1);
+      expect(alexCallsFor(first.leadId)).toBe(0);
+      const second = await reply(phone, 'OK');
+      expect(confirmTexts()).toBe(1);
+      expect(alexCallsFor(second.leadId)).toBe(1);
+    });
+
+    it('treats CANCEL right after "You\'re confirmed" as a reschedule and keeps the next answer for staff', async () => {
+      const phone = nextPhone();
+      const appointment = await booked(phone, { status: 'confirmed', reminderSent: true, reminderSentAt: at(2 * HOUR), confirmedReplyAt: at(60_000) });
+      await history(phone, [['Reminder: your appointment "Test drive"... Reply YES to confirm or CANCEL.', at(2 * HOUR)], ["You're confirmed for Thu 3:00 PM! See you then.", at(60_000)]]);
+      const cancel = await reply(phone, 'CANCEL');
+      expect((await Appointment.findById(appointment._id).lean() as any).rescheduleAwaitingReplyAt).toBeTruthy();
+      expect(sentBodies().some((body) => body.startsWith('Got it! What day and time works best'))).toBe(true);
+      expect(alexCallsFor(cancel.leadId)).toBe(0);
+      const answer = await reply(phone, 'Tuesday at 3pm works');
+      expect((await Appointment.findById(appointment._id).lean() as any).rescheduleStatedPreference).toBe('Tuesday at 3pm works');
+      expect(alexCallsFor(answer.leadId)).toBe(0);
+    });
+
+    it('gives Yes to the AI agent when someone texted after the reminder', async () => {
+      const phone = nextPhone();
+      const appointment = await booked(phone, { reminderSent: true, reminderSentAt: at(2 * HOUR) });
+      await history(phone, [['Reminder: your appointment "Test drive"... Reply YES to confirm or CANCEL.', at(2 * HOUR)], ['Do you want me to send the trade-in estimate too?', at(HOUR)]]);
+      const message = await reply(phone, 'Yes');
+      expect((await Appointment.findById(appointment._id).lean() as any).status).toBe('scheduled');
+      expect(alexCallsFor(message.leadId)).toBe(1);
+      expect(confirmTexts()).toBe(0);
+    });
+
+    it('with lead intake off, Yes on a known lead goes to the AI agent and a lone Yes from an unknown number makes no lead', async () => {
+      await setMode('off', AI_ORG);
+      try {
+        const phone = nextPhone();
+        const lead = await makeLead(aiOrgId, { phone }, { source: 'Inbound SMS' });
+        await Conversation.collection.insertOne({ orgId: AI_ORG, customerPhone: phone, leadId: lead._id, messageCount: 1, createdAt: at(HOUR), updatedAt: new Date() } as any);
+        const message = await reply(phone, 'Yes');
+        expect(String(message.leadId)).toBe(String(lead._id));
+        expect(alexCallsFor(lead._id)).toBe(1);
+        const stranger = nextPhone();
+        const lone = await reply(stranger, 'OK');
+        expect(lone.leadId ?? null).toBeNull();
+        expect(await Lead.countDocuments({ organizationId: aiOrgId, phone: stranger })).toBe(0);
+        expect(confirmTexts()).toBe(0);
+      } finally {
+        await setMode('active', AI_ORG);
+      }
+    });
+
+    it('confirms after the confirmation automation asked, but not after the reply window', async () => {
+      const asked = nextPhone();
+      const appointment = await booked(asked, { confirmationRequestedAt: at(10 * 60_000) });
+      await history(asked, [['Hi Pat, confirming your appointment "Test drive". Reply YES to confirm or CANCEL to change it.', at(10 * 60_000)]]);
+      await reply(asked, 'Y');
+      expect((await Appointment.findById(appointment._id).lean() as any).status).toBe('confirmed');
+      const late = nextPhone();
+      const old = await booked(late, { reminderSent: true, reminderSentAt: at(80 * HOUR) });
+      await history(late, [['Reminder: your appointment "Test drive"... Reply YES to confirm.', at(80 * HOUR)]]);
+      const message = await reply(late, 'YES');
+      expect((await Appointment.findById(old._id).lean() as any).status).toBe('scheduled');
+      expect(alexCallsFor(message.leadId)).toBe(1);
+    });
+  });
 });

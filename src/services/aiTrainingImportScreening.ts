@@ -1,5 +1,5 @@
 import { isDemoPhone } from '../utils/demoPhone';
-import { hasGuaranteedAvailabilityLanguage, validateOutboundMessage } from '../utils/aiOutboundSafety';
+import { hasGuaranteedAvailabilityLanguage, MONEY_SAFETY_REASONS, validateOutboundMessage } from '../utils/aiOutboundSafety';
 import { findProtectedTopicInText, findSafetyBypassInText } from './aiTrainingRules.service';
 import {
   EMAIL_PATTERN,
@@ -334,20 +334,23 @@ function labelsFor(hits: Array<{ topic: string }>): string {
   return Array.from(new Set(hits.map((hit) => TOPIC_LABELS[hit.topic] || hit.topic))).join(', ');
 }
 
-export function guardrailIssues(field: string, text: string, cls: GuardrailClass): ImportIssue[] {
+const MONEY_TOPICS = new Set(['price', 'discount', 'financing', 'trade_in']);
+
+export function guardrailIssues(field: string, text: string, cls: GuardrailClass, options: { allowMoney?: boolean } = {}): ImportIssue[] {
   if (cls === 'exempt' || !text) return [];
+  const allowMoney = options.allowMoney === true;
   const issues: ImportIssue[] = [];
   const add = (code: string, severity: ImportIssue['severity'], message: string) => {
     if (!issues.some((issue) => issue.code === code)) issues.push({ field, code, severity, message });
   };
   for (const sentence of sentencesOf(text)) {
-    if (hasFigure(sentence)) {
+    if (!allowMoney && hasFigure(sentence)) {
       add('guardrail_figure', 'error', 'Remove prices, payments, rates, percentages and other money figures. Imported training content cannot include them.');
       continue;
     }
-    const reasons = validateOutboundMessage(sentence).reasons.filter((reason) => GUARDED_REASONS.has(reason));
+    const reasons = validateOutboundMessage(sentence).reasons.filter((reason) => GUARDED_REASONS.has(reason) && !(allowMoney && MONEY_SAFETY_REASONS.has(reason)));
     if (hasGuaranteedAvailabilityLanguage(sentence) && !reasons.includes('guaranteed-availability language')) reasons.push('guaranteed-availability language');
-    const hits = topicHits(sentence);
+    const hits = topicHits(sentence).filter((hit) => !(allowMoney && MONEY_TOPICS.has(hit.topic)));
     if (!reasons.length && !hits.length) continue;
     if (cls === 'reply') {
       add('guardrail_reply', 'error', `This reply would be blocked by Suprah's outbound safety check (${reasons.join(', ') || labelsFor(hits)}). Rewrite it without pricing, financing, discount, trade-in or availability claims.`);

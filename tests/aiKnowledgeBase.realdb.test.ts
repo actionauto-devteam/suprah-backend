@@ -83,6 +83,13 @@ async function approved(author: string, approver: string, body: Record<string, u
   return id;
 }
 
+async function approvedWithAmounts(question: string, answer: string): Promise<string> {
+  const id = await newEntry('rep', faq({ topic: 'general', question, answer }));
+  await act('rep', id, 'submit', { expectedVersion: 1 }).expect(200);
+  await act('manager', id, 'approve', { expectedVersion: 1, allowAmounts: true }).expect(200);
+  return id;
+}
+
 async function seedImport() {
   const sha = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
   await AiTrainingImportBatch.collection.insertMany([
@@ -237,14 +244,67 @@ describe('Real-DB proof: P2a Knowledge Base backend (local MongoDB only)', () =>
       const entry = await stored(id);
       await AiKnowledgeEntryVersion.collection.insertOne({
         organizationId: ORG, entryId: entry._id, version: 2, createdBy: entry.createdBy, createdAt: new Date(),
-        content: { kind: 'faq', topic: 'hours', title: entry.title, question: entry.question, answer: 'A $500 deposit holds any vehicle.', channels: ['sms'], locationScope: { scope: 'all', locationIds: [] } },
+        content: { kind: 'faq', topic: 'hours', title: entry.title, question: entry.question, answer: 'Leave a refundable deposit and we will hold any vehicle.', channels: ['sms'], locationScope: { scope: 'all', locationIds: [] } },
       } as any);
       await AiKnowledgeEntry.collection.updateOne({ _id: entry._id }, { $set: { currentVersion: 2, submittedVersion: 2 } });
       const approve = await act('manager', id, 'approve', { expectedVersion: 2 });
       expect(approve.status).toBe(400);
-      expect(codes(approve)).toEqual(expect.arrayContaining(['answer:guardrail_figure', 'answer:knowledge_deposit_terms']));
+      expect(codes(approve)).toEqual(['answer:knowledge_deposit_terms']);
       expect(await stored(id)).toMatchObject({ status: 'in_review' });
       expect((await stored(id)).approvedVersion).toBeUndefined();
+    });
+  });
+
+  describe('money amounts', () => {
+    it('a manager must allow the amounts in an answer before approving it, and the approval records who allowed them', async () => {
+      const answer = '$500 which is non-refundable, but goes towards the purchase of the vehicle.';
+      const id = await newEntry('rep', faq({ topic: 'general', question: q('How much is the deposit'), answer }));
+      const view = await detail('rep', id);
+      expect(view.check.errors).toEqual([]);
+      expect(view.check.amounts).toEqual(['$500']);
+      expect(view.check.warnings.map((issue: any) => issue.code)).toEqual(['money_amounts']);
+      await act('rep', id, 'submit', { expectedVersion: 1 }).expect(200);
+      const refused = await act('manager', id, 'approve', { expectedVersion: 1 });
+      expect(refused.status).toBe(400);
+      expect(codes(refused)).toEqual(['answer:amounts_need_approval']);
+      expect(refused.body.errors[0].message).toContain('$500');
+      expect(await stored(id)).toMatchObject({ status: 'in_review' });
+      expect((await act('manager', id, 'approve', { expectedVersion: 1, allowAmounts: 'true' })).status).toBe(400);
+      await act('manager', id, 'approve', { expectedVersion: 1, allowAmounts: true }).expect(200);
+      const saved = await stored(id);
+      expect(saved).toMatchObject({ status: 'approved', approvedVersion: 1, amountApproval: { amounts: ['$500'], by: { userId: String(users.manager.id), role: 'manager' } } });
+      expect(saved.amountApproval.at).toBeInstanceOf(Date);
+      expect((await detail('rep', id)).entry.amountApproval).toMatchObject({ amounts: ['$500'], by: { role: 'manager' } });
+    });
+
+    it('a changed amount needs a new allowance, an answer without amounts clears it, and turning an entry back on checks it', async () => {
+      const question = q('How much is the hold');
+      const id = await approvedWithAmounts(question, 'We take a $500 deposit to hold a vehicle.');
+      await put('rep', id, faq({ topic: 'general', question, answer: 'We take a $750 deposit to hold a vehicle.', expectedVersion: 1 })).expect(200);
+      await act('rep', id, 'submit', { expectedVersion: 2 }).expect(200);
+      expect(codes(await act('manager2', id, 'approve', { expectedVersion: 2 }))).toEqual(['answer:amounts_need_approval']);
+      expect((await stored(id)).amountApproval.amounts).toEqual(['$500']);
+      await act('manager2', id, 'approve', { expectedVersion: 2, allowAmounts: true }).expect(200);
+      expect((await stored(id)).amountApproval).toMatchObject({ amounts: ['$750'], by: { userId: String(users.manager2.id) } });
+      await act('manager', id, 'disable').expect(200);
+      await AiKnowledgeEntry.collection.updateOne({ _id: new mongoose.Types.ObjectId(id) }, { $set: { 'amountApproval.amounts': ['$400'] } });
+      const enable = await act('manager', id, 'enable');
+      expect(enable.status).toBe(400);
+      expect(codes(enable)).toEqual(['answer:amounts_need_approval']);
+      expect(await stored(id)).toMatchObject({ lifecycle: 'disabled' });
+      await AiKnowledgeEntry.collection.updateOne({ _id: new mongoose.Types.ObjectId(id) }, { $set: { 'amountApproval.amounts': ['$750'] } });
+      await act('manager', id, 'enable').expect(200);
+      await put('rep', id, faq({ topic: 'general', question, answer: 'Our team can go over deposits with you.', expectedVersion: 2 })).expect(200);
+      await act('rep', id, 'submit', { expectedVersion: 3 }).expect(200);
+      await act('manager', id, 'approve', { expectedVersion: 3 }).expect(200);
+      expect((await stored(id)).amountApproval).toBeUndefined();
+    });
+
+    it('amounts never unlock promises', async () => {
+      const id = await newEntry('rep', faq({ topic: 'general', question: q('Can I get approved'), answer: 'Everyone gets approved with a $500 deposit.' }));
+      const submit = await act('rep', id, 'submit', { expectedVersion: 1 });
+      expect(submit.status).toBe(400);
+      expect(codes(submit)).toContain('answer:guardrail_promise');
     });
   });
 
@@ -531,9 +591,10 @@ describe('Real-DB proof: P2a Knowledge Base backend (local MongoDB only)', () =>
       expect(link.source.sourceStatus).toBe('on');
       const entry: any = await createKnowledgeEntry({ organizationId: ORG, user: manager, importLink: link, body: faq({ topic: 'general', question: q('Do you take deposits'), answer: 'A $500 deposit holds any vehicle for 48 hours.' }) });
       expect(entry.status).toBe('draft');
-      const submit = await act('manager', String(entry._id), 'submit', { expectedVersion: 1 });
-      expect(submit.status).toBe(400);
-      expect(codes(submit)).toEqual(expect.arrayContaining(['answer:guardrail_figure', 'answer:knowledge_deposit_terms']));
+      await act('manager', String(entry._id), 'submit', { expectedVersion: 1 }).expect(200);
+      expect(codes(await act('admin', String(entry._id), 'approve', { expectedVersion: 1 }))).toEqual(['answer:amounts_need_approval']);
+      await act('admin', String(entry._id), 'approve', { expectedVersion: 1, allowAmounts: true }).expect(200);
+      expect(await stored(String(entry._id))).toMatchObject({ status: 'approved', amountApproval: { amounts: ['$500'], by: { role: 'admin' } } });
     });
 
     it('only parked FAQ and business information items of the same organization can be linked, and the form cannot claim a source', async () => {

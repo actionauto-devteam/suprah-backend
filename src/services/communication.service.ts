@@ -375,35 +375,41 @@ export async function findLeadByPhone(orgId: any, phone: string): Promise<any | 
 }
 
 
-async function findAppointmentForReply(orgId: any, phone: string, requireReminder = false): Promise<any | null> {
+const APPOINTMENT_REPLY_WINDOW_HOURS = parseInt(process.env.APPOINTMENT_REPLY_WINDOW_HOURS || "72", 10);
+const APPOINTMENT_ASK_GRACE_MS = 5 * 60 * 1000;
+
+function appointmentAskedAt(appointment: any, afterConfirmation: boolean): number {
+  const times = [appointment?.reminderSentAt, appointment?.confirmationRequestedAt, afterConfirmation ? appointment?.confirmedReplyAt : null];
+  return Math.max(...times.map((value) => new Date(value || 0).getTime()));
+}
+
+async function textedSince(conversationId: any, since: number): Promise<boolean> {
+  if (!conversationId) return false;
+  const latest: any = await CommunicationMessage.findOne({ conversationId, direction: "outbound" }).sort({ createdAt: -1 }).select("createdAt").lean();
+  return Boolean(latest?.createdAt && new Date(latest.createdAt).getTime() > since + APPOINTMENT_ASK_GRACE_MS);
+}
+
+async function findAppointmentForReply(orgId: any, phone: string, conversationId?: any, leadId?: any, afterConfirmation = false): Promise<any | null> {
   const tail = last10(phone);
   if (tail.length < 7) return null;
 
-  const phoneFilter = { "customerBooking.phone": { $regex: `${tail.split("").join("[^0-9]*")}$` } };
-  const baseFilter = {
+  const now = Date.now();
+  const askedAfter = new Date(now - APPOINTMENT_REPLY_WINDOW_HOURS * 60 * 60 * 1000);
+  const contact: Record<string, unknown>[] = [{ "customerBooking.phone": { $regex: `${tail.split("").join("[^0-9]*")}$` } }];
+  if (leadId && mongoose.isValidObjectId(leadId)) contact.push({ leadId });
+
+  const appointment = await Appointment.findOne({
     organizationId: orgId,
     entryType: "appointment",
     status: { $in: ["scheduled", "confirmed"] },
-    ...phoneFilter,
-  };
-  const now = new Date();
-
-  const reminded = await Appointment.findOne({
-    ...baseFilter,
-    reminderSent: true,
-    startTime: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) },
+    startTime: { $gte: new Date(now - 24 * 60 * 60 * 1000) },
+    $and: [{ $or: contact }, { $or: [{ reminderSentAt: { $gte: askedAfter } }, { confirmationRequestedAt: { $gte: askedAfter } }, ...(afterConfirmation ? [{ confirmedReplyAt: { $gte: askedAfter } }] : [])] }],
   })
-    .sort({ reminderSentAt: -1 })
+    .sort({ confirmationRequestedAt: -1, reminderSentAt: -1 })
     .catch(() => null);
-  if (reminded) return reminded;
-  if (requireReminder) return null;
-
-  return Appointment.findOne({
-    ...baseFilter,
-    startTime: { $gte: now },
-  })
-    .sort({ startTime: 1 })
-    .catch(() => null);
+  if (!appointment) return null;
+  if (await textedSince(conversationId, appointmentAskedAt(appointment, afterConfirmation))) return null;
+  return appointment;
 }
 
 export function formatApptTimeForSms(date: Date): string {
@@ -427,14 +433,14 @@ export function buildRescheduleNoticeMessage(sender: string, firstName: string, 
   return `Hi ${firstName}, this is ${sender}. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`;
 }
 
-async function handleAppointmentSmsReply(orgId: any, from: string, body: string, requireReminder = false): Promise<boolean> {
+async function handleAppointmentSmsReply(orgId: any, from: string, body: string, conversationId?: any, leadId?: any): Promise<boolean> {
   const command = normalizeSmsCommand(body);
   const isConfirm = CONFIRM_KEYWORDS.has(command);
   const isReschedule = RESCHEDULE_KEYWORDS.has(command);
   if (!isConfirm && !isReschedule) return false;
 
-  const appointment = await findAppointmentForReply(orgId, from, requireReminder);
-  if (!appointment) return true;
+  const appointment = await findAppointmentForReply(orgId, from, conversationId, leadId, isReschedule);
+  if (!appointment) return false;
 
   const customerName =
     [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName]
@@ -468,12 +474,13 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string,
       });
 
       const timeLabel = formatApptTimeForSms(new Date(appointment.startTime));
-      await sendAutomatedReplySms({
+      const replied = await sendAutomatedReplySms({
         orgId,
         toPhone: from,
         body: buildConfirmReplyMessage(timeLabel),
         leadId: appointment.leadId,
       });
+      if (replied) await Appointment.updateOne({ _id: appointment._id }, { $set: { confirmedReplyAt: new Date() } });
 
       const { title, message } = notificationTemplates.appointment_confirmed_via_sms({
         customerName,
@@ -521,7 +528,7 @@ const RESCHEDULE_REPLY_CAPTURE_WINDOW_HOURS = parseInt(
  *  date/time, since a parsing error could create the wrong appointment slot.
  *  Bounded by a capture window so a much-later unrelated text is never
  *  misread as a stale reschedule answer. */
-async function captureRescheduleReply(orgId: any, from: string, body: string): Promise<boolean> {
+async function captureRescheduleReply(orgId: any, from: string, body: string, conversationId?: any): Promise<boolean> {
   const tail = last10(from);
   if (tail.length < 7) return false;
 
@@ -537,6 +544,7 @@ async function captureRescheduleReply(orgId: any, from: string, body: string): P
     .catch(() => null);
 
   if (!appointment) return false;
+  if (await textedSince(conversationId, new Date(appointment.rescheduleAwaitingReplyAt || 0).getTime())) return false;
 
   const trimmedBody = String(body || "").trim().slice(0, 300);
   if (!trimmedBody) return false;
@@ -1720,7 +1728,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
         return false;
       });
 
-  const appointmentHandled = await handleAppointmentSmsReply(orgId, from, body, lifecycle).catch((err) => {
+  const appointmentHandled = await handleAppointmentSmsReply(orgId, from, body, conversation._id, lead?._id).catch((err) => {
     console.error("[comm] handleAppointmentSmsReply failed:", err);
     return false;
   });
@@ -1739,7 +1747,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
   }
   const rescheduleReplyHandled =
     !optHandled && !appointmentHandled
-      ? await captureRescheduleReply(orgId, from, body).catch((err) => {
+      ? await captureRescheduleReply(orgId, from, body, conversation._id).catch((err) => {
           console.error("[comm] captureRescheduleReply failed:", err);
           return false;
         })
@@ -1752,18 +1760,22 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
         return null;
       });
     } else if (!lead) {
-      const result = await findOrCreateLeadForContact({
-        orgId,
-        conversation,
-        existingLead: null,
-        phone: from,
-        customer,
-        channel: "sms",
-        line: retention.line,
-      }).catch((err) => {
-        console.error("[comm] findOrCreateLeadForContact (sms) failed:", err);
-        return { lead: null, created: false };
-      });
+      const command = normalizeSmsCommand(body);
+      const shortReply = CONFIRM_KEYWORDS.has(command) || RESCHEDULE_KEYWORDS.has(command);
+      const result = shortReply && !conversation.leadId
+        ? { lead: null, created: false }
+        : await findOrCreateLeadForContact({
+            orgId,
+            conversation,
+            existingLead: null,
+            phone: from,
+            customer,
+            channel: "sms",
+            line: retention.line,
+          }).catch((err) => {
+            console.error("[comm] findOrCreateLeadForContact (sms) failed:", err);
+            return { lead: null, created: false };
+          });
       lead = result.lead;
 
       if (lead) {

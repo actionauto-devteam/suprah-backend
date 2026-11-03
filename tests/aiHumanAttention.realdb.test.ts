@@ -357,7 +357,7 @@ it('keeps transactional appointment confirmation working while Alex is durably p
   const f = await fixture('sms');
   await screenAiHumanAttention(await begin(f));
   const appointment = await Appointment.collection.insertOne({ organizationId: String(ids.org), leadId: new mongoose.Types.ObjectId(f.leadId),
-    title: 'Local Test Drive', entryType: 'appointment', status: 'scheduled', startTime: new Date(Date.now() + 3600000),
+    title: 'Local Test Drive', entryType: 'appointment', status: 'scheduled', startTime: new Date(Date.now() + 3600000), reminderSent: true, reminderSentAt: new Date(),
     endTime: new Date(Date.now() + 7200000), customerBooking: { phone: f.phone, firstName: 'Attention' } });
   mockCreate.mockClear();
   await handleInboundSms({ id: `attention-confirm-${serial}`, from: f.phone, to: '+18015550999', text: 'YES' }, ids.org);

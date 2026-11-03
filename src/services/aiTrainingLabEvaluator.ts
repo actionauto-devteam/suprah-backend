@@ -103,7 +103,8 @@ function safetyChecks(scenario: ScenarioContent, expectsStop: boolean): { checks
         : 'The message is not an opt-out or opt-in keyword.',
     });
 
-    const appointment = LAB_CONFIRM_KEYWORDS.has(command) || LAB_RESCHEDULE_KEYWORDS.has(command);
+    const appointmentWord = LAB_CONFIRM_KEYWORDS.has(command) || LAB_RESCHEDULE_KEYWORDS.has(command);
+    const appointment = appointmentWord && Boolean(scenario.flags?.hasUpcomingAppointment);
     certain = certain || appointment;
     checks.push({
       id: 'safety.sms_appointment_keyword',
@@ -111,11 +112,11 @@ function safetyChecks(scenario: ScenarioContent, expectsStop: boolean): { checks
       label: 'Appointment reply keywords',
       method: 'keyword_rule',
       status: relativeToExpectation(appointment, expectsStop, true),
-      message: !appointment
+      message: !appointmentWord
         ? 'The message is not an appointment reply keyword.'
-        : scenario.flags?.hasUpcomingAppointment
-          ? `"${command}" is handled as an appointment reply before the AI Agent, so the AI Agent never replies.`
-          : `"${command}" is handled as an appointment reply before the AI Agent even without an upcoming appointment, so the AI Agent never replies.`,
+        : appointment
+          ? `"${command}" answers the upcoming appointment when the last text asked about it (a reminder or confirmation request), so the AI Agent does not reply.`
+          : `"${command}" is not an appointment answer here because there is no upcoming appointment, so the AI Agent replies.`,
     });
 
     const optedOut = Boolean(scenario.flags?.previouslyOptedOut);

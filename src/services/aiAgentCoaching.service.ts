@@ -1,4 +1,5 @@
 import AiAgentCoachingRule from '../models/AiAgentCoachingRule.model';
+import { moneyFigures, sameMoneyFigures } from '../utils/aiMoneyAmounts';
 
 const MAX_COACHING_CANDIDATES = 50;
 const MAX_RULE_LENGTH = 320;
@@ -7,6 +8,7 @@ const MAX_TOTAL_LENGTH = 6000;
 export interface AiCoachingCandidate {
   id: string;
   instruction: string;
+  approvedAmounts?: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -28,7 +30,7 @@ export async function getRelevantAiCoaching(input: {
   })
     .sort({ updatedAt: -1, createdAt: -1 })
     .limit(MAX_COACHING_CANDIDATES)
-    .select('_id instruction createdAt updatedAt')
+    .select('_id instruction amountApproval createdAt updatedAt')
     .lean();
 
   const notes: string[] = [];
@@ -40,11 +42,13 @@ export async function getRelevantAiCoaching(input: {
     const note = cleanInstruction(rule.instruction);
     if (!note) continue;
     if (total + note.length > MAX_TOTAL_LENGTH) break;
+    const amounts = moneyFigures(String(rule.instruction || ''));
     notes.push(note);
     ids.push(String(rule._id));
     candidates.push({
       id: String(rule._id),
       instruction: note,
+      ...(sameMoneyFigures(rule.amountApproval?.amounts, amounts) ? { approvedAmounts: amounts } : {}),
       createdAt: rule.createdAt,
       updatedAt: rule.updatedAt,
     });

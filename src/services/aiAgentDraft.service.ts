@@ -4,7 +4,7 @@ import Organization from '../models/Organization.model';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import { AI_AGENT_NAME_REQUIRED_CODE, AI_AGENT_NAME_REQUIRED_MESSAGE, identityFromMetadata } from '../utils/aiAgentIdentity';
-import { hasGeminiApiKey, validateOutboundEmailMessage, validateOutboundMessage } from '../utils/aiOutboundSafety';
+import { buildMoneyAllowance, hasGeminiApiKey, type MoneyAllowance, validateOutboundEmailMessage, validateOutboundMessage } from '../utils/aiOutboundSafety';
 import { assertLeadOpenForManualSend } from '../utils/closedLeadGuard';
 import {
   AiAgentTranscriptEntry,
@@ -137,6 +137,7 @@ async function buildDraft(input: {
 
   let generate: (retryNote?: string) => Promise<GenerateAlexReplyResult>;
   let prices: number[] = [];
+  let amountAllowance: MoneyAllowance | undefined;
   if (channel === 'email') {
     const price = await resolveCurrentVehicleAndPrice(lead).catch(() => null);
     prices = [price?.price, price?.previousPrice].filter((value): value is number => typeof value === 'number');
@@ -146,16 +147,21 @@ async function buildDraft(input: {
     });
   } else {
     let coachingNotes: string[] = [];
+    let approvedAmounts: string[] | undefined;
     const coaching = await getRelevantAiCoaching({ organizationId, channel }).catch(() => ({ rules: [] as any[] }));
     if (coaching.rules.length) {
       const selection = await selectRelevantAiCoaching({
         rules: coaching.rules, agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel,
       });
-      if (selection.status !== 'error') coachingNotes = selection.appliedRules.map((rule) => rule.instruction);
+      if (selection.status !== 'error') {
+        coachingNotes = selection.appliedRules.map((rule) => rule.instruction);
+        amountAllowance = buildMoneyAllowance(selection.appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction));
+        approvedAmounts = amountAllowance?.amounts;
+      }
     }
     generate = (retryNote) => generateAlexReply({
       agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel, isFirstReply: false,
-      coachingNotes, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
+      coachingNotes, approvedAmounts, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
     });
   }
 
@@ -168,7 +174,7 @@ async function buildDraft(input: {
     }
     const text = generation.text;
     const note = generation.handoffReason ? `${agentName} suggests a team member follows up: ${generation.handoffReason}` : null;
-    const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices) : validateOutboundMessage(text);
+    const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices) : validateOutboundMessage(text, amountAllowance);
     if (!deterministic.ok) {
       logger.info({ organizationId, leadId: String(lead._id), channel, attempt, reasons: deterministic.reasons }, '[AiAgentDraft] Draft flagged by the safety rules');
       const words = safetyReasonWords(deterministic.reasons);
@@ -180,7 +186,7 @@ async function buildDraft(input: {
     }
     const verdict = channel === 'email'
       ? await classifyAlexEmailReplySafety(text, lead.phone)
-      : await classifyAlexReplySafety(text, lead.phone);
+      : await classifyAlexReplySafety(text, lead.phone, undefined, amountAllowance);
     if (verdict === 'SAFE') return { draft: text, note, safetyWarning: null };
     logger.info({ organizationId, leadId: String(lead._id), channel, attempt, verdict }, '[AiAgentDraft] Draft flagged by the safety check');
     if (verdict === 'UNSAFE' && attempt < SAFETY_ATTEMPTS) {

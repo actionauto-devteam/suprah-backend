@@ -42,11 +42,11 @@ export function strictRuleIssues(rule: StructuredRule): RuleIssue[] {
   return unique(issues);
 }
 
-export function strictInstructionIssues(instruction: string): RuleIssue[] {
+export function strictInstructionIssues(instruction: string, options: { allowMoney?: boolean } = {}): RuleIssue[] {
   const text = String(instruction || '');
   if (!text.trim()) return [];
   return unique([
-    ...blocking(guardrailIssues('instruction', text, 'instruction')),
+    ...blocking(guardrailIssues('instruction', text, 'instruction', options)),
     ...blocking(safetyIssues('instruction', text)),
   ]);
 }

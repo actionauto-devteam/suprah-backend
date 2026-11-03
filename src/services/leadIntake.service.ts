@@ -24,7 +24,7 @@ import { notifyOrgAdmins, notifyUsers } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
 import logger from '../utils/logger';
-import { isSmsKeyword } from '../utils/smsKeywords';
+import { CONFIRM_KEYWORDS, RESCHEDULE_KEYWORDS, isSmsKeyword, normalizeSmsCommand } from '../utils/smsKeywords';
 
 export const LEAD_INTAKE_MAX_ATTEMPTS = 5;
 
@@ -226,7 +226,9 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
       return { status: 'dismissed', inquiryId, reason: 'automated_email' };
     }
 
-    if (event.kind === 'sms' && isSmsKeyword(event.comments)) {
+    const command = normalizeSmsCommand(String(event.comments || ''));
+    const shortReply = event.kind === 'sms' && (CONFIRM_KEYWORDS.has(command) || RESCHEDULE_KEYWORDS.has(command));
+    if (event.kind === 'sms' && isSmsKeyword(event.comments) && !shortReply) {
       await completeInquiryAssociation(event._id, owner, {
         state: 'resolved',
         outcome: 'dismissed',
@@ -263,6 +265,18 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
         : event.intentAssurance === 'unconfirmed' && decided.action === 'create' && decided.previousLeadIds.length
           ? { ...decided, action: 'review' as const, reason: 'email_after_lead_closed' }
           : decided;
+
+      if (shortReply && decision.action !== 'append') {
+        await confirmHeld();
+        const done = await completeInquiryAssociation(event._id, owner, {
+          state: 'resolved',
+          outcome: 'dismissed',
+          reason: 'sms_keyword',
+          contextLeadId: event.association?.contextLeadId,
+        });
+        if (!done) throw new RetryableIntakeError('The intake lease expired before the dismissal was saved');
+        return { status: 'dismissed', inquiryId, reason: 'sms_keyword' } as LeadIntakeResult;
+      }
 
       if (decision.action === 'review') {
         await confirmHeld();
@@ -309,8 +323,10 @@ export async function processLeadInquiry(eventId: unknown): Promise<LeadIntakeRe
       return { status: 'associated', inquiryId, leadId: String(lead._id), created: true, reason: decision.reason } as LeadIntakeResult;
     });
 
-    await runInquirySideEffects(event._id).catch((err) =>
-      logger.warn({ err, inquiryId }, '[LeadIntake] Side effects will be retried by the recovery sweep'));
+    if (result.status !== 'dismissed') {
+      await runInquirySideEffects(event._id).catch((err) =>
+        logger.warn({ err, inquiryId }, '[LeadIntake] Side effects will be retried by the recovery sweep'));
+    }
     return result;
   } catch (err) {
     await failInquiryProcessing(event._id, owner, err).catch(() => undefined);

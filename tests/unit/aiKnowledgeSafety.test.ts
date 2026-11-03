@@ -22,8 +22,6 @@ describe('Knowledge Base answer safety', () => {
   });
 
   it.each([
-    ['A $500 deposit holds any vehicle for 48 hours.', 'answer:guardrail_figure'],
-    ['Our APR starts at 2.9% for qualified buyers.', 'answer:guardrail_figure'],
     ['Leave a refundable deposit and we will hold the car for you.', 'answer:knowledge_deposit_terms'],
     ['We can reserve the vehicle until you arrive.', 'answer:knowledge_deposit_terms'],
     ['Zero down options are available on most vehicles.', 'answer:knowledge_payment_terms'],
@@ -43,6 +41,25 @@ describe('Knowledge Base answer safety', () => {
     const check = faq(answer);
     expect(codes(check)).toContain(code);
     for (const issue of check.errors) expect(issue.message).not.toContain(answer.slice(0, 20));
+  });
+
+  it('lets money amounts through for a manager to allow, and keeps blocking promises next to them', () => {
+    const deposit = faq('A $500 deposit holds any vehicle for 48 hours.');
+    expect(deposit.errors).toEqual([]);
+    expect(deposit.amounts).toEqual(['$500']);
+    expect(deposit.warnings.map((issue) => issue.code)).toEqual(['money_amounts']);
+    expect(deposit.warnings[0].message).toContain('$500');
+    const podium = faq('$500 which is non-refundable, but goes towards the purchase of the vehicle.', 'How much is the deposit?');
+    expect(podium.errors).toEqual([]);
+    expect(podium.amounts).toEqual(['$500']);
+    const rate = faq('Our APR starts at 2.9% for qualified buyers.');
+    expect(rate.errors).toEqual([]);
+    expect(rate.amounts).toEqual(['2.9%']);
+    expect(codes(faq('Financing approval is guaranteed for everyone with a $500 deposit.'))).toContain('answer:guardrail_promise');
+    expect(codes(faq('We take a $500 deposit and work with bad credit.'))).toEqual(['answer:knowledge_financing_terms']);
+    expect(codes(faq('A $500 deposit holds it. That truck is still available and will not last long.'))).toContain('answer:guardrail_promise');
+    expect(faq('Leave a refundable deposit and we will hold the car for you.').amounts).toBeUndefined();
+    expect(codes(faq('Leave a refundable deposit and we will hold the car for you.'))).toEqual(['answer:knowledge_deposit_terms']);
   });
 
   it('checks the question and title too, and blocks protected questions and safety bypasses', () => {

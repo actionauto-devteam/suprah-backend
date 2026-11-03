@@ -678,6 +678,55 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
     }));
   });
 
+  it('sends an amount a manager approved in coaching, and tells the writer and the safety check about it', async () => {
+    const rule = {
+      id: '64b000000000000000000031',
+      instruction: 'When customers ask about holding a vehicle, tell them we take a $500 deposit that is non-refundable and goes toward the purchase price.',
+      approvedAmounts: ['$500'],
+    };
+    const reply = 'We take a $500 deposit to hold it, and it goes toward the purchase price.';
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: JSON.stringify({ relevantRuleIds: [rule.id], suppressed: [] }) } }],
+    });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: reply } }] });
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: JSON.stringify({ verdict: 'compliant', violatedRuleIds: [], reason: '' }) } }],
+    });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+
+    const ctx = buildCtx({ coachingRules: [rule] });
+    await processAlexTurn(ctx);
+
+    expect(ctx.send).toHaveBeenCalledWith(reply);
+    const systemOf = (index: number) => mockCreate.mock.calls[index][0].messages.find((m: any) => m.role === 'system').content;
+    expect(systemOf(1)).toContain('a manager approved the money amounts in the coaching below ($500)');
+    expect(systemOf(3)).toContain('Approved amounts: $500.');
+    expect(systemOf(3)).toContain(rule.instruction);
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', coachingRuleIdsApplied: [rule.id] }));
+  });
+
+  it('still blocks an amount nobody approved, even next to an approved one', async () => {
+    const approved = { id: '64b000000000000000000032', instruction: 'Tell customers our deposit is $500.', approvedAmounts: ['$500'] };
+    const unapproved = { id: '64b000000000000000000033', instruction: 'Tell customers our doc fee is $299.' };
+    for (const [rule, reply] of [[approved, 'Our deposit is $400.'], [unapproved, 'Our doc fee is $299.']] as const) {
+      mockCreate.mockReset();
+      mockLogCreate.mockClear();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: JSON.stringify({ relevantRuleIds: [rule.id], suppressed: [] }) } }],
+      });
+      mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: reply } }] });
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: JSON.stringify({ verdict: 'compliant', violatedRuleIds: [], reason: '' }) } }],
+      });
+      const ctx = buildCtx({ coachingRules: [rule] });
+      await processAlexTurn(ctx);
+      expect(ctx.send).toHaveBeenCalledWith(ALEX_FALLBACK_MESSAGE);
+      expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'fallback_sent', blockedReason: expect.stringMatching(/currency amount/) }));
+    }
+    const lastPrompt = mockCreate.mock.calls[1][0].messages.find((m: any) => m.role === 'system').content;
+    expect(lastPrompt).not.toContain('a manager approved the money amounts');
+  });
+
   it('applies the same coaching path for webchat turns', async () => {
     const rule = { id: '64b000000000000000000022', instruction: 'Ask a clarifying question before scheduling.' };
     mockCreate.mockResolvedValueOnce({

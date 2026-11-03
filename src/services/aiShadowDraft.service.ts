@@ -41,6 +41,7 @@ import {
   AiCallObserver,
   AiCallBudgetExceededError,
   runWithAiCallObserver,
+  buildMoneyAllowance,
   validateOutboundMessage,
   validateOutboundEmailMessage,
 } from '../utils/aiOutboundSafety';
@@ -517,6 +518,7 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
 
   observer.phase = 'generation';
   const vehicleContextNote = vehicleContext ? buildVehicleContextNote(vehicleContext) : undefined;
+  const amountAllowance = buildMoneyAllowance(appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction));
   const generation = input.channel === 'email'
     ? await generateAlexEmailReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, isFirstReply,
@@ -525,7 +527,7 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
       })
     : await generateAlexReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel: input.channel, isFirstReply,
-        coachingNotes: appliedRules.map((rule) => rule.instruction), phone: input.phone || lead.phone, vehicleContextNote,
+        coachingNotes: appliedRules.map((rule) => rule.instruction), approvedAmounts: amountAllowance?.amounts, phone: input.phone || lead.phone, vehicleContextNote,
       });
 
   const coachingRuleIds = appliedRules.map((rule) => rule.id);
@@ -545,14 +547,14 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
 
   const deterministic = input.channel === 'email'
     ? validateOutboundEmailMessage(draftText, [priceContext?.price, priceContext?.previousPrice].filter((value): value is number => typeof value === 'number'))
-    : validateOutboundMessage(draftText);
+    : validateOutboundMessage(draftText, amountAllowance);
 
   let classifierVerdict: ShadowDraftResult['classifierVerdict'];
   if (deterministic.ok) {
     observer.phase = 'safety_classifier';
     classifierVerdict = input.channel === 'email'
       ? await classifyAlexEmailReplySafety(draftText, input.phone || lead.phone)
-      : await classifyAlexReplySafety(draftText, input.phone || lead.phone, observer.perCallTimeoutMs);
+      : await classifyAlexReplySafety(draftText, input.phone || lead.phone, observer.perCallTimeoutMs, amountAllowance);
   }
 
   const safe = deterministic.ok && classifierVerdict === 'SAFE';
