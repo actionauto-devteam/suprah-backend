@@ -680,6 +680,12 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
   if (isStaff && user.role !== "super_admin") {
     query.organizationId = orgId;
   }
+  // A customer sees only cars on the marketplace (decided 2026-11-02): not
+  // cars being prepared, already sold, archived, or otherwise not for sale.
+  if (user?.role === "customer") {
+    query.status = "Ready for Sale";
+    query.isArchived = { $ne: true };
+  }
 
   const vehicle = await Vehicle.findOne(query)
     .select("-priceHistory")
