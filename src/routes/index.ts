@@ -66,6 +66,7 @@ import vehicleReengagementRoute from "./vehicleReengagement.route";
 import priceDropEmailRoute from "./priceDropEmail.route";
 import referralLeadRoute from "./referralLead.routes";
 import membershipRoute from "./membership.route";
+import customerPhotoRoute from "./customerPhoto.route";
 import customerInviteRoute from "./customerInvite.routes";
 import shopAssistantRoute from "./shopAssistant.route";
 import generalTimeclockRoute from "./generalTimeclock.route";
@@ -553,6 +554,10 @@ const defaultRoutes = [
   {
     path: "/membership",
     route: membershipRoute,
+  },
+  {
+    path: "/photos",
+    route: customerPhotoRoute,
   },
   {
     path: "/crm/customer-invites",
