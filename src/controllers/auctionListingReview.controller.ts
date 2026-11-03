@@ -4,6 +4,7 @@ import { ApiError } from "../utils/ApiError";
 import { AuctionListing, LISTING_STATUSES } from "../models/AuctionListing.model";
 import Vehicle from "../models/Vehicle.model";
 import mongoose from "mongoose";
+import { notifyListingSeller } from "../services/auctionListingNotice";
 
 const serialize = (listing: any) => ({
     ...listing.toObject(),
@@ -165,6 +166,8 @@ export const approveListing = asyncHandler(
             throw err;
         }
 
+        // The customer who listed the car is told (see auctionListingNotice).
+        void notifyListingSeller(listing, "approved", req.orgId);
         res.status(200).json({ success: true, data: serialize(listing) });
     },
 );
@@ -204,6 +207,8 @@ export const rejectListing = asyncHandler(
         });
         await listing.save();
 
+        // The customer who listed the car is told, with the reason.
+        void notifyListingSeller(listing, "rejected", req.orgId);
         res.status(200).json({ success: true, data: serialize(listing) });
     },
 );
