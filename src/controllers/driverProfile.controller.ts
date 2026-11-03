@@ -19,6 +19,7 @@ import {
   getOpenDriverStatusRequest,
 } from "../services/driverStatusTransition.service";
 import { recordDriverReviewEvent } from "../services/driverVerificationReview.service";
+import { notifyDriverReviewers } from "../services/driverReviewNotice";
 import { syncVerificationContactToAccount } from "../services/driverContactSync.service";
 import { withDriverCommitmentLock } from "../services/driverWorkCommitment.service";
 import { MAX_TRAILER_VEHICLES, RIG_HEIGHT_INCHES, RIG_LENGTH_FEET, TRAILER_TYPES } from "../validations/load.validation";
@@ -1512,6 +1513,14 @@ const updateIdentityVerification = asyncHandler(
         newStatus: "under_review",
         organizationId: user.organizationId?.toString?.(),
       });
+    }
+
+    // The people who approve drivers hear about it once each time it goes to review.
+    if (
+      profile.verificationStatus === "under_review" &&
+      previousVerificationStatus !== "under_review"
+    ) {
+      await notifyDriverReviewers(user);
     }
   },
 );
