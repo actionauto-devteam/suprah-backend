@@ -281,6 +281,11 @@ export const notificationTemplates = {
     };
   },
 
+  automation_alert: (data: { automationName: string; detail: string }) => ({
+    title: `Automation alert: ${data.automationName}`,
+    message: `${data.detail} Check that the automation is still set up the way you want.`,
+  }),
+
   missed_call: (data: { caller: string; line: string }) => ({
     title: 'Missed call',
     message: `Missed call from ${data.caller}${data.line ? ` to ${data.line}` : ''}. Open the lead to call or text them back.`,

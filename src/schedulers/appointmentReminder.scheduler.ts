@@ -35,6 +35,10 @@ function formatApptTime(date: Date): string {
   });
 }
 
+export function buildAppointmentReminderText(title: string, startTime: Date): string {
+  return `Reminder: your appointment "${title}" is scheduled for ${formatApptTime(startTime)}. Reply YES to confirm or CANCEL if you need to reschedule. Reply STOP to opt out.`;
+}
+
 export async function sendReminderFor(appointment: any): Promise<void> {
   const sends: Array<Promise<unknown>> = [];
 
@@ -58,8 +62,7 @@ export async function sendReminderFor(appointment: any): Promise<void> {
       }),
     );
   } else if (phone) {
-    const timeLabel = formatApptTime(forStartTime);
-    const text = `Reminder: your appointment "${appointment.title}" is scheduled for ${timeLabel}. Reply YES to confirm or CANCEL if you need to reschedule. Reply STOP to opt out.`;
+    const text = buildAppointmentReminderText(appointment.title, forStartTime);
     sends.push(
       (async () => {
         const started = await startAppointmentSmsNotice(appointment._id, 'reminderSms', forStartTime, 'sending');

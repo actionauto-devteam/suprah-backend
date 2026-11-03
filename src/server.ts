@@ -39,6 +39,7 @@ import { initLeadIntakeRecoveryScheduler } from "./schedulers/leadIntakeRecovery
 import { initLeadDuplicateCombineScheduler } from "./schedulers/leadDuplicateCombine.scheduler";
 import { initEmailCampaignScheduler } from "./schedulers/emailCampaign.scheduler";
 import { initWebchatSmsFallbackScheduler } from "./schedulers/webchatSmsFallback.scheduler";
+import { initCrmAutomationScheduler } from "./schedulers/crmAutomation.scheduler";
 import { initSupraSpaceScheduledMessageScheduler } from "./schedulers/supraspaceScheduledMessage.scheduler";
 import { initStaleShiftAutoClockoutScheduler } from "./schedulers/staleShiftAutoClockout.scheduler";
 import { initConnectionLossShiftAlertScheduler } from "./schedulers/connectionLossShiftAlert.scheduler";
@@ -247,6 +248,7 @@ if (require.main === module) {
       initLeadDuplicateCombineScheduler();
       initEmailCampaignScheduler();
       initWebchatSmsFallbackScheduler();
+      initCrmAutomationScheduler();
       initSupraSpaceScheduledMessageScheduler();
       initStaleShiftAutoClockoutScheduler();
       initConnectionLossShiftAlertScheduler();

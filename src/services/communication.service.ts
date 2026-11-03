@@ -174,7 +174,7 @@ export function buildMissedCallTextBackMessage(sender: string): string {
   return `Hi, this is ${sender}. Sorry we missed your call! Reply to this text and we'll get right back to you. Reply STOP to opt out.`;
 }
 
-function buildNoShowFollowUpMessage(
+export function buildNoShowFollowUpMessage(
   sender: string,
   firstName: string,
   title: string,
@@ -390,7 +390,7 @@ async function findAppointmentForReply(orgId: any, phone: string, requireReminde
     .catch(() => null);
 }
 
-function formatApptTimeForSms(date: Date): string {
+export function formatApptTimeForSms(date: Date): string {
   return date.toLocaleString("en-US", {
     weekday: "short",
     month: "short",
@@ -399,6 +399,16 @@ function formatApptTimeForSms(date: Date): string {
     minute: "2-digit",
     timeZone: CALENDAR_TZ,
   });
+}
+
+export function buildConfirmReplyMessage(timeLabel: string): string {
+  return `You're confirmed for ${timeLabel}! See you then.`;
+}
+
+export const RESCHEDULE_ASK_REPLY = "Got it! What day and time works best for you? We'll get you rebooked.";
+
+export function buildRescheduleNoticeMessage(sender: string, firstName: string, timeLabel: string): string {
+  return `Hi ${firstName}, this is ${sender}. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`;
 }
 
 async function handleAppointmentSmsReply(orgId: any, from: string, body: string, requireReminder = false): Promise<boolean> {
@@ -445,7 +455,7 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string,
       await sendAutomatedReplySms({
         orgId,
         toPhone: from,
-        body: `You're confirmed for ${timeLabel}! See you then.`,
+        body: buildConfirmReplyMessage(timeLabel),
         leadId: appointment.leadId,
       });
 
@@ -465,7 +475,7 @@ async function handleAppointmentSmsReply(orgId: any, from: string, body: string,
       await sendAutomatedReplySms({
         orgId,
         toPhone: from,
-        body: "Got it! What day and time works best for you? We'll get you rebooked.",
+        body: RESCHEDULE_ASK_REPLY,
         leadId: appointment.leadId,
       });
 
@@ -632,7 +642,7 @@ export async function notifyCustomerOfReschedule(appointment: any): Promise<Appo
   return sendSystemSms({
     orgId: appointment.organizationId,
     toPhone: phone,
-    body: `Hi ${firstName}, this is ${senderIntro(dealerName, agentNameConfigured ? agentName : null)}. Your appointment has been moved to ${timeLabel}. Reply STOP to opt out.`,
+    body: buildRescheduleNoticeMessage(senderIntro(dealerName, agentNameConfigured ? agentName : null), firstName, timeLabel),
     leadId: appointment.leadId,
   });
 }
@@ -793,7 +803,7 @@ export async function sendReviewRequestText(appointment: any): Promise<boolean> 
   });
 }
 
-function buildWebchatFallbackMessage(sender: string, firstName: string): string {
+export function buildWebchatFallbackMessage(sender: string, firstName: string): string {
   return `Hi ${firstName}, this is ${sender}. We got your message on our website chat and a team member will reply there shortly. Feel free to reply to this text instead if that's easier. Reply STOP to opt out.`;
 }
 
