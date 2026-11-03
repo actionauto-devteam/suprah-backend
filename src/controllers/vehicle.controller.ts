@@ -17,6 +17,14 @@ import cacheService from "../services/cache.service";
 import logger from "../utils/logger";
 import activityService from "../services/activity.service";
 import membershipService from "../services/membership.service";
+import {
+  containsText,
+  exactText,
+  marketplacePaging,
+  marketplaceSearchClause,
+  marketplaceSort,
+  queryNumber,
+} from "../services/marketplaceQuery";
 
 const VEH_CACHE_TTL = 60 * 60;
 
@@ -1088,20 +1096,24 @@ const buildScopedFilterQuery = (
 ) => {
   const scoped: Record<string, any> = { ...baseQuery };
 
-  if (query.make) scoped.make = { $regex: query.make, $options: "i" };
-  if (query.model) scoped.modelName = { $regex: query.model, $options: "i" };
-  if (query.status && query.status !== "all") scoped.status = query.status;
-  if (query.year) scoped.year = Number(query.year);
+  // Filter text is matched as plain text ("contains"), never as a pattern.
+  const make = containsText(query.make);
+  if (make) scoped.make = make;
+  const model = containsText(query.model);
+  if (model) scoped.modelName = model;
+  // A status the caller fixed (the marketplace's Ready for Sale) can't be replaced.
+  if (!baseQuery.status && typeof query.status === "string" && query.status !== "all") scoped.status = query.status;
+  const year = queryNumber(query.year);
+  if (year !== undefined) scoped.year = year;
 
-  if (query.location) {
-    scoped.$or = [
-      { dealerCity: { $regex: query.location, $options: "i" } },
-      { dealerState: { $regex: query.location, $options: "i" } },
-    ];
+  const location = containsText(query.location);
+  if (location) {
+    scoped.$or = [{ dealerCity: location }, { dealerState: location }];
   }
 
-  if (query.bodyStyle) {
-    scoped.bodyStyle = { $regex: query.bodyStyle, $options: "i" };
+  const bodyStyle = containsText(query.bodyStyle);
+  if (bodyStyle) {
+    scoped.bodyStyle = bodyStyle;
   }
 
   if (query.minPrice || query.maxPrice) {
@@ -1781,156 +1793,63 @@ const getMarketplaceVehicles = asyncHandler(
       maxPrice,
       minMileage,
       maxMileage,
-      highDemand,
-      lowPerforming,
-      sortBy = "recent",
-      sortOrder = "desc",
-      page = "1",
-      limit = "20",
+      sortBy,
+      sortOrder,
+      page,
+      limit,
     } = req.query;
 
-    const search = searchParam || q;
-
-    // STRICT MARKETPLACE FILTERS
+    // The public marketplace (see marketplaceQuery): visitor text is matched
+    // as plain text, paging is capped, and the dealership's lead-interest
+    // filters ("high demand", "low performing") aren't offered here.
     const filter: any = {
       isDeleted: false,
       isArchived: { $ne: true },
       status: "Ready for Sale", // Customers only see retail-ready inventory
     };
+    const and: Record<string, unknown>[] = [];
 
-    if (make) filter.make = { $regex: make, $options: "i" };
-    if (model) filter.modelName = { $regex: model, $options: "i" };
-    if (year) filter.year = Number(year);
+    const makeMatch = exactText(make);
+    if (makeMatch) filter.make = makeMatch;
+    const modelMatch = exactText(model);
+    if (modelMatch) filter.modelName = modelMatch;
+    const yearNumber = queryNumber(year);
+    if (yearNumber !== undefined) filter.year = yearNumber;
+    const bodyStyleMatch = containsText(bodyStyle);
+    if (bodyStyleMatch) filter.bodyStyle = bodyStyleMatch;
 
-    if (location) {
-      filter.$or = [
-        { dealerCity: { $regex: location, $options: "i" } },
-        { dealerState: { $regex: location, $options: "i" } },
-      ];
+    const locationMatch = exactText(location);
+    if (locationMatch) {
+      and.push({ $or: [{ dealerCity: locationMatch }, { dealerState: locationMatch }] });
     }
 
-    if (minPrice || maxPrice) {
+    const priceMin = queryNumber(minPrice);
+    const priceMax = queryNumber(maxPrice);
+    if (priceMin !== undefined || priceMax !== undefined) {
       filter.price = {};
-      if (minPrice) filter.price.$gte = Number(minPrice);
-      if (maxPrice) filter.price.$lte = Number(maxPrice);
+      if (priceMin !== undefined) filter.price.$gte = priceMin;
+      if (priceMax !== undefined) filter.price.$lte = priceMax;
     }
 
-    if (minMileage || maxMileage) {
+    const mileageMin = queryNumber(minMileage);
+    const mileageMax = queryNumber(maxMileage);
+    if (mileageMin !== undefined || mileageMax !== undefined) {
       filter.mileage = {};
-      if (minMileage) filter.mileage.$gte = Number(minMileage);
-      if (maxMileage) filter.mileage.$lte = Number(maxMileage);
+      if (mileageMin !== undefined) filter.mileage.$gte = mileageMin;
+      if (mileageMax !== undefined) filter.mileage.$lte = mileageMax;
     }
 
-    if (bodyStyle) {
-      filter.bodyStyle = { $regex: bodyStyle, $options: "i" };
-    }
+    const searchClause = marketplaceSearchClause(searchParam || q);
+    if (searchClause) and.push(searchClause);
+    if (and.length) filter.$and = and;
 
-    const sortObj: any = {};
-    const order = sortOrder === "desc" ? -1 : 1;
+    const { key: sortKey, sort: sortObj } = marketplaceSort(sortBy, sortOrder);
+    const { pageNum, limitNum, skip } = marketplacePaging(page, limit);
 
-    switch (sortBy) {
-      case "year":
-        sortObj.year = order;
-        break;
-      case "price":
-        sortObj.price = order;
-        break;
-      case "mileage":
-        sortObj.mileage = order;
-        break;
-      case "make":
-        sortObj.make = order;
-        sortObj.modelName = order;
-        break;
-      case "stockNumber":
-        sortObj.stockNumber = order;
-        break;
-      case "location":
-        sortObj.dealerCity = order;
-        sortObj.dealerState = order;
-        break;
-      case "demand":
-        sortObj.leadCount = order;
-        break;
-      case "low-performing":
-        sortObj.daysOnLot = -1;
-        sortObj.leadCount = 1;
-        break;
-      case "recent":
-      default:
-        sortObj.dateAdded = order;
-    }
+    const pipeline: any[] = [{ $match: filter }];
 
-    const pageNum = Math.max(1, Number(page));
-    const limitNum = Number(limit);
-    const skip = (pageNum - 1) * limitNum;
-
-    const pipeline: any[] = [];
-
-    // Global Search logic (no orgId constraint)
-    if (search) {
-      const searchString = search.toString();
-      const isNumericSearch = !isNaN(Number(searchString));
-
-      const shouldClauses: any[] = [
-        {
-          text: {
-            query: searchString,
-            path: ["make", "modelName", "vin", "stockNumber"],
-            fuzzy: { maxEdits: 1 },
-          },
-        },
-      ];
-
-      if (isNumericSearch) {
-        shouldClauses.push({
-          equals: { value: Number(searchString), path: "year" },
-        });
-      }
-
-      pipeline.push({
-        $search: {
-          index: "Vehicle",
-          compound: {
-            must: [
-              {
-                compound: {
-                  should: shouldClauses,
-                  minimumShouldMatch: 1,
-                },
-              },
-            ],
-          },
-        },
-      });
-
-      // After search, we STILL must match the marketplace status
-      pipeline.push({
-        $match: {
-          status: "Ready for Sale",
-          isDeleted: false,
-          isArchived: { $ne: true },
-        },
-      });
-    } else {
-      pipeline.push({
-        $match: {
-          status: "Ready for Sale",
-          isDeleted: false,
-          isArchived: { $ne: true },
-        },
-      });
-    }
-
-    pipeline.push({ $match: filter });
-
-    const needsDemandMetrics =
-      sortBy === "demand" ||
-      sortBy === "low-performing" ||
-      highDemand === "true" ||
-      lowPerforming === "true";
-
-    if (needsDemandMetrics) {
+    // "Most Popular" orders by how many inquiries each car has.
+    if (sortKey === "demand") {
       pipeline.push({
         $lookup: {
           from: "leads",
@@ -1949,14 +1868,6 @@ const getMarketplaceVehicles = asyncHandler(
           },
         },
       });
-
-      if (highDemand === "true") {
-        pipeline.push({ $match: { leadCount: { $gte: 1 } } });
-      }
-
-      if (lowPerforming === "true") {
-        pipeline.push({ $match: { leadCount: 0, daysOnLot: { $gte: 30 } } });
-      }
     }
 
     pipeline.push({ $sort: sortObj });
@@ -1966,8 +1877,8 @@ const getMarketplaceVehicles = asyncHandler(
         metadata: [{ $count: "total" }],
         data: [
           { $skip: skip },
-          { $limit: limitNum > 0 ? limitNum : 100 },
-          { $project: { priceHistory: 0 } },
+          { $limit: limitNum },
+          { $project: { priceHistory: 0, _leadData: 0, leadCount: 0 } },
         ],
       },
     });
@@ -1995,7 +1906,7 @@ const getMarketplaceVehicles = asyncHandler(
             page: pageNum,
             limit: limitNum,
             total,
-            totalPages: limitNum > 0 ? Math.ceil(total / limitNum) : 1,
+            totalPages: Math.max(1, Math.ceil(total / limitNum)),
           },
         },
         "Marketplace vehicles fetched successfully",
