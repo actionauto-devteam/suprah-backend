@@ -10,13 +10,13 @@ import {
   duplicateAutomation,
   getAutomation as loadAutomation,
   getAutomationOptions,
-  listAutomationActivity,
   listAutomations,
   setAutomationStatus,
   updateAutomationAlerts,
   updateAutomation,
 } from '../services/crmAutomation.service';
 import { createDataSync, deleteDataSync, getDataSync, listDataSyncs, updateDataSync } from '../services/crmDataSync.service';
+import { exportAutomationActivity, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, type MonitorQuery } from '../services/crmAutomationMonitor.service';
 
 function viewer(req: Request) {
   const orgId = String((req as any).orgId || '');
@@ -98,15 +98,50 @@ export const removeSync = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, { deleted: true }, 'Data sync deleted'));
 });
 
+function monitorQuery(req: Request): MonitorQuery {
+  const value = (key: string) => (typeof req.query[key] === 'string' && req.query[key] ? String(req.query[key]) : undefined);
+  return {
+    automationId: value('automation'),
+    tag: value('tag'),
+    status: value('status'),
+    mode: value('mode'),
+    q: value('q'),
+    name: value('name'),
+    range: value('range'),
+    group: value('group'),
+    view: value('view'),
+    page: Number(req.query.page) || 1,
+  };
+}
+
 export const getActivity = asyncHandler(async (req: Request, res: Response) => {
   const { orgId } = viewer(req);
-  const data = await listAutomationActivity(orgId, {
-    automationId: req.query.automation ? String(req.query.automation) : undefined,
-    status: req.query.status ? String(req.query.status) : undefined,
-    mode: req.query.mode ? String(req.query.mode) : undefined,
-    page: Number(req.query.page) || 1,
-  });
-  res.json(new ApiResponse(200, data, 'Automation activity'));
+  res.json(new ApiResponse(200, await listAutomationActivity(orgId, monitorQuery(req)), 'Automation activity'));
+});
+
+export const getActivitySummaryView = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = viewer(req);
+  res.json(new ApiResponse(200, await getActivitySummary(orgId, monitorQuery(req)), 'Automation activity summary'));
+});
+
+export const getActivityReengagement = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = viewer(req);
+  res.json(new ApiResponse(200, await getReengagementSummary(orgId), 'Vehicle re-engagement summary'));
+});
+
+export const getActivityLogs = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = viewer(req);
+  res.json(new ApiResponse(200, await listAutomationLogs(orgId, monitorQuery(req)), 'Automation logs'));
+});
+
+export const getActivityExport = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = viewer(req);
+  const { filename, csv } = await exportAutomationActivity(orgId, monitorQuery(req));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+  res.send(csv);
 });
 
 export const removeAutomation = asyncHandler(async (req: Request, res: Response) => {

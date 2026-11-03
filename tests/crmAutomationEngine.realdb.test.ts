@@ -35,6 +35,8 @@ import CrmAutomationCursor from '../src/models/CrmAutomationCursor.model';
 import { CallLog, Conversation, CommunicationMessage } from '../src/models/communication.model';
 import { setAutomationStatus } from '../src/services/crmAutomation.service';
 import { checkAutomationAlerts, nextSendingTime, runDueSteps, sweepReplies, sweepTriggers } from '../src/services/crmAutomationEngine.service';
+import { automationForMissedCallText } from '../src/services/crmAutomationCalls.service';
+import DealershipPhoneNumber from '../src/models/DealershipPhoneNumber.model';
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -112,6 +114,7 @@ describe('Real-DB proof: automation engine (local dev MongoDB only)', () => {
       { _id: rep, organizationId: orgId, name: 'Engine Rep', email: `rep-${rep}@example.com`, role: 'employee', isActive: true },
     ] as any[]);
     await CrmLocation.collection.insertOne({ _id: orem, organizationId: org, code: 'orem', name: 'Action Auto - Orem', aliases: [], aliasKeys: ['action auto - orem', 'orem'], status: 'active', archivedAt: null } as any);
+    await DealershipPhoneNumber.collection.insertOne({ organizationId: orgId, number: '+18015550950', label: 'Orem line', kind: 'location', location: 'Orem', department: '', createdBy: admin, updatedBy: admin, createdAt: new Date(), updatedAt: new Date() } as any);
   });
 
   beforeEach(async () => {
@@ -132,6 +135,7 @@ describe('Real-DB proof: automation engine (local dev MongoDB only)', () => {
   afterAll(async () => {
     await Promise.all([
       Organization.collection.deleteOne({ _id: orgId }),
+      DealershipPhoneNumber.collection.deleteMany({ organizationId: orgId }),
       User.collection.deleteMany({ organizationId: orgId }),
       CrmLocation.collection.deleteMany({ organizationId: org }),
       CrmAutomation.collection.deleteMany({ organizationId: org }),
@@ -373,6 +377,79 @@ describe('Real-DB proof: automation engine (local dev MongoDB only)', () => {
     const nora: any = await CrmAutomationRun.findOne({ automationId: quiet._id, 'contact.firstName': 'Nora' }).lean();
     expect(nora).toMatchObject({ status: 'completed' });
     expect(nora.log.map((entry: any) => entry.detail)).toEqual(['No condition matched. Else: do nothing']);
+  });
+
+  it('11. "Any call" runs for answered and missed calls, uses the location of the number that was called, fills {location_name}, and labels the text with the automation name', async () => {
+    const auto = await automation({
+      name: 'Auto text after call',
+      locations: { mode: 'specific', ids: [String(orem)] },
+      trigger: { source: 'suprah', event: 'call_any', repeat: { mode: 'every_time' }, sendingHours: 'any_time' },
+      steps: [{ id: 'm', type: 'send_message', config: { body: 'Thanks for calling {location_name}!', timing: { when: 'on' } } }],
+    });
+    await setAutomationStatus(org, actor, String(auto._id), 'active');
+    await startCursor();
+    const endedAt = new Date(Date.now() + 1000);
+    const call = (from: string, to: string, status: string) => ({ orgId: org, direction: 'inbound', from, to, status, leadId: null, endedAt, createdAt: new Date(), updatedAt: new Date() });
+    const newCaller = nextPhone();
+    const answered = nextPhone();
+    const otherLine = nextPhone();
+    await CallLog.collection.insertMany([
+      call(newCaller, '+18015550950', 'missed'),
+      call(answered, '+1 (801) 555-0950', 'completed'),
+      call(otherLine, '+18015550999', 'missed'),
+      call(nextPhone(), '+18015550950', 'ringing'),
+    ] as any[]);
+    await sweepTriggers(later(MINUTE));
+    await runDueSteps(later(MINUTE));
+    const runs: any[] = await CrmAutomationRun.find({ automationId: auto._id }).lean();
+    const byPhone = Object.fromEntries(runs.map((run) => [run.contact.phone, run]));
+    expect(runs).toHaveLength(3);
+    expect(byPhone[newCaller]).toMatchObject({ status: 'completed', event: 'call_any', location: 'Action Auto - Orem' });
+    expect(byPhone[answered]).toMatchObject({ status: 'completed', location: 'Action Auto - Orem' });
+    expect(byPhone[otherLine]).toMatchObject({ status: 'filtered', reason: 'Not at one of the selected locations' });
+    expect(mockSendSms.mock.calls.map((sent) => sent[1])).toEqual(['Thanks for calling Action Auto - Orem! Reply STOP to opt out.', 'Thanks for calling Action Auto - Orem! Reply STOP to opt out.']);
+    const messages: any[] = await CommunicationMessage.find({ orgId: { $in: [org, orgId] }, direction: 'outbound' }).lean();
+    expect(messages.map((message) => message.sentBy)).toEqual([{ userId: 'system', name: 'Automation - Auto text after call' }, { userId: 'system', name: 'Automation - Auto text after call' }].map((value) => expect.objectContaining(value)));
+
+    const anywhere = await automation({ name: 'Lead location text', trigger: { source: 'suprah', event: 'call_missed', repeat: { mode: 'every_time' }, sendingHours: 'any_time' }, steps: [{ id: 'l', type: 'send_message', config: { body: 'Hi from {location_name}', timing: { when: 'on' } } }] });
+    await setAutomationStatus(org, actor, String(auto._id), 'inactive');
+    await setAutomationStatus(org, actor, String(anywhere._id), 'active');
+    await sweepTriggers(later(2 * MINUTE));
+    const known = await lead({ firstName: 'Lena', location: 'orem' });
+    const unknownPlace = await lead({ firstName: 'Paz', location: '' });
+    const ended2 = new Date(Date.now() + 2 * MINUTE + 1000);
+    await CallLog.collection.insertMany([
+      { orgId: org, direction: 'inbound', from: known.phone, to: '+18015550999', status: 'missed', leadId: known._id, endedAt: ended2, createdAt: new Date(), updatedAt: new Date() },
+      { orgId: org, direction: 'inbound', from: unknownPlace.phone, to: '+18015550999', status: 'missed', leadId: unknownPlace._id, endedAt: ended2, createdAt: new Date(), updatedAt: new Date() },
+    ] as any[]);
+    mockSendSms.mockClear();
+    await sweepTriggers(later(3 * MINUTE));
+    await runDueSteps(later(3 * MINUTE));
+    expect(mockSendSms.mock.calls.filter((sent) => [known.phone, unknownPlace.phone].includes(sent[0])).map((sent) => sent[1]).sort()).toEqual(['Hi from Action Auto - Orem Reply STOP to opt out.', 'Hi from Engine Motors Reply STOP to opt out.']);
+  });
+
+  it('12. the built-in missed-call text steps aside only when an active automation will text that missed call', async () => {
+    const missed = (to: string, from = nextPhone()) => ({ orgId: org, from, to, leadId: null });
+    expect(await automationForMissedCallText(missed('+18015550950'))).toBeNull();
+    const auto = await automation({ name: 'Send a missed call follow-up', locations: { mode: 'specific', ids: [String(orem)] }, trigger: { source: 'suprah', event: 'call_missed' } });
+    expect(await automationForMissedCallText(missed('+18015550950'))).toBeNull();
+    await setAutomationStatus(org, actor, String(auto._id), 'test');
+    expect(await automationForMissedCallText(missed('+18015550950'))).toBeNull();
+    await setAutomationStatus(org, actor, String(auto._id), 'active');
+    expect(await automationForMissedCallText(missed('+18015550950'))).toBe('Send a missed call follow-up');
+    expect(await automationForMissedCallText(missed('+18015550999'))).toBeNull();
+    const oremLead = await lead({ location: 'Orem' });
+    expect(await automationForMissedCallText(missed('+18015550999', oremLead.phone))).toBe('Send a missed call follow-up');
+    expect(await automationForMissedCallText({ orgId: org, from: nextPhone(), to: '+18015550999', leadId: oremLead._id })).toBe('Send a missed call follow-up');
+    const ended = await automation({ name: 'Thanks after an answered call', trigger: { source: 'suprah', event: 'call_ended' } });
+    await setAutomationStatus(org, actor, String(ended._id), 'active');
+    expect(await automationForMissedCallText(missed('+18015550999'))).toBeNull();
+    process.env.CRM_AUTOMATIONS_ENABLED = 'false';
+    expect(await automationForMissedCallText(missed('+18015550950'))).toBeNull();
+    process.env.CRM_AUTOMATIONS_ENABLED = 'true';
+    const everywhere = await automation({ name: 'Any call text', trigger: { source: 'suprah', event: 'call_any' } });
+    await setAutomationStatus(org, actor, String(everywhere._id), 'active');
+    expect(await automationForMissedCallText(missed('+18015550999'))).toBe('Any call text');
   });
 
   it('9. alerts tell the chosen people when an automation ran too little or dropped, once a day, and never for a new automation', async () => {

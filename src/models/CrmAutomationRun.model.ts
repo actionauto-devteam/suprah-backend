@@ -22,6 +22,7 @@ export interface ICrmAutomationRun extends Document {
   targetAt: Date | null;
   appointmentId: string | null;
   contact: { leadId: string | null; name: string; firstName: string; phone: string; email: string };
+  location: string;
   repeatKey: string | null;
   pathRepeatKeys: string[];
   settings: { sendingHours: string; stopOnReply: boolean; cancelFirstOnReply: boolean; aiContinuesOnReply: boolean; stopOnFailure: boolean };
@@ -68,6 +69,7 @@ const CrmAutomationRunSchema = new Schema<ICrmAutomationRun>(
       phone: { type: String, default: '' },
       email: { type: String, default: '' },
     },
+    location: { type: String, default: '' },
     repeatKey: { type: String, default: null },
     pathRepeatKeys: { type: [String], default: [] },
     settings: { type: Schema.Types.Mixed, default: {} },
@@ -88,6 +90,7 @@ const CrmAutomationRunSchema = new Schema<ICrmAutomationRun>(
 CrmAutomationRunSchema.index({ automationId: 1, eventKey: 1 }, { unique: true });
 CrmAutomationRunSchema.index({ status: 1, nextRunAt: 1 });
 CrmAutomationRunSchema.index({ organizationId: 1, createdAt: -1 });
+CrmAutomationRunSchema.index({ organizationId: 1, 'log.at': -1 });
 CrmAutomationRunSchema.index({ organizationId: 1, 'contact.leadId': 1, status: 1 });
 CrmAutomationRunSchema.index({ automationId: 1, repeatKey: 1, createdAt: -1 });
 CrmAutomationRunSchema.index({ automationId: 1, pathRepeatKeys: 1, createdAt: -1 });

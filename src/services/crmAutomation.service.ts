@@ -52,6 +52,7 @@ export const AUTOMATION_SOURCES: CatalogSource[] = [
         events: [
           { key: 'call_missed', label: 'Missed call' },
           { key: 'call_ended', label: 'Call ended' },
+          { key: 'call_any', label: 'Any call (answered or missed)' },
           { key: 'voicemail_received', label: 'Voicemail received' },
         ],
       },
@@ -197,6 +198,7 @@ export const MESSAGE_VARIABLES = [
   { key: 'dealership_name', label: 'Dealership name' },
   { key: 'agent_name', label: 'AI agent name' },
   { key: 'vehicle', label: 'Vehicle' },
+  { key: 'location_name', label: 'Location name' },
 ] as const;
 
 const EDIT_ROLES = new Set(['admin', 'super_admin']);
@@ -231,7 +233,7 @@ export function canEditAutomations(role: unknown): boolean {
 
 export const ENGINE_EVENTS = new Set([
   'lead_created', 'website_form_lead', 'adf_lead_received', 'email_lead_received', 'lead_status_changed', 'lead_assigned', 'ai_handoff',
-  'text_received', 'website_chat_started', 'call_missed', 'call_ended',
+  'text_received', 'website_chat_started', 'call_missed', 'call_ended', 'call_any',
   'appointment_booked', 'appointment_confirmed', 'appointment_rescheduled', 'appointment_cancelled', 'appointment_no_show', 'appointment_completed',
 ]);
 export const ENGINE_ACTIONS = new Set([
@@ -711,50 +713,6 @@ export async function deleteAutomation(orgId: string, id: string) {
     { $set: { status: 'stopped', reason: 'The automation was deleted', nextRunAt: null } },
   );
   await doc.deleteOne();
-}
-
-const ACTIVITY_PAGE = 25;
-const RUN_STATUSES = ['filtered', 'waiting', 'running', 'completed', 'stopped', 'failed'];
-
-export async function listAutomationActivity(orgId: string, query: { automationId?: string; status?: string; mode?: string; page?: number }) {
-  const mode = query.mode === 'test' ? 'test' : 'live';
-  const base: Record<string, unknown> = { organizationId: orgId, mode };
-  if (query.automationId) {
-    if (!mongoose.isValidObjectId(query.automationId)) bad('That automation is not valid');
-    base.automationId = new mongoose.Types.ObjectId(query.automationId);
-  }
-  if (query.status && !RUN_STATUSES.includes(query.status)) bad('That status is not valid');
-  const filter = query.status ? { ...base, status: query.status } : base;
-  const page = Math.max(1, Math.min(1000, Number(query.page) || 1));
-  const [items, total, grouped] = await Promise.all([
-    CrmAutomationRun.find(filter).sort({ createdAt: -1 }).skip((page - 1) * ACTIVITY_PAGE).limit(ACTIVITY_PAGE).lean(),
-    CrmAutomationRun.countDocuments(filter),
-    CrmAutomationRun.aggregate([{ $match: base }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-  ]);
-  const counts = Object.fromEntries(RUN_STATUSES.map((status) => [status, 0])) as Record<string, number>;
-  for (const row of grouped) counts[row._id] = row.count;
-  return {
-    mode,
-    engineEnabled: isAutomationEngineEnabled(),
-    counts,
-    page,
-    pages: Math.max(1, Math.ceil(total / ACTIVITY_PAGE)),
-    total,
-    items: items.map((run: any) => ({
-      id: String(run._id),
-      automationId: String(run.automationId),
-      automationName: run.automationName,
-      mode: run.mode,
-      event: run.event,
-      status: run.status,
-      reason: run.reason,
-      contact: run.contact,
-      triggerAt: run.triggerAt,
-      nextRunAt: run.nextRunAt,
-      createdAt: run.createdAt,
-      log: (run.log || []).map((entry: any) => ({ type: entry.type, status: entry.status, detail: entry.detail, at: entry.at })),
-    })),
-  };
 }
 
 export function readinessProblems(doc: { trigger: CrmAutomationTrigger | null; steps: CrmAutomationStep[] }): string[] {

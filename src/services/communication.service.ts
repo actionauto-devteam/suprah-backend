@@ -219,12 +219,13 @@ export async function sendAutomatedSms(opts: {
   customerName?: string;
   leadId?: any;
   aiWorkflow?: AiWorkflow;
+  senderName?: string;
 }): Promise<boolean> {
   if (await isSmsOptedOut(opts.orgId, opts.toPhone)) return false;
-  const { aiWorkflow, ...rest } = opts;
+  const { aiWorkflow, senderName, ...rest } = opts;
   await sendSmsFromUser({
     ...rest,
-    user: await automatedActor(opts.orgId),
+    user: senderName ? { userId: "system", name: senderName } : await automatedActor(opts.orgId),
     beforeDispatch: aiWorkflow ? aiSmsDispatchGuard(opts.orgId, aiWorkflow, opts.toPhone, opts.leadId) : undefined,
   });
   return true;
@@ -286,7 +287,22 @@ export async function sendStaffAttributedSms(opts: {
   });
 }
 
+async function automationTextsMissedCall(call: any): Promise<string | null> {
+  try {
+    const { automationForMissedCallText } = await import('./crmAutomationCalls.service');
+    return await automationForMissedCallText(call);
+  } catch (err) {
+    console.error("[comm] missed-call automation check failed, sending the built-in text", err);
+    return null;
+  }
+}
+
 async function sendMissedCallTextBack(call: any): Promise<void> {
+  const automation = await automationTextsMissedCall(call);
+  if (automation) {
+    console.info("[comm] missed-call text-back skipped: an automation sends its own text", { automation, callId: String(call?._id || "") });
+    return;
+  }
   try {
     const sender = await resolveSenderIntro(call.orgId);
     await sendAutomatedSms({

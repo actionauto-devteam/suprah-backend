@@ -27,6 +27,7 @@ import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
 import { emitToOrg } from '../utils/socketEmitter';
 import { normalizeLocationKey } from '../utils/locationKey';
+import { dialedKey, dialedNumberLocations, locationDisplayName } from './crmAutomationCalls.service';
 import { COMPANY_TZ, addDaysToDateStr, toCompanyDateStr, zoneMidnightUtc } from '../utils/companyTimezone';
 import { AI_AGENT_ASSIGNEE, ENGINE_EVENTS, isAutomationEngineEnabled, teamQuery } from './crmAutomation.service';
 import logger from '../utils/logger';
@@ -60,6 +61,7 @@ interface EngineEvent {
   name: string;
   targetAt?: Date | null;
   appointmentId?: string | null;
+  location?: string;
 }
 
 interface ActionResult {
@@ -148,15 +150,16 @@ async function collectEvents(orgId: string, event: string, since: Date, now: Dat
       .lean();
     return messages.map((message: any) => ({ eventKey: `sms:${message._id}`, triggerAt: new Date(message.createdAt), leadId: message.leadId ? String(message.leadId) : null, phone: String(message.from || ''), email: '', name: '' }));
   }
-  if (event === 'call_missed' || event === 'call_ended') {
+  if (event === 'call_missed' || event === 'call_ended' || event === 'call_any') {
     const calls = await CallLog.find({
       orgId: { $in: orgIds },
       createdAt: { $gt: new Date(since.getTime() - RECENT_CALL_WINDOW_MS) },
       direction: 'inbound',
-      status: event === 'call_missed' ? 'missed' : 'completed',
+      status: event === 'call_any' ? { $in: ['missed', 'completed'] } : event === 'call_missed' ? 'missed' : 'completed',
       endedAt: { $gt: since, $lte: now },
-    }).select('from customerName leadId endedAt').limit(RECORD_LIMIT).lean();
-    return calls.map((call: any) => ({ eventKey: `${event}:${call._id}`, triggerAt: new Date(call.endedAt), leadId: call.leadId ? String(call.leadId) : null, phone: String(call.from || ''), email: '', name: String(call.customerName || '') }));
+    }).select('from to customerName leadId endedAt').limit(RECORD_LIMIT).lean();
+    const dialed = await dialedNumberLocations(orgId, calls.map((call: any) => String(call.to || '')));
+    return calls.map((call: any) => ({ eventKey: `${event}:${call._id}`, triggerAt: new Date(call.endedAt), leadId: call.leadId ? String(call.leadId) : null, phone: String(call.from || ''), email: '', name: String(call.customerName || ''), location: dialed.get(dialedKey(call.to)) || '' }));
   }
   if (event === 'website_chat_started') {
     const sessions = await WebChatSession.find({ organizationId: orgId, createdAt: { $gt: since, $lte: now } }).select('leadId visitorName visitorPhone visitorEmail createdAt').limit(RECORD_LIMIT).lean();
@@ -225,7 +228,7 @@ function fieldValue(field: string, ctx: { lead: any; event: EngineEvent; afterHo
     case 'lead_status': return lead?.status;
     case 'lead_tags': return lead?.tags || [];
     case 'assigned_to': return lead?.assignedTo ? String(lead.assignedTo) : '';
-    case 'location': return lead?.location || '';
+    case 'location': return event.location || lead?.location || '';
     case 'customer_name': return lead ? fullName(lead.firstName, lead.lastName) : event.name;
     case 'customer_email': return lead?.email || event.email;
     case 'customer_phone': return lead?.phone || event.phone;
@@ -290,8 +293,9 @@ async function startRun(automation: any, event: EngineEvent, orgId: string, loca
     email: String(lead?.email || event.email || ''),
   };
   let reason: string | null = null;
+  const rawLocation = String(event.location || lead?.location || '');
   if (automation.locations?.mode === 'specific') {
-    const key = normalizeLocationKey(String(lead?.location || ''));
+    const key = normalizeLocationKey(rawLocation);
     const allowed = (automation.locations.ids || []).some((id: string) => (locationKeys.get(String(id)) || []).includes(key));
     if (!key || !allowed) reason = 'Not at one of the selected locations';
   }
@@ -319,6 +323,7 @@ async function startRun(automation: any, event: EngineEvent, orgId: string, loca
       targetAt: event.targetAt || null,
       appointmentId: event.appointmentId || null,
       contact,
+      location: await locationDisplayName(orgId, rawLocation),
       repeatKey: reason ? null : repeatKey,
       settings: {
         sendingHours: automation.trigger.sendingHours || 'sending_hours',
@@ -448,7 +453,7 @@ async function sendText(run: ICrmAutomationRun, body: string): Promise<ActionRes
   const text = withStopLine(body);
   if (run.mode === 'test') return { status: 'test', detail: `Would text ${run.contact.phone}: ${text}` };
   try {
-    const sent = await sendAutomatedSms({ orgId: run.organizationId, toPhone: run.contact.phone, body: text, leadId: run.contact.leadId || undefined });
+    const sent = await sendAutomatedSms({ orgId: run.organizationId, toPhone: run.contact.phone, body: text, leadId: run.contact.leadId || undefined, senderName: `Automation - ${run.automationName}` });
     return sent ? { status: 'sent', detail: text } : { status: 'skipped', detail: 'The customer replied STOP' };
   } catch (err) {
     return smsOutcome(err);
@@ -540,7 +545,7 @@ function stepDue(run: ICrmAutomationRun, step: any, now: Date): Date | 'skip' | 
 }
 
 async function chooseBranchPath(run: ICrmAutomationRun, step: any): Promise<{ label: string; steps: any[]; repeatKey: string | null }> {
-  const event: EngineEvent = { eventKey: run.eventKey, triggerAt: run.triggerAt, leadId: run.contact.leadId, phone: run.contact.phone, email: run.contact.email, name: run.contact.name };
+  const event: EngineEvent = { eventKey: run.eventKey, triggerAt: run.triggerAt, leadId: run.contact.leadId, phone: run.contact.phone, email: run.contact.email, name: run.contact.name, location: run.location || '' };
   const lead = await loadLead(run.organizationId, event);
   const hour = denverHour(run.triggerAt);
   const ctx = { lead, event, afterHours: hour < SEND_START_HOUR || hour >= SEND_END_HOUR, newContact: false };
@@ -574,6 +579,7 @@ async function processRun(run: ICrmAutomationRun, now: Date) {
     agent_name: agent.displayName,
     agent_name_configured: agent.name || '',
     vehicle: vehicle || 'your vehicle',
+    location_name: run.location || dealerName,
   };
   while (run.stepIndex < run.steps.length) {
     const step: any = run.steps[run.stepIndex];
