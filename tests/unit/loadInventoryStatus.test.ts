@@ -16,6 +16,16 @@ describe('inventoryStatusAtDelivery', () => {
     expect(inventoryStatusAtDelivery(null)).toBe('Ready for Sale');
     expect(inventoryStatusAtDelivery({ quoteId: QUOTE })).toBe('Sold');
   });
+
+  it('marks a car Sold when Dispatch said it is sold to the person receiving it', () => {
+    expect(inventoryStatusAtDelivery({ soldOnDelivery: true })).toBe('Sold');
+    expect(inventoryStatusAtDelivery({ soldOnDelivery: false })).toBe('Ready for Sale');
+    expect(inventoryStatusAtDelivery({ soldOnDelivery: 'yes' })).toBe('Ready for Sale');
+    const load = { soldOnDelivery: true, vehicles: [{ vehicleId: CAR_A }] };
+    expect(inventoryVehicleIdsFollowingLoad(load, 'In Transit')).toEqual([CAR_A]);
+    expect(inventoryVehicleIdsFollowingLoad(load, 'Ready for Sale')).toEqual([]);
+    expect(inventoryVehicleIdsFollowingLoad(load, 'Sold')).toEqual([CAR_A]);
+  });
 });
 
 describe('inventoryVehicleIdsFollowingLoad', () => {

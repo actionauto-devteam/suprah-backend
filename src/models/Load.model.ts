@@ -30,6 +30,9 @@ export interface ILoad extends Document {
   /** Set when the load was converted from a quote — referral.service
    *  resolves referral credit through this link. */
   quoteId?: mongoose.Types.ObjectId;
+  /** Asked in Create Managed Load: the car is sold to the person receiving
+   *  it, so it's marked Sold at delivery (see inventoryStatusAtDelivery). */
+  soldOnDelivery?: boolean;
   loadNumber: string;
   postType: "load-board" | "assign-carrier";
   status: LoadStatus;
@@ -401,6 +404,7 @@ const loadSchema = new Schema<ILoad>(
     orgId: { type: Schema.Types.ObjectId, ref: "Organization" },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
     quoteId: { type: Schema.Types.ObjectId, ref: "Quote", index: true, sparse: true },
+    soldOnDelivery: { type: Boolean, default: undefined },
     // Unique per organization (see compound index below). The daily counter is
     // per organization, so a global unique index made the second org to post
     // on a given day collide with the first org's LD-YYYYMMDD-### numbers.

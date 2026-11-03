@@ -216,6 +216,7 @@ export const createLoadSchema = z
     additionalInfo: additionalInfoSchema,
     contract: contractSchema,
     pricing: pricingInputSchema,
+    soldOnDelivery: z.boolean("Choose whether the car is sold to the person receiving it.").optional(),
   })
   .superRefine((value, ctx) => {
     if (value.postType !== "assign-carrier") return;
@@ -267,6 +268,7 @@ export const updateLoadSchema = z
     additionalInfo: additionalInfoUpdateSchema,
     contract: contractSchema,
     pricing: pricingInputSchema,
+    soldOnDelivery: z.boolean("Choose whether the car is sold to the person receiving it.").optional(),
     // Echoing the current status is allowed; changing it is refused later.
     status: z.string().trim().max(40).optional(),
     expectedUpdatedAt: z
