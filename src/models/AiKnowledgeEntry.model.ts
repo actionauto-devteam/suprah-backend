@@ -96,6 +96,7 @@ export interface IAiKnowledgeEntry extends Document {
   lastReview?: { action: string; note?: string; by: TrainingActorRef; at: Date };
   approvedBy?: TrainingActorRef;
   approvedAt?: Date;
+  amountApproval?: { amounts: string[]; by: TrainingActorRef; at: Date };
   disabledAt?: Date;
   disabledBy?: TrainingActorRef;
   archivedAt?: Date;
@@ -172,6 +173,11 @@ const AiKnowledgeEntrySchema: Schema<IAiKnowledgeEntry> = new Schema(
     },
     approvedBy: { type: TrainingActorSchema },
     approvedAt: { type: Date },
+    amountApproval: {
+      amounts: { type: [{ type: String, trim: true, maxlength: 60 }], default: undefined },
+      by: { type: TrainingActorSchema },
+      at: { type: Date },
+    },
     disabledAt: { type: Date },
     disabledBy: { type: TrainingActorSchema },
     archivedAt: { type: Date },

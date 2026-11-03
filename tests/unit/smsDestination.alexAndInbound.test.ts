@@ -161,7 +161,7 @@ describe('inbound YES/CANCEL replies from a number automatic texts cannot reach'
     process.env.COMM_ORG_ID = 'org-1';
     mockResolveAiAgentSettings.mockResolvedValue({ enabled: false, agentName: 'Alex' });
     mockConvFindOneAndUpdate.mockResolvedValue(conversation('+639171234567'));
-    mockMessageFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    mockMessageFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null), sort: () => ({ select: () => ({ lean: jest.fn().mockResolvedValue(null) }) }) });
     mockMessageCreate.mockImplementation(async (doc: any) => ({
       _id: 'msg-in',
       createdAt: new Date(),
@@ -268,7 +268,7 @@ describe('Do Not Contact customers', () => {
       process.env.COMM_ORG_ID = 'org-1';
       mockResolveAiAgentSettings.mockResolvedValue({ enabled: false, agentName: 'Alex' });
       mockConvFindOneAndUpdate.mockResolvedValue(conversation('+13855035869'));
-      mockMessageFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+      mockMessageFindOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null), sort: () => ({ select: () => ({ lean: jest.fn().mockResolvedValue(null) }) }) });
       mockMessageCreate.mockImplementation(async (doc: any) => ({
         _id: 'msg-in',
         createdAt: new Date(),

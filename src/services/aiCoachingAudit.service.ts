@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import AiAgentCoachingRule from '../models/AiAgentCoachingRule.model';
 import Organization from '../models/Organization.model';
 import { strictInstructionIssues } from './aiTrainingSafetyGate';
+import { moneyFigures, sameMoneyFigures } from '../utils/aiMoneyAmounts';
 import {
   TARGET_ENVIRONMENTS,
   type CredentialAccess,
@@ -34,6 +35,7 @@ export interface CoachingAuditInput {
   status: string;
   channel?: string;
   instruction?: unknown;
+  amountApproval?: { amounts?: unknown } | null;
   usageCount?: number;
   lastUsedAt?: Date | null;
   createdAt?: Date | null;
@@ -105,10 +107,11 @@ const isoOrNull = (value: unknown): string | null => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
-export function evaluateCoachingRecord(record: Pick<CoachingAuditInput, 'instruction'>): { passed: boolean; noText: boolean; issueCodes: string[] } {
+export function evaluateCoachingRecord(record: Pick<CoachingAuditInput, 'instruction' | 'amountApproval'>): { passed: boolean; noText: boolean; issueCodes: string[] } {
   const text = typeof record.instruction === 'string' ? record.instruction : '';
   if (!text.trim()) return { passed: true, noText: true, issueCodes: [] };
-  const issueCodes = Array.from(new Set(strictInstructionIssues(text).map((issue) => issue.code)));
+  const allowMoney = sameMoneyFigures(record.amountApproval?.amounts, moneyFigures(text));
+  const issueCodes = Array.from(new Set(strictInstructionIssues(text, { allowMoney }).map((issue) => issue.code)));
   return { passed: issueCodes.length === 0, noText: false, issueCodes };
 }
 
@@ -229,7 +232,7 @@ export async function runLegacyCoachingAudit(options: { organizationId?: string 
   const cursor = collection.find(
     { ...scope, status: { $in: ['active', 'disabled'] } },
     {
-      projection: { organizationId: 1, status: 1, channel: 1, instruction: 1, usageCount: 1, lastUsedAt: 1, createdAt: 1, updatedAt: 1 },
+      projection: { organizationId: 1, status: 1, channel: 1, instruction: 1, amountApproval: 1, usageCount: 1, lastUsedAt: 1, createdAt: 1, updatedAt: 1 },
       sort: { _id: 1 },
       batchSize: AUDIT_BATCH_SIZE,
       maxTimeMS: AUDIT_MAX_TIME_MS,

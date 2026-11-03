@@ -14,6 +14,7 @@ import AiTrainingAuditLog from '../models/AiTrainingAuditLog.model';
 import AiAgentCoachingRule from '../models/AiAgentCoachingRule.model';
 import CrmLocation from '../models/CrmLocation.model';
 import { ApiError } from '../utils/ApiError';
+import { moneyFigures } from '../utils/aiMoneyAmounts';
 import logger from '../utils/logger';
 import {
   appendPolicyVersion,
@@ -317,7 +318,16 @@ function screenRow(row: CanonicalRow, contacts: BusinessContactSets, nameAllow: 
       }
     }
     const cls = guardrailClassFor(values.type, field, row.unsupportedType);
-    add('guardrail', guardrailIssues(path, text, cls));
+    const amounts = cls === 'knowledge' ? moneyFigures(text) : [];
+    add('guardrail', guardrailIssues(path, text, cls, { allowMoney: amounts.length > 0 }));
+    if (amounts.length) {
+      add('mapping', [{
+        field: path,
+        code: 'money_amounts',
+        severity: 'warning',
+        message: `Includes money amounts: ${amounts.join(', ')}. A manager or admin decides if the AI agent may say them when approving this answer in the Knowledge Base.`,
+      }]);
+    }
     if (cls !== 'exempt' && cls !== 'question') add('safety', safetyIssues(path, text));
     if (field === 'mustAvoid') {
       for (const issue of avoidItemIssues(path, text)) add(issue.code === 'must_avoid_safety' || issue.code === 'safety_bypass' ? 'safety' : 'guardrail', [issue]);

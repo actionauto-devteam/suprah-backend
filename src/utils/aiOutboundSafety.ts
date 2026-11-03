@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import logger from './logger';
 import { isDemoPhone } from './demoPhone';
 import { isLocalMongoTarget } from './productionDbGuard.util';
+import { moneyFigures, moneyKeys } from './aiMoneyAmounts';
 
 const NO_KEY_PLACEHOLDER = 'disabled-no-key';
 
@@ -170,8 +171,51 @@ export function hasGuaranteedAvailabilityLanguage(text: string): boolean {
   return false;
 }
 
-export function validateOutboundMessage(text: string): { ok: boolean; reasons: string[] } {
-  const reasons = PROHIBITED_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason);
+export const MONEY_SAFETY_REASONS = new Set([
+  'currency amount',
+  'price mention',
+  'percent-off',
+  'discount/incentive language',
+  'financing/payment language',
+  'trade-in mention',
+]);
+
+export interface MoneyAllowance {
+  notes: string[];
+  amounts: string[];
+  keys: string[];
+  reasons: string[];
+}
+
+export function buildMoneyAllowance(notes: string[]): MoneyAllowance | undefined {
+  const keys = new Set<string>();
+  const reasons = new Set<string>();
+  const amounts: string[] = [];
+  const used: string[] = [];
+  for (const note of notes) {
+    const noteKeys = moneyKeys(note);
+    if (!noteKeys.length) continue;
+    used.push(note);
+    noteKeys.forEach((key) => keys.add(key));
+    if (noteKeys.some((key) => key.startsWith('usd:'))) reasons.add('currency amount');
+    if (noteKeys.some((key) => key.startsWith('pct:'))) reasons.add('percent-off');
+    for (const entry of PROHIBITED_PATTERNS) {
+      if (MONEY_SAFETY_REASONS.has(entry.reason) && entry.pattern.test(note)) reasons.add(entry.reason);
+    }
+    for (const amount of moneyFigures(note)) if (!amounts.includes(amount)) amounts.push(amount);
+  }
+  if (!keys.size) return undefined;
+  return { notes: used, amounts, keys: Array.from(keys), reasons: Array.from(reasons) };
+}
+
+function usesOnlyApprovedAmounts(text: string, allowance: MoneyAllowance): boolean {
+  const keys = moneyKeys(text);
+  return keys.length > 0 && keys.every((key) => allowance.keys.includes(key));
+}
+
+export function validateOutboundMessage(text: string, allowance?: MoneyAllowance): { ok: boolean; reasons: string[] } {
+  let reasons = PROHIBITED_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason);
+  if (allowance && usesOnlyApprovedAmounts(text, allowance)) reasons = reasons.filter((reason) => !allowance.reasons.includes(reason));
   if (hasGuaranteedAvailabilityLanguage(text)) reasons.push('guaranteed-availability language');
   if (text.trim().length < 10) reasons.push('message too short or malformed');
   return { ok: reasons.length === 0, reasons: Array.from(new Set(reasons)) };

@@ -12,6 +12,7 @@ import {
   type BusinessContactSets,
 } from './aiTrainingImportScreening';
 import { EMAIL_PATTERN, FICTIONAL_EMAIL_DOMAIN, PHONE_PATTERN, URL_PATTERN } from './aiTrainingLab.service';
+import { moneyFigures } from '../utils/aiMoneyAmounts';
 
 export interface KnowledgeIssue {
   field: string;
@@ -22,6 +23,7 @@ export interface KnowledgeIssue {
 export interface KnowledgeCheck {
   errors: KnowledgeIssue[];
   warnings: KnowledgeIssue[];
+  amounts?: string[];
 }
 
 export interface KnowledgeCheckInput {
@@ -59,34 +61,42 @@ export function normalizeKnowledgeKey(value: unknown): string {
 
 const DISCOUNT_CODE = 'knowledge_discount_offer';
 
-const TERM_RULES: Array<{ code: string; pattern: RegExp; message: string }> = [
+const FINANCING_PROMISES = /\b(?:guaranteed|instant|easy)\s+(?:credit|financing|approvals?)\b|\b(?:approval|credit|financing)\s+(?:is\s+)?guaranteed\b|\b(?:all|any|every)\s+credit\b|\b(?:bad|poor|no)\s+credit\b|\bcredit (?:problems|issues)\b/gi;
+
+const TERM_RULES: Array<{ code: string; pattern: RegExp; message: string; money?: boolean; promises?: RegExp }> = [
   {
     code: 'knowledge_deposit_terms',
+    money: true,
     pattern: /\bdeposits?\b|\b(?:hold|holds|holding|reserve|reserves|reserving)\s+(?:the|a|an|your|any|that|this)?\s*(?:vehicle|vehicles|car|cars|truck|trucks|suv|suvs|van|vans)\b/gi,
     message: 'Remove deposit or vehicle-hold terms. Say the team will confirm them instead.',
   },
   {
     code: 'knowledge_payment_terms',
+    money: true,
     pattern: /\b(?:no|zero|\$?0)\s+(?:money\s+)?down\b|\bdown payments?\b|\b(?:monthly|weekly|bi-?weekly|low)\s+payments?\b|\bpayments?\s+(?:as low as|starting at|start at|from)\b|\bfirst payment\b|\bdefer(?:red)?\s+payments?\b|\bpay later\b/gi,
     message: 'Remove payment terms such as down payments or monthly payments. Say the finance team will go over them.',
   },
   {
     code: 'knowledge_financing_terms',
+    promises: FINANCING_PROMISES,
     pattern: /\b(?:low|lower|lowest|best|great|special|competitive|reduced)\s+(?:interest\s+)?(?:rates?|APR|financing)\b|\bAPR\b|\binterest rates?\b|\b(?:guaranteed|instant|easy)\s+(?:credit|financing|approvals?)\b|\b(?:approval|credit|financing)\s+(?:is\s+)?guaranteed\b|\b(?:all|any|every)\s+credit\b|\b(?:bad|poor|no)\s+credit\b|\bcredit (?:problems|issues)\b/gi,
     message: 'Remove rate, credit or approval claims. Say the finance team will go over financing options.',
   },
   {
     code: 'knowledge_price_claims',
+    money: true,
     pattern: /\b(?:best|lowest|cheapest|unbeatable)\s+(?:price|prices|deal|deals|value)\b|\bprice[\s-]match(?:ing)?\b|\bbeat any\b|\bbelow (?:market|invoice|msrp|sticker)\b|\bat (?:cost|invoice)\b|\bno[\s-]haggle\b|\b(?:dealer|doc|documentation|admin|administrative|processing|destination)\s+fees?\b|\bout[\s-]the[\s-]door\b|\bsticker price\b|\bfinal (?:price|pricing|cost)\b|\bMSRP\b/gi,
     message: 'Remove price claims, fees or price-match promises. Say the team will confirm pricing.',
   },
   {
     code: 'knowledge_trade_in_value',
+    money: true,
     pattern: /\btop dollar\b|\btrade[\s-]?in\s+(?:values?|offers?|bonus(?:es)?|credits?|allowances?|prices?)\b|\b(?:value|values|appraise|appraises|pay|pays)\s+(?:more\s+)?(?:for\s+)?(?:your|the|their)\s+trade\b|\bkelley blue book\b|\bKBB\b|\bblue book\b|\bmore for your trade\b|\bguaranteed trade\b/gi,
     message: 'Remove trade-in value claims. Say the team will appraise the trade-in.',
   },
   {
     code: DISCOUNT_CODE,
+    money: true,
     pattern: /\bdiscount(?:s|ed)?\b|\brebates?\b|\bincentives?\b|\bspecial offers?\b|\bpromo(?:tion)?(?:s|al)?\b|\bcoupons?\b|\bon sale\b|\bclearance\b|\bloyalty (?:bonus|cash)\b/gi,
     message: 'Remove discounts, rebates or incentives, or name an approved dealership program. Say the team will confirm current offers.',
   },
@@ -112,7 +122,7 @@ function firstUncovered(sentence: string, pattern: RegExp): boolean {
   return false;
 }
 
-export function knowledgeTermIssues(field: string, text: string, programNames: string[] = []): KnowledgeIssue[] {
+export function knowledgeTermIssues(field: string, text: string, programNames: string[] = [], allowMoney = false): KnowledgeIssue[] {
   const found = new Map<string, KnowledgeIssue>();
   if (!text) return [];
   for (const sentence of sentencesOf(text)) {
@@ -120,7 +130,8 @@ export function knowledgeTermIssues(field: string, text: string, programNames: s
     for (const rule of TERM_RULES) {
       if (found.has(rule.code)) continue;
       if (rule.code === DISCOUNT_CODE && namesProgram) continue;
-      if (firstUncovered(sentence, rule.pattern)) found.set(rule.code, { field, code: rule.code, message: rule.message });
+      const pattern = allowMoney ? (rule.money ? null : rule.promises || rule.pattern) : rule.pattern;
+      if (pattern && firstUncovered(sentence, pattern)) found.set(rule.code, { field, code: rule.code, message: rule.message });
     }
     const discountWords = new RegExp(TERM_RULES.find((rule) => rule.code === DISCOUNT_CODE)!.pattern.source, 'i').test(sentence);
     if (!found.has(PROGRAM_TERMS.code) && (namesProgram || discountWords) && firstUncovered(sentence, PROGRAM_TERMS.pattern)) {
@@ -157,7 +168,9 @@ export function knowledgeContentCheck(input: KnowledgeCheckInput, context: Knowl
     raw.push(...privacy('question', input.question), ...guardrailIssues('question', input.question, 'question'));
     raw.push(...protectedQuestionIssues('question', input.question));
   }
-  raw.push(...privacy('answer', input.answer), ...guardrailIssues('answer', input.answer, 'knowledge'), ...safetyIssues('answer', input.answer));
+  const amounts = moneyFigures(input.answer);
+  const allowMoney = amounts.length > 0;
+  raw.push(...privacy('answer', input.answer), ...guardrailIssues('answer', input.answer, 'knowledge', { allowMoney }), ...safetyIssues('answer', input.answer));
 
   const errors: KnowledgeIssue[] = [];
   const warnings: KnowledgeIssue[] = [];
@@ -172,8 +185,15 @@ export function knowledgeContentCheck(input: KnowledgeCheckInput, context: Knowl
     if (issue.severity === 'error') push(errors, toIssue(issue));
     else if (issue.severity === 'warning') push(warnings, toIssue(issue));
   }
-  for (const issue of knowledgeTermIssues('answer', input.answer, context.programNames || [])) push(errors, issue);
-  return { errors, warnings };
+  for (const issue of knowledgeTermIssues('answer', input.answer, context.programNames || [], allowMoney)) push(errors, issue);
+  if (allowMoney) {
+    push(warnings, {
+      field: 'answer',
+      code: 'money_amounts',
+      message: `Includes money amounts: ${amounts.join(', ')}. A manager or admin decides if the AI agent may say these exact amounts when approving it.`,
+    });
+  }
+  return { errors, warnings, ...(allowMoney ? { amounts } : {}) };
 }
 
 export const privacyErrors = (check: KnowledgeCheck): KnowledgeIssue[] => check.errors.filter((issue) => KNOWLEDGE_PRIVACY_CODES.has(issue.code));

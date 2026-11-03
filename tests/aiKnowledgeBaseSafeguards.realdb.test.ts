@@ -403,14 +403,13 @@ describe('Real-DB proof: P2a.1 Knowledge Base safeguards (local MongoDB only)', 
   });
 
   describe('verified discount programs', () => {
-    it('allows describing an approved program but never amounts, guaranteed eligibility, pricing or payment promises', async () => {
+    it('allows describing an approved program, amounts only with a manager allowing them, and never guaranteed eligibility, pricing or payment promises', async () => {
       const programId = await approvedDetail({ kind: 'program', value: 'Fictional Heroes Appreciation Program', programType: 'military', locations: { scope: 'all' } });
       const text = 'Our Fictional Heroes Appreciation Program offers a discount for active-duty and retired service members. Our team can confirm eligibility.';
       const programEntry = await approvedEntry({ kind: 'faq', topic: 'general', question: q('Do you have a military discount'), answer: text, locations: scope('orem') });
       expect((await entryDoc(programEntry)).approvedDependencies.map((dep: any) => String(dep.detailId))).toEqual([programId]);
       for (const [answer, code] of [
         ['All veterans qualify for our Fictional Heroes Appreciation Program discount.', 'answer:knowledge_program_terms'],
-        ['Our Fictional Heroes Appreciation Program takes $500 off.', 'answer:guardrail_figure'],
         ['Our Fictional Heroes Appreciation Program discount gets you the final price.', 'answer:knowledge_price_claims'],
         ['Our Fictional Heroes Appreciation Program includes low monthly payments.', 'answer:knowledge_payment_terms'],
         ['Our Unlisted Savings Program offers a discount for nurses.', 'answer:knowledge_discount_offer'],
@@ -418,6 +417,10 @@ describe('Real-DB proof: P2a.1 Knowledge Base safeguards (local MongoDB only)', 
         const id = await entry('rep', { kind: 'faq', topic: 'general', question: q('Tell me about discounts'), answer, locations: scope('orem') });
         expect(codes(await submit('rep', id))).toContain(code);
       }
+      const amount = await entry('rep', { kind: 'faq', topic: 'general', question: q('How much is the military discount'), answer: 'Our Fictional Heroes Appreciation Program takes $500 off.', locations: scope('orem') });
+      await ok(submit('rep', amount), 200);
+      expect(codes(await approve('manager', amount))).toEqual(['answer:amounts_need_approval']);
+      expect((await entryDoc(amount)).status).toBe('in_review');
       const localProgram = await approvedDetail({ kind: 'program', value: 'Fictional Orem Teacher Program', programType: 'educator', locations: scope('orem') });
       const wide = await entry('rep', { kind: 'faq', topic: 'general', question: q('Teacher discount'), answer: 'Our Fictional Orem Teacher Program offers a discount for teachers.', locations: { scope: 'all' } });
       expect(codes(await submit('rep', wide))).toEqual(['answer:knowledge_discount_offer']);

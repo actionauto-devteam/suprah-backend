@@ -77,6 +77,8 @@ export interface IAppointment extends Document {
   reminderSent: boolean;
   reminderTime?: Date;
   reminderSentAt?: Date;
+  confirmationRequestedAt?: Date;
+  confirmedReplyAt?: Date;
   reminderSms?: IAppointmentSmsNotice;
   rescheduleNotice?: IAppointmentSmsNotice;
   customerEmailNotice?: IAppointmentEmailNotice;
@@ -251,6 +253,8 @@ const AppointmentSchema: Schema<IAppointment> = new Schema(
     reminderSent: { type: Boolean, default: false },
     reminderTime: { type: Date },
     reminderSentAt: { type: Date },
+    confirmationRequestedAt: { type: Date },
+    confirmedReplyAt: { type: Date },
     reminderSms: { type: AppointmentSmsNoticeSchema, default: undefined },
     rescheduleNotice: { type: AppointmentSmsNoticeSchema, default: undefined },
     customerEmailNotice: { type: AppointmentEmailNoticeSchema, default: undefined },

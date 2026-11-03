@@ -7,6 +7,8 @@ import {
   hasGeminiApiKey,
   createCompletionWithFallback as createCompletionWithFallbackShared,
   validateOutboundMessage,
+  buildMoneyAllowance,
+  type MoneyAllowance,
   describeGenerationError as describeGenerationErrorShared,
   stripDraftArtifacts,
   classifySafety,
@@ -136,6 +138,11 @@ function staffDraftLines(agentName: string, dealerName: string, channelLabel: st
   ];
 }
 
+function approvedAmountLines(amounts?: string[]): string[] {
+  if (!amounts?.length) return [];
+  return [`Exception: a manager approved the money amounts in the coaching below (${amounts.join(', ')}). When one of them answers the customer's question, you may state it exactly as the coaching says. Never change, round or combine an approved amount, never use it for anything else, and never quote any other amount.`];
+}
+
 export async function generateAlexReply(opts: {
   agentName: string;
   dealerName: string;
@@ -145,6 +152,7 @@ export async function generateAlexReply(opts: {
   channel: 'webchat' | 'sms';
   isFirstReply?: boolean;
   coachingNotes?: string[];
+  approvedAmounts?: string[];
   phone?: string;
   vehicleContextNote?: string;
   contactRestrictionNote?: string;
@@ -182,6 +190,7 @@ export async function generateAlexReply(opts: {
     'Reply in 1-3 short, natural, conversational sentences. No signature, no "Best regards", no bullet lists.',
     'Sound like a friendly, genuinely helpful person at the dealership, not a script. Vary your phrasing and sentence structure naturally — do not reuse the same opening, closing, or stock phrase you already used earlier in this conversation.',
     'Never invent or quote prices, monthly payments, trade-in values, financing terms, discounts, or incentives, and never promise that a specific vehicle is still available; say you will confirm with the team instead.',
+    ...approvedAmountLines(opts.approvedAmounts),
     ...(opts.draftFor ? [] : ['Do not fabricate a human identity or impersonate an employee. Identity concerns and requests for a human are escalated by the application without an assistant reply.']),
     ...disclosureLines,
     'Reply in the same language the customer is using (including Spanish) — this applies to your introduction too, when one is called for.',
@@ -427,16 +436,29 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'Respond with EXACTLY ONE WORD: SAFE or UNSAFE. No punctuation, no explanation, no other text.',
 ].join('\n');
 
+function classifierPromptWith(prompt: string, allowance?: MoneyAllowance): string {
+  if (!allowance) return prompt;
+  return [
+    prompt,
+    'A manager approved these dealership notes, including the money amounts in them:',
+    ...allowance.notes.map((note, index) => `${index + 1}. ${note}`),
+    `Approved amounts: ${allowance.amounts.join(', ')}.`,
+    'Stating one of these approved amounts exactly, with the same meaning it has in its note, is SAFE. Any other amount, a changed or rounded amount, or an approved amount used for something else (for example as a discount, a payment or a vehicle price) is UNSAFE.',
+    'Respond with EXACTLY ONE WORD: SAFE or UNSAFE.',
+  ].join('\n');
+}
+
 export async function classifyAlexReplySafety(
   text: string,
   phone?: string,
   timeoutMs: number = CLASSIFIER_TIMEOUT_MS,
+  allowance?: MoneyAllowance,
 ): Promise<'SAFE' | 'UNSAFE' | 'ERROR'> {
   return classifySafety(gemini, text, {
     model: CLASSIFIER_MODEL,
     fallbackModel: GEMINI_FALLBACK_MODEL,
     timeoutMs,
-    systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
+    systemPrompt: classifierPromptWith(CLASSIFIER_SYSTEM_PROMPT, allowance),
     logLabel: LOG_LABEL,
     phone,
   });
@@ -701,6 +723,7 @@ async function regenerateForCoaching(input: {
   transcript: AiAgentTranscriptEntry[];
   channel: 'webchat' | 'sms';
   appliedRules: AppliedAiCoachingRule[];
+  approvedAmounts?: string[];
   originalDraft: string;
   violationReason?: string;
   vehicleContextNote?: string;
@@ -716,6 +739,7 @@ async function regenerateForCoaching(input: {
     'Reply in 1-3 short, natural, conversational sentences. No signature, no "Best regards", no bullet lists.',
     'Sound like a friendly, genuinely helpful person at the dealership, not a script. Vary your phrasing and sentence structure naturally — do not reuse the same opening, closing, or stock phrase you already used earlier in this conversation.',
     'Never invent or quote prices, monthly payments, trade-in values, financing terms, discounts, or incentives, and never promise that a specific vehicle is still available; say you will confirm with the team instead.',
+    ...approvedAmountLines(input.approvedAmounts),
     'Do not fabricate a human identity or impersonate an employee. Identity concerns and requests for a human are escalated by the application without an assistant reply.',
     'If the customer asks for something you genuinely cannot resolve yourself, say warmly and specifically what you will confirm and that you will follow up, then on a new line at the very end write exactly: [[HANDOFF: <short reason>]]',
     'Relevant active dealership coaching for this situation:',
@@ -991,6 +1015,9 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
 
   const appliedCoachingNotes = coachingSelection.appliedRules.map((rule) => rule.instruction);
   const appliedCoachingRuleIds = coachingSelection.appliedRules.map((rule) => rule.id);
+  const amountAllowance = buildMoneyAllowance(
+    coachingSelection.appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction),
+  );
 
   const generation = await generateAlexReply({
     agentName: ctx.agentName,
@@ -1001,6 +1028,7 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
     channel: ctx.channel,
     isFirstReply: ctx.isFirstReply,
     coachingNotes: appliedCoachingNotes,
+    approvedAmounts: amountAllowance?.amounts,
     phone: ctx.phone,
     vehicleContextNote: ctx.vehicleContextNote,
     contactRestrictionNote: ctx.contactRestrictionNote,
@@ -1068,6 +1096,7 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
         transcript: ctx.transcript,
         channel: ctx.channel,
         appliedRules: coachingSelection.appliedRules,
+        approvedAmounts: amountAllowance?.amounts,
         originalDraft: draft,
         violationReason: coachingRegenerationReason,
         vehicleContextNote: ctx.vehicleContextNote,
@@ -1124,7 +1153,7 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
   }
 
   const maxLen = ctx.channel === 'sms' ? MAX_REPLY_LENGTH_SMS : MAX_REPLY_LENGTH_WEBCHAT;
-  const deterministic = validateOutboundMessage(draft);
+  const deterministic = validateOutboundMessage(draft, amountAllowance);
   if (!deterministic.ok) {
     await sendFallback(ctx, base, deterministic.reasons.join(', '), {
       generatedMessage: draft,
@@ -1160,7 +1189,7 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
     return;
   }
 
-  let verdict = await classifyAlexReplySafety(draft, ctx.phone);
+  let verdict = await classifyAlexReplySafety(draft, ctx.phone, CLASSIFIER_TIMEOUT_MS, amountAllowance);
   let classifierRetried = false;
   if (
     verdict === 'ERROR' &&
@@ -1168,7 +1197,7 @@ export async function processAlexTurn(ctx: AiAgentTurnContext): Promise<void> {
     Date.now() - turnStartedAt < CLASSIFIER_RETRY_MAX_ELAPSED_MS
   ) {
     classifierRetried = true;
-    verdict = await classifyAlexReplySafety(draft, ctx.phone, CLASSIFIER_RETRY_TIMEOUT_MS);
+    verdict = await classifyAlexReplySafety(draft, ctx.phone, CLASSIFIER_RETRY_TIMEOUT_MS, amountAllowance);
   }
   if (verdict !== 'SAFE') {
     await sendFallback(

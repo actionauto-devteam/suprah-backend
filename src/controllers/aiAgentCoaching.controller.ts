@@ -10,6 +10,7 @@ import WebChatMessage from '../models/WebChatMessage.model';
 import { CommunicationMessage } from '../models/communication.model';
 import { submitCoachingAsProposal, trainingActor, writeTrainingAudit } from '../services/aiTraining.service';
 import { strictInstructionIssues } from '../services/aiTrainingSafetyGate';
+import { moneyFigures, sameMoneyFigures } from '../utils/aiMoneyAmounts';
 
 const AI_AGENT_ACTOR_ID = 'ai-agent';
 const MANAGER_ROLES = new Set(['manager', 'admin', 'super_admin']);
@@ -25,13 +26,31 @@ const actorName = (user: any) =>
 
 const isManager = (user: any) => MANAGER_ROLES.has(String(user?.role || ''));
 
-function requireSafeCoaching(instruction: string): void {
-  const blockers = strictInstructionIssues(instruction);
+function requireAmountDecision(instruction: string, allowed: unknown): string[] {
+  const amounts = moneyFigures(instruction);
+  requireSafeCoaching(instruction, amounts.length > 0);
+  if (amounts.length && allowed !== true) {
+    throw new ApiError(400, `This coaching includes money amounts: ${amounts.join(', ')}. Confirm that the AI agent may tell customers these exact amounts.`, [
+      { field: 'instruction', code: 'amounts_need_approval', message: 'Confirm the money amounts before saving.', amounts },
+    ]);
+  }
+  return amounts;
+}
+
+const amountApprovalFor = (user: any, amounts: string[]) => ({
+  amounts,
+  approvedBy: user._id,
+  approvedByName: actorName(user),
+  approvedAt: new Date(),
+});
+
+function requireSafeCoaching(instruction: string, allowMoney = false): void {
+  const blockers = strictInstructionIssues(instruction, { allowMoney });
   if (blockers.length) throw new ApiError(400, `This coaching can't be saved. ${blockers[0].message}`, blockers);
 }
 
-function requireSafeReactivation(instruction: string): void {
-  const blockers = strictInstructionIssues(instruction);
+function requireSafeReactivation(instruction: string, approvedAmounts?: unknown): void {
+  const blockers = strictInstructionIssues(instruction, { allowMoney: sameMoneyFigures(approvedAmounts, moneyFigures(instruction)) });
   if (blockers.length) {
     throw new ApiError(400, `This coaching can't be turned back on. ${blockers[0].message} It stays disabled until its text is updated.`, blockers);
   }
@@ -158,7 +177,7 @@ export const createAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     return;
   }
 
-  requireSafeCoaching(instruction);
+  const amounts = requireAmountDecision(instruction, req.body?.allowAmounts);
   const rule = await AiAgentCoachingRule.create({
     organizationId: orgId,
     scope: 'organization',
@@ -172,6 +191,7 @@ export const createAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
     originalAiMessageSnapshot: verified.originalAiMessageSnapshot,
     createdBy: user._id,
     createdByName: actorName(user),
+    ...(amounts.length ? { amountApproval: amountApprovalFor(user, amounts) } : {}),
   });
   await writeTrainingAudit({
     organizationId: orgId,
@@ -192,12 +212,15 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
   if (!mongoose.isValidObjectId(req.params.id)) throw new ApiError(400, 'Invalid coaching id');
 
   const setValues: Record<string, any> = { updatedBy: user._id };
+  const unsetValues: Record<string, ''> = {};
   if (Object.prototype.hasOwnProperty.call(req.body || {}, 'instruction')) {
     const instruction = String(req.body?.instruction || '').trim();
     if (!instruction) throw new ApiError(400, 'Coaching feedback is required');
     if (instruction.length > 800) throw new ApiError(400, 'Coaching feedback is too long');
-    requireSafeCoaching(instruction);
+    const amounts = requireAmountDecision(instruction, req.body?.allowAmounts);
     setValues.instruction = instruction;
+    if (amounts.length) setValues.amountApproval = amountApprovalFor(user, amounts);
+    else unsetValues.amountApproval = '';
   }
   if (Object.prototype.hasOwnProperty.call(req.body || {}, 'status')) {
     const status = String(req.body?.status || '');
@@ -212,11 +235,11 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
   const filter: Record<string, any> = { _id: req.params.id, organizationId: orgId, status: { $ne: 'deleted' } };
   let guarded = false;
   if (setValues.status === 'active' && !Object.prototype.hasOwnProperty.call(setValues, 'instruction')) {
-    const current = await AiAgentCoachingRule.findOne(filter).select('status instruction').lean() as any;
+    const current = await AiAgentCoachingRule.findOne(filter).select('status instruction amountApproval').lean() as any;
     if (!current) throw new ApiError(404, 'Coaching rule not found');
     filter.status = current.status;
     if (current.status !== 'active') {
-      requireSafeReactivation(String(current.instruction || ''));
+      requireSafeReactivation(String(current.instruction || ''), current.amountApproval?.amounts);
       if (current.instruction === undefined || current.instruction === null) filter.instruction = null;
       else filter.$expr = { $eq: ['$instruction', current.instruction] };
     }
@@ -224,7 +247,8 @@ export const updateAiAgentCoaching = asyncHandler(async (req: Request, res: Resp
   }
 
   const update: Record<string, any> = { $set: setValues };
-  if (setValues.status === 'active') update.$unset = { disabledAt: '', disabledBy: '' };
+  if (setValues.status === 'active') Object.assign(unsetValues, { disabledAt: '', disabledBy: '' });
+  if (Object.keys(unsetValues).length) update.$unset = unsetValues;
   const rule = await AiAgentCoachingRule.findOneAndUpdate(
     filter,
     update,

@@ -124,8 +124,9 @@ describe('STOP/START and appointment keyword drift detection', () => {
     expect(normalizeLabSmsCommand('  stop!! ')).toBe('STOP');
   });
 
-  it('the live SMS flow still consumes appointment keywords before Alex even without an appointment', () => {
-    expect(smsFlow).toMatch(/const appointment = await findAppointmentForReply\(orgId, from(, requireReminder)?\);\n\s*if \(!appointment\) return true;/);
+  it('the live SMS flow only takes appointment keywords when an appointment was asked about, otherwise Alex gets them', () => {
+    expect(smsFlow).toMatch(/const appointment = await findAppointmentForReply\(orgId, from, conversationId, leadId, isReschedule\);\n\s*if \(!appointment\) return false;/);
+    expect(smsFlow).toMatch(/reminderSentAt: \{ \$gte: askedAfter \} \}, \{ confirmationRequestedAt: \{ \$gte: askedAfter \} \}/);
   });
 });
 

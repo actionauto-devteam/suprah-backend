@@ -139,7 +139,7 @@ export const requestEntryChanges = lifecycleHandler(
   'Changes requested',
 );
 export const approveEntry = lifecycleHandler(
-  (input) => approveKnowledgeEntry({ ...input, expectedVersion: input.body.expectedVersion, note: input.body.note }),
+  (input) => approveKnowledgeEntry({ ...input, expectedVersion: input.body.expectedVersion, note: input.body.note, allowAmounts: input.body.allowAmounts }),
   'Knowledge Base entry approved',
 );
 export const rejectEntry = lifecycleHandler(

@@ -89,7 +89,8 @@ describe('dependencies and context', () => {
     expect(check('Our Military Appreciation Program offers a discount for active-duty and retired service members. Our team can confirm eligibility.')).toEqual([]);
     expect(check('Our Military Appreciation Program offers a discount for service members.', { ...context, programNames: [] })).toEqual(['answer:knowledge_discount_offer']);
     expect(check('Our Hero Savings Program offers a discount for service members.')).toEqual(['answer:knowledge_discount_offer']);
-    expect(check('Our Military Appreciation Program takes $500 off for service members.')).toContain('answer:guardrail_figure');
+    expect(check('Our Military Appreciation Program takes $500 off for service members.')).toEqual([]);
+    expect(knowledgeContentCheck({ kind: 'faq', title: 'Programs', question: 'Do you have programs?', answer: 'Our Military Appreciation Program takes $500 off for service members.' }, context).amounts).toEqual(['$500']);
     expect(check('All veterans qualify for our Military Appreciation Program discount.')).toEqual(['answer:knowledge_program_terms']);
     expect(check("With our Military Appreciation Program you'll save on any car.")).toEqual(['answer:knowledge_program_terms']);
     expect(check('Our Military Appreciation Program discount can be combined with any other offer.')).toEqual(['answer:knowledge_program_terms']);
@@ -109,9 +110,11 @@ describe('dependencies and context', () => {
       expect(errors('Our Military Appreciation Program offers a discount for service members.')).toEqual([]);
     });
 
-    it('accepted limitation: a second discount word inside the program sentence is allowed, but never amounts or promises', () => {
+    it('accepted limitation: a second discount word inside the program sentence is allowed, amounts wait for a manager, and promises never pass', () => {
       expect(errors('Our Military Appreciation Program offers a discount and other incentives for service members.')).toEqual([]);
-      expect(errors('Our Military Appreciation Program offers a discount and $500 in incentives.')).toContain('guardrail_figure');
+      expect(errors('Our Military Appreciation Program offers a discount and $500 in incentives.')).toEqual([]);
+      expect(knowledgeContentCheck({ kind: 'faq', title: 'Programs', question: 'Do you have programs?', answer: 'Our Military Appreciation Program discount is 10% off.' }, context).amounts).toEqual(['10%']);
+      expect(errors('Our Military Appreciation Program discount of $500 is guaranteed for service members.')).toEqual(expect.arrayContaining(['guardrail_promise']));
       expect(errors('Our Military Appreciation Program discount plus incentives means you will save on any car.')).toEqual(['knowledge_program_terms']);
     });
 
@@ -152,7 +155,6 @@ describe('dependencies and context', () => {
       expect(errors('Our Military Appreciation Program discount gets you below invoice pricing.')).toContain('knowledge_price_claims');
       expect(errors('Our Military Appreciation Program discount includes zero down.')).toContain('knowledge_payment_terms');
       expect(errors('Our Military Appreciation Program discount comes with special financing.')).toContain('knowledge_financing_terms');
-      expect(errors('Our Military Appreciation Program discount is 10% off.')).toContain('guardrail_figure');
     });
   });
 });

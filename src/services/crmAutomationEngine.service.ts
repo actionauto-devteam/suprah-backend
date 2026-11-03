@@ -481,7 +481,9 @@ async function executeStep(run: ICrmAutomationRun, step: any, values: Record<str
       }
       if (!upcoming(appointment)) return { status: 'skipped', detail: 'No upcoming appointment' };
       const sender = senderIntro(values.dealership_name, values.agent_name_configured || null);
-      return sendText(run, `Hi ${values.first_name}, this is ${sender}. Confirming your appointment "${appointment.title}" on ${formatApptTimeForSms(new Date(appointment.startTime))}. Reply YES to confirm or CANCEL to change it.`);
+      const asked = await sendText(run, `Hi ${values.first_name}, this is ${sender}. Confirming your appointment "${appointment.title}" on ${formatApptTimeForSms(new Date(appointment.startTime))}. Reply YES to confirm or CANCEL to change it.`);
+      if (asked.status === 'sent') await Appointment.updateOne({ _id: appointment._id }, { $set: { confirmationRequestedAt: new Date() } });
+      return asked;
     }
     case 'send_email': {
       if (!run.contact.email) return { status: 'skipped', detail: 'No email address' };

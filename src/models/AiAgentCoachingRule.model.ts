@@ -24,6 +24,7 @@ export interface IAiAgentCoachingRule extends Document {
   deletedAt?: Date;
   usageCount: number;
   lastUsedAt?: Date;
+  amountApproval?: { amounts: string[]; approvedBy?: mongoose.Types.ObjectId; approvedByName?: string; approvedAt?: Date };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -59,6 +60,12 @@ const AiAgentCoachingRuleSchema: Schema<IAiAgentCoachingRule> = new Schema(
     deletedAt: { type: Date },
     usageCount: { type: Number, default: 0 },
     lastUsedAt: { type: Date },
+    amountApproval: {
+      amounts: { type: [{ type: String, trim: true, maxlength: 60 }], default: undefined },
+      approvedBy: { type: Schema.Types.ObjectId, ref: 'CrmUser' },
+      approvedByName: { type: String, trim: true, maxlength: 120 },
+      approvedAt: { type: Date },
+    },
   },
   { timestamps: true },
 );

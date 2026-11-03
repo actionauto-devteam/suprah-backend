@@ -25,6 +25,7 @@ import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import { runTrainingWrite, trainingActor, trainingRole } from './aiTraining.service';
 import { knowledgeContentCheck, normalizeKnowledgeKey, privacyErrors, type KnowledgeCheck, type KnowledgeCheckContext, type KnowledgeIssue } from './aiKnowledgeSafety';
+import { sameMoneyFigures } from '../utils/aiMoneyAmounts';
 import { flushKnowledgeAudit, knowledgeAuditEntry } from './aiKnowledgeAudit';
 import {
   activeLocationIds,
@@ -234,7 +235,7 @@ async function reviewCheck(organizationId: string, content: any, session: Client
   const { context, details } = await knowledgeReviewContext(organizationId, content.locationScope, session);
   const check = knowledgeContentCheck(content, context);
   const locations = await locationIssues(organizationId, content.locationScope, session);
-  return { blockers: [...check.errors, ...locations], check: { errors: [...check.errors, ...locations], warnings: check.warnings }, details };
+  return { blockers: [...check.errors, ...locations], check: { ...check, errors: [...check.errors, ...locations] }, details };
 }
 
 export async function knowledgeStorableIssues(organizationId: string, content: KnowledgeEntryContent, context?: KnowledgeCheckContext): Promise<{ locations: KnowledgeIssue[]; privacy: KnowledgeIssue[] }> {
@@ -515,6 +516,10 @@ async function transition(input: {
   return updated;
 }
 
+function amountsIssue(amounts: string[]): KnowledgeIssue {
+  return { field: 'answer', code: 'amounts_need_approval', message: `Includes money amounts: ${amounts.join(', ')}. Allow them so the AI agent can say these exact amounts.` };
+}
+
 function canSubmitStatus(entry: any): boolean {
   return ['draft', 'changes_requested'].includes(entry.status) || (entry.status === 'approved' && needsReapproval(entry));
 }
@@ -576,7 +581,7 @@ export async function rejectKnowledgeEntry(input: { organizationId: string; entr
   });
 }
 
-export async function approveKnowledgeEntry(input: { organizationId: string; entryId: string; user: any; expectedVersion: unknown; note?: unknown }): Promise<any> {
+export async function approveKnowledgeEntry(input: { organizationId: string; entryId: string; user: any; expectedVersion: unknown; note?: unknown; allowAmounts?: unknown }): Promise<any> {
   const actor = trainingActor(input.user);
   requireKnowledgeReviewer(input.user);
   const entry = await loadVisibleEntry(input.organizationId, input.entryId, input.user);
@@ -603,9 +608,13 @@ export async function approveKnowledgeEntry(input: { organizationId: string; ent
   try {
     updated = await runTrainingWrite(async (session) => {
       await lockKnowledgeLocations(input.organizationId, session);
-      const { blockers, details } = await reviewCheck(input.organizationId, current.content, session);
+      const { blockers, details, check } = await reviewCheck(input.organizationId, current.content, session);
       if (blockers.length) {
         throw new ApiError(400, 'This version cannot be approved until the highlighted items are fixed. Request changes so the author can update it.', blockers);
+      }
+      const amounts = check.amounts || [];
+      if (amounts.length && input.allowAmounts !== true) {
+        throw new ApiError(400, 'This answer includes money amounts. Allow them before approving, or request changes.', [amountsIssue(amounts)]);
       }
       const dependencies = matchKnowledgeDependencies(current.content, details);
       await lockKnowledgeDependencies(input.organizationId, dependencies, session);
@@ -624,9 +633,10 @@ export async function approveKnowledgeEntry(input: { organizationId: string; ent
             approvalSuspendedLocationIds: [],
             approvedBy: actor,
             approvedAt: now,
+            ...(amounts.length ? { amountApproval: { amounts, by: actor, at: now } } : {}),
             lastReview: { action: 'approve', note, by: actor, at: now },
           },
-          $unset: { approvalInvalidation: '' },
+          $unset: { approvalInvalidation: '', ...(amounts.length ? {} : { amountApproval: '' }) },
           $push: { pendingAudit: knowledgeAuditEntry('entry_approved', actor, { version: entry.currentVersion, fromStatus: 'in_review', toStatus: 'approved', note }) },
         },
         { new: true, ...withSession(session) },
@@ -687,9 +697,12 @@ export async function enableKnowledgeEntry(input: { organizationId: string; entr
       const key = knowledgeKey(approved.content);
       updated = await runTrainingWrite(async (session) => {
         await lockKnowledgeLocations(input.organizationId, session);
-        const { blockers } = await reviewCheck(input.organizationId, { ...approved.content, locationScope: effective }, session);
+        const { blockers, check } = await reviewCheck(input.organizationId, { ...approved.content, locationScope: effective }, session);
         if (blockers.length) {
           throw new ApiError(400, "This entry can't be turned back on. Its approved version no longer passes the current checks. It stays disabled until a new version is approved.", blockers);
+        }
+        if (check.amounts?.length && !sameMoneyFigures(entry.amountApproval?.amounts, check.amounts)) {
+          throw new ApiError(400, "This entry can't be turned back on. Its money amounts were not allowed when it was approved. It stays disabled until a new version is approved.", [amountsIssue(check.amounts)]);
         }
         await lockKnowledgeDependencies(input.organizationId, entry.approvedDependencies || [], session);
         await lockKnowledgeKey(input.organizationId, entry.kind, key, session);
@@ -797,6 +810,9 @@ export function serializeKnowledgeEntry(entry: any, viewer: any, active?: Set<st
       : undefined,
     approvedBy: actor(entry.approvedBy),
     approvedAt: entry.approvedAt || undefined,
+    amountApproval: entry.amountApproval?.amounts?.length
+      ? { amounts: entry.amountApproval.amounts, by: actor(entry.amountApproval.by), at: entry.amountApproval.at }
+      : undefined,
     disabledAt: entry.disabledAt || undefined,
     archivedAt: entry.archivedAt || undefined,
     restoredAt: entry.restoredAt || undefined,

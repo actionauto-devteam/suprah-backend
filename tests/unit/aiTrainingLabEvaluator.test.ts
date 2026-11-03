@@ -48,13 +48,20 @@ describe('mandatory safety before Alex', () => {
     expect(byId(result, 'safety.sms_opt_keyword')).toMatchObject({ status: 'pass', method: 'keyword_rule' });
   });
 
-  it.each(['YES', 'ok', 'Cancel.'])('SMS appointment keyword "%s" stops Alex even without an appointment', (message) => {
+  it.each(['YES', 'ok', 'Cancel.'])('SMS "%s" goes to Alex when there is no upcoming appointment', (message) => {
     const result = evaluateScenario({ rule: rule(), scenario: scenario({ message }) });
+    expect(result.predictedPath).not.toBe('safety_stop_certain');
+    const check = byId(result, 'safety.sms_appointment_keyword');
+    expect(check.status).toBe('pass');
+    expect(check.message).toContain('there is no upcoming appointment, so the AI Agent replies');
+  });
+
+  it.each(['YES', 'ok', 'Cancel.'])('SMS "%s" answers an upcoming appointment that was asked about', (message) => {
+    const result = evaluateScenario({ rule: rule(), scenario: scenario({ message, flags: { hasUpcomingAppointment: true, previouslyOptedOut: false } }) });
     expect(result.predictedPath).toBe('safety_stop_certain');
     const check = byId(result, 'safety.sms_appointment_keyword');
     expect(check.status).toBe('fail');
-    expect(check.message).toContain('even without an upcoming appointment');
-    expect(result.verdict).toBe('failed');
+    expect(check.message).toContain('answers the upcoming appointment when the last text asked about it');
   });
 
   it('keywords only apply to SMS', () => {
