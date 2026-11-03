@@ -58,6 +58,7 @@ import dealershipReviewRoute from "./dealershipReview.route";
 import customerConcernRoute from "./customerConcern.route";
 import customerCallRoute from "./customerCall.route";
 import savedVehicleRoute from "./savedVehicle.route";
+import customerDealershipChatRoute from "./customerDealershipChat.route";
 import auctionListingRoute from "./auctionListing.route";
 import linkedAccountRoute from "./linkedAccount.routes";
 import auctionListingReviewRoute from "./auctionListingReview.route";
@@ -532,6 +533,10 @@ const defaultRoutes = [
   {
     path: "/customer/saved-vehicles",
     route: savedVehicleRoute,
+  },
+  {
+    path: "/customer/dealership-chat",
+    route: customerDealershipChatRoute,
   },
   {
     path: "/shop-assistant",
