@@ -6,6 +6,7 @@ import Lead from "../models/lead.model";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
 import { SIGN_IN_AGAIN, VEHICLE_NOT_FOUND } from "../utils/userMessages";
+import { MARKETPLACE_VEHICLE_FILTER } from "../utils/marketplaceVehicle";
 import {
   safeCreateNotification,
   notifyOrgAdmins,
@@ -715,9 +716,12 @@ const getVehicleById = asyncHandler(async (req: Request, res: Response) => {
  */
 const getPublicVehicleById = asyncHandler(
   async (req: Request, res: Response) => {
+    // Only cars on the marketplace (decided 2026-11-04): a link to a car
+    // that's being prepared, sold or archived says it can't be found.
     const vehicle = await Vehicle.findOne({
       _id: req.params.id,
       isDeleted: false,
+      ...MARKETPLACE_VEHICLE_FILTER,
     }).select(
       "-cost -notes -assignedTo -organizationId -dealerEmail -isDeleted -manualStatusLock -priceHistory",
     );
@@ -725,9 +729,6 @@ const getPublicVehicleById = asyncHandler(
     if (!vehicle) {
       throw new ApiError(404, VEHICLE_NOT_FOUND);
     }
-
-    // Double check status - normally we only show 'Ready for Sale' publicly
-    // But we allow others if explicitly shared, as long as sensitive data is scrubbed.
 
     res.json(
       new ApiResponse(
