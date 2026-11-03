@@ -15,6 +15,7 @@ import { storageService, BucketType } from '../services/storage.service';
 import { getSignedProofUrl } from '../utils/signedUrlCache';
 import { emitToUser, emitToShiftBoard, isCrmUserOnline, getSocketIO } from '../utils/socketEmitter';
 import CrmPushService from '../services/crmPush.service';
+import UnifiedPushService from '../services/unifiedPush.service';
 import ExcludedScreenshot from '../models/ExcludedScreenshot.model';
 import ScreenshotDeduction from '../models/ScreenshotDeduction.model';
 import AuditLog from '../models/AuditLog.model';
@@ -2489,6 +2490,28 @@ export const getCrmPushStatus = asyncHandler(async (req: Request, res: Response)
   }, 'Push subscription status'));
 });
 
+const testPushCooldown = new Map<string, number>();
+
+export const sendCrmTestPush = asyncHandler(async (req: Request, res: Response) => {
+  const user = req.crmUser!;
+  const key = String(user._id);
+  const last = testPushCooldown.get(key) || 0;
+  if (Date.now() - last < 10_000) throw new ApiError(429, 'Wait a few seconds before sending another test.');
+  testPushCooldown.set(key, Date.now());
+  const result = await UnifiedPushService.sendToUser(key, {
+    title: 'Test notification',
+    body: 'Desktop notifications are working. Suprah will tell you about new leads, texts, emails and calls here.',
+    tag: `push-test-${key}-${Date.now()}`,
+    data: { url: '/crm/leads' },
+  });
+  res.json(new ApiResponse(200, {
+    devices: (result as any).devices || 0,
+    sent: result.sent,
+    failed: result.failed,
+    removed: result.pruned,
+  }, 'Test notification sent'));
+});
+
 /**
  * GET /api/crm/timeproof/push/org-health
  */
@@ -2872,4 +2895,5 @@ export default {
   subscribeCrmPush,
   unsubscribeCrmPush,
   getCrmPushStatus,
+  sendCrmTestPush,
 };

@@ -1,8 +1,10 @@
 import mongoose from 'mongoose';
+import Notification from '../models/Notification.model';
 import { notifyOrgAdmins, notifyUsers } from '../utils/safeNotification';
 import { notificationTemplates } from '../utils/notificationTemplates';
 
 const NEW_LEAD_WINDOW_MS = 60_000;
+const HANDOFF_NOTICE_WINDOW_MS = 2 * 60_000;
 
 const displayPhone = (value: unknown) => {
   const match = /^\+?1?(\d{3})(\d{3})(\d{4})$/.exec(String(value || '').replace(/[^\d+]/g, ''));
@@ -11,6 +13,22 @@ const displayPhone = (value: unknown) => {
 
 export function leadDisplayName(lead: any): string {
   return [lead?.firstName, lead?.lastName].filter(Boolean).join(' ').trim() || displayPhone(lead?.phone) || String(lead?.email || '') || 'A customer';
+}
+
+export async function notifyLeadMessageUnlessHandoff(orgId: unknown, lead: any, channel: 'sms' | 'email', preview: string): Promise<boolean> {
+  try {
+    if (!lead?._id || !orgId) return false;
+    const handoff = await Notification.exists({
+      organizationId: String(orgId),
+      type: 'ai_agent_handoff_needed',
+      'metadata.leadId': String(lead._id),
+      createdAt: { $gte: new Date(Date.now() - HANDOFF_NOTICE_WINDOW_MS) },
+    });
+    if (handoff) return false;
+  } catch (error) {
+    console.error('[comm] Handoff notice check failed', error);
+  }
+  return notifyLeadMessage(orgId, lead, channel, preview);
 }
 
 export async function notifyLeadMessage(orgId: unknown, lead: any, channel: 'sms' | 'email', preview: string): Promise<boolean> {

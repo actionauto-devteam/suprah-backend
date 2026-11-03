@@ -32,40 +32,65 @@ async function pruneEndpoints(model: PushRecipientModel, userId: string, endpoin
   }
 }
 
-async function resolveRecipient(
-  userId: string,
-  includeSupraSpaceApp = false,
-): Promise<{ model: PushRecipientModel; pushSubscriptions: any[] } | null> {
-  const user = await User.findById(userId).select('pushSubscriptions').lean();
-  if (user) return { model: 'User', pushSubscriptions: user.pushSubscriptions || [] };
+interface PushTarget {
+  model: PushRecipientModel;
+  id: string;
+  pushSubscriptions: any[];
+}
 
-  const crmUser = await CrmUser.findById(userId).select('pushSubscriptions').lean();
-  if (crmUser) {
-    // Everything routed through this generic service (transportation, leads,
-    // driver requests, general admin broadcasts — anything that isn't a
-    // SupraSpace chat message or @mention) must never reach the dedicated
-    // SupraSpace app's own subscription. That app is meant to be a focused,
-    // message-only surface. Callers that ARE SupraSpace-related (see
-    // notification.service.ts's includeSupraSpaceApp for 'crm_message') opt
-    // back in explicitly instead.
-    const subs = includeSupraSpaceApp
-      ? (crmUser.pushSubscriptions || [])
-      : (crmUser.pushSubscriptions || []).filter((s: any) => s.appSource !== 'supraspace');
-    return { model: 'CrmUser', pushSubscriptions: subs };
+const RECENT_DELIVERY_MS = 30_000;
+const recentDeliveries = new Map<string, { at: number; recipient: string }>();
+
+function deliveryKey(endpoint: string, payload: Record<string, unknown>): string {
+  return [endpoint, payload.tag, payload.title, payload.body].map((part) => String(part ?? '')).join('|');
+}
+
+function deliveredToOtherIdentity(key: string, recipient: string): boolean {
+  const now = Date.now();
+  if (recentDeliveries.size > 5000) {
+    for (const [stored, entry] of recentDeliveries) if (now - entry.at > RECENT_DELIVERY_MS) recentDeliveries.delete(stored);
   }
+  const last = recentDeliveries.get(key);
+  if (last && now - last.at < RECENT_DELIVERY_MS && last.recipient !== recipient) return true;
+  recentDeliveries.set(key, { at: now, recipient });
+  return false;
+}
 
-  return null;
+const mainAppSubscriptions = (subs: any[] | undefined, includeSupraSpaceApp: boolean) =>
+  includeSupraSpaceApp ? (subs || []) : (subs || []).filter((s: any) => s.appSource !== 'supraspace');
+
+async function resolveTargets(userId: string, includeSupraSpaceApp = false): Promise<PushTarget[]> {
+  const user = await User.findById(userId).select('pushSubscriptions email organizationId').lean();
+  if (user) {
+    const targets: PushTarget[] = [{ model: 'User', id: userId, pushSubscriptions: user.pushSubscriptions || [] }];
+    const linked = user.email && user.organizationId
+      ? await CrmUser.findOne({ email: user.email, organizationId: user.organizationId, isActive: { $ne: false } }).select('pushSubscriptions').lean()
+      : null;
+    if (linked) targets.push({ model: 'CrmUser', id: String(linked._id), pushSubscriptions: mainAppSubscriptions(linked.pushSubscriptions, includeSupraSpaceApp) });
+    return targets;
+  }
+  const crmUser = await CrmUser.findById(userId).select('pushSubscriptions email organizationId').lean();
+  if (!crmUser) return [];
+  const targets: PushTarget[] = [{ model: 'CrmUser', id: userId, pushSubscriptions: mainAppSubscriptions(crmUser.pushSubscriptions, includeSupraSpaceApp) }];
+  const linked = crmUser.email && crmUser.organizationId
+    ? await User.findOne({ email: crmUser.email, organizationId: crmUser.organizationId }).select('pushSubscriptions').lean()
+    : null;
+  if (linked) targets.push({ model: 'User', id: String(linked._id), pushSubscriptions: linked.pushSubscriptions || [] });
+  return targets;
 }
 
 async function sendToSubscriptions(
   model: PushRecipientModel,
   userId: string,
   subscriptions: Array<{ endpoint: string; keys: { p256dh: string; auth: string } }>,
-  payload: object
+  payload: object,
+  recipient = userId,
 ) {
   if (!subscriptions.length) return { sent: 0, failed: 0, pruned: 0 };
 
   const { payload: normalized, topic } = normalizePushPayload(payload as any);
+  subscriptions = subscriptions.filter((sub) => !deliveredToOtherIdentity(deliveryKey(sub.endpoint, normalized), recipient));
+  if (!subscriptions.length) return { sent: 0, failed: 0, pruned: 0 };
   const stringifiedPayload = JSON.stringify(normalized);
   const endpointsToPrune: string[] = [];
   let sent = 0;
@@ -110,15 +135,26 @@ async function sendToSubscriptions(
 
 const sendToUser = async (userId: string, payload: object, includeSupraSpaceApp = false) => {
   try {
-    const recipient = await resolveRecipient(userId, includeSupraSpaceApp);
-    if (!recipient) {
+    const targets = await resolveTargets(userId, includeSupraSpaceApp);
+    if (!targets.length) {
       logger.debug(`${LOG_PREFIX} No User/CrmUser found for id ${userId}.`);
-      return { sent: 0, failed: 0, pruned: 0 };
+      return { sent: 0, failed: 0, pruned: 0, devices: 0 };
     }
-    return await sendToSubscriptions(recipient.model, userId, recipient.pushSubscriptions, payload);
+    const seen = new Set<string>();
+    const total = { sent: 0, failed: 0, pruned: 0, devices: 0 };
+    for (const target of targets) {
+      const subs = target.pushSubscriptions.filter((sub: any) => sub?.endpoint && !seen.has(sub.endpoint));
+      subs.forEach((sub: any) => seen.add(sub.endpoint));
+      total.devices += subs.length;
+      const result = await sendToSubscriptions(target.model, target.id, subs, payload, userId);
+      total.sent += result.sent;
+      total.failed += result.failed;
+      total.pruned += result.pruned;
+    }
+    return total;
   } catch (error: any) {
     logger.error(error, `${LOG_PREFIX} sendToUser failed for ${userId}`);
-    return { sent: 0, failed: 1, pruned: 0 };
+    return { sent: 0, failed: 1, pruned: 0, devices: 0 };
   }
 };
 

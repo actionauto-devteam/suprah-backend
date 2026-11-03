@@ -67,7 +67,7 @@ import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './
 import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
 import UnifiedPushService from "./unifiedPush.service";
-import { notifyLeadMessage } from "./leadMessageNotice.service";
+import { notifyLeadMessage, notifyLeadMessageUnlessHandoff } from "./leadMessageNotice.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -1740,6 +1740,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
       if (!(await screenAiHumanAttention({ ...check, leadId: String(lead._id), body, agentName, phone: conversation.customerPhone }))) {
         if (screeningMode === "training") queueShadowAttentionSkip(smsShadowSource(orgId, conversation, lead, check));
         if (lifecycle) settleLifecycleSms().catch((err) => console.error("[comm] lead intake for inbound SMS failed:", err));
+        void notifyLeadMessageUnlessHandoff(orgId, lead, "sms", body);
         return message;
       }
       screened = true;

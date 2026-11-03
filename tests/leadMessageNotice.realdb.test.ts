@@ -7,7 +7,8 @@ jest.mock('../src/utils/safeNotification', () => ({
   notifyOrgAdmins: (...args: unknown[]) => mockNotifyOrgAdmins(...args),
 }));
 
-import { notifyLeadMessage, leadDisplayName } from '../src/services/leadMessageNotice.service';
+import { notifyLeadMessage, notifyLeadMessageUnlessHandoff, leadDisplayName } from '../src/services/leadMessageNotice.service';
+import Notification from '../src/models/Notification.model';
 import { notificationTemplates } from '../src/utils/notificationTemplates';
 import { NOTIFICATION_TYPES } from '../src/constants/notificationTypes';
 
@@ -48,6 +49,23 @@ describe('Desktop and bell notices for customer texts and emails', () => {
     expect(await notifyLeadMessage(orgId, null, 'sms', 'hello')).toBe(false);
     expect(mockNotifyUsers).not.toHaveBeenCalled();
     expect(mockNotifyOrgAdmins).not.toHaveBeenCalled();
+  });
+
+  it('a text while the AI is paused for a human still notifies the rep, unless the customer-waiting notice for that lead just went out', async () => {
+    const lead = { _id: new mongoose.Types.ObjectId(), firstName: 'Casey', lastName: 'Park', assignedTo: repId, createdAt: old };
+    expect(await notifyLeadMessageUnlessHandoff(orgId, lead, 'sms', 'Hello? Anyone there?')).toBe(true);
+    expect(mockNotifyUsers).toHaveBeenCalledWith([repId], orgId, 'lead_message', 'New text from Casey Park', 'Hello? Anyone there?', expect.any(Object));
+    mockNotifyUsers.mockClear();
+    const handoff = await Notification.collection.insertOne({ organizationId: orgId, userId: repId, type: 'ai_agent_handoff_needed', category: 'crm', title: 'Waiting', message: 'x', metadata: { leadId: String(lead._id) }, isRead: false, createdAt: new Date(), updatedAt: new Date() } as any);
+    expect(await notifyLeadMessageUnlessHandoff(orgId, lead, 'sms', 'I need help')).toBe(false);
+    expect(mockNotifyUsers).not.toHaveBeenCalled();
+    await Notification.collection.updateOne({ _id: handoff.insertedId }, { $set: { createdAt: new Date(Date.now() - 3 * 60_000) } });
+    expect(await notifyLeadMessageUnlessHandoff(orgId, lead, 'sms', 'Still waiting')).toBe(true);
+    expect(mockNotifyUsers).toHaveBeenCalledTimes(1);
+    const otherOrg = String(new mongoose.Types.ObjectId());
+    await Notification.collection.updateOne({ _id: handoff.insertedId }, { $set: { createdAt: new Date(), organizationId: otherOrg } });
+    expect(await notifyLeadMessageUnlessHandoff(orgId, lead, 'sms', 'Other org handoff does not count')).toBe(true);
+    await Notification.collection.deleteOne({ _id: handoff.insertedId });
   });
 
   it('never breaks message handling when the notice fails', async () => {

@@ -26,6 +26,7 @@ import {
   subscribeCrmPush,
   unsubscribeCrmPush,
   getCrmPushStatus,
+  sendCrmTestPush,
   getOrgPushHealth,
   nudgeEnableNotifications,
   correctTimeLog,
@@ -103,6 +104,7 @@ router.get('/weekly-overtime-report', getWeeklyOvertimeReport);
 router.post('/push/subscribe', subscribeCrmPush);
 router.delete('/push/subscribe', unsubscribeCrmPush);
 router.get('/push/status', getCrmPushStatus);
+router.post('/push/test', sendCrmTestPush);
 router.get('/push/org-health', getOrgPushHealth);
 router.post('/push/nudge/:userId', nudgeEnableNotifications);
 
