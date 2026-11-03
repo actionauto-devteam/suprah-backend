@@ -9,6 +9,7 @@ const mockQuoteFindOneAndUpdate = jest.fn();
 const mockFindLeadLink = jest.fn();
 const mockLoadFindOne = jest.fn();
 const mockLoadCreate = jest.fn();
+const mockEmailCustomer = jest.fn();
 
 jest.mock('../../src/models/Quote.model', () => ({
   __esModule: true,
@@ -35,6 +36,9 @@ jest.mock('../../src/models/Load.model', () => ({
     findOne: (filter: unknown) => Promise.resolve(mockLoadFindOne(filter)),
     create: (doc: unknown) => Promise.resolve(mockLoadCreate(doc)),
   },
+}));
+jest.mock('../../src/services/staffQuoteCustomerEmail', () => ({
+  emailStaffQuoteCustomer: (...args: unknown[]) => mockEmailCustomer(...args),
 }));
 jest.mock('../../src/services/quoteLeadLink.service', () => ({
   findQuoteLeadLink: (...args: unknown[]) => mockFindLeadLink(...args),
@@ -171,6 +175,17 @@ describe('converting a quote into a load', () => {
       const load = { _id: 'load-1', loadNumber: 'LD-1', ...doc };
       return { ...load, toJSON: () => load };
     });
+  });
+
+  it("emails a staff-made quote's customer that it's booked", async () => {
+    mockQuoteFindOne.mockReturnValue(quoteDoc());
+    await call(quoteController.convertToLoad, {});
+    expect(mockEmailCustomer).toHaveBeenCalledWith('org-1', QUOTE_ID, 'booked', { loadNumber: 'LD-1' });
+
+    mockEmailCustomer.mockClear();
+    mockQuoteFindOne.mockReturnValue(quoteDoc({ source: 'customer_portal' }));
+    await call(quoteController.convertToLoad, {});
+    expect(mockEmailCustomer).not.toHaveBeenCalled();
   });
 
   it("makes the quote's customer the delivery contact", async () => {
