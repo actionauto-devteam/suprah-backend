@@ -10,7 +10,8 @@ import cacheService from "../services/cache.service";
 // A vehicle on a load is "In Transit" from pickup until delivery (see
 // deliverInventoryStatus in loadLifecycleOutbox.service). The feed never
 // changes its status, marks it sold or removes it; delivery puts it back to
-// Ready for Sale and later syncs update it as usual.
+// Ready for Sale (or Sold, for a car shipped to its buyer) and later syncs
+// update it as usual.
 const ON_A_LOAD_STATUS = "In Transit";
 
 const normKey = (s: string) =>

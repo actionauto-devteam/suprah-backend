@@ -660,9 +660,10 @@
 
   /**
    * Stock vehicles on a load follow it in Inventory: In Transit from pickup
-   * (so they can't be reserved or sold mid-trip), Ready for Sale again at
-   * delivery. Sold vehicles are never changed, and delivery only resets
-   * vehicles this load put In Transit.
+   * (so they can't be reserved or sold mid-trip), then at delivery Ready for
+   * Sale again, or Sold when the load took the car to its buyer (see
+   * inventoryStatusAtDelivery). Sold vehicles are never changed, and delivery
+   * only changes vehicles this load put In Transit.
    */
   async function deliverInventoryStatus(event: any) {
     const payload = event.payload ?? {};
@@ -671,14 +672,14 @@
     const vehicleIds = (Array.isArray(payload.vehicleIds) ? payload.vehicleIds : [])
       .map((id: unknown) => String(id ?? "").trim())
       .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
-    if (!organizationId || !vehicleIds.length || !["In Transit", "Ready for Sale"].includes(toStatus)) {
+    if (!organizationId || !vehicleIds.length || !["In Transit", "Ready for Sale", "Sold"].includes(toStatus)) {
       throw new NonRetryableOutboxError("Inventory status update is missing its vehicles or target status");
     }
     const fromStatus =
       toStatus === "In Transit" ? { $nin: ["Sold", "In Transit"] } : "In Transit";
     const result = await Vehicle.updateMany(
       { _id: { $in: vehicleIds }, organizationId, isDeleted: false, status: fromStatus },
-      { $set: { status: toStatus } },
+      { $set: toStatus === "Sold" ? { status: "Sold", dateSold: new Date() } : { status: toStatus } },
     );
     if (result.modifiedCount > 0) {
       await cacheService.invalidateByPrefix("veh:");

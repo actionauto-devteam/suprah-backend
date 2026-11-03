@@ -115,7 +115,7 @@ import {
   proofOfDeliveryOwnedByFilter,
 } from "../services/loadLifecyclePolicy";
 import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
-import { inventoryVehicleIdsFollowingLoad } from "../services/loadInventoryStatus";
+import { inventoryStatusAtDelivery, inventoryVehicleIdsFollowingLoad, type LoadInventoryStatus } from "../services/loadInventoryStatus";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
   customerShipmentNotification,
@@ -1384,13 +1384,12 @@ const getActiveDrivers = asyncHandler(async (req: ExpressRequest, res: ExpressRe
 
 
 // Stock vehicles on this load follow it in Inventory (see
-// deliverInventoryStatus): In Transit from pickup, Ready for Sale at delivery.
-// A car shipped out to a customer (load from a quote) goes In Transit but is
-// never put back on sale at delivery.
+// deliverInventoryStatus): In Transit from pickup, then at delivery Ready for
+// Sale, or Sold when the load took the car to its buyer (load from a quote).
 function lifecycleInventoryStatusEvents(
   organizationId: string,
   load: any,
-  toStatus: "In Transit" | "Ready for Sale",
+  toStatus: LoadInventoryStatus,
 ) {
   const vehicleIds = inventoryVehicleIdsFollowingLoad(load, toStatus);
   if (!vehicleIds.length) return [];
@@ -6727,7 +6726,7 @@ const completeDelivery = asyncHandler(async (req: ExpressRequest, res: ExpressRe
     ...(deliveryGpsFlag ? [deliveryGpsFlag.event] : []),
     ...deliveryCustomerEvents,
     ...deliverySalespersonEvents,
-    ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
+    ...lifecycleInventoryStatusEvents(organizationId, load, inventoryStatusAtDelivery(load)),
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -6921,7 +6920,7 @@ const markLoadDeliveredByDispatch = asyncHandler(async (req: ExpressRequest, res
     excludeUserIds: [user._id.toString()],
   });
   const outbox = [
-    ...lifecycleInventoryStatusEvents(organizationId, load, "Ready for Sale"),
+    ...lifecycleInventoryStatusEvents(organizationId, load, inventoryStatusAtDelivery(load)),
     ...customerEvents,
     ...deliverySalespersonEvents,
     // Refreshes open screens (Transportation, Driver Tracker, the driver's

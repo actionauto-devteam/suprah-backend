@@ -1,22 +1,33 @@
 import mongoose from "mongoose";
 
+/** The Inventory statuses a load moves its cars to. */
+export type LoadInventoryStatus = "In Transit" | "Ready for Sale" | "Sold";
+
 /**
- * The Inventory cars whose status follows a load: "In Transit" at pickup and
- * "Ready for Sale" at delivery, which fits a car coming to the dealership.
- * A load made from a quote ships a car out to a customer (decided
- * 2026-11-02): it still goes "In Transit" at pickup, so the marketplace stops
- * offering it, but delivery never puts it back on sale. The dealer, the feed
- * or "Add to customer's garage" decides when it's Sold.
+ * What the cars on a load become at delivery. A car coming to the dealership
+ * goes back to "Ready for Sale". A load made from a quote takes the car to its
+ * buyer, so at delivery it becomes "Sold" (decided 2026-11-02): it never goes
+ * back on sale, other customers' waiting requests for it close, and the feed
+ * can still update it later like any sold car.
+ */
+export function inventoryStatusAtDelivery(load: { quoteId?: unknown } | null | undefined): "Ready for Sale" | "Sold" {
+  return String(load?.quoteId ?? "").trim() ? "Sold" : "Ready for Sale";
+}
+
+/**
+ * The Inventory cars whose status follows a load. Every load puts its cars
+ * "In Transit" at pickup, so the marketplace stops offering them; at delivery
+ * only the status that fits the load applies (see inventoryStatusAtDelivery).
  */
 export function inventoryVehicleIdsFollowingLoad(
   load: {
     quoteId?: unknown;
     vehicles?: Array<{ vehicleId?: unknown } | null | undefined> | null;
   } | null | undefined,
-  toStatus: "In Transit" | "Ready for Sale",
+  toStatus: LoadInventoryStatus,
 ): string[] {
   if (!load) return [];
-  if (toStatus === "Ready for Sale" && String(load.quoteId ?? "").trim()) return [];
+  if (toStatus !== "In Transit" && toStatus !== inventoryStatusAtDelivery(load)) return [];
   return [
     ...new Set(
       (Array.isArray(load.vehicles) ? load.vehicles : [])
