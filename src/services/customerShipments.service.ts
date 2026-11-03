@@ -217,6 +217,7 @@ export type CustomerShipmentStage =
   | "accepted"
   | "declined"
   | "unavailable"
+  | "withdrawn"
   | "booked"
   | "picked_up"
   | "on_the_way"
@@ -242,7 +243,11 @@ export function customerShipmentStage(
         return "booked";
     }
   }
-  if (quote.status === "rejected") return quote.closedReason === "vehicle_unavailable" ? "unavailable" : "declined";
+  if (quote.status === "rejected") {
+    if (quote.closedReason === "vehicle_unavailable") return "unavailable";
+    if (quote.closedReason === "customer_withdrew") return "withdrawn";
+    return "declined";
+  }
   if (quote.status === "accepted") return "accepted";
   if (quote.status === "booked") return "booked";
   return "waiting";

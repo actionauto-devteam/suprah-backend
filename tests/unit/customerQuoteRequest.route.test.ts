@@ -18,6 +18,7 @@ jest.mock('../../src/controllers/quote.controller', () => ({
   default: {
     createCustomerQuoteRequest: (_req: any, res: any) => res.status(201).json({ ok: true }),
     getMyShipments: (_req: any, res: any) => res.status(200).json({ ok: true }),
+    withdrawCustomerQuoteRequest: (_req: any, res: any) => res.status(200).json({ ok: true }),
   },
 }));
 
@@ -78,5 +79,17 @@ describe("GET /api/quote-requests/mine", () => {
   it("is never cached", async () => {
     const res = await request(app).get("/api/quote-requests/mine").set("x-test-role", "customer");
     expect(res.headers["cache-control"]).toBe("private, no-store, max-age=0");
+  });
+});
+
+describe("POST /api/quote-requests/:id/withdraw", () => {
+  it("lets a customer withdraw a request", async () => {
+    expect((await request(app).post("/api/quote-requests/q-1/withdraw").set("x-test-role", "customer")).status).toBe(200);
+  });
+
+  it.each(["employee", "admin", "driver"])("keeps %s accounts out", async (role) => {
+    const res = await request(app).post("/api/quote-requests/q-1/withdraw").set("x-test-role", role);
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe("Only the customer who sent a shipping request can withdraw it.");
   });
 });

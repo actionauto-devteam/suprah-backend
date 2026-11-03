@@ -56,7 +56,7 @@ beforeEach(() => {
 
 describe('salesperson notices', () => {
   it('use notification types the platform accepts, with plain titles', () => {
-    for (const event of ['request', 'delivered', 'cancelled'] as SalespersonEvent[]) {
+    for (const event of ['request', 'withdrawn', 'delivered', 'cancelled'] as SalespersonEvent[]) {
       const notice = salespersonNotice(event, { customerName: 'Maria Santos', vehicleName: 'Camry', loadNumber: 'LD-7' });
       expect((NOTIFICATION_TYPES as readonly string[]).includes(notice.type)).toBe(true);
       expect(notice.title).toMatch(/^Your Customer/);
@@ -75,6 +75,9 @@ describe('salesperson notices', () => {
       "Maria Santos's shipment for the Camry (load LD-7) was cancelled. Reason: Other: Buyer backed out.",
     );
     expect(salespersonNotice('delivered', {}).message).toBe("Your customer's shipment for their vehicle was delivered.");
+    expect(salespersonNotice('withdrawn', { customerName: 'Maria Santos', vehicleName: '2021 Toyota Camry' }).message).toBe(
+      'Maria Santos withdrew their shipping request for the 2021 Toyota Camry. No action is needed.',
+    );
   });
 
   it('open the load, or Quotes for a new request', () => {

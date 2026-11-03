@@ -48,4 +48,11 @@ router.get(
   quoteController.getMyShipments,
 );
 
+// The customer withdraws their own request while it is still waiting.
+router.post(
+  "/:id/withdraw",
+  authorize("customer", "Only the customer who sent a shipping request can withdraw it."),
+  quoteController.withdrawCustomerQuoteRequest,
+);
+
 export default router;
