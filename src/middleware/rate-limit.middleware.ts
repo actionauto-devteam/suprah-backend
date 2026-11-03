@@ -483,7 +483,7 @@ export const marketplaceLimiter = rateLimit({
     },
     message: {
         success: false,
-        message: 'You are browsing vehicles quite quickly. Please take a short break to ensure best performance for everyone.',
+        message: 'You have looked through a lot of vehicles in a short time. Wait a few minutes, then refresh the page. If this keeps happening, contact Suprah AI support at support@suprahai.com.',
     },
     handler: (req, res, next, options) => {
         next(new ApiError(429, options.message.message));
