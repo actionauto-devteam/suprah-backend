@@ -8,6 +8,7 @@ import User from "../models/User.model";
 import { ApiError } from "../utils/ApiError";
 import logger from "../utils/logger";
 import notificationService from "./notification.service";
+import { sendDriverApprovedEmail } from "./driverApprovalEmail";
 import { emitDriverPoolChange } from "../utils/socketEmitter";
 import { invalidateUserCache } from "../utils/cache.util";
 
@@ -549,7 +550,7 @@ export async function approveDriverVerification(args: {
       organizationId: args.organizationId || "global",
       type: "driver_profile_approved",
       title: "Driver Profile Approved",
-      message: "Your driver verification has been fully approved.",
+      message: "Your driver verification is approved. You can now accept loads.",
       metadata: {
         driverProfileId: String(approvedProfile._id),
       },
@@ -559,6 +560,12 @@ export async function approveDriverVerification(args: {
       { error, driverId: args.driverId },
       "Non-fatal: failed to send driver profile approval notification",
     );
+  }
+
+  // This approval is what lets the driver sign in, so tell them by email too.
+  // A driver whose account was approved earlier already got that email.
+  if (previousUserState.isApproved !== true) {
+    await sendDriverApprovedEmail(driverUser);
   }
 
   return {
