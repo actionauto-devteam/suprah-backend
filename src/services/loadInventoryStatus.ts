@@ -8,10 +8,14 @@ export type LoadInventoryStatus = "In Transit" | "Ready for Sale" | "Sold";
  * goes back to "Ready for Sale". A load made from a quote takes the car to its
  * buyer, so at delivery it becomes "Sold" (decided 2026-11-02): it never goes
  * back on sale, other customers' waiting requests for it close, and the feed
- * can still update it later like any sold car.
+ * can still update it later like any sold car. A load made straight from
+ * Inventory becomes "Sold" too when Dispatch said the car is sold to the
+ * person receiving it (decided 2026-11-04).
  */
-export function inventoryStatusAtDelivery(load: { quoteId?: unknown } | null | undefined): "Ready for Sale" | "Sold" {
-  return String(load?.quoteId ?? "").trim() ? "Sold" : "Ready for Sale";
+export function inventoryStatusAtDelivery(
+  load: { quoteId?: unknown; soldOnDelivery?: unknown } | null | undefined,
+): "Ready for Sale" | "Sold" {
+  return String(load?.quoteId ?? "").trim() || load?.soldOnDelivery === true ? "Sold" : "Ready for Sale";
 }
 
 /**
@@ -22,6 +26,7 @@ export function inventoryStatusAtDelivery(load: { quoteId?: unknown } | null | u
 export function inventoryVehicleIdsFollowingLoad(
   load: {
     quoteId?: unknown;
+    soldOnDelivery?: unknown;
     vehicles?: Array<{ vehicleId?: unknown } | null | undefined> | null;
   } | null | undefined,
   toStatus: LoadInventoryStatus,

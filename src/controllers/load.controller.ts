@@ -334,7 +334,7 @@
         throw new ApiError(400, describeValidationIssues(parsed.error.issues));
       }
 
-      const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing } = parsed.data;
+      const { postType, pickupLocation, deliveryLocation, vehicles, trailerType, dates, additionalInfo, contract, pricing: clientPricing, soldOnDelivery } = parsed.data;
 
       const pricingEnabled = clientPricing?.isPricingEnabled !== false;
 
@@ -524,6 +524,7 @@
         pricing,
         additionalInfo,
         contract: contractWithTimestamp,
+        ...(soldOnDelivery !== undefined ? { soldOnDelivery } : {}),
         status: "Posted",
       });
 
@@ -1033,6 +1034,7 @@
         contract,
         status,
         expectedUpdatedAt,
+        soldOnDelivery,
       } = parsed.data;
 
       // The dispatcher must be editing the current version. Otherwise someone
@@ -1073,6 +1075,16 @@
       if (vehicles !== undefined) updateData.vehicles = restoreInspectionPhotoKeys(vehicles, (load as any).vehicles);
       if (trailerType !== undefined) updateData.trailerType = trailerType;
       if (dates !== undefined) updateData.dates = dates;
+      if (soldOnDelivery !== undefined && soldOnDelivery !== Boolean((load as any).soldOnDelivery)) {
+        // The car's status was already set when the load was delivered.
+        if (String(load.status) === "Delivered") {
+          throw new ApiError(
+            409,
+            `Load ${load.loadNumber} was already delivered, so its car's status was already set. To change the car's status, use Change status on the car in Inventory.`,
+          );
+        }
+        updateData.soldOnDelivery = soldOnDelivery;
+      }
       if (additionalInfo !== undefined) {
         // Leaving visibility out keeps the load's current Public / Private setting.
         updateData.additionalInfo = {
