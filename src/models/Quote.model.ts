@@ -65,6 +65,12 @@ export interface IQuote extends Document {
     // the customer sees it).
     declineReason?: string;
 
+    // Staff quotes only: staff stopped sharing this shipment with the
+    // customer's portal account ("Unlink"). See services/shipmentFollower.ts.
+    portalShareOff?: boolean;
+    portalShareOffAt?: Date;
+    portalShareOffBy?: mongoose.Types.ObjectId;
+
     createdAt: Date;
     updatedAt: Date;
 }
@@ -157,7 +163,10 @@ const QuoteSchema: Schema<IQuote> = new Schema(
         customerRecordId: { type: Schema.Types.ObjectId, ref: 'Customer' },
         closedReason: { type: String, enum: ['vehicle_unavailable', 'customer_withdrew'], default: undefined },
         closedAt: { type: Date },
-        declineReason: { type: String, trim: true, maxlength: 300 }
+        declineReason: { type: String, trim: true, maxlength: 300 },
+        portalShareOff: { type: Boolean, default: undefined },
+        portalShareOffAt: { type: Date },
+        portalShareOffBy: { type: Schema.Types.ObjectId, ref: 'User' }
     },
     {
         timestamps: true
@@ -175,6 +184,9 @@ QuoteSchema.index(
         name: 'one_pending_customer_request',
     }
 );
+
+// My Shipments finds the staff quotes shared with a customer by their email.
+QuoteSchema.index({ email: 1, createdAt: -1 }, { name: 'quote_email_recent' });
 
 const Quote = mongoose.model<IQuote>('Quote', QuoteSchema);
 

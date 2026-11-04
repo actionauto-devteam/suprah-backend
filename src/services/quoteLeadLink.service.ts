@@ -3,6 +3,7 @@ import Lead from "../models/lead.model";
 import Quote from "../models/Quote.model";
 import Load from "../models/Load.model";
 import { normalizeIdentityEmail, normalizeIdentityPhone } from "../utils/contactIdentity";
+import { describePortalCustomer, type PortalCustomerSummary } from "./shipmentFollower";
 
 export interface QuoteLeadLink {
   leadId: mongoose.Types.ObjectId;
@@ -59,6 +60,8 @@ export interface LoadQuoteOrigin {
   quoteId: string;
   customerName: string;
   lead: { _id: string; firstName?: string; lastName?: string } | null;
+  /** The customer's portal account that follows this shipment (see shipmentFollower). */
+  portalCustomer: PortalCustomerSummary | null;
 }
 
 /**
@@ -71,21 +74,27 @@ export async function findLoadQuoteOrigin(organizationId: string, quoteId: unkno
   const id = String(quoteId ?? "").trim();
   if (!organizationId || !mongoose.Types.ObjectId.isValid(id)) return null;
   const quote = await Quote.findOne({ _id: id, organizationId })
-    .select("firstName lastName leadId")
+    .select("firstName lastName leadId source requestedBy email portalShareOff")
     .populate("leadId", "firstName lastName")
     .lean<{
       _id: mongoose.Types.ObjectId;
       firstName?: string;
       lastName?: string;
       leadId?: { _id: mongoose.Types.ObjectId; firstName?: string; lastName?: string } | null;
+      source?: string;
+      requestedBy?: mongoose.Types.ObjectId;
+      email?: string;
+      portalShareOff?: boolean;
     }>();
   if (!quote) return null;
+  const portalCustomer = await describePortalCustomer(quote).catch(() => null);
   const customerName = [quote.firstName, quote.lastName].map((part) => String(part ?? "").trim()).filter(Boolean).join(" ");
   const lead = quote.leadId && typeof quote.leadId === "object" && "_id" in quote.leadId ? quote.leadId : null;
   return {
     quoteId: String(quote._id),
     customerName,
     lead: lead ? { _id: String(lead._id), firstName: lead.firstName, lastName: lead.lastName } : null,
+    portalCustomer,
   };
 }
 

@@ -118,6 +118,7 @@ import { LOAD_CANCELLATION_REASON_LABELS } from "../constants/loadCancellation";
 import { inventoryStatusAtDelivery, inventoryVehicleIdsFollowingLoad, type LoadInventoryStatus } from "../services/loadInventoryStatus";
 import { announceReopenedQuotes, reopenQuotesOfDeletedLoads } from "../services/quoteReopen.service";
 import {
+  customerHearsEvent,
   customerShipmentNotification,
   findQuoteCustomer,
   type CustomerShipmentEvent,
@@ -1628,20 +1629,22 @@ function lifecycleReleaseResolutionEvent(params: {
 }
 
 /**
- * The notice for the customer who asked for this shipment from the customer
- * portal (when the load came from their request), queued with the load's own
- * change so it's sent exactly once. Never blocks the driver's or Dispatch's step.
+ * The notice for the customer who follows this shipment in their portal
+ * (they asked for it, or it's a staff quote with their verified email; see
+ * shipmentFollower), queued with the load's own change so it's sent exactly
+ * once. Loads made without a quote have no customer. Never blocks the
+ * driver's or Dispatch's step.
  */
 async function customerShipmentEvents(
   organizationId: string,
   load: any,
   event: CustomerShipmentEvent,
-  extra: { reasonLabel?: string } = {},
+  extra: { reasonLabel?: string; driverName?: string } = {},
 ) {
   if (!load?.quoteId) return [];
   try {
     const customer = await findQuoteCustomer(organizationId, load.quoteId);
-    return customer
+    return customer && customerHearsEvent(customer, event)
       ? [
           lifecycleUserNotificationEvent(
             customerShipmentNotification(customer, organizationId, event, {
@@ -1658,12 +1661,24 @@ async function customerShipmentEvents(
 }
 
 /**
- * A staff-made quote's customer hears about this step by email (see
- * staffQuoteCustomerEmail), after the step is saved. Never blocks the step.
+ * The quote's customer hears about this step by email when it's one of the
+ * steps they get by email (see staffQuoteCustomerEmail), after the step is
+ * saved. Never blocks the step.
  */
-function emailQuoteCustomerStep(organizationId: string, load: any, event: StaffQuoteEmailEvent) {
+function emailQuoteCustomerStep(organizationId: string, load: any, event: StaffQuoteEmailEvent, driverName?: string) {
   if (!load?.quoteId) return;
-  void emailStaffQuoteCustomer(organizationId, load.quoteId, event, { loadNumber: load.loadNumber });
+  void emailStaffQuoteCustomer(organizationId, load.quoteId, event, { loadNumber: load.loadNumber, driverName });
+}
+
+/**
+ * When a driver who had accepted the load hands it back (dropped, removed,
+ * released or reassigned), the customer hears that a new driver is being
+ * found. Nothing is sent when the driver never accepted: the customer was
+ * never told about them.
+ */
+async function customerHandBackEvents(organizationId: string, load: any) {
+  if (!load?.acceptedAt) return [];
+  return customerShipmentEvents(organizationId, load, "finding_driver");
 }
 
 /**
@@ -2701,7 +2716,10 @@ const reassignLoad = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
     (driver as any)?.name || "the replacement driver",
   ).trim();
 
+  // The customer was told this driver accepted; now a new one has to.
+  const reassignCustomerEvents = await customerHandBackEvents(organizationId, load);
   const reassignmentOutbox = [
+    ...reassignCustomerEvents,
     lifecycleSyncEvent(
       organizationId,
       [previousDriverId, driverId],
@@ -3151,7 +3169,9 @@ const removeLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   ).trim();
 
   const previousStatus = load.status;
+  const removalCustomerEvents = await customerHandBackEvents(organizationId, load);
   const removalOutbox = [
+    ...removalCustomerEvents,
     lifecycleSyncEvent(organizationId, [previousDriverId], load._id.toString()),
     lifecycleUserNotificationEvent({
       userId: previousDriverId,
@@ -6320,8 +6340,12 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
 
   const validatedLoad = load;
 
+  const acceptCustomerEvents = await customerShipmentEvents(organizationId, load, "driver_accepted", {
+    driverName: String(user.name ?? ""),
+  });
 
   const acceptanceOutbox = [
+    ...acceptCustomerEvents,
     lifecycleSyncEvent(
       organizationId,
       [user._id.toString()],
@@ -6389,6 +6413,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
   });
 
   await flushLifecycleOutbox(load._id.toString());
+  emailQuoteCustomerStep(organizationId, load, "driver_accepted", String(user.name ?? ""));
 
   // Compatibility warnings are derived informational notices rather than the
   // authoritative lifecycle event. Keep them best-effort; the durable outbox
@@ -6462,8 +6487,12 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
   );
 
   const pickupGpsFlag = await buildMissingGpsFlag(load, user, "picked_up");
+  const pickupCustomerEvents = await customerShipmentEvents(organizationId, load, "picked_up", {
+    driverName: String(user.name ?? ""),
+  });
   const pickupOutbox = [
     ...(pickupGpsFlag ? [pickupGpsFlag.event] : []),
+    ...pickupCustomerEvents,
     ...lifecycleInventoryStatusEvents(organizationId, load, "In Transit"),
     lifecycleSyncEvent(
       organizationId,
@@ -6508,6 +6537,7 @@ const markPickedUp = asyncHandler(async (req: ExpressRequest, res: ExpressRespon
   });
 
   await flushLifecycleOutbox(load._id.toString());
+  emailQuoteCustomerStep(organizationId, load, "picked_up", String(user.name ?? ""));
 
   return res.status(200).json(new ApiResponse(200, load, "Pickup recorded"));
 });
@@ -6645,11 +6675,14 @@ const markArrived = asyncHandler(async (req: ExpressRequest, res: ExpressRespons
   };
   // The dispatcher in charge hears about it; without one, the org admins do.
   const dispatchOwnerId = String((load as any).dispatchOwnerId ?? "").trim();
+  // The customer following the shipment hears when the driver reaches them.
+  const arrivalCustomerEvents = stop === "delivery" ? await customerShipmentEvents(organizationId, load, "arrived") : [];
   const arrivalOutbox = [
     lifecycleSyncEvent(organizationId, [user._id.toString()], load._id.toString()),
     dispatchOwnerId && dispatchOwnerId !== user._id.toString()
       ? lifecycleUserNotificationEvent({ userId: dispatchOwnerId, ...notice })
       : lifecycleAdminNotificationEvent({ ...notice, excludeUserId: user._id.toString() }),
+    ...arrivalCustomerEvents,
   ];
 
   load = await updateLoadIfCurrent({
