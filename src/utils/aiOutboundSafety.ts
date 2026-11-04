@@ -185,6 +185,65 @@ export interface MoneyAllowance {
   amounts: string[];
   keys: string[];
   reasons: string[];
+  wordReasons?: string[];
+  phones?: string[];
+  emails?: string[];
+  domains?: string[];
+}
+
+const WORD_REASONS = new Set(['price mention', 'discount/incentive language', 'financing/payment language', 'trade-in mention']);
+const PHONE_IN_TEXT = /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+const ANY_PHONE = /(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+const EMAIL_IN_TEXT = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/gi;
+const HOST_IN_TEXT = /(?:https?:\/\/)?(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,})/gi;
+
+const lastTenDigits = (value: string) => value.replace(/\D/g, '').slice(-10);
+const cleanHost = (value: string) => value.toLowerCase().replace(/^www\./, '');
+
+function contactValues(texts: string[]) {
+  const phones = new Set<string>();
+  const emails = new Set<string>();
+  const domains = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(ANY_PHONE)) phones.add(lastTenDigits(match[0]));
+    for (const match of text.matchAll(EMAIL_IN_TEXT)) emails.add(match[0].toLowerCase());
+    for (const match of text.replace(EMAIL_IN_TEXT, ' ').matchAll(HOST_IN_TEXT)) domains.add(cleanHost(match[1]));
+  }
+  return { phones: Array.from(phones), emails: Array.from(emails), domains: Array.from(domains) };
+}
+
+export function buildReplyAllowance(input: { moneyNotes: string[]; approvedAnswers: string[] }): MoneyAllowance | undefined {
+  const answers = input.approvedAnswers.filter(Boolean);
+  const money = buildMoneyAllowance([...input.moneyNotes, ...answers]);
+  if (!answers.length) return money;
+  const wordReasons = new Set<string>();
+  for (const answer of answers) {
+    for (const entry of PROHIBITED_PATTERNS) if (WORD_REASONS.has(entry.reason) && entry.pattern.test(answer)) wordReasons.add(entry.reason);
+  }
+  const notes = [...(money?.notes || [])];
+  for (const answer of answers) if (!notes.includes(answer)) notes.push(answer);
+  return {
+    notes,
+    amounts: money?.amounts || [],
+    keys: money?.keys || [],
+    reasons: money?.reasons || [],
+    wordReasons: Array.from(wordReasons),
+    ...contactValues(answers),
+  };
+}
+
+function allowedContacts(text: string, reasons: string[], allowance: MoneyAllowance): string[] {
+  let kept = reasons;
+  const phones = Array.from(text.matchAll(PHONE_IN_TEXT)).map((match) => lastTenDigits(match[0]));
+  if (phones.length && phones.every((phone) => allowance.phones?.includes(phone))) kept = kept.filter((reason) => reason !== 'unexpected phone number');
+  const emails = Array.from(text.matchAll(EMAIL_IN_TEXT)).map((match) => match[0].toLowerCase());
+  if (emails.length && emails.every((email) => allowance.emails?.includes(email))) kept = kept.filter((reason) => reason !== 'unexpected email address');
+  const hosts = Array.from(text.replace(EMAIL_IN_TEXT, ' ').matchAll(HOST_IN_TEXT)).map((match) => cleanHost(match[1]));
+  const hostAllowed = (host: string) => (allowance.domains || []).some((domain) => host === domain || host.endsWith(`.${domain}`));
+  if ((hosts.length || emails.length) && hosts.every(hostAllowed) && emails.every((email) => allowance.emails?.includes(email))) {
+    kept = kept.filter((reason) => reason !== 'unexpected link');
+  }
+  return kept;
 }
 
 export function buildMoneyAllowance(notes: string[]): MoneyAllowance | undefined {
@@ -216,6 +275,8 @@ function usesOnlyApprovedAmounts(text: string, allowance: MoneyAllowance): boole
 export function validateOutboundMessage(text: string, allowance?: MoneyAllowance): { ok: boolean; reasons: string[] } {
   let reasons = PROHIBITED_PATTERNS.filter((entry) => entry.pattern.test(text)).map((entry) => entry.reason);
   if (allowance && usesOnlyApprovedAmounts(text, allowance)) reasons = reasons.filter((reason) => !allowance.reasons.includes(reason));
+  if (allowance?.wordReasons?.length) reasons = reasons.filter((reason) => !allowance.wordReasons!.includes(reason));
+  if (allowance && (allowance.phones?.length || allowance.emails?.length || allowance.domains?.length)) reasons = allowedContacts(text, reasons, allowance);
   if (hasGuaranteedAvailabilityLanguage(text)) reasons.push('guaranteed-availability language');
   if (text.trim().length < 10) reasons.push('message too short or malformed');
   return { ok: reasons.length === 0, reasons: Array.from(new Set(reasons)) };

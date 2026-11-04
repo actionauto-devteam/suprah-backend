@@ -24,10 +24,12 @@ import {
   classifyAlexReplySafety,
   classifyAlexEmailReplySafety,
   selectRelevantAiCoaching,
+  selectRelevantKnowledge,
   checkAiCoachingCompliance,
   checkReplyCaps,
 } from './aiAgent.service';
 import { getRelevantAiCoaching } from './aiAgentCoaching.service';
+import { loadReplyKnowledge, type KnowledgeAnswer } from './aiKnowledgeRuntime.service';
 import {
   VehicleContextResult,
   resolveVehicleContextForReply,
@@ -41,7 +43,7 @@ import {
   AiCallObserver,
   AiCallBudgetExceededError,
   runWithAiCallObserver,
-  buildMoneyAllowance,
+  buildReplyAllowance,
   validateOutboundMessage,
   validateOutboundEmailMessage,
 } from '../utils/aiOutboundSafety';
@@ -516,9 +518,21 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
     }
   }
 
+  let knowledge: KnowledgeAnswer[] = [];
+  if (input.channel !== 'email') {
+    const candidates = await loadReplyKnowledge({ organizationId: String(input.organizationId), channel: input.channel, location: replyLead.location, transcript });
+    if (candidates.length) {
+      observer.phase = 'knowledge_selection';
+      knowledge = await selectRelevantKnowledge({ candidates, agentName, dealerName, transcript, channel: input.channel, phone: input.phone || lead.phone });
+    }
+  }
+
   observer.phase = 'generation';
   const vehicleContextNote = vehicleContext ? buildVehicleContextNote(vehicleContext) : undefined;
-  const amountAllowance = buildMoneyAllowance(appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction));
+  const amountAllowance = buildReplyAllowance({
+    moneyNotes: appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction),
+    approvedAnswers: knowledge.map((entry) => entry.answer),
+  });
   const generation = input.channel === 'email'
     ? await generateAlexEmailReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, isFirstReply,
@@ -527,7 +541,7 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
       })
     : await generateAlexReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel: input.channel, isFirstReply,
-        coachingNotes: appliedRules.map((rule) => rule.instruction), approvedAmounts: amountAllowance?.amounts, phone: input.phone || lead.phone, vehicleContextNote,
+        coachingNotes: appliedRules.map((rule) => rule.instruction), approvedAmounts: amountAllowance?.amounts, knowledge, phone: input.phone || lead.phone, vehicleContextNote,
       });
 
   const coachingRuleIds = appliedRules.map((rule) => rule.id);

@@ -17,6 +17,8 @@ export const KNOWLEDGE_AUDIT_ACTIONS = [
   'location_suspended',
   'knowledge_base_enabled',
   'knowledge_base_disabled',
+  'knowledge_replies_enabled',
+  'knowledge_replies_disabled',
   'detail_proposed',
   'detail_updated',
   'detail_approved',

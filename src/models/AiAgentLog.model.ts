@@ -29,6 +29,7 @@ export interface IAiAgentLog extends Document {
   coachingRuleIdsConsidered?: mongoose.Types.ObjectId[];
   coachingRuleIdsRelevant?: mongoose.Types.ObjectId[];
   coachingRuleIdsApplied?: mongoose.Types.ObjectId[];
+  knowledgeEntryIds?: mongoose.Types.ObjectId[];
   coachingRuleIdsSuppressed?: mongoose.Types.ObjectId[];
   coachingSuppressionReasons?: Array<{ ruleId: mongoose.Types.ObjectId; reason: string }>;
   coachingFirstDraftVerdict?: AiAgentCoachingComplianceVerdict;
@@ -69,6 +70,7 @@ const AiAgentLogSchema: Schema<IAiAgentLog> = new Schema(
     coachingRuleIdsConsidered: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
     coachingRuleIdsRelevant: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
     coachingRuleIdsApplied: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
+    knowledgeEntryIds: { type: [{ type: Schema.Types.ObjectId }], default: undefined },
     coachingRuleIdsSuppressed: [{ type: Schema.Types.ObjectId, ref: 'AiAgentCoachingRule' }],
     coachingSuppressionReasons: [
       {

@@ -73,9 +73,10 @@ export function isKnowledgeBaseEnabled(): boolean {
 
 export async function resolveKnowledgeBaseAvailability(organizationId: string) {
   const serverEnabled = isKnowledgeBaseEnabled();
-  const org: any = await Organization.findById(organizationId).select('metadata.aiKnowledgeBaseEnabled').lean();
+  const org: any = await Organization.findById(organizationId).select('metadata.aiKnowledgeBaseEnabled metadata.aiKnowledgeRepliesEnabled').lean();
   const orgEnabled = org?.metadata?.aiKnowledgeBaseEnabled === true;
-  return { serverEnabled, orgEnabled, enabled: serverEnabled && orgEnabled };
+  const repliesEnabled = org?.metadata?.aiKnowledgeRepliesEnabled === true;
+  return { serverEnabled, orgEnabled, enabled: serverEnabled && orgEnabled, repliesEnabled };
 }
 
 export function requireKnowledgeBaseServer(): void {
@@ -364,6 +365,43 @@ export async function setOrganizationKnowledgeBaseEnabled(input: { organizationI
       { $set: { 'metadata.aiKnowledgeBaseEnabled': current } },
     ).catch(() => undefined);
     logger.error({ organizationId: input.organizationId, errorName: err?.name }, '[KnowledgeBase] Switch audit failed; the change was rolled back');
+    throw new ApiError(503, 'The change could not be recorded, so the setting was not changed. Try again.');
+  }
+  return { changed: true };
+}
+
+export async function setKnowledgeRepliesEnabled(input: { organizationId: string; user: any; enabled: unknown; reason?: unknown }) {
+  const actor = trainingActor(input.user);
+  if (trainingRole(input.user) !== 'admin') throw new ApiError(403, 'Only admins can change whether the AI agent uses Knowledge Base answers');
+  if (typeof input.enabled !== 'boolean') throw new ApiError(400, 'enabled must be true or false');
+  const reason = cleanKnowledgeNote(input.reason, false);
+  const org: any = await Organization.findById(input.organizationId).select('metadata').lean();
+  if (!org) throw new ApiError(404, 'Organization not found');
+  if (input.enabled && org.metadata?.aiKnowledgeBaseEnabled !== true) {
+    throw new ApiError(409, 'Turn the Knowledge Base on for this organization first.');
+  }
+  const current = org.metadata?.aiKnowledgeRepliesEnabled === true;
+  if (current === input.enabled) return { changed: false };
+  const claimed = await Organization.findOneAndUpdate(
+    { _id: input.organizationId, 'metadata.aiKnowledgeRepliesEnabled': current ? true : { $ne: true } },
+    { $set: { 'metadata.aiKnowledgeRepliesEnabled': input.enabled } },
+  );
+  if (!claimed) throw new ApiError(409, 'Someone else just changed this setting. Refresh and try again.');
+  try {
+    await AiKnowledgeAuditLog.create({
+      organizationId: input.organizationId,
+      action: input.enabled ? 'knowledge_replies_enabled' : 'knowledge_replies_disabled',
+      actor,
+      fromStatus: current ? 'on' : 'off',
+      toStatus: input.enabled ? 'on' : 'off',
+      note: reason,
+    });
+  } catch (err: any) {
+    await Organization.updateOne(
+      { _id: input.organizationId, 'metadata.aiKnowledgeRepliesEnabled': input.enabled },
+      { $set: { 'metadata.aiKnowledgeRepliesEnabled': current } },
+    ).catch(() => undefined);
+    logger.error({ organizationId: input.organizationId, errorName: err?.name }, '[KnowledgeBase] AI replies switch audit failed; the change was rolled back');
     throw new ApiError(503, 'The change could not be recorded, so the setting was not changed. Try again.');
   }
   return { changed: true };
@@ -994,7 +1032,7 @@ export async function knowledgeBaseStatus(organizationId: string, user: any) {
     canCreate: true,
     canReview: canReviewKnowledge(user),
     canManageSettings: trainingRole(user) === 'admin',
-    affectsAlex: false,
+    affectsAlex: availability.enabled && availability.repliesEnabled,
   };
 }
 

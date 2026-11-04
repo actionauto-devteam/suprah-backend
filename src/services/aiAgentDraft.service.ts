@@ -4,7 +4,8 @@ import Organization from '../models/Organization.model';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 import { AI_AGENT_NAME_REQUIRED_CODE, AI_AGENT_NAME_REQUIRED_MESSAGE, identityFromMetadata } from '../utils/aiAgentIdentity';
-import { buildMoneyAllowance, hasGeminiApiKey, type MoneyAllowance, validateOutboundEmailMessage, validateOutboundMessage } from '../utils/aiOutboundSafety';
+import { buildReplyAllowance, hasGeminiApiKey, type MoneyAllowance, validateOutboundEmailMessage, validateOutboundMessage } from '../utils/aiOutboundSafety';
+import { loadReplyKnowledge } from './aiKnowledgeRuntime.service';
 import { assertLeadOpenForManualSend } from '../utils/closedLeadGuard';
 import {
   AiAgentTranscriptEntry,
@@ -15,6 +16,7 @@ import {
   generateAlexEmailReply,
   generateAlexReply,
   selectRelevantAiCoaching,
+  selectRelevantKnowledge,
 } from './aiAgent.service';
 import { getRelevantAiCoaching } from './aiAgentCoaching.service';
 import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
@@ -147,7 +149,7 @@ async function buildDraft(input: {
     });
   } else {
     let coachingNotes: string[] = [];
-    let approvedAmounts: string[] | undefined;
+    let moneyNotes: string[] = [];
     const coaching = await getRelevantAiCoaching({ organizationId, channel }).catch(() => ({ rules: [] as any[] }));
     if (coaching.rules.length) {
       const selection = await selectRelevantAiCoaching({
@@ -155,13 +157,18 @@ async function buildDraft(input: {
       });
       if (selection.status !== 'error') {
         coachingNotes = selection.appliedRules.map((rule) => rule.instruction);
-        amountAllowance = buildMoneyAllowance(selection.appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction));
-        approvedAmounts = amountAllowance?.amounts;
+        moneyNotes = selection.appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction);
       }
     }
+    const candidates = await loadReplyKnowledge({ organizationId, channel, location: lead.location, transcript });
+    const knowledge = candidates.length
+      ? await selectRelevantKnowledge({ candidates, agentName, dealerName, transcript, channel, phone: lead.phone })
+      : [];
+    amountAllowance = buildReplyAllowance({ moneyNotes, approvedAnswers: knowledge.map((entry) => entry.answer) });
+    const approvedAmounts = amountAllowance?.amounts;
     generate = (retryNote) => generateAlexReply({
       agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel, isFirstReply: false,
-      coachingNotes, approvedAmounts, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
+      coachingNotes, approvedAmounts, knowledge, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
     });
   }
 

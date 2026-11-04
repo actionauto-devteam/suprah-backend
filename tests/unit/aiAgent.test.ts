@@ -699,10 +699,48 @@ describe('processAlexTurn — mid-generation human-takeover check', () => {
 
     expect(ctx.send).toHaveBeenCalledWith(reply);
     const systemOf = (index: number) => mockCreate.mock.calls[index][0].messages.find((m: any) => m.role === 'system').content;
-    expect(systemOf(1)).toContain('a manager approved the money amounts in the coaching below ($500)');
+    expect(systemOf(1)).toContain('a manager approved the money amounts in the dealership coaching or approved answers below ($500)');
     expect(systemOf(3)).toContain('Approved amounts: $500.');
     expect(systemOf(3)).toContain(rule.instruction);
     expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', coachingRuleIdsApplied: [rule.id] }));
+  });
+
+  it('picks an approved Knowledge Base answer, writes with it, and lets its approved facts through the final check', async () => {
+    const deposit = {
+      id: '64c000000000000000000001', kind: 'faq', topic: 'financing_process', title: 'Deposit', question: 'How much is the deposit?',
+      answer: '$500 which is non-refundable, but goes towards the purchase price. Our finance team can go over financing options.', approvedAmounts: ['$500'],
+    };
+    const hours = { id: '64c000000000000000000002', kind: 'business_info', topic: 'hours', title: 'Saturday hours', answer: 'We are open Saturday from 9am to 6pm.' };
+    const reply = 'The deposit is $500, non-refundable, and it goes toward the purchase price. Our finance team can go over financing options with you.';
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ relevantIds: [deposit.id, 'not-a-candidate'] }) } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: reply } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'SAFE' } }] });
+
+    const ctx = buildCtx({ transcript: [{ from: 'customer', body: 'How much do I need to put down to hold the truck?' }], knowledgeCandidates: [deposit, hours] });
+    await processAlexTurn(ctx);
+
+    expect(ctx.send).toHaveBeenCalledWith(reply);
+    const systemOf = (index: number) => mockCreate.mock.calls[index][0].messages.find((m: any) => m.role === 'system').content;
+    const userOf = (index: number) => mockCreate.mock.calls[index][0].messages.find((m: any) => m.role === 'user').content;
+    expect(systemOf(0)).toMatch(/pick which approved dealership answers/i);
+    expect(userOf(0)).toContain(`id=${hours.id}`);
+    expect(systemOf(1)).toContain(deposit.answer);
+    expect(systemOf(1)).not.toContain(hours.answer);
+    expect(systemOf(1)).toContain('approved answers below ($500)');
+    expect(systemOf(2)).toContain(deposit.answer);
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', knowledgeEntryIds: [deposit.id] }));
+  });
+
+  it('replies normally without approved answers when picking one fails, and never lets their amounts through then', async () => {
+    const deposit = { id: '64c000000000000000000003', kind: 'faq', topic: 'general', title: 'Deposit', question: 'Deposit?', answer: 'A $500 deposit holds the vehicle.', approvedAmounts: ['$500'] };
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'not json' } }] });
+    mockCreate.mockResolvedValueOnce({ choices: [{ message: { content: 'It is a $500 deposit.' } }] });
+    const ctx = buildCtx({ knowledgeCandidates: [deposit] });
+    await processAlexTurn(ctx);
+    expect(mockCreate.mock.calls[1][0].messages.find((m: any) => m.role === 'system').content).not.toContain(deposit.answer);
+    expect(ctx.send).toHaveBeenCalledWith(ALEX_FALLBACK_MESSAGE);
+    expect(mockLogCreate).toHaveBeenCalledWith(expect.objectContaining({ status: 'fallback_sent', blockedReason: expect.stringMatching(/currency amount/) }));
+    expect(mockLogCreate.mock.calls.at(-1)[0].knowledgeEntryIds).toBeUndefined();
   });
 
   it('still blocks an amount nobody approved, even next to an approved one', async () => {

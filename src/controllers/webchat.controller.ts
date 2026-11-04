@@ -32,6 +32,7 @@ import {
   processAlexTurn,
 } from '../services/aiAgent.service';
 import { getRelevantAiCoaching } from '../services/aiAgentCoaching.service';
+import { loadReplyKnowledge } from '../services/aiKnowledgeRuntime.service';
 import { buildWebchatTranscript } from '../services/aiReplyContext.service';
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from '../services/aiShadowDraft.service';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -285,7 +286,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
 
     try {
       const lead = await Lead.findOne({ _id: session.leadId, organizationId: session.organizationId })
-        .select('firstName vehicle assignedTo phone').lean();
+        .select('firstName vehicle assignedTo phone location').lean();
       const [transcript, repliesSentToday, priorAiReplyCount, dealerName, coaching] = await Promise.all([
         buildWebchatTranscript(session._id),
         WebChatMessage.countDocuments({
@@ -302,6 +303,13 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
         resolveDealerName(session.organizationId),
         getRelevantAiCoaching({ organizationId: String(session.organizationId), channel: 'webchat' }),
       ]);
+
+      const knowledgeCandidates = await loadReplyKnowledge({
+        organizationId: String(session.organizationId),
+        channel: 'webchat',
+        location: (lead as any)?.location,
+        transcript,
+      });
 
       const vehicleInterest = (lead as any)?.vehicle
         ? [(lead as any).vehicle.year, (lead as any).vehicle.make, (lead as any).vehicle.model]
@@ -325,6 +333,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
         coachingNotes: coaching.notes,
         coachingRuleIds: coaching.ids,
         coachingRules: coaching.rules,
+        knowledgeCandidates,
         contactRestrictionNote: restrictedSession ? DNC_WEBCHAT_ALEX_NOTE : undefined,
         send: async (text: string) => {
           await assertAiReplyAllowed(check);

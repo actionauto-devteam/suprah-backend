@@ -23,6 +23,7 @@ import {
   restoreKnowledgeEntry,
   saveKnowledgeVersion,
   setOrganizationKnowledgeBaseEnabled,
+  setKnowledgeRepliesEnabled,
   submitKnowledgeEntry,
 } from '../services/aiKnowledgeBase.service';
 import {
@@ -69,7 +70,9 @@ export const getKnowledgeBaseStatus = asyncHandler(async (req: Request, res: Res
 export const updateKnowledgeBaseSettings = asyncHandler(async (req: Request, res: Response) => {
   const { orgId, user } = context(req);
   requireKnowledgeBaseServer();
-  await setOrganizationKnowledgeBaseEnabled({ organizationId: orgId, user, enabled: body(req).enabled, reason: body(req).reason });
+  const input = { organizationId: orgId, user, enabled: body(req).enabled, reason: body(req).reason };
+  if (body(req).setting === 'ai_replies') await setKnowledgeRepliesEnabled(input);
+  else await setOrganizationKnowledgeBaseEnabled(input);
   res.json(new ApiResponse(200, await knowledgeBaseStatus(orgId, user), 'Knowledge Base setting saved'));
 });
 

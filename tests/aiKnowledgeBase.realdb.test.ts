@@ -156,7 +156,7 @@ describe('Real-DB proof: P2a Knowledge Base backend (local MongoDB only)', () =>
       process.env.AI_TRAINING_ENABLED = 'true';
       const status = await call('get', '/status', 'manager');
       expect(status.status).toBe(200);
-      expect(status.body.data).toEqual({ serverEnabled: false, orgEnabled: true, enabled: false, canCreate: true, canReview: true, canManageSettings: false, affectsAlex: false });
+      expect(status.body.data).toEqual({ serverEnabled: false, orgEnabled: true, enabled: false, canCreate: true, canReview: true, canManageSettings: false, affectsAlex: false, repliesEnabled: false });
       const id = String(new mongoose.Types.ObjectId());
       const attempts = [
         call('get', '/entries', 'manager'),

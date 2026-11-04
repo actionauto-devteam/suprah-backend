@@ -87,6 +87,20 @@ describe('Phase 3A isolation: training data can never reach AI generation', () =
     expect(TRAINING_MODULES.filter((mod) => graph.includes(mod))).toEqual([]);
   });
 
+  it('the Knowledge Base reaches replies only through the runtime reader, which reads approved, active answers and their approved version', () => {
+    const runtime = 'services/aiKnowledgeRuntime.service';
+    const graph = importGraph(`${runtime}.ts`);
+    expect(TRAINING_MODULES.filter((mod) => graph.includes(mod))).toEqual([]);
+    const source = fs.readFileSync(path.join(SRC, `${runtime}.ts`), 'utf8').replace(/\r\n/g, '\n');
+    expect(source).toMatch(/lifecycle: 'active',\n\s*approvedVersion: \{ \$gte: 1 \},\n\s*approvalInvalidation: null,/);
+    expect(source).toMatch(/entryId: entry\._id, version: entry\.approvedVersion/);
+    expect(source).toMatch(/aiKnowledgeRepliesEnabled === true/);
+    expect(source).not.toMatch(/currentVersion|submittedVersion/);
+    for (const entry of ['services/communication.service.ts', 'controllers/webchat.controller.ts', 'services/aiShadowDraft.service.ts']) {
+      expect(importGraph(entry)).toContain(runtime);
+    }
+  });
+
   it('coaching runtime still reads only active AiAgentCoachingRule documents', () => {
     const source = fs.readFileSync(path.join(SRC, 'services/aiAgentCoaching.service.ts'), 'utf8');
     expect(source).toMatch(/AiAgentCoachingRule\.find\(\{[\s\S]*?status: 'active'/);

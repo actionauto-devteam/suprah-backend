@@ -1,5 +1,5 @@
 import { moneyFigures, moneyKeys, sameMoneyFigures } from '../../src/utils/aiMoneyAmounts';
-import { buildMoneyAllowance, validateOutboundMessage } from '../../src/utils/aiOutboundSafety';
+import { buildMoneyAllowance, buildReplyAllowance, validateOutboundMessage } from '../../src/utils/aiOutboundSafety';
 import { guardrailIssues } from '../../src/services/aiTrainingImportScreening';
 import { strictInstructionIssues } from '../../src/services/aiTrainingSafetyGate';
 import { evaluateCoachingRecord } from '../../src/services/aiCoachingAudit.service';
@@ -74,5 +74,30 @@ describe('training checks with allowed amounts', () => {
     expect(evaluateCoachingRecord({ instruction }).passed).toBe(false);
     expect(evaluateCoachingRecord({ instruction, amountApproval: { amounts: ['$500'] } }).passed).toBe(true);
     expect(evaluateCoachingRecord({ instruction, amountApproval: { amounts: ['$400'] } }).passed).toBe(false);
+  });
+});
+
+describe('approved Knowledge Base answers in the final check', () => {
+  const allowance = buildReplyAllowance({
+    moneyNotes: [],
+    approvedAnswers: ['Our finance team can go over financing options. Call 801-555-0100, visit actionautoutah.com or email sales@actionautoutah.com.', 'We take trade-in vehicles.'],
+  })!;
+
+  it('allows the words, phone, website and email an approved answer uses, and nothing else', () => {
+    expect(allowance.wordReasons!.sort()).toEqual(['financing/payment language', 'trade-in mention']);
+    expect(allowance.amounts).toEqual([]);
+    expect(validateOutboundMessage('Our finance team can walk you through financing, call 801-555-0100.', allowance).ok).toBe(true);
+    expect(validateOutboundMessage('See actionautoutah.com/inventory, or email sales@actionautoutah.com.', allowance).ok).toBe(true);
+    expect(validateOutboundMessage('Yes, we take trade-in vehicles!', allowance).ok).toBe(true);
+    expect(validateOutboundMessage('Call 801-555-0199 instead.', allowance).reasons).toEqual(['unexpected phone number']);
+    expect(validateOutboundMessage('Visit cheapcars.com today.', allowance).reasons).toEqual(['unexpected link']);
+    expect(validateOutboundMessage('Email bob@gmail.com.', allowance).reasons).toContain('unexpected email address');
+    expect(validateOutboundMessage('Financing starts at $199 a month.', allowance).reasons).toContain('currency amount');
+    expect(validateOutboundMessage('Our discount is guaranteed.', allowance).reasons).toEqual(expect.arrayContaining(['discount/incentive language', 'guaranteed-availability language']));
+  });
+
+  it('without approved answers, nothing extra is allowed', () => {
+    expect(buildReplyAllowance({ moneyNotes: [], approvedAnswers: [] })).toBeUndefined();
+    expect(validateOutboundMessage('Our finance team can walk you through financing.').ok).toBe(false);
   });
 });

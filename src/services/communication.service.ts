@@ -68,6 +68,7 @@ import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
 import UnifiedPushService from "./unifiedPush.service";
 import { notifyLeadMessage, notifyLeadMessageUnlessHandoff } from "./leadMessageNotice.service";
+import { loadReplyKnowledge } from "./aiKnowledgeRuntime.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
@@ -1279,6 +1280,12 @@ export async function triggerSmsAiReply(
         transcript,
       });
       const replyLead = vehicleContext.lead || lead;
+      const knowledgeCandidates = await loadReplyKnowledge({
+        organizationId: String(orgId),
+        channel: "sms",
+        location: replyLead.location,
+        transcript,
+      });
       const vehicleInterest = replyLead.vehicle
         ? [replyLead.vehicle.year, replyLead.vehicle.make, replyLead.vehicle.model].filter(Boolean).join(" ")
         : undefined;
@@ -1299,6 +1306,7 @@ export async function triggerSmsAiReply(
         coachingNotes: coaching.notes,
         coachingRuleIds: coaching.ids,
         coachingRules: coaching.rules,
+        knowledgeCandidates,
         vehicleResolution: vehicleContext.resolution,
         vehicleContextNote: buildVehicleContextNote(vehicleContext),
         vehicleClarification: vehicleContext.resolution === "ambiguous" ? vehicleContext.ambiguousCandidates : undefined,
