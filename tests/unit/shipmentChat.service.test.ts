@@ -268,14 +268,14 @@ describe("the load's dispatcher", () => {
   it('is whoever created the load when the dispatcher it was handed to is switched off', async () => {
     staffUsers = [staff(CREATOR, { name: 'Carl Creator' })];
     const view = await shipmentChatView(await resolveCustomerChat(CUSTOMER, QUOTE, 'dispatcher'));
-    expect(view).toMatchObject({ open: true, withName: 'Carl Creator' });
+    expect(view).toMatchObject({ open: true, withName: 'Carl' });
   });
 
   it("is the dealership's longest-serving admin when neither can take it, never staff of another dealership", async () => {
     staffUsers = [staff(DISPATCHER, { organizationId: OTHER_ORG })];
     admins = [staff(ADMIN, { name: 'Ann Admin', role: 'admin' })];
     const view = await shipmentChatView(await resolveCustomerChat(CUSTOMER, QUOTE, 'dispatcher'));
-    expect(view).toMatchObject({ open: true, withName: 'Ann Admin' });
+    expect(view).toMatchObject({ open: true, withName: 'Ann' });
     expect(mockUserFind).toHaveBeenLastCalledWith({ organizationId: { $in: [ORG] }, role: 'admin', isActive: true });
   });
 
@@ -320,7 +320,7 @@ describe('sending', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
       userId: CUSTOMER,
-      title: 'Dana Dispatch (Action Auto Utah)',
+      title: 'Dana (Action Auto Utah)',
       metadata: expect.objectContaining({ route: `/customer/shipments?shipment=${QUOTE}&chat=dispatcher` }),
     }));
     expect(mockMessageCreate).toHaveBeenCalledWith(expect.objectContaining({ senderRole: 'dispatcher' }));
@@ -392,6 +392,19 @@ describe('reading', () => {
     expect(page.messages[48]).toMatchObject({ content: '#1', mine: false, senderName: 'Mike Driver' });
   });
 
+  it("customers see the dispatcher's first name only; the dispatcher sees their own full name", async () => {
+    mockThreadFindOne.mockReturnValue(thread({ kind: 'dispatcher', staffId: DISPATCHER }));
+    const reply = { _id: 'm1', senderId: DISPATCHER, senderRole: 'dispatcher', content: 'On its way', photos: [], readBy: [DISPATCHER], createdAt: new Date() };
+    mockMessageFind.mockReturnValueOnce([reply]);
+    const customerSide = await resolveCustomerChat(CUSTOMER, QUOTE, 'dispatcher');
+    expect((await listChatMessages(customerSide)).messages[0]).toMatchObject({ mine: false, senderName: 'Dana' });
+
+    mockMessageFind.mockReturnValueOnce([reply]);
+    const staffSide = await resolveLoadChat(staffActor(), ORG, LOAD);
+    expect((await listChatMessages(staffSide)).messages[0]).toMatchObject({ mine: true, senderName: 'Dana Dispatch' });
+    expect(await shipmentChatView(staffSide)).toMatchObject({ withName: 'Maria' });
+  });
+
   it('marks what the reader has on screen as read and tells the other person', async () => {
     mockThreadFindOne.mockReturnValue(thread());
     mockMessageUpdateMany.mockResolvedValueOnce({ modifiedCount: 3 });
@@ -436,7 +449,7 @@ describe('My Shipments', () => {
     const summaries = await customerChatSummaries(CUSTOMER, [{ ...baseLoad(), dealerName: 'Action Auto Utah' } as any]);
     expect(summaries.get(LOAD)).toEqual({
       driver: { open: true, readable: true, unread: 2, note: null, name: null },
-      dispatcher: { open: true, readable: true, unread: 1, note: null, name: 'Dana Dispatch' },
+      dispatcher: { open: true, readable: true, unread: 1, note: null, name: 'Dana' },
     });
   });
 

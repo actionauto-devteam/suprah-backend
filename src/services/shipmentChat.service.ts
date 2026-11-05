@@ -11,6 +11,7 @@ import { loadContactIds, pickLoadContact } from "./dispatchChatContact";
 import { storageService, BucketType } from "./storage.service";
 import { SHIPMENT_NOT_FOUND } from "./customerShipmentTracking";
 import {
+  customerFacingDispatcherName,
   dispatcherChatState,
   driverChatState,
   isShipmentChatKind,
@@ -319,6 +320,12 @@ export interface ShipmentChatView {
   canReopen: boolean;
 }
 
+/** The driver's or dispatcher's name as the viewer sees it: customers see a dispatcher's first name only. */
+function participantNameFor(ctx: ShipmentChatContext, viewerIsCustomer: boolean): string | null {
+  if (!ctx.participant) return null;
+  return viewerIsCustomer && ctx.kind === "dispatcher" ? customerFacingDispatcherName(ctx.participant.name) : ctx.participant.name;
+}
+
 async function unreadFor(threadId: unknown, viewerId: string): Promise<number> {
   if (!threadId) return 0;
   return ShipmentChatMessage.countDocuments({ threadId, readBy: { $ne: new mongoose.Types.ObjectId(viewerId) } });
@@ -343,7 +350,7 @@ export async function shipmentChatView(ctx: ShipmentChatContext): Promise<Shipme
     note,
     closesAt: state.closesAt,
     isParticipant,
-    withName: audience === "customer" ? participant?.name ?? null : customer?.name || (customer ? "Customer" : null),
+    withName: audience === "customer" ? participantNameFor(ctx, true) : customer?.name || (customer ? "Customer" : null),
     handledBy: !isParticipant && audience === "dispatcher" ? participant?.name ?? null : null,
     vehicleName: String(ctx.quote?.vehicleName ?? "").trim(),
     loadNumber: String(ctx.load?.loadNumber ?? ""),
@@ -396,9 +403,11 @@ async function photoView(photo: IShipmentChatPhoto): Promise<ShipmentChatPhotoVi
   return { url, name: photo.originalName || "Photo", available: Boolean(url) };
 }
 
-function senderNameFor(ctx: ShipmentChatContext, record: MessageRecord): string {
+function senderNameFor(ctx: ShipmentChatContext, record: MessageRecord, viewerId: string): string {
   if (record.senderRole === "customer") return ctx.customer?.name || "Customer";
-  if (ctx.participant && toId(record.senderId) === ctx.participant.id) return ctx.participant.name;
+  if (ctx.participant && toId(record.senderId) === ctx.participant.id) {
+    return participantNameFor(ctx, Boolean(ctx.customer) && viewerId === ctx.customer?.id) ?? ctx.participant.name;
+  }
   return record.senderRole === "driver" ? "Driver" : "Dispatcher";
 }
 
@@ -408,7 +417,7 @@ export async function serializeChatMessage(ctx: ShipmentChatContext, record: Mes
     id: toId(record._id),
     mine: senderId === viewerId,
     senderRole: record.senderRole,
-    senderName: senderNameFor(ctx, record),
+    senderName: senderNameFor(ctx, record, viewerId),
     content: String(record.content ?? ""),
     photos: await Promise.all((record.photos ?? []).map(photoView)),
     createdAt: new Date(record.createdAt).toISOString(),
@@ -496,7 +505,10 @@ async function notifyRecipient(ctx: ShipmentChatContext, thread: IShipmentChatTh
     title = `${customer.name || "Customer"} (customer)`;
     route = kind === "driver" ? `/driver/loads/${loadId}?chat=customer` : `/transportation/load/${loadId}?chat=customer`;
   } else {
-    title = kind === "driver" ? `${participant.name} (your driver)` : `${participant.name} (${ctx.dealerName || "dispatcher"})`;
+    title =
+      kind === "driver"
+        ? `${participant.name} (your driver)`
+        : `${customerFacingDispatcherName(participant.name)} (${ctx.dealerName || "dispatcher"})`;
     route = `/customer/shipments?shipment=${String(quote._id)}&chat=${kind}`;
   }
   const about = vehicle ? `About the ${vehicle}: ` : "";
@@ -662,7 +674,7 @@ export interface CustomerChatSummary {
   unread: number;
   /** Why it's closed, and what to do instead. */
   note: string | null;
-  /** Dispatcher chat: the dispatcher's name. */
+  /** Dispatcher chat: the dispatcher's first name (customers never see full names of staff). */
   name: string | null;
 }
 
@@ -716,7 +728,7 @@ export async function customerChatSummaries(
         readable: Boolean(dispatcher),
         unread: dispatcherThread ? unreadByThread.get(String(dispatcherThread._id)) ?? 0 : 0,
         note: shipmentChatClosedNote("dispatcher", dispatcherState.reason, "customer", load.dealerName),
-        name: dispatcher?.name ?? null,
+        name: dispatcher ? customerFacingDispatcherName(dispatcher.name) : null,
       },
     });
   }

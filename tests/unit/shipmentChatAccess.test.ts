@@ -4,6 +4,7 @@
  */
 import {
   DRIVER_CHAT_AFTER_DELIVERY_MS,
+  customerFacingDispatcherName,
   dispatcherChatState,
   driverChatState,
   isShipmentChatKind,
@@ -13,6 +14,15 @@ import {
 const DRIVER = '64b0000000000000000000d1';
 const DISPATCHER = '64b0000000000000000000f1';
 const NOW = Date.parse('2026-11-05T18:00:00Z');
+
+describe('the dispatcher as customers see them', () => {
+  it('is their first name only, or Dispatcher when there is no name', () => {
+    expect(customerFacingDispatcherName('Dana  Marie Dispatch')).toBe('Dana');
+    expect(customerFacingDispatcherName('  Carl ')).toBe('Carl');
+    expect(customerFacingDispatcherName('')).toBe('Dispatcher');
+    expect(customerFacingDispatcherName(undefined)).toBe('Dispatcher');
+  });
+});
 
 describe('the driver chat', () => {
   it('opens when the driver accepts and stays open on the way', () => {
