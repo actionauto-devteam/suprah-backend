@@ -317,7 +317,8 @@ export function nextStopFor(status: string | undefined): Stop | null {
   return null;
 }
 
-function stopAddressText(place: Record<string, any> | null | undefined): string {
+/** A stop's address as one line ("123 Main St, Denver, CO 80202"), for looking it up on the map. */
+export function stopAddressText(place: Record<string, any> | null | undefined): string {
   if (!place) return "";
   return [place.address, place.city, [place.state, place.zip].filter(Boolean).join(" ")]
     .map((part) => String(part ?? "").trim())
