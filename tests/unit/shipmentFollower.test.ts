@@ -24,6 +24,7 @@ import {
   findPortalCustomerByEmail,
   findPortalCustomersByEmail,
   findQuoteFollower,
+  findQuoteFollowers,
   isStaffQuote,
 } from '../../src/services/shipmentFollower';
 
@@ -81,6 +82,30 @@ describe('findQuoteFollower', () => {
     mockUserFindOne.mockReturnValue(null);
     expect(await findQuoteFollower({ email: 'unknown@example.com' })).toBeNull();
     expect(await findQuoteFollower(null)).toBeNull();
+  });
+});
+
+describe('findQuoteFollowers', () => {
+  it('works out many quotes at once with the same rule, in two queries', async () => {
+    const OTHER = '64b0000000000000000000c8';
+    const jo = { _id: OTHER, name: 'Jo Ray', email: 'jo@example.com' };
+    mockUserFind.mockImplementation((filter: any) => (filter._id ? [maria] : [jo]));
+    const followers = await findQuoteFollowers([
+      { _id: 'q1', source: 'customer_portal', requestedBy: CUSTOMER },
+      { _id: 'q2', email: ' JO@example.com ' },
+      { _id: 'q3', email: 'unlinked@example.com', portalShareOff: true },
+      { _id: 'q4', email: 'nobody@example.com' },
+      { _id: 'q5', source: 'customer_portal', requestedBy: 'not-an-id' },
+    ]);
+    expect(mockUserFind).toHaveBeenCalledTimes(2);
+    expect(mockUserFind).toHaveBeenCalledWith({ _id: { $in: [CUSTOMER] } });
+    // The unlinked quote's email isn't looked up.
+    expect(mockUserFind).toHaveBeenCalledWith({ email: { $in: ['jo@example.com', 'nobody@example.com'] }, role: 'customer', emailVerified: true, isActive: true });
+    expect([...followers.entries()]).toEqual([
+      ['q1', { id: CUSTOMER, name: 'Maria Lopez', email: 'maria@example.com', kind: 'request' }],
+      ['q2', { id: OTHER, name: 'Jo Ray', email: 'jo@example.com', kind: 'shared' }],
+    ]);
+    expect((await findQuoteFollowers([])).size).toBe(0);
   });
 });
 

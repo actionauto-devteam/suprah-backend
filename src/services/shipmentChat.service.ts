@@ -46,7 +46,7 @@ export const LOAD_CHAT_NOT_FOUND = "We couldn't find this load. Refresh the page
 export const LOAD_NOT_YOURS = "This load isn't assigned to you anymore, so its customer chat is closed.";
 export const CHAT_KIND_INVALID = "Choose the chat with your driver or with the dispatcher.";
 
-const CHAT_LOAD_FIELDS = "_id organizationId quoteId loadNumber status assignedDriverId deliveredAt dispatchOwnerId createdBy";
+export const CHAT_LOAD_FIELDS = "_id organizationId quoteId loadNumber status assignedDriverId deliveredAt dispatchOwnerId createdBy";
 const CHAT_QUOTE_FIELDS = "_id organizationId source requestedBy email portalShareOff vehicleName";
 
 export interface ChatLoad {

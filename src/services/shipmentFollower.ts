@@ -89,6 +89,41 @@ export async function describePortalCustomer(quote: FollowableQuote | null | und
   return account ? { name: account.name || "Customer", shared: !quote.portalShareOff, fromRequest: false } : null;
 }
 
+/**
+ * The followers of many quotes at once (the same rule as findQuoteFollower),
+ * keyed by quote id. Quotes nobody follows are left out. Two queries.
+ */
+export async function findQuoteFollowers(
+  quotes: Array<FollowableQuote & { _id: unknown }>,
+): Promise<Map<string, ShipmentFollower>> {
+  const requesterIds = [
+    ...new Set(
+      quotes
+        .filter((quote) => !isStaffQuote(quote))
+        .map((quote) => String(quote.requestedBy ?? "").trim())
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  const [requesters, byEmail] = await Promise.all([
+    requesterIds.length ? User.find({ _id: { $in: requesterIds } }).select(ACCOUNT_FIELDS).lean() : Promise.resolve([]),
+    findPortalCustomersByEmail(quotes.filter((quote) => isStaffQuote(quote) && !quote.portalShareOff).map((quote) => quote.email)),
+  ]);
+  const requesterById = new Map(requesters.map((user) => [String(user._id), toPortalCustomer(user)]));
+
+  const result = new Map<string, ShipmentFollower>();
+  for (const quote of quotes) {
+    if (!isStaffQuote(quote)) {
+      const requester = requesterById.get(String(quote.requestedBy ?? "").trim());
+      if (requester) result.set(String(quote._id), { ...requester, kind: "request" });
+    } else if (!quote.portalShareOff) {
+      const email = normalizeIdentityEmail(quote.email);
+      const customer = email ? byEmail.get(email) : undefined;
+      if (customer) result.set(String(quote._id), { ...customer, kind: "shared" });
+    }
+  }
+  return result;
+}
+
 /** The customer who follows this quote's shipment in their portal, or null. */
 export async function findQuoteFollower(quote: FollowableQuote | null | undefined): Promise<ShipmentFollower | null> {
   if (!quote) return null;
