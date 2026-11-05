@@ -428,7 +428,10 @@ export async function listChatMessages(ctx: ShipmentChatContext, before?: unknow
 function requireOpenChat(ctx: ShipmentChatContext) {
   if (!ctx.available) throw new ApiError(404, "No customer follows this load in the customer portal, so there's no customer chat.");
   if (!ctx.isParticipant) {
-    throw new ApiError(403, ctx.participant ? `Only ${ctx.participant.name}, this load's dispatcher, can message this customer.` : "You're not in this chat.");
+    const why = ctx.participant
+      ? `Only ${ctx.participant.name}, this load's dispatcher, can message this customer.`
+      : shipmentChatClosedNote(ctx.kind, ctx.state.reason, ctx.viewer.role, ctx.dealerName) ?? "You're not in this chat.";
+    throw new ApiError(403, why);
   }
   if (!ctx.state.open || !ctx.load || !ctx.quote || !ctx.customer || !ctx.participant) {
     throw new ApiError(409, shipmentChatClosedNote(ctx.kind, ctx.state.reason, ctx.viewer.role, ctx.dealerName) ?? "This chat is closed.");
