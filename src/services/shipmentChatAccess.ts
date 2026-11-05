@@ -22,6 +22,14 @@ export function isShipmentChatKind(value: unknown): value is ShipmentChatKind {
   return typeof value === "string" && (SHIPMENT_CHAT_KINDS as readonly string[]).includes(value);
 }
 
+/**
+ * How customers see the dispatcher: first name only, always shown with the
+ * dealership's name. Staff and drivers see full names.
+ */
+export function customerFacingDispatcherName(name: string | null | undefined): string {
+  return (name ?? "").trim().split(/\s+/)[0] || "Dispatcher";
+}
+
 /** The driver chat stays open this long after delivery, for last questions. */
 export const DRIVER_CHAT_AFTER_DELIVERY_MS = 24 * 60 * 60 * 1000;
 
