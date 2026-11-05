@@ -255,12 +255,48 @@ describe('who can open a chat', () => {
     expect(view.note).toMatch(/No customer follows this load/);
   });
 
-  it('other staff only see who handles the chat, never the messages', async () => {
+  it('other staff only see who handles the chat, never the messages or the customer', async () => {
+    mockThreadFindOne.mockReturnValue(thread({ kind: 'dispatcher', staffId: DISPATCHER }));
     const ctx = await resolveLoadChat(staffActor(ADMIN, 'admin'), ORG, LOAD);
-    expect(await shipmentChatView(ctx)).toMatchObject({ isParticipant: false, open: false, handledBy: 'Dana Dispatch', threadId: null });
+    expect(await shipmentChatView(ctx)).toMatchObject({
+      isParticipant: false, open: false, handledBy: 'Dana Dispatch', threadId: null, withName: null, unread: 0,
+    });
+    expect(await listChatMessages(ctx)).toEqual({ messages: [], hasMore: false });
+    expect(await markChatRead(ctx)).toEqual({ updated: 0 });
+    await expect(sendChatMessage(ctx, { content: 'Hi' })).rejects.toMatchObject({ statusCode: 403 });
+    await expect(setDispatcherChatClosed(ctx, true)).rejects.toMatchObject({ statusCode: 403 });
+    expect(mockMessageCreate).not.toHaveBeenCalled();
+    expect(mockMessageFind).not.toHaveBeenCalled();
+  });
+
+  it("a driver who hasn't accepted the load can't read, send or learn who the customer is", async () => {
+    mockLoadFindById.mockReturnValue({ ...baseLoad(), status: 'Assigned' });
+    mockThreadFindOne.mockReturnValue(thread());
+    const ctx = await resolveLoadChat(driverActor(), ORG, LOAD);
+    expect(await shipmentChatView(ctx)).toMatchObject({ isParticipant: false, open: false, withName: null, threadId: null, unread: 0 });
     expect(await listChatMessages(ctx)).toEqual({ messages: [], hasMore: false });
     await expect(sendChatMessage(ctx, { content: 'Hi' })).rejects.toMatchObject({ statusCode: 403 });
     expect(mockMessageCreate).not.toHaveBeenCalled();
+  });
+
+  it('a dispatcher who handed the load on can no longer read the chat they had', async () => {
+    mockLoadFindById.mockReturnValue({ ...baseLoad(), dispatchOwnerId: CREATOR });
+    staffUsers = [staff(DISPATCHER), staff(CREATOR, { name: 'Carl Creator' })];
+    const ctx = await resolveLoadChat(staffActor(DISPATCHER), ORG, LOAD);
+    expect(await shipmentChatView(ctx)).toMatchObject({ isParticipant: false, handledBy: 'Carl Creator', withName: null });
+    expect(await listChatMessages(ctx)).toEqual({ messages: [], hasMore: false });
+    await expect(sendChatMessage(ctx, { content: 'Still me' })).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('a customer whose shipment now belongs to another account loses the chat', async () => {
+    mockFollower.mockResolvedValue({ id: OTHER_CUSTOMER, name: 'New Owner', email: 'new@example.com', kind: 'shared' });
+    await expect(resolveCustomerChat(CUSTOMER, QUOTE, 'driver')).rejects.toMatchObject({ statusCode: 404 });
+    // The new account starts its own chat: the old customer's thread is retired.
+    await resolveCustomerChat(OTHER_CUSTOMER, QUOTE, 'driver');
+    expect(mockThreadUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ $or: [{ staffId: { $ne: DRIVER } }, { customerId: { $ne: OTHER_CUSTOMER } }] }),
+      expect.anything(),
+    );
   });
 });
 
