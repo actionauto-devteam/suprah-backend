@@ -13,17 +13,18 @@ import {
 } from "./driverRouteMatching.service";
 
 /**
- * Where Dispatch's "miles from pickup" is measured from before a load is
- * assigned, for a driver who isn't on a trip:
- *   1. the location the driver chose to share (Share Location / Keep
- *      Sharing), if it was measured in the last 5 minutes;
- *   2. otherwise the delivery address of a load they delivered in the last
- *      12 hours;
+ * Where Dispatch's "miles from pickup" is measured from while they choose a
+ * driver for a load (decided 2026-11-05):
+ *   1. the location the driver is sharing right now, for any reason (Share
+ *      Location / Keep Sharing, or required for a trip), if it was measured
+ *      in the last 5 minutes;
+ *   2. otherwise, for a driver who isn't on a trip, the delivery address of a
+ *      load they delivered in the last 12 hours;
  *   3. otherwise nothing here, and home base is used.
- * A driver with an accepted, picked-up or in-transit load gets nothing here:
- * they are on a trip, and their live location stays private to that load's
- * dispatcher. Neither does a driver who is On Leave or In Shop. Positions
- * never leave the server; only a rounded distance does.
+ * A driver who is On Leave or In Shop gets nothing here. Positions never
+ * leave the server: Dispatch only ever gets a distance rounded to 5 miles
+ * ("under 5 miles" when closer), so a driver's exact location stays private
+ * to the dispatcher of the load they accepted. Drivers are told this.
  */
 export const LAST_DELIVERY_WINDOW_MS = 12 * 60 * 60 * 1000;
 
@@ -64,7 +65,8 @@ export async function getDispatchProximityOrigins(
     })
       .select("userId")
       .lean(),
-    DriverLocation.find({ userId: { $in: objectIds }, manualSharingOptIn: true })
+    // Any sharing driver; resolveLiveCoordinates below keeps only fresh, shared positions.
+    DriverLocation.find({ userId: { $in: objectIds }, isSharing: { $ne: false } })
       .select("userId coords isSharing lastSeenAt locationRecordedAt")
       .lean(),
     Load.aggregate([
@@ -86,15 +88,14 @@ export async function getDispatchProximityOrigins(
     ]),
   ]);
 
-  // Skipped: on a trip, or On Leave / In Shop.
-  const onTrip = new Set([
-    ...onTripIds.map((id: unknown) => String(id)),
-    ...(notWorkingProfiles as any[]).map((profile) => String(profile.userId)),
-  ]);
+  // On Leave / In Shop: nothing. On a trip: only a location they're sharing now
+  // (an earlier delivery isn't where they are any more).
+  const notWorking = new Set((notWorkingProfiles as any[]).map((profile) => String(profile.userId)));
+  const onTrip = new Set(onTripIds.map((id: unknown) => String(id)));
 
   for (const location of sharedLocations as any[]) {
     const driverId = String(location.userId);
-    if (onTrip.has(driverId)) continue;
+    if (notWorking.has(driverId)) continue;
     const live = resolveLiveCoordinates(location);
     if (live.coords && live.lastSeenAt) {
       origins.set(driverId, {
@@ -108,7 +109,7 @@ export async function getDispatchProximityOrigins(
   await Promise.all(
     (lastDeliveries as any[]).map(async (delivery) => {
       const driverId = String(delivery._id);
-      if (onTrip.has(driverId) || origins.has(driverId)) return;
+      if (notWorking.has(driverId) || onTrip.has(driverId) || origins.has(driverId)) return;
       const coords = await deliveryCoordinates(delivery.deliveryLocation);
       if (coords) {
         origins.set(driverId, {

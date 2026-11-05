@@ -1,9 +1,9 @@
 /**
  * Dispatch's "miles from pickup" before a load is assigned, through the real
- * endpoints: measured from a location the driver chose to share (under 5
- * minutes old), else their delivery in the last 12 hours, else home base.
- * A driver on a trip always shows home base, distances from the new origins
- * are rounded to 5 miles, and no position is ever sent.
+ * endpoints: measured from any location the driver is sharing (by choice or
+ * for a trip, under 5 minutes old), else their delivery in the last 12 hours
+ * if they aren't on a trip, else home base. Distances from these origins are
+ * rounded to 5 miles, and no position is ever sent.
  *
  * Data safety (same as load-flow): every record is created under this suite's
  * own organization and users and removed afterwards.
@@ -121,7 +121,7 @@ beforeAll(async () => {
   await Load.create(loadFields({ status: 'Accepted', assignedDriverId: drivers.ontrip._id, acceptedAt: new Date(now - 10 * 60 * 1000) }));
   // Shared location (Keep Sharing / Share Location) from 1 minute ago, in Tucson.
   await DriverLocation.create({ userId: drivers.shared._id, coords: TUCSON, isSharing: true, manualSharingOptIn: true, lastSeenAt: new Date(now - 60_000), locationRecordedAt: new Date(now - 60_000) });
-  // A fresh location the driver did NOT choose to share with Dispatch.
+  // A fresh location shared without Share Location (for example during a trip): used too, rounded.
   await DriverLocation.create({ userId: drivers.private._id, coords: TUCSON, isSharing: true, manualSharingOptIn: false, lastSeenAt: new Date(now - 60_000), locationRecordedAt: new Date(now - 60_000) });
   // A shared location that is 20 minutes old.
   await DriverLocation.create({ userId: drivers.stale._id, coords: TUCSON, isSharing: true, manualSharingOptIn: true, lastSeenAt: new Date(now - 20 * 60_000), locationRecordedAt: new Date(now - 20 * 60_000) });
@@ -173,7 +173,7 @@ describe("Dispatch's distance to pickup before assigning", () => {
     expect(proximity.distanceToPickupMiles).toBeGreaterThan(500);
   });
 
-  it('shows home base for a driver on a trip, even right after a delivery', async () => {
+  it("shows home base for a driver on a trip who isn't sharing, even right after a delivery", async () => {
     const res = await preview();
     expect(res.body.data.compatibilityByDriverId[String(drivers.ontrip._id)].proximity.source).toBe('home_base');
   });
@@ -194,9 +194,12 @@ describe("Dispatch's distance to pickup before assigning", () => {
     expect(res.body.data.compatibilityByDriverId[String(drivers.onleave._id)].proximity.source).toBe('home_base');
   });
 
-  it('never uses a location the driver did not choose to share', async () => {
+  it('uses any location the driver is sharing, also one shared during a trip, rounded to 5 miles', async () => {
     const res = await preview();
-    expect(res.body.data.compatibilityByDriverId[String(drivers.private._id)].proximity.source).toBe('home_base');
+    const proximity = res.body.data.compatibilityByDriverId[String(drivers.private._id)].proximity;
+    expect(proximity.source).toBe('shared_location');
+    expect(proximity.approximate).toBe(true);
+    expect(proximity.distanceToPickupMiles % 5).toBe(0);
   });
 
   it('never sends a delivery address position or a shared position', async () => {
