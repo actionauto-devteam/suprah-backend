@@ -12,6 +12,7 @@ router.get('/activity', ctrl.getActivity);
 router.get('/activity/summary', ctrl.getActivitySummaryView);
 router.get('/activity/logs', ctrl.getActivityLogs);
 router.get('/activity/reengagement', ctrl.getActivityReengagement);
+router.get('/activity/export/count', ctrl.getActivityExportCount);
 router.get('/activity/export', ctrl.getActivityExport);
 router.get('/syncs', ctrl.getSyncs);
 router.post('/syncs', ctrl.postSync);

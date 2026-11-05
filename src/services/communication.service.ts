@@ -1888,6 +1888,25 @@ async function finishIvrMissed(call: any): Promise<void> {
   await notifyMissedCall(claimed);
 }
 
+const ABANDONED_CALL_MIN_MS = 5000;
+
+function callerAbandoned(call: any, callerLeg: boolean): boolean {
+  if (!callerLeg || call.direction !== "inbound" || call.answeredAt) return false;
+  const started = new Date(call.startedAt || call.createdAt || 0).getTime();
+  return started > 0 && Date.now() - started >= ABANDONED_CALL_MIN_MS;
+}
+
+async function followUpAbandonedCall(call: any): Promise<void> {
+  const claimed = await CallLog.findOneAndUpdate(
+    { _id: call._id, status: "missed", textBackSentAt: null },
+    { $set: { textBackSentAt: new Date() } },
+    { new: true }
+  );
+  if (!claimed) return;
+  await sendMissedCallTextBack(claimed);
+  await notifyMissedCall(claimed);
+}
+
 const PHONE_LEG_LIMIT = 15;
 
 function spokenCaller(call: any): string {
@@ -2586,9 +2605,11 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
   }
 
   if (call.routing) {
+    const abandoned = call.status !== 'in-progress' && callerAbandoned(call, payload.call_control_id === call.providerCallControlId);
     const final = await CallLog.findOneAndUpdate({ _id: call._id, status: call.status, 'routing.revision': call.routing.revision }, {
       $set: {
-        status: call.status === 'in-progress' ? 'completed' : 'canceled', endedAt: new Date(), hangupCause: cause,
+        status: call.status === 'in-progress' ? 'completed' : abandoned ? 'missed' : 'canceled', endedAt: new Date(), hangupCause: cause,
+        ...(abandoned ? { abandonedAt: new Date() } : {}),
         'routing.stage': 'terminal', 'routing.deadline': null,
         ...(call.answeredAt ? { durationSec: Math.max(0, Math.round((Date.now() - call.answeredAt.getTime()) / 1000)) } : {}),
       },
@@ -2596,24 +2617,27 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
     clearIvrTimer(String(call._id));
     if (final) emitIvrCall(final);
     await stopPhoneLegs(call);
+    if (final && abandoned) await followUpAbandonedCall(final);
     return;
   }
 
   const ended = new Date();
   const callerLeg =
     !payload?.call_control_id || !call.providerCallControlId || payload.call_control_id === call.providerCallControlId;
+  const abandoned = call.status !== "in-progress" && callerAbandoned(call, callerLeg);
   let status: string;
   if (call.status === "in-progress") status = "completed";
   else if (call.status === "ringing") {
     if (!callerLeg) return;
-    status = "canceled";
-  } else if (callerLeg) status = "canceled";
+    status = abandoned ? "missed" : "canceled";
+  } else if (callerLeg) status = abandoned ? "missed" : "canceled";
   else if (cause === "normal_clearing") status = "completed";
   else if (await returnLegacyCallToRinging(call, cause || "agent-unavailable")) return;
   else status = "missed";
 
   const update: Record<string, unknown> = { status, endedAt: ended };
   if (cause) update.hangupCause = cause;
+  if (abandoned) update.abandonedAt = ended;
   if (call.answeredAt) {
     update.durationSec = Math.max(0, Math.round((ended.getTime() - call.answeredAt.getTime()) / 1000));
   }
@@ -2636,7 +2660,9 @@ export async function handleCallHangup(payload: any, attempt = 0): Promise<void>
 
   emitToOrg(saved.orgId, "comm:call:update", { call: saved.toObject() });
 
-  if (status === "missed") {
+  if (status === "missed" && abandoned) {
+    await followUpAbandonedCall(saved);
+  } else if (status === "missed") {
     await releaseLegacyCaller(saved);
     const claimed = await CallLog.findOneAndUpdate(
       { _id: call._id, textBackSentAt: null },

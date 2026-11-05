@@ -17,6 +17,8 @@ type MonitorGroup = (typeof MONITOR_GROUPS)[number];
 
 const PAGE_SIZE = 25;
 const EXPORT_LIMIT = 5000;
+const MAX_CUSTOM_DAYS = 366;
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_SEARCH = 80;
 const TEXT_STEPS = new Set(['send_message', 'send_review_invitation', 'send_appointment_confirmation', 'send_ai_follow_up']);
 const DELIVERED = new Set(['sent', 'test']);
@@ -64,6 +66,8 @@ export interface MonitorQuery {
   group?: string;
   page?: number;
   view?: string;
+  from?: string;
+  to?: string;
 }
 
 function bad(message: string): never {
@@ -88,6 +92,20 @@ export function rangeBounds(range: MonitorRange, now: Date = new Date()) {
     from = `${to.slice(0, 8)}01`;
   }
   return { key: range, from, to, start: zoneMidnightUtc(from, COMPANY_TZ), end: zoneMidnightUtc(addDaysToDateStr(to, 1), COMPANY_TZ) };
+}
+
+function isCalendarDay(value: string): boolean {
+  if (!DAY_PATTERN.test(value)) return false;
+  const date = new Date(`${value}T12:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+export function customBounds(from: string, to: string) {
+  if (!isCalendarDay(from) || !isCalendarDay(to)) bad('Pick a valid start and end date');
+  if (from > to) bad('The start date must be on or before the end date');
+  const days = Math.round((Date.parse(`${to}T12:00:00.000Z`) - Date.parse(`${from}T12:00:00.000Z`)) / DAY_MS) + 1;
+  if (days > MAX_CUSTOM_DAYS) bad('Pick a date range of one year or less');
+  return { key: 'custom' as const, from, to, start: zoneMidnightUtc(from, COMPANY_TZ), end: zoneMidnightUtc(addDaysToDateStr(to, 1), COMPANY_TZ) };
 }
 
 function escapeRegex(value: string): string {
@@ -122,7 +140,9 @@ async function monitorMatch(orgId: string, query: MonitorQuery) {
   const name = String(query.name || '').trim().slice(0, MAX_SEARCH);
   if (name) match.automationName = new RegExp(escapeRegex(name), 'i');
   const status = query.status ? STATUS_MATCH[query.status as MonitorStatus] : {};
-  return { mode, match, status, range: rangeBounds(range) };
+  const from = String(query.from || '').trim();
+  const to = String(query.to || '').trim();
+  return { mode, match, status, range: from || to ? customBounds(from, to) : rangeBounds(range) };
 }
 
 function actionLabel(type: string | undefined): string {
@@ -163,24 +183,37 @@ function serializeRun(run: any) {
   };
 }
 
-async function findRuns(orgId: string, query: MonitorQuery, skip: number, limit: number) {
-  const { mode, match, status, range } = await monitorMatch(orgId, query);
-  const filter = { ...match, ...status, createdAt: { $gte: range.start, $lt: range.end } };
-  const [items, total] = await Promise.all([
-    CrmAutomationRun.find(filter).select('-settings').sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
-    CrmAutomationRun.countDocuments(filter),
-  ]);
-  return { mode, range, total, items: items.map(serializeRun) };
+type MonitorScope = Awaited<ReturnType<typeof monitorMatch>>;
+
+function runFilter({ match, status, range }: MonitorScope) {
+  return { ...match, ...status, createdAt: { $gte: range.start, $lt: range.end } };
 }
 
-async function findLogs(orgId: string, query: MonitorQuery, skip: number, limit: number) {
-  const { mode, match, status, range } = await monitorMatch(orgId, query);
+function logStages({ match, status, range }: MonitorScope): any[] {
   const inRange = { $gte: range.start, $lt: range.end };
-  const [result] = await CrmAutomationRun.aggregate([
+  return [
     { $match: { ...match, ...status, log: { $elemMatch: { at: inRange } } } },
     { $project: { automationId: 1, automationName: 1, contact: 1, log: 1 } },
     { $unwind: { path: '$log', includeArrayIndex: 'position' } },
     { $match: { 'log.at': inRange } },
+  ];
+}
+
+async function findRuns(orgId: string, query: MonitorQuery, skip: number, limit: number) {
+  const scope = await monitorMatch(orgId, query);
+  const filter = runFilter(scope);
+  const [items, total] = await Promise.all([
+    CrmAutomationRun.find(filter).select('-settings').sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
+    CrmAutomationRun.countDocuments(filter),
+  ]);
+  return { mode: scope.mode, range: scope.range, total, items: items.map(serializeRun) };
+}
+
+async function findLogs(orgId: string, query: MonitorQuery, skip: number, limit: number) {
+  const scope = await monitorMatch(orgId, query);
+  const { mode, range } = scope;
+  const [result] = await CrmAutomationRun.aggregate([
+    ...logStages(scope),
     { $sort: { 'log.at': -1, _id: -1, position: -1 } },
     { $facet: { items: [{ $skip: skip }, { $limit: limit }], total: [{ $count: 'count' }] } },
   ]);
@@ -329,6 +362,19 @@ function denverTime(value: unknown): string {
   const date = new Date(value as string);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleString('en-US', { timeZone: COMPANY_TZ, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+export async function countAutomationExport(orgId: string, query: MonitorQuery) {
+  const view = query.view === 'logs' ? 'logs' : 'events';
+  const scope = await monitorMatch(orgId, query);
+  let total: number;
+  if (view === 'logs') {
+    const [result] = await CrmAutomationRun.aggregate([...logStages(scope), { $count: 'count' }]);
+    total = result?.count || 0;
+  } else {
+    total = await CrmAutomationRun.countDocuments(runFilter(scope));
+  }
+  return { view, mode: scope.mode, range: { from: scope.range.from, to: scope.range.to }, total, limit: EXPORT_LIMIT, rows: Math.min(total, EXPORT_LIMIT) };
 }
 
 export async function exportAutomationActivity(orgId: string, query: MonitorQuery) {

@@ -103,6 +103,8 @@ const CALL_LABELS: Record<string, string> = {
   canceled: 'Ended before answer',
 };
 
+const callLabel = (call: any): string => (call.status === 'missed' && call.abandonedAt ? 'Missed (caller hung up)' : CALL_LABELS[call.status] || call.status);
+
 const AI_ACTOR = 'ai-agent';
 const SYSTEM_ACTORS = ['system', 'system-webchat-ack'];
 const OLD_AUTOMATIC_NAME = 'Suprah AI';
@@ -305,7 +307,7 @@ export async function loadConversationItems(organizationId: string, lead: any, o
       call: {
         id: String(call._id),
         status: call.status,
-        label: CALL_LABELS[call.status] || call.status,
+        label: callLabel(call),
         live,
         durationSec: call.durationSec ?? null,
         answeredBy: call.answeredBy?.name || null,
@@ -618,7 +620,7 @@ export async function getEarlierConversation(organizationId: string, leadId: str
         occurredAt: toIso(call.startedAt || call.createdAt),
         body: call.direction === 'outbound' ? 'Outgoing call' : 'Incoming call',
         author: { name: customerName, kind: 'customer' as const },
-        call: { id: String(call._id), status: call.status, label: CALL_LABELS[call.status] || call.status, live: false, durationSec: call.durationSec ?? null, answeredBy: call.answeredBy?.name || null },
+        call: { id: String(call._id), status: call.status, label: callLabel(call), live: false, durationSec: call.durationSec ?? null, answeredBy: call.answeredBy?.name || null },
       })),
     ].sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : 1));
     return { lead: null, items };

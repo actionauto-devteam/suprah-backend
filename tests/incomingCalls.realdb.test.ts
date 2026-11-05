@@ -684,6 +684,77 @@ describe('Real-DB: incoming calls (local MongoDB, simulated Telnyx only)', () =>
     expect(mockTelnyx.transferToAgent).not.toHaveBeenCalled();
   });
 
+  test('14b. a caller who gives up after waiting is a missed call: one text back, the missed-call notice, and no voicemail', async () => {
+    const { notifyOrgAdmins } = jest.requireMock('../src/utils/safeNotification');
+    const ringingCall = await incoming(nextPhone());
+    await backdate(ringingCall.call._id, 12);
+    const hangup = { call_control_id: ringingCall.controlId, call_session_id: ringingCall.sessionId, hangup_cause: 'originator_cancel' };
+    await webhook('call.hangup', hangup);
+    const missed: any = await until(() => CallLog.findById(ringingCall.call._id).lean(), (c: any) => Boolean(c?.textBackSentAt));
+    expect(missed.status).toBe('missed');
+    expect(missed.abandonedAt).toBeTruthy();
+    await until(async () => textBacksTo(ringingCall.call.from), (count) => count > 0);
+    expect(textBacksTo(ringingCall.call.from)).toBe(1);
+    expect(missedReleasesFor(ringingCall.controlId)).toBe(0);
+    expect(mockTelnyx.answerCall).not.toHaveBeenCalledWith(ringingCall.controlId);
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(ORG, 'missed_call', expect.any(String), expect.any(String), expect.objectContaining({ callId: String(ringingCall.call._id) }));
+    const conversation = await buildLeadConversation(ORG, String(missed.leadId));
+    const item: any = conversation.items.find((entry: any) => entry.id === `call:${ringingCall.call._id}`);
+    expect(item?.call?.label).toBe('Missed (caller hung up)');
+    await webhook('call.hangup', hangup);
+    await settle();
+    expect(textBacksTo(ringingCall.call.from)).toBe(1);
+
+    const connecting = await incoming(nextPhone());
+    expect((await claim(connecting.call._id)).status).toBe(200);
+    await backdate(connecting.call._id, 20);
+    await webhook('call.hangup', { call_control_id: connecting.controlId, call_session_id: connecting.sessionId, hangup_cause: 'normal_clearing' });
+    const gaveUp: any = await until(() => CallLog.findById(connecting.call._id).lean(), (c: any) => Boolean(c?.textBackSentAt));
+    expect(gaveUp.status).toBe('missed');
+    expect(gaveUp.abandonedAt).toBeTruthy();
+    expect(gaveUp.answeredAt).toBeFalsy();
+    await until(async () => textBacksTo(connecting.call.from), (count) => count > 0);
+    expect(textBacksTo(connecting.call.from)).toBe(1);
+
+    const answered = await answeredCall();
+    await backdate(answered.call._id, 30);
+    await webhook('call.hangup', { call_control_id: answered.controlId, call_session_id: answered.sessionId, hangup_cause: 'normal_clearing' });
+    const done: any = await until(() => CallLog.findById(answered.call._id).lean(), (c: any) => c?.status !== 'in-progress');
+    expect(done.status).toBe('completed');
+    expect(done.abandonedAt).toBeFalsy();
+    expect(textBacksTo(answered.call.from)).toBe(0);
+  });
+
+  test('14c. untagged call events from our own browser line are ignored, so they never refuse or hang up a call', async () => {
+    const previous = process.env.TELNYX_SIP_CONNECTION_ID;
+    process.env.TELNYX_SIP_CONNECTION_ID = 'conn-webrtc-p11';
+    try {
+      const outbound = nextControlId();
+      const toCustomer = await webhook('call.initiated', { call_control_id: outbound, call_session_id: `session-${outbound}`, connection_id: 'conn-webrtc-p11', direction: 'incoming', from: 'sip:p11agent@sip.telnyx.com', to: nextPhone(), state: 'parked' });
+      expect(toCustomer.status).toBe(200);
+      const toCompany = nextControlId();
+      await webhook('call.initiated', { call_control_id: toCompany, call_session_id: `session-${toCompany}`, connection_id: 'conn-webrtc-p11', direction: 'incoming', from: nextPhone(), to: COMPANY, state: 'parked' });
+      await webhook('call.answered', { call_control_id: outbound, call_session_id: `session-${outbound}`, connection_id: 'conn-webrtc-p11' });
+      await webhook('call.hangup', { call_control_id: outbound, call_session_id: `session-${outbound}`, connection_id: 'conn-webrtc-p11', hangup_cause: 'normal_clearing' });
+      await settle();
+      expect(await CallLog.countDocuments({ providerCallControlId: { $in: [outbound, toCompany] } })).toBe(0);
+      expect(refusalsFor(outbound) + refusalsFor(toCompany)).toBe(0);
+      expect(mockTelnyx.hangupCall).not.toHaveBeenCalled();
+      expect(mockTelnyx.answerCall).not.toHaveBeenCalled();
+
+      const started = await incoming(nextPhone());
+      expect((await claim(started.call._id)).status).toBe(200);
+      const agentControlId = `v3:p11-agent-${++serial}`;
+      const state = agentState(started.call._id);
+      await webhook('call.initiated', { call_control_id: agentControlId, call_session_id: started.sessionId, connection_id: 'conn-webrtc-p11', direction: 'outgoing', client_state: state, from: COMPANY, to: 'sip:p11agent@sip.telnyx.com' });
+      await webhook('call.answered', { call_control_id: agentControlId, call_session_id: started.sessionId, connection_id: 'conn-webrtc-p11', client_state: state });
+      expect((await until(() => CallLog.findById(started.call._id).lean(), (c: any) => c?.status === 'in-progress') as any).status).toBe('in-progress');
+    } finally {
+      if (previous === undefined) delete process.env.TELNYX_SIP_CONNECTION_ID;
+      else process.env.TELNYX_SIP_CONNECTION_ID = previous;
+    }
+  });
+
   test('recovery list only returns calls that can still be ringing', async () => {
     await CallLog.updateMany({ orgId: ORG, status: 'ringing' }, { $set: { status: 'canceled' } });
     const stale = await CallLog.create({ orgId: ORG, direction: 'inbound', from: nextPhone(), to: COMPANY, status: 'ringing', providerCallControlId: nextControlId(), startedAt: new Date(Date.now() - 10 * 60 * 1000) });
