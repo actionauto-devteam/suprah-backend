@@ -315,6 +315,31 @@ describe('Stage 41B local MongoDB verification', () => {
     expect(telnyx.recordingCommand).not.toHaveBeenCalled();
     expect(await CallRecording.countDocuments({ callLogId: call._id })).toBe(0);
   });
+  it('a caller who gives up in the menu or while it rings is a missed call: one text back, the missed-call notice, no voicemail', async () => {
+    const { notifyOrgAdmins } = jest.requireMock('../src/utils/safeNotification');
+    const hangup = (call: any) => ({ call_session_id: call.providerCallSessionId, call_control_id: call.providerCallControlId, hangup_cause: 'normal_clearing' });
+    const greetings = () => (telnyx.speakIvr as jest.Mock).mock.calls.filter(([, , state]) => state?.kind === 'voicemail-greeting').length;
+    const inMenu = await freshCall();
+    await CallLog.updateOne({ _id: inMenu._id }, { $set: { startedAt: new Date(Date.now() - 15000) } });
+    await Promise.all([comm.handleCallHangup(hangup(inMenu)), comm.handleCallHangup(hangup(inMenu))]);
+    const gaveUp = await CallLog.findById(inMenu._id);
+    expect(gaveUp.status).toBe('missed'); expect(gaveUp.abandonedAt).toBeTruthy(); expect(gaveUp.routing.stage).toBe('terminal');
+    expect(gaveUp.textBackSentAt).toBeTruthy();
+    expect(telnyx.sendSms).toHaveBeenCalledTimes(1);
+    expect(notifyOrgAdmins).toHaveBeenCalledWith(orgId, 'missed_call', expect.any(String), expect.any(String), expect.objectContaining({ callId: String(inMenu._id) }));
+    const ringing = await select('1');
+    await CallLog.updateOne({ _id: ringing._id }, { $set: { startedAt: new Date(Date.now() - 40000) } });
+    await comm.handleCallHangup(hangup(ringing));
+    expect((await CallLog.findById(ringing._id)).status).toBe('missed');
+    expect(telnyx.sendSms).toHaveBeenCalledTimes(2);
+    const quick = await freshCall();
+    await comm.handleCallHangup(hangup(quick));
+    const ended = await CallLog.findById(quick._id);
+    expect(ended.status).toBe('canceled'); expect(ended.abandonedAt).toBeFalsy();
+    expect(telnyx.sendSms).toHaveBeenCalledTimes(2);
+    expect(greetings()).toBe(0);
+    expect(telnyx.answerCall).toHaveBeenCalledTimes(3);
+  });
   it('invalid/no input replays once then routes to Reception, ignoring repeated delivery', async () => {
     const call = await freshCall(); const invalid = gather(call, '9');
     await Promise.all([handleIvrGather(invalid, callbacks), handleIvrGather(invalid, callbacks)]);

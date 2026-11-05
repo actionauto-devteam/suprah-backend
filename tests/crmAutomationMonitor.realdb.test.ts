@@ -12,7 +12,7 @@ import Appointment from '../src/models/Appointment.model';
 import { CommunicationMessage } from '../src/models/communication.model';
 import { generateCrmToken } from '../src/middleware/crmAuth.middleware';
 import crmAutomationRoute from '../src/routes/crmAutomation.routes';
-import { getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, rangeBounds } from '../src/services/crmAutomationMonitor.service';
+import { customBounds, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, rangeBounds } from '../src/services/crmAutomationMonitor.service';
 import { COMPANY_TZ, addDaysToDateStr, toCompanyDateStr, zoneMidnightUtc } from '../src/utils/companyTimezone';
 
 const app = express();
@@ -224,5 +224,41 @@ describe('Real-DB proof: automation Monitor (local dev MongoDB only)', () => {
     const res = await request(app).get(`${base}/activity/reengagement`).set(as('manager'));
     expect(res.status).toBe(200);
     expect(res.body.data.totals).toEqual({ sent: 3, engaged: 1, booked: 1 });
+  });
+
+  it('7. Export CSV can use a start and end date, and tells how many rows the file will have', async () => {
+    const yesterday = addDaysToDateStr(today, -1);
+    const count = (query: string, who: keyof typeof users = 'manager') => request(app).get(`${base}/activity/export/count?${query}`).set(as(who));
+    expect((await count(`from=${yesterday}&to=${today}`, 'employee')).status).toBe(403);
+    const events = await count(`from=${yesterday}&to=${today}`);
+    expect(events.status).toBe(200);
+    expect(events.body.data).toEqual({ view: 'events', mode: 'live', range: { from: yesterday, to: today }, total: 6, limit: 5000, rows: 6 });
+    expect((await count(`from=${yesterday}&to=${today}&status=failed&range=today`, 'admin')).body.data.total).toBe(1);
+    expect((await count(`from=${yesterday}&to=${today}&q=rosa`)).body.data.total).toBe(1);
+    expect((await count(`from=${yesterday}&to=${today}&view=logs`)).body.data).toMatchObject({ view: 'logs', total: 4, rows: 4 });
+    expect((await count(`from=${today}&to=${today}&view=logs&mode=test`)).body.data.total).toBe(1);
+    const file = await request(app).get(`${base}/activity/export?from=${yesterday}&to=${yesterday}&range=month_to_date`).set(as('admin'));
+    expect(file.status).toBe(200);
+    expect(file.headers['content-disposition']).toBe(`attachment; filename="automation-events-${yesterday}-to-${yesterday}.csv"`);
+    const lines = file.text.replace(/^\uFEFF/, '').trim().split('\r\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^Gus Hale,/);
+    const list = await listAutomationActivity(orgKey, { from: today, to: today });
+    expect(list.total).toBe(5);
+    expect(list.range).toEqual({ key: 'custom', from: today, to: today });
+    const problem = async (query: string) => {
+      const res = await count(query);
+      expect(res.status).toBe(400);
+      return res.body.message;
+    };
+    expect(await problem(`from=${today}`)).toBe('Pick a valid start and end date');
+    expect(await problem('from=2026-02-30&to=2026-03-01')).toBe('Pick a valid start and end date');
+    expect(await problem('from=11/05/2026&to=11/05/2026')).toBe('Pick a valid start and end date');
+    expect(await problem(`from=${today}&to=${yesterday}`)).toBe('The start date must be on or before the end date');
+    expect(await problem('from=2025-01-01&to=2026-01-02')).toBe('Pick a date range of one year or less');
+    expect((await count('from=2025-01-02&to=2026-01-02')).status).toBe(200);
+    expect(customBounds('2026-03-08', '2026-03-08').end.toISOString()).toBe('2026-03-09T06:00:00.000Z');
+    const fallBack = customBounds('2026-11-01', '2026-11-01');
+    expect([fallBack.start.toISOString(), fallBack.end.toISOString()]).toEqual(['2026-11-01T06:00:00.000Z', '2026-11-02T07:00:00.000Z']);
   });
 });

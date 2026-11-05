@@ -861,6 +861,11 @@ export const getRtcToken = asyncHandler(async (req: Request, res: Response) => {
   res.json(new ApiResponse(200, data, "RTC token"));
 });
 
+function isUntaggedBrowserLineEvent(payload: any): boolean {
+  const connectionId = process.env.TELNYX_SIP_CONNECTION_ID || "";
+  return Boolean(connectionId) && String(payload?.connection_id || "") === connectionId && !payload?.client_state;
+}
+
 /* ------------------------------ Telnyx webhook --------------------------- */
 /** PUBLIC endpoint (no crmAuth) — authenticity comes from the Ed25519
  *  signature. Requires raw body capture in app.ts (see setup guide). */
@@ -911,6 +916,7 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
   res.status(200).json({ received: true });
 
   try {
+    const browserLine = isUntaggedBrowserLineEvent(payload);
     switch (type) {
       case "message.received":
         await comm.handleInboundSms(payload, undefined, retainedSms);
@@ -920,13 +926,13 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
         await comm.handleSmsStatus(payload);
         break;
       case "call.initiated":
-        await comm.handleCallInitiated(payload);
+        if (!browserLine) await comm.handleCallInitiated(payload);
         break;
       case "call.answered":
-        if (recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallAnswered(payload);
+        if (!browserLine && recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallAnswered(payload);
         break;
       case "call.hangup":
-        if (recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallHangup(payload);
+        if (!browserLine && recording.decodeRecordingState(payload.client_state)?.kind !== 'recording-outbound') await comm.handleCallHangup(payload);
         break;
       case "call.speak.ended":
         if (!await recording.finishRecordingDisclosure(payload)) await comm.handleSpeakEnded(payload);

@@ -16,7 +16,7 @@ import {
   updateAutomation,
 } from '../services/crmAutomation.service';
 import { createDataSync, deleteDataSync, getDataSync, listDataSyncs, updateDataSync } from '../services/crmDataSync.service';
-import { exportAutomationActivity, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, type MonitorQuery } from '../services/crmAutomationMonitor.service';
+import { countAutomationExport, exportAutomationActivity, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, type MonitorQuery } from '../services/crmAutomationMonitor.service';
 
 function viewer(req: Request) {
   const orgId = String((req as any).orgId || '');
@@ -110,6 +110,8 @@ function monitorQuery(req: Request): MonitorQuery {
     range: value('range'),
     group: value('group'),
     view: value('view'),
+    from: value('from'),
+    to: value('to'),
     page: Number(req.query.page) || 1,
   };
 }
@@ -132,6 +134,11 @@ export const getActivityReengagement = asyncHandler(async (req: Request, res: Re
 export const getActivityLogs = asyncHandler(async (req: Request, res: Response) => {
   const { orgId } = viewer(req);
   res.json(new ApiResponse(200, await listAutomationLogs(orgId, monitorQuery(req)), 'Automation logs'));
+});
+
+export const getActivityExportCount = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = viewer(req);
+  res.json(new ApiResponse(200, await countAutomationExport(orgId, monitorQuery(req)), 'Automation export rows'));
 });
 
 export const getActivityExport = asyncHandler(async (req: Request, res: Response) => {

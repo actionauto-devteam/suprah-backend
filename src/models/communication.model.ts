@@ -168,6 +168,7 @@ export interface ICallLog extends Document {
   answeredVia?: "browser" | "phone";
   phoneLegs?: { userId: string; phone: string; callControlId: string; state: "dialing" | "answered" | "ended"; at: Date }[];
   textBackSentAt?: Date | null;
+  abandonedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -205,6 +206,7 @@ const CallLogSchema = new Schema<ICallLog>(
     answeredVia: { type: String, enum: ["browser", "phone"] },
     phoneLegs: { type: [Schema.Types.Mixed], default: undefined },
     textBackSentAt: { type: Date, default: null },
+    abandonedAt: { type: Date, default: null },
     routing: { type: Schema.Types.Mixed },
     recordingCorrelation: { type: Schema.Types.Mixed, select: false },
   },
