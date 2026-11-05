@@ -396,3 +396,69 @@ export const uploadDispatchChatFiles: RequestHandler = (req, res, next) => {
     },
   );
 };
+
+// ─── Shipment chat photos ──────────────────────────────────────────────────────
+// Customers, drivers and dispatchers send photos (not other files) in a
+// shipment's customer chats. Same checks as above: the extension, the claimed
+// type and the file's actual contents must all be a photo.
+
+const SHIPMENT_CHAT_MAX_PHOTOS = 5;
+const SHIPMENT_CHAT_MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+const SHIPMENT_CHAT_PHOTO_TYPES = "JPG, PNG or WebP";
+
+const SHIPMENT_CHAT_PHOTOS: Record<string, AttachmentSpec> = {
+  ".jpg": ALLOWED_ATTACHMENTS[".jpg"],
+  ".jpeg": ALLOWED_ATTACHMENTS[".jpeg"],
+  ".png": ALLOWED_ATTACHMENTS[".png"],
+  ".webp": ALLOWED_ATTACHMENTS[".webp"],
+};
+
+function getShipmentChatPhotoSpec(file: Express.Multer.File) {
+  const extension = path.extname(file.originalname || "").toLowerCase();
+  const spec = SHIPMENT_CHAT_PHOTOS[extension];
+  const claimedMime = String(file.mimetype || OCTET_STREAM).toLowerCase();
+  if (!spec || !spec.claimedMimes.has(claimedMime)) {
+    throw new ApiError(400, `${file.originalname || "This file"} isn't a photo we can send. Send photos as ${SHIPMENT_CHAT_PHOTO_TYPES}.`);
+  }
+  return spec;
+}
+
+const shipmentChatUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: SHIPMENT_CHAT_MAX_PHOTOS, fileSize: SHIPMENT_CHAT_MAX_PHOTO_BYTES },
+  fileFilter: (_req, file, callback) => {
+    try {
+      getShipmentChatPhotoSpec(file);
+      callback(null, true);
+    } catch (error) {
+      callback(error as Error);
+    }
+  },
+});
+
+export const uploadShipmentChatPhotos: RequestHandler = (req, res, next) => {
+  shipmentChatUpload.array("photos", SHIPMENT_CHAT_MAX_PHOTOS)(req, res, (error: any) => {
+    if (error instanceof multer.MulterError) {
+      if (error.code === "LIMIT_FILE_SIZE") return next(new ApiError(400, "Each photo must be 10 MB or smaller. Choose a smaller photo and try again."));
+      if (error.code === "LIMIT_FILE_COUNT") return next(new ApiError(400, `You can send up to ${SHIPMENT_CHAT_MAX_PHOTOS} photos at once.`));
+      return next(new ApiError(400, `We couldn't read those photos. Send photos as ${SHIPMENT_CHAT_PHOTO_TYPES}.`));
+    }
+    if (error) {
+      return next(error instanceof ApiError ? error : new ApiError(400, `We couldn't read those photos. Send photos as ${SHIPMENT_CHAT_PHOTO_TYPES}.`));
+    }
+
+    const files = (req.files || []) as Express.Multer.File[];
+    try {
+      for (const file of files) {
+        const spec = getShipmentChatPhotoSpec(file);
+        if (!Buffer.isBuffer(file.buffer) || !spec.validate(file.buffer)) {
+          throw new ApiError(400, `${file.originalname || "This file"} isn't a real ${SHIPMENT_CHAT_PHOTO_TYPES} photo. Choose another photo.`);
+        }
+        file.mimetype = spec.canonicalMime;
+      }
+    } catch (validationError) {
+      return next(validationError);
+    }
+    return next();
+  });
+};
