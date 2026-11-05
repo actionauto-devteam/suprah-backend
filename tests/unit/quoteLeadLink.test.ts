@@ -12,6 +12,11 @@ const mockQuoteFindOne = jest.fn();
 const mockPopulate = jest.fn();
 const mockQuoteFind = jest.fn();
 const mockLoadFind = jest.fn();
+const mockDescribePortalCustomer = jest.fn();
+jest.mock('../../src/services/shipmentFollower', () => ({
+  __esModule: true,
+  describePortalCustomer: (quote: unknown) => mockDescribePortalCustomer(quote),
+}));
 
 jest.mock('../../src/models/lead.model', () => ({
   __esModule: true,
@@ -63,6 +68,7 @@ const LEAD = '64b0000000000000000000ac';
 beforeEach(() => {
   jest.clearAllMocks();
   mockLeadFindOne.mockReturnValue(null);
+  mockDescribePortalCustomer.mockResolvedValue(null);
 });
 
 describe('findQuoteLeadLink', () => {
@@ -133,13 +139,16 @@ describe('findQuoteLeadLink', () => {
 });
 
 describe('findLoadQuoteOrigin', () => {
-  it("gives the load page the quote's customer and linked lead", async () => {
-    mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: ' Santos ', leadId: { _id: LEAD, firstName: 'Maria', lastName: 'Santos' } });
+  it("gives the load page the quote's customer, linked lead and portal account", async () => {
+    mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: ' Santos ', email: 'maria@example.com', leadId: { _id: LEAD, firstName: 'Maria', lastName: 'Santos' } });
+    mockDescribePortalCustomer.mockResolvedValue({ name: 'Maria Santos', shared: true, fromRequest: false });
     expect(await findLoadQuoteOrigin(ORG, QUOTE)).toEqual({
       quoteId: QUOTE,
       customerName: 'Maria Santos',
       lead: { _id: LEAD, firstName: 'Maria', lastName: 'Santos' },
+      portalCustomer: { name: 'Maria Santos', shared: true, fromRequest: false },
     });
+    expect(mockDescribePortalCustomer).toHaveBeenCalledWith(expect.objectContaining({ email: 'maria@example.com' }));
     expect(mockQuoteFindOne).toHaveBeenCalledWith({ _id: QUOTE, organizationId: ORG });
     expect(mockPopulate).toHaveBeenCalledWith('leadId', 'firstName lastName');
   });
@@ -147,6 +156,12 @@ describe('findLoadQuoteOrigin', () => {
   it('shows no lead when the quote has none or its lead was deleted', async () => {
     mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: 'Santos', leadId: null });
     expect((await findLoadQuoteOrigin(ORG, QUOTE))?.lead).toBeNull();
+  });
+
+  it('still opens the load page when the portal account lookup fails', async () => {
+    mockQuoteFindOne.mockReturnValue({ _id: QUOTE, firstName: 'Maria', lastName: 'Santos', leadId: null });
+    mockDescribePortalCustomer.mockRejectedValue(new Error('db down'));
+    expect((await findLoadQuoteOrigin(ORG, QUOTE))?.portalCustomer).toBeNull();
   });
 
   it('returns nothing when the quote is gone or the id is not valid', async () => {

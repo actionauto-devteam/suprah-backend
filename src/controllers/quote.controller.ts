@@ -30,6 +30,7 @@ import { vehicleStateOf, type VehicleState } from '../services/vehicleAvailabili
 import { findVehicleShipping } from '../services/vehicleShipping.service';
 import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
+import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
 
 /**
  * The CRM lead for a quote's customer, preferring the lead about the quote's
@@ -713,6 +714,69 @@ const getQuotesForLead = asyncHandler(async (req: Request, res: Response) => {
 });
 
 /**
+ * What staff see about a staff quote's portal account: who follows the
+ * shipment in their customer portal, and whether staff stopped sharing it.
+ * Null for portal requests (labelled "From customer portal") and for emails
+ * no verified customer account uses.
+ */
+function portalCustomerView(
+    quote: { source?: string | null; email?: unknown; portalShareOff?: boolean | null },
+    accounts: Map<string, PortalCustomer>,
+): { name: string; shared: boolean } | null {
+    if (!isStaffQuote(quote)) return null;
+    const account = accounts.get(String(quote.email ?? '').trim().toLowerCase());
+    return account ? { name: account.name || 'Customer', shared: !quote.portalShareOff } : null;
+}
+
+/**
+ * POST /api/quotes/:id/portal-share  { share: boolean }
+ * Staff stop sharing a staff quote's shipment with the customer's portal
+ * account ("Unlink"), or share it again ("Link again"). The account is always
+ * the one whose verified email is the quote's email; staff can't pick another.
+ */
+const setPortalShare = asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId as string;
+    const userId = getUserId(req);
+    const share = req.body?.share;
+    if (typeof share !== 'boolean') {
+        throw new ApiError(400, 'Choose whether to share this shipment with the customer\'s portal.');
+    }
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id))) {
+        throw new ApiError(404, QUOTE_NOT_FOUND);
+    }
+    const quote = await Quote.findOne({ _id: req.params.id, organizationId: orgId })
+        .select('source email portalShareOff');
+    if (!quote) throw new ApiError(404, QUOTE_NOT_FOUND);
+    if (!isStaffQuote(quote)) {
+        throw new ApiError(409, 'This request came from the customer\'s own portal, so it always shows there. Decline it or delete it instead.');
+    }
+
+    await Quote.updateOne(
+        { _id: quote._id, organizationId: orgId },
+        share
+            ? { $unset: { portalShareOff: '', portalShareOffAt: '', portalShareOffBy: '' } }
+            : { $set: { portalShareOff: true, portalShareOffAt: new Date(), ...(userId ? { portalShareOffBy: userId } : {}) } },
+    );
+
+    const account = await findPortalCustomerByEmail(quote.email);
+    const portalCustomer = account ? { name: account.name || 'Customer', shared: share } : null;
+
+    await cacheService.invalidateByPrefix(`quotes:${orgId}`);
+    getSocketIO()?.to(`org:${orgId}`).emit('quote:change', { action: 'updated', quoteId: String(quote._id) });
+    logger.info({ quoteId: String(quote._id), orgId, share }, 'Staff changed whether a quote shows in the customer portal');
+
+    return res.status(200).json(new ApiResponse(
+        200,
+        { portalCustomer },
+        share
+            ? (account
+                ? `${account.name || 'The customer'} can follow this shipment in their portal again.`
+                : 'Sharing is back on. No verified customer account uses this email yet, so nobody follows it for now.')
+            : 'The customer no longer sees this shipment in their portal or gets its updates.',
+    ));
+});
+
+/**
  * Get all quotes (cross-org — all orgs visible for transparency)
  */
 const getQuotes = asyncHandler(async (req: Request, res: Response) => {
@@ -831,12 +895,22 @@ const getQuotes = asyncHandler(async (req: Request, res: Response) => {
         for (const id of quoteVehicleIds) vehicleStates.set(id, vehicleStateOf(found.get(id)));
     }
 
+    // Staff quotes: the customer account that follows the shipment in its
+    // portal (verified email match), so staff can spot a wrong email.
+    const portalCustomers = await findPortalCustomersByEmail(
+        quotes.filter((q) => isStaffQuote(q)).map((q) => q.email),
+    ).catch((err) => {
+        logger.warn({ err, orgId }, 'Could not look up the portal accounts for staff quotes');
+        return new Map();
+    });
+
     const quotesWithOrg = quotes.map(q => {
         const vehicleState = vehicleStates.get(vehicleIdOf(q));
         return {
             ...(q.toJSON()),
             organization: orgMap.get(q.organizationId) || { name: 'Unknown Org' },
             ...(vehicleState && vehicleState !== 'available' ? { vehicleState } : {}),
+            portalCustomer: portalCustomerView(q, portalCustomers),
         };
     });
 
@@ -1853,4 +1927,5 @@ export default {
     updateQuoteStatus,
     deleteQuote,
     convertToLoad,
+    setPortalShare,
 };

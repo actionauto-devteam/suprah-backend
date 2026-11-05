@@ -42,4 +42,9 @@ router
     .route('/:id/convert-to-load')
     .post(quoteChangeLimiter, quoteController.convertToLoad);
 
+// Unlink / Link again: whether a staff quote shows in the customer's portal.
+router
+    .route('/:id/portal-share')
+    .post(quoteChangeLimiter, quoteController.setPortalShare);
+
 export default router;
