@@ -350,7 +350,13 @@ export async function shipmentChatView(ctx: ShipmentChatContext): Promise<Shipme
     note,
     closesAt: state.closesAt,
     isParticipant,
-    withName: audience === "customer" ? participantNameFor(ctx, true) : customer?.name || (customer ? "Customer" : null),
+    // Only the two people in the chat learn who the other one is: a driver
+    // who hasn't accepted the load, or other staff, never get the customer's name.
+    withName: !isParticipant
+      ? null
+      : audience === "customer"
+        ? participantNameFor(ctx, true)
+        : customer?.name || (customer ? "Customer" : null),
     handledBy: !isParticipant && audience === "dispatcher" ? participant?.name ?? null : null,
     vehicleName: String(ctx.quote?.vehicleName ?? "").trim(),
     loadNumber: String(ctx.load?.loadNumber ?? ""),
