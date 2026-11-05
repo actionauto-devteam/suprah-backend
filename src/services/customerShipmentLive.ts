@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Load from "../models/Load.model";
 import Quote from "../models/Quote.model";
 import { findQuoteFollowers } from "./shipmentFollower";
+import { CHAT_LOAD_FIELDS, loadDispatchers, type ChatLoad } from "./shipmentChat.service";
 import { LIVE_MAP_STATUSES } from "./customerShipmentTracking";
 import { APPROXIMATE_POSITION_METERS } from "./loadRoute.service";
 import { emitToUser } from "../utils/socketEmitter";
@@ -19,6 +20,9 @@ import logger from "../utils/logger";
  */
 
 export const CUSTOMER_LOCATION_EVENT = "customer-shipment:location";
+
+/** Staff unlinked a shipment from the customer's portal, or linked it again. */
+export const CUSTOMER_SHIPMENT_CHANGED_EVENT = "customer-shipment:changed";
 
 /** Who follows each load is kept this long, so a heartbeat (up to 12 a minute) rarely reads the database. */
 export const FOLLOWER_CACHE_MS = 60_000;
@@ -110,5 +114,42 @@ export async function emitLocationToShipmentFollowers(
   } catch (error) {
     logger.warn({ error: error instanceof Error ? error.message : "unknown" }, "[CustomerShipmentLive] Live position not sent to customers");
     return 0;
+  }
+}
+
+/**
+ * After staff Unlink a shipment from the customer's portal or Link it again,
+ * everyone involved sees it at once instead of at their next refresh: the
+ * customer's My Shipments (the shipment and its chats go or come back), and
+ * the load's driver and dispatcher (their Message customer button and
+ * Customers section). Never throws: the change is already saved.
+ */
+export async function announceShipmentSharing(
+  organizationId: string,
+  quoteId: string,
+  customerId: string | null,
+  shared: boolean,
+): Promise<void> {
+  try {
+    if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
+      emitToUser(customerId, CUSTOMER_SHIPMENT_CHANGED_EVENT, { quoteId, shared });
+    }
+    if (!mongoose.Types.ObjectId.isValid(quoteId)) return;
+    const load = await Load.findOne({ quoteId, organizationId })
+      .sort({ createdAt: -1 })
+      .select(CHAT_LOAD_FIELDS)
+      .lean<ChatLoad>();
+    if (!load) return;
+    const dispatcherId = (await loadDispatchers([load])).get(String(load._id))?.id ?? null;
+    const driverId = toId(load.assignedDriverId);
+    const loadId = String(load._id);
+    if (driverId && mongoose.Types.ObjectId.isValid(driverId)) {
+      emitToUser(driverId, "shipment-chat:changed", { loadId, quoteId, kind: "driver" });
+    }
+    if (dispatcherId && dispatcherId !== driverId) {
+      emitToUser(dispatcherId, "shipment-chat:changed", { loadId, quoteId, kind: "dispatcher" });
+    }
+  } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : "unknown" }, "[CustomerShipmentLive] Sharing change not announced");
   }
 }

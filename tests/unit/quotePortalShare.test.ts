@@ -8,6 +8,8 @@ const mockQuoteFindOne = jest.fn();
 const mockQuoteUpdateOne = jest.fn();
 const mockFindPortalCustomerByEmail = jest.fn();
 const mockInvalidate = jest.fn();
+const mockAnnounce = jest.fn();
+const mockForget = jest.fn();
 
 jest.mock('../../src/models/Quote.model', () => ({
   __esModule: true,
@@ -30,6 +32,11 @@ jest.mock('../../src/services/customerShipments.service', () => ({
 jest.mock('../../src/services/activity.service', () => ({ __esModule: true, default: { createActivity: jest.fn() } }));
 jest.mock('../../src/services/cache.service', () => ({ __esModule: true, default: { invalidateByPrefix: (...args: unknown[]) => mockInvalidate(...args) } }));
 jest.mock('../../src/utils/socketEmitter', () => ({ getSocketIO: () => null }));
+jest.mock('../../src/services/customerShipmentLive', () => ({
+  __esModule: true,
+  announceShipmentSharing: (...args: unknown[]) => mockAnnounce(...args),
+  forgetShipmentFollowers: () => mockForget(),
+}));
 
 import quoteController from '../../src/controllers/quote.controller';
 
@@ -66,6 +73,9 @@ describe('sharing a staff quote with the customer portal', () => {
     expect(result.body.data).toEqual({ portalCustomer: { name: 'Maria Lopez', shared: false } });
     expect(result.body.message).toBe('The customer no longer sees this shipment in their portal or gets its updates.');
     expect(mockInvalidate).toHaveBeenCalledWith(`quotes:${ORG}`);
+    // The customer, driver and dispatcher see it at once; live positions stop.
+    expect(mockForget).toHaveBeenCalled();
+    expect(mockAnnounce).toHaveBeenCalledWith(ORG, QUOTE_ID, 'c1', false);
   });
 
   it('links it again, and says so plainly when no account uses the email', async () => {
