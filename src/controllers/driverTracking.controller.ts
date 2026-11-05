@@ -5084,7 +5084,7 @@ const DRIVER_DISPATCH_QUICK_PRESET_MESSAGES: Record<
   DriverDispatchQuickPreset,
   string
 > = {
-  check_dispatch_chat: "Dispatch needs your attention. Please check your Dispatch Chat.",
+  check_dispatch_chat: "Dispatch needs your attention. Please check your Messages.",
   please_respond: "Dispatch needs your attention. Please respond when it is safe to do so.",
   contact_dispatch: "Please contact Dispatch when safely parked.",
   custom: "",
@@ -5844,7 +5844,7 @@ const respondToDriverAlert = asyncHandler(async (req: ExpressRequest, res: Expre
     }
     throw new ApiError(
       409,
-      `You already responded "${labelFor(earlier)}" to this alert. If something changed, message Dispatch in Dispatch Chat.`,
+      `You already responded "${labelFor(earlier)}" to this alert. If something changed, message Dispatch in Messages.`,
     );
   }
 
@@ -6369,7 +6369,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
       organizationId,
       type: "general",
       title: "Location Sharing Required",
-      message: `Load ${load.loadNumber} is accepted. Location sharing is now required until this load is delivered, released by Dispatch, cancelled, or reassigned. Only the dispatcher responsible for this load can view your live location${load.quoteId ? ", and from pickup until delivery the customer receiving the vehicle sees where you are on their shipment map" : ""}.${load.quoteId ? " If that customer follows the shipment in the customer portal, they can message you about it from now until 24 hours after delivery; open the load to reply." : ""}`,
+      message: `Load ${load.loadNumber} is accepted. Location sharing is now required until this load is delivered, released by Dispatch, cancelled, or reassigned. Only the dispatcher responsible for this load can view your live location${load.quoteId ? ", and from pickup until delivery the customer receiving the vehicle sees where you are on their shipment map" : ""}.${load.quoteId ? " If that customer follows the shipment in the customer portal, they can message you about it from now until 24 hours after delivery; reply from Messages (under Customers) or from the load." : ""}`,
       metadata: {
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,

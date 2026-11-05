@@ -509,7 +509,8 @@ async function notifyRecipient(ctx: ShipmentChatContext, thread: IShipmentChatTh
   let route: string;
   if (fromCustomer) {
     title = `${customer.name || "Customer"} (customer)`;
-    route = kind === "driver" ? `/driver/loads/${loadId}?chat=customer` : `/transportation/load/${loadId}?chat=customer`;
+    // Drivers: the Customers section of Messages (their chats page). Staff: the load page.
+    route = kind === "driver" ? `/driver/channels?customerChat=${loadId}` : `/transportation/load/${loadId}?chat=customer`;
   } else {
     title =
       kind === "driver"
