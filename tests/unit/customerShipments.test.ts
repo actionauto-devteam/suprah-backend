@@ -59,6 +59,12 @@ jest.mock('../../src/services/notification.service', () => ({
   __esModule: true,
   default: { createNotification: (...args: unknown[]) => mockCreateNotification(...args) },
 }));
+// The chats on each shipment (tested in shipmentChat.service.test.ts).
+const mockChatSummaries = jest.fn((_customerId: string, _loads: unknown[]) => Promise.resolve(new Map<string, unknown>()));
+jest.mock('../../src/services/shipmentChat.service', () => ({
+  __esModule: true,
+  customerChatSummaries: (customerId: string, loads: unknown[]) => mockChatSummaries(customerId, loads),
+}));
 
 import { NOTIFICATION_TYPES } from '../../src/constants/notificationTypes';
 import {
@@ -288,6 +294,32 @@ describe('My Shipments status', () => {
     mockLoadFind.mockReturnValue([{ quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-4', status: 'Assigned', assignedDriverId: '64b0000000000000000000d1' }]);
     const [waiting] = await listCustomerShipments(CUSTOMER);
     expect(waiting.driver).toBeNull();
+  });
+
+  it('carries the two chats of each booked shipment, and none before booking', async () => {
+    const LOAD_ID = '64b0000000000000000000b1';
+    const chats = {
+      driver: { open: true, readable: true, unread: 1, note: null, name: null },
+      dispatcher: { open: true, readable: true, unread: 0, note: null, name: 'Dana' },
+    };
+    mockChatSummaries.mockResolvedValueOnce(new Map([[LOAD_ID, chats]]));
+    mockPortalRequests.mockReturnValue([{ _id: QUOTE, organizationId: ORG, source: 'customer_portal', status: 'booked', createdAt: new Date() }]);
+    mockLoadFind.mockReturnValue([{ _id: LOAD_ID, quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-5', status: 'In-Transit', dispatchOwnerId: 'disp-1' }]);
+    const [entry] = await listCustomerShipments(CUSTOMER);
+    expect(entry.chats).toEqual(chats);
+    expect(mockChatSummaries).toHaveBeenCalledWith(CUSTOMER, [expect.objectContaining({ _id: LOAD_ID, dispatchOwnerId: 'disp-1', dealerName: 'Action Auto' })]);
+
+    mockLoadFind.mockReturnValue([]);
+    const [waiting] = await listCustomerShipments(CUSTOMER);
+    expect(waiting.chats).toBeNull();
+  });
+
+  it('still lists shipments when the chats are unavailable', async () => {
+    mockChatSummaries.mockRejectedValueOnce(new Error('chat store down'));
+    mockPortalRequests.mockReturnValue([{ _id: QUOTE, organizationId: ORG, source: 'customer_portal', status: 'booked', createdAt: new Date() }]);
+    mockLoadFind.mockReturnValue([{ _id: 'load-x', quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-6', status: 'Posted' }]);
+    const [entry] = await listCustomerShipments(CUSTOMER);
+    expect(entry).toMatchObject({ stage: 'booked', chats: null });
   });
 
   it("adds staff quotes with the customer's verified email once booked, without the dealership's price", async () => {

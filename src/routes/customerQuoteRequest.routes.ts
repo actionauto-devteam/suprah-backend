@@ -1,6 +1,9 @@
 import express from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import quoteController from "../controllers/quote.controller";
+import shipmentChatController from "../controllers/shipmentChat.controller";
+import { uploadShipmentChatPhotos } from "../middleware/dispatchChatAttachment.middleware";
+import { dispatchChatMessageLimiter, dispatchChatUploadLimiter } from "../middleware/transportRateLimit.middleware";
 import auth from "../middleware/auth.middleware";
 import authorize from "../middleware/role.middleware";
 import { ApiError } from "../utils/ApiError";
@@ -73,6 +76,20 @@ router.get(
   customerTrackingLimiter,
   quoteController.getShipmentTracking,
 );
+
+// The customer's private chats about a shipment: "driver" (the driver carrying
+// the car) or "dispatcher" (the load's dispatcher). Text and photos.
+const chatCustomerOnly = authorize("customer", "This chat is for the customer receiving the vehicle. Staff and drivers open it from the load.");
+router.get("/:id/chats/:kind", chatCustomerOnly, shipmentChatController.getCustomerChat);
+router.post("/:id/chats/:kind/messages", chatCustomerOnly, dispatchChatMessageLimiter, shipmentChatController.sendCustomerMessage);
+router.post(
+  "/:id/chats/:kind/photos",
+  chatCustomerOnly,
+  dispatchChatUploadLimiter,
+  uploadShipmentChatPhotos,
+  shipmentChatController.sendCustomerPhotos,
+);
+router.post("/:id/chats/:kind/read", chatCustomerOnly, shipmentChatController.markCustomerChatRead);
 
 // The customer withdraws their own request while it is still waiting.
 router.post(

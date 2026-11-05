@@ -6,6 +6,7 @@ import User from "../models/User.model";
 import DriverProfile from "../models/DriverProfile.model";
 import notificationService from "./notification.service";
 import { findQuoteFollower, type ShipmentFollower } from "./shipmentFollower";
+import { customerChatSummaries, type CustomerChatSummary } from "./shipmentChat.service";
 import logger from "../utils/logger";
 import { LOAD_CANCELLATION_REASON_LABELS, isLoadCancellationReason } from "../constants/loadCancellation";
 
@@ -407,7 +408,7 @@ async function driversForCustomers(driverIds: string[]): Promise<Map<string, Cus
 const QUOTE_FIELDS =
   "_id organizationId source vehicleName vehicleImage toAddress miles rate eta status closedReason declineReason createdAt";
 const LOAD_FIELDS =
-  "quoteId organizationId loadNumber status assignedDriverId createdAt acceptedAt pickedUpAt inTransitAt deliveredAt arrivals.delivery cancellation.reason cancellation.at dates.deliveryDeadline +assignmentHistory";
+  "quoteId organizationId loadNumber status assignedDriverId dispatchOwnerId createdBy createdAt acceptedAt pickedUpAt inTransitAt deliveredAt arrivals.delivery cancellation.reason cancellation.at dates.deliveryDeadline +assignmentHistory";
 
 /**
  * The customer's shipments, newest first, for "My Shipments": the requests
@@ -469,6 +470,15 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
     logger.warn({ err }, "Could not load the drivers for My Shipments");
     return new Map<string, CustomerShipmentDriver>();
   });
+  // The two chats on each booked shipment, with unread messages.
+  const bookedLoads = visible
+    .map((quote) => loadByQuote.get(String(quote._id)))
+    .filter(Boolean)
+    .map((load) => ({ ...load, dealerName: dealerById.get(String(load.organizationId ?? "")) || "" }));
+  const chats = await customerChatSummaries(customerId, bookedLoads).catch((err) => {
+    logger.warn({ err }, "Could not load the shipment chats for My Shipments");
+    return new Map<string, { driver: CustomerChatSummary; dispatcher: CustomerChatSummary }>();
+  });
 
   return visible.map((quote) => {
     const load = loadByQuote.get(String(quote._id)) ?? null;
@@ -493,6 +503,8 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
       // What staff wrote for the customer when declining (optional).
       declineReason: stage === "declined" ? String(quote.declineReason ?? "").trim() || null : null,
       driver,
+      // Chats with the driver and the dispatcher, once the shipment is booked.
+      chats: load ? chats.get(String(load._id)) ?? null : null,
       shipment: load
         ? {
             number: String(load.loadNumber ?? ""),

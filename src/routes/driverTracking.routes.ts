@@ -26,7 +26,8 @@ import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { mapPlaceLookupLimiter, routeLookupLimiter, uploadLimiter } from "../middleware/rate-limit.middleware";
 import loadRouteController from "../controllers/loadRoute.controller";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
-import { uploadDispatchChatFiles } from "../middleware/dispatchChatAttachment.middleware";
+import { uploadDispatchChatFiles, uploadShipmentChatPhotos } from "../middleware/dispatchChatAttachment.middleware";
+import shipmentChatController from "../controllers/shipmentChat.controller";
 import {
   dispatchChatMessageLimiter,
   dispatchChatUploadLimiter,
@@ -269,6 +270,24 @@ router.post(
   "/dispatch-chat/:driverId/read",
   dispatchChatController.markRead,
 );
+
+// Customer chats on a load (decided 2026-11-05): the load's driver talks with
+// the customer who follows the shipment on My Shipments, and so does its
+// dispatcher. The service works out who's in each chat from the load as it is
+// now, so only the current driver and dispatcher can read or send.
+router.use("/loads/:loadId/customer-chat", noStoreSensitive);
+router.get("/loads/:loadId/customer-chat", shipmentChatController.getLoadChat);
+router.get("/loads/:loadId/customer-chat/messages", shipmentChatController.getLoadChatMessages);
+router.post("/loads/:loadId/customer-chat/messages", dispatchChatMessageLimiter, shipmentChatController.sendLoadMessage);
+router.post(
+  "/loads/:loadId/customer-chat/photos",
+  dispatchChatUploadLimiter,
+  uploadShipmentChatPhotos,
+  shipmentChatController.sendLoadPhotos,
+);
+router.post("/loads/:loadId/customer-chat/read", shipmentChatController.markLoadChatRead);
+router.post("/loads/:loadId/customer-chat/close", staffOnly, shipmentChatController.closeLoadChat);
+router.post("/loads/:loadId/customer-chat/reopen", staffOnly, shipmentChatController.reopenLoadChat);
 
 // Driver dashboard summary (read-only)
 router.get("/dashboard-stats", driverOnly, noStoreSensitive, driverTrackingController.getDashboardStats);

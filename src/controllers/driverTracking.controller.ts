@@ -6369,7 +6369,7 @@ const acceptLoad = asyncHandler(async (req: ExpressRequest, res: ExpressResponse
       organizationId,
       type: "general",
       title: "Location Sharing Required",
-      message: `Load ${load.loadNumber} is accepted. Location sharing is now required until this load is delivered, released by Dispatch, cancelled, or reassigned. Only the dispatcher responsible for this load can view your live location${load.quoteId ? ", and from pickup until delivery the customer receiving the vehicle sees where you are on their shipment map" : ""}.`,
+      message: `Load ${load.loadNumber} is accepted. Location sharing is now required until this load is delivered, released by Dispatch, cancelled, or reassigned. Only the dispatcher responsible for this load can view your live location${load.quoteId ? ", and from pickup until delivery the customer receiving the vehicle sees where you are on their shipment map" : ""}.${load.quoteId ? " If that customer follows the shipment in the customer portal, they can message you about it from now until 24 hours after delivery; open the load to reply." : ""}`,
       metadata: {
         loadId: load._id.toString(),
         loadNumber: load.loadNumber,
