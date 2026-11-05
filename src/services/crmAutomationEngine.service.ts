@@ -52,7 +52,7 @@ const APPOINTMENT_STATUS_EVENTS: Record<string, string> = {
   completed: 'appointment_completed',
 };
 
-interface EngineEvent {
+export interface EngineEvent {
   eventKey: string;
   triggerAt: Date;
   leadId: string | null;
@@ -274,13 +274,12 @@ function repeatValue(field: string, ctx: { lead: any; event: EngineEvent; afterH
   return String(value ?? '').trim().toLowerCase();
 }
 
-async function locationKeyMap(orgId: string): Promise<Map<string, string[]>> {
+export async function locationKeyMap(orgId: string): Promise<Map<string, string[]>> {
   const locations = await CrmLocation.find({ organizationId: orgId }).select('aliasKeys').lean();
   return new Map(locations.map((location: any) => [String(location._id), (location.aliasKeys || []).map((key: string) => normalizeLocationKey(key))]));
 }
 
-async function startRun(automation: any, event: EngineEvent, orgId: string, locationKeys: Map<string, string[]>): Promise<boolean> {
-  if (await CrmAutomationRun.exists({ automationId: automation._id, eventKey: event.eventKey })) return false;
+export async function decideRun(automation: any, event: EngineEvent, orgId: string, locationKeys: Map<string, string[]>) {
   const lead = await loadLead(orgId, event);
   const ctx = { lead, event, afterHours: (() => { const hour = denverHour(event.triggerAt); return hour < SEND_START_HOUR || hour >= SEND_END_HOUR; })(), newContact: false };
   const filters = automation.trigger?.filters || [];
@@ -311,6 +310,12 @@ async function startRun(automation: any, event: EngineEvent, orgId: string, loca
       if (already) reason = `Already ran for this contact in the last ${repeat.days || 365} days`;
     }
   }
+  return { contact, rawLocation, reason, repeatKey };
+}
+
+async function startRun(automation: any, event: EngineEvent, orgId: string, locationKeys: Map<string, string[]>): Promise<boolean> {
+  if (await CrmAutomationRun.exists({ automationId: automation._id, eventKey: event.eventKey })) return false;
+  const { contact, rawLocation, reason, repeatKey } = await decideRun(automation, event, orgId, locationKeys);
   try {
     await CrmAutomationRun.create({
       organizationId: orgId,

@@ -12,7 +12,11 @@ const displayPhone = (value: unknown) => {
 };
 
 export function leadDisplayName(lead: any): string {
-  return [lead?.firstName, lead?.lastName].filter(Boolean).join(' ').trim() || displayPhone(lead?.phone) || String(lead?.email || '') || 'A customer';
+  const name = [lead?.firstName, lead?.lastName]
+    .map((part) => String(part || '').trim())
+    .filter((part) => part && !/^unknown$/i.test(part))
+    .join(' ');
+  return name || displayPhone(lead?.phone) || String(lead?.phone || '').trim() || String(lead?.email || '') || 'A customer';
 }
 
 export async function notifyLeadMessageUnlessHandoff(orgId: unknown, lead: any, channel: 'sms' | 'email', preview: string): Promise<boolean> {

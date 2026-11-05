@@ -5,6 +5,7 @@ import logger from '../utils/logger';
 import { isSmsDestinationError } from '../utils/smsDestination';
 import { isDoNotContactError } from '../services/contactRestriction.service';
 import { isWithinSendingHours } from '../utils/sendingWindow';
+import { automationForNoShowText } from '../services/crmAutomationTexts.service';
 
 const CRON_SCHEDULE = process.env.NOSHOW_FOLLOWUP_CRON || '*/10 * * * *';
 const DELAY_MINUTES = parseInt(process.env.NOSHOW_FOLLOWUP_DELAY_MINUTES || '30', 10);
@@ -37,6 +38,15 @@ async function hasUpcomingAppointment(appointment: any, now: Date): Promise<bool
   });
 
   return !!upcoming;
+}
+
+async function automationTextsNoShow(appointment: any): Promise<string | null> {
+  try {
+    return await automationForNoShowText(appointment);
+  } catch (err) {
+    logger.warn({ err, appointmentId: appointment?._id }, '[NoShowFollowUp] Automation check failed; sending the built-in text');
+    return null;
+  }
 }
 
 export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
@@ -96,6 +106,23 @@ export async function runNoShowFollowUpSweep(): Promise<FollowUpStats> {
             $set: {
               noShowFollowUpStatus: 'skipped',
               noShowFollowUpFailureReason: 'Customer has an upcoming appointment',
+            },
+            $unset: { noShowFollowUpNextRetryAt: 1 },
+          },
+          { timestamps: false },
+        );
+        stats.skipped++;
+        continue;
+      }
+
+      const automation = await automationTextsNoShow(appointment);
+      if (automation) {
+        await Appointment.updateOne(
+          { _id: appointment._id, noShowFollowUpSentAt: null },
+          {
+            $set: {
+              noShowFollowUpStatus: 'skipped',
+              noShowFollowUpFailureReason: `The "${automation}" automation texts this customer instead`.slice(0, 500),
             },
             $unset: { noShowFollowUpNextRetryAt: 1 },
           },

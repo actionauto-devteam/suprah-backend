@@ -25,6 +25,7 @@ import { notificationTemplates } from '../utils/notificationTemplates';
 import { emitToOrg } from '../utils/socketEmitter';
 import logger from '../utils/logger';
 import { CONFIRM_KEYWORDS, RESCHEDULE_KEYWORDS, isSmsKeyword, normalizeSmsCommand } from '../utils/smsKeywords';
+import { leadDisplayName } from './leadMessageNotice.service';
 
 export const LEAD_INTAKE_MAX_ATTEMPTS = 5;
 
@@ -370,7 +371,7 @@ async function linkInquirySources(event: any): Promise<void> {
 }
 
 function customerNameOf(event: any): string {
-  return [event.contact?.firstName, event.contact?.lastName].filter(Boolean).join(' ').trim() || event.contact?.email || event.contact?.phone || 'A customer';
+  return leadDisplayName(event.contact || {});
 }
 
 function vehicleLabelOf(event: any): string {

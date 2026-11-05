@@ -67,7 +67,7 @@ import { handleStaffPhoneVerifyAnswered, handleStaffPhoneVerifyGather } from './
 import StaffCallPhone from "../models/StaffCallPhone.model";
 import CrmUser from "../models/CrmUser.model";
 import UnifiedPushService from "./unifiedPush.service";
-import { notifyLeadMessage, notifyLeadMessageUnlessHandoff } from "./leadMessageNotice.service";
+import { leadDisplayName, notifyLeadMessage, notifyLeadMessageUnlessHandoff } from "./leadMessageNotice.service";
 import { loadReplyKnowledge } from "./aiKnowledgeRuntime.service";
 import { DealershipLine, findDealershipLine, leadFieldsForLine, resolveOutboundNumber } from './dealershipPhoneNumber.service';
 import { IvrInboundClaim } from '../models/CallRoutingConfig.model';
@@ -1795,8 +1795,7 @@ export async function handleInboundSms(payload: any, orgOverride?: any, retained
         emitToOrg(orgId, "lead:new", lead.toObject ? lead.toObject() : lead);
 
         if (result.created) {
-          const customerNameForNotice =
-            [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || "A new customer";
+          const customerNameForNotice = leadDisplayName(lead);
           const { title, message: notificationMessage } = notificationTemplates.new_lead({
             customerName: customerNameForNotice,
             source: LEAD_SOURCE.INBOUND_SMS,
@@ -2382,7 +2381,7 @@ export async function handleCallInitiated(payload: any) {
     lead = result.lead;
     if (lead && result.created) {
       emitToOrg(orgId, "lead:new", lead.toObject ? lead.toObject() : lead);
-      const customerNameForNotice = [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim() || prettyPhone(from);
+      const customerNameForNotice = leadDisplayName({ ...(lead.toObject ? lead.toObject() : lead), phone: lead.phone || from });
       const { title, message: notificationMessage } = notificationTemplates.new_lead({ customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL });
       notifyOrgAdmins(String(orgId), "new_lead", title, notificationMessage, {
         leadId: String(lead._id), customerName: customerNameForNotice, source: LEAD_SOURCE.INBOUND_CALL, channel: "phone", route: `/crm/leads?leadId=${lead._id}`,

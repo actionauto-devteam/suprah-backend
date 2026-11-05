@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import CrmAutomation from '../models/CrmAutomation.model';
 import CrmLocation from '../models/CrmLocation.model';
 import DealershipPhoneNumber from '../models/DealershipPhoneNumber.model';
-import Lead from '../models/lead.model';
+import { stepsSendText } from './crmAutomationTexts.service';
 import { normalizeLocationKey } from '../utils/locationKey';
 
 export const MISSED_CALL_TEXT_EVENTS = ['call_missed', 'call_any'];
@@ -39,30 +39,27 @@ export async function locationDisplayName(orgId: string, raw: string): Promise<s
   return match ? String(match.name) : raw.trim();
 }
 
-async function callLocation(orgId: string, call: any): Promise<string> {
-  const dialed = (await dialedNumberLocations(orgId, [call?.to])).get(digits(call?.to));
-  if (dialed) return dialed;
-  const filter: Record<string, unknown> = { organizationId: { $in: orgVariants(orgId) } };
-  if (call?.leadId && mongoose.isValidObjectId(call.leadId)) filter._id = call.leadId;
-  else if (digits(call?.from)) filter.normalizedPhone = { $in: [`+1${digits(call.from)}`, `1${digits(call.from)}`, digits(call.from)] };
-  else return '';
-  const lead: any = await Lead.findOne(filter).sort({ createdAt: -1 }).select('location').lean();
-  return String(lead?.location || '');
-}
-
 export async function automationForMissedCallText(call: any): Promise<string | null> {
   if (process.env.CRM_AUTOMATIONS_ENABLED !== 'true') return null;
   const orgId = String(call?.orgId || '');
   if (!orgId) return null;
-  const automations: any[] = await CrmAutomation.find({ organizationId: orgId, status: 'active', 'trigger.event': { $in: MISSED_CALL_TEXT_EVENTS } }).select('name locations').lean();
-  if (!automations.length) return null;
-  const everywhere = automations.find((automation) => automation.locations?.mode !== 'specific');
-  if (everywhere) return String(everywhere.name);
-  const key = normalizeLocationKey(await callLocation(orgId, call));
-  if (!key) return null;
-  const ids = automations.flatMap((automation) => automation.locations?.ids || []).filter((id: string) => mongoose.isValidObjectId(id));
-  const locations: any[] = await CrmLocation.find({ organizationId: orgId, _id: { $in: ids } }).select('name aliasKeys').lean();
-  const covered = new Set(locations.filter((location) => normalizeLocationKey(location.name) === key || (location.aliasKeys || []).some((alias: string) => normalizeLocationKey(alias) === key)).map((location) => String(location._id)));
-  const match = automations.find((automation) => (automation.locations?.ids || []).some((id: string) => covered.has(String(id))));
-  return match ? String(match.name) : null;
+  const automations: any[] = await CrmAutomation.find({ organizationId: orgId, status: 'active', 'trigger.event': { $in: MISSED_CALL_TEXT_EVENTS } }).lean();
+  const texting = automations.filter((automation) => stepsSendText(automation.steps));
+  if (!texting.length) return null;
+  const { decideRun, locationKeyMap } = await import('./crmAutomationEngine.service');
+  const event = {
+    eventKey: `call_missed:${call?._id || 'now'}`,
+    triggerAt: new Date(call?.endedAt || Date.now()),
+    leadId: call?.leadId && mongoose.isValidObjectId(call.leadId) ? String(call.leadId) : null,
+    phone: String(call?.from || ''),
+    email: '',
+    name: String(call?.customerName || ''),
+    location: (await dialedNumberLocations(orgId, [call?.to])).get(digits(call?.to)) || '',
+  };
+  const locationKeys = await locationKeyMap(orgId);
+  for (const automation of texting) {
+    const decision = await decideRun(automation, event, orgId, locationKeys);
+    if (!decision.reason) return String(automation.name);
+  }
+  return null;
 }

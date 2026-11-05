@@ -452,6 +452,27 @@ describe('Real-DB proof: automation engine (local dev MongoDB only)', () => {
     expect(await automationForMissedCallText(missed('+18015550999'))).toBe('Any call text');
   });
 
+  it('13. the missed-call check follows the automation audience and Repeat, and needs a text step, so a caller is never left without a text', async () => {
+    const taskOnly = await automation({ name: 'Call back task', trigger: { source: 'suprah', event: 'call_missed' }, steps: [{ id: 't', type: 'create_task', config: { recipients: 'admins', task: 'Call them back', timing: { when: 'on' } } }] });
+    await setAutomationStatus(org, actor, String(taskOnly._id), 'active');
+    const web = await lead({ source: 'Website Inquiry' });
+    const walkIn = await lead({ source: 'Walk-in' });
+    const call = (who: any) => ({ orgId: org, from: who.phone, to: '+18015550999', leadId: who._id });
+    expect(await automationForMissedCallText(call(web))).toBeNull();
+    const auto = await automation({ name: 'Website callers', trigger: { source: 'suprah', event: 'call_missed', filters: [{ field: 'lead_source', operator: 'is', value: 'Website Inquiry' }] } });
+    await setAutomationStatus(org, actor, String(auto._id), 'active');
+    expect(await automationForMissedCallText(call(walkIn))).toBeNull();
+    expect(await automationForMissedCallText(call(web))).toBe('Website callers');
+    await startCursor();
+    const ended = new Date(Date.now() + 1000);
+    await CallLog.collection.insertOne({ orgId: org, direction: 'inbound', from: web.phone, to: '+18015550999', status: 'missed', leadId: web._id, endedAt: ended, createdAt: new Date(), updatedAt: new Date() } as any);
+    await sweepTriggers(later(MINUTE));
+    expect(await CrmAutomationRun.countDocuments({ automationId: auto._id, status: { $ne: 'filtered' } })).toBe(1);
+    expect(await automationForMissedCallText(call(web))).toBeNull();
+    await CrmAutomation.updateOne({ _id: auto._id }, { $set: { 'trigger.repeat': { mode: 'every_time', days: null, per: [] } } });
+    expect(await automationForMissedCallText(call(web))).toBe('Website callers');
+  });
+
   it('9. alerts tell the chosen people when an automation ran too little or dropped, once a day, and never for a new automation', async () => {
     const tenAm = new Date('2026-11-20T17:00:00Z');
     const quiet = await automation({ name: 'Quiet one', status: 'active', statusChangedAt: new Date(tenAm.getTime() - 10 * DAY), alerts: { enabled: true, condition: 'min_events', minEvents: 2, days: 7, dropPercent: 50, userIds: [String(admin)] } });

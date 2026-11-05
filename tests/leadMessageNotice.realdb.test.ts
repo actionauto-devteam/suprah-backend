@@ -38,6 +38,10 @@ describe('Desktop and bell notices for customer texts and emails', () => {
   it('goes to the admins when nobody is assigned, and names the customer by number when there is no name', async () => {
     const lead = { _id: new mongoose.Types.ObjectId(), phone: '+18015550162', createdAt: old };
     expect(leadDisplayName(lead)).toBe('(801) 555-0162');
+    expect(leadDisplayName({ firstName: 'Unknown', phone: '+18015550182' })).toBe('(801) 555-0182');
+    expect(leadDisplayName({ firstName: 'unknown', lastName: 'Lee', phone: '+18015550182' })).toBe('Lee');
+    expect(leadDisplayName({ firstName: 'Unknown', email: 'pat@example.com' })).toBe('pat@example.com');
+    expect(leadDisplayName({ firstName: 'Unknown', phone: '+44 20 7946 0958' })).toBe('+44 20 7946 0958');
     await notifyLeadMessage(orgId, lead, 'email', 'Re: your quote');
     expect(mockNotifyOrgAdmins).toHaveBeenCalledWith(orgId, 'lead_message', 'New email from (801) 555-0162', 'Re: your quote', expect.objectContaining({ channel: 'email' }));
     expect(mockNotifyUsers).not.toHaveBeenCalled();

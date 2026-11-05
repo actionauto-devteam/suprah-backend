@@ -92,6 +92,7 @@ CrmAutomationRunSchema.index({ status: 1, nextRunAt: 1 });
 CrmAutomationRunSchema.index({ organizationId: 1, createdAt: -1 });
 CrmAutomationRunSchema.index({ organizationId: 1, 'log.at': -1 });
 CrmAutomationRunSchema.index({ organizationId: 1, 'contact.leadId': 1, status: 1 });
+CrmAutomationRunSchema.index({ organizationId: 1, appointmentId: 1, event: 1 });
 CrmAutomationRunSchema.index({ automationId: 1, repeatKey: 1, createdAt: -1 });
 CrmAutomationRunSchema.index({ automationId: 1, pathRepeatKeys: 1, createdAt: -1 });
 CrmAutomationRunSchema.index({ createdAt: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
