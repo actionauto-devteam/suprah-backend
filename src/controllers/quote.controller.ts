@@ -32,6 +32,7 @@ import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
 import { customerShipmentTracking } from '../services/customerShipmentTracking';
+import { forgetShipmentFollowers } from '../services/customerShipmentLive';
 
 /**
  * The CRM lead for a quote's customer, preferring the lead about the quote's
@@ -771,6 +772,8 @@ const setPortalShare = asyncHandler(async (req: Request, res: Response) => {
             ? { $unset: { portalShareOff: '', portalShareOffAt: '', portalShareOffBy: '' } }
             : { $set: { portalShareOff: true, portalShareOffAt: new Date(), ...(userId ? { portalShareOffBy: userId } : {}) } },
     );
+    // An unlinked customer stops getting the driver's live position at once.
+    forgetShipmentFollowers();
 
     const account = await findPortalCustomerByEmail(quote.email);
     const portalCustomer = account ? { name: account.name || 'Customer', shared: share } : null;

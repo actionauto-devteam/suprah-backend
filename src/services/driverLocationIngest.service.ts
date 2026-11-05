@@ -10,6 +10,7 @@ import {
   getDriverGpsTrackingLoads,
 } from "./driverLocationAccess.service";
 import { clearDriverExactLocationIfUnneeded } from "./driverLocationRetention.service";
+import { emitLocationToShipmentFollowers } from "./customerShipmentLive";
 import {
   finalizeDriverStatusChangeIfClear,
   getDriverLocationRequirement,
@@ -384,6 +385,9 @@ export async function ingestDriverLocation(
     },
     policy.trackingLoads,
   );
+  // The customer following a shipment on this truck sees it move on My
+  // Shipments (Picked Up and In-Transit only). Never throws or holds this up.
+  void emitLocationToShipmentFollowers(policy.trackingLoads, location);
   await recordTripHistory(input, measuredAt, policy.trackingLoads);
 
   return { accepted: true, location, policy, hasTrackingRelationship, viewerIds };

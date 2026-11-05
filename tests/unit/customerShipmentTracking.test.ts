@@ -13,6 +13,7 @@ const mockLoadFindOne = jest.fn();
 const mockLocationFindOne = jest.fn();
 const mockFollower = jest.fn();
 const mockCustomerRoute = jest.fn();
+const mockLookupPlace = jest.fn();
 jest.mock('../../src/models/Quote.model', () => ({ __esModule: true, default: { findById: (id: unknown) => chain(() => mockQuoteFindById(id)) } }));
 jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: { findOne: (filter: unknown) => chain(() => mockLoadFindOne(filter)) } }));
 jest.mock('../../src/models/DriverLocation.model', () => ({
@@ -24,6 +25,11 @@ jest.mock('../../src/services/loadRoute.service', () => {
   const actual = jest.requireActual('../../src/services/loadRoute.service');
   return { ...actual, getCustomerLoadRoute: (load: unknown) => mockCustomerRoute(load) };
 });
+jest.mock('../../src/services/googleGeocoding.service', () => ({
+  __esModule: true,
+  MAX_PLACE_QUERY_LENGTH: 200,
+  lookupPlace: (query: string) => mockLookupPlace(query),
+}));
 jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }));
 
 import { SHIPMENT_NOT_FOUND, customerShipmentTracking } from '../../src/services/customerShipmentTracking';
@@ -44,6 +50,7 @@ beforeEach(() => {
   });
   mockLocationFindOne.mockReturnValue({ coords: { lat: 40.5, lng: -105.08 }, locationRecordedAt: new Date('2026-11-05T17:00:00Z'), accuracy: 12, speed: 28 });
   mockCustomerRoute.mockResolvedValue({ available: false, reason: 'routes_off', message: 'off' });
+  mockLookupPlace.mockResolvedValue(null);
 });
 
 const notFound = async (promise: Promise<unknown>) => {
@@ -132,5 +139,32 @@ describe('when the map is live', () => {
   it('still shows the map when the route lookup fails', async () => {
     mockCustomerRoute.mockRejectedValueOnce(new Error('aws down'));
     expect(await customerShipmentTracking(CUSTOMER, QUOTE)).toMatchObject({ live: true, eta: null, route: null });
+  });
+});
+
+describe('the delivery point', () => {
+  it("uses the pin staff placed, without looking anything up", async () => {
+    expect((await customerShipmentTracking(CUSTOMER, QUOTE)).delivery).toEqual(DELIVERY);
+    expect(mockLookupPlace).not.toHaveBeenCalled();
+  });
+
+  it('looks up the delivery address when there is no pin, like Driver Tracker', async () => {
+    mockLoadFindOne.mockReturnValueOnce({
+      _id: 'load-1', status: 'In-Transit', assignedDriverId: 'driver-1',
+      deliveryLocation: { address: '1600 Broadway', city: 'Denver', state: 'CO', zip: '80202' },
+    });
+    mockLookupPlace.mockResolvedValueOnce({ lat: 39.74, lng: -104.98 });
+    expect((await customerShipmentTracking(CUSTOMER, QUOTE)).delivery).toEqual({ lat: 39.74, lng: -104.98 });
+    expect(mockLookupPlace).toHaveBeenCalledWith('1600 Broadway, Denver, CO 80202');
+  });
+
+  it("still shows the driver when the address can't be placed or the lookup fails", async () => {
+    const noPin = { _id: 'load-1', status: 'In-Transit', assignedDriverId: 'driver-1', deliveryLocation: { city: 'Denver', state: 'CO' } };
+    mockLoadFindOne.mockReturnValueOnce(noPin);
+    mockLookupPlace.mockRejectedValueOnce(new Error('google down'));
+    expect(await customerShipmentTracking(CUSTOMER, QUOTE)).toMatchObject({ live: true, delivery: null, driver: { approximate: false } });
+    mockLoadFindOne.mockReturnValueOnce({ ...noPin, deliveryLocation: {} });
+    expect((await customerShipmentTracking(CUSTOMER, QUOTE)).delivery).toBeNull();
+    expect(mockLookupPlace).toHaveBeenCalledTimes(1);
   });
 });

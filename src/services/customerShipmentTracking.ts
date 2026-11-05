@@ -3,7 +3,8 @@ import Quote from "../models/Quote.model";
 import Load from "../models/Load.model";
 import DriverLocation from "../models/DriverLocation.model";
 import { findQuoteFollower } from "./shipmentFollower";
-import { getCustomerLoadRoute, pinOf, APPROXIMATE_POSITION_METERS, type RouteCoordinate } from "./loadRoute.service";
+import { getCustomerLoadRoute, pinOf, stopAddressText, APPROXIMATE_POSITION_METERS, type RouteCoordinate } from "./loadRoute.service";
+import { lookupPlace, MAX_PLACE_QUERY_LENGTH } from "./googleGeocoding.service";
 import { ApiError } from "../utils/ApiError";
 
 /*
@@ -52,6 +53,21 @@ const isoOrNull = (value: unknown) => {
 };
 
 /**
+ * Where the delivery point goes on the map, the same way Driver Tracker places
+ * a stop: the pin staff placed in Create Load, otherwise the delivery address
+ * looked up (kept for an hour, so a customer watching the map doesn't look it
+ * up again each minute). Null when neither works: the map then shows only the
+ * driver.
+ */
+async function deliverySpot(place: Record<string, any> | null | undefined): Promise<{ lat: number; lng: number } | null> {
+  const pin = pinOf(place);
+  if (pin) return pin;
+  const address = stopAddressText(place);
+  if (!address) return null;
+  return lookupPlace(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null);
+}
+
+/**
  * The live map for one of the customer's own shipments. A shipment that isn't
  * theirs (or was unlinked) answers "not found", the same as one that doesn't
  * exist, so nobody can learn about other shipments.
@@ -95,7 +111,7 @@ export async function customerShipmentTracking(customerId: string, quoteId: unkn
   return {
     live: true,
     driver,
-    delivery: routed?.route?.stops.delivery ?? pinOf(load.deliveryLocation),
+    delivery: routed?.route?.stops.delivery ?? (await deliverySpot(load.deliveryLocation)),
     eta: routed
       ? {
           arrivalAt: routed.arrivalAt,
