@@ -78,6 +78,15 @@ jest.mock('../../src/models/ShipmentChatMessage.model', () => ({
     aggregate: (p: unknown) => mockMessageAggregate(p),
   },
 }));
+const mockReceiptExists = jest.fn();
+const mockReceiptFind = jest.fn();
+jest.mock('../../src/models/ShipmentReview.model', () => ({
+  __esModule: true,
+  default: {
+    exists: (f: unknown) => Promise.resolve(mockReceiptExists(f)),
+    find: (f: unknown) => chain(() => mockReceiptFind(f)),
+  },
+}));
 jest.mock('../../src/services/shipmentFollower', () => ({ __esModule: true, findQuoteFollower: (q: unknown) => mockFollower(q) }));
 jest.mock('../../src/services/customerShipmentTracking', () => ({
   __esModule: true,
@@ -167,6 +176,33 @@ beforeEach(() => {
   mockUpload.mockImplementation((file: any) => Promise.resolve(`https://files.example.com/shipment-chat-photos/${file.originalname}`));
   mockDelete.mockResolvedValue(undefined);
   mockNotify.mockResolvedValue({});
+  mockReceiptExists.mockReturnValue(null);
+  mockReceiptFind.mockReturnValue([]);
+});
+
+describe('after the customer confirms they received the vehicle', () => {
+  it('both chats close for everyone, and stay readable', async () => {
+    mockReceiptExists.mockReturnValue({ _id: 'receipt-1' });
+    mockLoadFindOne.mockReturnValue({ ...baseLoad(), status: 'Delivered', deliveredAt: new Date() });
+    mockThreadFindOne.mockReturnValue(thread());
+    const driverChat = await resolveCustomerChat(CUSTOMER, QUOTE, 'driver');
+    expect(await shipmentChatView(driverChat)).toMatchObject({ open: false, threadId: THREAD });
+    await expect(sendChatMessage(driverChat, { content: 'Thanks' })).rejects.toMatchObject({
+      statusCode: 409, message: expect.stringMatching(/You confirmed you received your vehicle/),
+    });
+
+    mockThreadFindOne.mockReturnValue(thread({ kind: 'dispatcher', staffId: DISPATCHER }));
+    const staffSide = await shipmentChatView(await resolveLoadChat(staffActor(), ORG, LOAD));
+    expect(staffSide).toMatchObject({ open: false, canClose: false, canReopen: false });
+    expect(staffSide.note).toMatch(/customer confirmed they received the vehicle/);
+  });
+
+  it('My Shipments shows both chats closed', async () => {
+    mockReceiptFind.mockReturnValueOnce([{ loadId: LOAD }]);
+    const summaries = await customerChatSummaries(CUSTOMER, [{ ...baseLoad(), status: 'Delivered', deliveredAt: new Date() } as any]);
+    expect(summaries.get(LOAD)?.driver).toMatchObject({ open: false, readable: true });
+    expect(summaries.get(LOAD)?.dispatcher).toMatchObject({ open: false, readable: true });
+  });
 });
 
 const driverActor = (id = DRIVER) => ({ _id: id, role: 'driver' });

@@ -40,7 +40,9 @@ export type ShipmentChatClosedReason =
   /** Dispatcher chat: nobody at the dealership can take messages. */
   | "no_dispatcher"
   /** Dispatcher chat: the dispatcher closed it. */
-  | "closed_by_dispatcher";
+  | "closed_by_dispatcher"
+  /** Both chats: the customer confirmed they received the vehicle. */
+  | "received";
 
 export interface ShipmentChatState {
   /** Messages can be sent. */
@@ -76,12 +78,17 @@ const closed = (reason: ShipmentChatClosedReason, participantId: string | null =
   closesAt: null,
 });
 
-/** The customer ↔ driver chat for this load right now. */
-export function driverChatState(load: ChatLoad, now = Date.now()): ShipmentChatState {
+/**
+ * The customer ↔ driver chat for this load right now. It closes 24 hours
+ * after delivery, or as soon as the customer confirms they received the
+ * vehicle (`received`), whichever comes first.
+ */
+export function driverChatState(load: ChatLoad, now = Date.now(), received = false): ShipmentChatState {
   const status = String(load.status ?? "");
   const driverId = idOf(load.assignedDriverId);
   if (status === "Cancelled") return closed("cancelled", driverId);
   if (!driverId || !DRIVER_CHAT_STATUSES.has(status)) return closed("no_driver_yet");
+  if (received) return closed("received", driverId);
   if (status === "Delivered") {
     const deliveredAt = timeOf(load.deliveredAt);
     const closesAt = deliveredAt === null ? null : deliveredAt + DRIVER_CHAT_AFTER_DELIVERY_MS;
@@ -94,11 +101,13 @@ export function driverChatState(load: ChatLoad, now = Date.now()): ShipmentChatS
 /**
  * The customer ↔ dispatcher chat for this load right now. `dispatcherId` is
  * the load's current contact (see dispatchChatContact), `closedByDispatcher`
- * whether that dispatcher closed their chat.
+ * whether that dispatcher closed their chat, `received` whether the customer
+ * confirmed they received the vehicle (that closes it for good).
  */
-export function dispatcherChatState(dispatcherId: unknown, closedByDispatcher = false): ShipmentChatState {
+export function dispatcherChatState(dispatcherId: unknown, closedByDispatcher = false, received = false): ShipmentChatState {
   const id = idOf(dispatcherId);
   if (!id) return closed("no_dispatcher");
+  if (received) return closed("received", id);
   if (closedByDispatcher) return closed("closed_by_dispatcher", id);
   return { open: true, participantId: id, reason: null, closesAt: null };
 }
@@ -131,6 +140,8 @@ export function shipmentChatClosedNote(
         return `Nobody at ${dealer} can take messages here right now. Try again later. If you need help sooner, contact Suprah AI support at ${SUPPORT_EMAIL}.`;
       case "closed_by_dispatcher":
         return `The dispatcher closed this chat. If you still need help with this shipment, contact Suprah AI support at ${SUPPORT_EMAIL}.`;
+      case "received":
+        return `You confirmed you received your vehicle, so this chat is closed. If anything isn't right, contact Suprah AI support at ${SUPPORT_EMAIL}.`;
     }
   }
   switch (reason) {
@@ -150,6 +161,8 @@ export function shipmentChatClosedNote(
       return audience === "dispatcher"
         ? "You closed this chat. The customer can read it but can't send messages. Reopen it if they still need you."
         : "The dispatcher closed this chat.";
+    case "received":
+      return "The customer confirmed they received the vehicle, so this chat is closed. You can still read it.";
   }
   return null;
 }

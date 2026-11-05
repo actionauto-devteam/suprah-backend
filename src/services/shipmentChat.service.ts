@@ -5,6 +5,7 @@ import User from "../models/User.model";
 import Organization from "../models/Organization.model";
 import ShipmentChatThread, { type IShipmentChatThread } from "../models/ShipmentChatThread.model";
 import ShipmentChatMessage, { type IShipmentChatPhoto } from "../models/ShipmentChatMessage.model";
+import ShipmentReview from "../models/ShipmentReview.model";
 import { findQuoteFollower, type ShipmentFollower } from "./shipmentFollower";
 import { loadContactIds, pickLoadContact } from "./dispatchChatContact";
 import { storageService, BucketType } from "./storage.service";
@@ -215,8 +216,14 @@ async function finishContext(
     participant = (await loadDispatchers([load])).get(String(load._id)) ?? null;
   }
 
-  const thread = participant ? await currentThread(load, quote, kind, customer.id, participant.id, false) : null;
-  const state = kind === "driver" ? driverChatState(load) : dispatcherChatState(participant?.id, Boolean(thread?.closedAt));
+  const [thread, received] = await Promise.all([
+    participant ? currentThread(load, quote, kind, customer.id, participant.id, false) : Promise.resolve(null),
+    ShipmentReview.exists({ loadId: load._id }).then(Boolean),
+  ]);
+  const state =
+    kind === "driver"
+      ? driverChatState(load, Date.now(), received)
+      : dispatcherChatState(participant?.id, Boolean(thread?.closedAt), received);
   const isParticipant = viewer.role === "customer" ? viewer.id === customer.id : Boolean(participant && participant.id === viewer.id);
   return { ...base, state, participant, isParticipant, thread };
 }
@@ -670,7 +677,11 @@ export async function customerChatSummaries(
   const result = new Map<string, { driver: CustomerChatSummary; dispatcher: CustomerChatSummary }>();
   if (!isObjectId(customerId) || loads.length === 0) return result;
 
-  const dispatchers = await loadDispatchers(loads);
+  const [dispatchers, receipts] = await Promise.all([
+    loadDispatchers(loads),
+    ShipmentReview.find({ loadId: { $in: loads.map((load) => load._id) } }).select("loadId").lean<Array<{ loadId: unknown }>>(),
+  ]);
+  const receivedLoads = new Set(receipts.map((receipt) => toId(receipt.loadId)));
   const threads = await ShipmentChatThread.find({ customerId, loadId: { $in: loads.map((load) => load._id) }, active: true })
     .select("_id loadId kind staffId closedAt")
     .lean<Array<{ _id: mongoose.Types.ObjectId; loadId: unknown; kind: ShipmentChatKind; staffId: unknown; closedAt?: Date | null }>>();
@@ -686,11 +697,12 @@ export async function customerChatSummaries(
 
   for (const load of loads) {
     const loadId = String(load._id);
-    const driverState = driverChatState(load);
+    const received = receivedLoads.has(loadId);
+    const driverState = driverChatState(load, Date.now(), received);
     const driverThread = threadFor(loadId, "driver", driverState.participantId);
     const dispatcher = dispatchers.get(loadId) ?? null;
     const dispatcherThread = threadFor(loadId, "dispatcher", dispatcher?.id ?? null);
-    const dispatcherState = dispatcherChatState(dispatcher?.id, Boolean(dispatcherThread?.closedAt));
+    const dispatcherState = dispatcherChatState(dispatcher?.id, Boolean(dispatcherThread?.closedAt), received);
     result.set(loadId, {
       driver: {
         open: driverState.open,

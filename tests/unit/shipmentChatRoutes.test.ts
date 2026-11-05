@@ -33,6 +33,14 @@ jest.mock('../../src/controllers/shipmentChat.controller', () => ({
   },
 }));
 
+jest.mock('../../src/controllers/shipmentReview.controller', () => ({
+  __esModule: true,
+  default: {
+    confirmReceived: (_req: any, res: any) => res.status(200).json({ ok: true }),
+    review: (_req: any, res: any) => res.status(200).json({ ok: true }),
+  },
+}));
+
 import customerQuoteRequestRoutes from '../../src/routes/customerQuoteRequest.routes';
 
 const app = express();
@@ -74,6 +82,19 @@ describe('the customer side of the chats', () => {
     expect(limited.status).toBe(429);
     expect(limited.body.message).toMatch(/Wait a minute/);
     expect((await send('other-customer')).status).toBe(201);
+  });
+});
+
+describe('confirm received and reviews', () => {
+  it('lets the customer confirm and review', async () => {
+    expect((await request(app).post('/api/quote-requests/q-1/received').set('x-test-role', 'customer')).status).toBe(200);
+    expect((await request(app).post('/api/quote-requests/q-1/review').set('x-test-role', 'customer').send({ driverStars: 5 })).status).toBe(200);
+  });
+
+  it.each(['employee', 'admin', 'driver'])('keeps %s accounts out', async (role) => {
+    const res = await request(app).post('/api/quote-requests/q-1/review').set('x-test-role', role).send({ driverStars: 5 });
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe('Only the customer receiving the vehicle can confirm it arrived or review the delivery.');
   });
 });
 

@@ -28,6 +28,7 @@ import loadRouteController from "../controllers/loadRoute.controller";
 import { startDriverLocationMonitor } from "../services/driverLocationMonitor.service";
 import { uploadDispatchChatFiles, uploadShipmentChatPhotos } from "../middleware/dispatchChatAttachment.middleware";
 import shipmentChatController from "../controllers/shipmentChat.controller";
+import shipmentReviewController from "../controllers/shipmentReview.controller";
 import {
   dispatchChatMessageLimiter,
   dispatchChatUploadLimiter,
@@ -288,6 +289,9 @@ router.post(
 router.post("/loads/:loadId/customer-chat/read", shipmentChatController.markLoadChatRead);
 router.post("/loads/:loadId/customer-chat/close", staffOnly, shipmentChatController.closeLoadChat);
 router.post("/loads/:loadId/customer-chat/reopen", staffOnly, shipmentChatController.reopenLoadChat);
+// The customer's confirmation and review, for the load's own dealership only
+// (drivers never see reviews).
+router.get("/loads/:loadId/customer-review", staffOnly, noStoreSensitive, shipmentReviewController.getLoadReview);
 
 // Driver dashboard summary (read-only)
 router.get("/dashboard-stats", driverOnly, noStoreSensitive, driverTrackingController.getDashboardStats);
