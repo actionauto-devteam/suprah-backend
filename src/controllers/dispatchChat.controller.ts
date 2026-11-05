@@ -21,6 +21,7 @@ import logger from "../utils/logger";
 import { recordAvailableLoadInquiry } from "../services/availableLoadInquiry.service";
 import { safeCreateNotification } from "../utils/safeNotification";
 import { loadContactIds, NO_DISPATCH_CHAT_CONTACT, pickLoadContact } from "../services/dispatchChatContact";
+import { customerChatUnreadTotal } from "../services/shipmentChatInbox.service";
 
 const STAFF_ROLES = ["employee", "admin", "super_admin"];
 const MAX_MESSAGE_LENGTH = 4000;
@@ -1450,11 +1451,15 @@ const getUnreadTotal = asyncHandler(async (req: ExpressRequest, res: ExpressResp
       ),
   );
 
+  // Customer chats (Dispatch Chat's Customers section) are counted on their
+  // own, so unreadTotal keeps meaning dispatcher↔driver messages only.
+  const customerChatUnread = await customerChatUnreadTotal(actor, requestOrganizationId);
+
   if (visibleThreads.length === 0) {
     return res.status(200).json(
       new ApiResponse(
         200,
-        { unreadTotal: 0 },
+        { unreadTotal: 0, customerChatUnread },
         "Dispatch Chat unread total fetched",
       ),
     );
@@ -1478,7 +1483,7 @@ const getUnreadTotal = asyncHandler(async (req: ExpressRequest, res: ExpressResp
   return res.status(200).json(
     new ApiResponse(
       200,
-      { unreadTotal },
+      { unreadTotal, customerChatUnread },
       "Dispatch Chat unread total fetched",
     ),
   );

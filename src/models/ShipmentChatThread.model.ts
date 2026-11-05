@@ -60,6 +60,9 @@ shipmentChatThreadSchema.index(
 // My Shipments: the customer's live chats on their loads.
 shipmentChatThreadSchema.index({ customerId: 1, loadId: 1, active: 1 });
 
+// Dispatch Chat's Customers section: a driver's or dispatcher's live chats, newest first.
+shipmentChatThreadSchema.index({ staffId: 1, kind: 1, active: 1, lastMessageAt: -1 });
+
 const ShipmentChatThread: Model<IShipmentChatThread> =
   (mongoose.models.ShipmentChatThread as Model<IShipmentChatThread>) ||
   mongoose.model<IShipmentChatThread>("ShipmentChatThread", shipmentChatThreadSchema);

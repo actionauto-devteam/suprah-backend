@@ -15,6 +15,7 @@ import {
   shipmentChatView,
   type ShipmentChatContext,
 } from "../services/shipmentChat.service";
+import { listCustomerChatInbox } from "../services/shipmentChatInbox.service";
 
 /*
  * Customer chats on a shipment (see services/shipmentChat.service.ts).
@@ -98,6 +99,12 @@ const markLoadChatRead = asyncHandler(async (req: Request, res: Response) => {
   return res.status(200).json(new ApiResponse(200, await markChatRead(ctx, req.body?.readUpTo), "Chat marked read"));
 });
 
+/** GET /api/driver-tracking/customer-chats — Dispatch Chat's Customers section: my customer chats, newest first. */
+const getCustomerChatInbox = asyncHandler(async (req: Request, res: Response) => {
+  const inbox = await listCustomerChatInbox(signedInUser(req), req.orgId);
+  return res.status(200).json(new ApiResponse(200, inbox, "Customer chats"));
+});
+
 /** POST /api/driver-tracking/loads/:loadId/customer-chat/close and /reopen (the dispatcher) */
 const setLoadChatClosed = (close: boolean) =>
   asyncHandler(async (req: Request, res: Response) => {
@@ -117,6 +124,7 @@ export default {
   sendLoadMessage,
   sendLoadPhotos,
   markLoadChatRead,
+  getCustomerChatInbox,
   closeLoadChat: setLoadChatClosed(true),
   reopenLoadChat: setLoadChatClosed(false),
 };

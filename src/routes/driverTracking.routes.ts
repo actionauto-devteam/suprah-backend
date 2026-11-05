@@ -289,6 +289,9 @@ router.post(
 router.post("/loads/:loadId/customer-chat/read", shipmentChatController.markLoadChatRead);
 router.post("/loads/:loadId/customer-chat/close", staffOnly, shipmentChatController.closeLoadChat);
 router.post("/loads/:loadId/customer-chat/reopen", staffOnly, shipmentChatController.reopenLoadChat);
+// Dispatch Chat's Customers section: the driver's or dispatcher's own customer
+// chats (the service refuses anyone else).
+router.get("/customer-chats", noStoreSensitive, shipmentChatController.getCustomerChatInbox);
 // The customer's confirmation and review, for the load's own dealership only
 // (drivers never see reviews).
 router.get("/loads/:loadId/customer-review", staffOnly, noStoreSensitive, shipmentReviewController.getLoadReview);
