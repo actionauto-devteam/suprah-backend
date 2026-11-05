@@ -31,6 +31,7 @@ import { findVehicleShipping } from '../services/vehicleShipping.service';
 import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
+import { customerShipmentTracking } from '../services/customerShipmentTracking';
 
 /**
  * The CRM lead for a quote's customer, preferring the lead about the quote's
@@ -635,14 +636,27 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
 
 /**
  * GET /api/quote-requests/mine
- * The signed-in customer's own shipping requests and how each shipment is
- * going (no driver details or location), newest first.
+ * The signed-in customer's shipments and how each one is going, newest first
+ * (the driver's name, photo and truck once they accept; see
+ * customerShipments.service).
  */
 const getMyShipments = asyncHandler(async (req: Request, res: Response) => {
     const user = req.user as IUser | undefined;
     if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
     const shipments = await listCustomerShipments(String(user._id));
     return res.status(200).json(new ApiResponse(200, shipments, 'Your shipments'));
+});
+
+/**
+ * GET /api/quote-requests/:id/tracking
+ * The live map for one of the customer's own shipments, from pickup until
+ * delivery (see customerShipmentTracking). Anyone else's shipment is "not found".
+ */
+const getShipmentTracking = asyncHandler(async (req: Request, res: Response) => {
+    const user = req.user as IUser | undefined;
+    if (!user?._id) throw new ApiError(401, SIGN_IN_AGAIN);
+    const view = await customerShipmentTracking(String(user._id), req.params.id);
+    return res.status(200).json(new ApiResponse(200, view, 'Shipment tracking'));
 });
 
 /**
@@ -1919,6 +1933,7 @@ export default {
     createQuote,
     createCustomerQuoteRequest,
     getMyShipments,
+    getShipmentTracking,
     withdrawCustomerQuoteRequest,
     getQuotesForLead,
     getQuotes,

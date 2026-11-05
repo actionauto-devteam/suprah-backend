@@ -18,6 +18,7 @@ jest.mock('../../src/controllers/quote.controller', () => ({
   default: {
     createCustomerQuoteRequest: (_req: any, res: any) => res.status(201).json({ ok: true }),
     getMyShipments: (_req: any, res: any) => res.status(200).json({ ok: true }),
+    getShipmentTracking: (_req: any, res: any) => res.status(200).json({ ok: true }),
     withdrawCustomerQuoteRequest: (_req: any, res: any) => res.status(200).json({ ok: true }),
   },
 }));
@@ -79,6 +80,35 @@ describe("GET /api/quote-requests/mine", () => {
   it("is never cached", async () => {
     const res = await request(app).get("/api/quote-requests/mine").set("x-test-role", "customer");
     expect(res.headers["cache-control"]).toBe("private, no-store, max-age=0");
+  });
+});
+
+describe("GET /api/quote-requests/:id/tracking", () => {
+  const track = (role: string, user = `${role}-1`) =>
+    request(app).get("/api/quote-requests/q-1/tracking").set("x-test-role", role).set("x-test-user", user);
+
+  it("lets a customer open the live map, never cached", async () => {
+    const res = await track("customer");
+    expect(res.status).toBe(200);
+    expect(res.headers["cache-control"]).toBe("private, no-store, max-age=0");
+  });
+
+  it.each(["employee", "admin", "driver"])("keeps %s accounts out", async (role) => {
+    const res = await track(role);
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe("The live map is for the customer receiving the vehicle. Staff see the driver on Driver Tracker.");
+  });
+
+  it("allows 150 refreshes in 10 minutes per customer, then explains the wait", async () => {
+    for (let i = 0; i < 150; i += 1) {
+      expect((await track("customer", "map-watcher")).status).toBe(200);
+    }
+    const limited = await track("customer", "map-watcher");
+    expect(limited.status).toBe(429);
+    expect(limited.body.message).toBe(
+      "The live map is refreshing too often. It will update again in a few minutes; you can keep using My Shipments meanwhile.",
+    );
+    expect((await track("customer", "another-watcher")).status).toBe(200);
   });
 });
 

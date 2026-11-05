@@ -325,7 +325,8 @@ function stopAddressText(place: Record<string, any> | null | undefined): string 
     .join(", ");
 }
 
-function pinOf(place: Record<string, any> | null | undefined): LatLng | null {
+/** The exact spot picked on the map for a stop, when there is one. */
+export function pinOf(place: Record<string, any> | null | undefined): LatLng | null {
   const pin = place?.coordinates;
   return pin && Number.isFinite(pin.lat) && Number.isFinite(pin.lng) ? { lat: Number(pin.lat), lng: Number(pin.lng) } : null;
 }
@@ -741,6 +742,49 @@ export async function getLoadRoute(load: RouteLoad): Promise<LoadRoute> {
   return request;
 }
 
+/** How long a customer's arrival time is reused (decided 2026-11-05). */
+export const CUSTOMER_ROUTE_REUSE_MS = 10 * 60_000;
+/** Customers may start at most this share of the per-minute cap, so dispatchers always come first. */
+export const CUSTOMER_ROUTE_SHARE = 0.5;
+let customerQuotaWindowStart = 0;
+let customerQuotaUsed = 0;
+
+function takeCustomerQuota(perMinute: number): boolean {
+  const now = Date.now();
+  if (now - customerQuotaWindowStart >= 60_000) {
+    customerQuotaWindowStart = now;
+    customerQuotaUsed = 0;
+  }
+  if (customerQuotaUsed >= Math.max(1, Math.floor(perMinute * CUSTOMER_ROUTE_SHARE))) return false;
+  customerQuotaUsed += 1;
+  return true;
+}
+
+/**
+ * The route and arrival time a customer sees for their own car, on the way to
+ * the delivery only. It's the same route dispatchers see (worked out once per
+ * load), reused for up to 10 minutes for customers, and never re-planned
+ * because a customer is watching. Customers can start only part of the
+ * per-minute cap; past that they keep the last route (or none) until there's
+ * room again. Returns the route with when it was worked out.
+ */
+export async function getCustomerLoadRoute(load: RouteLoad): Promise<LoadRoute> {
+  const config = getAmazonLocationConfig();
+  if (!config.routesEnabled) return unavailable("routes_off");
+  if (nextStopFor(load.status) !== "delivery" || !load.assignedDriverId) return unavailable("not_tracked");
+  const key = `${String(load._id)}:delivery:${config.routePreference}:${stopsKey(load)}`;
+  const cached = results.get(key);
+  if (cached && Date.now() - cached.at < CUSTOMER_ROUTE_REUSE_MS) {
+    health.reused += 1;
+    return cached.result;
+  }
+  if (!takeCustomerQuota(config.routesPerMinute)) {
+    health.skippedByCap += 1;
+    return cached ? cached.result : unavailable("unavailable");
+  }
+  return getLoadRoute(load);
+}
+
 export function loadRouteHealthSnapshot() {
   const config = getAmazonLocationConfig();
   return {
@@ -763,6 +807,8 @@ export function resetLoadRouteForTests() {
   geocodes.clear();
   quotaWindowStart = 0;
   quotaUsed = 0;
+  customerQuotaWindowStart = 0;
+  customerQuotaUsed = 0;
   Object.assign(health, {
     computed: 0, reused: 0, rerouted: 0, withheldForLimits: 0, geocoded: 0, addressTooBroad: 0,
     failed: 0, timedOut: 0, skippedByCap: 0, unrecognizedNotices: {}, lastError: null, lastErrorAt: null,

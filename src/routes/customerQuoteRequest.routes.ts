@@ -28,6 +28,24 @@ const customerQuoteRequestLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// The live map refreshes about once a minute per open shipment; this leaves
+// room for several shipments on a few devices, and stops runaway refreshing.
+const customerTrackingLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 150,
+  skip: () => process.env.SKIP_RATE_LIMIT === "true",
+  keyGenerator: (req: any) => req.user?._id?.toString() ?? ipKeyGenerator(req.ip ?? "unknown"),
+  message: {
+    success: false,
+    message: "The live map is refreshing too often. It will update again in a few minutes; you can keep using My Shipments meanwhile.",
+  },
+  handler: (req, res, next, options) => {
+    next(new ApiError(429, options.message.message));
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.use(auth());
 router.use((req, res, next) => {
   res.setHeader("Cache-Control", "private, no-store, max-age=0");
@@ -46,6 +64,14 @@ router.get(
   "/mine",
   authorize("customer", "My Shipments is for customer accounts. Staff see quotes and loads on the Transportation page."),
   quoteController.getMyShipments,
+);
+
+// Where the driver carrying the customer's car is, from pickup until delivery.
+router.get(
+  "/:id/tracking",
+  authorize("customer", "The live map is for the customer receiving the vehicle. Staff see the driver on Driver Tracker."),
+  customerTrackingLimiter,
+  quoteController.getShipmentTracking,
 );
 
 // The customer withdraws their own request while it is still waiting.
