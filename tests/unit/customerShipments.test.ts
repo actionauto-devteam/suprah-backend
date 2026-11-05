@@ -65,6 +65,12 @@ jest.mock('../../src/services/shipmentChat.service', () => ({
   __esModule: true,
   customerChatSummaries: (customerId: string, loads: unknown[]) => mockChatSummaries(customerId, loads),
 }));
+// "Confirm received" (tested in shipmentReview.service.test.ts).
+const mockReceipts = jest.fn((_loadIds: unknown[]) => Promise.resolve(new Map<string, unknown>()));
+jest.mock('../../src/services/shipmentReview.service', () => ({
+  __esModule: true,
+  receiptsForLoads: (loadIds: unknown[]) => mockReceipts(loadIds),
+}));
 
 import { NOTIFICATION_TYPES } from '../../src/constants/notificationTypes';
 import {
@@ -312,6 +318,32 @@ describe('My Shipments status', () => {
     mockLoadFind.mockReturnValue([]);
     const [waiting] = await listCustomerShipments(CUSTOMER);
     expect(waiting.chats).toBeNull();
+  });
+
+  it('shows on delivered shipments whether the customer confirmed receipt', async () => {
+    const LOAD_ID = '64b0000000000000000000b2';
+    const receipt = { receivedAt: '2026-11-05T18:00:00.000Z', reviewed: false, driverStars: null };
+    mockReceipts.mockResolvedValueOnce(new Map([[LOAD_ID, receipt]]));
+    mockPortalRequests.mockReturnValue([{ _id: QUOTE, organizationId: ORG, source: 'customer_portal', status: 'booked', createdAt: new Date() }]);
+    mockLoadFind.mockReturnValue([{ _id: LOAD_ID, quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-7', status: 'Delivered' }]);
+    const [entry] = await listCustomerShipments(CUSTOMER);
+    expect(entry.receipt).toEqual(receipt);
+    expect(mockReceipts).toHaveBeenCalledWith([LOAD_ID]);
+
+    // Not yet confirmed, and not delivered yet.
+    const [unconfirmed] = await listCustomerShipments(CUSTOMER);
+    expect(unconfirmed.receipt).toBeNull();
+    mockLoadFind.mockReturnValue([{ _id: LOAD_ID, quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-7', status: 'In-Transit' }]);
+    const [coming] = await listCustomerShipments(CUSTOMER);
+    expect(coming.receipt).toBeNull();
+  });
+
+  it("doesn't offer a confirmation it couldn't check", async () => {
+    mockReceipts.mockRejectedValueOnce(new Error('down'));
+    mockPortalRequests.mockReturnValue([{ _id: QUOTE, organizationId: ORG, source: 'customer_portal', status: 'booked', createdAt: new Date() }]);
+    mockLoadFind.mockReturnValue([{ _id: 'load-d', quoteId: QUOTE, organizationId: ORG, loadNumber: 'LD-8', status: 'Delivered' }]);
+    const [entry] = await listCustomerShipments(CUSTOMER);
+    expect(entry.receipt).toBe('unknown');
   });
 
   it('still lists shipments when the chats are unavailable', async () => {

@@ -14,6 +14,7 @@ import { GPS_TRACKING_LOAD_STATUSES, isOrganizationAdminFor } from "../services/
 import { GPS_LIVE_MS } from "../constants/driverGps";
 import { ACTIVE_LOAD_STATUSES as SHARED_ACTIVE_LOAD_STATUSES } from "../constants/loadStatus";
 import { getLoadAcceptanceMaterialVersion } from "../services/loadAcceptanceMaterial.service";
+import { driverCustomerRatings, type DriverCustomerRating } from "../services/shipmentReview.service";
 import {
   finalizeDriverStatusChangeIfClear,
   isStatusRequestBlockingNewWork,
@@ -30,6 +31,8 @@ interface OrgDriver {
   avatar: string | null;
   isActive: boolean;
   memberSince: Date | null;
+  /** Customers' star average from delivered shipments (never shown to the driver). */
+  customerRating: DriverCustomerRating | null;
   equipment: {
     trailerType: string | null;
     maxVehicleCapacity: number | null;
@@ -238,6 +241,9 @@ async function buildDirectoryEntries(
       .sort({ createdAt: -1 })
       .lean(),
   ]);
+
+  // Customers' star averages. A failure only hides the stars.
+  const ratings = await driverCustomerRatings(ids).catch(() => new Map<string, DriverCustomerRating>());
 
   // Whether a driver can take new work uses their open Work Availability
   // requests in every organization: the same rule as the Assign button
@@ -450,6 +456,7 @@ async function buildDirectoryEntries(
       avatar: u.avatar ?? null,
       isActive: Boolean(u.isActive),
       memberSince: u.createdAt ?? null,
+      customerRating: ratings.get(key) ?? null,
       equipment: profile
         ? {
             trailerType: profile.trailerType ?? null,

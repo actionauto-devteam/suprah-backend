@@ -7,6 +7,7 @@ import DriverProfile from "../models/DriverProfile.model";
 import notificationService from "./notification.service";
 import { findQuoteFollower, type ShipmentFollower } from "./shipmentFollower";
 import { customerChatSummaries, type CustomerChatSummary } from "./shipmentChat.service";
+import { receiptsForLoads } from "./shipmentReview.service";
 import logger from "../utils/logger";
 import { LOAD_CANCELLATION_REASON_LABELS, isLoadCancellationReason } from "../constants/loadCancellation";
 
@@ -475,10 +476,17 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
     .map((quote) => loadByQuote.get(String(quote._id)))
     .filter(Boolean)
     .map((load) => ({ ...load, dealerName: dealerById.get(String(load.organizationId ?? "")) || "" }));
-  const chats = await customerChatSummaries(customerId, bookedLoads).catch((err) => {
-    logger.warn({ err }, "Could not load the shipment chats for My Shipments");
-    return new Map<string, { driver: CustomerChatSummary; dispatcher: CustomerChatSummary }>();
-  });
+  const [chats, receipts] = await Promise.all([
+    customerChatSummaries(customerId, bookedLoads).catch((err) => {
+      logger.warn({ err }, "Could not load the shipment chats for My Shipments");
+      return new Map<string, { driver: CustomerChatSummary; dispatcher: CustomerChatSummary }>();
+    }),
+    // "Confirm received" and the review, on delivered shipments.
+    receiptsForLoads(bookedLoads.filter((load) => load.status === "Delivered").map((load) => load._id)).catch((err) => {
+      logger.warn({ err }, "Could not load the delivery confirmations for My Shipments");
+      return null;
+    }),
+  ]);
 
   return visible.map((quote) => {
     const load = loadByQuote.get(String(quote._id)) ?? null;
@@ -505,6 +513,15 @@ export async function listCustomerShipments(customerId: string, limit = 50) {
       driver,
       // Chats with the driver and the dispatcher, once the shipment is booked.
       chats: load ? chats.get(String(load._id)) ?? null : null,
+      // Delivered shipments: whether the customer confirmed receipt and
+      // reviewed it. "unknown" when that couldn't be checked right now, so
+      // the page doesn't offer a confirmation that may already exist.
+      receipt:
+        stage !== "delivered" || !load
+          ? null
+          : receipts === null
+            ? ("unknown" as const)
+            : receipts.get(String(load._id)) ?? null,
       shipment: load
         ? {
             number: String(load.loadNumber ?? ""),

@@ -2,6 +2,7 @@ import express from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import quoteController from "../controllers/quote.controller";
 import shipmentChatController from "../controllers/shipmentChat.controller";
+import shipmentReviewController from "../controllers/shipmentReview.controller";
 import { uploadShipmentChatPhotos } from "../middleware/dispatchChatAttachment.middleware";
 import { dispatchChatMessageLimiter, dispatchChatUploadLimiter } from "../middleware/transportRateLimit.middleware";
 import auth from "../middleware/auth.middleware";
@@ -90,6 +91,12 @@ router.post(
   shipmentChatController.sendCustomerPhotos,
 );
 router.post("/:id/chats/:kind/read", chatCustomerOnly, shipmentChatController.markCustomerChatRead);
+
+// The customer confirms they received their delivered vehicle (closing both
+// chats), and sends their one review of the delivery.
+const receivingCustomerOnly = authorize("customer", "Only the customer receiving the vehicle can confirm it arrived or review the delivery.");
+router.post("/:id/received", receivingCustomerOnly, shipmentReviewController.confirmReceived);
+router.post("/:id/review", receivingCustomerOnly, shipmentReviewController.review);
 
 // The customer withdraws their own request while it is still waiting.
 router.post(

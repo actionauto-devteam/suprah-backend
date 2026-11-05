@@ -45,6 +45,13 @@ describe('the driver chat', () => {
     expect(driverChatState({ status: 'Delivered', assignedDriverId: DRIVER, deliveredAt: null }, NOW)).toMatchObject({ open: false, reason: 'delivered' });
   });
 
+  it('closes as soon as the customer confirms they received the vehicle, even within the 24 hours', () => {
+    const deliveredAt = new Date(NOW - 60 * 60 * 1000);
+    expect(driverChatState({ status: 'Delivered', assignedDriverId: DRIVER, deliveredAt }, NOW, true)).toEqual({
+      open: false, participantId: DRIVER, reason: 'received', closesAt: null,
+    });
+  });
+
   it('closes when the load is cancelled', () => {
     expect(driverChatState({ status: 'Cancelled', assignedDriverId: DRIVER }, NOW)).toMatchObject({ open: false, participantId: DRIVER, reason: 'cancelled' });
   });
@@ -54,6 +61,12 @@ describe('the dispatcher chat', () => {
   it('is open with the load dispatcher until they close it', () => {
     expect(dispatcherChatState(DISPATCHER)).toEqual({ open: true, participantId: DISPATCHER, reason: null, closesAt: null });
     expect(dispatcherChatState(DISPATCHER, true)).toMatchObject({ open: false, participantId: DISPATCHER, reason: 'closed_by_dispatcher' });
+  });
+
+  it('closes for good once the customer confirms receipt (the dispatcher can no longer reopen it)', () => {
+    expect(dispatcherChatState(DISPATCHER, false, true)).toMatchObject({ open: false, participantId: DISPATCHER, reason: 'received' });
+    expect(dispatcherChatState(DISPATCHER, true, true)).toMatchObject({ reason: 'received' });
+    expect(shipmentChatClosedNote('dispatcher', 'received', 'customer')).toMatch(/You confirmed you received your vehicle.*support@suprahai\.com/);
   });
 
   it('is closed when nobody at the dealership can take it', () => {
