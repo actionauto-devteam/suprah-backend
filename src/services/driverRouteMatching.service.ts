@@ -63,11 +63,10 @@ export interface DispatchProximityOrigin {
 // Distances from a dispatch origin are rounded to 5 miles, so distances to
 // several pickups can't be used to work out where the driver is.
 const APPROXIMATE_MILES_STEP = 5;
-function approximateMiles(miles: number): number {
-  return Math.max(
-    APPROXIMATE_MILES_STEP,
-    Math.round(miles / APPROXIMATE_MILES_STEP) * APPROXIMATE_MILES_STEP,
-  );
+/** Rounded to 5 miles; 0 means "under 5 miles", so a close driver's spot isn't given away. */
+export function approximateMiles(miles: number): number {
+  if (!Number.isFinite(miles) || miles < APPROXIMATE_MILES_STEP) return 0;
+  return Math.round(miles / APPROXIMATE_MILES_STEP) * APPROXIMATE_MILES_STEP;
 }
 
 const PRESENCE_STALE_MS = GPS_RECENT_FOR_DISTANCE_MS;

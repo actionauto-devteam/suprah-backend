@@ -58,3 +58,12 @@ export const quoteChangeLimiter = perPersonLimiter(
   60,
   "You've created or changed a lot of quotes in the last few minutes. Wait a few minutes, then try again.",
 );
+
+// Matching drivers to a load shows each sharing driver's rounded distance to
+// the pickup. Normal use (Create Load, Driver Tracker's Assign Driver) stays
+// far below this; trying many pickup spots to pin a driver down doesn't.
+export const driverMatchPreviewLimiter = perPersonLimiter(
+  10 * 60 * 1000,
+  120,
+  "You've checked driver matches many times in the last few minutes. Wait a few minutes, then try again.",
+);

@@ -21,6 +21,8 @@ describe('rate limits on routes', () => {
     'router.post("/loads/:id/drop", driverOnly, driverLoadRequestLimiter,',
     'router.post( "/dispatch-chat/:driverId/messages", dispatchChatMessageLimiter,',
     'router.post( "/dispatch-chat/:driverId/attachments", dispatchChatUploadLimiter, uploadDispatchChatFiles,',
+    // Driver matching shows rounded distances: limited so nobody can probe many pickup spots.
+    'router.post( "/compatibility-preview", staffOnly, trackingOrganizationOnly, driverMatchPreviewLimiter,',
   ])('Driver Tracker: %s', (expected) => {
     expect(driverTracking).toContain(expected);
   });

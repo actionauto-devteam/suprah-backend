@@ -18,7 +18,7 @@ describe('Pickup distance origins', () => {
     expect(signals.proximity.distanceToPickupMiles).not.toBe(5);
   });
 
-  it('a dispatch origin a few hundred feet away shows as 5 miles, never 0', async () => {
+  it('a dispatch origin a few hundred feet away shows as under 5 miles (0), never its real distance', async () => {
     const at = new Date(Date.now() - 3 * 60 * 60 * 1000);
     const signals = await evaluateDriverRouteCompatibility(profile, load, null, {
       coords: nearPickup,
@@ -28,7 +28,7 @@ describe('Pickup distance origins', () => {
     expect(signals.proximity).toMatchObject({
       source: 'last_delivery',
       approximate: true,
-      distanceToPickupMiles: 5,
+      distanceToPickupMiles: 0,
       lastSeenAt: at.toISOString(),
     });
   });

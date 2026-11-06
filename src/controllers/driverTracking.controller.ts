@@ -81,6 +81,8 @@ import {
   evaluateDriverLoadCompatibilityWithRecommendations,
 } from "../services/driverLoadCompatibility.service";
 import { getDispatchProximityOrigins } from "../services/driverDispatchProximity.service";
+import { lookupPlace, MAX_PLACE_QUERY_LENGTH } from "../services/googleGeocoding.service";
+import { stopAddressText } from "../services/loadRoute.service";
 import { getCoordinatesFromZip } from "../utils/calculations";
 import {
   GPS_TRACKING_LOAD_STATUSES,
@@ -3609,6 +3611,13 @@ const previewDriverLoadCompatibility = asyncHandler(async (req: ExpressRequest, 
       } catch {
         // Recommendation preview degrades to unknown proximity/service area.
       }
+    }
+    // No pin and no ZIP: the pickup address itself, the same lookup Driver
+    // Tracker uses for stops (kept for an hour).
+    if (!pickupCoordinates) {
+      const address = stopAddressText(previewLoad?.pickupLocation);
+      const place = address ? await lookupPlace(address.slice(0, MAX_PLACE_QUERY_LENGTH)).catch(() => null) : null;
+      if (place) pickupCoordinates = { lat: place.lat, lng: place.lng };
     }
 
     return {

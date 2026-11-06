@@ -33,6 +33,7 @@ import {
   dispatchChatMessageLimiter,
   dispatchChatUploadLimiter,
   driverLoadRequestLimiter,
+  driverMatchPreviewLimiter,
 } from "../middleware/transportRateLimit.middleware";
 import { startLoadLifecycleOutboxWorker } from "../services/loadLifecycleOutbox.service";
 import { areBackgroundJobsDisabled } from "../config/backgroundJobs";
@@ -150,6 +151,7 @@ router.post(
   "/compatibility-preview",
   staffOnly,
   trackingOrganizationOnly,
+  driverMatchPreviewLimiter,
   driverTrackingController.previewDriverLoadCompatibility,
 );
 // Reassign / Remove stay open to any organization employee so another staff
