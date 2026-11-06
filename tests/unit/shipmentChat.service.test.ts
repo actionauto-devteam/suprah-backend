@@ -346,7 +346,8 @@ describe('sending', () => {
       type: 'message_received',
       title: 'Maria (customer)',
       message: 'About the 2021 Toyota Camry: Hi, is the car on the way?',
-      metadata: expect.objectContaining({ route: `/driver/loads/${LOAD}?chat=customer`, pushTag: `shipment-chat:${THREAD}` }),
+      // Drivers open it in the Customers section of Messages.
+      metadata: expect.objectContaining({ route: `/driver/channels?customerChat=${LOAD}`, pushTag: `shipment-chat:${THREAD}` }),
     }));
   });
 
