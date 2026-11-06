@@ -9,6 +9,7 @@ import { asyncHandler } from '../utils/asyncHandler';
 import config from '../config';
 import appointmentService from '../services/appointment.service';
 import { emitToOrg, emitToUser } from '../utils/socketEmitter';
+import { readCalendarState, signCalendarState } from '../utils/calendarOAuthState';
 
 
 const SCOPES = [
@@ -36,7 +37,7 @@ export const crmCalendarController = {
       access_type: 'offline',
       scope: SCOPES,
       prompt: 'consent',
-      state: crmUserId, // Pass the CRM User ID in state
+      state: signCalendarState(crmUserId),
     });
 
     res.json({ url: authUrl });
@@ -61,7 +62,11 @@ export const crmCalendarController = {
       CRM_REDIRECT_URI
     );
 
-    const crmUserId = state as string;
+    const crmUserId = readCalendarState(state);
+    if (!crmUserId) {
+      backToAppointments('error');
+      return;
+    }
     try {
       const { tokens } = await oauth2Client.getToken(code as string);
 

@@ -20,6 +20,7 @@ import {
 } from './aiAgent.service';
 import { getRelevantAiCoaching } from './aiAgentCoaching.service';
 import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
+import { describeVehicleInterest } from './vehicleInterest.service';
 import { recordAiUsage } from './aiOperatingMode.service';
 import { ContactRestrictedError, resolveContactRestriction } from './contactRestriction.service';
 import { ConversationItem, loadConversationItems } from './leadConversation.service';
@@ -130,9 +131,7 @@ async function buildDraft(input: {
   const { items } = await loadConversationItems(organizationId, lead, { limit: 60 });
   const transcript = draftTranscriptFromItems(items, agentName);
   const customerFirstName = lead.firstName || undefined;
-  const leadVehicleInterest = lead.vehicle
-    ? [lead.vehicle.year, lead.vehicle.make, lead.vehicle.model].filter(Boolean).join(' ') || undefined
-    : undefined;
+  const leadVehicleInterest = await describeVehicleInterest(lead, organizationId);
   const pinned = await resolvePinnedVehicleContext({ organizationId, lead, phone: lead.phone, email: lead.email }).catch(() => null);
   const vehicleContextNote = pinned ? buildVehicleContextNote(pinned) : undefined;
   const draftFor = { name: input.staffName };

@@ -39,6 +39,7 @@ import {
   lastAiMessageWasClarifyingQuestion,
 } from './vehicleInquiryContext.service';
 import { buildSmsTranscriptUntil, buildWebchatTranscriptUntil, resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
+import { describeVehicleInterest } from './vehicleInterest.service';
 import {
   AiCallObserver,
   AiCallBudgetExceededError,
@@ -467,9 +468,7 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
 
   const replyLead = vehicleContext?.lead || lead;
   const customerFirstName = input.customerFirstName || replyLead.firstName || lead.firstName || undefined;
-  const leadVehicleInterest = replyLead.vehicle
-    ? [replyLead.vehicle.year, replyLead.vehicle.make, replyLead.vehicle.model].filter(Boolean).join(' ') || undefined
-    : undefined;
+  const leadVehicleInterest = await describeVehicleInterest(replyLead, input.organizationId);
   const isFirstReply = !transcript.some((entry) => entry.from === 'ai');
   const vehicleResolution = vehicleContext?.resolution;
   const caps = input.channel === 'email'

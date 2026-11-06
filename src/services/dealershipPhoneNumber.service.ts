@@ -219,8 +219,16 @@ export async function listDealershipNumbers(organizationId: string) {
     ? await CrmLeadGroup.find({ _id: { $in: groupIds }, organizationId }).select('name isActive').lean()
     : [];
   const names = new Map(groups.map((group: any) => [String(group._id), group.isActive ? group.name : '']));
+  const menus = rows.length
+    ? await CallRoutingConfig.find({ organizationId, enabled: true, inboundNumber: { $in: rows.map((row) => row.number) } }).select('name inboundNumber').lean()
+    : [];
+  const menuNames = new Map(menus.map((menu: any) => [String(menu.inboundNumber), String(menu.name || '').trim() || 'Phone Menu']));
   return rows
-    .map((row) => ({ ...row, ringGroupName: row.ringGroupId ? names.get(String(row.ringGroupId)) || '' : '' }))
+    .map((row) => ({
+      ...row,
+      ringGroupName: row.ringGroupId ? names.get(String(row.ringGroupId)) || '' : '',
+      phoneMenuName: menuNames.get(row.number) || '',
+    }))
     .sort((a, b) => PHONE_NUMBER_KINDS.indexOf(a.kind) - PHONE_NUMBER_KINDS.indexOf(b.kind) || a.label.localeCompare(b.label));
 }
 
