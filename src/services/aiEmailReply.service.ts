@@ -19,6 +19,7 @@ import { createAiAgentTaskAndNotify } from '../utils/aiAgentTask';
 import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from '../utils/leadNote';
 import { sendLeadReplyEmail, fetchGmailThreadMessages } from '../controllers/lead.controller';
 import { resolveCurrentVehicleAndPrice } from './aiReplyContext.service';
+import { describeVehicleInterest } from './vehicleInterest.service';
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from './aiShadowDraft.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from './aiOperatingMode.service';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
@@ -134,9 +135,7 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
         resolvePinnedVehicleContext({ organizationId: orgId, lead, email: lead.email }),
       ]);
       const dealerName = (org as any)?.name || 'Your Dealership';
-      const vehicleInterest = lead.vehicle
-        ? [lead.vehicle.year, lead.vehicle.make, lead.vehicle.model].filter(Boolean).join(' ')
-        : undefined;
+      const vehicleInterest = await describeVehicleInterest(lead, orgId);
 
       const generation = await generateAlexEmailReply({
         agentName,

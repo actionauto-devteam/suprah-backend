@@ -35,6 +35,7 @@ import {
 } from "./aiAgent.service";
 import { getRelevantAiCoaching } from "./aiAgentCoaching.service";
 import { buildSmsTranscript } from "./aiReplyContext.service";
+import { describeVehicleInterest } from "./vehicleInterest.service";
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from "./aiShadowDraft.service";
 import {
   resolveVehicleContextForReply,
@@ -1286,9 +1287,7 @@ export async function triggerSmsAiReply(
         location: replyLead.location,
         transcript,
       });
-      const vehicleInterest = replyLead.vehicle
-        ? [replyLead.vehicle.year, replyLead.vehicle.make, replyLead.vehicle.model].filter(Boolean).join(" ")
-        : undefined;
+      const vehicleInterest = await describeVehicleInterest(replyLead, orgId);
 
       await processAlexTurn({
         organizationId: String(orgId),

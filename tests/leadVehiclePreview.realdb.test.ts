@@ -32,6 +32,7 @@ import Vehicle from '../src/models/Vehicle.model';
 import LeadInquiry from '../src/models/LeadInquiry.model';
 import { generateCrmToken } from '../src/middleware/crmAuth.middleware';
 import leadRoutes from '../src/routes/lead.route';
+import { describeVehicleInterest } from '../src/services/vehicleInterest.service';
 
 const app = express();
 app.use(express.json());
@@ -222,6 +223,33 @@ describe('Real-DB: vehicle of interest preview (local MongoDB only)', () => {
     expect(others[0]).toMatchObject({ origin: 'inquiry', state: 'matched', match: 'stock', vehicle: { availability: 'archived' }, receivedAt: '2026-10-02T10:00:00.000Z' });
     expect(others[1]).toMatchObject({ state: 'unconfirmed', reason: 'no_identifier', similarCount: 1, vehicle: null });
     expect(JSON.stringify(res.body)).not.toMatch(/Telluride|T201/);
+  });
+
+  it('tells the AI agent the first vehicle and the other vehicles asked about on the same card, newest first', async () => {
+    const lead = await makeLead({ vehicle: { year: '2024', make: 'Buick', model: 'Encore GX' } });
+    await addInquiry(lead._id, { year: '2024', make: 'Buick', model: 'Encore GX' }, 'associated', new Date('2026-11-01T10:00:00Z'));
+    await addInquiry(lead._id, { year: '2023', make: 'Audi', model: 'Q5' }, 'associated', new Date('2026-11-02T10:00:00Z'));
+    await addInquiry(lead._id, { year: '2022', make: 'BMW', model: 'i4' }, 'associated', new Date('2026-11-03T10:00:00Z'));
+    await addInquiry(lead._id, { year: '2023', make: 'Audi', model: 'Q5' }, 'associated', new Date('2026-11-04T10:00:00Z'));
+    await addInquiry(lead._id, { year: '2020', make: 'Kia', model: 'Soul' }, 'unassociated', new Date('2026-11-05T10:00:00Z'));
+    const other = await makeLead({ vehicle: { year: '2019', make: 'Ford', model: 'Ranger' } });
+    await addInquiry(other._id, { year: '2018', make: 'Mazda', model: 'CX-5' }, 'associated', new Date('2026-11-05T11:00:00Z'));
+
+    expect(await describeVehicleInterest(lead.toObject(), ORG_A)).toBe('2024 Buick Encore GX; the customer also asked about (newest first): 2023 Audi Q5; 2022 BMW i4');
+    expect(await describeVehicleInterest({ ...lead.toObject(), organizationId: undefined }, ORG_A)).toBe('2024 Buick Encore GX; the customer also asked about (newest first): 2023 Audi Q5; 2022 BMW i4');
+    expect(await describeVehicleInterest(lead.toObject(), ORG_B)).toBe('2024 Buick Encore GX');
+    expect(await describeVehicleInterest({ _id: lead._id, vehicle: lead.vehicle })).toBe('2024 Buick Encore GX');
+
+    const many = await makeLead({ vehicle: {} });
+    const models = ['Civic', 'Accord', 'Pilot', 'Odyssey', 'Passport', 'Ridgeline'];
+    for (const [index, model] of models.entries()) {
+      await addInquiry(many._id, { year: '2021', make: 'Honda', model }, 'associated', new Date(Date.UTC(2026, 10, 1, index)));
+    }
+    expect(await describeVehicleInterest(many.toObject(), ORG_A)).toBe('The customer asked about (newest first): 2021 Honda Ridgeline; 2021 Honda Passport; 2021 Honda Odyssey; 2021 Honda Pilot');
+
+    const nothing = await makeLead({ vehicle: {} });
+    expect(await describeVehicleInterest(nothing.toObject(), ORG_A)).toBeUndefined();
+    expect(await describeVehicleInterest(null, ORG_A)).toBeUndefined();
   });
 
   it('is read-only', async () => {

@@ -327,6 +327,10 @@ const defaultRoutes = [
     route: webchatRoute,
   },
   {
+    path: "/crm/calendar",
+    route: crmCalendarRoute,
+  },
+  {
     path: "/crm",
     route: crmRoute,
   },
@@ -486,10 +490,6 @@ const defaultRoutes = [
   {
     path: "/driver-profile",
     route: driverProfileRoute,
-  },
-  {
-    path: "/crm/calendar",
-    route: crmCalendarRoute,
   },
   {
     path: "/calendar",

@@ -273,6 +273,25 @@ describe('Real-DB: dealership phone numbers (local MongoDB, simulated Telnyx onl
     expect(list.body.data.numbers.map((row: any) => row.number)).toEqual([COMPANY, LEHI, SERVICE]);
   });
 
+  test('a number answered by a Phone Menu that is on says so, and a menu that is off does not count', async () => {
+    const menus = await CallRoutingConfig.collection.insertMany([
+      { organizationId: orgId, enabled: true, name: 'Front Desk Menu', inboundNumber: COMPANY, mainNumber: COMPANY, greeting: 'Thank you for calling', ringTimeoutSeconds: 35, retryCount: 1, allOrgFallback: false, options: [] },
+      { organizationId: orgId, enabled: false, name: 'Lehi Menu', inboundNumber: LEHI, mainNumber: COMPANY, greeting: 'Thank you for calling Lehi', ringTimeoutSeconds: 35, retryCount: 1, allOrgFallback: false, options: [] },
+    ] as any[]);
+    try {
+      const list = await api().list();
+      expect(list.status).toBe(200);
+      const byNumber = new Map<string, any>(list.body.data.numbers.map((row: any) => [row.number, row]));
+      expect(byNumber.get(COMPANY)?.phoneMenuName).toBe('Front Desk Menu');
+      expect(byNumber.get(LEHI)?.phoneMenuName).toBe('');
+      expect(byNumber.get(SERVICE)?.phoneMenuName).toBe('');
+    } finally {
+      await CallRoutingConfig.collection.deleteMany({ _id: { $in: Object.values(menus.insertedIds) } });
+    }
+    const after = await api().list();
+    expect(after.body.data.numbers.every((row: any) => row.phoneMenuName === '')).toBe(true);
+  });
+
   test('a text to the Lehi number creates a lead for this dealership tagged with the Lehi location and line', async () => {
     const from = nextPhone();
     expect((await text(from, LEHI)).status).toBe(200);

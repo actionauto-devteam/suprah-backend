@@ -25,6 +25,7 @@ import {
   latestSharedConversationActivity,
   buildVehicleContextNote,
 } from '../services/vehicleInquiryContext.service';
+import { describeVehicleInterest } from '../services/vehicleInterest.service';
 
 /** Eligibility evaluation genuinely starts at 8:00 AM America/Denver, with actual sending
  *  still never earlier than 9:00 AM — preserved as two distinct things, not collapsed into
@@ -239,7 +240,7 @@ export async function runAiLeadFollowupSweep(): Promise<AiFollowUpStats> {
         }
 
         const dealerName = await resolveDealerName(lead.organizationId);
-        const vehicleInterest = lead.vehicle ? [lead.vehicle.year, lead.vehicle.make, lead.vehicle.model].filter(Boolean).join(' ') : undefined;
+        const vehicleInterest = await describeVehicleInterest(lead, lead.organizationId);
         const transcript = await buildSmsTranscriptForLead(lead.organizationId, lead.phone);
 
         const generation = await generateProactiveFollowUp({

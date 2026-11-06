@@ -52,6 +52,7 @@ import WebChatSession from '../src/models/WebChatSession.model';
 import WebChatMessage from '../src/models/WebChatMessage.model';
 import LeadIntakeControl from '../src/models/LeadIntakeControl.model';
 import LeadIntakeAudit from '../src/models/LeadIntakeAudit.model';
+import LeadInquiry from '../src/models/LeadInquiry.model';
 import { CommunicationMessage, Conversation } from '../src/models/communication.model';
 import { generateCrmToken } from '../src/middleware/crmAuth.middleware';
 import leadRoutes from '../src/routes/lead.route';
@@ -190,6 +191,18 @@ describe('Real-DB: staff AI draft assistant (local MongoDB only)', () => {
     expect(leadAfter.updatedAt.toISOString()).toBe(leadBefore.updatedAt.toISOString());
     expect(leadAfter.status).toBe('New');
     expect(await usage()).toBe(usageBefore + 1);
+  });
+
+  it('tells the AI every vehicle the customer asked about on this card', async () => {
+    const lead = await makeLead({ vehicle: { year: '2024', make: 'Buick', model: 'Encore GX' } });
+    await seedSmsThread(lead);
+    await LeadInquiry.collection.insertOne({
+      organizationId: orgId, kind: 'inquiry', receivedAt: new Date('2026-11-04T15:00:00Z'), vehicle: { year: '2023', make: 'Audi', model: 'Q5' },
+      sourceIds: {}, association: { state: 'associated', leadId: lead._id }, createdAt: new Date(), updatedAt: new Date(),
+    } as any);
+    const res = await draft(lead._id, 'sms');
+    expect(res.status).toBe(200);
+    expect(mockGenerateReply.mock.calls[0][0].leadVehicleInterest).toBe('2024 Buick Encore GX; the customer also asked about (newest first): 2023 Audi Q5');
   });
 
   it('drafts an Email reply with the email generator', async () => {

@@ -34,6 +34,7 @@ import {
 import { getRelevantAiCoaching } from '../services/aiAgentCoaching.service';
 import { loadReplyKnowledge } from '../services/aiKnowledgeRuntime.service';
 import { buildWebchatTranscript } from '../services/aiReplyContext.service';
+import { describeVehicleInterest } from '../services/vehicleInterest.service';
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from '../services/aiShadowDraft.service';
 import { AttentionCheck, beginAiAttentionCheck, finishAiAttentionCheck, screenAiHumanAttention,
   canSendAiReply, assertAiReplyAllowed, claimAiGeneration, claimAiReplyDispatch } from '../services/aiHumanAttention.service';
@@ -311,11 +312,7 @@ async function triggerWebchatAiReply(session: any, check: AttentionCheck, body: 
         transcript,
       });
 
-      const vehicleInterest = (lead as any)?.vehicle
-        ? [(lead as any).vehicle.year, (lead as any).vehicle.make, (lead as any).vehicle.model]
-            .filter(Boolean)
-            .join(' ')
-        : undefined;
+      const vehicleInterest = await describeVehicleInterest(lead as any, session.organizationId);
 
       await processAlexTurn({
         organizationId: String(session.organizationId),
