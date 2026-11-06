@@ -32,7 +32,7 @@ import { emailStaffQuoteCustomer } from '../services/staffQuoteCustomerEmail';
 import { normalizeIdentityEmail, normalizeIdentityPhone } from '../utils/contactIdentity';
 import { findPortalCustomerByEmail, findPortalCustomersByEmail, isStaffQuote, type PortalCustomer } from '../services/shipmentFollower';
 import { customerShipmentTracking } from '../services/customerShipmentTracking';
-import { forgetShipmentFollowers } from '../services/customerShipmentLive';
+import { announceShipmentSharing, forgetShipmentFollowers } from '../services/customerShipmentLive';
 
 /**
  * The CRM lead for a quote's customer, preferring the lead about the quote's
@@ -777,6 +777,8 @@ const setPortalShare = asyncHandler(async (req: Request, res: Response) => {
 
     const account = await findPortalCustomerByEmail(quote.email);
     const portalCustomer = account ? { name: account.name || 'Customer', shared: share } : null;
+    // The customer, driver and dispatcher see the change at once.
+    void announceShipmentSharing(orgId, String(quote._id), account?.id ?? null, share);
 
     await cacheService.invalidateByPrefix(`quotes:${orgId}`);
     getSocketIO()?.to(`org:${orgId}`).emit('quote:change', { action: 'updated', quoteId: String(quote._id) });

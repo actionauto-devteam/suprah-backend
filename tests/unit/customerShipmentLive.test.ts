@@ -9,10 +9,26 @@ const chain = (value: () => unknown) => {
   return self;
 };
 const mockLoadFind = jest.fn();
+const mockLoadFindOne = jest.fn();
+const mockDispatchers = jest.fn();
 const mockQuoteFind = jest.fn();
 const mockFollowers = jest.fn();
 const mockEmit = jest.fn();
-jest.mock('../../src/models/Load.model', () => ({ __esModule: true, default: { find: (f: unknown) => chain(() => mockLoadFind(f)) } }));
+jest.mock('../../src/models/Load.model', () => ({
+  __esModule: true,
+  default: {
+    find: (f: unknown) => chain(() => mockLoadFind(f)),
+    findOne: (f: unknown) => {
+      const self: any = { sort: () => self, select: () => self, lean: () => Promise.resolve().then(() => mockLoadFindOne(f)) };
+      return self;
+    },
+  },
+}));
+jest.mock('../../src/services/shipmentChat.service', () => ({
+  __esModule: true,
+  CHAT_LOAD_FIELDS: '_id organizationId quoteId assignedDriverId dispatchOwnerId createdBy',
+  loadDispatchers: (loads: unknown) => mockDispatchers(loads),
+}));
 jest.mock('../../src/models/Quote.model', () => ({ __esModule: true, default: { find: (f: unknown) => chain(() => mockQuoteFind(f)) } }));
 jest.mock('../../src/services/shipmentFollower', () => ({ __esModule: true, findQuoteFollowers: (q: unknown) => mockFollowers(q) }));
 jest.mock('../../src/services/customerShipmentTracking', () => ({ __esModule: true, LIVE_MAP_STATUSES: new Set(['Picked Up', 'In-Transit']) }));
@@ -22,6 +38,8 @@ jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { error:
 
 import {
   CUSTOMER_LOCATION_EVENT,
+  CUSTOMER_SHIPMENT_CHANGED_EVENT,
+  announceShipmentSharing,
   FOLLOWER_CACHE_MS,
   emitLocationToShipmentFollowers,
   forgetShipmentFollowers,
@@ -134,5 +152,43 @@ describe('heartbeats stay light', () => {
       throw new Error('database down');
     });
     await expect(emitLocationToShipmentFollowers([{ _id: LOAD, status: 'In-Transit' }], location(), NOW)).resolves.toBe(0);
+  });
+});
+
+describe('Unlink and Link again show at once', () => {
+  const DRIVER = '64b0000000000000000000d1';
+  const DISPATCHER = '64b0000000000000000000f1';
+
+  beforeEach(() => {
+    mockLoadFindOne.mockReturnValue({ _id: LOAD, organizationId: ORG, quoteId: QUOTE, assignedDriverId: DRIVER });
+    mockDispatchers.mockResolvedValue(new Map([[LOAD, { id: DISPATCHER, name: 'Dana Dispatch' }]]));
+  });
+
+  it("tells the customer, the load's driver and its dispatcher", async () => {
+    await announceShipmentSharing(ORG, QUOTE, CUSTOMER, false);
+    expect(mockEmit.mock.calls).toEqual([
+      [CUSTOMER, CUSTOMER_SHIPMENT_CHANGED_EVENT, { quoteId: QUOTE, shared: false }],
+      [DRIVER, 'shipment-chat:changed', { loadId: LOAD, quoteId: QUOTE, kind: 'driver' }],
+      [DISPATCHER, 'shipment-chat:changed', { loadId: LOAD, quoteId: QUOTE, kind: 'dispatcher' }],
+    ]);
+    expect(mockLoadFindOne).toHaveBeenCalledWith({ quoteId: QUOTE, organizationId: ORG });
+  });
+
+  it('copes with no customer account, no load yet, or no driver', async () => {
+    mockLoadFindOne.mockReturnValueOnce(null);
+    await announceShipmentSharing(ORG, QUOTE, null, true);
+    expect(mockEmit).not.toHaveBeenCalled();
+
+    mockLoadFindOne.mockReturnValueOnce({ _id: LOAD, organizationId: ORG, quoteId: QUOTE, assignedDriverId: null });
+    await announceShipmentSharing(ORG, QUOTE, CUSTOMER, true);
+    expect(mockEmit.mock.calls.map(([user]) => user)).toEqual([CUSTOMER, DISPATCHER]);
+  });
+
+  it('never throws: the change is already saved', async () => {
+    mockLoadFindOne.mockImplementationOnce(() => {
+      throw new Error('database down');
+    });
+    await expect(announceShipmentSharing(ORG, QUOTE, CUSTOMER, false)).resolves.toBeUndefined();
+    expect(mockEmit).toHaveBeenCalledTimes(1);
   });
 });
