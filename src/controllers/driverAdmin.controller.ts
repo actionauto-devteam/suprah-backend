@@ -11,6 +11,7 @@ import CustomerInviteToken from "../models/CustomerInviteToken.model";
 import activityService from "../services/activity.service";
 import emailService from "../services/email.service";
 import logger from "../utils/logger";
+import { SUPPORT_EMAIL } from "../utils/userMessages";
 import config from "../config";
 import {
   approveDriverVerification,
@@ -581,14 +582,15 @@ const bulkGenerateDriverInviteLinks = asyncHandler(async (req: Request, res: Res
 
       await emailService.sendEmail({
         to: email,
-        subject: "You're invited to drive with SUPRAH.AI",
-        text: `You've been invited to apply as a driver on SUPRAH.AI.\n\nClick the link below to get started:\n${invite.link}\n\nThis link expires in 24 hours and can only be used once.`,
+        // Same wording as the driver sign-up page (2026-11-06).
+        subject: "You're invited to sign up as a driver at Suprah AI",
+        text: `You've been invited to sign up as a driver at Suprah AI.\n\nUse the link below to create your driver account:\n${invite.link}\n\nThis link expires in 24 hours and can only be used once. If it has expired, ask for a new invite, or contact Suprah AI support at ${SUPPORT_EMAIL}.`,
         html: `
           <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
-            <h2 style="color:#111">You're invited to drive with SUPRAH.AI</h2>
-            <p>Click the button below to create your driver account and submit your application.</p>
-            <a href="${invite.link}" style="display:inline-block;margin-top:8px;padding:10px 20px;background:#10b981;color:#fff;text-decoration:none;border-radius:6px">Apply now</a>
-            <p style="color:#888;font-size:12px;margin-top:16px">This link expires in 24 hours and can only be used once.</p>
+            <h2 style="color:#111">You're invited to sign up as a driver at Suprah AI</h2>
+            <p>Use the button below to create your driver account and fill in your application.</p>
+            <a href="${invite.link}" style="display:inline-block;margin-top:8px;padding:10px 20px;background:#047857;color:#fff;text-decoration:none;border-radius:6px">Sign up as a driver</a>
+            <p style="color:#888;font-size:12px;margin-top:16px">This link expires in 24 hours and can only be used once. If it has expired, ask for a new invite, or contact Suprah AI support at ${SUPPORT_EMAIL}.</p>
           </div>
         `,
       });
