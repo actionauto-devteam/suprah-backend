@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler";
 import { ApiResponse } from "../utils/ApiResponse";
 import { ApiError } from "../utils/ApiError";
-import { SELECT_ORGANIZATION } from "../utils/userMessages";
+import { SELECT_ORGANIZATION, SUPPORT_EMAIL } from "../utils/userMessages";
 import { parseClientRequestId } from "../utils/clientRequestId";
 import { emitToUser } from "../utils/socketEmitter";
 import { safeCreateNotification } from "../utils/safeNotification";
@@ -832,7 +832,7 @@ const uploadAttachments = asyncHandler(async (req: ExpressRequest, res: ExpressR
   } catch (error) {
     await removeStoredFiles(attachments);
     logger.error({ error, channelId: String(channel._id) }, "Channel file upload failed");
-    throw new ApiError(503, "Sending files isn't available right now. Please try again in a moment.");
+    throw new ApiError(503, `Sending files isn't available right now. Please try again in a moment. If it keeps happening, contact Suprah AI support at ${SUPPORT_EMAIL}.`);
   }
 
   let message: any;
