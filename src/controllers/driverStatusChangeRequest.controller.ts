@@ -192,12 +192,12 @@ async function publishStatusDecisionToPrivateDispatchChat(params: {
         : `This Dispatch team did not approve your ${requestedStatusLabel} request.${decisionReason ? ` Reason: ${decisionReason}` : ""} Your global Work Availability will remain unchanged.`
       : decision === "approved"
         ? awaitingReassignment
-          ? `Dispatch approved your ${requestedStatusLabel} request. New work is blocked while Dispatch reassigns your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}. Your Dispatch Status will change automatically after those loads are moved.`
+          ? `Dispatch approved your ${requestedStatusLabel} request. New work is blocked while Dispatch reassigns your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"}. Your Work Availability will change automatically after those loads are moved.`
           : keptAssigned
-            ? `Dispatch approved your ${requestedStatusLabel} request and kept your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} assigned to you. ${request.retainedGpsRequired ? "GPS is required by Dispatch while those retained loads remain active." : "GPS remains optional while you are in this Dispatch Status."}`
+            ? `Dispatch approved your ${requestedStatusLabel} request and kept your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} assigned to you. ${request.retainedGpsRequired ? "GPS is required by Dispatch while those retained loads remain active." : "GPS remains optional while you are in this Work Availability."}`
             : returnedAvailable
-              ? `Dispatch approved your ${requestedStatusLabel} request and returned your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} to Available. Your Dispatch Status is now ${requestedStatusLabel}.`
-              : `Dispatch approved your ${requestedStatusLabel} request. Your Dispatch Status is now ${requestedStatusLabel}.`
+              ? `Dispatch approved your ${requestedStatusLabel} request and returned your ${activeLoadCount} active load${activeLoadCount === 1 ? "" : "s"} to Available. Your Work Availability is now ${requestedStatusLabel}.`
+              : `Dispatch approved your ${requestedStatusLabel} request. Your Work Availability is now ${requestedStatusLabel}.`
         : `Dispatch did not approve your ${requestedStatusLabel} request.${decisionReason ? ` Reason: ${decisionReason}` : ""}`;
 
     const thread = await ensureDispatchChatThread({

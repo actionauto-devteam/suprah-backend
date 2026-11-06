@@ -1243,7 +1243,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
   if (operationalStatus !== undefined) {
     const allowed = ["active", "on_leave", "maintenance"];
     if (!allowed.includes(String(operationalStatus))) {
-      throw new ApiError(400, "Choose a Dispatch Status from the list.");
+      throw new ApiError(400, "Choose your Work Availability from the list.");
     }
   }
 
@@ -1314,7 +1314,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
             if (openRequest) {
               throw new ApiError(
                 409,
-                "You already have an active Dispatch Status request. Wait for Dispatch or update that request instead of changing status directly.",
+                "You already have an active Work Availability request. Wait for Dispatch or update that request instead of changing status directly.",
               );
             }
 
@@ -1328,7 +1328,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
                 409,
                 `You currently have ${activeLoadCount} active load${
                   activeLoadCount === 1 ? "" : "s"
-                }. Submit a Dispatch Status request so Dispatch can review and reassign the affected loads.`,
+                }. Submit a Work Availability request so Dispatch can review and reassign the affected loads.`,
               );
             }
           }
@@ -1344,7 +1344,7 @@ const updateLogistics = asyncHandler(async (req: Request, res: Response) => {
         if (!lockAcquired && error instanceof ApiError && error.statusCode === 409) {
           throw new ApiError(
             409,
-            "Dispatch is updating your loads right now. Wait a moment, then change your Dispatch Status again.",
+            "Dispatch is updating your loads right now. Wait a moment, then change your Work Availability again.",
           );
         }
         throw error;

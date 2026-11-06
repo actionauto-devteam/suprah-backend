@@ -318,41 +318,42 @@ export async function assertDriverCanTakeNewWork(
 
   if (eligibility.eligible) return eligibility;
 
-  if (action === "accept") {
-    if (eligibility.operationalStatus === "on_leave") {
-      throw new ApiError(
-        409,
-        "Unable to Accept Load — Your Dispatch Status is currently On Leave. You must be Active before you can accept an assigned load.",
-      );
-    }
-
-    if (eligibility.operationalStatus === "maintenance") {
-      throw new ApiError(
-        409,
-        "Unable to Accept Load — Your vehicle is currently marked In Shop. You must return your Dispatch Status to Active before accepting this load.",
-      );
-    }
-  }
-
-  if (action === "request") {
-    if (eligibility.operationalStatus === "on_leave") {
-      throw new ApiError(
-        409,
-        "You cannot request a new load while your Dispatch Status is On Leave. Return to Active first.",
-      );
-    }
-    if (eligibility.operationalStatus === "maintenance") {
-      throw new ApiError(
-        409,
-        "You cannot request a new load while your Dispatch Status is In Shop. Return to Active first.",
-      );
-    }
+  // The driver's own words, with what to do; staff keep the reasons above.
+  if (action === "accept" || action === "request") {
+    throw new ApiError(409, driverWorkBlockedMessage(eligibility, action));
   }
 
   throw new ApiError(
     409,
     eligibility.reason || "This driver is not eligible for new work right now.",
   );
+}
+
+/**
+ * Why a driver can't accept or request a load right now, said to the driver,
+ * with what they can do about it (the same wording as their Driver Page).
+ */
+export function driverWorkBlockedMessage(
+  eligibility: { operationalStatus?: string | null; code?: string | null },
+  action: "accept" | "request",
+): string {
+  const doing = action === "accept" ? "accept this load" : "request new loads";
+  if (eligibility.operationalStatus === "on_leave") {
+    return `Your Work Availability is On Leave, so you can't ${doing}. Switch it to Active on your Driver Page, then try again.`;
+  }
+  if (eligibility.operationalStatus === "maintenance") {
+    return `Your Work Availability is In Shop, so you can't ${doing}. Switch it to Active on your Driver Page when your truck is ready, then try again.`;
+  }
+  switch (eligibility.code) {
+    case "DRIVER_EMERGENCY_RELEASE_ACTIVE":
+      return `Your emergency release request is active, so you can't ${doing} while Dispatch handles your current loads. Message Dispatch in Messages if you have questions.`;
+    case "DRIVER_STATUS_CHANGE_COORDINATED":
+      return `Your Work Availability change is being coordinated with the Dispatch teams you work with, so you can't ${doing} yet. You can once every team has finished its part.`;
+    case "DRIVER_STATUS_CHANGE_AWAITING_REASSIGNMENT":
+      return `Your Work Availability change was approved and your loads are being handed to other drivers, so you can't ${doing} yet. You can once that's done.`;
+    default:
+      return `You can't ${doing} right now. Check your Work Availability on your Driver Page, or message Dispatch in Messages. If it still doesn't work, contact Suprah AI support at ${SUPPORT_EMAIL}.`;
+  }
 }
 
 export async function applyDriverOperationalStatus(params: {
