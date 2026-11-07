@@ -32,6 +32,8 @@ const mockSendLeadReplyEmail = jest.fn();
 const mockFetchGmailThreadMessages = jest.fn().mockResolvedValue([]);
 const mockMatchesVehicle = jest.fn().mockReturnValue(false);
 const mockAiAgentLogCreate = jest.fn().mockResolvedValue({});
+const mockLoadReplyKnowledge = jest.fn().mockResolvedValue([]);
+const mockSelectRelevantKnowledge = jest.fn().mockResolvedValue([]);
 
 jest.mock('../../src/models/AiAgentLog.model', () => ({
   __esModule: true,
@@ -58,6 +60,10 @@ jest.mock('../../src/services/aiAgent.service', () => ({
   resolveAiAgentSettings: mockResolveAiAgentSettings,
   generateAlexEmailReply: mockGenerateAlexEmailReply,
   classifyAlexEmailReplySafety: mockClassifyAlexEmailReplySafety,
+  selectRelevantKnowledge: mockSelectRelevantKnowledge,
+}));
+jest.mock('../../src/services/aiKnowledgeRuntime.service', () => ({
+  loadReplyKnowledge: mockLoadReplyKnowledge,
 }));
 jest.mock('../../src/services/aiHumanAttention.service', () => ({
   beginAiAttentionCheck: mockBeginAiAttentionCheck,
@@ -84,6 +90,7 @@ jest.mock('../../src/utils/logger', () => ({
 import mongoose from 'mongoose';
 import { validateOutboundEmailMessage, triggerAiEmailReplyForNewInquiry } from '../../src/services/aiEmailReply.service';
 import { GENERIC_FALLBACK_MESSAGES } from '../../src/utils/aiFallbackMessage';
+import { buildReplyAllowance } from '../../src/utils/aiOutboundSafety';
 
 describe('validateOutboundEmailMessage', () => {
   it('blocks percent-off language', () => {
@@ -136,6 +143,29 @@ describe('validateOutboundEmailMessage', () => {
   it('allows a dollar amount matching a confirmed price even with comma/decimal formatting differences', () => {
     const result = validateOutboundEmailMessage('It is listed at $21695.00 right now for you', [21695]);
     expect(result.ok).toBe(true);
+  });
+
+  it('allows an amount, phone number and link only when they come from an approved Knowledge Base answer', () => {
+    const allowance = buildReplyAllowance({ moneyNotes: [], approvedAnswers: ['Our documentation fee is $299. Call 801-555-0100 or visit actionautoutah.com for details.'] });
+    const reply = 'Our documentation fee is $299, and you can call 801-555-0100 or visit actionautoutah.com.';
+    expect(validateOutboundEmailMessage(reply, [], allowance).ok).toBe(true);
+    expect(validateOutboundEmailMessage(reply).ok).toBe(false);
+    const otherAmount = validateOutboundEmailMessage('Our documentation fee is $399 this month for you.', [], allowance);
+    expect(otherAmount.ok).toBe(false);
+    expect(otherAmount.reasons).toContain('unverified price figure');
+    expect(validateOutboundEmailMessage('Call 801-555-0199 for the documentation fee details today.', [], allowance).reasons).toContain('unexpected phone number');
+    expect(validateOutboundEmailMessage('The $299 fee applies and this car is still available, hurry!', [], allowance).reasons).toContain('guaranteed-availability language');
+  });
+
+  it('still allows the confirmed vehicle price next to an approved amount', () => {
+    const allowance = buildReplyAllowance({ moneyNotes: [], approvedAnswers: ['The documentation fee is $299.'] });
+    expect(validateOutboundEmailMessage('The Civic is listed at $21,695 and the documentation fee is $299.', [21695], allowance).ok).toBe(true);
+  });
+
+  it('lets the words of an approved financing answer through, but not discount language it does not use', () => {
+    const allowance = buildReplyAllowance({ moneyNotes: [], approvedAnswers: ['We work with several local banks and credit unions for financing.'] });
+    expect(validateOutboundEmailMessage('We work with several local banks and credit unions for financing, and the team can walk you through it.', [], allowance).ok).toBe(true);
+    expect(validateOutboundEmailMessage('We have financing and a special discount this week for you.', [], allowance).reasons).toContain('discount/incentive language');
   });
 
   it('passes a normal benign message with no price mentioned at all', () => {
@@ -285,6 +315,38 @@ describe('triggerAiEmailReplyForNewInquiry', () => {
       'actionautoutah.dev@gmail.com',
       { beforeDispatch: expect.any(Function), requireVerifiedRecipient: true },
     );
+  });
+
+  it('uses approved Knowledge Base answers for the email reply and lets their exact amount through', async () => {
+    const answer = { id: 'kb-1', kind: 'faq', topic: 'documents_required', title: 'Doc fee', question: 'What is the doc fee?', answer: 'Our documentation fee is $299.', approvedAmounts: ['$299'] };
+    const draft = 'Hi Kaitlyn, our documentation fee is $299, and I will confirm the rest with the team.';
+    const asked = [{ from: 'customer', body: 'What is your doc fee on the Volvo?' }];
+    mockLoadReplyKnowledge.mockResolvedValueOnce([answer]);
+    mockSelectRelevantKnowledge.mockResolvedValueOnce([answer]);
+    mockGenerateAlexEmailReply.mockResolvedValueOnce({ text: draft });
+
+    await triggerAiEmailReplyForNewInquiry('org-1', { ...lead, location: 'Lehi' }, 'What is your doc fee on the Volvo?');
+
+    expect(mockLoadReplyKnowledge).toHaveBeenCalledWith({ organizationId: 'org-1', channel: 'email', location: 'Lehi', transcript: asked });
+    expect(mockSelectRelevantKnowledge).toHaveBeenCalledWith(expect.objectContaining({ candidates: [answer], channel: 'email', transcript: asked }));
+    expect(mockGenerateAlexEmailReply).toHaveBeenCalledWith(expect.objectContaining({ knowledge: [answer], approvedAmounts: ['$299'], transcript: asked }));
+    expect(mockClassifyAlexEmailReplySafety).toHaveBeenCalledWith(draft, undefined, expect.objectContaining({ keys: ['usd:299'] }));
+    expect(mockSendLeadReplyEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendLeadReplyEmail.mock.calls[0][1]).toBe(draft);
+    expect(mockCreateAiAgentTaskAndNotify).not.toHaveBeenCalled();
+  });
+
+  it('without a fitting Knowledge Base answer, an amount in the email is still blocked and a safe fallback goes out', async () => {
+    const draft = 'Hi Kaitlyn, our documentation fee is $299 for this one.';
+    mockGenerateAlexEmailReply.mockResolvedValueOnce({ text: draft });
+
+    await triggerAiEmailReplyForNewInquiry('org-1', lead, 'What is your doc fee?');
+
+    expect(mockLoadReplyKnowledge).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email' }));
+    expect(mockSelectRelevantKnowledge).not.toHaveBeenCalled();
+    expect(mockGenerateAlexEmailReply).toHaveBeenCalledWith(expect.objectContaining({ knowledge: [], approvedAmounts: undefined }));
+    expect(mockClassifyAlexEmailReplySafety).not.toHaveBeenCalled();
+    expect(mockSendLeadReplyEmail.mock.calls.map((call: any[]) => call[1])).not.toContain(draft);
   });
 
   it('passes the confirmed current price into generation when a matching vehicle with a price is found', async () => {

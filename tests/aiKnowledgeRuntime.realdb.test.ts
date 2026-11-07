@@ -112,6 +112,7 @@ describe('Real-DB proof: the AI agent reads only approved Knowledge Base answers
     expect(titles(answers)).toEqual(['Saturday hours']);
     expect(answers[0].answer).toBe('We are open Saturday 9 to 6.');
     expect(await loadReplyKnowledge({ organizationId: ORG, channel: 'webchat', location: null, transcript: ask('hours?') })).toHaveLength(1);
+    expect(titles(await loadReplyKnowledge({ organizationId: ORG, channel: 'email', location: 'Orem', transcript: ask('Are you open Saturday?') }))).toEqual(['Email only question']);
   });
 
   it('follows the approved locations, including other names for a location and suspended locations', async () => {

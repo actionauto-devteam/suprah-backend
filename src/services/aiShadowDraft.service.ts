@@ -518,25 +518,23 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
   }
 
   let knowledge: KnowledgeAnswer[] = [];
-  if (input.channel !== 'email') {
-    const candidates = await loadReplyKnowledge({ organizationId: String(input.organizationId), channel: input.channel, location: replyLead.location, transcript });
-    if (candidates.length) {
-      observer.phase = 'knowledge_selection';
-      knowledge = await selectRelevantKnowledge({ candidates, agentName, dealerName, transcript, channel: input.channel, phone: input.phone || lead.phone });
-    }
+  const candidates = await loadReplyKnowledge({ organizationId: String(input.organizationId), channel: input.channel, location: replyLead.location, transcript });
+  if (candidates.length) {
+    observer.phase = 'knowledge_selection';
+    knowledge = await selectRelevantKnowledge({ candidates, agentName, dealerName, transcript, channel: input.channel, phone: input.phone || lead.phone });
   }
 
   observer.phase = 'generation';
   const vehicleContextNote = vehicleContext ? buildVehicleContextNote(vehicleContext) : undefined;
   const amountAllowance = buildReplyAllowance({
-    moneyNotes: appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction),
+    moneyNotes: input.channel === 'email' ? [] : appliedRules.filter((rule) => rule.approvedAmounts?.length).map((rule) => rule.instruction),
     approvedAnswers: knowledge.map((entry) => entry.answer),
   });
   const generation = input.channel === 'email'
     ? await generateAlexEmailReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, isFirstReply,
         confirmedPrice: priceContext?.price, confirmedPreviousPrice: priceContext?.previousPrice,
-        phone: input.phone || lead.phone, vehicleContextNote,
+        approvedAmounts: amountAllowance?.amounts, knowledge, phone: input.phone || lead.phone, vehicleContextNote,
       })
     : await generateAlexReply({
         agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, channel: input.channel, isFirstReply,
@@ -559,14 +557,14 @@ async function buildShadowResult(input: ShadowGenerationInput, observer: AiCallO
   }
 
   const deterministic = input.channel === 'email'
-    ? validateOutboundEmailMessage(draftText, [priceContext?.price, priceContext?.previousPrice].filter((value): value is number => typeof value === 'number'))
+    ? validateOutboundEmailMessage(draftText, [priceContext?.price, priceContext?.previousPrice].filter((value): value is number => typeof value === 'number'), amountAllowance)
     : validateOutboundMessage(draftText, amountAllowance);
 
   let classifierVerdict: ShadowDraftResult['classifierVerdict'];
   if (deterministic.ok) {
     observer.phase = 'safety_classifier';
     classifierVerdict = input.channel === 'email'
-      ? await classifyAlexEmailReplySafety(draftText, input.phone || lead.phone)
+      ? await classifyAlexEmailReplySafety(draftText, input.phone || lead.phone, amountAllowance)
       : await classifyAlexReplySafety(draftText, input.phone || lead.phone, observer.perCallTimeoutMs, amountAllowance);
   }
 

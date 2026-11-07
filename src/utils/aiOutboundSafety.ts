@@ -139,8 +139,8 @@ const ALWAYS_UNSAFE_AVAILABILITY = /\bguarantee(d)?\b|\bact fast\b|\bwon'?t last
 const CONDITIONAL_AVAILABILITY_PHRASES = /\bstill available\b|\bin stock\b|\bavailable now\b/gi;
 const AVAILABILITY_HEDGE_WORDS = /\b(if|whether|check|confirm(ing)?|verify|verifying|see|seeing|find out|let me|i'll|we'll|will|going to)\b/i;
 
-export function validateOutboundEmailMessage(text: string, allowedPrices: number[] = []): { ok: boolean; reasons: string[] } {
-  const reasons: string[] = [];
+export function validateOutboundEmailMessage(text: string, allowedPrices: number[] = [], allowance?: MoneyAllowance): { ok: boolean; reasons: string[] } {
+  let reasons: string[] = [];
   if (/\d+\s?%\s?(off)?/i.test(text)) reasons.push('percent-off');
   if (/\bdiscount(s|ed)?\b|\bpromo(tion)?(al)?\b|\bincentive[s]?\b|\brebate[s]?\b|\bon sale\b|\bsale price\b|\bclearance\b|\bspecial offer\b/i.test(text)) reasons.push('discount/incentive language');
   if (/\bfinanc(e|ing)\b|\bloan[s]?\b|\blease[ds]?\b|\bAPR\b|\bdown payment\b|\bmonthly payment[s]?\b|\bcredit approv(al|ed)\b|\/\s?mo\b/i.test(text)) reasons.push('financing/payment language');
@@ -150,11 +150,23 @@ export function validateOutboundEmailMessage(text: string, allowedPrices: number
   if (/https?:\/\/|www\.|[a-z0-9-]+\.(com|net|org|io)\b/i.test(text)) reasons.push('unexpected link');
   if (/[\w.+-]+@[\w-]+\.[a-z]{2,}/i.test(text)) reasons.push('unexpected email address');
 
-  const dollarAmounts = Array.from(text.matchAll(/\$\s?([\d,]+(?:\.\d{2})?)/g)).map((m) => parseFloat(m[1].replace(/,/g, '')));
-  for (const amount of dollarAmounts) {
-    if (!allowedPrices.some((p) => Math.abs(p - amount) < 0.5)) {
+  const approvedKeys = new Set(allowance?.keys || []);
+  const dollarMatches = Array.from(text.matchAll(/\$\s?([\d,]+(?:\.\d{2})?)/g));
+  for (const match of dollarMatches) {
+    const amount = parseFloat(match[1].replace(/,/g, ''));
+    const isVehiclePrice = allowedPrices.some((p) => Math.abs(p - amount) < 0.5);
+    const keys = moneyKeys(match[0]);
+    const isApprovedAmount = keys.length > 0 && keys.every((key) => approvedKeys.has(key));
+    if (!isVehiclePrice && !isApprovedAmount) {
       reasons.push('unverified price figure');
     }
+  }
+
+  if (allowance) {
+    const percentKeys = moneyKeys(text).filter((key) => key.startsWith('pct:'));
+    if (percentKeys.length && percentKeys.every((key) => approvedKeys.has(key))) reasons = reasons.filter((reason) => reason !== 'percent-off');
+    if (allowance.wordReasons?.length) reasons = reasons.filter((reason) => !allowance.wordReasons!.includes(reason));
+    if (allowance.phones?.length || allowance.emails?.length || allowance.domains?.length) reasons = allowedContacts(text, reasons, allowance);
   }
 
   if (text.trim().length < 10) reasons.push('message too short or malformed');

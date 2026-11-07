@@ -7,5 +7,6 @@ const router = express.Router();
 router.use(crmAuth());
 
 router.get('/overview', ctrl.getCrmReportsOverview);
+router.get('/salespeople', ctrl.getCrmSalespeopleReport);
 
 export default router;

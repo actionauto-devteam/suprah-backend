@@ -5,8 +5,10 @@ import {
   resolveAiAgentSettings,
   generateAlexEmailReply,
   classifyAlexEmailReplySafety,
+  selectRelevantKnowledge,
   AiAgentTranscriptEntry,
 } from './aiAgent.service';
+import { loadReplyKnowledge } from './aiKnowledgeRuntime.service';
 import { resolvePinnedVehicleContext, buildVehicleContextNote, formatVehicleLabel } from './vehicleInquiryContext.service';
 import { buildContextualFallback } from '../utils/aiFallbackMessage';
 import {
@@ -23,7 +25,7 @@ import { describeVehicleInterest } from './vehicleInterest.service';
 import { queueShadowDraft, queueShadowAttentionSkip, ShadowDraftSource } from './aiShadowDraft.service';
 import { resolveAiChannelMode, decideAiDelivery, assertAiDispatchAllowed, isAttentionScreeningMode } from './aiOperatingMode.service';
 import { AiReplySuppressedError } from '../utils/aiReplySuppressed';
-import { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
+import { buildReplyAllowance, validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 export { validateOutboundEmailMessage } from '../utils/aiOutboundSafety';
 import logger from '../utils/logger';
 import AiAgentLog from '../models/AiAgentLog.model';
@@ -136,16 +138,24 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       ]);
       const dealerName = (org as any)?.name || 'Your Dealership';
       const vehicleInterest = await describeVehicleInterest(lead, orgId);
+      const replyTranscript: AiAgentTranscriptEntry[] = transcript.length ? transcript : [{ from: 'customer', body: text }];
+      const knowledgeCandidates = await loadReplyKnowledge({ organizationId: String(orgId), channel: 'email', location: lead.location, transcript: replyTranscript });
+      const knowledge = knowledgeCandidates.length
+        ? await selectRelevantKnowledge({ candidates: knowledgeCandidates, agentName, dealerName, transcript: replyTranscript, channel: 'email', phone: lead.phone })
+        : [];
+      const allowance = buildReplyAllowance({ moneyNotes: [], approvedAnswers: knowledge.map((entry) => entry.answer) });
 
       const generation = await generateAlexEmailReply({
         agentName,
         dealerName,
         customerFirstName: lead.firstName,
         leadVehicleInterest: vehicleInterest,
-        transcript,
+        transcript: replyTranscript,
         isFirstReply: true,
         confirmedPrice: priceContext?.price,
         confirmedPreviousPrice: priceContext?.previousPrice,
+        approvedAmounts: allowance?.amounts,
+        knowledge,
         vehicleContextNote: buildVehicleContextNote(vehicleContext),
       });
 
@@ -201,8 +211,8 @@ export async function triggerAiEmailReplyForNewInquiry(orgId: any, lead: any, in
       }
 
       const allowedPrices = [priceContext?.price, priceContext?.previousPrice].filter((v): v is number => typeof v === 'number');
-      const deterministic = validateOutboundEmailMessage(generation.text, allowedPrices);
-      const classifierVerdict = deterministic.ok ? await classifyAlexEmailReplySafety(generation.text) : 'UNSAFE';
+      const deterministic = validateOutboundEmailMessage(generation.text, allowedPrices, allowance);
+      const classifierVerdict = deterministic.ok ? await classifyAlexEmailReplySafety(generation.text, undefined, allowance) : 'UNSAFE';
 
       if (!deterministic.ok || classifierVerdict !== 'SAFE') {
         logger.warn({ leadId: lead._id, reasons: deterministic.reasons, classifierVerdict }, '[AiEmailReply] Generated reply blocked by safety checks, sending fallback');

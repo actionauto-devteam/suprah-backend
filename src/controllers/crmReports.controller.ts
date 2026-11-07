@@ -11,6 +11,9 @@ import VehicleReengagementLog from '../models/VehicleReengagementLog.model';
 import SmsOptOut from '../models/SmsOptOut.model';
 import EmailOptOut from '../models/EmailOptOut.model';
 import { normalizeLeadSourceForDisplay, isGenuineDemoLead, UNMAPPED_LEAD_SOURCE_LABEL } from '../constants/leadSource';
+import { buildSalespeopleReport } from '../services/crmSalespeopleReport.service';
+
+const MAX_SALESPEOPLE_RANGE_MS = 367 * 24 * 60 * 60 * 1000;
 
 function parseDateRange(req: Request): { from: Date; to: Date } {
   const { from, to } = req.query;
@@ -169,4 +172,21 @@ export const getCrmReportsOverview = asyncHandler(async (req: Request, res: Resp
       email: emailUnsubscribeCount,
     },
   }, 'CRM reports overview'));
+});
+
+export const getCrmSalespeopleReport = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = String((req as any).orgId);
+  const { from, to } = parseDateRange(req);
+  if (to.getTime() - from.getTime() > MAX_SALESPEOPLE_RANGE_MS) {
+    throw new ApiError(400, 'Pick a date range of one year or less.');
+  }
+  const crmUser = (req as any).crmUser || {};
+  const report = await buildSalespeopleReport({
+    orgId,
+    from,
+    to,
+    viewer: { role: crmUser.role, email: crmUser.email },
+    includeLeads: req.query.leads === '1',
+  });
+  res.json(new ApiResponse(200, report, 'CRM salespeople report'));
 });
