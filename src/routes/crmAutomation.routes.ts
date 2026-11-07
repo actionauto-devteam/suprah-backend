@@ -14,6 +14,7 @@ router.get('/activity/logs', ctrl.getActivityLogs);
 router.get('/activity/reengagement', ctrl.getActivityReengagement);
 router.get('/activity/export/count', ctrl.getActivityExportCount);
 router.get('/activity/export', ctrl.getActivityExport);
+router.post('/runs/:runId/retry', ctrl.postRunRetry);
 router.get('/syncs', ctrl.getSyncs);
 router.post('/syncs', ctrl.postSync);
 router.get('/syncs/:id', ctrl.getSync);

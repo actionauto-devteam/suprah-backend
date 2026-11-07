@@ -145,6 +145,7 @@ export interface ILead extends Document {
     changedAt: Date;
     changedBy?: mongoose.Types.ObjectId;
     reason?: string;
+    automationId?: string;
   }>;
 
   /** Internal notes added by CRM users */
@@ -574,6 +575,10 @@ const LeadSchema: Schema<ILead> = new Schema<ILead>(
         },
 
         reason: {
+          type: String,
+        },
+
+        automationId: {
           type: String,
         },
       },

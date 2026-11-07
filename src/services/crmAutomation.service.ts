@@ -6,7 +6,8 @@ import User from '../models/User.model';
 import CrmAutomationRun from '../models/CrmAutomationRun.model';
 import { ApiError } from '../utils/ApiError';
 import { resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
-import { LEAD_STATUS_VALUES } from '../constants/leadStatus';
+import { LEAD_STATUS_VALUES, isContactRestrictedStatus } from '../constants/leadStatus';
+import { DATE_RUN_LIMIT, MIN_PRICE_DROP, dateTriggerTimes } from './crmAutomationSources.service';
 import { REPORTABLE_LEAD_SOURCE_VALUES } from '../constants/leadSource';
 
 interface CatalogEvent {
@@ -74,10 +75,6 @@ export const AUTOMATION_SOURCES: CatalogSource[] = [
           { key: 'appointment_no_show', label: 'Appointment marked no-show' },
           { key: 'appointment_completed', label: 'Appointment completed' },
         ],
-      },
-      {
-        label: 'Reviews',
-        events: [{ key: 'review_received', label: 'Review received' }],
       },
     ],
   },
@@ -199,7 +196,12 @@ export const MESSAGE_VARIABLES = [
   { key: 'agent_name', label: 'AI agent name' },
   { key: 'vehicle', label: 'Vehicle' },
   { key: 'location_name', label: 'Location name' },
+  { key: 'vehicle_price', label: 'Vehicle price' },
+  { key: 'vehicle_link', label: 'Vehicle link' },
 ] as const;
+
+export const INVENTORY_VARIABLES = new Set(['vehicle_price', 'vehicle_link']);
+export const INVENTORY_EVENTS = new Set(['vehicle_added', 'vehicle_price_dropped']);
 
 const EDIT_ROLES = new Set(['admin', 'super_admin']);
 const VIEW_ROLES = new Set(['manager', 'admin', 'super_admin']);
@@ -232,14 +234,16 @@ export function canEditAutomations(role: unknown): boolean {
 }
 
 export const ENGINE_EVENTS = new Set([
-  'lead_created', 'website_form_lead', 'adf_lead_received', 'email_lead_received', 'lead_status_changed', 'lead_assigned', 'ai_handoff',
-  'text_received', 'website_chat_started', 'call_missed', 'call_ended', 'call_any',
+  'lead_created', 'website_form_lead', 'adf_lead_received', 'email_lead_received', 'lead_status_changed', 'lead_assigned', 'ai_handoff', 'lead_went_quiet',
+  'text_received', 'website_chat_started', 'call_missed', 'call_ended', 'call_any', 'voicemail_received',
   'appointment_booked', 'appointment_confirmed', 'appointment_rescheduled', 'appointment_cancelled', 'appointment_no_show', 'appointment_completed',
+  'vehicle_added', 'vehicle_price_dropped',
 ]);
 export const ENGINE_ACTIONS = new Set([
   'send_review_invitation', 'send_message', 'send_appointment_confirmation', 'send_email', 'send_notification',
-  'assign_team_member', 'unassign_team_member', 'create_task', 'wait', 'branch',
+  'assign_team_member', 'unassign_team_member', 'create_task', 'wait', 'branch', 'send_ai_follow_up', 'update_lead_status',
 ]);
+const QUIET_LIMITS: Record<string, number> = { hours: 168, days: 30 };
 
 export function isAutomationEngineEnabled(): boolean {
   return process.env.CRM_AUTOMATIONS_ENABLED === 'true';
@@ -337,6 +341,14 @@ async function cleanTrigger(orgId: string, value: any): Promise<CrmAutomationTri
   }
   const filters = await cleanFilters(orgId, value.filters);
   const { mode: repeatMode, days, per } = cleanRepeat(value.repeat);
+  let quietFor: CrmAutomationTrigger['quietFor'] = null;
+  if (event === 'lead_went_quiet') {
+    const rawUnit = value.quietFor?.unit;
+    const unit = rawUnit === undefined || rawUnit === null ? 'hours' : rawUnit === 'hours' || rawUnit === 'days' ? rawUnit : bad('Choose hours or days for how long the lead was quiet');
+    const amount = Number(value.quietFor?.amount ?? 24);
+    if (!Number.isInteger(amount) || amount < 1 || amount > QUIET_LIMITS[unit]) bad(`The quiet time must be between 1 and ${QUIET_LIMITS[unit]} ${unit}`);
+    quietFor = { amount, unit };
+  }
   const sendingHours = value.sendingHours === undefined ? 'sending_hours' : ['sending_hours', 'any_time'].includes(value.sendingHours) ? value.sendingHours : bad('Choose when messages can be sent');
   const flag = (key: string, fallback: boolean) => (value[key] === undefined ? fallback : Boolean(value[key]));
   const stopOnReply = flag('stopOnReply', true);
@@ -347,6 +359,7 @@ async function cleanTrigger(orgId: string, value: any): Promise<CrmAutomationTri
     time,
     filters,
     repeat: { mode: repeatMode, days, per },
+    quietFor,
     sendingHours,
     stopOnReply,
     cancelFirstOnReply: stopOnReply && flag('cancelFirstOnReply', true),
@@ -477,6 +490,7 @@ async function cleanStepList(orgId: string, value: unknown, depth: number, conte
         return { id, type: 'branch', config: {} };
       case 'update_lead_status': {
         const status = LEAD_STATUS_VALUES.includes(text(config.status)) ? text(config.status) : bad('Pick the new lead status');
+        if (isContactRestrictedStatus(status)) bad('An automation cannot mark a lead Do Not Contact. Staff must do that with a reason.');
         return { id, type: 'update_lead_status', config: { status } };
       }
       case 'send_notification': {
@@ -543,6 +557,17 @@ function checkTimingFitsTrigger(trigger: CrmAutomationTrigger | null, steps: Crm
   if (!usesBefore) return;
   const futureTime = trigger && (trigger.source === 'on_a_date' || FUTURE_TIME_EVENTS.has(String(trigger.event)));
   if (!futureTime) bad('"Deliver before trigger" only works with appointment or On a Date triggers');
+}
+
+const VARIABLE_TEXT_FIELDS = ['body', 'subject', 'message', 'task'];
+
+function checkVariablesFitTrigger(trigger: CrmAutomationTrigger | null, steps: CrmAutomationStep[]) {
+  if (trigger && INVENTORY_EVENTS.has(String(trigger.event))) return;
+  const used = flattenSteps(steps).some((step) => VARIABLE_TEXT_FIELDS.some((field) => {
+    const value = (step.config as any)?.[field];
+    return typeof value === 'string' && /\{\s*(vehicle_price|vehicle_link)\s*\}/.test(value);
+  }));
+  if (used) bad('"{vehicle_price}" and "{vehicle_link}" only work with the Inventory triggers');
 }
 
 function cleanTags(value: unknown): string[] {
@@ -615,6 +640,9 @@ export async function getAutomationOptions(orgId: string) {
     actions: AUTOMATION_ACTIONS.map((action) => ({ ...action, connected: ENGINE_ACTIONS.has(action.key) })),
     agentName: agent.displayName,
     variables: MESSAGE_VARIABLES,
+    inventoryVariables: Array.from(INVENTORY_VARIABLES),
+    priceDropMinimum: MIN_PRICE_DROP,
+    dateRunLimit: DATE_RUN_LIMIT,
     locations: locations.map((location: any) => ({ id: String(location._id), name: location.name })),
     team: team.map((member: any) => ({ id: String(member._id), name: memberName(member), email: String(member.email || ''), role: member.role })),
   };
@@ -635,6 +663,7 @@ export async function createAutomation(orgId: string, actor: CrmAutomationActorR
   const trigger = await cleanTrigger(orgId, input?.trigger);
   const steps = await cleanSteps(orgId, input?.steps);
   checkTimingFitsTrigger(trigger, steps);
+  checkVariablesFitTrigger(trigger, steps);
   const doc = await CrmAutomation.create({
     organizationId: orgId,
     name,
@@ -656,7 +685,10 @@ export async function updateAutomation(orgId: string, actor: CrmAutomationActorR
   if (input?.trigger !== undefined) doc.trigger = await cleanTrigger(orgId, input.trigger);
   if (input?.steps !== undefined) doc.steps = await cleanSteps(orgId, input.steps);
   if (input?.tags !== undefined) doc.tags = cleanTags(input.tags);
-  if (input?.trigger !== undefined || input?.steps !== undefined) checkTimingFitsTrigger(doc.trigger, doc.steps);
+  if (input?.trigger !== undefined || input?.steps !== undefined) {
+    checkTimingFitsTrigger(doc.trigger, doc.steps);
+    checkVariablesFitTrigger(doc.trigger, doc.steps);
+  }
   if (doc.status === 'active' || doc.status === 'test') {
     const problems = readinessProblems(doc);
     if (problems.length) bad(`This automation is on, so it must stay ready to run. ${problems.join('. ')}`);
@@ -715,10 +747,15 @@ export async function deleteAutomation(orgId: string, id: string) {
   await doc.deleteOne();
 }
 
-export function readinessProblems(doc: { trigger: CrmAutomationTrigger | null; steps: CrmAutomationStep[] }): string[] {
+export function readinessProblems(doc: { trigger: CrmAutomationTrigger | null; steps: CrmAutomationStep[] }, activating = false): string[] {
   const problems: string[] = [];
   if (!doc.trigger) problems.push('Choose a trigger');
-  else if (doc.trigger.source === 'on_a_date' || !ENGINE_EVENTS.has(String(doc.trigger.event))) problems.push('This trigger is not live yet, so the automation cannot run');
+  else if (doc.trigger.source === 'on_a_date') {
+    const times = dateTriggerTimes(doc.trigger, flattenSteps(doc.steps || []));
+    if (!times) problems.push('Pick the date for this automation');
+    else if (activating && times.at.getTime() <= Date.now()) problems.push('The date already passed. Pick a date in the future');
+    if (!(doc.trigger.filters || []).length) problems.push('Add at least one audience filter so the automation does not message every lead');
+  } else if (!ENGINE_EVENTS.has(String(doc.trigger.event))) problems.push('This trigger is not live yet, so the automation cannot run');
   const all = flattenSteps(doc.steps || []);
   if (!all.some((step) => step.type !== 'wait' && step.type !== 'branch')) problems.push('Add at least one action after the trigger');
   if (all.some((step) => step.type === 'branch' && !((step.config as any)?.paths || []).length)) problems.push('Each Branch needs at least one If condition');
@@ -731,7 +768,7 @@ export async function setAutomationStatus(orgId: string, actor: CrmAutomationAct
   if (!['active', 'test', 'inactive'].includes(String(status))) bad('Choose Activate, Test Mode, or Deactivate');
   const doc = await loadOwned(orgId, id);
   if (status !== 'inactive') {
-    const problems = readinessProblems(doc);
+    const problems = readinessProblems(doc, doc.status !== status);
     if (problems.length) bad(problems.join('. '));
   }
   const previous = doc.status;

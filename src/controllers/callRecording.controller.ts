@@ -12,6 +12,7 @@ import { CallRecording, CallRecordingSettings, CallRecordingGrant, CallRecording
 import { recordingPrincipal, recordingPermissions, requireRecordingPermission, recordingAudit, RecordingPrincipal } from '../services/callRecordingAccess.service';
 import { recordingSettingsInput, getRecordingSettings, controlRecording, startManualRecording, recordingReady, callRepId, deleteRecording, hashToken } from '../services/callRecording.service';
 import { streamRecordingFile } from '../services/callRecordingStorage.service';
+import { defaultVoicemailGreeting } from '../utils/voicemailGreeting';
 import { recordingMediaAuth } from '../services/recordingMediaAuth.service';
 
 async function principal(req: Request) {
@@ -50,11 +51,11 @@ export const getAccess = asyncHandler(async (req: Request, res: Response) => {
 });
 export const getSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
-  const settings = await getRecordingSettings(p.orgId);
+  const [settings, voicemailGreetingDefault] = await Promise.all([getRecordingSettings(p.orgId), defaultVoicemailGreeting(p.orgId)]);
   const grants: any[] = (await CallRecordingGrant.find({ organizationId: p.orgId }).lean()).map((g: any) => ({ ...g, permissions: grantable(g.permissions) }));
   const crm: any[] = await CrmUser.find({ organizationId: p.orgId, isActive: true, isSystem: { $ne: true }, isOffboarded: { $ne: true } }).select('fullName email role department avatar').lean();
   const main: any[] = await User.find({ organizationId: p.orgId, isActive: true, role: { $in: ['employee', 'admin', 'super_admin'] }, $or: [{ email: { $nin: crm.map(u => u.email) } }, { _id: { $in: grants.filter(g => g.principalKind === 'main' && g.permissions.length).map(g => g.principalId) } }] }).select('name email role personalInfo.department avatar').lean();
-  res.json({ data: { settings: { announcementText: settings.announcementText, retentionMonths: settings.retentionMonths, autoRecord: settings.autoRecord }, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: GRANTABLE_RECORDING_PERMISSIONS } });
+  res.json({ data: { settings: { announcementText: settings.announcementText, retentionMonths: settings.retentionMonths, autoRecord: settings.autoRecord, voicemailGreeting: settings.voicemailGreeting, voicemailGreetingDefault }, grants, staff: [...crm.map(u => ({ id: String(u._id), kind: 'crm', name: u.fullName, email: u.email, role: u.role, department: u.department, avatar: u.avatar })), ...main.map(u => ({ id: String(u._id), kind: 'main', name: u.name, email: u.email, role: u.role, department: u.personalInfo?.department, avatar: u.avatar }))], permissions: GRANTABLE_RECORDING_PERMISSIONS } });
 });
 export const saveSettings = asyncHandler(async (req: Request, res: Response) => {
   const p = await admin(req);
@@ -164,8 +165,10 @@ export const getRecording = asyncHandler(async (req: Request, res: Response) => 
   await recordingAudit(p, 'recording.viewed', record._id);
   const audits = await CallRecordingAudit.find({ organizationId: p.orgId, recordingId: record._id }).sort({ createdAt: -1 }).limit(100).lean();
   const shares = await CallRecordingShare.find({ organizationId: p.orgId, recordingId: record._id }).sort({ createdAt: -1 }).limit(50).lean();
+  const names = await staffNames(audits.map((audit: any) => String(audit.actorId || '')));
+  const named = audits.map((audit: any) => ({ ...audit, actorName: audit.actorId ? names.get(String(audit.actorId)) || '' : '' }));
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ data: { recording: summary(record), permissions: await recordingPermissions(p), audits, shares } });
+  res.json({ data: { recording: summary(record), permissions: await recordingPermissions(p), audits: named, shares } });
 });
 export const reviewRecording = asyncHandler(async (req: Request, res: Response) => {
   const p = await principal(req);

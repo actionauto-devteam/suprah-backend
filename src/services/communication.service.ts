@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 import { startVoicemailRecording } from "./callRecording.service";
+import { CallRecordingSettings } from "../models/CallRecording.model";
+import { buildVoicemailGreeting } from "../utils/voicemailGreeting";
 import {
   Conversation,
   CommunicationMessage,
@@ -141,15 +143,14 @@ function buildMissedCallMessage(dealerName: string): string {
   return `Thank you for calling ${dealerName}. All of our team members are currently unavailable. Please send us a text message and we will get back to you as soon as possible.`;
 }
 
-function buildVoicemailGreeting(dealerName: string): string {
-  return `Thank you for calling ${dealerName}. All of our team members are busy right now. Please leave a message after the tone, and we will call you back as soon as we can.`;
-}
 
 async function startVoicemail(call: any): Promise<void> {
   const dealerName = await resolveDealerName(call.orgId);
+  const saved: any = await CallRecordingSettings.findOne({ organizationId: String(call.orgId) }).select('voicemailGreeting').lean().catch(() => null);
+  const greeting = String(saved?.voicemailGreeting || '').trim() || buildVoicemailGreeting(dealerName);
   try {
     if (!call.routing?.customerAnswered) await telnyx.answerCall(call.providerCallControlId);
-    await telnyx.speakIvr(call.providerCallControlId, buildVoicemailGreeting(dealerName), {
+    await telnyx.speakIvr(call.providerCallControlId, greeting, {
       kind: 'voicemail-greeting', callLogId: String(call._id), revision: call.routing?.revision ?? 0,
     });
   } catch (err) {

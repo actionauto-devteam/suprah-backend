@@ -14,15 +14,23 @@ export const VOICEMAIL_MAX_SECONDS = 120;
 const VOICEMAIL_RECORDING = { channels: 'single', recording_track: 'inbound', play_beep: true, max_length: VOICEMAIL_MAX_SECONDS };
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+
+const SPANISH = /spanish|espa[nñ]ol|^es(-|$)/i;
+
+export function transcriptionOptions(call: any): Record<string, string> {
+  const routing = call?.routing || {};
+  return SPANISH.test(String(routing.language || '').trim()) || SPANISH.test(String(routing.selectedLabel || '').trim()) ? { transcription_language: 'es-US' } : {};
+}
 export const recordingSettingsInput = z.object({
   announcementText: z.string().trim().min(1, 'Write the announcement callers hear').max(300, 'Keep the announcement under 300 characters'),
   retentionMonths: z.number().int().min(1, 'Keep recordings for at least 1 month').max(120, 'Keep recordings for at most 120 months'),
   autoRecord: z.boolean().optional(),
+  voicemailGreeting: z.string().trim().max(400, 'Keep the voicemail greeting under 400 characters').optional(),
 }).strict();
 
 export async function getRecordingSettings(organizationId: string) {
   const row: any = await CallRecordingSettings.findOne({ organizationId }).lean();
-  return { announcementText: row?.announcementText || DEFAULT_RECORDING_ANNOUNCEMENT, announcementLanguage: row?.announcementLanguage || 'en-US', retentionMonths: row?.retentionMonths || 6, autoRecord: row?.autoRecord !== false };
+  return { announcementText: row?.announcementText || DEFAULT_RECORDING_ANNOUNCEMENT, announcementLanguage: row?.announcementLanguage || 'en-US', retentionMonths: row?.retentionMonths || 6, autoRecord: row?.autoRecord !== false, voicemailGreeting: String(row?.voicemailGreeting || '') };
 }
 
 export function addCalendarMonths(date: Date, months: number): Date {
@@ -156,7 +164,7 @@ export async function startVoicemailRecording(call: any) {
     throw err;
   }
   try {
-    await telnyx.recordingCommand(call.providerCallControlId, 'start', `voicemail-start-${record._id}`, VOICEMAIL_RECORDING);
+    await telnyx.recordingCommand(call.providerCallControlId, 'start', `voicemail-start-${record._id}`, { ...VOICEMAIL_RECORDING, ...transcriptionOptions(call) });
     await CallRecording.updateOne({ _id: record._id, state: 'start-pending' }, { $set: { state: 'recording' }, $inc: { revision: 1 } });
   } catch (err) {
     console.error('[voicemail] Recording could not start', err);
@@ -178,7 +186,9 @@ async function startReservedRecording(id: unknown) {
   if (!reserved) return;
   try {
     await recordingAudit({ orgId: record.organizationId }, 'recording.start-requested', record._id);
-    await telnyx.recordingCommand(record.controlId, 'start', `recording-start-${record._id}`);
+    const language = transcriptionOptions(call);
+    if (Object.keys(language).length) await telnyx.recordingCommand(record.controlId, 'start', `recording-start-${record._id}`, language);
+    else await telnyx.recordingCommand(record.controlId, 'start', `recording-start-${record._id}`);
     await change(reserved, 'recording');
   } catch (err) {
     await markFailure(record, err);

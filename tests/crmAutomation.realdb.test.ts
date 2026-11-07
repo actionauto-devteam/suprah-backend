@@ -289,7 +289,7 @@ describe('Real-DB proof: Automation builder endpoints (local dev MongoDB only)',
     expect(booked.body.data.automation.steps[0].config.timing).toEqual({ when: 'before', amount: 1, unit: 'days' });
     const dated = await request(app).post(base).set(as('admin')).send({ name: 'Date', trigger: { source: 'on_a_date', date: '2026-12-24', time: '09:00' }, steps: [before] });
     expect(dated.status).toBe(201);
-    const broken = await request(app).patch(`${base}/${booked.body.data.automation.id}`).set(as('admin')).send({ trigger: { source: 'suprah', event: 'review_received' } });
+    const broken = await request(app).patch(`${base}/${booked.body.data.automation.id}`).set(as('admin')).send({ trigger: { source: 'suprah', event: 'call_missed' } });
     expect(broken.status).toBe(400);
     expect(broken.body.message).toMatch(/only works with appointment or On a Date triggers/);
     const stillBooked = await request(app).get(`${base}/${booked.body.data.automation.id}`).set(as('admin'));

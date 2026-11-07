@@ -102,6 +102,7 @@ describe('AI operating mode — every automated AI send path is guarded', () => 
       'controllers/demoLab.controller.ts',
       'services/aiShadowDraft.service.ts',
       'services/aiAgentDraft.service.ts',
+      'services/crmAutomationAi.service.ts',
     ]);
     const unexpected = allFiles.filter(({ file, source }) => generators.test(source) && !allowed.has(file)).map(({ file }) => file);
     expect(unexpected).toEqual([]);
@@ -112,6 +113,7 @@ describe('AI operating mode — every automated AI send path is guarded', () => 
     expect(readSrc('controllers/webchat.controller.ts')).toMatch(/workflow: 'webchat_reply',[\s\S]*?if \(delivery\.action !== 'send'\)[\s\S]*?claimAiGeneration\(check\)/);
     expect(readSrc('services/aiEmailReply.service.ts')).toMatch(/workflow: 'email_reply'[\s\S]*?if \(delivery\.action !== 'send'\)[\s\S]*?claimAiGeneration\(check\)/);
     expect(readSrc('schedulers/aiLeadFollowup.scheduler.ts')).toMatch(/workflow: 'sms_followup'[\s\S]*?if \(delivery\.action !== 'send'\)[\s\S]*?Lead\.findOneAndUpdate/);
+    expect(readSrc('services/crmAutomationAi.service.ts')).toMatch(/workflow: 'sms_followup'[\s\S]*?if \(delivery\.action !== 'send'\)[\s\S]*?generateProactiveFollowUp\(/);
     expect(readSrc('services/vehicleReengagement.service.ts')).toMatch(/workflow: 'vehicle_reengagement'[\s\S]*?skipped_ai_not_live[\s\S]*?generateReengagementMessage\(lead, vehicle\)/);
     expect(readSrc('controllers/vehicleReengagement.controller.ts')).toMatch(/workflow: 'reengagement_send_anyway'[\s\S]*?ApiError\(409/);
     expect(readSrc('services/aiShadowDraft.service.ts')).toMatch(/claimShadowDraft\(input\)[\s\S]*?beginShadowGeneration\([\s\S]*?runWithAiCallObserver\([\s\S]*?completeShadowDraft\(/);
