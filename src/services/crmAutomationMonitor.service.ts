@@ -147,6 +147,7 @@ async function monitorMatch(orgId: string, query: MonitorQuery) {
 
 function actionLabel(type: string | undefined): string {
   if (!type) return '';
+  if (type === 'retry') return 'Retry';
   return AUTOMATION_ACTIONS.find((action) => action.key === type)?.label || type;
 }
 
@@ -163,7 +164,8 @@ function channelOf(entries: Array<{ type: string; status: string }>): string {
 function serializeRun(run: any) {
   const log = run.log || [];
   const pending = run.status === 'waiting' || run.status === 'running' ? (run.steps || [])[run.stepIndex] : null;
-  const stepType = pending?.type || log[log.length - 1]?.type || (run.steps || []).find((step: any) => step.type !== 'wait')?.type;
+  const lastStep = [...log].reverse().find((entry: any) => entry.type !== 'retry');
+  const stepType = pending?.type || lastStep?.type || (run.steps || []).find((step: any) => step.type !== 'wait')?.type;
   return {
     id: String(run._id),
     automationId: String(run.automationId),
@@ -175,6 +177,7 @@ function serializeRun(run: any) {
     step: actionLabel(stepType),
     channel: channelOf(log),
     reason: run.reason,
+    retryable: run.status === 'failed' && log.filter((entry: any) => entry.type === 'retry').length < 3,
     contact: run.contact,
     triggerAt: run.triggerAt,
     nextRunAt: run.nextRunAt,

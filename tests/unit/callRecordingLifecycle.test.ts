@@ -5,7 +5,7 @@ jest.mock('../../src/models/CallRecording.model', () => ({ DEFAULT_RECORDING_ANN
 jest.mock('../../src/services/callRecordingStorage.service', () => ({}));
 jest.mock('../../src/services/callRecordingAccess.service', () => ({ recordingAudit: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/services/telnyx.service', () => ({ recordingCommand: jest.fn().mockResolvedValue({}), recordingDisclosure: jest.fn().mockResolvedValue({}) }));
-import { startManualRecording, controlRecording, observeRecordingCall, finishRecordingDisclosure } from '../../src/services/callRecording.service';
+import { startManualRecording, controlRecording, observeRecordingCall, finishRecordingDisclosure, transcriptionOptions } from '../../src/services/callRecording.service';
 import * as telnyx from '../../src/services/telnyx.service';
 let call: any; let settings: any; let record: any;
 const principal: any = { id: 'rep', orgId: 'org', kind: 'crm' };
@@ -76,4 +76,13 @@ describe('Mocked manual recording lifecycle', () => {
   it('the first customer event pins the connection and later mismatches are ignored', async () => { call.recordingCorrelation = {}; await observeRecordingCall('call.initiated', { call_control_id: 'customer', call_session_id: 'session', connection_id: 'connection', call_leg_id: 'customer-leg' }); expect(call.recordingCorrelation.connectionId).toBe('connection'); mockCallUpdate.mockClear(); await observeRecordingCall('call.bridged', { call_control_id: 'customer', call_session_id: 'session', connection_id: 'other' }); expect(mockCallUpdate).not.toHaveBeenCalled(); });
   it('failed disclosure does not record and consumes its speech callback', async () => { await startManualRecording(principal, call._id); expect(await finishRecordingDisclosure({ call_control_id: 'customer', client_state: encode({ recordingDisclosureId: record._id }), status: 'failed' })).toBe(true); expect(record.state).toBe('failed'); expect(telnyx.recordingCommand).not.toHaveBeenCalled(); });
   it('recording notice is separate from unrelated speech', async () => { await startManualRecording(principal, call._id); expect(await finishRecordingDisclosure({ call_control_id: 'customer', client_state: encode({ kind: 'ivr-menu' }) })).toBe(false); expect(record.state).toBe('disclosing'); });
+  it('a call that picked the Spanish menu option is transcribed in Spanish, every other call stays English', async () => {
+    call.routing = { selectedLabel: 'Spanish', language: '' };
+    await announce();
+    expect(telnyx.recordingCommand).toHaveBeenCalledWith('customer', 'start', expect.any(String), { transcription_language: 'es-US' });
+    expect(transcriptionOptions({ routing: { selectedLabel: 'Para español', language: '' } })).toEqual({ transcription_language: 'es-US' });
+    expect(transcriptionOptions({ routing: { selectedLabel: 'Orem sales', language: 'Spanish' } })).toEqual({ transcription_language: 'es-US' });
+    expect(transcriptionOptions({ routing: { selectedLabel: 'Orem sales', language: '' } })).toEqual({});
+    expect(transcriptionOptions({})).toEqual({});
+  });
 });

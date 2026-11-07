@@ -29,7 +29,21 @@ import { emitToOrg } from '../utils/socketEmitter';
 import { normalizeLocationKey } from '../utils/locationKey';
 import { dialedKey, dialedNumberLocations, locationDisplayName } from './crmAutomationCalls.service';
 import { COMPANY_TZ, addDaysToDateStr, toCompanyDateStr, zoneMidnightUtc } from '../utils/companyTimezone';
-import { AI_AGENT_ASSIGNEE, ENGINE_EVENTS, isAutomationEngineEnabled, teamQuery } from './crmAutomation.service';
+import { AI_AGENT_ASSIGNEE, ENGINE_EVENTS, flattenSteps, isAutomationEngineEnabled, teamQuery } from './crmAutomation.service';
+import {
+  DATE_LATE_LIMIT_MS,
+  DATE_RUN_LIMIT,
+  collectPriceDropEvents,
+  collectQuietEvents,
+  collectVehicleAddedEvents,
+  collectVoicemailEvents,
+  dateTriggerLeads,
+  dateTriggerTimes,
+  quietPeriodMs,
+} from './crmAutomationSources.service';
+import { runAiFollowUpStep } from './crmAutomationAi.service';
+import { isContactRestrictedStatus } from '../constants/leadStatus';
+import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
 
 const MINUTE = 60 * 1000;
@@ -42,7 +56,9 @@ const RECORD_LIMIT = 500;
 const RUN_BATCH = 50;
 const SEND_START_HOUR = 9;
 const SEND_END_HOUR = 20;
-const MESSAGE_STEPS = new Set(['send_message', 'send_review_invitation', 'send_appointment_confirmation', 'send_email']);
+const MESSAGE_STEPS = new Set(['send_message', 'send_review_invitation', 'send_appointment_confirmation', 'send_email', 'send_ai_follow_up']);
+const MAX_RETRIES = 3;
+const NOT_PENDING_STATUSES = new Set(['Contacted', 'Appointment Set', 'Closed']);
 const UNIT_MS: Record<string, number> = { minutes: MINUTE, hours: 60 * MINUTE, days: 24 * 60 * MINUTE };
 const LEAD_FIELDS = 'firstName lastName email phone normalizedPhone normalizedEmail channel source status tags assignedTo location vehicle createdAt intakeIdentity organizationId';
 const APPOINTMENT_STATUS_EVENTS: Record<string, string> = {
@@ -62,6 +78,8 @@ export interface EngineEvent {
   targetAt?: Date | null;
   appointmentId?: string | null;
   location?: string;
+  vehicle?: { id: string; label: string; price: number | null; link: string } | null;
+  runFrom?: Date;
 }
 
 interface ActionResult {
@@ -121,8 +139,12 @@ function leadMatches(event: string, lead: any): boolean {
   return true;
 }
 
-async function collectEvents(orgId: string, event: string, since: Date, now: Date): Promise<EngineEvent[]> {
+async function collectEvents(orgId: string, event: string, since: Date, now: Date, quietMs = 0): Promise<EngineEvent[]> {
   const orgIds = orgIdVariants(orgId);
+  if (event === 'lead_went_quiet') return collectQuietEvents(orgId, since, now, quietMs);
+  if (event === 'voicemail_received') return collectVoicemailEvents(orgId, since, now);
+  if (event === 'vehicle_added') return collectVehicleAddedEvents(orgId, since, now);
+  if (event === 'vehicle_price_dropped') return collectPriceDropEvents(orgId, since, now);
   if (['lead_created', 'website_form_lead', 'adf_lead_received', 'email_lead_received'].includes(event)) {
     const leads = await Lead.find({ organizationId: { $in: orgIds }, createdAt: { $gt: since, $lte: now } }).select(LEAD_FIELDS).limit(RECORD_LIMIT).lean();
     return leads.filter((lead: any) => leadMatches(event, lead)).map((lead: any) => leadEvent(lead, `lead:${lead._id}`, new Date(lead.createdAt)));
@@ -134,7 +156,7 @@ async function collectEvents(orgId: string, event: string, since: Date, now: Dat
       .limit(RECORD_LIMIT)
       .lean();
     return leads.flatMap((lead: any) => (lead[path] || [])
-      .filter((entry: any) => entry.changedAt && new Date(entry.changedAt) > since && new Date(entry.changedAt) <= now && (event === 'lead_status_changed' || entry.to))
+      .filter((entry: any) => entry.changedAt && new Date(entry.changedAt) > since && new Date(entry.changedAt) <= now && (event === 'lead_status_changed' ? !entry.automationId : entry.to))
       .map((entry: any) => leadEvent(lead, `${path}:${lead._id}:${new Date(entry.changedAt).getTime()}`, new Date(entry.changedAt))));
   }
   if (event === 'ai_handoff') {
@@ -313,16 +335,17 @@ export async function decideRun(automation: any, event: EngineEvent, orgId: stri
   return { contact, rawLocation, reason, repeatKey };
 }
 
-async function startRun(automation: any, event: EngineEvent, orgId: string, locationKeys: Map<string, string[]>): Promise<boolean> {
+async function startRun(automation: any, event: EngineEvent, orgId: string, locationKeys: Map<string, string[]>, skipFiltered = false): Promise<boolean> {
   if (await CrmAutomationRun.exists({ automationId: automation._id, eventKey: event.eventKey })) return false;
   const { contact, rawLocation, reason, repeatKey } = await decideRun(automation, event, orgId, locationKeys);
+  if (reason && skipFiltered) return false;
   try {
     await CrmAutomationRun.create({
       organizationId: orgId,
       automationId: automation._id,
       automationName: automation.name,
       mode: automation.status === 'test' ? 'test' : 'live',
-      event: automation.trigger.event,
+      event: automation.trigger.event || automation.trigger.source,
       eventKey: event.eventKey,
       triggerAt: event.triggerAt,
       targetAt: event.targetAt || null,
@@ -338,9 +361,10 @@ async function startRun(automation: any, event: EngineEvent, orgId: string, loca
         stopOnFailure: Boolean(automation.trigger.stopOnFailure),
       },
       steps: automation.steps || [],
+      vehicle: event.vehicle || null,
       status: reason ? 'filtered' : 'waiting',
       reason,
-      nextRunAt: reason ? null : event.triggerAt,
+      nextRunAt: reason ? null : event.runFrom || event.triggerAt,
     });
   } catch (err: any) {
     if (err?.code !== 11000) throw err;
@@ -353,18 +377,19 @@ export async function sweepTriggers(now = new Date()): Promise<number> {
   const automations = await CrmAutomation.find({ status: { $in: ['active', 'test'] }, 'trigger.event': { $in: Array.from(ENGINE_EVENTS) } }).lean();
   const groups = new Map<string, any[]>();
   for (const automation of automations as any[]) {
-    const key = `${automation.organizationId}|${automation.trigger.event}`;
+    const variant = automation.trigger.event === 'lead_went_quiet' ? String(quietPeriodMs(automation.trigger.quietFor)) : '';
+    const key = `${automation.organizationId}|${automation.trigger.event}|${variant}`;
     groups.set(key, [...(groups.get(key) || []), automation]);
   }
   let created = 0;
   const locationCache = new Map<string, Map<string, string[]>>();
   for (const [key, list] of groups) {
-    const [orgId, event] = key.split('|');
-    const cursorKey = `${orgId}:${event}`;
+    const [orgId, event, variant] = key.split('|');
+    const cursorKey = variant ? `${orgId}:${event}:${variant}` : `${orgId}:${event}`;
     const since = await readCursor(cursorKey, now);
     if (!since) continue;
     try {
-      const events = await collectEvents(orgId, event, since, now);
+      const events = await collectEvents(orgId, event, since, now, Number(variant) || 0);
       if (!locationCache.has(orgId)) locationCache.set(orgId, await locationKeyMap(orgId));
       for (const item of events) {
         for (const automation of list) {
@@ -375,6 +400,43 @@ export async function sweepTriggers(now = new Date()): Promise<number> {
       await moveCursor(cursorKey, now);
     } catch (err) {
       logger.error({ err, orgId, event }, '[CrmAutomation] Trigger sweep failed');
+    }
+  }
+  return created;
+}
+
+export async function sweepDateTriggers(now = new Date()): Promise<number> {
+  const automations = await CrmAutomation.find({ status: { $in: ['active', 'test'] }, 'trigger.source': 'on_a_date' }).lean();
+  let created = 0;
+  for (const automation of automations as any[]) {
+    const times = dateTriggerTimes(automation.trigger, flattenSteps(automation.steps || []));
+    if (!times || now < times.fireAt || now.getTime() > times.at.getTime() + DATE_LATE_LIMIT_MS) continue;
+    if (automation.statusChangedAt && new Date(automation.statusChangedAt) > times.at) continue;
+    const mode = automation.status === 'test' ? 'test' : 'live';
+    const cursorKey = `date:${automation._id}:${mode}:${times.key}`;
+    if (await CrmAutomationCursor.exists({ key: cursorKey })) continue;
+    const orgId = String(automation.organizationId);
+    try {
+      const locationKeys = await locationKeyMap(orgId);
+      let started = 0;
+      for (const lead of await dateTriggerLeads(orgId)) {
+        if (started >= DATE_RUN_LIMIT) break;
+        const event: EngineEvent = {
+          eventKey: `date:${mode}:${times.key}:${lead._id}`,
+          triggerAt: times.at,
+          targetAt: times.at,
+          runFrom: now,
+          leadId: String(lead._id),
+          phone: String(lead.phone || ''),
+          email: String(lead.email || ''),
+          name: fullName(lead.firstName, lead.lastName),
+        };
+        if (await startRun(automation, event, orgId, locationKeys, true)) started += 1;
+      }
+      created += started;
+      await CrmAutomationCursor.updateOne({ key: cursorKey }, { $set: { at: now } }, { upsert: true });
+    } catch (err) {
+      logger.error({ err, automationId: String(automation._id) }, '[CrmAutomation] Date trigger failed');
     }
   }
   return created;
@@ -436,6 +498,25 @@ async function assignLead(orgId: string, leadId: string | null, userId: string |
   );
   emitToOrg(orgId, 'lead:update', { leadId: String(lead._id) });
   return userId ? 'Assigned the lead' : 'Removed the assigned team member';
+}
+
+async function changeLeadStatus(run: ICrmAutomationRun, status: string): Promise<ActionResult> {
+  const leadId = run.contact.leadId;
+  if (!leadId || !mongoose.isValidObjectId(leadId)) return { status: 'skipped', detail: 'No lead to update' };
+  if (!status) return { status: 'skipped', detail: 'No status was picked' };
+  const lead: any = await Lead.findOne({ _id: leadId, organizationId: { $in: orgIdVariants(run.organizationId) } }).select('status').lean();
+  if (!lead) return { status: 'skipped', detail: 'The lead was not found' };
+  if (isContactRestrictedStatus(lead.status)) return { status: 'skipped', detail: 'The lead is marked Do Not Contact, so its status was not changed' };
+  if (isContactRestrictedStatus(status)) return { status: 'skipped', detail: 'An automation cannot mark a lead Do Not Contact' };
+  if (lead.status === status) return { status: 'done', detail: `The lead is already ${status}` };
+  if (run.mode === 'test') return { status: 'test', detail: `Would change the status from ${lead.status || 'none'} to ${status}` };
+  const set: Record<string, unknown> = { status };
+  if (NOT_PENDING_STATUSES.has(status)) set.isPending = false;
+  const entry = { from: lead.status, to: status, changedAt: new Date(), reason: `Changed by the automation "${run.automationName}"`, automationId: String(run.automationId) };
+  const updated = await Lead.updateOne({ _id: lead._id, status: lead.status }, { $set: set, $push: { statusHistory: entry } });
+  if (!updated.modifiedCount) return { status: 'skipped', detail: 'The status changed at the same time, so nothing was changed' };
+  emitToOrg(run.organizationId, 'lead:update', { leadId: String(lead._id) });
+  return { status: 'done', detail: `Changed the status from ${lead.status || 'none'} to ${status}` };
 }
 
 async function recipientsFor(orgId: string, config: any, leadId: string | null): Promise<string[]> {
@@ -532,6 +613,10 @@ async function executeStep(run: ICrmAutomationRun, step: any, values: Record<str
       }
       return { status: 'done', detail: `Created ${targets.length} task${targets.length === 1 ? '' : 's'}` };
     }
+    case 'send_ai_follow_up':
+      return runAiFollowUpStep(run, String(config.instructions || ''));
+    case 'update_lead_status':
+      return changeLeadStatus(run, String(config.status || ''));
     default:
       return { status: 'skipped', detail: 'This step is not live yet' };
   }
@@ -576,18 +661,65 @@ async function chooseBranchPath(run: ICrmAutomationRun, step: any): Promise<{ la
   return { label: 'No condition matched. Followed Else', steps: step.config?.else?.steps || [], repeatKey: null };
 }
 
+function failedStepIds(log: CrmAutomationRunLog[]): string[] {
+  const latest = new Map<string, CrmAutomationRunLog>();
+  for (const entry of log) {
+    if (entry.type === 'retry') continue;
+    latest.set(`${entry.stepId}|${entry.type}`, entry);
+  }
+  return Array.from(new Set(Array.from(latest.values()).filter((entry) => entry.status === 'failed').map((entry) => entry.stepId)));
+}
+
 async function processRun(run: ICrmAutomationRun, now: Date) {
   const [dealerName, agent] = await Promise.all([resolveDealerName(run.organizationId), resolveAiAgentIdentity(run.organizationId)]);
   const lead: any = run.contact.leadId && mongoose.isValidObjectId(run.contact.leadId) ? await Lead.findById(run.contact.leadId).select('vehicle').lean() : null;
   const vehicle = [lead?.vehicle?.year, lead?.vehicle?.make, lead?.vehicle?.model].filter(Boolean).join(' ');
+  const eventVehicle: any = run.vehicle || null;
+  const price = Number(eventVehicle?.price);
   const values: Record<string, string> = {
     first_name: run.contact.firstName || 'there',
     dealership_name: dealerName,
     agent_name: agent.displayName,
     agent_name_configured: agent.name || '',
-    vehicle: vehicle || 'your vehicle',
+    vehicle: eventVehicle?.label || vehicle || 'your vehicle',
+    vehicle_price: Number.isFinite(price) && price > 0 ? `$${Math.round(price).toLocaleString('en-US')}` : '',
+    vehicle_link: String(eventVehicle?.link || ''),
     location_name: run.location || dealerName,
   };
+  while (run.retrySteps?.length) {
+    const stepId = run.retrySteps[0];
+    const step: any = run.steps.find((item) => item.id === stepId);
+    if (step) {
+      if (MESSAGE_STEPS.has(step.type) && run.settings.sendingHours !== 'any_time') {
+        const due = nextSendingTime(now);
+        if (due > now) {
+          run.status = 'waiting';
+          run.nextRunAt = due;
+          run.leaseUntil = null;
+          await run.save();
+          return;
+        }
+      }
+      let result: ActionResult;
+      try {
+        result = await executeStep(run, step, values, agent.displayName);
+      } catch (err: any) {
+        result = { status: 'failed', detail: String(err?.message || err).slice(0, 300) };
+      }
+      run.log.push({ stepId: step.id, type: step.type, status: result.status, detail: result.detail.slice(0, 2000), at: new Date() });
+      if (MESSAGE_STEPS.has(step.type) && (result.status === 'sent' || result.status === 'test')) run.sentAnyMessage = true;
+    }
+    run.retrySteps = run.retrySteps.slice(1);
+    await run.save();
+  }
+  if (run.settings.stopOnFailure && failedStepIds(run.log).length) {
+    run.status = 'failed';
+    run.reason = 'A step failed, so the automation stopped';
+    run.nextRunAt = null;
+    run.leaseUntil = null;
+    await run.save();
+    return;
+  }
   while (run.stepIndex < run.steps.length) {
     const step: any = run.steps[run.stepIndex];
     if (step.type === 'wait') {
@@ -666,7 +798,7 @@ async function processRun(run: ICrmAutomationRun, now: Date) {
     }
     await run.save();
   }
-  run.status = run.log.some((entry) => entry.status === 'failed') ? 'failed' : 'completed';
+  run.status = failedStepIds(run.log).length ? 'failed' : 'completed';
   run.reason = run.status === 'failed' ? 'One or more steps failed' : null;
   run.nextRunAt = null;
   run.leaseUntil = null;
@@ -701,6 +833,31 @@ export async function runDueSteps(now = new Date()): Promise<number> {
     processed += 1;
   }
   return processed;
+}
+
+export async function retryRun(orgId: string, runId: string, actorName: string) {
+  if (!isAutomationEngineEnabled()) throw new ApiError(409, 'Automations are turned off on this server, so nothing can run');
+  if (!mongoose.isValidObjectId(runId)) throw new ApiError(404, 'Automation event not found');
+  const run = await CrmAutomationRun.findOne({ _id: runId, organizationId: orgId });
+  if (!run) throw new ApiError(404, 'Automation event not found');
+  if (run.status !== 'failed') throw new ApiError(400, 'Only failed events can be retried');
+  const automation: any = await CrmAutomation.findOne({ _id: run.automationId, organizationId: orgId }).select('status').lean();
+  const on = automation && (run.mode === 'test' ? automation.status === 'test' : automation.status === 'active');
+  if (!on) throw new ApiError(400, run.mode === 'test' ? 'Set the automation to Test Mode before retrying this event' : 'Activate the automation before retrying this event');
+  if (run.log.filter((entry) => entry.type === 'retry').length >= MAX_RETRIES) throw new ApiError(400, `This event was already retried ${MAX_RETRIES} times`);
+  const steps = failedStepIds(run.log).filter((id) => run.steps.some((step) => step.id === id));
+  if (!steps.length && run.stepIndex >= run.steps.length) throw new ApiError(400, 'Nothing failed that can be retried');
+  const now = new Date();
+  const updated = await CrmAutomationRun.findOneAndUpdate(
+    { _id: run._id, status: 'failed' },
+    {
+      $set: { status: 'waiting', nextRunAt: now, leaseUntil: null, reason: null, retrySteps: steps },
+      $push: { log: { stepId: 'retry', type: 'retry', status: 'done', detail: `Retry requested by ${actorName}`, at: now } },
+    },
+    { new: true },
+  );
+  if (!updated) throw new ApiError(409, 'This event changed. Refresh and try again.');
+  return { id: String(updated._id), status: updated.status, retrySteps: steps.length };
 }
 
 export async function checkAutomationAlerts(now = new Date()): Promise<number> {
@@ -740,7 +897,7 @@ export async function checkAutomationAlerts(now = new Date()): Promise<number> {
 export async function runAutomationTick(now = new Date()) {
   if (!isAutomationEngineEnabled()) return { replies: 0, started: 0, processed: 0, alerts: 0 };
   const replies = await sweepReplies(now);
-  const started = await sweepTriggers(now);
+  const started = (await sweepTriggers(now)) + (await sweepDateTriggers(now));
   const processed = await runDueSteps(now);
   const alerts = await checkAutomationAlerts(now);
   return { replies, started, processed, alerts };

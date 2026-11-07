@@ -39,7 +39,7 @@ recording.index({ organizationId: 1, startedAt: -1 });
 const settings = new Schema({
   organizationId: { type: String, required: true, unique: true },
   announcementText: { type: String, default: DEFAULT_RECORDING_ANNOUNCEMENT }, announcementLanguage: { type: String, default: 'en-US' },
-  retentionMonths: { type: Number, default: 6 }, autoRecord: { type: Boolean, default: true }, updatedBy: String,
+  retentionMonths: { type: Number, default: 6 }, autoRecord: { type: Boolean, default: true }, voicemailGreeting: { type: String, default: '' }, updatedBy: String,
 }, { timestamps: true });
 
 const grant = new Schema({ organizationId: { type: String, required: true }, principalId: { type: String, required: true }, principalKind: { type: String, enum: ['crm', 'main'], required: true }, permissions: [{ type: String, enum: RECORDING_PERMISSIONS }], updatedBy: String }, { timestamps: true });

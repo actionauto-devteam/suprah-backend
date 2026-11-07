@@ -35,6 +35,8 @@ export interface ICrmAutomationRun extends Document {
   leaseUntil: Date | null;
   sentAnyMessage: boolean;
   stopAfterMessage: boolean;
+  vehicle: { id: string; label: string; price: number | null; link: string } | null;
+  retrySteps: string[];
   log: CrmAutomationRunLog[];
   createdAt: Date;
   updatedAt: Date;
@@ -82,6 +84,8 @@ const CrmAutomationRunSchema = new Schema<ICrmAutomationRun>(
     leaseUntil: { type: Date, default: null },
     sentAnyMessage: { type: Boolean, default: false },
     stopAfterMessage: { type: Boolean, default: false },
+    vehicle: { type: Schema.Types.Mixed, default: null },
+    retrySteps: { type: [String], default: [] },
     log: { type: [LogSchema], default: [] },
   },
   { timestamps: true },

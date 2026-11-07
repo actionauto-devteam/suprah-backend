@@ -21,6 +21,7 @@ export interface CrmAutomationTrigger {
   time: string | null;
   filters: CrmAutomationFilter[];
   repeat: { mode: 'every_time' | 'once_per_days'; days: number | null; per: string[] };
+  quietFor?: { amount: number; unit: 'hours' | 'days' } | null;
   sendingHours: 'sending_hours' | 'any_time';
   stopOnReply: boolean;
   cancelFirstOnReply: boolean;
@@ -89,6 +90,10 @@ const TriggerSchema = new Schema<CrmAutomationTrigger>(
       mode: { type: String, enum: ['every_time', 'once_per_days'], default: 'once_per_days' },
       days: { type: Number, default: 365 },
       per: { type: [String], default: ['customer_phone'] },
+    },
+    quietFor: {
+      type: new Schema({ amount: { type: Number, required: true }, unit: { type: String, enum: ['hours', 'days'], required: true } }, { _id: false }),
+      default: null,
     },
     sendingHours: { type: String, enum: ['sending_hours', 'any_time'], default: 'sending_hours' },
     stopOnReply: { type: Boolean, default: true },

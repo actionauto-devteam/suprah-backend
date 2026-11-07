@@ -17,6 +17,7 @@ import {
 } from '../services/crmAutomation.service';
 import { createDataSync, deleteDataSync, getDataSync, listDataSyncs, updateDataSync } from '../services/crmDataSync.service';
 import { countAutomationExport, exportAutomationActivity, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, type MonitorQuery } from '../services/crmAutomationMonitor.service';
+import { retryRun } from '../services/crmAutomationEngine.service';
 
 function viewer(req: Request) {
   const orgId = String((req as any).orgId || '');
@@ -149,6 +150,11 @@ export const getActivityExport = asyncHandler(async (req: Request, res: Response
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
   res.send(csv);
+});
+
+export const postRunRetry = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId, actor } = editor(req);
+  res.json(new ApiResponse(200, await retryRun(orgId, String(req.params.runId), actor.name), 'Retry started'));
 });
 
 export const removeAutomation = asyncHandler(async (req: Request, res: Response) => {

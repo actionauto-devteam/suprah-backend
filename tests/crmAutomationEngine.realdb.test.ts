@@ -156,8 +156,10 @@ describe('Real-DB proof: automation engine (local dev MongoDB only)', () => {
     const onlyWait = await automation({ steps: [{ id: 'w', type: 'wait', config: { amount: 1, unit: 'days' } }] });
     await expect(setAutomationStatus(org, actor, String(onlyWait._id), 'test')).rejects.toThrow(/at least one action/);
     const ai = await automation({ steps: [{ id: 'a', type: 'send_ai_follow_up', config: { instructions: '', timing: { when: 'on' } } }] });
-    await expect(setAutomationStatus(org, actor, String(ai._id), 'active')).rejects.toThrow(/not live yet: Send AI Follow-up Message/);
+    await expect(setAutomationStatus(org, actor, String(ai._id), 'active')).resolves.toMatchObject({ status: 'active' });
     await expect(setAutomationStatus(org, actor, String(ai._id), 'inactive')).resolves.toMatchObject({ status: 'inactive' });
+    const dated = await automation({ trigger: { source: 'on_a_date', event: null, date: null, time: null } });
+    await expect(setAutomationStatus(org, actor, String(dated._id), 'test')).rejects.toThrow(/Pick the date for this automation/);
     const ready = await automation();
     const on = await setAutomationStatus(org, actor, String(ready._id), 'active');
     expect(on.status).toBe('active');

@@ -75,7 +75,7 @@ describe('Call recordings on local MongoDB', () => {
     const linked = await User.create({ organizationId: org, email: boss.email, name: 'Linked Admin', role: 'admin', password: 'Password123!', isActive: true });
     try {
       let response = await request(app).get('/settings'); expect(response.status).toBe(200);
-      expect(response.body.data.settings).toEqual({ announcementText: DEFAULT_RECORDING_ANNOUNCEMENT, retentionMonths: 6, autoRecord: true });
+      expect(response.body.data.settings).toEqual({ announcementText: DEFAULT_RECORDING_ANNOUNCEMENT, retentionMonths: 6, autoRecord: true, voicemailGreeting: '', voicemailGreetingDefault: expect.stringMatching(/^Thank you for calling .+\. All of our team members are busy right now\. Please leave a message after the tone/) });
       expect(response.body.data.permissions).toEqual(['view', 'download', 'share', 'review', 'delete']);
       expect(response.body.data.staff.find((u: any) => u.id === String(rep._id))).toMatchObject({ kind: 'crm', role: 'employee', department: 'Sales' });
       expect(response.body.data.staff.find((u: any) => u.id === String(outsider._id))).toMatchObject({ kind: 'main', role: 'employee', department: 'QA' });
@@ -89,6 +89,9 @@ describe('Call recordings on local MongoDB', () => {
   it('saves the announcement and how long recordings are kept; only admins, with plain-language limits', async () => {
     expect((await request(app).put('/settings').send({ announcementText: '  This call is recorded for training.  ', retentionMonths: 12 })).status).toBe(200);
     expect(await CallRecordingSettings.findOne({ organizationId: org }).lean()).toMatchObject({ announcementText: 'This call is recorded for training.', retentionMonths: 12 });
+    expect((await request(app).put('/settings').send({ announcementText: 'This call is recorded for training.', retentionMonths: 12, voicemailGreeting: '  Please leave your name and number after the tone.  ' })).status).toBe(200);
+    expect(await CallRecordingSettings.findOne({ organizationId: org }).lean()).toMatchObject({ voicemailGreeting: 'Please leave your name and number after the tone.' });
+    expect((await request(app).put('/settings').send({ announcementText: 'This call is recorded for training.', retentionMonths: 12, voicemailGreeting: 'x'.repeat(401) })).body.message).toMatch(/voicemail greeting under 400 characters/);
     expect((await request(app).put('/settings').set('x-user', String(rep._id)).send({ announcementText: 'x', retentionMonths: 6 })).status).toBe(403);
     const blank = await request(app).put('/settings').send({ announcementText: '   ', retentionMonths: 6 }); expect(blank.status).toBe(400); expect(blank.body.message).toContain('announcement');
     expect((await request(app).put('/settings').send({ announcementText: 'ok', retentionMonths: 0 })).status).toBe(400);
@@ -255,7 +258,10 @@ describe('Call recordings on local MongoDB', () => {
     const saved: any = await CallRecording.findById(started._id);
     expect(saved.state).toBe('ready'); expect(saved.files).toHaveLength(1);
     expect(provider.hangupCall).toHaveBeenCalledWith(c.providerCallControlId);
-    expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(rep2._id))).status).toBe(200);
+    const opened = await request(app).get(`/recordings/${started._id}`).set('x-user', String(rep2._id));
+    expect(opened.status).toBe(200);
+    expect(opened.body.data.audits.find((audit: any) => audit.action === 'recording.viewed')).toMatchObject({ actorId: String(rep2._id), actorName: 'Second Rep' });
+    expect(opened.body.data.audits.find((audit: any) => audit.action === 'recording.start-requested' || !audit.actorId)?.actorName ?? '').toBe('');
     expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(rep._id))).status).toBe(403);
     expect((await request(app).get(`/recordings/${started._id}`).set('x-user', String(outsider._id))).status).toBe(403);
     expect((await request(app).get(`/recordings/${started._id}`)).status).toBe(200);

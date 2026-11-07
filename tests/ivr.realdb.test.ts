@@ -29,7 +29,7 @@ import CustomerIdentityLock from '../src/models/CustomerIdentityLock.model';
 import CrmLeadGroup from '../src/models/CrmLeadGroup.model';
 import CallRoutingConfig, { IvrInboundClaim, RoutingConfig } from '../src/models/CallRoutingConfig.model';
 import { CallLog, Conversation, CommunicationMessage, TelephonyCredential } from '../src/models/communication.model';
-import { CallRecording } from '../src/models/CallRecording.model';
+import { CallRecording, CallRecordingSettings } from '../src/models/CallRecording.model';
 import { getInboundRoutingConfig, routingGroupRecipients, validateRoutingGroups } from '../src/services/callRoutingConfig.service';
 import { initializeIvr, handleIvrGather, handleIvrCustomerAnswered, expireIvr, recoverIvrCalls, clearIvrTimer } from '../src/services/ivr.service';
 import * as comm from '../src/services/communication.service';
@@ -280,6 +280,23 @@ describe('Stage 41B local MongoDB verification', () => {
     await comm.claimInboundCall({ callId: String(ringing._id), orgId, user: { userId: crmIds[1] } });
     await comm.handleCallAnswered({ call_session_id: ringing.providerCallSessionId, call_control_id: ringing.providerCallControlId, client_state: null });
     expect((await CallLog.findById(ringing._id)).status).toBe('answering');
+  });
+  it('a voicemail greeting saved in the recording settings replaces the standard one, and a Spanish menu choice records the voicemail in Spanish', async () => {
+    await CallRecordingSettings.updateOne({ organizationId: orgId }, { $set: { voicemailGreeting: 'Gracias por llamar. Please leave a message after the tone.' } }, { upsert: true });
+    try {
+      const call = await select('1');
+      await CallLog.updateOne({ _id: call._id }, { $set: { 'recordingCorrelation.connectionId': 'voice-app', 'recordingCorrelation.customerLegId': 'customer-leg', 'routing.selectedLabel': 'Spanish' } });
+      for (let i = 0; i < 3 && (await CallLog.findById(call._id)).status !== 'missed'; i++) {
+        await CallLog.updateOne({ _id: call._id }, { $set: { 'routing.deadline': new Date(Date.now() - 1000) } });
+        await comm.recoverPendingIvrCalls(orgId);
+      }
+      const greeting: any = (telnyx.speakIvr as jest.Mock).mock.calls.find(([id, , state]) => id === call.providerCallControlId && state?.kind === 'voicemail-greeting');
+      expect(greeting?.[1]).toBe('Gracias por llamar. Please leave a message after the tone.');
+      await comm.handleSpeakEnded({ call_control_id: call.providerCallControlId, client_state: Buffer.from(JSON.stringify(greeting[2])).toString('base64'), status: 'completed' });
+      expect(telnyx.recordingCommand).toHaveBeenCalledWith(call.providerCallControlId, 'start', expect.stringMatching(/^voicemail-start-/), expect.objectContaining({ play_beep: true, transcription_language: 'es-US' }));
+    } finally {
+      await CallRecordingSettings.deleteOne({ organizationId: orgId });
+    }
   });
   it('when nobody answers, the operator invites a voicemail, then records up to 2 minutes after a beep for the people the call rang', async () => {
     const call = await select('1');
