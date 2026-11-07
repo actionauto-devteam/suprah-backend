@@ -5,7 +5,7 @@ import { normalizeLocationKey } from '../utils/locationKey';
 import { moneyFigures, sameMoneyFigures } from '../utils/aiMoneyAmounts';
 import logger from '../utils/logger';
 
-export type KnowledgeReplyChannel = 'sms' | 'webchat';
+export type KnowledgeReplyChannel = 'sms' | 'webchat' | 'email';
 
 export interface KnowledgeAnswer {
   id: string;

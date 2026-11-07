@@ -142,9 +142,15 @@ async function buildDraft(input: {
   if (channel === 'email') {
     const price = await resolveCurrentVehicleAndPrice(lead).catch(() => null);
     prices = [price?.price, price?.previousPrice].filter((value): value is number => typeof value === 'number');
+    const candidates = await loadReplyKnowledge({ organizationId, channel, location: lead.location, transcript });
+    const knowledge = candidates.length
+      ? await selectRelevantKnowledge({ candidates, agentName, dealerName, transcript, channel, phone: lead.phone })
+      : [];
+    amountAllowance = buildReplyAllowance({ moneyNotes: [], approvedAnswers: knowledge.map((entry) => entry.answer) });
+    const approvedAmounts = amountAllowance?.amounts;
     generate = (retryNote) => generateAlexEmailReply({
       agentName, dealerName, customerFirstName, leadVehicleInterest, transcript, isFirstReply: false,
-      confirmedPrice: price?.price, confirmedPreviousPrice: price?.previousPrice, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
+      confirmedPrice: price?.price, confirmedPreviousPrice: price?.previousPrice, approvedAmounts, knowledge, phone: lead.phone, vehicleContextNote, draftFor, retryNote,
     });
   } else {
     let coachingNotes: string[] = [];
@@ -180,7 +186,7 @@ async function buildDraft(input: {
     }
     const text = generation.text;
     const note = generation.handoffReason ? `${agentName} suggests a team member follows up: ${generation.handoffReason}` : null;
-    const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices) : validateOutboundMessage(text, amountAllowance);
+    const deterministic = channel === 'email' ? validateOutboundEmailMessage(text, prices, amountAllowance) : validateOutboundMessage(text, amountAllowance);
     if (!deterministic.ok) {
       logger.info({ organizationId, leadId: String(lead._id), channel, attempt, reasons: deterministic.reasons }, '[AiAgentDraft] Draft flagged by the safety rules');
       const words = safetyReasonWords(deterministic.reasons);
@@ -191,7 +197,7 @@ async function buildDraft(input: {
       return { draft: text, note, safetyWarning: words ? `Check this before sending. It mentions ${words}.` : SAFETY_WARNINGS.flagged };
     }
     const verdict = channel === 'email'
-      ? await classifyAlexEmailReplySafety(text, lead.phone)
+      ? await classifyAlexEmailReplySafety(text, lead.phone, amountAllowance)
       : await classifyAlexReplySafety(text, lead.phone, undefined, amountAllowance);
     if (verdict === 'SAFE') return { draft: text, note, safetyWarning: null };
     logger.info({ organizationId, leadId: String(lead._id), channel, attempt, verdict }, '[AiAgentDraft] Draft flagged by the safety check');

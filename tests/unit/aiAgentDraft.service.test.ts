@@ -13,6 +13,8 @@ const mockLoadItems = jest.fn();
 const mockPinned = jest.fn();
 const mockHasKey = jest.fn();
 const mockAssertOpen = jest.fn();
+const mockLoadKnowledge = jest.fn();
+const mockSelectKnowledge = jest.fn();
 
 const chain = (value: unknown) => ({ select: () => ({ lean: () => Promise.resolve(value) }) });
 
@@ -26,7 +28,9 @@ jest.mock('../../src/services/aiAgent.service', () => ({
   classifyAlexReplySafety: (...args: unknown[]) => mockClassify(...args),
   classifyAlexEmailReplySafety: (...args: unknown[]) => mockClassifyEmail(...args),
   selectRelevantAiCoaching: (...args: unknown[]) => mockSelectCoaching(...args),
+  selectRelevantKnowledge: (...args: unknown[]) => mockSelectKnowledge(...args),
 }));
+jest.mock('../../src/services/aiKnowledgeRuntime.service', () => ({ loadReplyKnowledge: (...args: unknown[]) => mockLoadKnowledge(...args) }));
 jest.mock('../../src/services/aiAgentCoaching.service', () => ({ getRelevantAiCoaching: (...args: unknown[]) => mockGetCoaching(...args) }));
 jest.mock('../../src/services/aiReplyContext.service', () => ({ resolveCurrentVehicleAndPrice: (...args: unknown[]) => mockResolvePrice(...args) }));
 jest.mock('../../src/services/aiOperatingMode.service', () => ({ recordAiUsage: (...args: unknown[]) => mockRecordUsage(...args) }));
@@ -97,6 +101,8 @@ describe('staff AI draft service', () => {
     mockClassifyEmail.mockResolvedValue('SAFE');
     mockResolvePrice.mockResolvedValue(null);
     mockRecordUsage.mockResolvedValue(undefined);
+    mockLoadKnowledge.mockResolvedValue([]);
+    mockSelectKnowledge.mockResolvedValue([]);
   });
 
   it('returns a draft for review and records only the usage counter', async () => {
@@ -114,6 +120,20 @@ describe('staff AI draft service', () => {
     expect(mockGenerateEmailReply).toHaveBeenCalledWith(expect.objectContaining({ confirmedPrice: 23995, draftFor: { name: 'Erin' } }));
     expect(mockClassifyEmail).toHaveBeenCalled();
     expect(mockGenerateReply).not.toHaveBeenCalled();
+  });
+
+  it('gives the email draft the approved Knowledge Base answers and accepts their exact amount', async () => {
+    setLead({ ...smsLead, channel: 'web', location: 'Orem' });
+    const answer = { id: 'kb-2', kind: 'faq', topic: 'general', title: 'Doc fee', answer: 'Our documentation fee is $299.' };
+    mockLoadKnowledge.mockResolvedValue([answer]);
+    mockSelectKnowledge.mockResolvedValue([answer]);
+    mockGenerateEmailReply.mockResolvedValue({ text: 'Hi Pat, our documentation fee is $299, and I will confirm everything else with the team.' });
+    const result = await request({ channel: 'email' });
+    expect(mockLoadKnowledge).toHaveBeenCalledWith(expect.objectContaining({ organizationId: ORG, channel: 'email', location: 'Orem' }));
+    expect(mockSelectKnowledge).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', candidates: [answer] }));
+    expect(mockGenerateEmailReply).toHaveBeenCalledWith(expect.objectContaining({ knowledge: [answer], approvedAmounts: ['$299'] }));
+    expect(mockClassifyEmail).toHaveBeenCalledWith(expect.any(String), smsLead.phone, expect.objectContaining({ keys: ['usd:299'] }));
+    expect(result).toEqual(expect.objectContaining({ draft: 'Hi Pat, our documentation fee is $299, and I will confirm everything else with the team.', safetyWarning: null }));
   });
 
   it.each([undefined, '', '   ', '123'])('refuses to draft when the AI Agent name is %p', async (aiAgentName) => {
