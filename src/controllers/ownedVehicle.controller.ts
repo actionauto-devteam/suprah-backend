@@ -6,12 +6,13 @@ import mongoose from "mongoose";
 import axios from "axios";
 import Vehicle from "../models/Vehicle.model";
 import storageService from "../services/storage.service";
+import { SUPPORT_EMAIL } from "../utils/userMessages";
 
 export const addOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const {
@@ -26,12 +27,12 @@ export const addOwnedVehicle = asyncHandler(
     } = req.body;
 
     if (!vin || !make || !model || !year) {
-      throw new ApiError(400, "VIN, Make, Model, and Year are required");
+      throw new ApiError(400, "Enter the car's VIN, make, model and year, then save again.");
     }
 
     const existingVehicle = await OwnedVehicle.findOne({ userId, vin });
     if (existingVehicle) {
-      throw new ApiError(400, "You have already registered this vehicle");
+      throw new ApiError(400, "This car is already in My Garage.");
     }
 
     const vehicle = await OwnedVehicle.create({
@@ -61,7 +62,7 @@ export const getOwnedVehicles = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const vehicles = await OwnedVehicle.find({ userId, status: "ACTIVE" }).sort(
@@ -83,24 +84,24 @@ export const updateOwnedVehicleMileage = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const { id } = req.params;
     const { currentMileage } = req.body;
 
     if (currentMileage === undefined || typeof currentMileage !== "number") {
-      throw new ApiError(400, "Valid currentMileage is required");
+      throw new ApiError(400, "Enter the car's current mileage as a number, then save again.");
     }
 
     const vehicle = await OwnedVehicle.findOne({ _id: id, userId });
 
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, "We couldn't find this car in My Garage. It may have been removed. Refresh the page.");
     }
 
     if (currentMileage < vehicle.currentMileage) {
-      throw new ApiError(400, "Mileage cannot be decreased");
+      throw new ApiError(400, "The new mileage can't be lower than the last one you saved. Check the odometer and try again.");
     }
 
     vehicle.currentMileage = currentMileage;
@@ -119,12 +120,12 @@ export const updateOwnedVehicleMileage = asyncHandler(
 export const decodeVin = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user?._id;
   if (!userId) {
-    throw new ApiError(401, "Please authenticate");
+    throw new ApiError(401, "Your session ended. Sign in again to continue.");
   }
 
   const vin = (req.params.vin || "").toUpperCase().trim();
   if (!vin || vin.length !== 17) {
-    throw new ApiError(400, "A valid 17-character VIN is required");
+    throw new ApiError(400, "A VIN has 17 letters and numbers. Check it and try again.");
   }
 
   try {
@@ -137,7 +138,7 @@ export const decodeVin = asyncHandler(async (req: Request, res: Response) => {
     const result = response.data?.Results?.[0];
 
     if (!result || !result.Make) {
-      throw new ApiError(404, "Could not decode this VIN");
+      throw new ApiError(404, "We couldn't find car details for this VIN. Check it, or enter the make, model and year yourself.");
     }
 
     res.status(200).json({
@@ -153,8 +154,10 @@ export const decodeVin = asyncHandler(async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
+    // "No details for this VIN" is the customer's answer, not a lookup failure.
+    if (error instanceof ApiError) throw error;
     console.error("VIN Decode Error:", error);
-    throw new ApiError(500, "Failed to connect to VIN decoding service");
+    throw new ApiError(503, `We couldn't look up this VIN right now. Try again in a minute, or enter the make, model and year yourself. If it keeps happening, contact Suprah AI support at ${SUPPORT_EMAIL}.`);
   }
 });
 
@@ -163,7 +166,7 @@ export const updateOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const { id } = req.params;
@@ -171,7 +174,7 @@ export const updateOwnedVehicle = asyncHandler(
 
     const vehicle = await OwnedVehicle.findOne({ _id: id, userId });
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, "We couldn't find this car in My Garage. It may have been removed. Refresh the page.");
     }
 
     if (color !== undefined) vehicle.color = color;
@@ -179,7 +182,7 @@ export const updateOwnedVehicle = asyncHandler(
     if (trim !== undefined) vehicle.trim = trim;
     if (currentMileage !== undefined) {
       if (currentMileage < vehicle.currentMileage) {
-        throw new ApiError(400, "Mileage cannot be decreased");
+        throw new ApiError(400, "The new mileage can't be lower than the last one you saved. Check the odometer and try again.");
       }
       vehicle.currentMileage = currentMileage;
     }
@@ -202,18 +205,18 @@ export const uploadOwnedVehicleImage = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const { id } = req.params;
     const file = req.file;
     if (!file) {
-      throw new ApiError(400, "An image file is required");
+      throw new ApiError(400, "Choose a photo of your car to upload.");
     }
 
     const vehicle = await OwnedVehicle.findOne({ _id: id, userId });
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, "We couldn't find this car in My Garage. It may have been removed. Refresh the page.");
     }
 
     const previousImage = vehicle.images?.[0];
@@ -241,19 +244,19 @@ export const deleteOwnedVehicle = asyncHandler(
   async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) {
-      throw new ApiError(401, "Please authenticate");
+      throw new ApiError(401, "Your session ended. Sign in again to continue.");
     }
 
     const { id } = req.params;
 
     const vehicle = await OwnedVehicle.findOneAndDelete({ _id: id, userId });
     if (!vehicle) {
-      throw new ApiError(404, "Vehicle not found");
+      throw new ApiError(404, "We couldn't find this car in My Garage. It may have been removed. Refresh the page.");
     }
 
     res.status(200).json({
       success: true,
-      message: "Vehicle deleted successfully",
+      message: "Car removed from My Garage.",
       data: {},
     });
   },

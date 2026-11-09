@@ -39,7 +39,7 @@ const normalizeVehicle = (v: any) => ({
 
 export const getSavedVehicles = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
-    if (!userId) throw new ApiError(401, 'Please authenticate');
+    if (!userId) throw new ApiError(401, 'Your session ended. Sign in again to continue.');
 
     const saved = await SavedVehicle.find({ userId }).sort({ savedAt: -1 });
     const vehicleIds = saved.map(s => s.vehicleId);
@@ -59,13 +59,13 @@ export const getSavedVehicles = asyncHandler(async (req: Request, res: Response)
 
 export const saveVehicle = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
-    if (!userId) throw new ApiError(401, 'Please authenticate');
+    if (!userId) throw new ApiError(401, 'Your session ended. Sign in again to continue.');
 
     const { vehicleId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(vehicleId)) throw new ApiError(400, 'Invalid vehicle ID');
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) throw new ApiError(400, "This car link isn't valid. Refresh the page and try again.");
 
     const vehicle = await Vehicle.findById(vehicleId);
-    if (!vehicle) throw new ApiError(404, 'Vehicle not found');
+    if (!vehicle) throw new ApiError(404, "This car is no longer available, so it can't be added to your Wishlist.");
 
     await SavedVehicle.findOneAndUpdate(
         { userId, vehicleId: new mongoose.Types.ObjectId(vehicleId) },
@@ -73,17 +73,17 @@ export const saveVehicle = asyncHandler(async (req: Request, res: Response) => {
         { upsert: true, new: true }
     );
 
-    res.status(201).json({ success: true, message: 'Vehicle saved' });
+    res.status(201).json({ success: true, message: 'Added to your Wishlist.' });
 });
 
 export const removeSavedVehicle = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
-    if (!userId) throw new ApiError(401, 'Please authenticate');
+    if (!userId) throw new ApiError(401, 'Your session ended. Sign in again to continue.');
 
     const { vehicleId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(vehicleId)) throw new ApiError(400, 'Invalid vehicle ID');
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) throw new ApiError(400, "This car link isn't valid. Refresh the page and try again.");
 
     await SavedVehicle.findOneAndDelete({ userId, vehicleId: new mongoose.Types.ObjectId(vehicleId) });
 
-    res.status(200).json({ success: true, message: 'Vehicle removed from saved' });
+    res.status(200).json({ success: true, message: 'Removed from your Wishlist.' });
 });
