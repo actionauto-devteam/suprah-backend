@@ -43,7 +43,8 @@ export async function automationForMissedCallText(call: any): Promise<string | n
   if (process.env.CRM_AUTOMATIONS_ENABLED !== 'true') return null;
   const orgId = String(call?.orgId || '');
   if (!orgId) return null;
-  const automations: any[] = await CrmAutomation.find({ organizationId: orgId, status: 'active', 'trigger.event': { $in: MISSED_CALL_TEXT_EVENTS } }).lean();
+  const events = call?.abandonedAt ? [...MISSED_CALL_TEXT_EVENTS, 'call_abandoned'] : MISSED_CALL_TEXT_EVENTS;
+  const automations: any[] = await CrmAutomation.find({ organizationId: orgId, status: 'active', 'trigger.event': { $in: events } }).lean();
   const texting = automations.filter((automation) => stepsSendText(automation.steps));
   if (!texting.length) return null;
   const { decideRun, locationKeyMap } = await import('./crmAutomationEngine.service');

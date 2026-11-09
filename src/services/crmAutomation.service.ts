@@ -52,6 +52,7 @@ export const AUTOMATION_SOURCES: CatalogSource[] = [
         label: 'Calls',
         events: [
           { key: 'call_missed', label: 'Missed call' },
+          { key: 'call_abandoned', label: 'Caller hung up before anyone answered' },
           { key: 'call_ended', label: 'Call ended' },
           { key: 'call_any', label: 'Any call (answered or missed)' },
           { key: 'voicemail_received', label: 'Voicemail received' },
@@ -235,7 +236,7 @@ export function canEditAutomations(role: unknown): boolean {
 
 export const ENGINE_EVENTS = new Set([
   'lead_created', 'website_form_lead', 'adf_lead_received', 'email_lead_received', 'lead_status_changed', 'lead_assigned', 'ai_handoff', 'lead_went_quiet',
-  'text_received', 'website_chat_started', 'call_missed', 'call_ended', 'call_any', 'voicemail_received',
+  'text_received', 'website_chat_started', 'call_missed', 'call_abandoned', 'call_ended', 'call_any', 'voicemail_received',
   'appointment_booked', 'appointment_confirmed', 'appointment_rescheduled', 'appointment_cancelled', 'appointment_no_show', 'appointment_completed',
   'vehicle_added', 'vehicle_price_dropped',
 ]);

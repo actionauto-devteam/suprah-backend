@@ -15,7 +15,7 @@ export interface ICrmAutomationRun extends Document {
   organizationId: string;
   automationId: mongoose.Types.ObjectId;
   automationName: string;
-  mode: 'live' | 'test';
+  mode: 'live' | 'test' | 'podium';
   event: string;
   eventKey: string;
   triggerAt: Date;
@@ -58,7 +58,7 @@ const CrmAutomationRunSchema = new Schema<ICrmAutomationRun>(
     organizationId: { type: String, required: true },
     automationId: { type: Schema.Types.ObjectId, ref: 'CrmAutomation', required: true },
     automationName: { type: String, required: true },
-    mode: { type: String, enum: ['live', 'test'], required: true },
+    mode: { type: String, enum: ['live', 'test', 'podium'], required: true },
     event: { type: String, required: true },
     eventKey: { type: String, required: true },
     triggerAt: { type: Date, required: true },

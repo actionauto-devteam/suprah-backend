@@ -44,6 +44,18 @@ describe('Contact identity normalization and resolution', () => {
     expect(evaluateCustomerIdentity({}, [makeCustomer({ firstName: 'Same', lastName: 'Name' })]).status).toBe('unresolved');
     expect(contactIdentity({ phone: '' }).normalizedPhone).toBeNull();
   });
+  test('a new phone links only when the email and the first and last name all match, and only when asked', () => {
+    const maria = makeCustomer({ firstName: 'María', lastName: 'López', email: 'maria@example.com', phone: '8015550140' });
+    const input = { firstName: 'MARIA', lastName: ' lopez ', email: 'Maria@Example.com', phone: '8015550141' };
+    expect(evaluateCustomerIdentity(input, [maria]).reason).toBe('email_phone_disagree');
+    expect(evaluateCustomerIdentity(input, [maria], { nameLink: true })).toMatchObject({ status: 'linked', reason: 'email_and_name_match', customerId: String(maria._id) });
+    expect(evaluateCustomerIdentity({ ...input, firstName: 'Jose' }, [maria], { nameLink: true }).status).toBe('conflict');
+    expect(evaluateCustomerIdentity({ ...input, lastName: '' }, [maria], { nameLink: true }).status).toBe('conflict');
+    expect(evaluateCustomerIdentity({ ...input, email: 'other@example.com' }, [maria], { nameLink: true }).status).toBe('unresolved');
+    const unknown = makeCustomer({ firstName: 'Unknown', lastName: 'Lopez', email: 'maria@example.com', phone: '8015550140' });
+    expect(evaluateCustomerIdentity({ ...input, firstName: 'Unknown' }, [unknown], { nameLink: true }).status).toBe('conflict');
+    expect(evaluateCustomerIdentity({ ...input, phone: '8015550140', email: 'other@example.com' }, [maria], { nameLink: true }).status).toBe('conflict');
+  });
   test('customer lookup always scopes by organizationId, never an unscoped fallback', async () => {
     const customer = makeCustomer({ phone: '8015550123' });
     const cursor = { async *[Symbol.asyncIterator]() { yield customer; }, close: jest.fn() };

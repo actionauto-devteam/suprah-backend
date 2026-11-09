@@ -124,6 +124,31 @@ test('email/phone disagreements and inactive Customers remain explicit conflicts
   expect(inactive.customerLink?.reason).toBe('inactive_customer');
 });
 
+test('a returning customer with a new phone links when the email and the full name match, and the new phone becomes the 2nd phone', async () => {
+  const maria = await customer({ firstName: 'Maria', lastName: 'Lopez', email: 'maria@example.com', phone: '8015550140' });
+  const first = await lead({ firstName: 'MARÍA', lastName: 'lopez', email: 'Maria@example.com', phone: '(801) 555-0141' });
+  expect(first.customerLink).toMatchObject({ status: 'linked', reason: 'email_and_name_match' });
+  expect(String(first.customerId)).toBe(String(maria._id));
+  let saved: any = await Customer.findById(maria._id).lean();
+  expect(saved).toMatchObject({ phone: '8015550140', alternatePhone: '(801) 555-0141', normalizedAlternatePhone: '+18015550141' });
+  expect(saved.transactions).toHaveLength(1);
+  const byNewPhone = await lead({ phone: '8015550141' });
+  expect(String(byNewPhone.customerId)).toBe(String(maria._id));
+  const third = await lead({ firstName: 'Maria', lastName: 'Lopez', email: 'maria@example.com', phone: '8015550142' });
+  expect(third.customerLink).toMatchObject({ status: 'linked', reason: 'email_and_name_match' });
+  saved = await Customer.findById(maria._id).lean();
+  expect(saved.alternatePhone).toBe('(801) 555-0141');
+  const family = await lead({ firstName: 'Jose', lastName: 'Lopez', email: 'maria@example.com', phone: '8015550143' });
+  expect(family.customerLink).toMatchObject({ status: 'conflict', reason: 'email_phone_disagree' });
+  expect(family.customerId).toBeUndefined();
+  expect(await Customer.countDocuments({ organizationId })).toBe(1);
+  const old = await historical({ firstName: 'Maria', lastName: 'Lopez', email: 'maria@example.com', phone: '8015550144' });
+  const report = await reconcileHistoricalLeads(organizationId, { apply: true });
+  expect(report.results.find(result => result.leadId === String(old))).toMatchObject({ status: 'conflict', reason: 'email_phone_disagree' });
+  expect((await Lead.findById(old))?.customerId).toBeUndefined();
+  expect((await Lead.findById(third._id))?.customerLink).toMatchObject({ status: 'linked', reason: 'email_and_name_match' });
+});
+
 test('contact edits never silently reassign the existing relationship or history', async () => {
   const item = await lead({ email: 'old@example.com', phone: '8015550123', notes: [{ text: 'Preserved note' }], location: 'Orem', status: 'Contacted' });
   const id = item.customerId;

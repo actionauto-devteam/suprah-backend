@@ -18,6 +18,7 @@ import {
 import { createDataSync, deleteDataSync, getDataSync, listDataSyncs, updateDataSync } from '../services/crmDataSync.service';
 import { countAutomationExport, exportAutomationActivity, getActivitySummary, getReengagementSummary, listAutomationActivity, listAutomationLogs, type MonitorQuery } from '../services/crmAutomationMonitor.service';
 import { retryRun } from '../services/crmAutomationEngine.service';
+import { importPodiumRows } from '../services/crmAutomationImport.service';
 
 function viewer(req: Request) {
   const orgId = String((req as any).orgId || '');
@@ -155,6 +156,11 @@ export const getActivityExport = asyncHandler(async (req: Request, res: Response
 export const postRunRetry = asyncHandler(async (req: Request, res: Response) => {
   const { orgId, actor } = editor(req);
   res.json(new ApiResponse(200, await retryRun(orgId, String(req.params.runId), actor.name), 'Retry started'));
+});
+
+export const postPodiumImport = asyncHandler(async (req: Request, res: Response) => {
+  const { orgId } = editor(req);
+  res.json(new ApiResponse(200, await importPodiumRows(orgId, req.body), 'Podium rows imported'));
 });
 
 export const removeAutomation = asyncHandler(async (req: Request, res: Response) => {

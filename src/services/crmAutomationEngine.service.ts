@@ -172,12 +172,13 @@ async function collectEvents(orgId: string, event: string, since: Date, now: Dat
       .lean();
     return messages.map((message: any) => ({ eventKey: `sms:${message._id}`, triggerAt: new Date(message.createdAt), leadId: message.leadId ? String(message.leadId) : null, phone: String(message.from || ''), email: '', name: '' }));
   }
-  if (event === 'call_missed' || event === 'call_ended' || event === 'call_any') {
+  if (event === 'call_missed' || event === 'call_abandoned' || event === 'call_ended' || event === 'call_any') {
     const calls = await CallLog.find({
       orgId: { $in: orgIds },
       createdAt: { $gt: new Date(since.getTime() - RECENT_CALL_WINDOW_MS) },
       direction: 'inbound',
-      status: event === 'call_any' ? { $in: ['missed', 'completed'] } : event === 'call_missed' ? 'missed' : 'completed',
+      status: event === 'call_any' ? { $in: ['missed', 'completed'] } : event === 'call_ended' ? 'completed' : 'missed',
+      ...(event === 'call_abandoned' ? { abandonedAt: { $ne: null } } : {}),
       endedAt: { $gt: since, $lte: now },
     }).select('from to customerName leadId endedAt').limit(RECORD_LIMIT).lean();
     const dialed = await dialedNumberLocations(orgId, calls.map((call: any) => String(call.to || '')));
@@ -840,6 +841,7 @@ export async function retryRun(orgId: string, runId: string, actorName: string) 
   if (!mongoose.isValidObjectId(runId)) throw new ApiError(404, 'Automation event not found');
   const run = await CrmAutomationRun.findOne({ _id: runId, organizationId: orgId });
   if (!run) throw new ApiError(404, 'Automation event not found');
+  if (run.mode === 'podium') throw new ApiError(400, 'Events imported from Podium are only a record and cannot be retried');
   if (run.status !== 'failed') throw new ApiError(400, 'Only failed events can be retried');
   const automation: any = await CrmAutomation.findOne({ _id: run.automationId, organizationId: orgId }).select('status').lean();
   const on = automation && (run.mode === 'test' ? automation.status === 'test' : automation.status === 'active');

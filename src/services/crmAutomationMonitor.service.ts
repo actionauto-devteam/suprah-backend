@@ -113,7 +113,7 @@ function escapeRegex(value: string): string {
 }
 
 async function monitorMatch(orgId: string, query: MonitorQuery) {
-  const mode = query.mode === 'test' ? 'test' : 'live';
+  const mode = query.mode === 'test' || query.mode === 'podium' ? query.mode : 'live';
   const range = (MONITOR_RANGES as readonly string[]).includes(String(query.range)) ? (query.range as MonitorRange) : 'month_to_date';
   if (query.status && !(MONITOR_STATUSES as readonly string[]).includes(query.status)) bad('That status is not valid');
   const match: Record<string, unknown> = { organizationId: orgId, mode };
@@ -148,6 +148,7 @@ async function monitorMatch(orgId: string, query: MonitorQuery) {
 function actionLabel(type: string | undefined): string {
   if (!type) return '';
   if (type === 'retry') return 'Retry';
+  if (type === 'podium') return 'From Podium';
   return AUTOMATION_ACTIONS.find((action) => action.key === type)?.label || type;
 }
 
@@ -174,10 +175,10 @@ function serializeRun(run: any) {
     event: run.event,
     status: run.status,
     display: monitorStatus(run),
-    step: actionLabel(stepType),
+    step: run.mode === 'podium' ? 'From Podium' : actionLabel(stepType),
     channel: channelOf(log),
     reason: run.reason,
-    retryable: run.status === 'failed' && log.filter((entry: any) => entry.type === 'retry').length < 3,
+    retryable: run.mode !== 'podium' && run.status === 'failed' && log.filter((entry: any) => entry.type === 'retry').length < 3,
     contact: run.contact,
     triggerAt: run.triggerAt,
     nextRunAt: run.nextRunAt,
@@ -397,6 +398,6 @@ export async function exportAutomationActivity(orgId: string, query: MonitorQuer
     for (const item of data.items) rows.push([item.contact?.name, item.contact?.phone, item.contact?.email, item.automationName, item.step, STATUS_LABELS[item.display], item.reason, item.channel, denverTime(item.createdAt)]);
   }
   const csv = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
-  const suffix = query.mode === 'test' ? '-test-mode' : '';
+  const suffix = query.mode === 'test' ? '-test-mode' : query.mode === 'podium' ? '-from-podium' : '';
   return { filename: `automation-${view}${suffix}-${range.from}-to-${range.to}.csv`, csv: `\uFEFF${csv}\r\n` };
 }

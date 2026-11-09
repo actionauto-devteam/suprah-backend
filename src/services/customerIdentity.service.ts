@@ -16,10 +16,21 @@ export interface CustomerLinkResult {
   customerId?: string;
   candidateIds: string[];
 }
-type IdentityInput = { email?: unknown; phone?: unknown; alternatePhone?: unknown };
+type IdentityInput = { email?: unknown; phone?: unknown; alternatePhone?: unknown; firstName?: unknown; lastName?: unknown };
 export type IdentityCustomer = IdentityInput & { _id: mongoose.Types.ObjectId; organizationId: string; isActive?: boolean };
 
-export function evaluateCustomerIdentity(input: IdentityInput, candidates: IdentityCustomer[]): CustomerLinkResult {
+function nameKey(value: unknown) {
+  return String(value ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+export function sameCustomerName(a: IdentityInput, b: IdentityInput) {
+  const first = nameKey(a.firstName);
+  const last = nameKey(a.lastName);
+  if (!first || !last || first === 'unknown') return false;
+  return first === nameKey(b.firstName) && last === nameKey(b.lastName);
+}
+
+export function evaluateCustomerIdentity(input: IdentityInput, candidates: IdentityCustomer[], options: { nameLink?: boolean } = {}): CustomerLinkResult {
   const identity = contactIdentity(input);
   const matches = candidates.filter(customer => {
     const other = contactIdentity(customer);
@@ -37,6 +48,9 @@ export function evaluateCustomerIdentity(input: IdentityInput, candidates: Ident
   }
   const phones = [other.normalizedPhone, other.normalizedAlternatePhone].filter(Boolean);
   if (identity.normalizedPhone && phones.length && !phones.includes(identity.normalizedPhone)) {
+    if (options.nameLink && identity.normalizedEmail && identity.normalizedEmail === other.normalizedEmail && sameCustomerName(input, customer)) {
+      return { status: 'linked', reason: 'email_and_name_match', customerId: String(customer._id), candidateIds };
+    }
     return { status: 'conflict', reason: 'email_phone_disagree', candidateIds };
   }
   return { status: 'linked', reason: 'exact_normalized_contact', customerId: String(customer._id), candidateIds };
@@ -78,8 +92,10 @@ async function reconcileUnderLock(organizationId: string, leadId: string, renew:
   const historicalProxyContact = lead.identityEmailExcluded === undefined && Boolean(senderAddress)
     && senderAddress === normalizeIdentityEmail(lead.email) && (lead.channel === 'adf' || lead.centralIngestion === true);
   const emailExcluded = lead.identityEmailExcluded || historicalProxyContact;
-  const input = { email: emailExcluded ? undefined : lead.email, phone: lead.phone };
+  const input = { email: emailExcluded ? undefined : lead.email, phone: lead.phone, firstName: lead.firstName, lastName: lead.lastName };
   const identity = contactIdentity(input);
+  const nameLink = lead.customerLink?.reason === 'email_and_name_match'
+    || (!options.historical && ['pending', 'retry'].includes(String(lead.customerLink?.status || '')));
   const snapshot = { _id: lead._id, organizationId, email: lead.email ?? null, phone: lead.phone ?? null, identityEmailExcluded: lead.identityEmailExcluded ?? { $ne: true }, customerId: lead.customerId ?? null };
   const persist = async (result: CustomerLinkResult, clearInvalidReference = false) => {
     if (!options.dryRun) {
@@ -108,14 +124,14 @@ async function reconcileUnderLock(organizationId: string, leadId: string, renew:
   const provenance = await Customer.find({ organizationId, $or: [
     { sourceLeadId: lead._id },
     { transactions: { $elemMatch: { type: 'lead', referenceModel: 'Lead', referenceId: leadId } } },
-  ] }).select('_id organizationId email phone alternatePhone isActive').limit(21).maxTimeMS(5000).lean();
+  ] }).select('_id organizationId firstName lastName email phone alternatePhone isActive').limit(21).maxTimeMS(5000).lean();
   const known = new Map([...candidates, ...provenance].map(customer => [String(customer._id), customer]));
   if (lead.customerId) {
     const linked = await Customer.findOne({ _id: lead.customerId, organizationId }).maxTimeMS(5000).lean();
     if (!linked) return persist({ status: 'conflict', reason: 'invalid_customer_reference', candidateIds: [] }, true);
     known.set(String(linked._id), linked);
   }
-  const result = evaluateCustomerIdentity(input, [...known.values()]);
+  const result = evaluateCustomerIdentity(input, [...known.values()], { nameLink });
   const provenIds = new Set(provenance.map(customer => String(customer._id)));
   if (lead.customerId) provenIds.add(String(lead.customerId));
   if (provenIds.size > 1 || (provenIds.size === 1 && (!result.customerId || !provenIds.has(result.customerId)))) {
@@ -146,6 +162,8 @@ async function reconcileUnderLock(organizationId: string, leadId: string, renew:
   const enrichment: Record<string, unknown> = {};
   if (!String(customer.email || '').trim() && identity.normalizedEmail) enrichment.email = identity.normalizedEmail;
   if (!String(customer.phone || '').trim() && identity.normalizedPhone) enrichment.phone = String(lead.phone).trim();
+  else if (result.reason === 'email_and_name_match' && identity.normalizedPhone && !String(customer.alternatePhone || '').trim()
+    && contactIdentity(customer).normalizedPhone !== identity.normalizedPhone) enrichment.alternatePhone = String(lead.phone).trim();
   if (!customer.vehicleInterest?.make && lead.vehicle?.make) enrichment.vehicleInterest = { year: lead.vehicle.year, make: lead.vehicle.make, model: lead.vehicle.model };
   const enriched = contactIdentity({ ...customer, ...enrichment });
   await renew();
