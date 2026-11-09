@@ -915,6 +915,11 @@ export const telnyxWebhook = asyncHandler(async (req: Request, res: Response) =>
   // Respond fast; process async. Telnyx retries on non-2xx/timeouts.
   res.status(200).json({ received: true });
 
+  if (type === "call.initiated") {
+    try { await comm.stopRestrictedBrowserCall(payload); }
+    catch (err) { console.error("[comm] Do Not Contact check after dialing failed", err); }
+  }
+
   try {
     const browserLine = isUntaggedBrowserLineEvent(payload);
     switch (type) {

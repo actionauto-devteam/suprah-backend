@@ -24,6 +24,7 @@ import { describeSmsFailure } from "../utils/smsFailure";
 import { assertSmsDestination, isSmsDestinationError, resolveSmsDestination, SmsDestinationPolicy } from "../utils/smsDestination";
 import { recordAppointmentSmsDelivery } from "../utils/appointmentSmsNotice";
 import { assertContactAllowed, auditActorFromRef, checkContactForSend, isContactRestrictedError, contactRestrictionSkipReason } from "./contactRestriction.service";
+import { authorizeOutboundCall, grantCallbackPermission } from "./callbackPermission.service";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
 import SmsOptOut from "../models/SmsOptOut.model";
@@ -2428,6 +2429,7 @@ export async function handleCallInitiated(payload: any) {
     ...(ringTeam.length ? { ringGroupId: line!.ringGroupId, ringRecipientIds: ringTeam } : {}),
   });
   if (call.leadId) void touchLeadOnInbound(call.leadId, orgId);
+  void grantCallbackPermission(call).catch((err) => console.error("[comm] Could not save the callback permission for a Do Not Contact caller", err));
 
   if (intakeMode === "active" && callInquiryId) {
     const inquiryId = callInquiryId;
@@ -2700,6 +2702,71 @@ export async function handleSpeakEnded(payload: any) {
   if (id) await telnyx.hangupCall(id).catch(() => {});
 }
 
+const BROWSER_CALL_CHECK_WINDOW_MS = 10 * 60 * 1000;
+
+function orgIdValues(orgId: string): unknown[] {
+  return mongoose.isValidObjectId(orgId) ? [orgId, new mongoose.Types.ObjectId(orgId)] : [orgId];
+}
+
+export async function stopRestrictedBrowserCall(payload: any): Promise<void> {
+  const sipConnection = String(process.env.TELNYX_SIP_CONNECTION_ID || "");
+  const callControlId = String(payload?.call_control_id || "");
+  if (!sipConnection || !callControlId || String(payload?.connection_id || "") !== sipConnection) return;
+  const rawTo = String(payload?.to || "").trim();
+  if (!rawTo || /^sips?:/i.test(rawTo) || rawTo.includes("@")) return;
+  const to = normalizePhone(rawTo);
+  if (!normalizeIdentityPhone(to) || await findDealershipLine(to)) return;
+  const from = normalizePhone(String(payload?.from || ""));
+  const recent = new Date(Date.now() - BROWSER_CALL_CHECK_WINDOW_MS);
+  const tag = decodeClientState(payload?.client_state);
+  const live = {
+    direction: "outbound",
+    to,
+    status: { $in: ["ringing", "in-progress"] },
+    startedAt: { $gte: recent },
+    providerCallControlId: { $in: [null, callControlId] },
+  };
+  let call: any = tag?.kind === "recording-outbound" && mongoose.isValidObjectId(String(tag.callLogId || ""))
+    ? await CallLog.findOne({ _id: tag.callLogId, ...live })
+    : null;
+  let orgId = call?.orgId ? String(call.orgId) : "";
+  if (!orgId) {
+    const line = await findDealershipLine(from);
+    const routing = line ? null : await getInboundRoutingConfig(from).catch(() => null);
+    orgId = line?.organizationId || routing?.orgId || resolveCompanyNumberOrg(from) || "";
+  }
+  if (!orgId) {
+    console.warn("[comm] A call from the browser could not be matched to a dealership, so Do Not Contact was not checked again", { callControlId });
+    return;
+  }
+  if (!call) {
+    call = await CallLog.findOne({ orgId: { $in: orgIdValues(orgId) }, ...live }).sort({ startedAt: -1 });
+  }
+  if (call?.callbackPermission) return;
+  const decision = await authorizeOutboundCall({
+    organizationId: orgId,
+    phone: to,
+    leadId: call?.leadId,
+    customerId: call?.customerId,
+    actor: call?.placedBy ? auditActorFromRef(call.placedBy) : { kind: "staff", userId: null, name: null },
+    purpose: "call_check_after_dial",
+    callLogId: call?._id,
+    allowWhenUnconfirmed: true,
+  });
+  if (decision.allowed) {
+    if (decision.callback && call) await CallLog.updateOne({ _id: call._id }, { $set: { callbackPermission: decision.callback } });
+    return;
+  }
+  await telnyx.hangupCall(callControlId).catch((err) => console.error("[comm] Could not stop a call to a Do Not Contact customer", err));
+  if (!call) return;
+  const stopped = await CallLog.findOneAndUpdate(
+    { _id: call._id, status: { $in: ["ringing", "in-progress"] } },
+    { $set: { status: "failed", endedAt: new Date(), hangupCause: "do-not-contact" } },
+    { new: true },
+  );
+  if (stopped) emitToOrg(stopped.orgId, "comm:call:update", { call: stopped.toObject() });
+}
+
 /* ------------------------------ voice: outbound -------------------------- */
 /** Outbound calls originate in the BROWSER via TelnyxRTC (credential
  *  connection), so the frontend reports lifecycle events for logging.
@@ -2730,16 +2797,18 @@ export async function logClientCall(opts: {
       const lead = await findLeadByPhone(opts.orgId, to);
       if (lead) leadId = lead._id;
     }
-    const restriction = await checkContactForSend(
-      { organizationId: opts.orgId, phone: to, leadId, customerId },
-      { purpose: "manual_call", actor: auditActorFromRef(opts.user) },
-    );
-    if (restriction.status === "restricted") {
-      throw new ApiError(403, "This customer is marked Do Not Contact, so you can't call them. Only an admin can remove Do Not Contact.");
-    }
-    if (restriction.status !== "allowed") {
-      throw new ApiError(503, "We couldn't confirm this customer can be contacted, so the call wasn't placed. Please try again in a moment.");
-    }
+    const callLogId = new mongoose.Types.ObjectId();
+    const decision = await authorizeOutboundCall({
+      organizationId: opts.orgId,
+      phone: to,
+      leadId,
+      customerId,
+      actor: auditActorFromRef(opts.user),
+      purpose: "manual_call",
+      callLogId,
+      newCall: true,
+    });
+    if (!decision.allowed) throw new ApiError(decision.status === "restricted" ? 403 : 503, decision.message);
     const conversation = await getOrCreateConversation({
       orgId: opts.orgId,
       phone: to,
@@ -2757,6 +2826,7 @@ export async function logClientCall(opts: {
       { clientCallId: opts.clientCallId },
       {
         $setOnInsert: {
+          _id: callLogId,
           orgId: opts.orgId,
           customerId,
           leadId,
@@ -2767,6 +2837,7 @@ export async function logClientCall(opts: {
           status: "ringing",
           placedBy: opts.user,
           ...(caller?.label ? { lineLabel: caller.label } : {}),
+          ...(decision.callback ? { callbackPermission: decision.callback } : {}),
           startedAt: new Date(),
           customerName,
           clientCallId: opts.clientCallId,

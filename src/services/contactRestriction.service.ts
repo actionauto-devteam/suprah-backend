@@ -108,7 +108,7 @@ export function auditActorFromRef(ref: { userId?: unknown; name?: unknown } | nu
 }
 
 export interface ContactAuditContext {
-  channel?: 'sms' | 'email' | 'webchat';
+  channel?: 'sms' | 'email' | 'webchat' | 'call';
   purpose?: string;
   actor?: IContactRestrictionAuditActor;
 }
@@ -118,7 +118,7 @@ export interface ContactRestrictionAuditInput {
   event: ContactRestrictionAuditEvent;
   actor: IContactRestrictionAuditActor;
   leadId?: unknown;
-  channel?: 'sms' | 'email' | 'webchat';
+  channel?: 'sms' | 'email' | 'webchat' | 'call';
   purpose?: string;
   outcome?: 'restricted' | 'unavailable';
   fromStatus?: string | null;
@@ -130,6 +130,7 @@ export interface ContactRestrictionAuditInput {
   sessionId?: unknown;
   messageId?: unknown;
   respondingToMessageId?: unknown;
+  callLogId?: unknown;
 }
 
 const objectIdOrNull = (value: unknown) =>
@@ -156,6 +157,7 @@ export async function recordContactRestrictionAudit(entry: ContactRestrictionAud
       sessionId: objectIdOrNull(entry.sessionId),
       messageId: objectIdOrNull(entry.messageId),
       respondingToMessageId: objectIdOrNull(entry.respondingToMessageId),
+      callLogId: objectIdOrNull(entry.callLogId),
     });
     return true;
   } catch (err) {
@@ -524,4 +526,105 @@ export async function describeWebchatContactPolicy(session: WebchatSessionLike):
     restrictedSince: since ? since.toISOString() : null,
     windowMinutes: WEBCHAT_RESPONSE_WINDOW_MINUTES,
   };
+}
+
+export const MAIL_RECIPIENT_MESSAGES = {
+  unavailable: "We couldn't confirm the people you're emailing can be contacted, so this email wasn't sent. Please try again in a moment.",
+};
+
+export function mailRecipientRestrictedMessage(emails: string[]): string {
+  if (emails.length === 1) {
+    return `${emails[0]} is marked Do Not Contact, so this email wasn't sent. Remove that address, or ask an admin to remove Do Not Contact.`;
+  }
+  return `These addresses are marked Do Not Contact, so this email wasn't sent: ${emails.join(', ')}. Remove them, or ask an admin to remove Do Not Contact.`;
+}
+
+export function mailRecipientAddresses(...lists: unknown[]): string[] {
+  const found = new Set<string>();
+  for (const list of lists) {
+    const values = Array.isArray(list) ? list : [list];
+    for (const value of values) {
+      for (const match of String(value ?? '').match(/[^\s<>(),;:"]+@[^\s<>(),;:"]+/g) || []) {
+        const email = normalizeIdentityEmail(match);
+        if (email) found.add(email);
+      }
+    }
+  }
+  return [...found];
+}
+
+async function organizationStaffAddresses(organizationId: string, emails: string[]): Promise<Set<string>> {
+  const { default: CrmUser } = await import('../models/CrmUser.model');
+  const { default: User } = await import('../models/User.model');
+  const [crmUsers, users] = await Promise.all([
+    CrmUser.find({ organizationId, $or: [{ email: { $in: emails } }, { 'googleMail.gmailAddress': { $in: emails } }] })
+      .select('email googleMail.gmailAddress')
+      .lean(),
+    User.find({ organizationId, email: { $in: emails } }).select('email').lean(),
+  ]);
+  const staff = new Set<string>();
+  for (const user of [...crmUsers, ...users] as any[]) {
+    for (const address of [user?.email, user?.googleMail?.gmailAddress]) {
+      const email = normalizeIdentityEmail(address);
+      if (email) staff.add(email);
+    }
+  }
+  return staff;
+}
+
+export async function assertMailRecipientsAllowed(input: {
+  userId: string;
+  to?: unknown;
+  cc?: unknown;
+  bcc?: unknown;
+}): Promise<void> {
+  const recipients = mailRecipientAddresses(input.to, input.cc, input.bcc);
+  if (!recipients.length) return;
+  const { default: CrmUser } = await import('../models/CrmUser.model');
+  let sender: any;
+  try {
+    sender = await CrmUser.findById(input.userId).select('organizationId fullName').lean();
+  } catch (err) {
+    logger.warn({ err }, '[ContactRestriction] Suprah Mail sender lookup failed; blocking the email');
+    throw new ContactRestrictedError({ status: 'unavailable' }, { message: MAIL_RECIPIENT_MESSAGES.unavailable });
+  }
+  const organizationId = sender?.organizationId ? String(sender.organizationId) : '';
+  if (!mongoose.isValidObjectId(organizationId)) return;
+
+  let external = recipients;
+  try {
+    const [staff, dealership] = await Promise.all([
+      organizationStaffAddresses(organizationId, recipients),
+      dealershipAddresses(organizationId),
+    ]);
+    external = recipients.filter((email) => !staff.has(email) && !dealership.has(email));
+  } catch (err) {
+    logger.warn({ err, organizationId }, '[ContactRestriction] Suprah Mail staff lookup failed; checking every recipient');
+  }
+  if (!external.length) return;
+
+  const checks = await Promise.all(
+    external.map(async (email) => ({ email, check: await resolveContactRestriction({ organizationId, email }) })),
+  );
+  const restricted = checks.filter((item) => item.check.status === 'restricted');
+  const unavailable = checks.some((item) => item.check.status === 'unavailable');
+  if (!restricted.length && !unavailable) return;
+
+  const leadIds = [...new Set(restricted.flatMap((item) => (item.check.status === 'restricted' ? item.check.leadIds : [])))];
+  await recordContactRestrictionAudit({
+    organizationId,
+    event: 'outbound_blocked',
+    actor: { kind: 'staff', userId: String(input.userId), name: sender?.fullName ? String(sender.fullName) : null },
+    channel: 'email',
+    purpose: 'suprah_mail',
+    outcome: restricted.length ? 'restricted' : 'unavailable',
+    restrictingLeadIds: leadIds,
+  });
+  if (restricted.length) {
+    throw new ContactRestrictedError(
+      { status: 'restricted', leadIds, onThisLead: false },
+      { message: mailRecipientRestrictedMessage(restricted.map((item) => item.email)) },
+    );
+  }
+  throw new ContactRestrictedError({ status: 'unavailable' }, { message: MAIL_RECIPIENT_MESSAGES.unavailable });
 }

@@ -1,7 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 jest.mock('../../src/services/telnyx.service', () => ({ verifyWebhookSignature: jest.fn().mockReturnValue(true) }));
-jest.mock('../../src/services/communication.service', () => ({ handleCallInitiated: jest.fn(), handleCallAnswered: jest.fn(), handleCallHangup: jest.fn(), handleSpeakEnded: jest.fn(), handleCallGatherEnded: jest.fn() }));
+jest.mock('../../src/services/communication.service', () => ({ handleCallInitiated: jest.fn(), handleCallAnswered: jest.fn(), handleCallHangup: jest.fn(), handleSpeakEnded: jest.fn(), handleCallGatherEnded: jest.fn(), stopRestrictedBrowserCall: jest.fn() }));
 jest.mock('../../src/services/callRecording.service', () => ({ enqueueRecordingEvent: jest.fn().mockResolvedValue(true), observeRecordingCall: jest.fn(), finishRecordingDisclosure: jest.fn().mockResolvedValue(false), decodeRecordingState: (s: string) => { try { return JSON.parse(Buffer.from(s, 'base64').toString()); } catch { return null; } } }));
 import { telnyxWebhook } from '../../src/controllers/communication.controller';
 import * as provider from '../../src/services/telnyx.service';
@@ -13,6 +13,7 @@ const send = (type: string, payload: any = {}) => request(app).post('/webhook').
 const tag = (kind: string, extra: any = {}) => Buffer.from(JSON.stringify({ kind, ...extra })).toString('base64');
 beforeEach(() => { jest.clearAllMocks(); (provider.verifyWebhookSignature as jest.Mock).mockReturnValue(true); (recording.enqueueRecordingEvent as jest.Mock).mockResolvedValue(true); });
 describe('Recording webhook compatibility', () => {
+  it('call.initiated runs the Do Not Contact check after dialing, and a failure there does not stop the call handling', async () => { const payload = { call_control_id: 'leg', connection_id: 'browser' }; (comm.stopRestrictedBrowserCall as jest.Mock).mockRejectedValueOnce(new Error('lookup down')); expect((await send('call.initiated', payload)).status).toBe(200); expect(comm.stopRestrictedBrowserCall).toHaveBeenCalledWith(payload); expect(comm.handleCallInitiated).toHaveBeenCalledWith(payload); });
   it('invalid signature never enters recording processing', async () => { (provider.verifyWebhookSignature as jest.Mock).mockReturnValue(false); expect((await send('call.recording.saved')).status).toBe(401); expect(recording.enqueueRecordingEvent).not.toHaveBeenCalled(); });
   it('saved webhook is durably accepted', async () => { expect((await send('call.recording.saved', { recording_id: 'file' })).status).toBe(200); expect(recording.enqueueRecordingEvent).toHaveBeenCalledWith('fixture-event', 'call.recording.saved', { recording_id: 'file' }); });
   it('durability failure requests provider retry for saved recordings', async () => { (recording.enqueueRecordingEvent as jest.Mock).mockRejectedValue(new Error('database unavailable')); expect((await send('call.recording.saved')).status).toBe(500); });
