@@ -10,10 +10,9 @@ import {
   validateDriverDocumentContent,
   validateDriverStatusRequestAttachmentContent,
 } from "../middleware/upload.middleware";
-import {
-  driverDocumentUploadLimiter,
-  uploadLimiter,
-} from "../middleware/rate-limit.middleware";
+import { uploadLimiter } from "../middleware/rate-limit.middleware";
+// Approved drivers: 20 document uploads per 10 minutes, with a plain message (2026-11-09).
+import { driverDocumentUploadLimit } from "../middleware/driverDocumentUploadLimit";
 
 const router = express.Router();
 
@@ -29,7 +28,7 @@ router.patch("/compliance", driverOnly, driverProfileController.updateCompliance
 router.post(
   "/documents",
   driverOnly,
-  driverDocumentUploadLimiter,
+  driverDocumentUploadLimit,
   uploadDriverDocument,
   validateDriverDocumentContent,
   driverProfileController.uploadDocument,
@@ -44,7 +43,7 @@ router.get(
 router.post(
   "/documents/:documentId/replace",
   driverOnly,
-  driverDocumentUploadLimiter,
+  driverDocumentUploadLimit,
   uploadDriverDocument,
   validateDriverDocumentContent,
   driverProfileController.replaceDocument,
