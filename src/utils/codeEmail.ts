@@ -3,14 +3,14 @@ import { SUPPORT_EMAIL } from "./userMessages";
 /**
  * The branded email for a one-time code: sign-up verification, Resend Code and
  * password reset all look the same, so a driver recognises every code email.
- * Same look as the driver approval email (green header, white card, Suprah.AI
+ * Same look as the driver approval email (green header, white card, Suprah AI
  * footer). Styles are inline because many email apps drop <style> blocks.
  */
 const escapeHtml = (value: string) =>
   value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 
 export function codeEmail(options: {
-  // The sender's name: the dealership for its customers, otherwise Suprah.AI.
+  // The sender's name: the dealership for its customers, otherwise Suprah AI.
   brandName: string;
   heading: string;
   intro: string;
@@ -34,7 +34,7 @@ export function codeEmail(options: {
     "",
     ignore,
     `Questions? Email ${SUPPORT_EMAIL}.`,
-    "— Suprah.AI",
+    "— Suprah AI",
   ].join("\n");
 
   const html = `<!DOCTYPE html>
@@ -55,7 +55,7 @@ export function codeEmail(options: {
         <p style="margin:12px 0 0 0;color:#6b7280;font-size:13px;">${ignore}</p>
       </div>
       <div style="text-align:center;color:#6b7280;font-size:12px;padding:20px;background:#f9fafb;border-top:1px solid #e5e7eb;">
-        <p style="margin:0;"><strong>Suprah.AI</strong></p>
+        <p style="margin:0;"><strong>Suprah AI</strong></p>
         <p style="margin:4px 0 0 0;">Questions? Email <a href="mailto:${SUPPORT_EMAIL}" style="color:#047857;">${SUPPORT_EMAIL}</a>.</p>
       </div>
     </div>
