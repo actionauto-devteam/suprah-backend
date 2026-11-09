@@ -4,57 +4,30 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { ApiError } from '../utils/ApiError';
 import { SavedVehicle } from '../models/SavedVehicle.model';
 import Vehicle from '../models/Vehicle.model';
+import membershipService from '../services/membership.service';
+import { isOnMarketplace } from '../utils/marketplaceVehicle';
+import { wishlistEntries } from '../utils/wishlist';
+import { normalizeCustomerVehicle } from './vehicle.controller';
 
-const normalizeVehicle = (v: any) => ({
-    id: v._id.toString(),
-    vin: v.vin,
-    year: v.year,
-    make: v.make,
-    model: v.modelName,
-    modelName: v.modelName,
-    trim: v.trim || '',
-    color: v.exteriorColor || 'N/A',
-    exteriorColor: v.exteriorColor || 'N/A',
-    interiorColor: v.interiorColor || 'N/A',
-    stockNumber: v.stockNumber || 'N/A',
-    price: v.price || 0,
-    mileage: v.mileage || 0,
-    transmission: v.transmission || 'Automatic',
-    fuelType: v.fuelType || 'Gasoline',
-    engine: v.engine || '',
-    bodyStyle: v.bodyStyle || '',
-    driveTrain: v.driveTrain || '',
-    image: Array.isArray(v.images)
-        ? v.images.find((image: unknown): image is string => typeof image === 'string' && image.trim().length > 0) || ''
-        : '',
-    images: Array.isArray(v.images)
-        ? v.images.filter((image: unknown): image is string => typeof image === 'string' && image.trim().length > 0)
-        : [],
-    status: v.status,
-    location: v.dealerCity
-        ? `${v.dealerCity}${v.dealerState ? ', ' + v.dealerState : ''}`
-        : 'Unknown',
-    leadCount: v.leadCount || 0,
-});
+// The Wishlist uses Shop's rules (2026-11-09): only cars for sale can be
+// saved, saved cars show the member price like Shop, internal numbers (the
+// dealer's cost, how many leads a car has) never reach the customer, and a car
+// that's no longer for sale is listed as such so it can be removed.
 
 export const getSavedVehicles = asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, 'Your session ended. Sign in again to continue.');
 
-    const saved = await SavedVehicle.find({ userId }).sort({ savedAt: -1 });
-    const vehicleIds = saved.map(s => s.vehicleId);
+    const saved = await SavedVehicle.find({ userId }).sort({ savedAt: -1 }).lean();
+    const savedIds = saved.map((s: any) => s.vehicleId.toString());
 
-    const vehicles = await Vehicle.find({ _id: { $in: vehicleIds } });
+    const [vehicles, member] = await Promise.all([
+        Vehicle.find({ _id: { $in: savedIds } }).select('-priceHistory -notes').lean(),
+        membershipService.getMemberPricingForUser(userId.toString()).catch(() => undefined),
+    ]);
 
-    const vehicleMap = new Map(vehicles.map(v => [v._id.toString(), v]));
-    const normalized = saved
-        .map(s => {
-            const v = vehicleMap.get(s.vehicleId.toString());
-            return v ? normalizeVehicle(v) : null;
-        })
-        .filter(Boolean);
-
-    res.status(200).json({ success: true, data: normalized });
+    const data = wishlistEntries(savedIds, vehicles as any[], (vehicle) => normalizeCustomerVehicle(vehicle, member));
+    res.status(200).json({ success: true, data });
 });
 
 export const saveVehicle = asyncHandler(async (req: Request, res: Response) => {
@@ -64,14 +37,22 @@ export const saveVehicle = asyncHandler(async (req: Request, res: Response) => {
     const { vehicleId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(vehicleId)) throw new ApiError(400, "This car link isn't valid. Refresh the page and try again.");
 
-    const vehicle = await Vehicle.findById(vehicleId);
-    if (!vehicle) throw new ApiError(404, "This car is no longer available, so it can't be added to your Wishlist.");
+    // Only a car that's for sale in Shop can be saved.
+    const vehicle = await Vehicle.findById(vehicleId).select('status isArchived isDeleted').lean();
+    if (!isOnMarketplace(vehicle as any)) {
+        throw new ApiError(404, "This car is no longer available, so it can't be added to your Wishlist.");
+    }
 
-    await SavedVehicle.findOneAndUpdate(
-        { userId, vehicleId: new mongoose.Types.ObjectId(vehicleId) },
-        { userId, vehicleId: new mongoose.Types.ObjectId(vehicleId), savedAt: new Date() },
-        { upsert: true, new: true }
-    );
+    try {
+        await SavedVehicle.findOneAndUpdate(
+            { userId, vehicleId: new mongoose.Types.ObjectId(vehicleId) },
+            { userId, vehicleId: new mongoose.Types.ObjectId(vehicleId), savedAt: new Date() },
+            { upsert: true, new: true }
+        );
+    } catch (error: any) {
+        // Two quick taps can both try to add it; the second finds it already saved.
+        if (error?.code !== 11000) throw error;
+    }
 
     res.status(201).json({ success: true, message: 'Added to your Wishlist.' });
 });
