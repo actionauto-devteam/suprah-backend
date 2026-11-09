@@ -6,6 +6,8 @@ export const CONTACT_RESTRICTION_AUDIT_EVENTS = [
   'dnc_contact_changed',
   'webchat_exception_reply',
   'outbound_blocked',
+  'callback_permission_granted',
+  'callback_permission_used',
 ] as const;
 export type ContactRestrictionAuditEvent = (typeof CONTACT_RESTRICTION_AUDIT_EVENTS)[number];
 
@@ -22,7 +24,7 @@ export interface IContactRestrictionAudit extends Document {
   leadId?: mongoose.Types.ObjectId | null;
   event: ContactRestrictionAuditEvent;
   actor: IContactRestrictionAuditActor;
-  channel?: 'sms' | 'email' | 'webchat' | null;
+  channel?: 'sms' | 'email' | 'webchat' | 'call' | null;
   purpose?: string | null;
   outcome?: 'restricted' | 'unavailable' | null;
   fromStatus?: string | null;
@@ -34,6 +36,7 @@ export interface IContactRestrictionAudit extends Document {
   sessionId?: mongoose.Types.ObjectId | null;
   messageId?: mongoose.Types.ObjectId | null;
   respondingToMessageId?: mongoose.Types.ObjectId | null;
+  callLogId?: mongoose.Types.ObjectId | null;
   createdAt: Date;
 }
 
@@ -58,7 +61,7 @@ const ContactRestrictionAuditSchema = new Schema<IContactRestrictionAudit>(
       ),
       required: true,
     },
-    channel: { type: String, enum: ['sms', 'email', 'webchat', null], default: null },
+    channel: { type: String, enum: ['sms', 'email', 'webchat', 'call', null], default: null },
     purpose: { type: String, trim: true, maxlength: 80, default: null },
     outcome: { type: String, enum: ['restricted', 'unavailable', null], default: null },
     fromStatus: { type: String, default: null },
@@ -70,6 +73,7 @@ const ContactRestrictionAuditSchema = new Schema<IContactRestrictionAudit>(
     sessionId: { type: Schema.Types.ObjectId, ref: 'WebChatSession', default: null },
     messageId: { type: Schema.Types.ObjectId, default: null },
     respondingToMessageId: { type: Schema.Types.ObjectId, default: null },
+    callLogId: { type: Schema.Types.ObjectId, ref: 'CallLog', default: null },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
 );

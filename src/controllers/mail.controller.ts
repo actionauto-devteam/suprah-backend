@@ -10,6 +10,7 @@ import gmailService, { OutgoingAttachment } from '../services/gmail.service';
 import mailSyncService from '../services/mailSync.service';
 import gmailMailboxIndexService from '../services/gmailMailboxIndex.service';
 import { storageService, BucketType } from '../services/storage.service';
+import { assertMailRecipientsAllowed } from '../services/contactRestriction.service';
 
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
 const MAIL_PAGE_PATH = '/crm/suprah-mail';
@@ -714,6 +715,7 @@ const sendConversationMessage = asyncHandler(async (req: Request, res: Response)
 
   const conversation = await MailConversation.findOne({ _id: id, ownerCrmUserId: user._id });
   if (!conversation) throw new ApiError(404, 'Conversation not found');
+  await assertMailRecipientsAllowed({ userId: user._id.toString(), to: conversation.participants.map((p) => p.email) });
 
   const fresh = await CrmUser.findById(user._id).select('fullName email googleMail.gmailAddress').lean();
   const fromEmail = (fresh?.googleMail?.gmailAddress || fresh?.email || user.email).toLowerCase();

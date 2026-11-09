@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import CrmUser from '../models/CrmUser.model';
 import { ApiError } from '../utils/ApiError';
 import { resolveCrmJwtSecret } from '../utils/crmJwtSecret';
+import { assertMailRecipientsAllowed } from './contactRestriction.service';
 
 /**
  * gmail.service — everything Suprah Mail needs from the Gmail API.
@@ -1496,6 +1497,7 @@ class GmailService {
   // ── Sending ──────────────────────────────────────────────────────────────
 
   async sendEmail(userId: string, input: SendEmailInput): Promise<ParsedMessage> {
+    await assertMailRecipientsAllowed({ userId, to: input.to, cc: input.cc, bcc: input.bcc });
     const { gmail } = await this.getClientForUser(userId);
     const raw = this.buildRawEmail(input);
     const res = await gmail.users.messages.send({
@@ -1963,6 +1965,22 @@ class GmailService {
   async sendDraft(userId: string, draftId: string): Promise<ParsedMessage> {
     const operation = (async () => {
       const { gmail } = await this.getClientForUser(userId);
+      let draft: gmail_v1.Schema$Draft;
+      try {
+        ({ data: draft } = await gmail.users.drafts.get(
+          { userId: 'me', id: draftId, format: 'metadata' },
+          { timeout: MAIL_OPERATION_GMAIL_TIMEOUT_MS },
+        ));
+      } catch (err: any) {
+        const status = err?.response?.status ?? err?.code ?? err?.status;
+        if (status === 404) throw new ApiError(404, 'Draft not found');
+        throw err;
+      }
+      const headers = draft.message?.payload?.headers || [];
+      const header = (name: string) => headers
+        .filter((item) => String(item.name || '').toLowerCase() === name)
+        .map((item) => String(item.value || ''));
+      await assertMailRecipientsAllowed({ userId, to: header('to'), cc: header('cc'), bcc: header('bcc') });
       const res = await gmail.users.drafts.send(
         { userId: 'me', requestBody: { id: draftId } },
         { timeout: MAIL_OPERATION_GMAIL_TIMEOUT_MS },
