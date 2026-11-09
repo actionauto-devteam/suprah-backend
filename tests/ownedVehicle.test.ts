@@ -83,7 +83,7 @@ describe('OwnedVehicle API Logic', () => {
             });
 
         expect(res.status).toBe(400);
-        expect(res.body.message).toBe('You have already registered this vehicle');
+        expect(res.body.message).toBe('This car is already in My Garage.');
     });
 
     it('GET /api/customer/vehicles - Should return user cars only', async () => {
@@ -141,6 +141,6 @@ describe('OwnedVehicle API Logic', () => {
             .send({ currentMileage: 4000 });
 
         expect(res.status).toBe(400);
-        expect(res.body.message).toBe('Mileage cannot be decreased');
+        expect(res.body.message).toBe("The new mileage can't be lower than the last one you saved. Check the odometer and try again.");
     });
 });
