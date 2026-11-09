@@ -11,6 +11,7 @@ import authService from '../services/auth.service';
 import DealershipInquiry from '../models/DealershipInquiry.model';
 import config from '../config';
 import { strongPasswordProblems } from '../validations/auth.validation';
+import { SUPPORT_EMAIL } from '../utils/userMessages';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
 const BULK_TEMP_PASSWORD = 'customersaccount';
@@ -333,13 +334,15 @@ export const registerViaInvite = asyncHandler(async (req: Request, res: Response
     try {
       await emailService.sendEmail({
         to: normalizedEmail,
+        // Same Suprah AI wording as the invite email and the pending page (2026-11-09).
         subject: 'Driver application submitted',
-        text: `Hello ${name.trim()},\n\nYour driver application has been submitted for review by SUPRAH.AI. We'll email you once it's approved.\n\nEmail: ${normalizedEmail}`,
+        text: `Hello ${name.trim()},\n\nYour driver application has been sent to the Suprah AI team for review. We'll email you once it's approved.\n\nIf you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.\n\nEmail: ${normalizedEmail}`,
         html: `
           <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
             <h2 style="color:#111">Driver application submitted</h2>
             <p>Hello <strong>${name.trim()}</strong>,</p>
-            <p>Your driver application has been submitted for review by SUPRAH.AI. We'll email you once it's approved.</p>
+            <p>Your driver application has been sent to the Suprah AI team for review. We'll email you once it's approved.</p>
+            <p style="color:#555;font-size:13px">If you have questions, contact Suprah AI support at ${SUPPORT_EMAIL}.</p>
           </div>
         `,
       });
