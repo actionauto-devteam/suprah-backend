@@ -42,6 +42,37 @@ const documentState = (document: any) => {
   return "pending" as const;
 };
 
+/**
+ * The Driver Verification details an approval needs, as [label, filled in],
+ * in the order the Documents page asks for them. The approval check below and
+ * the Driver Page reminder (missingVerificationDetails) share this one list.
+ */
+function verificationInformation(profile: any): Array<[string, boolean]> {
+  return [
+    ["First Name", Boolean(profile?.firstName?.trim?.())],
+    ["Last Name", Boolean(profile?.lastName?.trim?.())],
+    ["CDL Number", Boolean(profile?.driversLicenseNumber?.trim?.())],
+    ["License State", Boolean(profile?.licenseState?.trim?.())],
+    ["CDL Expiration", Boolean(profile?.licenseExpirationDate)],
+    ["Insurance Provider", Boolean(profile?.insuranceProvider?.trim?.())],
+    ["Insurance Policy Number", Boolean(profile?.insurancePolicyNumber?.trim?.())],
+    ["VIN", Boolean(profile?.vin?.trim?.())],
+    ["SSN Last 4", String(profile?.ssnLast4 ?? "").length === 4],
+    ["Background Check Authorization", profile?.backgroundCheckConsent === true],
+  ];
+}
+
+/**
+ * Which Driver Verification details are still missing, so an approved driver
+ * can be told what to add on the Documents page before the Suprah AI team can
+ * verify them (2026-11-09). Empty when everything is filled in.
+ */
+export function missingVerificationDetails(profile: any): string[] {
+  return verificationInformation(profile)
+    .filter(([, filled]) => !filled)
+    .map(([label]) => label);
+}
+
 export function evaluateDriverVerificationEligibility(
   profile: any,
 ): DriverVerificationEligibility {
@@ -51,18 +82,7 @@ export function evaluateDriverVerificationEligibility(
     blockers.push("Driver Verification has not been submitted for admin review");
   }
 
-  const requiredInformation = [
-    ["First Name", profile?.firstName?.trim?.()],
-    ["Last Name", profile?.lastName?.trim?.()],
-    ["CDL Number", profile?.driversLicenseNumber?.trim?.()],
-    ["License State", profile?.licenseState?.trim?.()],
-    ["CDL Expiration", profile?.licenseExpirationDate],
-    ["Insurance Provider", profile?.insuranceProvider?.trim?.()],
-    ["Insurance Policy Number", profile?.insurancePolicyNumber?.trim?.()],
-    ["VIN", profile?.vin?.trim?.()],
-    ["SSN Last 4", String(profile?.ssnLast4 ?? "").length === 4],
-    ["Background Check Authorization", profile?.backgroundCheckConsent === true],
-  ] as Array<[string, unknown]>;
+  const requiredInformation = verificationInformation(profile);
 
   for (const [label, value] of requiredInformation) {
     if (!value) blockers.push(`${label} is incomplete`);

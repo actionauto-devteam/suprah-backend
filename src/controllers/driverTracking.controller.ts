@@ -135,6 +135,7 @@ import {
   approveDriverVerification,
   evaluateDriverVerificationEligibility,
   listDriverReviewEvents,
+  missingVerificationDetails,
   recordDriverReviewEvent,
   reviewDriverDocument,
 } from "../services/driverVerificationReview.service";
@@ -3453,7 +3454,7 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
       DriverProfile.findOne({
         userId: user._id,
       })
-        .select("profileCompletionScore isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate documents.type documents.label documents.expiresAt documents.reviewStatus trailerType")
+        .select("profileCompletionScore isComplianceExpired licenseExpirationDate medicalCardExpirationDate insuranceExpirationDate documents.type documents.label documents.expiresAt documents.reviewStatus trailerType verificationStatus firstName lastName driversLicenseNumber licenseState insuranceProvider insurancePolicyNumber vin ssnLast4 backgroundCheckConsent")
         .lean(),
 
       // Earnings are authoritative only after a payout reaches paid. Because
@@ -3502,6 +3503,10 @@ const getDashboardStats = asyncHandler(async (req: ExpressRequest, res: ExpressR
     // Whether the driver has told us their trailer (type and how many vehicles
     // it carries). Until then their capacity is the default of 1 vehicle.
     trailerSetUp: Boolean(profile?.trailerType),
+    // Driver Verification details still missing (labels only, never values),
+    // so the Driver Page can ask for them. Empty once verified.
+    verificationDetailsMissing:
+      profile?.verificationStatus === "verified" ? [] : missingVerificationDetails(profile),
   };
 
   return res
