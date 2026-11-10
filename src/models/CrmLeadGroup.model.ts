@@ -7,6 +7,7 @@ export interface ICrmLeadGroup extends Document {
   color?: string;
   memberIds: mongoose.Types.ObjectId[];
   isActive: boolean;
+  roundRobinCursor: number;
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -45,6 +46,10 @@ const CrmLeadGroupSchema = new Schema<ICrmLeadGroup>(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    roundRobinCursor: {
+      type: Number,
+      default: 0,
     },
     createdBy: {
       type: Schema.Types.ObjectId,

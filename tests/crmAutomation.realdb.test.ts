@@ -125,7 +125,7 @@ describe('Real-DB proof: Automation builder endpoints (local dev MongoDB only)',
     expect(data.sources.map((source: any) => source.label)).toEqual(['Suprah Leads', 'Suprah', 'ADF Lead Delivery', 'Inventory', 'On a Date']);
     expect(JSON.stringify(data)).not.toMatch(/podium/i);
     expect(data.sources.find((source: any) => source.key === 'on_a_date').groups).toEqual([]);
-    expect(data.actions.map((action: any) => action.label)).toEqual(['Send a Review Invitation', 'Send a Message', 'Send an Appointment Confirmation', 'Branch', 'Send an Email', 'Send Notification', 'Assign to a team member', 'Remove the assigned team member', 'Send AI Follow-up Message', 'Create a Task for the Team', 'Update Lead Status', 'Wait']);
+    expect(data.actions.map((action: any) => action.label)).toEqual(['Send a Review Invitation', 'Send a Message', 'Send an Appointment Confirmation', 'Branch', 'Send an Email', 'Send Notification', 'Assign to a team member', 'Remove the assigned team member', 'Send AI Follow-up Message', 'Create a Task for the Team', 'Update Lead Status', 'Assign to a Lead Group', 'Assign to who handled it', 'Create a Deal', 'Move the Deal', 'Wait']);
     const fields = Object.fromEntries(data.audienceFields.map((field: any) => [field.key, field]));
     expect(data.audienceFields.map((field: any) => field.label)).toEqual(['After hours', 'New contact', 'Channel', 'Lead source', 'Lead status', 'Lead tags', 'Assigned to', 'Location', 'Customer name', 'Customer email', 'Customer phone number', 'Vehicle make', 'Vehicle model', 'Vehicle condition']);
     expect(fields.location.choices.map((choice: any) => choice.label)).toEqual(['Action Auto - Lehi', 'Action Auto - Orem']);

@@ -822,13 +822,34 @@ export async function sendReviewRequestText(appointment: any): Promise<boolean> 
     resolveDealerName(appointment.organizationId),
     resolveReviewLink(appointment.organizationId, dealerCity),
   ]);
-
-  return sendAutomatedSms({
-    orgId: appointment.organizationId,
-    toPhone: phone,
-    body: buildReviewRequestMessage(dealerName, firstName, reviewLink, String(appointment._id)),
+  const { createFeedbackRequest, discardFeedbackRequest } = await import("./customerFeedback.service");
+  const feedback = await createFeedbackRequest({
+    organizationId: String(appointment.organizationId),
     leadId: appointment.leadId,
+    appointmentId: appointment._id,
+    channel: "sms",
+    source: "appointment",
+    name: [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName].filter(Boolean).join(" "),
+    phone,
+    email: appointment.customerBooking?.email || "",
+    reviewLink,
+  }).catch((err) => {
+    console.warn("[comm] feedback link was not created for the review request", { appointmentId: String(appointment._id), err: err?.message });
+    return null;
   });
+
+  let sent = false;
+  try {
+    sent = await sendAutomatedSms({
+      orgId: appointment.organizationId,
+      toPhone: phone,
+      body: buildReviewRequestMessage(dealerName, firstName, feedback?.url || reviewLink, String(appointment._id)),
+      leadId: appointment.leadId,
+    });
+  } finally {
+    if (!sent) await discardFeedbackRequest(feedback?.id);
+  }
+  return sent;
 }
 
 export function buildWebchatFallbackMessage(sender: string, firstName: string): string {

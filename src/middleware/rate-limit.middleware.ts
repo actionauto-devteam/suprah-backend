@@ -230,6 +230,23 @@ export const publicBookingLimiter = rateLimit({
     validate: { default: false }
 });
 
+export const customerFeedbackLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 30,
+    skip: () => process.env.SKIP_RATE_LIMIT === 'true',
+    keyGenerator: (req: any) => ipKeyGenerator(String(req.ip || '')),
+    message: {
+        success: false,
+        message: 'Too many tries. Please wait a few minutes and try again.',
+    },
+    handler: (req, res, next, options) => {
+        next(new ApiError(429, options.message.message));
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { default: false }
+});
+
 export const webchatStartLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 6,

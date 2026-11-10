@@ -7,6 +7,9 @@ import logger from '../utils/logger';
 import { getCustomerProfile, listCustomerRecords, updateCustomerRecord } from '../services/customerRecords.service';
 import { getCustomerTimeline } from '../services/customerLifecycle.service';
 import { getCustomerCatchUpStatus } from '../services/customerCatchUp.service';
+import { listCustomerFeedback } from '../services/customerFeedback.service';
+import { createSupportRequest, listSupportRequests, updateSupportRequest } from '../services/customerSupportRequest.service';
+import { resolveCrmStaff } from '../utils/crmStaff';
 
 const requireOrgId = (req: Request) => {
   const orgId = req.orgId ? String(req.orgId) : '';
@@ -48,6 +51,28 @@ export const getCustomerTimelineHandler = asyncHandler(async (req: Request, res:
   const { filter, before, limit } = req.query;
   const timeline = await getCustomerTimeline(orgId, String(req.params.id), { filter, before, limit });
   res.json(new ApiResponse(200, timeline, 'Customer timeline'));
+});
+
+export const getCustomerFeedbackHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  res.json(new ApiResponse(200, await listCustomerFeedback(orgId, String(req.params.id)), 'Customer feedback'));
+});
+
+export const listSupportRequestsHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  res.json(new ApiResponse(200, await listSupportRequests(orgId, String(req.params.id)), 'Support requests'));
+});
+
+export const createSupportRequestHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  res.status(201).json(new ApiResponse(201, await createSupportRequest(orgId, String(req.params.id), staff, req.body || {}), 'Support request added'));
+});
+
+export const updateSupportRequestHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  res.json(new ApiResponse(200, await updateSupportRequest(orgId, String(req.params.id), String(req.params.requestId), staff, req.body || {}), 'Support request updated'));
 });
 
 export const updateCustomerRecordHandler = asyncHandler(async (req: Request, res: Response) => {
