@@ -45,6 +45,12 @@ jest.mock('../../src/models/Vehicle.model', () => ({
   default: { findById: () => ({ select: () => ({ lean: () => ({ catch: () => Promise.resolve(null) }) }) }) },
 }));
 jest.mock('../../src/services/communication.service', () => ({ resolveReviewLink: jest.fn().mockResolvedValue('https://g.page/review') }));
+const mockCreateFeedback = jest.fn().mockResolvedValue(null);
+const mockDiscardFeedback = jest.fn().mockResolvedValue(undefined);
+jest.mock('../../src/services/customerFeedback.service', () => ({
+  createFeedbackRequest: (...args: unknown[]) => mockCreateFeedback(...args),
+  discardFeedbackRequest: (...args: unknown[]) => mockDiscardFeedback(...args),
+}));
 jest.mock('../../src/utils/aiOutboundSafety', () => ({ isLocalUiAcceptanceMode: () => false }));
 jest.mock('../../src/utils/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
 
@@ -212,6 +218,32 @@ describe('shared Gmail API MIME builder', () => {
     expect(longestLine(mime)).toBeLessThanOrEqual(998);
     expect(topHeaders(mime)).not.toMatch(/List-Unsubscribe/i);
     expect(partBody(mime, 'text/html')).toContain('https://g.page/review');
+  });
+
+  it('review request emails send the customer to the feedback page and still show the public review link to everyone', async () => {
+    mockCreateFeedback.mockResolvedValueOnce({ id: 'feedback-1', url: 'https://suprah.test/feedback/abc123' });
+    await emailService.sendReviewRequestEmail({
+      _id: 'appt-1',
+      organizationId: 'org-1',
+      leadId: 'lead-1',
+      customerBooking: { email: 'jordan@example.com', firstName: 'Jordan', lastName: 'Lee' },
+    });
+    expect(mockCreateFeedback).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email', source: 'appointment', leadId: 'lead-1', appointmentId: 'appt-1', reviewLink: 'https://g.page/review' }));
+    const mime = decodeRaw(mockGmailSend.mock.calls[0][0].requestBody.raw);
+    const html = partBody(mime, 'text/html');
+    expect(html).toContain('https://suprah.test/feedback/abc123');
+    expect(html).toContain('Rate your visit');
+    expect(html).toContain('https://g.page/review');
+    expect(partBody(mime, 'text/plain')).toContain('Tell us how we did: https://suprah.test/feedback/abc123');
+    expect(mockDiscardFeedback).not.toHaveBeenCalled();
+  });
+
+  it('a review request email that fails to send throws away its unused feedback link', async () => {
+    mockCreateFeedback.mockResolvedValueOnce({ id: 'feedback-2', url: 'https://suprah.test/feedback/def456' });
+    mockGmailSend.mockRejectedValueOnce(new Error('gmail down'));
+    mockSendMail.mockRejectedValueOnce(new Error('smtp down'));
+    await expect(emailService.sendReviewRequestEmail({ organizationId: 'org-1', customerBooking: { email: 'jordan@example.com', firstName: 'Jordan' } })).rejects.toBeTruthy();
+    expect(mockDiscardFeedback).toHaveBeenCalledWith('feedback-2');
   });
 
   it('SMTP fallback carries the campaign headers too', async () => {

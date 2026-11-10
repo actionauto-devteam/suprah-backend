@@ -9,6 +9,9 @@ import { resolveAiAgentIdentity } from '../utils/aiAgentIdentity';
 import { LEAD_STATUS_VALUES, isContactRestrictedStatus } from '../constants/leadStatus';
 import { DATE_RUN_LIMIT, MIN_PRICE_DROP, dateTriggerTimes } from './crmAutomationSources.service';
 import { REPORTABLE_LEAD_SOURCE_VALUES } from '../constants/leadSource';
+import CrmLeadGroup from '../models/CrmLeadGroup.model';
+import { CRM_DEAL_STAGES } from '../models/CrmDeal.model';
+import { DEAL_STAGE_LABELS, OPEN_DEAL_STAGES } from './crmDeal.service';
 
 interface CatalogEvent {
   key: string;
@@ -188,6 +191,10 @@ export const AUTOMATION_ACTIONS = [
   { key: 'send_ai_follow_up', label: 'Send AI Follow-up Message', group: 'Actions' },
   { key: 'create_task', label: 'Create a Task for the Team', group: 'Actions' },
   { key: 'update_lead_status', label: 'Update Lead Status', group: 'Actions' },
+  { key: 'assign_lead_group', label: 'Assign to a Lead Group', group: 'Actions' },
+  { key: 'assign_dynamic', label: 'Assign to who handled it', group: 'Actions' },
+  { key: 'create_deal', label: 'Create a Deal', group: 'Actions' },
+  { key: 'move_deal', label: 'Move the Deal', group: 'Actions' },
   { key: 'wait', label: 'Wait', group: 'Timing' },
 ] as const;
 
@@ -243,6 +250,7 @@ export const ENGINE_EVENTS = new Set([
 export const ENGINE_ACTIONS = new Set([
   'send_review_invitation', 'send_message', 'send_appointment_confirmation', 'send_email', 'send_notification',
   'assign_team_member', 'unassign_team_member', 'create_task', 'wait', 'branch', 'send_ai_follow_up', 'update_lead_status',
+  'assign_lead_group', 'assign_dynamic', 'create_deal', 'move_deal',
 ]);
 const QUIET_LIMITS: Record<string, number> = { hours: 168, days: 30 };
 
@@ -400,19 +408,26 @@ export function flattenSteps(steps: CrmAutomationStep[]): CrmAutomationStep[] {
 
 interface StepContext {
   teamIds: Set<string>;
+  groupIds: Set<string>;
   ids: Set<string>;
   total: number;
 }
 
 async function cleanSteps(orgId: string, value: unknown): Promise<CrmAutomationStep[]> {
   if (value === undefined) return [];
-  const context: StepContext = { teamIds: new Set<string>(), ids: new Set<string>(), total: 0 };
+  const context: StepContext = { teamIds: new Set<string>(), groupIds: new Set<string>(), ids: new Set<string>(), total: 0 };
   const steps = await cleanStepList(orgId, value, 0, context);
   if (context.teamIds.size) {
     const ids = Array.from(context.teamIds);
     if (ids.some((userId) => !mongoose.isValidObjectId(userId))) bad('One of the team members is not valid');
     const found = await User.countDocuments({ _id: { $in: ids }, ...teamQuery(orgId) });
     if (found !== ids.length) bad('One of the team members is inactive or not on this team');
+  }
+  if (context.groupIds.size) {
+    const ids = Array.from(context.groupIds);
+    if (ids.some((groupId) => !mongoose.isValidObjectId(groupId))) bad('One of the Lead Groups is not valid');
+    const found = await CrmLeadGroup.countDocuments({ _id: { $in: ids }, organizationId: { $in: orgIdVariants(orgId) }, isActive: { $ne: false } });
+    if (found !== ids.length) bad('One of the Lead Groups was deleted or turned off. Pick again.');
   }
   return steps;
 }
@@ -506,6 +521,22 @@ async function cleanStepList(orgId: string, value: unknown, depth: number, conte
         const userId = text(config.userId) || bad('Pick the team member');
         teamIds.add(userId);
         return { id, type: 'assign_team_member', config: { userId } };
+      }
+      case 'assign_lead_group': {
+        const groupId = text(config.groupId) || bad('Pick the Lead Group');
+        context.groupIds.add(groupId);
+        return { id, type: 'assign_lead_group', config: { groupId } };
+      }
+      case 'assign_dynamic':
+        return { id, type: 'assign_dynamic', config: {} };
+      case 'create_deal': {
+        const stage = text(config.stage) || 'new';
+        if (!OPEN_DEAL_STAGES.includes(stage as any)) bad('A new deal starts in New, Working, Offer sent or Negotiating');
+        return { id, type: 'create_deal', config: { stage } };
+      }
+      case 'move_deal': {
+        const stage = (CRM_DEAL_STAGES as readonly string[]).includes(text(config.stage)) ? text(config.stage) : bad('Pick the stage to move the deal to');
+        return { id, type: 'move_deal', config: { stage } };
       }
       case 'wait': {
         const unit = ['minutes', 'hours', 'days'].includes(config.unit) ? config.unit : bad('Choose minutes, hours, or days');
@@ -621,10 +652,11 @@ async function loadOwned(orgId: string, id: string) {
 }
 
 export async function getAutomationOptions(orgId: string) {
-  const [locations, team, agent] = await Promise.all([
+  const [locations, team, agent, groups] = await Promise.all([
     CrmLocation.find({ organizationId: orgId, status: 'active' }).select('name').sort({ name: 1 }).lean(),
     User.find(teamQuery(orgId)).select('name email role').sort({ name: 1 }).lean(),
     resolveAiAgentIdentity(orgId),
+    CrmLeadGroup.find({ organizationId: { $in: orgIdVariants(orgId) }, isActive: { $ne: false } }).select('name memberIds').sort({ name: 1 }).limit(200).lean(),
   ]);
   const resolved: Record<ChoiceSource, Choice[]> = {
     locations: locations.map((location: any) => ({ value: String(location._id), label: location.name })),
@@ -646,6 +678,8 @@ export async function getAutomationOptions(orgId: string) {
     dateRunLimit: DATE_RUN_LIMIT,
     locations: locations.map((location: any) => ({ id: String(location._id), name: location.name })),
     team: team.map((member: any) => ({ id: String(member._id), name: memberName(member), email: String(member.email || ''), role: member.role })),
+    leadGroups: groups.map((group: any) => ({ id: String(group._id), name: group.name, members: (group.memberIds || []).length })),
+    dealStages: CRM_DEAL_STAGES.map((value) => ({ value, label: DEAL_STAGE_LABELS[value], open: OPEN_DEAL_STAGES.includes(value) })),
   };
 }
 

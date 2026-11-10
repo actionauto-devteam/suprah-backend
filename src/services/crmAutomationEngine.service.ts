@@ -42,6 +42,11 @@ import {
   quietPeriodMs,
 } from './crmAutomationSources.service';
 import { runAiFollowUpStep } from './crmAutomationAi.service';
+import { createFeedbackRequest, discardFeedbackRequest, feedbackPageBase } from './customerFeedback.service';
+import { createDealFromAutomation, moveDealFromAutomation } from './crmDeal.service';
+import CrmLeadGroup from '../models/CrmLeadGroup.model';
+import CrmUser from '../models/CrmUser.model';
+import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
 import { isContactRestrictedStatus } from '../constants/leadStatus';
 import { ApiError } from '../utils/ApiError';
 import logger from '../utils/logger';
@@ -501,6 +506,97 @@ async function assignLead(orgId: string, leadId: string | null, userId: string |
   return userId ? 'Assigned the lead' : 'Removed the assigned team member';
 }
 
+async function teamMemberFromActor(orgId: string, actorId: unknown, model?: string | null): Promise<{ id: string; name: string } | null> {
+  const id = actorId ? String(actorId) : '';
+  if (!mongoose.isValidObjectId(id)) return null;
+  const pick = (user: any) => (user ? { id: String(user._id), name: String(user.name || user.email || 'Team member') } : null);
+  if (model !== 'CrmUser') {
+    const user = await User.findOne({ _id: id, ...teamQuery(orgId) }).select('name email').lean();
+    if (user) return pick(user);
+  }
+  const crmUser: any = await CrmUser.findOne({ _id: id, organizationId: { $in: orgIdVariants(orgId) } }).select('email').lean();
+  if (!crmUser?.email) return null;
+  return pick(await User.findOne({ email: String(crmUser.email).trim().toLowerCase(), ...teamQuery(orgId) }).select('name email').lean());
+}
+
+async function assignToLeadGroup(run: ICrmAutomationRun, groupId: string): Promise<ActionResult> {
+  const leadId = run.contact.leadId;
+  if (!leadId || !mongoose.isValidObjectId(leadId)) return { status: 'skipped', detail: 'No lead to assign' };
+  if (!mongoose.isValidObjectId(groupId)) return { status: 'skipped', detail: 'No Lead Group was picked' };
+  const orgId = run.organizationId;
+  const group: any = await CrmLeadGroup.findOne({ _id: groupId, organizationId: { $in: orgIdVariants(orgId) } }).select('name memberIds isActive roundRobinCursor').lean();
+  if (!group || group.isActive === false) return { status: 'skipped', detail: 'The Lead Group was deleted or turned off' };
+  const found = await User.find({ _id: { $in: group.memberIds || [] }, ...teamQuery(orgId) }).select('name email').lean();
+  const byId = new Map(found.map((user: any) => [String(user._id), user]));
+  const members = (group.memberIds || []).map((id: any) => byId.get(String(id))).filter(Boolean) as any[];
+  if (!members.length) return { status: 'skipped', detail: `"${group.name}" has no active members` };
+  const memberName = (user: any) => String(user.name || user.email || 'Team member');
+  if (run.mode === 'test') {
+    const next = members[(Number(group.roundRobinCursor) || 0) % members.length];
+    return { status: 'test', detail: `Would assign the lead to ${memberName(next)} from "${group.name}" and notify ${members.length} ${members.length === 1 ? 'person' : 'people'}` };
+  }
+  const before: any = await CrmLeadGroup.findOneAndUpdate({ _id: group._id }, { $inc: { roundRobinCursor: 1 } }, { new: false }).select('roundRobinCursor').lean();
+  const pick = members[(Number(before?.roundRobinCursor) || 0) % members.length];
+  const detail = await assignLead(orgId, leadId, String(pick._id));
+  const customer = run.contact.name || 'A customer';
+  await notifyUsers(members.map((user) => String(user._id)), orgId, 'lead_assigned', `New lead for ${group.name}`, `${customer} was assigned to ${memberName(pick)} by the automation "${run.automationName}".`, {
+    leadId,
+    customerName: run.contact.name,
+    route: `/crm/leads?leadId=${leadId}`,
+  });
+  return { status: 'done', detail: `${detail}: ${memberName(pick)} from "${group.name}". Notified ${members.length} ${members.length === 1 ? 'person' : 'people'}` };
+}
+
+const CALL_EVENTS = new Set(['call_missed', 'call_abandoned', 'call_ended', 'call_any']);
+
+async function lastStaffTexter(orgId: string, leadId: string, phone: string): Promise<{ id: string; name: string } | null> {
+  const conversations = await Conversation.find({ orgId: { $in: orgIdVariants(orgId) }, $or: [{ leadId }, ...(phone ? [{ customerPhone: normalizePhone(phone) }] : [])] }).select('_id').limit(20).lean();
+  const messages = await CommunicationMessage.find({
+    direction: 'outbound',
+    $or: [{ leadId }, { conversationId: { $in: conversations.map((item: any) => item._id) } }],
+  })
+    .sort({ createdAt: -1 })
+    .select('sentBy')
+    .limit(25)
+    .lean();
+  for (const message of messages as any[]) {
+    const member = await teamMemberFromActor(orgId, message.sentBy?.userId);
+    if (member) return member;
+  }
+  return null;
+}
+
+async function assignToHandler(run: ICrmAutomationRun): Promise<ActionResult> {
+  const leadId = run.contact.leadId;
+  if (!leadId || !mongoose.isValidObjectId(leadId)) return { status: 'skipped', detail: 'No lead to assign' };
+  const orgId = run.organizationId;
+  let member: { id: string; name: string } | null = null;
+  let role = '';
+  if (CALL_EVENTS.has(run.event)) {
+    role = 'answered the call';
+    const callId = run.eventKey.split(':')[1] || '';
+    const call: any = mongoose.isValidObjectId(callId) ? await CallLog.findOne({ _id: callId, orgId: { $in: orgIdVariants(orgId) } }).select('answeredBy').lean() : null;
+    member = call?.answeredBy ? await teamMemberFromActor(orgId, call.answeredBy.userId) : null;
+    if (!member) return { status: 'skipped', detail: 'Nobody on the team answered this call, so the lead was not reassigned' };
+  } else if (run.event.startsWith('appointment_')) {
+    role = 'booked the appointment';
+    const appointment: any = run.appointmentId && mongoose.isValidObjectId(run.appointmentId)
+      ? await Appointment.findOne({ _id: run.appointmentId, organizationId: orgId }).select('createdBy createdByModel').lean()
+      : null;
+    const systemUserId = await resolveOrgSystemUserId(orgId);
+    const automatic = appointment && appointment.createdByModel !== 'CrmUser' && systemUserId && String(appointment.createdBy) === systemUserId;
+    member = appointment && !automatic ? await teamMemberFromActor(orgId, appointment.createdBy, appointment.createdByModel) : null;
+    if (!member) return { status: 'skipped', detail: 'The appointment was booked by the customer, the website or the AI agent, not by a team member, so the lead was not reassigned' };
+  } else {
+    role = 'last texted the customer';
+    member = await lastStaffTexter(orgId, leadId, run.contact.phone);
+    if (!member) return { status: 'skipped', detail: 'No team member has texted this customer yet, so the lead was not reassigned' };
+  }
+  if (run.mode === 'test') return { status: 'test', detail: `Would assign the lead to ${member.name}, who ${role}` };
+  const detail = await assignLead(orgId, leadId, member.id);
+  return { status: 'done', detail: `${detail}: ${member.name}, who ${role}` };
+}
+
 async function changeLeadStatus(run: ICrmAutomationRun, status: string): Promise<ActionResult> {
   const leadId = run.contact.leadId;
   if (!leadId || !mongoose.isValidObjectId(leadId)) return { status: 'skipped', detail: 'No lead to update' };
@@ -556,7 +652,28 @@ async function executeStep(run: ICrmAutomationRun, step: any, values: Record<str
       return sendText(run, render(String(config.body || ''), values));
     case 'send_review_invitation': {
       const reviewLink = await resolveReviewLink(orgId);
-      return sendText(run, buildReviewRequestMessage(values.dealership_name, values.first_name, reviewLink, String(run._id)));
+      if (test || !run.contact.phone) {
+        const pageBase = feedbackPageBase();
+        return sendText(run, buildReviewRequestMessage(values.dealership_name, values.first_name, pageBase ? `${pageBase}/feedback/(link)` : reviewLink, String(run._id)));
+      }
+      const feedback = await createFeedbackRequest({
+        organizationId: orgId,
+        leadId: run.contact.leadId,
+        appointmentId: run.appointmentId,
+        automationRunId: String(run._id),
+        channel: 'sms',
+        source: 'automation',
+        name: run.contact.name,
+        phone: run.contact.phone,
+        email: run.contact.email,
+        reviewLink,
+      }).catch((err) => {
+        logger.warn({ err, runId: String(run._id) }, '[CrmAutomation] Feedback link was not created');
+        return null;
+      });
+      const result = await sendText(run, buildReviewRequestMessage(values.dealership_name, values.first_name, feedback?.url || reviewLink, String(run._id)));
+      if (result.status !== 'sent') await discardFeedbackRequest(feedback?.id);
+      return result;
     }
     case 'send_appointment_confirmation': {
       const upcoming = (appointment: any) => appointment && new Date(appointment.startTime) > new Date() && ['scheduled', 'confirmed'].includes(appointment.status);
@@ -618,6 +735,14 @@ async function executeStep(run: ICrmAutomationRun, step: any, values: Record<str
       return runAiFollowUpStep(run, String(config.instructions || ''));
     case 'update_lead_status':
       return changeLeadStatus(run, String(config.status || ''));
+    case 'assign_lead_group':
+      return assignToLeadGroup(run, String(config.groupId || ''));
+    case 'assign_dynamic':
+      return assignToHandler(run);
+    case 'create_deal':
+      return createDealFromAutomation({ organizationId: orgId, leadId: run.contact.leadId, stage: config.stage || 'new', automationId: String(run.automationId), automationName: run.automationName, test });
+    case 'move_deal':
+      return moveDealFromAutomation({ organizationId: orgId, leadId: run.contact.leadId, stage: config.stage, automationName: run.automationName, test });
     default:
       return { status: 'skipped', detail: 'This step is not live yet' };
   }

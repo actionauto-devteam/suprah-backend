@@ -1037,6 +1037,23 @@ See you there!
         );
         const unsubscribeUrl = `${config.backendUrl}/api/email/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
 
+        const { createFeedbackRequest, discardFeedbackRequest } = await import('./customerFeedback.service');
+        const feedback = await createFeedbackRequest({
+            organizationId: String(orgId),
+            leadId: appointment.leadId,
+            appointmentId: appointment._id,
+            channel: 'email',
+            source: 'appointment',
+            name: [appointment.customerBooking?.firstName, appointment.customerBooking?.lastName].filter(Boolean).join(' '),
+            phone: phone || '',
+            email,
+            reviewLink,
+        }).catch((err) => {
+            logger.warn({ err }, '[ReviewRequestEmail] Feedback link was not created');
+            return null;
+        });
+        const feedbackUrl = feedback?.url || null;
+
         const subject = `How was your visit to ${dealerName}?`;
 
         const html = `
@@ -1111,7 +1128,13 @@ See you there!
 
                     <div class="content">
                         <p style="font-size: 16px;">Hi ${firstName},</p>
-                        ${reviewLink
+                        ${feedbackUrl
+                            ? `<p style="font-size: 16px;">We'd really appreciate it if you could take a minute to tell us how we did.</p>
+                               <div style="text-align: center;">
+                                   <a href="${feedbackUrl}" class="cta">Rate your visit</a>
+                               </div>
+                               ${reviewLink ? `<p style="font-size: 14px; text-align: center;">Or <a href="${reviewLink}">leave us a public review</a>.</p>` : ''}`
+                            : reviewLink
                             ? `<p style="font-size: 16px;">We'd really appreciate it if you could take a minute to share your experience.</p>
                                <div style="text-align: center;">
                                    <a href="${reviewLink}" class="cta">Leave a review</a>
@@ -1133,7 +1156,9 @@ See you there!
 Hi ${firstName},
 
 Thanks for choosing ${dealerName}!
-${reviewLink
+${feedbackUrl
+    ? `Tell us how we did: ${feedbackUrl}${reviewLink ? `\nOr leave us a public review: ${reviewLink}` : ''}`
+    : reviewLink
     ? `We'd really appreciate a quick review: ${reviewLink}`
     : `We'd love to hear how it went — just reply to this email and let us know.`}
 
@@ -1142,7 +1167,12 @@ ${dealerName}
 Unsubscribe from review request emails: ${unsubscribeUrl}
         `;
 
-        await this.sendEmail({ to: email, subject, text, html, organizationId: orgId });
+        try {
+            await this.sendEmail({ to: email, subject, text, html, organizationId: orgId });
+        } catch (err) {
+            await discardFeedbackRequest(feedback?.id);
+            throw err;
+        }
         return true;
     }
 

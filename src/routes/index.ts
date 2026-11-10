@@ -107,6 +107,8 @@ import aiKnowledgeBaseRoute from "./aiKnowledgeBase.routes";
 import contactRoute from "./contact.route";
 import telnyxWebhookRoute from "./telnyxWebhook.route";
 import emailUnsubscribeRoute from "./emailUnsubscribe.routes";
+import customerFeedbackRoute from "./customerFeedback.routes";
+import crmDealRoute from "./crmDeal.routes";
 import youtubeRoute from "./youtube.route";
 import suprahMeetRoute from "./suprahMeet.route";
 
@@ -243,6 +245,10 @@ const defaultRoutes = [
     route: emailUnsubscribeRoute,
   },
   {
+    path: "/feedback",
+    route: customerFeedbackRoute,
+  },
+  {
     path: "/mail",
     route: mailRoute,
   },
@@ -297,6 +303,10 @@ const defaultRoutes = [
   {
     path: "/crm/customer-records",
     route: crmCustomerRecordsRoute,
+  },
+  {
+    path: "/crm/deals",
+    route: crmDealRoute,
   },
   {
     path: "/crm/lead-intake",
