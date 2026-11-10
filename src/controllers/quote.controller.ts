@@ -475,12 +475,16 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const orgId = String(vehicle.organizationId);
 
     // Who is asking: the signed-in account. The form only fills gaps the
-    // account doesn't have (a last name, a usable phone number).
+    // account doesn't have (a last name). The phone is the number typed on the
+    // form, which starts filled in from the account, so a customer can give a
+    // different number for this request; the account's is used when the form's
+    // isn't a phone number (2026-11-10).
     const accountName = splitAccountName(user.name);
     const firstName = accountName.firstName || String(body.firstName ?? '').trim();
     const lastName = accountName.lastName || String(body.lastName ?? '').trim();
     const email = String(user.email ?? '').trim().toLowerCase();
-    const phone = usablePhone((user as any).personalInfo?.phone) || usablePhone(body.phone);
+    const accountPhone = usablePhone((user as any).personalInfo?.phone);
+    const phone = usablePhone(body.phone) || accountPhone;
     if (!firstName || !lastName) {
         throw new ApiError(400, 'Enter your first and last name so the dealership knows who the quote is for.');
     }
@@ -558,7 +562,9 @@ const createCustomerQuoteRequest = asyncHandler(async (req: Request, res: Respon
     const rate = calculateRate(miles, 1, enclosedTrailer, vehicleInoperable);
     const eta = calculateETA(miles);
     const vehicleName = `${vehicle.year} ${vehicle.make} ${vehicle.modelName}`;
-    const leadLink = await leadLinkFor(orgId, { email, phone }, { vehicleId: vehicle._id, vin: vehicle.vin });
+    // Matched on the account's own details, so a number typed for this
+    // request can't link it to someone else's lead.
+    const leadLink = await leadLinkFor(orgId, { email, phone: accountPhone || phone }, { vehicleId: vehicle._id, vin: vehicle.vin });
 
     let quote;
     try {
