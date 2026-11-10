@@ -1,6 +1,11 @@
 import express from 'express';
 import crmAuth from '../middleware/crmAuth.middleware';
 import {
+  createPurchaseHandler,
+  deletePurchaseHandler,
+  importPurchasesHandler,
+  listPurchasesHandler,
+  updatePurchaseHandler,
   createSupportRequestHandler,
   getCustomerCatchUpStatusHandler,
   getCustomerFeedbackHandler,
@@ -18,6 +23,11 @@ router.use(crmAuth());
 
 router.get('/', listCustomerRecordsHandler);
 router.get('/catch-up', getCustomerCatchUpStatusHandler);
+router.post('/purchases/import', importPurchasesHandler);
+router.get('/:id/purchases', listPurchasesHandler);
+router.post('/:id/purchases', createPurchaseHandler);
+router.patch('/:id/purchases/:purchaseId', updatePurchaseHandler);
+router.delete('/:id/purchases/:purchaseId', deletePurchaseHandler);
 router.get('/:id/timeline', getCustomerTimelineHandler);
 router.get('/:id/feedback', getCustomerFeedbackHandler);
 router.get('/:id/support-requests', listSupportRequestsHandler);

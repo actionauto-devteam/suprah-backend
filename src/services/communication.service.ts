@@ -23,7 +23,8 @@ import { addLeadNoteAndNotify, shouldSuppressHandoffNoteNotification } from "../
 import { describeSmsFailure } from "../utils/smsFailure";
 import { assertSmsDestination, isSmsDestinationError, resolveSmsDestination, SmsDestinationPolicy } from "../utils/smsDestination";
 import { recordAppointmentSmsDelivery } from "../utils/appointmentSmsNotice";
-import { assertContactAllowed, auditActorFromRef, checkContactForSend, isContactRestrictedError, contactRestrictionSkipReason } from "./contactRestriction.service";
+import { assertContactAllowed, auditActorFromRef, checkContactForSend, isContactRestrictedError, contactRestrictionSkipReason, resolveContactRestriction } from "./contactRestriction.service";
+import WebChatSession from "../models/WebChatSession.model";
 import { authorizeOutboundCall, grantCallbackPermission } from "./callbackPermission.service";
 import { notificationTemplates } from "../utils/notificationTemplates";
 import { CALENDAR_TZ } from "../constants/calendarTimezone";
@@ -869,6 +870,110 @@ export async function sendWebchatFallbackSms(opts: {
     body: buildWebchatFallbackMessage(sender, opts.firstName?.trim() || "there"),
     leadId: opts.leadId,
   });
+}
+
+export function buildWebchatTextWelcome(sender: string, firstName: string): string {
+  return `Hi ${firstName}, this is ${sender}. Thanks for your message on our website! We'll keep the conversation going here by text. Reply STOP to opt out.`;
+}
+
+export type WebchatTextResult =
+  | { ok: true; phone: string }
+  | { ok: false; reason: "not_textable" | "opted_out" | "restricted" | "already_started" | "send_failed" };
+
+export async function continueWebchatByText(opts: {
+  orgId: any;
+  sessionId: any;
+  lead: any;
+  phone: string;
+  firstName?: string;
+  message: string;
+}): Promise<WebchatTextResult> {
+  const destination = resolveSmsDestination(opts.phone, "automated");
+  if (!destination.ok) return { ok: false, reason: "not_textable" };
+  const phone = destination.e164;
+  if (await isSmsOptedOut(opts.orgId, phone)) return { ok: false, reason: "opted_out" };
+  const restriction = await resolveContactRestriction({ organizationId: opts.orgId, phone, leadId: opts.lead._id });
+  if (restriction.status !== "allowed") return { ok: false, reason: "restricted" };
+
+  const startedAt = new Date();
+  const claimed = await WebChatSession.findOneAndUpdate(
+    { _id: opts.sessionId, organizationId: String(opts.orgId), continuedBySmsAt: null },
+    { $set: { continuedBySmsAt: startedAt, smsFallbackSentAt: startedAt } },
+    { new: true },
+  );
+  if (!claimed) return { ok: false, reason: "already_started" };
+
+  const customerName = `${opts.lead.firstName || ""} ${opts.lead.lastName || ""}`.trim() || undefined;
+  const conversation = await getOrCreateConversation({ orgId: opts.orgId, phone, leadId: opts.lead._id, customerName });
+  const sender = await resolveOutboundNumber({ organizationId: opts.orgId, channel: "texts", leadId: opts.lead._id }).catch(() => null);
+  const messageId = new mongoose.Types.ObjectId();
+  const check = await beginAiAttentionCheck({
+    organizationId: String(opts.orgId),
+    channel: "sms",
+    targetId: String(conversation._id),
+    messageId: String(messageId),
+  });
+  const inquiry = await CommunicationMessage.create({
+    _id: messageId,
+    orgId: opts.orgId,
+    conversationId: conversation._id,
+    leadId: opts.lead._id,
+    direction: "inbound",
+    body: opts.message,
+    from: phone,
+    to: sender?.number || telnyx.COMPANY_NUMBER,
+    status: "received",
+    origin: "inquiry",
+  });
+  await bumpConversation(conversation._id, inquiry);
+  await touchLeadOnInbound(opts.lead._id, opts.orgId);
+  emitToOrg(opts.orgId, "comm:message:new", {
+    message: inquiry.toObject(),
+    conversation: {
+      _id: conversation._id,
+      customerPhone: conversation.customerPhone,
+      customerName: conversation.customerName,
+      customerId: conversation.customerId,
+      leadId: conversation.leadId,
+    },
+  });
+
+  try {
+    const intro = await resolveSenderIntro(opts.orgId);
+    const sent = await sendAutomatedSms({
+      orgId: opts.orgId,
+      toPhone: phone,
+      body: buildWebchatTextWelcome(intro, opts.firstName?.trim() || "there"),
+      leadId: opts.lead._id,
+      customerName,
+    });
+    if (!sent) throw new Error("The customer opted out of texts");
+  } catch (err: any) {
+    await finishAiAttentionCheck(check).catch(() => undefined);
+    await WebChatSession.updateOne(
+      { _id: opts.sessionId, continuedBySmsAt: startedAt },
+      { $set: { continuedBySmsAt: null, smsFallbackSentAt: null } },
+    ).catch(() => undefined);
+    console.warn("[comm] Website chat could not continue by text", { leadId: String(opts.lead._id), err: err?.message });
+    return { ok: false, reason: "send_failed" };
+  }
+
+  const LeadModel = mongoose.model("Lead");
+  await LeadModel.updateOne({ _id: opts.lead._id, organizationId: opts.lead.organizationId }, { $set: { channel: "sms" } });
+  emitToOrg(opts.orgId, "lead:update", { leadId: String(opts.lead._id) });
+  const aiClaim = await LeadModel.findOneAndUpdate(
+    { _id: opts.lead._id, organizationId: opts.lead.organizationId, aiFirstReplyTriggeredAt: null },
+    { $set: { aiFirstReplyTriggeredAt: new Date() } },
+    { new: true },
+  ).lean();
+  if (aiClaim) {
+    triggerSmsAiReply(opts.orgId, conversation, aiClaim, check, opts.message, false, { isNewInquiry: true }).catch((err) => {
+      console.error("[comm] Website chat text reply failed:", err);
+    });
+  } else {
+    await finishAiAttentionCheck(check).catch(() => undefined);
+  }
+  return { ok: true, phone };
 }
 
 /** Touch the lead so the unanswered-inquiry tracking and the leads list stay

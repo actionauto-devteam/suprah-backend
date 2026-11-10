@@ -397,6 +397,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     : [];
   const webchatEnabled = metadata.webchatEnabled !== false;
   const webchatGreeting = metadata.webchatGreeting || "";
+  const webchatTextMode = metadata.webchatTextMode === true;
   const aiAgentEnabled = metadata.aiAgentEnabled === true;
   const aiAgentIdentity = identityFromMetadata(metadata);
   const aiAgentName = aiAgentIdentity.name || "";
@@ -420,6 +421,7 @@ const getOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         reviewLinks,
         webchatEnabled,
         webchatGreeting,
+        webchatTextMode,
         aiAgentEnabled,
         aiAgentName,
         aiHandoffFallbackGroupId,
@@ -451,6 +453,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     reviewLinks,
     webchatEnabled,
     webchatGreeting,
+    webchatTextMode,
     aiAgentEnabled,
     aiAgentName,
     aiHandoffFallbackGroupId,
@@ -487,6 +490,9 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
     metadata.webchatGreeting = String(webchatGreeting || "")
       .trim()
       .slice(0, 300);
+  }
+  if (webchatTextMode !== undefined) {
+    metadata.webchatTextMode = webchatTextMode === true;
   }
   if (aiAgentEnabled === true) {
     throw new ApiError(
@@ -535,6 +541,7 @@ const updateOrgSettings = asyncHandler(async (req: Request, res: Response) => {
         reviewLinks: org.metadata.reviewLinks,
         webchatEnabled: org.metadata.webchatEnabled,
         webchatGreeting: org.metadata.webchatGreeting,
+        webchatTextMode: org.metadata.webchatTextMode === true,
         aiAgentEnabled: org.metadata.aiAgentEnabled,
         aiAgentName: org.metadata.aiAgentName,
         aiHandoffFallbackGroupId: org.metadata.aiHandoffFallbackGroupId,

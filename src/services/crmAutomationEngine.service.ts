@@ -44,6 +44,7 @@ import {
 import { runAiFollowUpStep } from './crmAutomationAi.service';
 import { createFeedbackRequest, discardFeedbackRequest, feedbackPageBase } from './customerFeedback.service';
 import { createDealFromAutomation, moveDealFromAutomation } from './crmDeal.service';
+import { recordPurchaseFromSoldLeadSafely } from './customerPurchase.service';
 import CrmLeadGroup from '../models/CrmLeadGroup.model';
 import CrmUser from '../models/CrmUser.model';
 import { resolveOrgSystemUserId } from '../utils/orgSystemUser';
@@ -613,6 +614,7 @@ async function changeLeadStatus(run: ICrmAutomationRun, status: string): Promise
   const updated = await Lead.updateOne({ _id: lead._id, status: lead.status }, { $set: set, $push: { statusHistory: entry } });
   if (!updated.modifiedCount) return { status: 'skipped', detail: 'The status changed at the same time, so nothing was changed' };
   emitToOrg(run.organizationId, 'lead:update', { leadId: String(lead._id) });
+  if (status === 'Sold') recordPurchaseFromSoldLeadSafely(String(run.organizationId), lead._id, { userId: 'automation', name: `Automation - ${run.automationName}`.slice(0, 160) });
   return { status: 'done', detail: `Changed the status from ${lead.status || 'none'} to ${status}` };
 }
 

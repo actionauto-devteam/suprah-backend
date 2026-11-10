@@ -10,6 +10,7 @@ import { getCustomerCatchUpStatus } from '../services/customerCatchUp.service';
 import { listCustomerFeedback } from '../services/customerFeedback.service';
 import { createSupportRequest, listSupportRequests, updateSupportRequest } from '../services/customerSupportRequest.service';
 import { resolveCrmStaff } from '../utils/crmStaff';
+import { createPurchase, deletePurchase, importPurchases, listCustomerPurchases, updatePurchase } from '../services/customerPurchase.service';
 
 const requireOrgId = (req: Request) => {
   const orgId = req.orgId ? String(req.orgId) : '';
@@ -73,6 +74,36 @@ export const updateSupportRequestHandler = asyncHandler(async (req: Request, res
   const orgId = requireOrgId(req);
   const staff = await resolveCrmStaff(orgId, req.crmUser);
   res.json(new ApiResponse(200, await updateSupportRequest(orgId, String(req.params.id), String(req.params.requestId), staff, req.body || {}), 'Support request updated'));
+});
+
+export const listPurchasesHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  res.json(new ApiResponse(200, await listCustomerPurchases(orgId, String(req.params.id)), 'Purchases'));
+});
+
+export const createPurchaseHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  res.status(201).json(new ApiResponse(201, await createPurchase(orgId, String(req.params.id), staff, req.body || {}), 'Purchase added'));
+});
+
+export const updatePurchaseHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  res.json(new ApiResponse(200, await updatePurchase(orgId, String(req.params.id), String(req.params.purchaseId), staff, req.body || {}), 'Purchase updated'));
+});
+
+export const deletePurchaseHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  await deletePurchase(orgId, String(req.params.id), String(req.params.purchaseId), staff);
+  res.json(new ApiResponse(200, null, 'Purchase deleted'));
+});
+
+export const importPurchasesHandler = asyncHandler(async (req: Request, res: Response) => {
+  const orgId = requireOrgId(req);
+  const staff = await resolveCrmStaff(orgId, req.crmUser);
+  res.json(new ApiResponse(200, await importPurchases(orgId, staff, req.body?.rows), 'Sales imported'));
 });
 
 export const updateCustomerRecordHandler = asyncHandler(async (req: Request, res: Response) => {

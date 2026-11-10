@@ -5,6 +5,7 @@ import { ApiError } from '../utils/ApiError';
 import { CrmStaff, isManagerOrAdmin, listStaffTeam, orgIdVariants, requireTeamMember, staffName, staffTeamQuery } from '../utils/crmStaff';
 import { isContactRestrictedStatus } from '../constants/leadStatus';
 import User from '../models/User.model';
+import { recordPurchaseFromDeal, removeDealPurchase } from './customerPurchase.service';
 
 export const DEAL_STAGE_LABELS: Record<CrmDealStage, string> = {
   new: 'New',
@@ -231,9 +232,15 @@ async function markLeadSold(orgId: string, leadId: unknown, by: DealActor): Prom
   return updated.modifiedCount ? 'changed' : 'conflict';
 }
 
+async function syncDealPurchase(orgId: string, doc: ICrmDeal, wasWon: boolean, by: DealActor) {
+  if (doc.stage === 'won') await recordPurchaseFromDeal(orgId, doc, by);
+  else if (wasWon) await removeDealPurchase(orgId, doc._id);
+}
+
 export async function updateDeal(orgId: string, staff: CrmStaff, id: string, body: any) {
   const doc = await loadDeal(orgId, id);
   requireEditor(staff, doc);
+  const wasWon = doc.stage === 'won';
   const by: DealActor = { userId: staff.actorId, name: staff.name };
   const now = new Date();
   let leadSold: string | null = null;
@@ -287,6 +294,7 @@ export async function updateDeal(orgId: string, staff: CrmStaff, id: string, bod
     }
   }
   await doc.save();
+  await syncDealPurchase(orgId, doc, wasWon, by);
   return { deal: serialize(doc.toObject(), staff), leadSold };
 }
 
@@ -356,5 +364,6 @@ export async function moveDealFromAutomation(input: { organizationId: string; le
   doc.lostAt = input.stage === 'lost' ? now : null;
   doc.lostReason = input.stage === 'lost' ? `Moved by the automation "${input.automationName}"`.slice(0, MAX_REASON) : '';
   await doc.save();
+  await syncDealPurchase(input.organizationId, doc, false, by);
   return { status: 'done', detail: `Moved the deal from ${DEAL_STAGE_LABELS[from]} to ${stageLabel}` };
 }
